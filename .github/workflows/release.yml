@@ -18,6 +18,19 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      # Fail fast when the tag does not match the single source of truth:
+      # a tag pushed before the version-bump PR lands would otherwise build
+      # artifacts labeled with the PREVIOUS version under the new tag name
+      # (this bit v1.0.1's first tag — mislabeled GHCR images and Release
+      # dists, PyPI rejecting the duplicate upload). Guarding here gates
+      # both publish jobs via `needs: build`.
+      - name: guard tag matches __version__
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/llm_redact/__init__.py)
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match __version__ ${version} — land the version-bump PR on main first, then re-tag (docs/RELEASING.md)"
+            exit 1
+          fi
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           python-version: "3.13"

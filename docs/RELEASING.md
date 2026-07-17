@@ -10,7 +10,11 @@ sdist and wheel attached, and publishes the container image to GHCR.
 - `CHANGELOG.md`: the `[Unreleased]` section has been moved into a dated
   `## [X.Y.Z] - YYYY-MM-DD` section describing exactly that tree.
 - `src/llm_redact/__init__.py` `__version__` matches `X.Y.Z` (the single
-  source of truth; hatchling reads it at build time).
+  source of truth; hatchling reads it at build time). The workflow's first
+  step enforces this: a tag that does not match `__version__` fails the
+  `build` job before anything is built or published — so a tag pushed
+  before the version-bump PR lands on `main` fails fast instead of
+  releasing artifacts labeled with the previous version.
 
 ## Cutting the release
 

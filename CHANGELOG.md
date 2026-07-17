@@ -11,6 +11,8 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-07-17
+
 ### Added
 
 - Interactive install script `scripts/install.sh`: detects the tools

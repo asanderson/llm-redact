@@ -11,6 +11,19 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- Interactive install script `scripts/install.sh`: detects the tools
+  available on the machine (uv, pipx, pip, Homebrew, docker, podman),
+  prompts for the preferred install method (`--method NAME` for
+  non-interactive use), and prints every command before running it. The
+  container methods pull `ghcr.io/asanderson/llm-redact:latest` and
+  offer a loopback-published run.
+- README Install section now shows the prebuilt-container path
+  explicitly — `docker pull` / `podman pull` from
+  `ghcr.io/asanderson/llm-redact` with the loopback publish spec — and
+  links the install script.
+
 ## [1.0.0] - 2026-07-17
 
 Initial public release. llm-redact was developed privately before this

@@ -1,8 +1,10 @@
 # llm-redact
 
 [![CI](https://github.com/asanderson/llm-redact/actions/workflows/ci.yml/badge.svg)](https://github.com/asanderson/llm-redact/actions/workflows/ci.yml)
-[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/llm-redact-proxy)](https://pypi.org/project/llm-redact-proxy/)
+[![Container](https://img.shields.io/badge/ghcr.io-asanderson%2Fllm--redact-blue?logo=docker&logoColor=white)](https://github.com/asanderson/llm-redact/pkgs/container/llm-redact)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
 Large Language Model (LLM) information redactor that prevents private information from being sent to LLMs from agentic tools by substituting placeholders for private information on outgoing requests and then replaces the placeholders on the incoming responses seamlessly for the agentic tool users.
 

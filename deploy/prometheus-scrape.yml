@@ -1,0 +1,22 @@
+# Prometheus scrape config for the llm-redact proxy.
+#
+# The metrics endpoint lives under the reserved prefix and exposes
+# METADATA ONLY — request counts by provider/status, detection/warning/
+# block/rehydration counts by TYPE, vault entry/session gauges, and build
+# info. It never exposes secret values or placeholder ids (see the metrics
+# section of docs/threat-model.md), so scraping it is safe.
+#
+# The proxy binds 127.0.0.1 by default, so run Prometheus on the same host
+# (or expose the proxy behind mutual TLS — never a plain wider bind). Merge
+# this job into your existing prometheus.yml `scrape_configs:`.
+scrape_configs:
+  - job_name: llm-redact
+    metrics_path: /__llm-redact/metrics
+    scheme: http
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["127.0.0.1:8787"]
+        labels:
+          service: llm-redact
+    # If the proxy runs under TLS (`[tls]`), switch scheme to https and add
+    # a tls_config with ca_file (+ cert_file/key_file for mutual TLS).

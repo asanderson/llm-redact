@@ -1,0 +1,23 @@
+apiVersion: v2
+name: llm-redact
+description: >-
+  The llm-redact privacy proxy for agentic tools — deploy it as a hardened
+  same-pod loopback sidecar or as a standalone, autoscaled, shared in-cluster
+  proxy Service. The FOSS core deploys with no license; a license key matters
+  only to the paid llm-redact-pro package's subsystems.
+type: application
+# The chart version tracks the app; a bump keeps the default image tag in sync
+# (pinned by tests/test_deploy_assets.py: appVersion == llm_redact.__version__).
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - llm
+  - privacy
+  - redaction
+  - proxy
+  - sidecar
+home: https://github.com/asanderson/llm-redact
+sources:
+  - https://github.com/asanderson/llm-redact
+maintainers:
+  - name: asanderson

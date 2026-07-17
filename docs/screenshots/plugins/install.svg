@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="217" viewBox="0 0 820 217" role="img" aria-label="terminal output of llm-redact plugin install claude">
+<rect width="820" height="217" rx="10" fill="#0d1117"/>
+<path d="M0 10a10 10 0 0 1 10-10h800a10 10 0 0 1 10 10v30h-820z" fill="#161b22"/>
+<circle cx="24" cy="20" r="6" fill="#ff5f57"/>
+<circle cx="46" cy="20" r="6" fill="#febc2e"/>
+<circle cx="68" cy="20" r="6" fill="#28c840"/>
+<text x="410" y="24" text-anchor="middle" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">llm-redact plugin install claude</text>
+<text x="22" y="75" fill="#7ee787" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">$ llm-redact plugin install claude</text>
+<text x="22" y="94" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">claude: 10 file(s) written, 0 already current in ~/.claude/commands</text>
+<text x="22" y="113" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">claude: commands available as /llm-redact-&lt;name&gt; (e.g. /llm-redact-status). Repo checkouts can ins</text>
+<text x="22" y="132" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  tead use `/plugin marketplace add asanderson/llm-redact` for namespaced /llm-redact:&lt;name&gt; comma</text>
+<text x="22" y="151" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  nds.</text>
+<text x="22" y="170" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">claude: no proxy answering at http://127.0.0.1:8787 — start one with `llm-redact serve` or `llm-re</text>
+<text x="22" y="189" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  dact run -- &lt;tool&gt;` before using the commands.</text>
+</svg>

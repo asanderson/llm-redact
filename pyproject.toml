@@ -1,0 +1,196 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+# PyPI distribution name; the import package stays `llm_redact` and the CLI
+# stays `llm-redact` (the bare name is taken by an unrelated PyPI project).
+name = "llm-redact-proxy"
+dynamic = ["version"]
+description = "Transparent local proxy that redacts private information from LLM requests and seamlessly restores it in responses"
+readme = "README.md"
+license = "AGPL-3.0-only"
+requires-python = ">=3.11"
+# Floors track the tested majors: CI runs `uv sync --frozen` against the lock,
+# so these lower bounds are what a NON-frozen `pip install` may resolve. They
+# are raised past the starlette 0.x->1.x boundary (lock: 1.3.1) so a fresh
+# install cannot pull an untested pre-1.0 ASGI surface.
+dependencies = [
+    "httpx>=0.28",
+    "starlette>=1.0",
+    "uvicorn>=0.50",
+]
+
+[project.optional-dependencies]
+ner = ["spacy>=3.7,<4"]
+# Heavy (pulls torch + transformers); more robust than spaCy on unusual names.
+gliner = ["gliner>=0.2"]
+# Microsoft's FOSS PII analyzer: recognizers + checksums + context scoring
+# over spaCy. Pulls pydantic — extras never touch the request path.
+presidio = ["presidio-analyzer>=2.2,<3"]
+# Stanford Stanza: accurate neural NER for 60+ languages (the multilingual
+# complement to the English-first spaCy default). Pulls torch; no confidences.
+stanza = ["stanza>=1.7,<2"]
+# Any Hugging Face token-classification model as a detector (multilingual
+# XLM-R NER, domain-tuned checkpoints, ...). Pulls transformers + torch;
+# emits confidences (score_threshold applies).
+hf = ["transformers>=4.40"]
+# At-rest encryption for the sqlite vault ([vault] encryption = "fernet").
+crypto = ["cryptography>=42"]
+# Pro persistent vault on a server RDBMS ([vault] backend = "postgresql" /
+# "mysql" / "oracle"). The generic backend = "dbapi" needs no extra — it
+# imports whatever DB-API 2.0 module you name. Drivers never touch the
+# request path beyond vault point lookups.
+vault-postgres = ["psycopg[binary]>=3.1"]
+vault-mysql = ["PyMySQL>=1.1"]
+vault-oracle = ["oracledb>=2"]
+# Vault key in the OS keychain (llm-redact vault set-key) instead of the
+# LLM_REDACT_VAULT_KEY env var. Resolution: env var, then keyring, then
+# fail closed.
+keyring = ["keyring>=24"]
+# Faster event loop: uvicorn's loop="auto" picks uvloop up automatically
+# when installed; serve needs no code change (and none should be added —
+# an explicit loop= would break the auto-selection this extra relies on).
+perf = ["uvloop>=0.19"]
+# Realtime WebSocket APIs (OpenAI Realtime, Gemini Live). One package
+# serves both sides: uvicorn's WS protocol lights up automatically when
+# it is importable, and the relay uses its client for the upstream leg.
+realtime = ["websockets>=13"]
+# OpenTelemetry export ([otel] enabled = true): metadata-only traces and
+# counters over OTLP/HTTP. Extras never touch the request path.
+otel = [
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
+]
+
+[project.scripts]
+llm-redact = "llm_redact.cli:main"
+
+# Paid-tier plugin discovery (open-core split, llm-redact-pro docs/licensing.md). The
+# Free core discovers plugins registered under the `llm_redact.plugins`
+# entry-point group via importlib.metadata; installing the separate
+# `llm-redact-pro` distribution is what supplies that hook and overrides the
+# subsystem factories. The Free distribution declares none — without the pro
+# package every paid config fails closed.
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    # The crypto extra, always present in dev so the suite exercises it;
+    # unit tests still importorskip for environments without wheels.
+    "cryptography>=42",
+    # The realtime extra, same treatment: the relay suite runs real
+    # sockets everywhere; the no-extra refusal is pinned via a
+    # monkeypatched import guard instead of a separate CI variant.
+    "websockets>=13",
+    "hypothesis>=6.100",
+    # Mutation testing (assurance): dev-only, never touches the request path.
+    "mutmut>=3.6",
+    # The complexity-coverage gate (scripts/complexity_gate.py): every
+    # branching function must be executed by the suite.
+    "coverage>=7.6",
+]
+
+[tool.hatch.version]
+path = "src/llm_redact/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_redact"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+# The fp corpus is scanned test DATA (deliberately odd-looking code and
+# text); linting or reformatting it would change the pinned counts.
+extend-exclude = ["bench/fp_corpus"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "live: hits real provider APIs; requires LLM_REDACT_LIVE=1 and API keys (costs money)",
+    "soak: many-connection concurrency/soak checks; slower, run with -m soak",
+]
+addopts = "-m 'not live and not soak'"
+
+[tool.mypy]
+strict = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = "spacy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "gliner.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "presidio_analyzer.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "stanza.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "transformers.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "opentelemetry.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "keyring.*"
+ignore_missing_imports = true
+
+# The paid distribution (open-core split, llm-redact-pro docs/licensing.md). The Free
+# core reaches it only through lazy, fail-closed guarded imports (cli.py audit /
+# users subcommands) and the entry-point-discovered plugin; it is never a build
+# or runtime dependency of the Free wheel, so its absence must not fail typing.
+[[tool.mypy.overrides]]
+module = "llm_redact_pro.*"
+ignore_missing_imports = true
+
+# Mutation testing (assurance, Phase 20). Proves the suites have TEETH: a
+# silently weakened guard or a corrupted checksum table must make a test fail.
+# Scoped to the load-bearing correctness core, where mutation is fast,
+# deterministic, and high-signal. Run as its own CI job (`mutation`); the
+# killed-mutant ratio is the signal. The proxy guard chain gets a targeted,
+# documented pass instead of standing here (its ~1.9k mutants over
+# async-integration coverage would swamp a recurring gate) — see
+# docs/assurance.md.
+[tool.mutmut]
+# Free-core only: the paid subsystems (and their per-conversation session
+# routing) moved to the llm-redact-pro repo in the R4 physical split, where
+# their mutation coverage now lives.
+source_paths = ["src/llm_redact"]
+only_mutate = [
+    "src/llm_redact/detection/validators.py",
+    "src/llm_redact/redactor.py",
+    "src/llm_redact/rehydrate.py",
+    "src/llm_redact/vault.py",
+    # Round 2 (1.16.0): the byte-level codec trust boundary — where
+    # never-break-the-tool and never-wrong-value live.
+    "src/llm_redact/sse.py",
+    "src/llm_redact/ndjson.py",
+    "src/llm_redact/jsonwalk.py",
+    "src/llm_redact/placeholders.py",
+    "src/llm_redact/multipart.py",
+    "src/llm_redact/eventstream.py",
+]
+# mutmut runs pytest from a mutants/ copy; the suite reads repo data by path
+# (docs/api-coverage.md, deploy/*, bench/fp_corpus/*, the checked-in agent
+# plugin under plugins/ + .claude-plugin/, config.example.toml, README.md),
+# so those must be copied alongside the tests/ and pyproject.toml mutmut
+# copies by default — a path missing here fails the BASELINE run and every
+# mutant reports "not checked".
+also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", "config.example.toml", "README.md"]
+pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]

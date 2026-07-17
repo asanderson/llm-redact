@@ -1,0 +1,67 @@
+# Deployment descriptor for the fp corpus: everything here is fake and
+# deliberately shaped to look *almost* like the values the secret rules
+# match — each entry documents why it must NOT fire.
+service:
+  name: order-processor
+  version: 2.14.0            # semver, not an IP (three parts)
+  replicas: 3
+  build: 20260601.4          # datestamp build id
+
+runtime:
+  # low entropy: the generic-secret entropy gate must veto these; the
+  # all-zero value also probes the credit-card validator, which must veto
+  # the one all-same-digit shape that satisfies Luhn arithmetic
+  password: aaaaaaaaaaaaaaaaaaaaaa
+  secret: "0000000000000000"
+  # too short for the value grammar (needs 16+)
+  api_key: shortval
+  # sk- prefix but far under the 20-char minimum
+  placeholder_key: sk-proj-abc123
+  # keyword is absent: a bare base64 blob has no assignment context
+  cache_seed: YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamts
+
+storage:
+  # connection string WITHOUT AccountKey= — nothing to anchor on
+  conn: "DefaultEndpointsProtocol=https;AccountName=fpcorpus;EndpointSuffix=core.windows.net"
+  # AccountKey present but the value is entropy-zero: the base64 gate vetoes
+  probe: "AccountKey=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  bucket: builds-archive-2026
+  checksum: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+network:
+  # invalid octets: the IPv4 validator must veto both
+  probe_a: 256.1.1.1
+  probe_b: 999.999.999.999
+  port: 8787
+  cidr_note: "documentation ranges live in rfc_excerpt.txt, counted there"
+
+identifiers:
+  request: 550e8400-e29b-41d4-a716-446655440000
+  commit: 2fd4e1c67a2d28fced849ee1bb76e7391b93eb12
+  image: sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+  invoice: "9876543210"      # ten digits, bare: phone must never fire
+  # SSN-shaped but every one is in an SSA-invalid range
+  ssn_probe_area: 666-12-3456
+  ssn_probe_nine: 900-12-3456
+  ssn_probe_group: 123-00-4567
+  ssn_probe_serial: 123-45-0000
+  # 16 digits failing Luhn: the credit-card validator must veto
+  card_probe: 1234-5678-9012-3455
+  # IBAN-shaped, mod-97 fails
+  iban_probe: DE00123456781234567890
+  # JWT-shaped but the first segment does not decode to a JSON object
+  jwt_probe: eyJzzzzzzzzzzzzz.eyJwwwwwwwwwwww.sig-sig-sig
+  # stripe test keys are deliberately out of scope
+  stripe_test: sk_test_4eC39HqLyjWDarjtT1zdp7dc
+
+tokens_probe:
+  # vendor prefixes one character short of their grammar (round 2)
+  gitlab_short: glpat-abc123
+  databricks_short: dapi0123abc
+  bitbucket_short: ATBBshort1
+  atlassian_short: ATATTx
+
+listeners:
+  # letterless short compressed ipv6 forms: vetoed by the letter/groups gate
+  local_v6: "[::1]:8080"
+  any_v6: "[::]:9090"

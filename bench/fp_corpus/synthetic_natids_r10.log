@@ -1,0 +1,28 @@
+# Synthetic negatives: national-id NEAR MISSES (round 10). Every value
+# has a valid GRAMMAR but a wrong checksum — and where the shape also
+# rides the card grammar, it fails Luhn too. Nothing here may fire.
+
+batch item jp-15: ref 0564-5152-7894 queued
+batch item jp-54: ref 1636 8539 3767 queued
+batch item jp-48: ref 0097 2160 3296 queued
+batch item jp-36: ref 1462-6481-8821 queued
+batch item jp-99: ref 0526-9104-3262 queued
+batch item jp-49: ref 1191 4948 3418 queued
+ticket th-364: id 8-7525-25638-65-0 rejected
+ticket th-885: id 1-8083-24949-75-8 rejected
+ticket th-939: id 3-4416-50957-52-9 rejected
+ticket th-318: id 8-8146-91362-27-3 rejected
+ticket th-615: id 4-3119-52035-22-1 rejected
+ticket th-924: id 2-9554-05108-20-1 rejected
+case ie-310: applicant 9896262H needs review
+case ie-35: applicant 6694686WH needs review
+case ie-845: applicant 1252029SW needs review
+case ie-632: applicant 6165633OW needs review
+case ie-772: applicant 9927037SH needs review
+case ie-849: applicant 5958451F needs review
+registro mx-374: curp LUAC091022HSPXWBZ0 no valido
+registro mx-638: curp JXCQ080702MNLQXRR8 no valido
+registro mx-117: curp BXDZ090125MSPMTSX0 no valido
+registro mx-541: curp QEIP461111HSPZTC62 no valido
+registro mx-964: curp UIGJ430922MASGTQ07 no valido
+registro mx-654: curp LAWG101027HSPQLVX1 no valido

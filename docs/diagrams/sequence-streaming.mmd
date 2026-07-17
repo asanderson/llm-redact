@@ -1,0 +1,22 @@
+%% Streaming rehydration: a placeholder split across chunk boundaries is
+%% held back only as long as it stays a viable token prefix, then restored.
+%% The same channel machinery serves SSE, NDJSON, Bedrock eventstream
+%% frames, and realtime WebSocket deltas.
+%% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+sequenceDiagram
+    participant L as Provider (SSE)
+    participant P as Proxy — StreamingRehydrator
+    participant T as Agentic tool
+
+    L-->>P: delta "Sent it to «EM"
+    Note right of P: "«EM" is a viable token prefix —<br/>hold it back, forward the rest
+    P-->>T: delta "Sent it to "
+    L-->>P: delta "AIL_001» a mom"
+    Note right of P: buffer + chunk = "«EMAIL_001» a mom"<br/>complete token → vault lookup
+    P-->>T: delta "jane@corp.example a mom"
+    L-->>P: delta "ent ago."
+    P-->>T: delta "ent ago."
+    L-->>P: content_block_stop
+    Note right of P: any held-back leftover flushes as a<br/>synthetic delta BEFORE the stop event
+    P-->>T: content_block_stop
+    Note over L,T: Chunk-split sweeps test every possible split offset:<br/>streamed output must equal non-streaming output, byte for byte.

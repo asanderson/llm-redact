@@ -1,0 +1,36 @@
+name: Feature request
+description: A new capability, provider, or detection rule.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, or what leaks that shouldn't?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        For **new detection rules**, note the bars up front (they are why
+        some obvious-seeming rules are deliberately absent — see the
+        "Known limitations" section of the README):
+        - vendor tokens need a distinctive **prefix** to anchor on;
+        - national ids need a **grouped display form plus a checksum**
+          (bare digit runs never fire — too collision-prone);
+        - the rule must pass the false-positive corpus gate.
+
+        For **new providers**: the proxy operates on raw bytes and must
+        forward unknown fields verbatim; a link to the provider's wire
+        format docs (streaming included) makes triage much faster.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Custom rules (`[[detection.custom_rules]]`), deny strings, an existing provider's compat endpoint, ...

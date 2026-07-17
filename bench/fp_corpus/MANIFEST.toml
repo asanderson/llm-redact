@@ -1,0 +1,109 @@
+# Exact expected detector-type counts per corpus file. The fp gate
+# (python -m llm_redact.bench --check) asserts equality in BOTH directions:
+# an extra detection is a precision regression; a missing expected one means
+# a rule change silently altered documented behavior — update this file
+# with the change that causes it, and say why in the commit.
+#
+# Every file in this directory must be listed here (an unlisted file is a
+# gate failure). An empty table means "nothing may fire in this file".
+
+[files."gutenberg_prose.txt"]
+
+[files."README.md"]
+
+[files."sqlite_excerpt.c"]
+# `return +2147483647` (INT_MAX in a comment) matches the E.164 phone
+# grammar: a leading + followed by 8-15 digits is indistinguishable from a
+# solid-format international number, which real users do send. Documented
+# known FP — requiring separators would miss genuine +14155550100 phones.
+PHONE = 1
+
+[files."rfc_excerpt.txt"]
+# RFC 5737 contains real values, correctly detected: the three IPv4
+# documentation blocks in prose, and the authors' contact emails and phone
+# numbers in the Authors' Addresses section. These pin correct-positive
+# behavior on a real document, not false positives.
+IPV4 = 8
+EMAIL = 3
+PHONE = 2
+
+[files."synthetic_app.log"]
+
+[files."synthetic_code.py"]
+# user@dotted-host inside URLs (ssh://git@build.internal/...) matches the
+# email grammar. Accepted over-redaction: identity-ish text, round-trips
+# invisibly; requiring URL-context exclusion would cost real emails.
+EMAIL = 2
+
+[files."synthetic_config.yaml"]
+
+[files."synthetic_k8s.yaml"]
+# All four hits are genuine address-shaped values (cluster IP, node
+# InternalIP, podCIDR base, and a documentation 2001:db8::/56 prefix in a
+# comment): address-shaped values redact regardless of context by design —
+# allowlisting doc prefixes is user config. The file's real probes stay
+# silent: image digests, UIDs, pod-template hashes, quoted timestamps,
+# secretKeyRef *names*, and checksum annotations fire nothing.
+IPV4 = 3
+IPV6 = 1
+
+[files."synthetic_eu_document.txt"]
+# European invoice/forms document stressing the national-id rules: every
+# planted shape is one digit off its checksum (Verhoeff for the 4-4-4
+# Aadhaar shape, ATO mod-11 for 3-3-3 triads, Luhn for the SIN-shaped
+# tail, mod-97 for both NIR forms incl. Corsican 2A, mod-23 letter for
+# DNI/NIE, ISO 7064 for the Steuer-ID) — plus dates, spaced amounts,
+# spaced IBAN (the rule matches solid form only), and project-number
+# triads. Nothing may fire.
+
+[files."synthetic_runbook.md"]
+# Token-rotation runbook stressing the vendor-prefix rules: every specimen
+# is one structural step off the real grammar (short hex tails, wrong
+# prefix families like dop_v2_, identifier-shaped secret_* names, env-var
+# spellings, "pat" inside ordinary words). Nothing may fire.
+
+[files."synthetic_web3.ts"]
+# Web3/EVM client code stressing the new crypto-wallet rules: 0x + 64-hex
+# hashes and 0x + 8-hex selectors (wrong length), a 32-byte storage slot, a
+# mixed-case address with a deliberately broken EIP-55 checksum, an IPFS CIDv0
+# ("Qm…" base58 but not a 1/3 Bitcoin address), and base58/bech32 strings with
+# corrupted checksums. Every checksum gate must reject — nothing may fire.
+
+[files."synthetic_terraform.tf"]
+# Terraform config dense with identifier-shaped values: a sha256 image digest
+# and a 40-hex module/commit hash (NOT 0x-prefixed, so not an ETH address),
+# AMI/subnet ids, a Bedrock model ARN (provider config), and version pins.
+# Nothing is a secret; nothing may fire.
+
+[files."synthetic_netdebug.log"]
+# A network-debug transcript is made of addresses; every hit is a genuine
+# one (interface/gateway/DNS IPv4s — including the address part of
+# tcpdump's IP.port dotted form — plus a link-local and a documentation
+# IPv6). The probes stay silent: MAC addresses, an 8-group certificate
+# serial, and hh:mm:ss timestamps are all colon-hex shapes the ipv6
+# validator's gates must keep rejecting, and ://host:port/path URLs
+# without an @-password never fire url_credentials. 127.0.0.1 is
+# default-allowlisted and uncounted.
+IPV4 = 17
+IPV6 = 2
+
+[files."synthetic_bigint.log"]
+# 18-19-digit machine integers: snowflake ids, nanosecond timestamps, Kafka
+# offsets, idempotency keys — the exact shapes the separator-less Chinese
+# Resident ID rule must never claim. Several rows deliberately carry a
+# valid province prefix AND a valid embedded date but a WRONG check
+# character (the 1/11 near-miss class); nothing here may fire.
+
+[files."synthetic_natids_r10.log"]
+# Round-10 national-id NEAR MISSES: my-number 4-4-4 groups (lead 0/1, so
+# aadhaar's grammar never even applies) with wrong check digits, dashed
+# Thai shapes failing BOTH the Thai checksum and Luhn, PPSN shapes with
+# wrong check letters, and grammar-valid CURPs with wrong check digits.
+# Nothing here may fire.
+
+[files."synthetic_agentstack.env"]
+# Agent-stack token LOOKALIKES: wrong lengths/charsets behind the round-10
+# prefixes, the deliberately-unmatched pk-lf- public key, and fc- embedded
+# in a dashed hostname (which forced the rule's dash-excluding
+# lookarounds). The malformed sk-lf- row is kept SHORT so the generic sk-
+# rule doesn't legitimately claim it. Nothing here may fire.

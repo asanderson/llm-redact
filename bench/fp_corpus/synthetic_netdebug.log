@@ -1,0 +1,43 @@
+# Synthetic network-debugging transcript: `ip addr`, ping, traceroute,
+# netstat, TLS handshake output. Probes the ipv6 validator's gates (MAC
+# addresses, certificate serials, log timestamps are all colon-hex shapes
+# that must never fire) and url_credentials near-misses (ports and paths
+# after :// without an @-password).
+$ ip addr show dev eth0
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default qlen 1000
+    link/ether 52:54:00:12:34:56 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.1.42/24 brd 192.168.1.255 scope global dynamic eth0
+       valid_lft 85918sec preferred_lft 85918sec
+    inet6 fe80::5054:ff:fe12:3456/64 scope link
+       valid_lft forever preferred_lft forever
+
+$ ping -c 2 gateway
+PING gateway (192.168.1.1) 56(84) bytes of data.
+64 bytes from gateway (192.168.1.1): icmp_seq=1 ttl=64 time=0.412 ms
+64 bytes from gateway (192.168.1.1): icmp_seq=2 ttl=64 time=0.398 ms
+
+$ ping6 -c 1 ipv6.gateway
+PING ipv6.gateway(2001:db8:42::1) 56 data bytes
+64 bytes from 2001:db8:42::1: icmp_seq=1 ttl=64 time=0.71 ms
+
+12:03:44.112233 IP 192.168.1.42.55832 > 192.168.1.1.53: 12345+ A? api.internal. (30)
+12:03:44.113901 IP 192.168.1.1.53 > 192.168.1.42.55832: 12345 1/0/0 A 172.20.7.19 (46)
+
+$ curl -sv https://api.internal:8443/healthz
+*   Trying 172.20.7.19:8443...
+* Connected to api.internal (172.20.7.19) port 8443
+* Server certificate:
+*  subject: CN=api.internal
+*  serial: 04:9f:86:d0:81:88:4c:7d
+*  SSL certificate verify ok.
+< HTTP/2 200
+{"status":"ok","checks":{"redis":"redis://cache:6379 reachable","upstream":"https://payments.internal:443/ping ok"}}
+
+$ netstat -tn | head -4
+Proto Recv-Q Send-Q Local Address           Foreign Address         State
+tcp        0      0 192.168.1.42:55912      172.20.7.19:8443        ESTABLISHED
+tcp        0      0 127.0.0.1:8787          127.0.0.1:44210         ESTABLISHED
+
+$ systemctl status wg-quick@wg0 | tail -2
+    wg0: endpoint resolution deferred; allowed ips 10.13.0.0/16
+    handshake retry in 5s (attempt 3, timers 00:05, 01:30, 12:03:44)

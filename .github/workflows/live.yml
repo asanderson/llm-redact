@@ -1,0 +1,63 @@
+name: Live API smoke
+
+# Manual only: sends real provider requests and spends API credits.
+# Requires repo secrets ANTHROPIC_API_KEY and/or OPENAI_API_KEY.
+# Never runs on pushes or pull requests.
+on:
+  workflow_dispatch:
+    inputs:
+      dogfood:
+        description: "also run scripts/dogfood_claude.py (real claude CLI through the proxy)"
+        type: boolean
+        default: false
+  # Enable a weekly drift check after the first successful manual run:
+  # schedule:
+  #   - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - run: uv run pytest -m live -rA tests/test_live.py
+        env:
+          LLM_REDACT_LIVE: "1"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+  dogfood:
+    # The full production loop: the real claude CLI driven through a real
+    # proxy subprocess. Opt-in via the dispatch input; needs ANTHROPIC_API_KEY.
+    if: inputs.dogfood
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/setup-node@395ad3262231945d0d5e35de6a4a55fcec1502e4 # v6
+        with:
+          node-version: 22
+      # Pinned to the version the harness was verified against; bump
+      # deliberately. (Manual opt-in job, so no lockfile to anchor to.)
+      - run: npm install -g @anthropic-ai/claude-code@2.1.203
+      - run: uv sync --frozen
+      - run: uv run python scripts/dogfood_claude.py
+        env:
+          LLM_REDACT_DOGFOOD: "1"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

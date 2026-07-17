@@ -1,0 +1,49 @@
+RECHNUNG / FACTURE / FACTURA — Nr. 2026-0117
+Musterfirma Handels GmbH · Beispielstraße 12 · 80331 München
+
+Kundennummer:        812 526 315
+Bestellnummer:       84 736 291 552
+Auftragsreferenz:    2024 0118 4470
+Vorgangs-ID:         7301 5548 2210
+
+Lieferdatum:         30 06 2026 (KW 27)
+Zahlungsziel:        14 Tage netto, Skonto 2 % bis 12 03 2026
+
+Position  Beschreibung                Menge   Einzelpreis     Gesamt
+1         Wartungsvertrag Q3          1       4 500,00 EUR    4 500,00 EUR
+2         Ersatzteilpaket B           3       1 234,56 EUR    3 703,68 EUR
+3         Anfahrtspauschale           2         89,90 EUR       179,80 EUR
+
+Zwischensumme:                                                8 383,48 EUR
+USt. 19 %:                                                    1 592,86 EUR
+Rechnungsbetrag:                                              9 976,34 EUR
+
+Bankverbindung (Musterdaten, kein gültiges Konto):
+IBAN: DE00 1234 5678 9012 3456 78 · BIC MUSTDEXX
+Verwendungszweck: RG 2026-0117 / Kd 812 526 315
+
+---
+
+Référence dossier CPAM (exemple de formulaire, clé volontairement fausse):
+numéro de sécurité sociale : 1 84 12 76 451 208 33
+Ancien numéro de dossier :   2 70 05 2A 004 117 12
+
+Contacto administración (España) — formulario de ejemplo:
+NIF/DNI del titular: 12345678A (letra de control de ejemplo, no válida)
+NIE de muestra:      X7654321B
+
+Steuerliche Angaben (Beispielformular, Prüfziffer absichtlich falsch):
+Steuer-ID des Antragstellers: 12 345 678 903
+Steuernummer (altes Format):  181/815/08155
+
+Australian branch order sheet (specimen only):
+Supplier reference 876 543 218 must be quoted on all consignments.
+Consignment weight: 12 500 kg gross, 11 950 kg net.
+
+भारत शाखा — नमूना प्रपत्र (सत्यापन अंक जानबूझकर अमान्य):
+आधार-शैली संदर्भ: 2345 6789 0120
+
+Terminübersicht:
+- 01 07 2026 Kickoff Lyon (Referenz 1 85 03 75 116 384 68)
+- 15 08 2026 Abnahme München
+- Projektnummern: 470 110 220, 550 660 771, 990 880 442

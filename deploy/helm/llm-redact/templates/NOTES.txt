@@ -1,0 +1,71 @@
+llm-redact {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}".
+
+Kubernetes deployment requires a Team-tier-or-higher license — the proxy refuses
+to start on k8s below Team. Provide it via the Secret named
+"{{ .Values.license.secretName }}" (key: license-key).
+
+{{ if eq .Values.mode "standalone" -}}
+Mode: STANDALONE — a shared in-cluster proxy (Deployment + Service{{ if .Values.autoscaling.enabled }} + HorizontalPodAutoscaler{{ end }}).
+
+  Agent pods reach the proxy at:
+    http://{{ include "llm-redact.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+  Point your tool at it, e.g.:
+    ANTHROPIC_BASE_URL / OPENAI_BASE_URL / GOOGLE_GEMINI_BASE_URL = that URL.
+
+{{ if .Values.autoscaling.enabled -}}
+  Autoscaling: {{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }} replicas
+  (CPU target {{ .Values.autoscaling.targetCPUUtilizationPercentage }}%). Every replica shares one
+  vault backend "{{ .Values.vault.backend }}" so all pods issue consistent «TYPE_NNN» tokens —
+  a per-pod vault would let one pod rehydrate another's secret (never-wrong-value).
+{{ end -}}
+  SECURITY: a standalone proxy serves other pods over the network, i.e. a
+  NON-LOOPBACK bind (Pro). Prefer real mutual TLS — mount the cert Secret via
+  extraVolumes/extraVolumeMounts and set [tls] certfile/keyfile/client_ca via
+  `extraConfig`. insecureBind={{ .Values.insecureBind }} is the documented hatch for a
+  TRUSTED in-cluster network only — pair it with networkPolicy.enabled=true
+  (currently {{ .Values.networkPolicy.enabled }}); see docs/threat-model.md.
+{{- if and (has .Values.vault.backend (list "postgresql" "mysql" "oracle" "dbapi")) (eq .Values.image.repository "ghcr.io/asanderson/llm-redact") (not (contains "pro" (.Values.image.tag | default .Chart.AppVersion))) }}
+
+  *** WARNING: vault.backend = "{{ .Values.vault.backend }}" but the image tag
+  "{{ .Values.image.tag | default .Chart.AppVersion }}" is the STOCK Free image, which ships without
+  the RDBMS drivers and crypto extras — the proxy will REFUSE to start (missing
+  driver / off-box-DSN-without-fernet), and a server RDBMS vault is an
+  llm-redact-pro subsystem anyway. Use the paid distribution's image (paired
+  with a license):
+    image.repository=<the llm-redact-pro image>  image.tag={{ .Chart.AppVersion }}-pro
+  See docs/editions.md and the llm-redact-pro repo's docs/vault-rdbms.md.
+{{- end }}
+{{- else -}}
+Mode: SIDECAR — the proxy runs in the SAME pod as your agentic tool and BINDS
+127.0.0.1: containers in a pod share the network namespace, so the tool
+reaches it over loopback while other pods cannot reach it at all. This is the
+secure default: one replica, no Service, no HPA (probes are exec-based —
+kubelet httpGet would need a pod-IP bind).
+{{- if .Values.tool.enabled }}
+{{- if eq .Values.tool.image "your-registry/your-agentic-tool:latest" }}
+
+  *** WARNING: tool.image is still the placeholder
+  "your-registry/your-agentic-tool:latest" — that container will
+  ImagePullBackOff. Set tool.image to your agentic tool's image.
+{{- end }}
+
+  The tool container talks to the proxy over loopback; the provider base URLs
+  are already wired to http://127.0.0.1:{{ .Values.service.port }}.
+{{- else }}
+
+  tool.enabled=false: this pod runs the proxy only. Add your agentic tool as
+  a second container (tool.enabled=true + tool.image), or exec in to test:
+    kubectl exec -it deploy/{{ include "llm-redact.fullname" . }} -c llm-redact -- llm-redact preview --text "test@corp.example"
+{{- end }}
+{{- end }}
+{{- if and (eq .Values.vault.backend "sqlite") (not .Values.persistence.enabled) }}
+
+*** WARNING: vault.backend=sqlite with persistence.enabled=false — the vault
+lives on an emptyDir, so a pod restart WIPES it and previously issued token
+numbers get reissued (never-wrong-value depends on the dense counter
+surviving). Set persistence.enabled=true with a PersistentVolumeClaim.
+{{- end }}
+
+Check posture once the pod is up:
+  kubectl exec deploy/{{ include "llm-redact.fullname" . }} -c llm-redact -- llm-redact status

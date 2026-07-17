@@ -1,0 +1,7 @@
+# Config for the compose.yaml demo: routes Anthropic traffic to the bundled
+# fake upstream so the redact/rehydrate loop can be observed without keys.
+[providers.anthropic]
+upstream_base_url = "http://fake-upstream:9999"
+
+[vault]
+backend = "sqlite" # persisted in the llm-redact-data volume

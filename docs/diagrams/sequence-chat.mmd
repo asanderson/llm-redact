@@ -1,0 +1,24 @@
+%% Non-streaming request round trip. The provider only ever sees the
+%% placeholder; the tool only ever sees the real value.
+%% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+sequenceDiagram
+    autonumber
+    participant T as Agentic tool
+    participant P as llm-redact proxy
+    participant V as Vault (local)
+    participant L as LLM provider
+
+    T->>P: POST /v1/messages<br/>"…email jane@corp.example…"
+    activate P
+    P->>P: walk every JSON string value,<br/>detect + resolve overlaps
+    P->>V: token for (session, EMAIL, value)
+    V-->>P: «EMAIL_001» — deterministic:<br/>same value ⇒ same token
+    P->>L: "…email «EMAIL_001»…"<br/>(+ system note: reproduce tokens exactly)
+    deactivate P
+    L-->>P: 200 "Sure, I drafted the email to «EMAIL_001»"
+    activate P
+    P->>V: reverse lookup «EMAIL_001»
+    V-->>P: jane@corp.example
+    P-->>T: "Sure, I drafted the email to jane@corp.example"
+    deactivate P
+    Note over T,L: Auth headers pass through untouched. Unrecognized<br/>traffic forwards verbatim. Oversized redactable bodies → 413.

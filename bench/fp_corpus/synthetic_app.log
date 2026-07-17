@@ -1,0 +1,23 @@
+2026-06-01T08:00:01Z INFO  worker-3 starting build 4155550100 (release 2.14.0)
+2026-06-01T08:00:01Z INFO  worker-3 base image digest sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+2026-06-01T08:00:02Z DEBUG worker-3 request id 550e8400-e29b-41d4-a716-446655440000 accepted
+2026-06-01T08:00:02Z DEBUG worker-3 parent span 6ba7b810-9dad-11d1-80b4-00c04fd430c8, child f47ac10b-58cc-4372-a567-0e02b2c3d479
+2026-06-01T08:00:03Z INFO  worker-3 checked out commit da39a3ee5e6b4b0d3255bfef95601890afd80709 on branch main
+2026-06-01T08:00:03Z INFO  worker-3 cherry-picked 2fd4e1c67a2d28fced849ee1bb76e7391b93eb12 and adc83b19e793491b1c6ea0fd8b46cd9f32e592fc
+2026-06-01T08:00:04Z WARN  worker-3 retrying invoice 9876543210 (attempt 2 of 5)
+2026-06-01T08:00:05Z INFO  worker-3 order 1234567890 shipped; tracking 55501004155
+2026-06-01T08:00:06Z DEBUG scheduler cron fired at 08:00:06.123456, next run 2026-06-02T08:00:00Z
+2026-06-01T08:00:07Z INFO  api GET /v2/items?page=3&per_page=100 -> 200 in 41.55 ms
+2026-06-01T08:00:08Z DEBUG cache key items:v2:page:3 evicted after 3600s (hit ratio 0.415)
+2026-06-01T08:00:09Z INFO  build tool versions: node 22.11.0, python 3.13.1, rustc 1.83.0
+2026-06-01T08:00:10Z WARN  db connection pool 8/10 busy; slow query took 555.0100 ms
+2026-06-01T08:00:11Z INFO  telemetry counter deploys_total{env="prod"} 12034 exported
+2026-06-01T08:00:12Z DEBUG feature flag rollout-2026-06 at 41.55% of traffic
+2026-06-01T08:00:13Z INFO  upgraded dependency httpx 0.27.2 -> 0.28.1 (lockfile hash 8843d7f92416211de9ebb963ff4ce28125932878)
+2026-06-01T08:00:14Z INFO  git tag v0.4.0 resolved to 356a192b7913b04c54574d18c28d46e6395428ab
+2026-06-01T08:00:15Z DEBUG chunk sizes: [4096, 8192, 16384, 32768] bytes, checksum crc32 0xdeadbeef
+2026-06-01T08:00:16Z INFO  ticket PROJ-4155 closed as duplicate of PROJ-550
+2026-06-01T08:00:17Z WARN  certificate serial 04:9f:86:d0:81:88:4c:7d:65:9a expires in 30 days
+2026-06-01T08:00:18Z INFO  copied s3 object builds/2026/06/01/artifact-9d5e3f1a.tar.gz (14.2 MiB)
+2026-06-01T08:00:19Z DEBUG session affinity cookie route=w3-1717228819 set (ttl 86400)
+2026-06-01T08:00:20Z INFO  healthcheck ok: uptime 415550 s, goroutines 42, heap 128 MiB

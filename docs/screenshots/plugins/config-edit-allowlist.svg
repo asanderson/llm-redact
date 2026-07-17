@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="616" viewBox="0 0 820 616" role="img" aria-label="terminal output of Claude Code — /llm-redact:config-edit">
+<rect width="820" height="616" rx="10" fill="#0d1117"/>
+<path d="M0 10a10 10 0 0 1 10-10h800a10 10 0 0 1 10 10v30h-820z" fill="#161b22"/>
+<circle cx="24" cy="20" r="6" fill="#ff5f57"/>
+<circle cx="46" cy="20" r="6" fill="#febc2e"/>
+<circle cx="68" cy="20" r="6" fill="#28c840"/>
+<text x="410" y="24" text-anchor="middle" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">Claude Code — /llm-redact:config-edit</text>
+<text x="22" y="75" fill="#7ee787" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">&gt; /llm-redact:config-edit stop redacting support@corp.example — it's our public address</text>
+<text x="22" y="94" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="113" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ I'll read the effective config, apply the edit, gate it with</text>
+<text x="22" y="132" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  serve --check, reload via SIGHUP, and verify the result.</text>
+<text x="22" y="151" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="170" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Bash(llm-redact config show --path)</text>
+<text x="22" y="189" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  ~/.config/llm-redact/config.toml</text>
+<text x="22" y="208" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="227" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Update(~/.config/llm-redact/config.toml)</text>
+<text x="22" y="246" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  Added 2 lines:</text>
+<text x="22" y="265" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">       [detection.allowlist_by_type]</text>
+<text x="22" y="284" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">       EMAIL = ["support@corp.example"]</text>
+<text x="22" y="303" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="322" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Bash(llm-redact serve --check)</text>
+<text x="22" y="341" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  serve --check: OK — config loads, builds, and passes bind policy</text>
+<text x="22" y="360" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="379" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Bash(kill -HUP $(pgrep -f 'llm-redact serve'))</text>
+<text x="22" y="398" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  (No content)</text>
+<text x="22" y="417" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="436" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Bash(llm-redact preview --text "mail support@corp.example and jane.doe@corp.example about the ro</text>
+<text x="22" y="455" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  llout")</text>
+<text x="22" y="474" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  redact  EMAIL x1</text>
+<text x="22" y="493" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     ---</text>
+<text x="22" y="512" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     mail support@corp.example and «EMAIL_001» about the rollout</text>
+<text x="22" y="531" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="550" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Allowlisted for the EMAIL type only: the public address passes</text>
+<text x="22" y="569" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  through while every other email still redacts — the preview</text>
+<text x="22" y="588" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  proves it without sending anything upstream.</text>
+</svg>

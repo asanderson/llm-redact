@@ -1,0 +1,11 @@
+2026-07-10T09:14:22Z order-svc INFO created order id=845190322071985126 user=member
+2026-07-10T09:14:22Z order-svc DEBUG snowflake=1456239706584862720 shard=12 seq=4095
+2026-07-10T09:14:23Z billing INFO invoice 731028455901882 total_cents=124900
+2026-07-10T09:14:23Z metrics DEBUG boot_ns=1720512000123456789 uptime_ns=86400000000123
+2026-07-10T09:14:24Z kafka INFO offset=920138475560271 partition=7 topic=events
+2026-07-10T09:14:25Z payments WARN idempotency_key=110915200302285510 retry=1
+2026-07-10T09:14:26Z sensor DEBUG reading window 320151198404201830 discarded (crc mismatch)
+2026-07-10T09:14:26Z sensor DEBUG reading window 320129197503250881 discarded (crc mismatch)
+2026-07-10T09:14:27Z sensor DEBUG reading window 320132198409227170 discarded (crc mismatch)
+2026-07-10T09:14:27Z export INFO wrote batch 511702198306150001 rows=18234
+2026-07-10T09:14:28Z export INFO wrote batch 340822197511300000 rows=9410

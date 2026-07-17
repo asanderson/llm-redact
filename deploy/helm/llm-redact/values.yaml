@@ -1,0 +1,166 @@
+# Default values for the llm-redact chart.
+# NOTE: the FOSS core deploys on Kubernetes with no license at all. A license
+# key matters only to the paid llm-redact-pro package's subsystems; when you
+# use them, provide the key via the Secret named by `license.secretName`.
+
+# Deployment shape:
+#   sidecar    — the proxy runs in the SAME pod as your agentic tool and BINDS
+#                127.0.0.1, so it is genuinely unreachable from other pods
+#                (containers in a pod share the network namespace; probes are
+#                exec-based because kubelet httpGet dials the pod IP).
+#                replicas is 1; no Service/HPA. This is the secure default.
+#   standalone — a shared in-cluster proxy (Deployment + Service) that agent
+#                pods reach over the network (binds 0.0.0.0); supports the
+#                HorizontalPodAutoscaler. See `insecureBind` and
+#                `networkPolicy` before exposing it.
+mode: sidecar
+
+image:
+  repository: ghcr.io/asanderson/llm-redact
+  # Defaults to the chart's appVersion when empty. The stock Free image ships
+  # the perf+realtime extras ONLY — a server RDBMS vault (postgresql/mysql) and
+  # vault encryption are llm-redact-pro subsystems whose image (`<version>-pro`,
+  # adding the vault-postgres, vault-mysql, and crypto extras) ships from the
+  # paid llm-redact-pro distribution (NOTES.txt warns when the values ask for
+  # an RDBMS backend on the stock FOSS image). See docs/editions.md.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Pull secrets for the pod (private registries — the tool image in sidecar
+# mode is typically yours): [{ name: my-registry-cred }]
+imagePullSecrets: []
+
+# Standalone replicas when autoscaling is OFF (ignored when autoscaling.enabled).
+replicaCount: 1
+
+vault:
+  # memory | sqlite | postgresql | mysql | oracle | dbapi
+  # A multi-replica / autoscaled STANDALONE proxy MUST use a shared server
+  # backend (postgresql/mysql/oracle/dbapi) so every replica issues consistent
+  # «TYPE_NNN» tokens — the chart REFUSES memory/sqlite in that case
+  # (never-wrong-value across pods). sqlite is fine for sidecar / single
+  # replica, but set persistence.enabled=true with it: on an emptyDir a pod
+  # restart wipes the vault and token numbers get reissued.
+  backend: memory
+  # "none" | "fernet". Encrypted vaults need the llm-redact-pro package, a key
+  # Secret, and the -rdbms image variant (the crypto extra is not in the stock
+  # image).
+  encryption: none
+  # Secret holding key `vault-key` for at-rest encryption (optional).
+  # Create it: kubectl create secret generic llm-redact-vault \
+  #   --from-literal=vault-key="$(llm-redact vault gen-key)"
+  keySecret: llm-redact-vault
+  # Secret + key holding the RDBMS DSN, wired to LLM_REDACT_VAULT_DSN when set.
+  # Create it: kubectl create secret generic llm-redact-dsn \
+  #   --from-literal=dsn="postgresql://vault@pg.default.svc:5432/llmredact"
+  dsnSecret: ""
+  dsnSecretKey: dsn
+
+license:
+  # Secret holding key `license-key` (llmr1...). k8s requires Team+.
+  # Create it: kubectl create secret generic llm-redact-license \
+  #   --from-literal=license-key="llmr1...."
+  secretName: llm-redact-license
+
+log:
+  # "text" | "json". JSON logs are Free as of 3.2.0.
+  format: text
+
+# STANDALONE ONLY (sidecar binds loopback and never needs it): a standalone
+# proxy serves other pods over the network — a non-loopback bind. Prefer real
+# mTLS: mount the cert Secret via extraVolumes/extraVolumeMounts and set [tls]
+# certfile/keyfile/client_ca in extraConfig. INSECURE_BIND=1 is the documented
+# hatch for a TRUSTED in-cluster network only — pair it with networkPolicy.
+insecureBind: true
+
+service:
+  type: ClusterIP
+  port: 8787
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # Set to a number to also scale on memory; null disables the memory metric.
+  targetMemoryUtilizationPercentage: null
+
+# NetworkPolicy for the proxy pods (defense in depth; needs a CNI that
+# enforces policies). Sidecar mode gets default-deny ingress (loopback
+# traffic inside the pod is unaffected). Standalone mode restricts ingress on
+# the proxy port to pods matching allowFrom (empty list = allow any pod —
+# still better than nothing, since it excludes other namespaces by default).
+# CAVEAT: kubelet exec probes are unaffected, but on some CNIs a default-deny
+# policy can interfere with httpGet probes — another reason sidecar uses exec.
+networkPolicy:
+  enabled: false
+  # Standalone: podSelector matchLabels for client pods allowed to reach the
+  # proxy, e.g. { llm-redact-client: "true" }. Empty = any pod in this namespace.
+  allowFrom: {}
+
+# PodDisruptionBudget for standalone multi-replica deployments — without one
+# a node drain can evict every replica of the shared proxy at once.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# ServiceAccount for the proxy pod. Cloud features (managed-DBMS vault via IAM
+# auth and S3/GCS audit sinks via IRSA / Workload Identity — both Pro; the LLM
+# cloud adapters — Team) need an annotatable ServiceAccount; keep create=false
+# to use the namespace default.
+serviceAccount:
+  create: false
+  # Name to use (with create=false, an existing SA; empty = "default").
+  name: ""
+  annotations: {}
+
+# Prometheus Operator ServiceMonitor for /__llm-redact/metrics (standalone).
+serviceMonitor:
+  enabled: false
+  interval: 30s
+
+resources:
+  # HPA CPU/memory targets are a percentage of these requests — keep them set.
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Persist the sqlite vault/audit across restarts (sidecar / single replica).
+# never-wrong-value depends on the dense counter surviving.
+persistence:
+  enabled: false
+  claimName: llm-redact-data
+
+# Extra environment for the proxy container (e.g. a DSN password secretRef).
+extraEnv: []
+
+# Extra pod volumes / proxy-container mounts — the way to mount a [tls]
+# cert/key/client-ca Secret so extraConfig can reference it, e.g.:
+#   extraVolumes:
+#     - name: tls
+#       secret: { secretName: llm-redact-tls }
+#   extraVolumeMounts:
+#     - { name: tls, mountPath: /etc/llm-redact/tls, readOnly: true }
+extraVolumes: []
+extraVolumeMounts: []
+
+# Raw TOML appended to the generated config (providers overrides, [tls], etc.).
+extraConfig: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+# The agentic tool container (sidecar mode only). Disabled by default so a
+# bare `helm install` yields a working proxy-only pod you can exec into —
+# enable it AND set a real image (the placeholder would ImagePullBackOff).
+tool:
+  enabled: false
+  name: your-agentic-tool
+  image: your-registry/your-agentic-tool:latest

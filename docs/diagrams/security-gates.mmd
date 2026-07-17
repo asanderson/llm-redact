@@ -1,0 +1,42 @@
+%% Security-relevant data flow: every gate a request passes, what decides
+%% (PDP) and what enforces (PEP) at each one. Companion table with code
+%% references: docs/security-dataflows.md.
+%% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+flowchart TB
+    conn([client connection]) --> g1{"① bind policy<br/>loopback, or full mTLS?"}
+    g1 -- "non-loopback without mTLS:<br/>serve refuses to start" --> r1([no socket at all])
+    g1 -- accepted --> route{"reserved path<br/>/__llm-redact/* ?"}
+
+    route -- yes --> g2{"② ops guard chain<br/>GET-only + Host · Origin · CSRF<br/>header · content-type · 1 MiB cap<br/>on the two POST exceptions"}
+    g2 -- any layer fails --> r2([4xx — never forwarded])
+    g2 -- ok --> ops([ops surface: status, metrics,<br/>dashboard, config editor —<br/>types and counts only, never values])
+
+    route -- no --> g3{"③ provider routing<br/>adapter match (incl. /custom/NAME)<br/>+ enabled? + detection on?"}
+    g3 -- "provider disabled or<br/>unknown custom name" --> r3([proxy-generated 502 —<br/>never falls through to pass-through])
+    g3 -- "unrecognized traffic" --> pass([verbatim pass-through —<br/>never break the tool])
+    g3 -- matched --> g4{"④ body size<br/>≤ max_body_bytes?"}
+    g4 -- "too large to redact" --> r4([413 — nothing sent upstream])
+    g4 -- ok --> g5{"⑤ detection + per-rule modes<br/>deny strings win every overlap,<br/>then rules + allowlists<br/>(scoped by [detection] languages);<br/>redact / warn / block;<br/>[detection.mcp] exempt_servers<br/>blocks bypass this gate"}
+
+    g5 -- "block-mode match" --> r5([400, type only —<br/>nothing sent upstream])
+    g5 -- "redact (default)" --> g6{"⑥ write-ahead audit<br/>[audit] required only:<br/>START row durably committed?"}
+    g6 -- "write fault:<br/>no audit row, no service" --> r6([503 — nothing sent upstream])
+    g6 -- "committed (or mode off)" --> up["upstream request:<br/>placeholders only"]
+    g5 -. "warn mode: counted but the<br/>VALUE IS FORWARDED — observation,<br/>not protection" .-> up
+    g4 -. "[providers.NAME] detection = false:<br/>⑤ SKIPPED — forwarded UNREDACTED<br/>(deliberate per-provider opt-out;<br/>logged + surfaced in /status)" .-> up
+    up --> resp["response rehydrated locally<br/>(vault reverse lookup)"]
+    resp --> out([client receives real values])
+    resp -. "audit copies (opt-in): local DB +<br/>optional S3/GCS/Azure sinks — types and<br/>counts, never values; [audit] required<br/>spools sinks at-least-once" .-> sink[("⑧ audit sinks")]
+
+    vault[("⑦ vault<br/>0600/0700 · optional Fernet at rest ·<br/>wrong/missing key fails closed AT OPEN ·<br/>strict per-session isolation")]
+    g5 -. "issue tokens" .- vault
+    resp -. "reverse lookup" .- vault
+
+    classDef refuse fill:#ffebe9,stroke:#cf222e,stroke-width:1px;
+    classDef gate fill:#ddf4ff,stroke:#0969da,stroke-width:1px;
+    classDef okPath fill:#dafbe1,stroke:#1a7f37,stroke-width:1px;
+    classDef vaultBox fill:#fff8c5,stroke:#9a6700,stroke-width:1.5px;
+    class r1,r2,r3,r4,r5,r6 refuse;
+    class g1,g2,g3,g4,g5,g6 gate;
+    class up,resp,out,ops,pass okPath;
+    class vault,sink vaultBox;

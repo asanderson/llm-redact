@@ -1,0 +1,16 @@
+{{- if and (eq .Values.mode "standalone") .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "llm-redact.fullname" . }}
+  labels:
+    {{- include "llm-redact.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "llm-redact.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: proxy
+      path: /__llm-redact/metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

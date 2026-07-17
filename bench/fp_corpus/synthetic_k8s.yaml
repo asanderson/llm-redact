@@ -1,0 +1,81 @@
+# Synthetic but realistic Kubernetes manifests: the shapes agentic tools
+# paste when debugging deployments. Probes: image digests (long hex),
+# resource UIDs, quoted timestamps (colon groups), CPU limits, selector
+# hashes, secretKeyRef *names* (never values), CIDRs and cluster IPs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: prod
+  uid: 8f0b4b3e-92c4-4d7a-9a3e-6f1f2f3a4b5c
+  creationTimestamp: "2026-07-08T10:15:00Z"
+  labels:
+    app.kubernetes.io/name: payments-api
+    pod-template-hash: 5b8d66c9cf
+  annotations:
+    deployment.kubernetes.io/revision: "42"
+    checksum/config: 3b0cd44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payments-api
+  template:
+    spec:
+      containers:
+        - name: api
+          image: registry.internal/payments/api@sha256:9c56cc51b374c3ba189210d5b6d4bf57790d351c96c47c02190ecf1e430ba0aa
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: payments-db-credentials
+                  key: password
+            - name: AWS_REGION
+              value: us-east-1
+          resources:
+            limits:
+              cpu: "1500m"
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-api
+  namespace: prod
+spec:
+  type: ClusterIP
+  clusterIP: 10.96.14.203
+  selector:
+    app.kubernetes.io/name: payments-api
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Node
+metadata:
+  name: worker-3
+status:
+  addresses:
+    - type: InternalIP
+      address: 172.20.33.7
+  nodeInfo:
+    bootID: 42e7c9a1-0e0e-4bb1-8f2a-3c1d5e7f9a0b
+    containerRuntimeVersion: containerd://1.7.13
+    kernelVersion: 6.6.30-generic
+    kubeletVersion: v1.29.4
+spec:
+  podCIDR: 10.244.3.0/24
+  # Dual-stack pools use documentation prefixes in our runbooks:
+  # 2001:db8:42::/56 is the example range, never a live allocation.

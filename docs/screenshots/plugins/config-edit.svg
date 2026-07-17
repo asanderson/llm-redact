@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="825" viewBox="0 0 820 825" role="img" aria-label="terminal output of Claude Code — /llm-redact:config-edit">
+<rect width="820" height="825" rx="10" fill="#0d1117"/>
+<path d="M0 10a10 10 0 0 1 10-10h800a10 10 0 0 1 10 10v30h-820z" fill="#161b22"/>
+<circle cx="24" cy="20" r="6" fill="#ff5f57"/>
+<circle cx="46" cy="20" r="6" fill="#febc2e"/>
+<circle cx="68" cy="20" r="6" fill="#28c840"/>
+<text x="410" y="24" text-anchor="middle" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">Claude Code — /llm-redact:config-edit</text>
+<text x="22" y="75" fill="#7ee787" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">&gt; /llm-redact:config-edit add "project aurora" as a deny string and trial phone_number in warn mod</text>
+<text x="22" y="94" fill="#7ee787" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  e</text>
+<text x="22" y="113" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="132" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ I'll read the effective config, apply the edit, gate it with</text>
+<text x="22" y="151" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  serve --check, reload via SIGHUP, and verify the result.</text>
+<text x="22" y="170" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="189" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Bash(llm-redact config show --path)</text>
+<text x="22" y="208" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  ~/.config/llm-redact/config.toml</text>
+<text x="22" y="227" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="246" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Update(~/.config/llm-redact/config.toml)</text>
+<text x="22" y="265" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  Added 5 lines:</text>
+<text x="22" y="284" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">       [detection]</text>
+<text x="22" y="303" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">       deny = ["project aurora"]</text>
+<text x="22" y="322" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">       </text>
+<text x="22" y="341" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">       [detection.modes]</text>
+<text x="22" y="360" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">       phone_number = "warn"</text>
+<text x="22" y="379" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="398" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Bash(llm-redact serve --check)</text>
+<text x="22" y="417" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  serve --check: OK — config loads, builds, and passes bind policy</text>
+<text x="22" y="436" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="455" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Bash(kill -HUP $(pgrep -f 'llm-redact serve'))</text>
+<text x="22" y="474" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  (No content)</text>
+<text x="22" y="493" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="512" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Bash(llm-redact status)</text>
+<text x="22" y="531" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  llm-redact 1.0.0 — up 0.4s</text>
+<text x="22" y="550" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     license: none (FOSS core — nothing gated)</text>
+<text x="22" y="569" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     licensed-features package: not installed (FOSS core is complete)</text>
+<text x="22" y="588" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     session: default  vault: sqlite (2 entries)</text>
+<text x="22" y="607" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     detections:  DENY×1 EMAIL×1</text>
+<text x="22" y="626" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     rehydrations: DENY×1 EMAIL×1</text>
+<text x="22" y="645" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     audit: disabled</text>
+<text x="22" y="664" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     fuzzy: True  ner: False</text>
+<text x="22" y="683" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     posture:</text>
+<text x="22" y="702" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">       ⚠ warn mode: PHONE×1 FORWARDED upstream (observation, not protection)</text>
+<text x="22" y="721" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     … (+8 more lines)</text>
+<text x="22" y="740" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
+<text x="22" y="759" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Both changes are live without a restart. Note the posture line:</text>
+<text x="22" y="778" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  warn mode FORWARDS matched phone numbers upstream while you</text>
+<text x="22" y="797" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  measure the rule's noise — switch it to redact once it's quiet.</text>
+</svg>

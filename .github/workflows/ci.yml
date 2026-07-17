@@ -1,0 +1,439 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly run so new dependency advisories (the audit job) surface on main
+  # without waiting for the next push.
+  schedule:
+    - cron: "17 6 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - run: uv run pytest
+      # The concurrency/soak checks are deselected from the default run; run
+      # them explicitly so the never-wrong-value-under-load invariants stay live.
+      - run: uv run pytest -m soak
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+
+  test-macos:
+    # Both macOS architectures, one Python each: the platform-sensitive
+    # surface (kqueue event loop, APFS os.replace, explicit 0600/0700
+    # modes, sqlite WAL, SIGHUP) does not vary by Python minor, and macOS
+    # runners bill ~10x Linux. macos-15 is Apple silicon (arm64);
+    # macos-15-intel is GitHub's x86_64 runner (supported into 2027) —
+    # the wheel is pure-Python, so these jobs ARE the x86_64/arm64 macOS
+    # support verification.
+    name: test (macOS ${{ matrix.arch }}, py3.13)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - run: uv run pytest
+
+  test-windows:
+    # Phase 26: the supported Windows scope is the Free tier + agent
+    # plugins, and this job is its verification — the FULL suite runs, with
+    # only narrow, pinned platform gates (POSIX mode assertions become
+    # conditional; doctor/service take their win32 branches). PYTHONUTF8
+    # keeps the guillemet placeholders printable on a cp1252 console.
+    name: test (Windows, py3.13)
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - run: uv run pytest
+
+  plugins:
+    name: agent plugins (install e2e + validate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      # The rendered plugin tree + marketplace must be in sync with
+      # plugin_assets.py (also pinned by test, but re-render here so a
+      # stale checked-in file fails loudly).
+      - run: uv run python scripts/render_plugins.py && git diff --exit-code plugins .claude-plugin
+      # Install into a throwaway HOME and prove the command↔CLI contract.
+      - run: uv run python scripts/plugin_e2e.py
+      # Structural validation of the Claude Code plugin manifest, when the
+      # CLI is available (best-effort — never blocks the job if absent).
+      - name: claude plugin validate (best-effort)
+        run: |
+          if command -v claude >/dev/null 2>&1; then
+            claude plugin validate --strict plugins/llm-redact || exit 1
+          else
+            echo "claude CLI not present on the runner; skipping structural validate"
+          fi
+
+  helm:
+    # The Helm chart (deploy/helm/llm-redact) rendered for real: `helm lint`
+    # plus the helm-gated tests in test_deploy_assets.py, which render both
+    # value presets (sidecar; standalone+autoscaling) and assert the
+    # never-wrong-value guardrail {{ fail }}s a per-pod-vault autoscaled render.
+    # helm is installed from the official release with a PINNED version +
+    # SHA256 checksum (no marketplace action in the supply chain); the base
+    # `test` job already runs the stdlib needle/appVersion tests, which skip
+    # the helm-gated ones when helm is absent.
+    name: helm chart (lint + render both modes)
+    runs-on: ubuntu-latest
+    env:
+      HELM_VERSION: v3.16.3
+      HELM_SHA256: f5355c79190951eed23c5432a3b920e071f4c00a64f75e077de0dd4cb7b294ea
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - name: install helm (pinned + checksum-verified)
+        run: |
+          set -euo pipefail
+          tarball="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL "https://get.helm.sh/${tarball}" -o "$tarball"
+          echo "${HELM_SHA256}  ${tarball}" | sha256sum -c -
+          tar xzf "$tarball"
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          helm version
+      - name: helm lint
+        run: helm lint deploy/helm/llm-redact
+      - name: chart tests (renders both presets + guardrail-fires)
+        run: uv run pytest tests/test_deploy_assets.py -v
+      - name: guardrail fails an autoscaled per-pod-vault render
+        run: |
+          set -euo pipefail
+          if helm template rel deploy/helm/llm-redact \
+               --set mode=standalone --set autoscaling.enabled=true \
+               --set vault.backend=sqlite >/dev/null 2>err.txt; then
+            echo "FAIL: guardrail did not fire for standalone+sqlite+autoscaling"; exit 1
+          fi
+          grep -q "SHARED vault" err.txt
+
+  audit:
+    name: dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      # Runtime closure only (no dev tools): what a `pip install
+      # llm-redact-proxy` user actually gets. Gating on purpose — the
+      # closure is tiny (httpx/starlette/uvicorn). If an advisory has no
+      # fix released yet, add `--ignore-vuln GHSA-...` with a comment and
+      # an issue link, and remove it when the fix ships.
+      - run: >
+          uv export --frozen --no-dev --no-emit-project --no-hashes
+          -o requirements-audit.txt
+      - run: uvx pip-audit --strict --no-deps -r requirements-audit.txt
+
+  dependency-review:
+    # Blocks a PR that introduces a dependency with a known vulnerability or a
+    # disallowed licence, using GitHub's Dependency Graph diff. The graph is
+    # available on public repos (and private repos with Advanced Security), so
+    # the job self-skips while this repo is private — it arms on go-public,
+    # the same switch as PyPI publishing and build attestations. pip-audit
+    # (the `audit` job) covers the runtime closure meanwhile.
+    name: dependency review
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' && github.event.repository.private == false }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          # Copyleft licences would complicate the MIT distribution; flag them
+          # for a human decision rather than silently pulling them in.
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
+
+  ner:
+    name: ner extras (spaCy model + presidio)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen --extra ner --extra presidio
+      # Direct wheel URL: `spacy download` shells out to pip, which does not
+      # exist in uv-managed venvs. One model serves both backends (the
+      # presidio detector pins en_core_web_sm too).
+      - run: uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+      # test_presidio.py includes the real-AnalyzerEngine smoke test, which
+      # only runs when the extra and the model are both present — i.e. here.
+      - run: uv run pytest tests/test_ner.py tests/test_presidio.py -v
+
+  # NOTE (R4 open-core split): the real-PostgreSQL+MySQL RDBMS-vault job moved
+  # to the private llm-redact-pro repo's CI (the server RDBMS vault is a Pro
+  # feature). The Free `test` job still runs test_vault_rdbms.py's fake-driver
+  # battery over stdlib sqlite3-as-dbapi, which proves the portable dialect SQL.
+
+  bench:
+    name: detection bench (report artifact)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - run: uv run python -m llm_redact.bench --latency --out bench-report --check
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-report
+          path: bench-report/
+
+  complexity:
+    # Every function with cyclomatic complexity > 1 must be EXECUTED by the
+    # suite (scripts/complexity_gate.py). Report-only through 3.1.1; gated
+    # here from 3.1.2 — an uncovered branching function fails unless recorded
+    # in scripts/complexity_allowlist.py with a justification, and a stale
+    # allowlist entry fails too (same discipline as the mutation gate).
+    name: complexity coverage (assurance gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - name: run the suite under coverage
+        run: uv run coverage run -m pytest -q
+      - name: gate on CC>1 execution (Free core)
+        run: uv run python scripts/complexity_gate.py --check
+      # The paid package's own complexity gate runs in the llm-redact-pro repo's
+      # CI (R4 physical split) — it is no longer in this tree.
+
+  # NOTE (R4 open-core split): the `free-alone` job (which hid the co-located
+  # src/llm_redact_pro to simulate a Free-only install) and the `enforcement-ext`
+  # job (which compiled the pro Cython enforcement core) both moved to the
+  # llm-redact-pro repo. This repo IS the Free-only install now — test_free_alone.py
+  # runs in the normal `test` job (the pro package is genuinely absent), and the
+  # keyless-boot / paid-config-fails-closed assertions ride there.
+
+  mutation:
+    # Assurance: mutation testing proves the suites KILL a weakened guard or a
+    # broken checksum, not just that they pass. Scoped to the load-bearing
+    # correctness core ([tool.mutmut] in pyproject). GATING via
+    # scripts/mutation_gate.py: a surviving mutant fails unless recorded in
+    # scripts/mutation_equivalents.py with a reviewed justification, and a
+    # stale allow-list entry fails too — nothing survives silently in either
+    # direction (see docs/assurance.md). Baseline: 968/1100 killed, 130
+    # reviewed equivalents.
+    name: mutation testing (assurance gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      # mutmut exits non-zero when ANY mutant survives — including the 130
+      # reviewed equivalents — so the run itself must not gate; the gate
+      # script right after it is the pass/fail arbiter.
+      - name: run mutation testing
+        run: uv run mutmut run || true
+      - name: gate against the equivalents allow-list
+        run: uv run python scripts/mutation_gate.py
+      - name: summarize survivors
+        if: always()
+        run: uv run mutmut results | tee mutmut-results.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutation-results
+          path: mutmut-results.txt
+
+  history-hygiene:
+    # Non-gating: runs the production detectors over ALL git history and
+    # uploads the HISTORY-ONLY report. This is the go-public review signal —
+    # flipping the repo public exposes every past commit at once, so the
+    # report must be reviewed clean before that (see docs/history-hygiene.md).
+    # Not a hard gate: 17 phases carry many benign secret-SHAPED test fixtures.
+    name: history hygiene (report artifact)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history for the sweep
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - run: uv run python scripts/history_sweep.py | tee history-sweep.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: history-sweep
+          path: history-sweep.txt
+
+  build:
+    name: build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+      - run: uv build
+      - run: uvx twine check dist/*
+      # twine cannot catch missing package data; assert the dashboard, the
+      # user guide, and the license text ship in both distributions.
+      - name: check package data
+        run: |
+          python -m zipfile -l dist/*.whl | grep 'llm_redact/dashboard.html'
+          tar -tzf dist/*.tar.gz | grep 'src/llm_redact/dashboard.html'
+          python -m zipfile -l dist/*.whl | grep 'llm_redact/user_guide.md'
+          python -m zipfile -l dist/*.whl | grep 'llm_redact/user_guide.html'
+          tar -tzf dist/*.tar.gz | grep 'src/llm_redact/user_guide.md'
+          tar -tzf dist/*.tar.gz | grep 'src/llm_redact/user_guide.html'
+          python -m zipfile -l dist/*.whl | grep 'licenses/LICENSE'
+          tar -tzf dist/*.tar.gz | grep -x '[^/]*/LICENSE'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+
+  reproducible-build:
+    # Supply-chain assurance: two builds from the same tree with a pinned
+    # SOURCE_DATE_EPOCH must be byte-identical — a divergence means embedded
+    # timestamps/ordering crept in and the provenance story weakens. Out-dirs
+    # live OUTSIDE the workspace: the sdist packs the working tree, so a
+    # first build left inside it would poison the second (found the hard way).
+    name: reproducible build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.13"
+      - name: build twice with a pinned epoch and compare byte-for-byte
+        run: |
+          export SOURCE_DATE_EPOCH=1704067200
+          uv build --out-dir "$RUNNER_TEMP/build-a"
+          uv build --out-dir "$RUNNER_TEMP/build-b"
+          status=0
+          for f in "$RUNNER_TEMP"/build-a/*; do
+            name="$(basename "$f")"
+            if cmp -s "$f" "$RUNNER_TEMP/build-b/$name"; then
+              echo "IDENTICAL: $name"
+            else
+              echo "DIFFERS: $name"
+              status=1
+            fi
+          done
+          exit "$status"
+
+  container-docker:
+    name: container (docker)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: docker build --target runtime -t llm-redact:ci .
+      - run: docker build --target fake-upstream -t llm-redact-fake:ci .
+      - run: ./scripts/container_smoke.sh docker llm-redact:ci llm-redact-fake:ci
+
+  container-podman:
+    name: container (podman, rootless)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: podman build --target runtime -t llm-redact:ci .
+      - run: podman build --target fake-upstream -t llm-redact-fake:ci .
+      - run: ./scripts/container_smoke.sh podman llm-redact:ci llm-redact-fake:ci

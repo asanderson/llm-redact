@@ -1,0 +1,36 @@
+%% System data flow: what leaves the machine and what never does.
+%% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+flowchart LR
+    subgraph machine["Your machine — the proxy binds 127.0.0.1 by default"]
+        direction LR
+        subgraph tool["Agentic tool — Claude Code, Codex CLI,<br/>anything speaking a provider API"]
+            plugins["llm-redact plugin<br/>slash commands:<br/>/llm-redact:status · :recent ·<br/>:preview · :config-edit · ..."]
+        end
+        proxy["llm-redact proxy<br/><br/>outbound: detection (regex rules +<br/>checksum validators, optional NER),<br/>redactor substitutes placeholders<br/><br/>inbound: rehydrator restores values,<br/>streaming-safe across chunk splits<br/>(SSE / NDJSON / eventstream / WS)"]
+        vault[("Vault — local only<br/>«EMAIL_001» ↔ real value<br/>in-memory or SQLite")]
+    end
+    provider["LLM provider<br/>Anthropic, OpenAI, Gemini,<br/>Azure, Vertex, Bedrock, Ollama,<br/>Cohere, custom upstreams<br/>(/custom/NAME: vLLM, LM Studio, ...)"]
+    subgraph pro["Pro"]
+        s3[("audit log + object-store sinks<br/>[audit.s3] aws / MinIO / Ceph / GCS,<br/>[audit.azure] Azure Blob — default off;<br/>metadata rows only")]
+    end
+
+    tool -- "① request<br/>(may contain secrets)" --> proxy
+    proxy == "② placeholders only" ==> provider
+    provider == "③ response with<br/>placeholders" ==> proxy
+    proxy -- "④ restored response" --> tool
+    vault -. "issue deterministic tokens,<br/>reverse lookups" .- proxy
+    plugins -. "local ops only: status,<br/>recent, preview, guarded<br/>config-edit" .- proxy
+    proxy -. "audit rows, batched (opt-in):<br/>types + counts, paths, durations —<br/>never values" .-> s3
+
+    classDef boundary fill:#f6f8fa,stroke:#57606a,stroke-width:1px;
+    classDef vaultBox fill:#fff8c5,stroke:#9a6700,stroke-width:1.5px;
+    classDef upstream fill:#ddf4ff,stroke:#0969da,stroke-width:1px;
+    classDef pluginBox fill:#eaeef2,stroke:#57606a,stroke-width:1px;
+    classDef toolBox fill:#ffffff,stroke:#57606a,stroke-width:1px;
+    classDef proBox fill:none,stroke:#8250df,stroke-width:1.5px,stroke-dasharray:6 4;
+    class machine boundary;
+    class vault vaultBox;
+    class provider,s3 upstream;
+    class plugins pluginBox;
+    class tool toolBox;
+    class pro proBox;

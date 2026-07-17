@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="426" viewBox="0 0 820 426" role="img" aria-label="terminal output of llm-redact status">
+<rect width="820" height="426" rx="10" fill="#0d1117"/>
+<path d="M0 10a10 10 0 0 1 10-10h800a10 10 0 0 1 10 10v30h-820z" fill="#161b22"/>
+<circle cx="24" cy="20" r="6" fill="#ff5f57"/>
+<circle cx="46" cy="20" r="6" fill="#febc2e"/>
+<circle cx="68" cy="20" r="6" fill="#28c840"/>
+<text x="410" y="24" text-anchor="middle" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">llm-redact status</text>
+<text x="22" y="75" fill="#7ee787" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">$ llm-redact status</text>
+<text x="22" y="94" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">llm-redact 1.0.0 — up 2.0s</text>
+<text x="22" y="113" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">license: none (FOSS core — nothing gated)</text>
+<text x="22" y="132" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">licensed-features package: not installed (FOSS core is complete)</text>
+<text x="22" y="151" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">session: default  vault: sqlite (2 entries)</text>
+<text x="22" y="170" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">detections:  AWS_KEY×1 EMAIL×2</text>
+<text x="22" y="189" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">rehydrations: AWS_KEY×1 EMAIL×2</text>
+<text x="22" y="208" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">audit: disabled</text>
+<text x="22" y="227" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">fuzzy: True  ner: False</text>
+<text x="22" y="246" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">posture: all traffic redacted (no coverage opt-outs)</text>
+<text x="22" y="265" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">upstream[anthropic]: https://api.anthropic.com</text>
+<text x="22" y="284" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">upstream[openai]: https://api.openai.com</text>
+<text x="22" y="303" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">upstream[gemini]: https://generativelanguage.googleapis.com</text>
+<text x="22" y="322" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">upstream[cohere]: https://api.cohere.com</text>
+<text x="22" y="341" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">upstream[ollama]: http://127.0.0.1:11434</text>
+<text x="22" y="360" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">upstream[azure]: (not configured — its routes answer 502)</text>
+<text x="22" y="379" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">upstream[vertex]: (not configured — its routes answer 502)</text>
+<text x="22" y="398" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">upstream[bedrock]: (not configured — its routes answer 502)</text>
+</svg>

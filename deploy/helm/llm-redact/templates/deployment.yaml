@@ -1,0 +1,50 @@
+{{- include "llm-redact.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-redact.fullname" . }}
+  labels:
+    {{- include "llm-redact.labels" . | nindent 4 }}
+spec:
+  {{- if eq .Values.mode "standalone" }}
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  {{- else }}
+  replicas: 1
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "llm-redact.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "llm-redact.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.serviceAccount.create .Values.serviceAccount.name }}
+      serviceAccountName: {{ .Values.serviceAccount.name | default (include "llm-redact.fullname" .) }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        {{- include "llm-redact.proxyContainer" . | nindent 8 }}
+        {{- if and (eq .Values.mode "sidecar") .Values.tool.enabled }}
+        # --- your agentic tool (sidecar mode) — reaches the proxy on loopback ---
+        - name: {{ .Values.tool.name }}
+          image: {{ .Values.tool.image }}
+          env:
+            - { name: ANTHROPIC_BASE_URL, value: "http://127.0.0.1:8787" }
+            - { name: OPENAI_BASE_URL, value: "http://127.0.0.1:8787" }
+            - { name: GOOGLE_GEMINI_BASE_URL, value: "http://127.0.0.1:8787" }
+            - { name: OLLAMA_HOST, value: "http://127.0.0.1:8787" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+        {{- end }}
+      volumes:
+        {{- include "llm-redact.volumes" . | nindent 8 }}

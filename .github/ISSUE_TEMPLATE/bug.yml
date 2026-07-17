@@ -1,0 +1,50 @@
+name: Bug report
+description: Something misbehaves — a redaction miss on a covered shape, a mangled response, a broken tool.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste real secrets, vault contents, or raw request/response
+        bodies containing private values.** Reproduce with secret-shaped
+        fakes (`AKIAIOSFODNN7EXAMPLE`, `jane@corp.example`) — the detectors
+        treat them identically. Suspected security vulnerabilities go
+        through [private reporting](../../security/policy), not issues.
+  - type: input
+    id: version
+    attributes:
+      label: llm-redact version
+      description: "`llm-redact --version` (also note the install method: pip/uvx, container, source)"
+      placeholder: "1.4.0, via uvx"
+    validations:
+      required: true
+  - type: input
+    id: tool
+    attributes:
+      label: Agentic tool and provider
+      description: What talks through the proxy, and to which provider/endpoint?
+      placeholder: "Claude Code → Anthropic /v1/messages (streaming)"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Smallest input/config that shows the problem. Redact your config's allowlist/deny values if they are themselves sensitive.
+      placeholder: |
+        1. serve with the config below
+        2. send this request (fake values)
+        3. observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Proxy log lines
+      description: Proxy logs carry only paths, statuses, and detection counts by design — safe to paste as-is.

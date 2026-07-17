@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="331" viewBox="0 0 820 331" role="img" aria-label="terminal output of llm-redact doctor">
+<rect width="820" height="331" rx="10" fill="#0d1117"/>
+<path d="M0 10a10 10 0 0 1 10-10h800a10 10 0 0 1 10 10v30h-820z" fill="#161b22"/>
+<circle cx="24" cy="20" r="6" fill="#ff5f57"/>
+<circle cx="46" cy="20" r="6" fill="#febc2e"/>
+<circle cx="68" cy="20" r="6" fill="#28c840"/>
+<text x="410" y="24" text-anchor="middle" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">llm-redact doctor</text>
+<text x="22" y="75" fill="#7ee787" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">$ llm-redact doctor</text>
+<text x="22" y="94" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">PASS  config: ~/.config/llm-redact/config.toml parses</text>
+<text x="22" y="113" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">PASS  license: no key configured (FOSS core: nothing is gated)</text>
+<text x="22" y="132" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">PASS  license: licensed-features package not installed (FOSS core is complete; pro-only config fai</text>
+<text x="22" y="151" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ls closed)</text>
+<text x="22" y="170" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">PASS  build: 87 detectors build</text>
+<text x="22" y="189" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">PASS  bind: loopback bind (127.0.0.1)</text>
+<text x="22" y="208" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">PASS  body cap: max_body_bytes 10485760 (~10 MiB); redactable requests above this answer 413 — rai</text>
+<text x="22" y="227" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  se it for large batch/file uploads</text>
+<text x="22" y="246" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">PASS  proxy: running 1.0.0 at 127.0.0.1:8787</text>
+<text x="22" y="265" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">PASS  vault: ~/.local/share/llm-redact/vault.db permissions ok (mode 600)</text>
+<text x="22" y="284" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">PASS  realtime: websockets importable (WS relay active)</text>
+<text x="22" y="303" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">PASS  posture: no coverage opt-outs configured (all traffic redacted)</text>
+</svg>

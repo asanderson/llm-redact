@@ -1,0 +1,78 @@
+# Prometheus alerting rules for the llm-redact proxy.
+#
+# All rules read the metadata-only metrics — counts and gauges, never values.
+# Load via prometheus.yml `rule_files:` and wire your Alertmanager as usual.
+groups:
+  - name: llm-redact
+    rules:
+      # The proxy is the redaction chokepoint: if it is down, tools that were
+      # pointed at it will fail closed (connection refused) rather than leak,
+      # but the operator needs to know immediately.
+      - alert: LlmRedactProxyDown
+        expr: up{job="llm-redact"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "llm-redact proxy is not scrapeable"
+          description: "No successful scrape of {{ $labels.instance }} for 2m — the proxy may be stopped; tools using it are failing closed."
+
+      # Warn mode FORWARDS the matched value upstream by design. A sustained
+      # warn rate means real values are leaving the box — usually a rule left
+      # in warn after a trial. This is the honesty alert.
+      - alert: LlmRedactWarnModeForwardingValues
+        expr: sum(rate(llm_redact_warnings_total[10m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "llm-redact is forwarding values in warn mode"
+          description: "warn-mode detections are firing ({{ $value | printf \"%.2f\" }}/s over 10m); the matched values ARE being sent upstream. Move the rule to redact/block or confirm this is intended."
+
+      # A spike in blocked requests means block-mode rules are rejecting
+      # traffic (400s before upstream) — could be an attack, a
+      # misconfiguration, or a tool sending secrets it shouldn't.
+      - alert: LlmRedactHighBlockRate
+        expr: sum(rate(llm_redact_blocked_total[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "llm-redact is blocking many requests"
+          description: "block-mode rejections at {{ $value | printf \"%.2f\" }}/s over 5m — investigate which type is blocking (llm_redact_blocked_total by type)."
+
+      # Per-conversation history compaction forks a fresh vault session, which
+      # deliberately fails pass-through (documented never-wrong-value tradeoff).
+      # A rising rate means users are hitting it often.
+      - alert: LlmRedactCompactionForks
+        expr: increase(llm_redact_compaction_forks_total[1h]) > 5
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "llm-redact per-conversation sessions are forking on compaction"
+          description: "{{ $value | printf \"%.0f\" }} compaction forks in the last hour — see docs/compaction-relink.md; consider static session mode if this is disruptive."
+
+      # Upstream transport faults (connect refused, read/connect timeout,
+      # mid-body drop) that the proxy failed closed with a 502. A sustained
+      # rate means the provider or the network path is unhealthy — tools are
+      # getting gateway errors, though never a wrong or leaked value.
+      - alert: LlmRedactUpstreamErrors
+        expr: sum(rate(llm_redact_upstream_errors_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "llm-redact is seeing upstream transport faults"
+          description: "upstream faults at {{ $value | printf \"%.2f\" }}/s over 5m (failed closed as 502) — check provider reachability and the network path (llm_redact_upstream_errors_total by provider)."
+
+      # p95 in-proxy latency ceiling. The proxy adds a few ms on healthy
+      # hardware; a sustained high p95 points at giant bodies or a slow host.
+      - alert: LlmRedactHighLatencyP95
+        expr: histogram_quantile(0.95, sum(rate(llm_redact_request_duration_seconds_bucket[5m])) by (le)) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "llm-redact p95 request duration is high"
+          description: "p95 in-proxy duration is {{ $value | printf \"%.2f\" }}s over 5m (redaction + rehydration + forwarding); check body sizes and host load."

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llm-redact user guide</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 2rem auto;
+         max-width: 46rem; padding: 0 1rem; line-height: 1.55; color: #1a2330; }
+  h1, h2, h3 { line-height: 1.2; } h1 { font-size: 1.6rem; } h2 { font-size: 1.25rem;
+         margin-top: 2rem; border-bottom: 1px solid #d8dee7; padding-bottom: .25rem; }
+  code { background: #eef1f5; border-radius: 4px; padding: .1rem .3rem; font-size: .9em; }
+  pre { background: #eef1f5; border-radius: 6px; padding: .8rem; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  a { color: #0b5fa5; } li { margin: .25rem 0; }
+  .top { font-size: .85rem; opacity: .7; margin-bottom: 1.5rem; }
+</style>
+</head>
+<body>
+<p class="top"><a href="/__llm-redact/">&larr; back to the dashboard</a></p>
+<h1>llm-redact user guide</h1>
+<p>llm-redact is a local proxy that sits between your agentic tools (Claude Code, Codex, Cursor, OpenCode, and anything else that speaks a provider API) and the LLM providers. On the way out it replaces private values — emails, keys, national IDs, custom patterns — with placeholder tokens like <code>«EMAIL_001»</code>; on the way back it restores the real values. The mapping lives in a local vault; the provider only ever sees placeholders.</p>
+<p>This guide covers the two user interfaces: the <strong>web dashboard</strong> (with its config editor) and the <strong>agent plugin commands</strong>. The deeper design documents live in the repository's <code>docs/</code> directory.</p>
+<h2>Quick start</h2>
+<ul>
+<li><code>llm-redact init</code> — interactive setup: writes a starter config and prints the environment exports for your tools.</li>
+<li><code>llm-redact run -- claude</code> — run a tool through the proxy (reuses a running proxy, or starts an ephemeral one for the command's lifetime).</li>
+<li><code>llm-redact serve</code> — run the proxy in the foreground.</li>
+<li><code>llm-redact service install</code> — run it at login (launchd/systemd; on Windows this prints a Task Scheduler command to run yourself).</li>
+<li><code>llm-redact doctor</code> — read-only diagnostics: config, extras, permissions, ports, and every coverage opt-out.</li>
+</ul>
+<p>Already running a proxy elsewhere (a team server, another machine)? Point everything at it with <code>LLM_REDACT_PROXY_URL</code> — <code>run</code>, <code>status</code>, and the plugin commands all honor it, and <code>llm-redact plugin install &lt;tool&gt; --proxy-url URL</code> sets it up for you. Plain http is loopback-only; a remote proxy must be https.</p>
+<h2>The web dashboard</h2>
+<p>Open <code>http://127.0.0.1:8787/__llm-redact/</code> (your host/port may differ). Everything on the page is served by the proxy itself — self-contained, no external resources, no data leaves your machine.</p>
+<ul>
+<li><strong>Status pill</strong> — proxy version, uptime, vault backend, session mode, and the license tier. License warnings (invalid key, expiry grace) appear here loudly; they are never silent.</li>
+<li><strong>Counters</strong> — detections, rehydrations, warn-mode observations, and blocked requests by placeholder type; upstream errors per provider.</li>
+<li><strong>Recent requests</strong> — the last 200 requests (path, provider, status, duration, detection counts — never values), updated live over a server-sent event stream. This works without the audit log.</li>
+<li><strong>Sessions</strong> — vault sessions with entry counts and idle times; whole idle sessions can be pruned from here (sqlite backend). The active session is never pruned.</li>
+<li><strong>Named users</strong> (Pro+) — invite teammates by email, see seat usage against the license cap, revoke access. Verification codes are delivered by your <code>[email]</code> SMTP settings or shown once for manual delivery. Per-user keys are shown once, at verification, to the invitee — never stored, never re-displayed.</li>
+<li><strong>Preview</strong> — paste text and see exactly what the live detector set would redact, without sending anything upstream or writing anything to the vault. Warn-mode matches are shown unmasked, because that is honestly what would be forwarded.</li>
+<li><strong>NER card</strong> — the optional model-based detectors: per-backend toggles, model names, and the live folded-type state.</li>
+</ul>
+<h2>The config editor</h2>
+<p>The editor card edits the proxy's TOML config file with guardrails:</p>
+<ul>
+<li>It always merges over <strong>file truth</strong> — environment-variable overrides are never baked into the file.</li>
+<li>Every submit is validated by a full parse AND a dry-run detector build before anything is written; a rejected edit changes nothing.</li>
+<li>The write is atomic, keeps one <code>.bak</code>, and hot-applies without a restart. Comments in the file are not preserved.</li>
+<li>Sections that cannot hot-apply (host/port, vault, audit, TLS, log, OTel, users, email) are shown read-only; change those in the file and restart (or send SIGHUP on macOS/Linux — on Windows, where SIGHUP does not exist, the editor and restarts are the reload paths).</li>
+</ul>
+<p>The CLI equivalents: <code>llm-redact config show</code> prints the effective config; <code>llm-redact serve --check</code> runs the full startup build without binding a socket — the deploy gate.</p>
+<h2>Agent plugin commands</h2>
+<p><code>llm-redact plugin install claude|codex|opencode|cursor</code> installs slash commands into your agent tool (Claude Code repo checkouts can instead use <code>/plugin marketplace add asanderson/llm-redact</code>). Invocation forms: Claude Code and Cursor <code>/llm-redact-&lt;name&gt;</code>, Codex <code>/prompts:llm-redact-&lt;name&gt;</code>, OpenCode <code>/llm-redact-&lt;name&gt;</code>.</p>
+<ul>
+<li><strong>status</strong> — proxy health, tier, counters, and the honesty posture (anything configured to reduce protection is called out).</li>
+<li><strong>recent</strong> — the recent-requests table, summarized by the agent.</li>
+<li><strong>sessions</strong> — vault sessions and what pruning would remove.</li>
+<li><strong>config-show</strong> — the effective configuration as TOML.</li>
+<li><strong>config-edit</strong> — guided config editing with the editor's guardrails (validate with <code>serve --check</code> before applying; only on your ask).</li>
+<li><strong>preview</strong> — run text through the live detectors locally.</li>
+<li><strong>doctor</strong> — the diagnostics report, interpreted.</li>
+<li><strong>audit</strong> — audit log status, tamper-chain verification, and whether the zero-loss <code>required</code> mode is on.</li>
+<li><strong>users</strong> — seat usage and invitations (never prints per-user keys).</li>
+<li><strong>guide</strong> — displays this guide.</li>
+</ul>
+<p>Every command begins by checking that the <code>llm-redact</code> CLI is present and will never install anything without asking you first. The <code>lookup</code> command (resolving a placeholder back to its secret value) is deliberately NOT a plugin command: an agent that read a secret would send it upstream on its next turn.</p>
+<h2>Honesty surfaces</h2>
+<p>Anything that reduces coverage is surfaced, never silent: warn-mode rules (matches are observed and FORWARDED), per-provider detection off, MCP server exemptions, language-scoped-out national-ID rules, the remote-plaintext vault hatch, and audit-backup upload failures all appear in <code>/__llm-redact/status</code>, <code>llm-redact status</code>'s posture block, <code>doctor</code>, and the dashboard.</p>
+<h2>Going deeper</h2>
+<p>In the repository: <code>README.md</code> (overview), <code>docs/editions.md</code> (editions and the tier matrix), <code>docs/quickstart.md</code>, <code>docs/troubleshooting.md</code>, <code>docs/deployment.md</code>, <code>docs/threat-model.md</code>, and <code>docs/plugins.md</code>. Paid-feature guides (server database vaults, named users, the paid deployment surface) and the full licensing reference live in the <code>llm-redact-pro</code> repo's <code>docs/</code>.</p>
+</body>
+</html>

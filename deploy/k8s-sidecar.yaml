@@ -1,0 +1,101 @@
+# llm-redact as a sidecar: the redaction proxy runs in the SAME pod as your
+# agentic tool, sharing the pod network namespace, and BINDS 127.0.0.1 — the
+# tool reaches it over loopback and other pods cannot reach it at all. Point
+# the tool's provider base URLs at the proxy (see the TOOL_EXPORTS env below)
+# and its API traffic is redacted on the way out, rehydrated on the way back,
+# transparently.
+#
+# This is a template: replace `your-agentic-tool` and its image, pick the
+# vault backend you need, and set any provider [providers.*] overrides via a
+# mounted config (a ConfigMap) if you use non-default upstreams.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentic-tool-with-redact
+  labels: { app: agentic-tool }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: agentic-tool }
+  template:
+    metadata:
+      labels: { app: agentic-tool }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        # --- the redaction proxy sidecar ---
+        - name: llm-redact
+          image: ghcr.io/asanderson/llm-redact:3.3.0
+          args: ["serve"]
+          env:
+            # Loopback bind: containers in a pod share the network namespace,
+            # so the tool reaches 127.0.0.1 while OTHER PODS CANNOT reach the
+            # proxy at all. (The image default 0.0.0.0 would also listen on
+            # the pod IP — reachable cluster-wide without a NetworkPolicy.)
+            # A loopback bind needs no INSECURE_BIND hatch, but it does need
+            # the exec probes below: kubelet httpGet dials the pod IP.
+            - { name: LLM_REDACT_HOST, value: "127.0.0.1" }
+            - { name: LLM_REDACT_PORT, value: "8787" }
+            - { name: XDG_DATA_HOME, value: "/data" }
+            # At-rest vault encryption: supply the key from a Secret (never a
+            # ConfigMap or the image). Remove if using the in-memory vault.
+            - name: LLM_REDACT_VAULT_KEY
+              valueFrom:
+                secretKeyRef: { name: llm-redact-vault, key: vault-key, optional: true }
+            # License key (optional — the FOSS core needs none, on Kubernetes or
+            # anywhere else; it matters only to llm-redact-pro subsystems).
+            # Create it with:
+            #   kubectl create secret generic llm-redact-license \
+            #     --from-literal=license-key="llmr1...."
+            - name: LLM_REDACT_LICENSE_KEY
+              valueFrom:
+                secretKeyRef: { name: llm-redact-license, key: license-key, optional: true }
+          ports:
+            - { name: proxy, containerPort: 8787 }
+          # Exec probes (the Dockerfile HEALTHCHECK one-liner): httpGet probes
+          # come from the kubelet via the POD IP, which a loopback-bound
+          # proxy deliberately does not answer.
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8787/__llm-redact/readyz')"]
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8787/__llm-redact/healthz')"]
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits: { cpu: "500m", memory: "512Mi" }
+          volumeMounts:
+            # Persist the sqlite vault/audit across restarts (never-wrong-value
+            # depends on the counter surviving); use a PVC for real persistence.
+            - { name: redact-data, mountPath: /data }
+        # --- your agentic tool ---
+        - name: your-agentic-tool
+          image: your-registry/your-agentic-tool:latest
+          env:
+            # Route the tool's provider traffic through the sidecar. These are
+            # exactly the variables/values `llm-redact run` injects
+            # (TOOL_EXPORTS) — the plain proxy base URL, no /v1 suffix.
+            - { name: ANTHROPIC_BASE_URL, value: "http://127.0.0.1:8787" }
+            - { name: OPENAI_BASE_URL, value: "http://127.0.0.1:8787" }
+            - { name: GOOGLE_GEMINI_BASE_URL, value: "http://127.0.0.1:8787" }
+            - { name: OLLAMA_HOST, value: "http://127.0.0.1:8787" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: redact-data
+          emptyDir: {}
+          # For persistence across pod restarts, replace emptyDir with:
+          # persistentVolumeClaim: { claimName: llm-redact-data }

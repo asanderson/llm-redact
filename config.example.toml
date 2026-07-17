@@ -1,0 +1,449 @@
+# llm-redact example configuration.
+# Copy to $XDG_CONFIG_HOME/llm-redact/config.toml (~/.config/llm-redact/config.toml)
+# or pass explicitly: llm-redact serve --config ./config.toml
+# Every key is optional; the values below are the defaults unless noted.
+
+host = "127.0.0.1"
+port = 8787
+
+# When a request was redacted, append a short system note asking the model to
+# reproduce «TYPE_NNN» tokens exactly. Reduces the risk of the model mangling
+# placeholders so they can't be restored.
+inject_system_note = true
+
+# Redactable requests larger than this are rejected with 413 before anything
+# is sent upstream (fail closed — the proxy never forwards unredacted).
+max_body_bytes = 10485760
+
+[providers.anthropic]
+upstream_base_url = "https://api.anthropic.com"
+
+[providers.openai]
+# Point this at any OpenAI-compatible server (Ollama: http://127.0.0.1:11434,
+# vLLM, LM Studio) to redact traffic to local models too.
+upstream_base_url = "https://api.openai.com"
+
+[providers.gemini]
+upstream_base_url = "https://generativelanguage.googleapis.com"
+
+# Ollama's NATIVE API (/api/chat, /api/generate, /api/embed) — newline-
+# delimited JSON streams, redacted and rehydrated like everything else.
+# (Ollama's OpenAI-compatible /v1 endpoints work via [providers.openai].)
+[providers.ollama]
+upstream_base_url = "http://127.0.0.1:11434"
+
+# Realtime WebSocket APIs (OpenAI /v1/realtime, Gemini Live) relay through
+# the same openai/gemini upstreams above, scheme-swapped to wss. Requires
+# the realtime extra (pip install 'llm-redact-proxy[realtime]'); without it
+# WS upgrades are refused outright. Text modality only — voice audio is
+# never scanned. No extra config keys.
+
+# Any provider can be disabled; its routes then answer 502 instead of
+# forwarding (fail closed — traffic is never passed through unredacted).
+# enabled = false
+
+# Per-provider detection off-switch. detection = false forwards requests to
+# that upstream UNREDACTED — no detection, deny strings, block modes, or
+# note injection; like warn mode, nothing is protected. Rehydration stays
+# active so placeholders from earlier conversation turns still restore.
+# Meant for upstreams you own end to end (e.g. a local Ollama).
+# detection = false
+
+# Azure OpenAI has no sane default (the upstream is your own resource URL);
+# azure routes answer 502 until this is set.
+# [providers.azure]
+# upstream_base_url = "https://YOUR-RESOURCE.openai.azure.com"
+
+# Google Vertex AI likewise embeds your region in the host; vertex routes
+# (/v1/projects/... generateContent etc.) answer 502 until this is set.
+# [providers.vertex]
+# upstream_base_url = "https://us-central1-aiplatform.googleapis.com"
+
+# AWS Bedrock (bearer-token API keys only — SigV4-signed SDK traffic cannot
+# transit a body-rewriting proxy) also embeds the region; /model/... routes
+# (converse, converse-stream, invoke, invoke-with-response-stream) answer
+# 502 until this is set.
+# [providers.bedrock]
+# upstream_base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+
+[log]
+# "text" (default) or "json" — one JSON object per line, for log shippers.
+# Content is identical either way: paths, statuses, and detection counts;
+# never values or headers. JSON logs are Free. Restart to apply.
+format = "text"
+
+# TLS (restart to apply). certfile + keyfile serve HTTPS; client_ca turns
+# on MUTUAL TLS (clients must present a certificate this CA signed) and is
+# REQUIRED for any non-loopback host — `serve` refuses to start otherwise
+# (see docs/threat-model.md). Loopback binds may use server-only TLS.
+# [tls]
+# certfile = "/etc/llm-redact/server.crt"
+# keyfile = "/etc/llm-redact/server.key"
+# client_ca = "/etc/llm-redact/clients-ca.crt"
+
+[vault]
+# "memory" (default): mappings die with the process.
+# "sqlite" (Free, unencrypted): mappings persist across restarts, so tokens
+# issued before a restart keep rehydrating and provider prompt caches stay
+# coherent. The database holds the real secret values — it is created 0600 in
+# a 0700 directory, but only enable this if you accept secrets on disk.
+# Encrypting it at rest (encryption = "fernet", below) needs Pro.
+# "postgresql" | "mysql" | "oracle" | "dbapi" (Pro; llm-redact-pro docs/vault-rdbms.md):
+# the same persistent vault on a server RDBMS via the [vault.rdbms] section
+# below. A DSN pointing off this machine requires encryption = "fernet"
+# (only the HMAC index + ciphertext leave the box); a cloud-managed DBMS
+# (RDS/Aurora, Azure Database, Cloud SQL) is included with llm-redact-pro
+# (no cloud entitlement required).
+backend = "memory"
+# path = "~/.local/share/llm-redact/vault.db"   # default: $XDG_DATA_HOME/llm-redact/vault.db
+session = "default"   # or: llm-redact serve --session NAME
+
+# "static" (default): all traffic shares one placeholder namespace (the
+# session above). "per-conversation": each conversation gets its own vault
+# session derived from a salted hash of its first user message (only the
+# hash is stored); tokens from one conversation are never restored in
+# another. In this mode `session` names the fallback for requests with no
+# derivable anchor. See README "Per-conversation session isolation" for the
+# history-compaction caveat. "per-conversation" needs the llm-redact-pro package.
+session_mode = "static"
+
+# "fernet" encrypts stored values: at rest for sqlite, and in RAM for the
+# memory backend (ciphertext + HMAC index instead of plaintext maps — the
+# key itself still lives in process memory). Requires the crypto
+# extra (pip install 'llm-redact-proxy[crypto]') and LLM_REDACT_VAULT_KEY
+# (generate with: llm-redact vault gen-key). With the keyring extra the key
+# can live in the OS keychain instead: llm-redact vault set-key (resolution
+# is env var, then keychain, then fail closed). Migrating an existing vault
+# to encrypted is automatic and one-way.
+encryption = "none"
+
+# Retention: a background task prunes WHOLE sessions idle longer than this
+# many days (the active session is never pruned). Bounds unbounded vault
+# growth in per-conversation mode; 0 (default) disables auto-prune. The CLI
+# `llm-redact sessions prune --older-than 90d` is the manual equivalent.
+# session_ttl_days = 0
+
+# Server-RDBMS connection (backend = "postgresql"/"mysql"/"oracle"/"dbapi"
+# only). Install the driver extra: vault-postgres / vault-mysql /
+# vault-oracle; "dbapi" imports whatever DB-API 2.0 module you name and
+# passes dsn to its connect() verbatim. Keep credentials OUT of this file:
+# LLM_REDACT_VAULT_DSN overrides dsn entirely, and the password resolves
+# from the env var named by password_env. DSNs are never logged.
+# [vault.rdbms]
+# dsn = "postgresql://vault@db.internal:5432/llmredact"
+# password_env = "LLM_REDACT_VAULT_DB_PASSWORD"
+# module = "pyodbc"        # backend = "dbapi" only
+# cloud = "aws"            # declared managed-DBMS placement (llm-redact-pro);
+#                          # recognized managed hostnames are also detected
+
+[rehydration]
+# Restore LLM-mangled placeholders too («email_001», «EMAIL-1», « EMAIL_001 »).
+# Every candidate is checked against the vault before restoring; unknown
+# tokens always pass through verbatim.
+fuzzy = true
+
+[detection]
+# Languages your traffic is written in (ISO 639-1 codes). Omit to run every
+# rule (the default). When set, national-id rules for OTHER languages are
+# not built at all — e.g. languages = ["en"] skips french_nir, spanish_dni,
+# german_steuer_id, brazilian_cpf, italian_codice_fiscale, swiss_ahv,
+# swedish_personnummer, belgian_nn, finnish_hetu and norwegian_fnr (but keeps
+# nhs_number, tagged "en"). Universal rules
+# (emails, IPs, credit cards, IBANs,
+# phones, vendor tokens) always run. An enabled NER whose `language` is
+# outside this list is a startup error, never a silent mismatch.
+# languages = ["en"]
+
+# Built-in rules to enable. LEAVE THIS COMMENTED OUT to run every built-in
+# rule, including ones added by future releases — an explicit list pins the
+# rule set forever (rules added later silently never activate). Uncomment
+# only to pin or trim deliberately.
+# enabled = [
+#     "email",
+#     "ipv4",
+#     "ipv6",
+#     "credit_card",
+#     "phone_number",
+#     "us_ssn",
+#     "canadian_sin",
+#     "uk_nino",
+#     "aadhaar",
+#     "australian_tfn",
+#     "spanish_dni",
+#     "french_nir",
+#     "german_steuer_id",
+#     "brazilian_cpf",
+#     "italian_codice_fiscale",
+#     "swiss_ahv",
+#     "swedish_personnummer",
+#     "belgian_nn",
+#     "finnish_hetu",
+#     "nhs_number",
+#     "norwegian_fnr",
+#     "korean_rrn",
+#     "singapore_nric",
+#     "chinese_resident_id",
+#     "japanese_my_number",
+#     "thai_id",
+#     "irish_pps",
+#     "mexican_curp",
+#     "iban",
+#     "eth_address",
+#     "btc_address",
+#     "btc_bech32",
+#     "aws_access_key_id",
+#     "aws_secret_key",
+#     "github_token",
+#     "github_fine_grained_pat",
+#     "anthropic_api_key",
+#     "openai_api_key",
+#     "openrouter_key",
+#     "groq_key",
+#     "tavily_key",
+#     "firecrawl_key",
+#     "nvidia_key",
+#     "cerebras_key",
+#     "langfuse_secret_key",
+#     "figma_pat",
+#     "huggingface_token",
+#     "slack_token",
+#     "private_key",
+#     "google_api_key",
+#     "gcp_private_key_id",
+#     "azure_storage_key",
+#     "jwt",
+#     "stripe_key",
+#     "sendgrid_key",
+#     "twilio_id",
+#     "npm_token",
+#     "pypi_token",
+#     "gitlab_pat",
+#     "gitlab_token",
+#     "google_oauth_client_secret",
+#     "sentry_token",
+#     "xai_key",
+#     "perplexity_key",
+#     "hashicorp_vault_token",
+#     "langsmith_key",
+#     "replicate_token",
+#     "pinecone_key",
+#     "databricks_token",
+#     "bitbucket_app_password",
+#     "atlassian_api_token",
+#     "tailscale_key",
+#     "digitalocean_token",
+#     "notion_token",
+#     "linear_api_key",
+#     "supabase_key",
+#     "planetscale_token",
+#     "doppler_token",
+#     "postman_key",
+#     "airtable_pat",
+#     "shopify_token",
+#     "new_relic_key",
+#     "grafana_service_account",
+#     "jina_key",
+#     "telegram_bot_token",
+#     "url_credentials",
+#     "generic_secret",
+# ]
+
+# Strings that must ALWAYS be redacted — the strongest signal there is.
+# Deny matches win every overlap against rule matches, ignore the allowlist,
+# and are never subject to [detection.modes]. Case-insensitive substrings:
+# deny = ["project aurora", "codename bluebird"]
+# Per-entry options (case sensitivity, placeholder type):
+# [[detection.deny_strings]]
+# value = "Aurora"
+# case_sensitive = true
+# type = "PROJECT"        # -> «PROJECT_001»; default "DENY"
+
+# Exact values never to redact (loopback/broadcast IPs are always allowed).
+allowlist = ["noreply@github.com"]
+
+# Regexes; any detection whose value matches is suppressed. (not defaults)
+allowlist_patterns = ['^10\.', '^192\.168\.']
+
+# Exact values never to redact, scoped to one placeholder type — allow a
+# support address as EMAIL without also allowing it anywhere else. Deny
+# strings bypass ALL allowlists, per-type included. (not defaults)
+# [detection.allowlist_by_type]
+# EMAIL = ["support@corp.example"]
+# IPV4 = ["203.0.113.7"]
+
+# Additional rules of your own. `type` becomes the placeholder label:
+# PROJ-12345 -> «TICKET_001»
+#
+# [[detection.custom_rules]]
+# name = "jira"
+# type = "TICKET"
+# pattern = 'PROJ-\d{4,}'
+#
+# A rule may add a named `validator` (checksum/format gate) so a loose
+# pattern only fires when the match also passes the check — the recipe the
+# built-in card/national-id rules use. Valid names: luhn, mod97, verhoeff,
+# jwt, entropy. Optional `required` (literals that MUST be present before the
+# rule runs) and `anchors` (every match starts with one of these) are
+# hot-path prefilters — a wrong hint silently misses matches, so leave them
+# unset unless you know the shape.
+#
+# [[detection.custom_rules]]
+# name = "cardish"
+# type = "CARDISH"
+# pattern = '\d[\d ]{14,18}\d'
+# validator = "luhn"
+# anchors = ["4", "5"]
+
+# Per-rule handling. Omitted rules use "redact" (substitute a placeholder).
+# "warn" only counts the detection — THE VALUE IS SENT UPSTREAM UNREDACTED
+# (including anything a longer warn-mode match overlaps); use it to trial a
+# noisy rule without breaking traffic. "block" rejects the whole request
+# with a 400 before anything is sent upstream. Two rules that share a
+# placeholder type (github_token / github_fine_grained_pat) must agree.
+#
+# [detection.modes]
+# phone_number = "warn"
+# private_key = "block"
+
+# MCP content blocks addressed to these server names/labels (Anthropic
+# server_name, OpenAI server_label) bypass detection ENTIRELY — their
+# arguments and results are forwarded unredacted. Anthropic tool-result
+# blocks name no server; they are exempt only when their tool_use_id
+# points at an exempt tool-use block in the same request (an
+# uncorrelatable result is redacted normally). Use only for MCP servers
+# you run and trust; HTTP bodies only (realtime WS is not exempted).
+#
+# [detection.mcp]
+# exempt_servers = ["my-internal-server"]
+
+[detection.ner]
+# Person-name detection (regex misses most names).
+# backend = "spacy" (default): uv sync --extra ner, then install the model:
+#   uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+#   (~1-5 ms per scanned string on CPU)
+# backend = "gliner": uv sync --extra gliner (heavy: torch + transformers);
+#   more robust on unusual names; supports score_threshold.
+# backend = "presidio": uv sync --extra presidio (Microsoft's FOSS PII
+#   analyzer: recognizers + checksums + context scoring over the same
+#   spaCy model; supports score_threshold). Entity types that overlap the
+#   built-in rules (EMAIL_ADDRESS, PHONE_NUMBER, US_SSN, IBAN_CODE,
+#   CREDIT_CARD) fold into the built-in placeholder names.
+enabled = false
+backend = "spacy"
+# Run several backends at once, each toggled individually (wins over
+# `backend`; the config editor UI writes this form):
+# backends = ["spacy", "presidio"]
+# Per-backend model overrides (the single `model` key below applies only
+# when exactly one backend is active):
+# [detection.ner.models]
+# spacy = "en_core_web_md"
+# gliner = "urchade/gliner_medium-v2.1"
+# NOTE: a placeholder type disabled in the `enabled` rule list above stays
+# disabled for NER too (presidio folds EMAIL/PHONE/US_SSN/IBAN/CREDIT_CARD
+# into the built-in types) — rule toggles are the single source of truth.
+entities = ["PERSON"]
+max_chars = 20000   # strings longer than this skip NER (regex still applies)
+language = "en"     # presidio wires this through the analyzer
+# model = "en_core_web_sm"   # spaCy pipeline (spacy/presidio) or HF id (gliner)
+# score_threshold = 0.5      # gliner and presidio backends only
+
+[audit]
+# Opt-in local log of proxy activity: detector types and counts, paths,
+# timestamps, durations — never values. Stored separately from the vault.
+# Enabling it needs the llm-redact-pro package.
+enabled = false
+# path = "~/.local/share/llm-redact/audit.db"
+max_rows = 10000
+# Tamper-evident hash chain over the rows (Pro; requires
+# LLM_REDACT_AUDIT_HMAC_KEY in the environment — enabled without it refuses
+# startup). Verify offline with: llm-redact audit verify
+# tamper_evident = true
+# Zero-loss mode ("no audit row, no service"; Pro, needs enabled = true):
+# a write-ahead START row is durably committed BEFORE any upstream contact
+# and a request that cannot be recorded is refused 503. This inverts the
+# default fail-open stance — audit storage joins the availability path (a
+# full disk stops the proxy) — so it is an explicit opt-in for deployments
+# that need a guaranteed-complete audit trail.
+# required = true
+
+# Optional S3 copy of audit rows (restart to apply; default off). Batches
+# of the same metadata-only rows — never values — are PUT as NDJSON
+# objects. NOTE: this ships metadata OFF the machine; enable it only for
+# a bucket you trust, the same contract as [otel]. Credentials come from
+# environment variables ONLY, never from this file. provider "aws" derives
+# the host from bucket + region; "minio" and "ceph" (Ceph RGW) use
+# endpoint_url with path-style addressing; "gcs" reaches Google Cloud
+# Storage through its S3-compatible XML API (storage.googleapis.com) with
+# HMAC interoperability keys. Credential env vars: aws/minio/ceph ->
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (+ optional AWS_SESSION_TOKEN);
+# gcs -> GCS_HMAC_ACCESS_ID / GCS_HMAC_SECRET. Azure Blob (SharedKey, not an
+# S3 API) has its own [audit.azure] section below. Upload failures WARN and
+# drop the batch — the proxy never blocks on it.
+# [audit.s3]
+# enabled = true
+# provider = "aws"                  # "aws" | "minio" | "ceph" | "gcs"
+# bucket = "my-audit-bucket"
+# prefix = "llm-redact/"
+# region = "us-east-1"              # gcs: your bucket's location, e.g. "us"
+# endpoint_url = "http://127.0.0.1:9000"   # minio/ceph only
+# flush_seconds = 60.0
+# encryption = "fernet"   # each batch uploaded as ONE Fernet token (crypto
+#                         # extra + LLM_REDACT_AUDIT_ENC_KEY, env only);
+#                         # read back with `llm-redact audit decrypt`
+
+# Azure Blob Storage sink (SharedKey auth — not an S3 API, so its own
+# section). Same metadata-only rows; account key from AZURE_STORAGE_KEY
+# (env only, never this file). endpoint_url overrides the default host for
+# Azurite/local testing. Upload failures WARN and drop, like [audit.s3].
+# [audit.azure]
+# enabled = true
+# account = "myaccount"
+# container = "audit"
+# prefix = "llm-redact/"
+# endpoint_url = "http://127.0.0.1:10000/myaccount"   # Azurite only
+# flush_seconds = 60.0
+# encryption = "fernet"   # same client-side batch encryption as [audit.s3]
+
+# OpenTelemetry export (restart to apply). Requires the otel extra
+# (pip install 'llm-redact-proxy[otel]'). One span plus request/duration/
+# detection counters per request over OTLP/HTTP — metadata only, the same
+# contract as [audit]: never values, never headers. NOTE: this sends
+# telemetry OFF the machine if the endpoint is remote; point it only at a
+# collector you trust. Enabling it needs the llm-redact-pro package.
+# [otel]
+# enabled = true
+# endpoint = "http://127.0.0.1:4318"   # unset: OTEL_EXPORTER_OTLP_* env applies
+# service_name = "llm-redact"
+
+# Named-user registry (Pro+ tiers): where the users database lives.
+# Default: $XDG_DATA_HOME/llm-redact/users.db. Restart to apply.
+# [users]
+# path = "/var/lib/llm-redact/users.db"
+
+# Verification-email delivery for `llm-redact users invite` — YOUR SMTP
+# server, nothing goes through a vendor service. The SMTP password comes
+# from the environment variable named by password_env, never this file.
+# Restart to apply. Without this section, invite requires --print-code.
+# [email]
+# smtp_host = "smtp.corp.example"
+# smtp_port = 587
+# starttls = true
+# username = "llm-redact"
+# password_env = "LLM_REDACT_SMTP_PASSWORD"
+# from_address = "llm-redact@corp.example"
+
+# License key (see docs/editions.md). The FOSS core needs NO key — nothing in
+# this repository is gated. A key matters only when the separately-installed
+# llm-redact-pro package supplies its paid subsystems (named users,
+# audit/encryption/OTel, RDBMS vaults, per-conversation sessions). Resolution:
+# LLM_REDACT_LICENSE_KEY env var > key > key_file. A configured pro-only
+# subsystem NEVER silently downgrades — without the package the proxy refuses
+# to start and names the feature and the package instead.
+# [license]
+# key = "llmr1.…"
+# key_file = "/etc/llm-redact/license.key"
+
+# Environment overrides (precedence: CLI flag > env var > this file):
+#   LLM_REDACT_HOST, LLM_REDACT_PORT, LLM_REDACT_CONFIG
+# Config search order: $LLM_REDACT_CONFIG, then
+# $XDG_CONFIG_HOME/llm-redact/config.toml, then /etc/llm-redact/config.toml.

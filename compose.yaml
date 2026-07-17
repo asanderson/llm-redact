@@ -1,0 +1,33 @@
+# Demo stack: the proxy fronting the bundled fake upstream.
+# Point a real deployment's [providers.*] at the actual APIs instead.
+services:
+  proxy:
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "127.0.0.1:8787:8787" # never expose beyond loopback
+    volumes:
+      - ./examples/compose-config.toml:/etc/llm-redact/config.toml:ro
+      - llm-redact-data:/data
+    depends_on:
+      - fake-upstream
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8787/__llm-redact/healthz')",
+        ]
+      interval: 30s
+      timeout: 3s
+
+  fake-upstream:
+    build:
+      context: .
+      target: fake-upstream
+    # Internal only: reachable from the proxy as http://fake-upstream:9999.
+
+volumes:
+  llm-redact-data:

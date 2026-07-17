@@ -1,0 +1,1218 @@
+<!doctype html>
+<html lang="en" data-llm-redact-dashboard>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llm-redact dashboard</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 1.5rem;
+         max-width: 72rem; margin-inline: auto; }
+  h1 { font-size: 1.2rem; margin: 0 0 .25rem; }
+  .muted { opacity: .65; }
+  .row { display: flex; flex-wrap: wrap; gap: 1.5rem; margin-top: 1.25rem; }
+  .card { border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+          border-radius: 8px; padding: .9rem 1.1rem; flex: 1 1 16rem; }
+  .card h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em;
+             margin: 0 0 .5rem; opacity: .7; }
+  table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+  th, td { text-align: left; padding: .25rem .6rem .25rem 0; vertical-align: top;
+           border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent); }
+  th { opacity: .7; font-weight: 600; }
+  td.num, th.num { text-align: right; }
+  td.num { padding-right: 0; }
+  code { font-size: .85em; }
+  #error { color: #c0392b; margin-top: 1rem; display: none; }
+  footer { margin-top: 2rem; font-size: .8rem; opacity: .65; }
+  .pill { display: inline-block; border-radius: 999px; padding: .05rem .55rem;
+          border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+          font-size: .78rem; margin-right: .4rem; }
+  .rules { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+           gap: .1rem .8rem; font-size: .85rem; }
+  .rules label { white-space: nowrap; display: flex; align-items: center; gap: .3rem; }
+  .rules label span { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+  .rules select { font: inherit; font-size: .8rem; }
+  fieldset { border: none; padding: 0; margin: .8rem 0 0; }
+  fieldset legend { font-size: .8rem; font-weight: 600; opacity: .75; padding: 0;
+                    text-transform: uppercase; letter-spacing: .04em; }
+  textarea { width: 100%; box-sizing: border-box; font: .85rem/1.4 monospace;
+             min-height: 3.2rem; }
+  input[type="text"], input[type="number"] { font: inherit; padding: .15rem .3rem; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: .3rem .8rem;
+        align-items: center; font-size: .85rem; }
+  #config-note { font-size: .85rem; margin: .8rem 0 .4rem; display: none; }
+  #config-note.error { color: #c0392b; display: block; }
+  #config-note.ok { color: #27ae60; display: block; }
+  .readonly-grid { opacity: .7; }
+  button { font: inherit; padding: .25rem .9rem; }
+  .warn { font-size: .8rem; opacity: .7; }
+</style>
+</head>
+<body>
+<h1>llm-redact <span id="version" class="muted"></span></h1>
+<div>
+  <span class="pill" title="time since the proxy started — totals below reset at start">uptime <span id="uptime">–</span>s</span>
+  <span class="pill" title="vault session mode: how placeholder namespaces are chosen (static = one shared namespace; per-conversation = one per conversation)">mode <span id="mode">–</span></span>
+  <span class="pill" title="vault backend (where token-to-value mappings live) and how many mappings it holds">vault <span id="vault">–</span></span>
+  <span class="pill" title="number of vault sessions (placeholder namespaces)">sessions <span id="sessions">–</span></span>
+  <span class="pill" title="conversations whose history was rewritten by the tool (compaction): their pre-rewrite placeholders pass through unrestored rather than risking a wrong value">compaction forks <span id="forks">–</span></span>
+  <span class="pill" title="fuzzy rehydration: restore LLM-mangled placeholder tokens («email_001», «EMAIL-1») via vault lookup">fuzzy <span id="fuzzy">–</span></span>
+  <span class="pill" title="WebSocket relay for OpenAI Realtime / Gemini Live (needs the realtime extra)">realtime <span id="realtime">–</span></span>
+  <span class="pill" title="OpenTelemetry export (metadata only, like the audit log)">otel <span id="otel">–</span></span>
+  <span class="pill" title="object-store audit backup sinks: batches uploaded, rows dropped on failure">audit sinks <span id="audit-sinks">–</span></span>
+  <span class="pill" title="license tier in effect (see README.md)">license <span id="license">–</span></span>
+</div>
+<p id="license-warnings" class="warn"></p>
+<p id="posture"></p>
+<p id="error"></p>
+
+<div class="row">
+  <div class="card">
+    <h2>Detections / restores by type <span id="since" class="muted"></span></h2>
+    <table>
+      <thead><tr><th>type</th><th class="num">redacted</th><th class="num">restored</th>
+        <th class="num" title="warn-mode matches: these values WERE FORWARDED upstream unredacted">warned&#9888;</th><th class="num">blocked</th></tr></thead>
+      <tbody id="totals"><tr><td class="muted" colspan="5">none yet</td></tr></tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h2>Upstreams</h2>
+    <table><tbody id="upstreams"></tbody></table>
+  </div>
+</div>
+
+<div class="card" style="margin-top:1.5rem">
+  <h2>Recent requests
+    <label class="muted" style="font-weight:normal;font-size:.85rem;margin-left:.8rem">
+      <input type="checkbox" id="recent-source-audit"> include persistent audit history
+    </label>
+  </h2>
+  <table>
+    <thead><tr>
+      <th>time</th><th>provider</th><th>method</th><th>path</th>
+      <th class="num">status</th><th class="num">ms</th><th>stream</th><th>redacted</th>
+      <th title="warn-mode matches on this request: the values WERE FORWARDED upstream unredacted">warned&#9888;</th><th>restored</th><th>user</th>
+    </tr></thead>
+    <tbody id="audit"><tr><td class="muted" colspan="11">loading…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card" style="margin-top:1.5rem">
+  <h2>Vault sessions</h2>
+  <table>
+    <thead><tr><th>session</th><th class="num">entries</th><th>first</th><th>last</th></tr></thead>
+    <tbody id="session-rows"><tr><td class="muted" colspan="4">loading…</td></tr></tbody>
+  </table>
+  <div class="kv" style="margin-top:.6rem">
+    <label for="prune-days">prune sessions idle longer than (days)</label>
+    <input type="number" id="prune-days" min="0" value="90" style="width:6rem">
+    <button type="button" id="prune-button">prune</button>
+    <span id="prune-note" class="muted"></span>
+  </div>
+  <p class="warn">Pruning deletes whole idle sessions from the sqlite vault —
+    their placeholders can no longer be restored. The active session is never
+    pruned here.</p>
+</div>
+
+<div class="card" style="margin-top:1.5rem" id="users-card" hidden>
+  <h2>Named users</h2>
+  <p class="muted" id="users-summary"></p>
+  <table>
+    <thead><tr><th>status</th><th>email</th><th>name</th><th></th></tr></thead>
+    <tbody id="users-rows"><tr><td class="muted" colspan="4">loading…</td></tr></tbody>
+  </table>
+  <div class="kv" style="margin-top:.6rem">
+    <label for="invite-name">invite</label>
+    <div>
+      <input type="text" id="invite-name" placeholder="name" style="width:9rem">
+      <input type="text" id="invite-email" placeholder="email" style="width:14rem">
+      <button type="button" id="invite-button">invite</button>
+    </div>
+  </div>
+  <p id="users-note" class="muted"></p>
+  <p class="warn">Codes are emailed when [email] is configured; otherwise the
+    code appears above for manual delivery. The per-user key is shown exactly
+    once, at <code>llm-redact users verify</code>, never here.</p>
+</div>
+
+<div class="card" style="margin-top:1.5rem" data-preview>
+  <h2>Redaction preview</h2>
+  <p class="muted">Paste representative prompt text to see what the CURRENT
+    config would redact, warn on, or block — no request is sent upstream and
+    nothing is stored.</p>
+  <textarea id="preview-input" spellcheck="false"
+    placeholder="mail jane@corp.example, key AKIA..."></textarea>
+  <button type="button" id="preview-run">Preview</button>
+  <p id="preview-note" class="muted"></p>
+  <div class="kv" id="preview-summary"></div>
+  <label for="preview-output" class="muted">redacted (what the upstream would receive)</label>
+  <textarea id="preview-output" readonly spellcheck="false"></textarea>
+</div>
+
+<div class="card" style="margin-top:1.5rem" data-config-editor>
+  <h2>Configuration</h2>
+  <form id="config-form" style="display:none">
+    <div class="kv">
+      <label for="cfg-note-toggle">inject system note</label>
+      <input type="checkbox" id="cfg-note-toggle">
+      <label for="cfg-fuzzy">fuzzy rehydration</label>
+      <input type="checkbox" id="cfg-fuzzy">
+      <label for="cfg-max-body">max body bytes</label>
+      <input type="number" id="cfg-max-body" min="1" style="width:10rem">
+    </div>
+    <fieldset>
+      <legend>Detection rules</legend>
+      <label><input type="checkbox" id="cfg-all-rules">
+        all built-in rules (including ones added by future versions)</label>
+      <p class="warn">Per-rule mode: <code>redact</code> substitutes a placeholder;
+        <code>warn</code> only counts — the value IS sent upstream unredacted
+        (including anything a longer warn-mode match overlaps);
+        <code>block</code> rejects the whole request with a 400.</p>
+      <div class="rules" id="cfg-rules"></div>
+      <label for="cfg-languages">languages (comma-separated ISO 639-1 codes;
+        blank = all — national-id rules outside the list are not built,
+        universal rules like emails and vendor keys always run)</label>
+      <input type="text" id="cfg-languages" spellcheck="false"
+        placeholder="en, de, fr" style="width:16rem">
+      <p class="muted" id="cfg-languages-effect"></p>
+    </fieldset>
+    <fieldset>
+      <legend>Allowlist (exact values, one per line — shown here, unlike other endpoints)</legend>
+      <textarea id="cfg-allowlist" spellcheck="false"></textarea>
+    </fieldset>
+    <fieldset>
+      <legend>Allowlist patterns (regex, one per line)</legend>
+      <textarea id="cfg-allowlist-patterns" spellcheck="false"></textarea>
+    </fieldset>
+    <fieldset>
+      <legend>Per-type allowlist (TYPE: value per line — the value is allowed
+        only when matched as that detector type)</legend>
+      <textarea id="cfg-allowlist-by-type" spellcheck="false"
+        placeholder="EMAIL: support@corp.example"></textarea>
+    </fieldset>
+    <fieldset>
+      <legend>Deny strings (always redacted; win every overlap; ignore the
+        allowlist and modes)</legend>
+      <table>
+        <thead><tr><th>value</th><th>case sensitive</th><th>type</th><th></th></tr></thead>
+        <tbody id="cfg-deny-strings"></tbody>
+      </table>
+      <button type="button" id="cfg-add-deny">add deny string</button>
+    </fieldset>
+    <fieldset>
+      <legend>MCP exempt servers (server name/label per line — their MCP
+        content blocks bypass detection entirely)</legend>
+      <p class="warn">Content addressed to or returned by these MCP servers
+        is forwarded unredacted. Use only for servers you run and trust.</p>
+      <textarea id="cfg-mcp-exempt" spellcheck="false"
+        placeholder="my-internal-server"></textarea>
+    </fieldset>
+    <fieldset>
+      <legend>Custom rules</legend>
+      <table>
+        <thead><tr><th>name</th><th>type</th><th>pattern</th><th>priority</th><th>validator</th><th>required</th><th>anchors</th><th></th></tr></thead>
+        <tbody id="cfg-custom-rules"></tbody>
+      </table>
+      <button type="button" id="cfg-add-rule">add rule</button>
+    </fieldset>
+    <fieldset>
+      <legend>NER (person-name detection)</legend>
+      <p class="warn">Each backend needs its extra installed
+        (<code>ner</code> for spacy, <code>gliner</code>,
+        <code>presidio</code>, <code>stanza</code>, <code>hf</code>) plus the
+        model where applicable — enabling without it is rejected with the
+        exact install command.</p>
+      <div class="kv">
+        <label for="cfg-ner-enabled">enabled</label>
+        <input type="checkbox" id="cfg-ner-enabled">
+        <label>backends (each runs when checked)</label>
+        <span>
+          <label><input type="checkbox" id="cfg-ner-backend-spacy"
+            data-ner-backend="spacy"> spacy</label>
+          <label><input type="checkbox" id="cfg-ner-backend-gliner"
+            data-ner-backend="gliner"> gliner</label>
+          <label><input type="checkbox" id="cfg-ner-backend-presidio"
+            data-ner-backend="presidio"> presidio</label>
+          <label><input type="checkbox" id="cfg-ner-backend-stanza"
+            data-ner-backend="stanza"> stanza</label>
+          <label><input type="checkbox" id="cfg-ner-backend-hf"
+            data-ner-backend="hf"> hf</label>
+        </span>
+        <label for="cfg-ner-model-spacy">spacy model (blank = en_core_web_sm)</label>
+        <input type="text" id="cfg-ner-model-spacy" data-ner-model="spacy" spellcheck="false">
+        <label for="cfg-ner-model-gliner">gliner model (blank = urchade/gliner_small-v2.1)</label>
+        <input type="text" id="cfg-ner-model-gliner" data-ner-model="gliner" spellcheck="false">
+        <label for="cfg-ner-model-presidio">presidio model (blank = en_core_web_sm)</label>
+        <input type="text" id="cfg-ner-model-presidio" data-ner-model="presidio"
+          spellcheck="false">
+        <label for="cfg-ner-model-stanza">stanza model (blank = language default)</label>
+        <input type="text" id="cfg-ner-model-stanza" data-ner-model="stanza" spellcheck="false">
+        <label for="cfg-ner-model-hf">hf model (blank = dslim/bert-base-NER)</label>
+        <input type="text" id="cfg-ner-model-hf" data-ner-model="hf" spellcheck="false">
+        <label for="cfg-ner-entities">entities (comma-separated)</label>
+        <input type="text" id="cfg-ner-entities" spellcheck="false">
+        <label for="cfg-ner-max-chars">max chars scanned per string</label>
+        <input type="number" id="cfg-ner-max-chars" min="1" style="width:8rem">
+        <label for="cfg-ner-language">language</label>
+        <input type="text" id="cfg-ner-language" style="width:6rem" spellcheck="false">
+        <label for="cfg-ner-threshold" id="cfg-ner-threshold-label">score threshold</label>
+        <input type="number" id="cfg-ner-threshold" min="0" max="1" step="0.05"
+          style="width:8rem">
+      </div>
+      <p>Rule toggles above are the single source of truth per placeholder
+        type: a type disabled there is suppressed for NER too (presidio
+        folds these into the built-in types). Currently:
+        <span id="cfg-ner-folded"></span></p>
+    </fieldset>
+    <fieldset>
+      <legend>Upstreams</legend>
+      <div class="kv" id="cfg-providers"></div>
+      <div id="cfg-custom-new"></div>
+      <button type="button" id="cfg-add-custom">add custom upstream</button>
+      <p>Custom upstreams are OpenAI-compatible backends served under
+        <code>/custom/&lt;name&gt;/</code> (point the tool's
+        <code>OPENAI_BASE_URL</code> there); names are lowercase
+        <code>[a-z0-9-]</code>.</p>
+    </fieldset>
+    <p class="warn">Saving rewrites the config file (comments are not preserved;
+      one <code>.bak</code> of the previous file is kept) and applies immediately —
+      no restart needed for these settings.</p>
+    <button type="submit" id="cfg-save">Save &amp; apply</button>
+    <p id="config-note"></p>
+  </form>
+  <p id="config-unavailable" class="muted" style="display:none"></p>
+</div>
+
+<div class="card readonly-grid" style="margin-top:1.5rem">
+  <h2>Restart-required settings <span class="pill">read-only</span></h2>
+  <div class="kv" id="cfg-readonly"></div>
+  <p class="warn">Change these in the config file, then restart the proxy.</p>
+</div>
+
+<footer>
+  Local-only view over <code>/__llm-redact/status</code>,
+  <code>/__llm-redact/recent</code>, <code>/__llm-redact/events</code>,
+  <code>/__llm-redact/sessions</code>,
+  <code>/__llm-redact/audit</code> and <code>/__llm-redact/config</code>
+  · <a href="/__llm-redact/metrics">metrics</a>
+  · <a href="/__llm-redact/guide">user guide</a>
+</footer>
+
+<script>
+"use strict";
+function counts(object) {
+  return Object.entries(object || {}).map(([k, v]) => k + "×" + v).join(" ") || "";
+}
+function cell(row, text, numeric) {
+  const td = document.createElement("td");
+  td.textContent = text;
+  if (numeric) td.className = "num";
+  row.appendChild(td);
+}
+async function refreshStatus() {
+  const response = await fetch("/__llm-redact/status", { cache: "no-store" });
+  const s = await response.json();
+  document.getElementById("version").textContent = "v" + s.version;
+  document.getElementById("uptime").textContent = Math.round(s.uptime_seconds);
+  document.getElementById("since").textContent = s.started_at
+    ? "— totals since " + s.started_at.replace("T", " ").replace("+00:00", "Z")
+    : "";
+  document.getElementById("mode").textContent = s.session_mode;
+  document.getElementById("forks").textContent = String(s.compaction_forks || 0);
+  document.getElementById("realtime").textContent = s.realtime_available ? "on" : "off";
+  document.getElementById("otel").textContent = s.otel_enabled ? "on" : "off";
+  // Object-store audit sinks: batches uploaded, and — loudly — any rows
+  // dropped on upload failure (the sink never blocks the proxy).
+  const sinkLabels = [];
+  ["s3", "azure"].forEach((name) => {
+    const sink = (s.audit || {})[name] || {};
+    if (!sink.enabled) return;
+    let label = name + " ↑" + (sink.batches_uploaded || 0);
+    if (sink.rows_dropped) label += " ⚠" + sink.rows_dropped + " dropped";
+    sinkLabels.push(label);
+  });
+  document.getElementById("audit-sinks").textContent =
+    sinkLabels.length ? sinkLabels.join(" · ") : "off";
+  document.getElementById("vault").textContent =
+    s.vault.backend + " (" + s.vault.entries + ")";
+  document.getElementById("sessions").textContent = s.vault.sessions;
+  document.getElementById("fuzzy").textContent = s.rehydration.fuzzy ? "on" : "off";
+  // Effective license tier (llm-redact-pro docs/licensing.md): tier, user cap, clouds,
+  // expiry — plus any resolution warnings (invalid key fell to Free,
+  // expiry grace) rendered loudly under the pills, never hidden.
+  const lic = s.license || { tier: "free" };
+  let licLabel = lic.tier;
+  if (lic.tier !== "free" && lic.max_users !== null && lic.max_users !== undefined)
+    licLabel += " · " + lic.max_users + " user" + (lic.max_users === 1 ? "" : "s");
+  else if (lic.tier !== "free") licLabel += " · unlimited users";
+  else licLabel += " · nothing gated";
+  if ((lic.clouds || []).length) licLabel += " · " + lic.clouds.join("+");
+  if (lic.expires) licLabel += " · exp " + lic.expires;
+  if (lic.in_grace) licLabel += " ⚠ GRACE";
+  // Open-core honesty (llm-redact-pro docs/licensing.md): is the paid llm-redact-pro package
+  // installed, and did its plugin register? Older proxies omit the field.
+  if (lic.package_installed === true)
+    licLabel += (lic.plugins || []).length ? " · pro pkg ✓" : " · pro pkg (no plugin)";
+  else if (lic.package_installed === false) licLabel += " · pro pkg –";
+  document.getElementById("license").textContent = licLabel;
+  document.getElementById("license-warnings").textContent =
+    (lic.warnings || []).length ? "⚠ " + lic.warnings.join(" · ") : "";
+
+  // Protection-posture banner: the single most important fact on the page.
+  // Green when every enabled rule redacts and nothing is opted out; a loud
+  // amber list otherwise (warn-mode rules forward values, detection-off
+  // providers forward everything, exempt MCP servers and language-scoped-out
+  // rules are not scanned).
+  const posture = document.getElementById("posture");
+  const optOuts = [];
+  const modes = (s.detection || {}).modes || {};
+  const warnRules = Object.entries(modes).filter(([, m]) => m === "warn").map(([r]) => r);
+  const blockRules = Object.entries(modes).filter(([, m]) => m === "block").map(([r]) => r);
+  if (warnRules.length)
+    optOuts.push("warn-mode rules (values ARE forwarded): " + warnRules.join(", "));
+  (s.providers_detection_off || []).forEach((p) =>
+    optOuts.push("provider " + p + ": DETECTION OFF (forwarded unredacted)"));
+  if (s.mcp_exempt_servers)
+    optOuts.push(s.mcp_exempt_servers + " MCP server(s) exempt from detection");
+  const inactive = (s.detection || {}).language_inactive_rules || [];
+  if (inactive.length)
+    optOuts.push("language-scoped out (not built): " + inactive.join(", "));
+  if (lic.package_installed === true && !(lic.plugins || []).length)
+    optOuts.push("licensed-features package present but no plugin registered — paid features OFF");
+  if (optOuts.length) {
+    posture.className = "warn";
+    posture.textContent = "⚠ coverage opt-outs: " + optOuts.join(" · ");
+  } else {
+    posture.className = "muted";
+    posture.textContent = "✓ all enabled rules redact — no coverage opt-outs"
+      + (blockRules.length ? " (block-mode: " + blockRules.join(", ") + ")" : "");
+  }
+
+  const types = new Set([
+    ...Object.keys(s.detections_total || {}), ...Object.keys(s.rehydrations_total || {}),
+    ...Object.keys(s.warnings_total || {}), ...Object.keys(s.blocked_total || {}),
+  ]);
+  const totals = document.getElementById("totals");
+  totals.replaceChildren();
+  if (types.size === 0) {
+    const row = document.createElement("tr");
+    cell(row, "none yet");
+    row.firstChild.colSpan = 5;
+    row.firstChild.className = "muted";
+    totals.appendChild(row);
+  }
+  [...types].sort().forEach((type) => {
+    const row = document.createElement("tr");
+    cell(row, type);
+    cell(row, String(s.detections_total[type] || 0), true);
+    cell(row, String(s.rehydrations_total[type] || 0), true);
+    cell(row, String((s.warnings_total || {})[type] || 0), true);
+    cell(row, String((s.blocked_total || {})[type] || 0), true);
+    totals.appendChild(row);
+  });
+
+  const upstreams = document.getElementById("upstreams");
+  upstreams.replaceChildren();
+  const disabled = new Set(s.providers_disabled || []);
+  const detectionOff = new Set(s.providers_detection_off || []);
+  const upstreamErrors = s.upstream_errors_total || {};
+  Object.entries(s.providers || {}).forEach(([name, url]) => {
+    const row = document.createElement("tr");
+    cell(row, name + (disabled.has(name) ? " (disabled)" : "")
+      + (detectionOff.has(name) ? " ⚠ DETECTION OFF" : "")
+      + (upstreamErrors[name] ? " ⚠" + upstreamErrors[name] + " upstream errors" : ""));
+    cell(row, url);
+    upstreams.appendChild(row);
+  });
+}
+function recentRow(entry) {
+  const row = document.createElement("tr");
+  cell(row, (entry.ts || "").replace("T", " ").replace("+00:00", "Z"));
+  cell(row, entry.provider || "passthrough");
+  cell(row, entry.method);
+  cell(row, entry.path);
+  cell(row, entry.status == null ? "—" : String(entry.status), true);
+  cell(row, String(Math.round(entry.duration_ms)), true);
+  cell(row, entry.streamed ? "yes" : "");
+  cell(row, counts(entry.detections));
+  // Warn-mode hits on THIS request: the values were forwarded upstream.
+  const warned = counts(entry.warned || {});
+  cell(row, warned ? "⚠ " + warned : "");
+  cell(row, counts(entry.rehydrations));
+  cell(row, entry.user || "");
+  return row;
+}
+function unavailableRow(body, span, status) {
+  // An error response must never render as an empty state: a host-gated 403
+  // showing "no requests recorded yet" reads as "no traffic flowed" — the
+  // wrong-conclusion failure for an operator checking for leaks.
+  const row = document.createElement("tr");
+  cell(row, status === 403
+    ? "access restricted from this host — open the dashboard via 127.0.0.1:" + location.port
+    : "unavailable (HTTP " + status + ")");
+  row.firstChild.colSpan = span;
+  row.firstChild.className = "muted";
+  body.appendChild(row);
+}
+async function refreshRecent() {
+  // The in-memory ring buffer (last 200 requests, metadata only) — or, with
+  // the toggle on, the persistent audit DB, so "did my key leak yesterday?"
+  // survives a proxy restart.
+  const body = document.getElementById("audit");
+  const useAudit = document.getElementById("recent-source-audit").checked;
+  const source = useAudit ? "/__llm-redact/audit?limit=50" : "/__llm-redact/recent?limit=50";
+  const response = await fetch(source, { cache: "no-store" });
+  body.replaceChildren();
+  if (!response.ok) {
+    if (useAudit && response.status === 404) {
+      const row = document.createElement("tr");
+      cell(row, "the persistent audit log is disabled — enable it with [audit] enabled = true (Pro)");
+      row.firstChild.colSpan = 11;
+      row.firstChild.className = "muted";
+      body.appendChild(row);
+      return;
+    }
+    unavailableRow(body, 11, response.status);
+    return;
+  }
+  const entries = (await response.json()).entries || [];
+  if (entries.length === 0) {
+    const row = document.createElement("tr");
+    cell(row, "no traffic yet — point your tool at this proxy: `llm-redact run -- <tool>`,"
+      + " or set ANTHROPIC_BASE_URL / OPENAI_BASE_URL to this address (see the user guide below)");
+    row.firstChild.colSpan = 11;
+    row.firstChild.className = "muted";
+    body.appendChild(row);
+  }
+  entries.forEach((entry) => {
+    body.appendChild(recentRow(entry));
+  });
+}
+async function refreshSessions() {
+  // NOT the plain "sessions" id — that one belongs to the status pill, and
+  // since getElementById returns the first match, this function used to
+  // stuff table rows into the pill while the real table sat on "loading…".
+  const body = document.getElementById("session-rows");
+  const response = await fetch("/__llm-redact/sessions", { cache: "no-store" });
+  body.replaceChildren();
+  if (!response.ok) { unavailableRow(body, 4, response.status); return; }
+  const payload = await response.json();
+  const sessions = payload.sessions || [];
+  if (sessions.length === 0) {
+    const row = document.createElement("tr");
+    cell(row, "no sessions yet (" + payload.backend + " backend)");
+    row.firstChild.colSpan = 4;
+    row.firstChild.className = "muted";
+    body.appendChild(row);
+    return;
+  }
+  sessions.forEach((entry) => {
+    const row = document.createElement("tr");
+    cell(row, entry.session + (entry.session === payload.active_session ? " (active)" : ""));
+    cell(row, String(entry.entries), true);
+    cell(row, entry.first || "—");
+    cell(row, entry.last || "—");
+    body.appendChild(row);
+  });
+}
+async function pruneSessions() {
+  const noteEl = document.getElementById("prune-note");
+  const days = parseInt(document.getElementById("prune-days").value, 10);
+  if (Number.isNaN(days) || days < 0) {
+    noteEl.textContent = "enter a whole number of days";
+    return;
+  }
+  if (csrfToken === null) {
+    noteEl.textContent = "config endpoint unavailable — cannot prune";
+    return;
+  }
+  if (!window.confirm("Delete every session idle longer than " + days +
+      " days? Their placeholders can no longer be restored.")) return;
+  const response = await fetch("/__llm-redact/sessions/prune", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-llm-redact-csrf": csrfToken },
+    body: JSON.stringify({ older_than_days: days }),
+  });
+  const payload = await response.json();
+  noteEl.textContent = response.ok
+    ? "pruned " + payload.pruned + " session(s)"
+    : "prune failed: " + (payload.error || response.status);
+  await refreshSessions();
+}
+document.getElementById("recent-source-audit").addEventListener("change", refreshRecent);
+document.getElementById("prune-button").addEventListener("click", () => {
+  pruneSessions().catch((problem) => {
+    document.getElementById("prune-note").textContent = "prune failed: " + problem;
+  });
+});
+async function refreshUsers() {
+  const card = document.getElementById("users-card");
+  const response = await fetch("/__llm-redact/users", { cache: "no-store" });
+  if (!response.ok) { card.hidden = true; return; }  // Free tier: no card
+  const payload = await response.json();
+  card.hidden = false;
+  const cap = payload.max_users === null ? "unlimited" : payload.max_users;
+  document.getElementById("users-summary").textContent =
+    "seats " + payload.active + "/" + cap + " · verified " + payload.verified +
+    " · enforcement " + (payload.enforcement ? "ON" : "off (implicit single user)");
+  const body = document.getElementById("users-rows");
+  body.replaceChildren();
+  if ((payload.users || []).length === 0) {
+    const row = document.createElement("tr");
+    cell(row, "no users yet — invite one below");
+    row.firstChild.colSpan = 4;
+    row.firstChild.className = "muted";
+    body.appendChild(row);
+    return;
+  }
+  payload.users.forEach((entry) => {
+    const row = document.createElement("tr");
+    cell(row, entry.status);
+    cell(row, entry.email);
+    cell(row, entry.name);
+    const actions = document.createElement("td");
+    if (entry.status !== "revoked") {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "revoke";
+      button.addEventListener("click", () => { revokeUser(entry.email); });
+      actions.appendChild(button);
+    }
+    row.appendChild(actions);
+    body.appendChild(row);
+  });
+}
+async function inviteUser() {
+  const note = document.getElementById("users-note");
+  const name = document.getElementById("invite-name").value.trim();
+  const email = document.getElementById("invite-email").value.trim();
+  if (!name || !email) { note.textContent = "enter a name and an email"; return; }
+  if (csrfToken === null) { note.textContent = "config endpoint unavailable"; return; }
+  const response = await fetch("/__llm-redact/users/invite", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-llm-redact-csrf": csrfToken },
+    body: JSON.stringify({ name: name, email: email }),
+  });
+  const payload = await response.json();
+  if (!response.ok) { note.textContent = "invite failed: " + (payload.error || response.status); return; }
+  note.textContent = payload.sent
+    ? "verification code emailed to " + email
+    : "code for " + email + ": " + payload.code + " (deliver it yourself; expires in 24h)";
+  await refreshUsers();
+}
+async function revokeUser(email) {
+  const note = document.getElementById("users-note");
+  if (csrfToken === null) { note.textContent = "config endpoint unavailable"; return; }
+  if (!window.confirm("Revoke " + email + "? Their key stops working immediately.")) return;
+  const response = await fetch("/__llm-redact/users/revoke", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-llm-redact-csrf": csrfToken },
+    body: JSON.stringify({ email: email }),
+  });
+  const payload = await response.json();
+  note.textContent = response.ok
+    ? "revoked " + email
+    : "revoke failed: " + (payload.error || response.status);
+  await refreshUsers();
+}
+document.getElementById("invite-button").addEventListener("click", () => {
+  inviteUser().catch((problem) => {
+    document.getElementById("users-note").textContent = "invite failed: " + problem;
+  });
+});
+async function refresh() {
+  const error = document.getElementById("error");
+  try {
+    await refreshStatus();
+    await refreshRecent();
+    await refreshSessions();
+    await refreshUsers();
+    error.style.display = "none";
+  } catch (problem) {
+    error.textContent = "refresh failed: " + problem;
+    error.style.display = "block";
+  }
+}
+let timer = setInterval(refresh, 3000);
+document.addEventListener("visibilitychange", () => {
+  clearInterval(timer);
+  if (!document.hidden) {
+    refresh();
+    timer = setInterval(refresh, 3000);
+  }
+});
+refresh();
+
+/* ---- live feed: /__llm-redact/events prepends rows between polls. The 3 s
+   poll keeps running and re-renders from /recent, so it stays authoritative
+   (dropped events and reconnect gaps self-heal within one poll). ---- */
+if (window.EventSource) {
+  const feed = new EventSource("/__llm-redact/events");
+  let feedOpened = false;
+  feed.onopen = () => { feedOpened = true; };
+  feed.onerror = () => {
+    // Never connected (older proxy, SSE-stripping middlebox): stop retrying
+    // and fall back to the poll alone. Drops after a good connect use
+    // EventSource's built-in reconnect.
+    if (!feedOpened) feed.close();
+  };
+  feed.onmessage = (event) => {
+    const body = document.getElementById("audit");
+    try {
+      const entry = JSON.parse(event.data);
+      const placeholder = body.firstChild;
+      if (placeholder && placeholder.firstChild &&
+          placeholder.firstChild.className === "muted") {
+      body.replaceChildren();
+      }
+      body.insertBefore(recentRow(entry), body.firstChild);
+      while (body.childNodes.length > 50) body.removeChild(body.lastChild);
+    } catch (problem) {
+      // Malformed event: ignore; the poll re-renders the table anyway.
+    }
+  };
+}
+
+/* ---- config editor: loaded once, never clobbered by the 3 s poll ---- */
+let csrfToken = null;
+let configFingerprint = null;
+let nerState = null;
+// Modes loaded for rules the grid does not show (custom rules): preserved
+// verbatim on save so the built-in selects never clobber them.
+let extraModes = {};
+
+function lines(textareaId) {
+  return document.getElementById(textareaId).value
+    .split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
+}
+function note(kind, text) {
+  const el = document.getElementById("config-note");
+  el.className = kind;
+  el.textContent = text;
+}
+function customRuleRow(rule) {
+  const row = document.createElement("tr");
+  [["name", rule.name], ["type", rule.type], ["pattern", rule.pattern]].forEach(([key, val]) => {
+    const td = document.createElement("td");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = val;
+    input.dataset.key = key;
+    if (key === "pattern") input.style.width = "14rem";
+    td.appendChild(input);
+    row.appendChild(td);
+  });
+  const priorityTd = document.createElement("td");
+  const priority = document.createElement("input");
+  priority.type = "number";
+  priority.value = String(rule.priority);
+  priority.dataset.key = "priority";
+  priority.style.width = "4.5rem";
+  priorityTd.appendChild(priority);
+  row.appendChild(priorityTd);
+  // Optional gate/prefilter fields: these MUST round-trip — a save that
+  // dropped them silently stripped a rule's checksum gate (the 2.0 rider
+  // fix). required/anchors are comma-separated literals here; literals
+  // containing commas need the config file directly.
+  [["validator", rule.validator || ""],
+   ["required", (rule.required || []).join(",")],
+   ["anchors", (rule.anchors || []).join(",")]].forEach(([key, val]) => {
+    const td = document.createElement("td");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = val;
+    input.dataset.key = key;
+    input.style.width = key === "validator" ? "6rem" : "8rem";
+    td.appendChild(input);
+    row.appendChild(td);
+  });
+  const removeTd = document.createElement("td");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "remove";
+  remove.addEventListener("click", () => row.remove());
+  removeTd.appendChild(remove);
+  row.appendChild(removeTd);
+  return row;
+}
+function denyStringRow(entry) {
+  const row = document.createElement("tr");
+  const valueTd = document.createElement("td");
+  const value = document.createElement("input");
+  value.type = "text";
+  value.value = entry.value;
+  value.dataset.key = "value";
+  value.style.width = "14rem";
+  valueTd.appendChild(value);
+  row.appendChild(valueTd);
+  const caseTd = document.createElement("td");
+  const caseBox = document.createElement("input");
+  caseBox.type = "checkbox";
+  caseBox.checked = entry.case_sensitive;
+  caseBox.dataset.key = "case_sensitive";
+  caseTd.appendChild(caseBox);
+  row.appendChild(caseTd);
+  const typeTd = document.createElement("td");
+  const type = document.createElement("input");
+  type.type = "text";
+  type.value = entry.type;
+  type.dataset.key = "type";
+  type.style.width = "7rem";
+  typeTd.appendChild(type);
+  row.appendChild(typeTd);
+  const removeTd = document.createElement("td");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "remove";
+  remove.addEventListener("click", () => row.remove());
+  removeTd.appendChild(remove);
+  row.appendChild(removeTd);
+  return row;
+}
+function syncAllRules() {
+  const all = document.getElementById("cfg-all-rules").checked;
+  document.querySelectorAll("#cfg-rules input").forEach((box) => {
+    box.disabled = all;
+    if (all) box.checked = true;
+  });
+}
+async function loadConfig() {
+  const form = document.getElementById("config-form");
+  const unavailable = document.getElementById("config-unavailable");
+  let payload;
+  try {
+    const response = await fetch("/__llm-redact/config", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    payload = await response.json();
+  } catch (problem) {
+    unavailable.textContent = "config editor unavailable: " + problem;
+    unavailable.style.display = "block";
+    return;
+  }
+  csrfToken = payload.csrf_token;
+  configFingerprint = payload.config_fingerprint || null;
+  nerState = payload.editable.detection.ner;
+  const detection = payload.editable.detection;
+
+  document.getElementById("cfg-note-toggle").checked = payload.editable.inject_system_note;
+  document.getElementById("cfg-fuzzy").checked = payload.editable.rehydration.fuzzy;
+  document.getElementById("cfg-max-body").value = payload.editable.max_body_bytes;
+
+  const enabled = new Set(detection.enabled);
+  const modes = detection.modes || {};
+  extraModes = Object.fromEntries(Object.entries(modes)
+    .filter(([name]) => !payload.builtin_rules.includes(name)));
+  const rules = document.getElementById("cfg-rules");
+  rules.replaceChildren();
+  payload.builtin_rules.forEach((name) => {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = name;
+    box.checked = enabled.has(name);
+    label.appendChild(box);
+    const text = document.createElement("span");
+    text.textContent = name;
+    label.appendChild(text);
+    const select = document.createElement("select");
+    select.dataset.rule = name;
+    ["redact", "warn", "block"].forEach((mode) => {
+      const option = document.createElement("option");
+      option.value = mode;
+      option.textContent = mode;
+      select.appendChild(option);
+    });
+    select.value = modes[name] || "redact";
+    label.appendChild(select);
+    rules.appendChild(label);
+  });
+  const allBox = document.getElementById("cfg-all-rules");
+  allBox.checked = payload.builtin_rules.every((name) => enabled.has(name));
+  allBox.addEventListener("change", syncAllRules);
+  syncAllRules();
+
+  document.getElementById("cfg-allowlist").value = detection.allowlist.join("\n");
+  document.getElementById("cfg-allowlist-patterns").value =
+    detection.allowlist_patterns.join("\n");
+
+  // Language scope + live effective-rule display: which enabled rules the
+  // current entry would leave unbuilt (universal rules always run).
+  const languagesInput = document.getElementById("cfg-languages");
+  languagesInput.value = (detection.languages || []).join(", ");
+  const ruleLanguages = payload.builtin_rule_languages || {};
+  const syncLanguages = () => {
+    const scope = languagesInput.value
+      .split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0);
+    const note = document.getElementById("cfg-languages-effect");
+    if (scope.length === 0) {
+      note.textContent = "all languages: every enabled rule runs";
+      return;
+    }
+    const inactive = Object.entries(ruleLanguages)
+      .filter(([, langs]) => !langs.some((l) => scope.includes(l)))
+      .map(([name]) => name).sort();
+    note.textContent = inactive.length
+      ? "language-scoped out (not built): " + inactive.join(", ")
+      : "all enabled rules run in this scope";
+  };
+  languagesInput.addEventListener("input", syncLanguages);
+  syncLanguages();
+
+  const rulesBody = document.getElementById("cfg-custom-rules");
+  rulesBody.replaceChildren();
+  detection.custom_rules.forEach((rule) => rulesBody.appendChild(customRuleRow(rule)));
+  document.getElementById("cfg-add-rule").addEventListener("click", () => {
+    rulesBody.appendChild(customRuleRow({ name: "", type: "", pattern: "", priority: 100 }));
+  });
+
+  const denyBody = document.getElementById("cfg-deny-strings");
+  denyBody.replaceChildren();
+  (detection.deny_strings || []).forEach((entry) => denyBody.appendChild(denyStringRow(entry)));
+  document.getElementById("cfg-add-deny").addEventListener("click", () => {
+    denyBody.appendChild(denyStringRow({ value: "", case_sensitive: false, type: "DENY" }));
+  });
+
+  document.getElementById("cfg-allowlist-by-type").value =
+    Object.entries(detection.allowlist_by_type || {})
+      .flatMap(([type, values]) => values.map((v) => type + ": " + v)).join("\n");
+
+  document.getElementById("cfg-mcp-exempt").value =
+    ((detection.mcp || {}).exempt_servers || []).join("\n");
+
+  document.getElementById("cfg-ner-enabled").checked = nerState.enabled;
+  const nerBackends = new Set(nerState.backends || [nerState.backend]);
+  document.querySelectorAll("input[data-ner-backend]").forEach((box) => {
+    box.checked = nerBackends.has(box.dataset.nerBackend);
+  });
+  const nerModels = nerState.models || {};
+  document.querySelectorAll("input[data-ner-model]").forEach((input) => {
+    const legacy = nerBackends.size === 1 && nerBackends.has(input.dataset.nerModel)
+      ? nerState.model : null;
+    input.value = nerModels[input.dataset.nerModel] || legacy || "";
+  });
+  document.getElementById("cfg-ner-entities").value = (nerState.entities || []).join(", ");
+  document.getElementById("cfg-ner-max-chars").value = nerState.max_chars;
+  document.getElementById("cfg-ner-language").value = nerState.language || "en";
+  document.getElementById("cfg-ner-threshold").value = nerState.score_threshold;
+  const syncNerThreshold = () => {
+    // parse_config rejects score_threshold without a confidence backend.
+    const show = ["gliner", "presidio"].some(
+      (b) => document.getElementById("cfg-ner-backend-" + b).checked);
+    document.getElementById("cfg-ner-threshold").style.display = show ? "" : "none";
+    document.getElementById("cfg-ner-threshold-label").style.display = show ? "" : "none";
+  };
+  document.querySelectorAll("input[data-ner-backend]").forEach((box) => {
+    box.addEventListener("change", syncNerThreshold);
+  });
+  syncNerThreshold();
+  // The rule checkboxes are the single source of truth per placeholder
+  // type; mirror the NER-foldable ones so the two cards never disagree.
+  const nerFolded = { email: "EMAIL", phone_number: "PHONE", us_ssn: "SSN",
+    iban: "IBAN", credit_card: "CREDIT_CARD" };
+  const syncNerFolded = () => {
+    const parts = [];
+    document.querySelectorAll("#cfg-rules input[type=checkbox]").forEach((box) => {
+      if (nerFolded[box.value]) {
+        parts.push(nerFolded[box.value] + (box.checked ? " on" : " OFF"));
+      }
+    });
+    document.getElementById("cfg-ner-folded").textContent = parts.join(" \u00b7 ");
+  };
+  document.getElementById("cfg-rules").addEventListener("change", syncNerFolded);
+  document.getElementById("cfg-all-rules").addEventListener("change", syncNerFolded);
+  syncNerFolded();
+
+  const providers = document.getElementById("cfg-providers");
+  providers.replaceChildren();
+  Object.entries(payload.editable.providers).forEach(([name, provider]) => {
+    const label = document.createElement("label");
+    // Unchecking disables the provider: the proxy answers its routes with
+    // an error instead of forwarding (never falls through to pass-through).
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    toggle.checked = provider.enabled !== false;
+    toggle.dataset.providerEnabled = name;
+    toggle.title = "enabled (unchecked = proxy refuses this provider's routes)";
+    const toggleTag = document.createElement("span");
+    toggleTag.textContent = " on ";
+    label.appendChild(toggle);
+    label.appendChild(toggleTag);
+    // The per-provider detection off-switch. Unchecked = requests to this
+    // upstream are forwarded UNREDACTED (rehydration stays active).
+    const detect = document.createElement("input");
+    detect.type = "checkbox";
+    detect.checked = provider.detection !== false;
+    detect.dataset.providerDetection = name;
+    detect.title = "detection (unchecked = values go to this upstream UNREDACTED)";
+    detect.addEventListener("change", () => {
+      // Unchecking is a protection opt-out with maximal misclick cost —
+      // confirm it the way session pruning is confirmed.
+      if (!detect.checked && !window.confirm(
+        "Turn DETECTION OFF for " + name + "? Requests to this provider will be"
+        + " forwarded with values UNREDACTED (rehydration stays active)."
+      )) detect.checked = true;
+    });
+    const detectTag = document.createElement("span");
+    detectTag.textContent = " detect ";
+    label.appendChild(detect);
+    label.appendChild(detectTag);
+    label.appendChild(document.createTextNode(" " + name));
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = provider.upstream_base_url;
+    input.dataset.provider = name;
+    input.style.width = "100%";
+    if (name.startsWith("custom:")) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "remove";
+      remove.addEventListener("click", () => { label.remove(); input.remove(); });
+      label.appendChild(remove);
+    }
+    providers.appendChild(label);
+    providers.appendChild(input);
+  });
+  const customNew = document.getElementById("cfg-custom-new");
+  customNew.replaceChildren();
+  document.getElementById("cfg-add-custom").addEventListener("click", () => {
+    const row = document.createElement("div");
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.placeholder = "name (e.g. vllm)";
+    nameInput.dataset.customNewName = "1";
+    const urlInput = document.createElement("input");
+    urlInput.type = "text";
+    urlInput.placeholder = "upstream base URL (127.0.0.1:8000 etc.)";
+    urlInput.dataset.customNewUrl = "1";
+    urlInput.style.width = "60%";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "remove";
+    remove.addEventListener("click", () => row.remove());
+    row.appendChild(nameInput);
+    row.appendChild(urlInput);
+    row.appendChild(remove);
+    customNew.appendChild(row);
+  });
+
+  const readonly = document.getElementById("cfg-readonly");
+  readonly.replaceChildren();
+  const ro = payload.readonly;
+  [["host", ro.host], ["port", ro.port],
+   ["vault backend", ro.vault.backend], ["vault session", ro.vault.session],
+   ["session mode", ro.vault.session_mode],
+   ["audit", ro.audit.enabled ? "enabled (max " + ro.audit.max_rows + " rows)" : "disabled"],
+   ["audit tamper-evidence", ro.audit.tamper_evident ? "on (HMAC hash-chain)" : "off"],
+   ["audit required (zero-loss)", ro.audit.required ? "on (no audit row, no service)" : "off"],
+   ["audit s3 sink", (ro.audit.s3 || {}).enabled
+     ? ro.audit.s3.provider + " " + ro.audit.s3.bucket + " (metadata rows leave this machine)"
+     : "off"],
+   ["audit azure sink", (ro.audit.azure || {}).enabled
+     ? ro.audit.azure.account + "/" + ro.audit.azure.container
+       + " (metadata rows leave this machine)"
+     : "off"],
+   ["otel", (ro.otel || {}).enabled
+     ? "on → " + ((ro.otel || {}).endpoint || "default endpoint")
+     : "off"],
+   ["log format", (ro.log || {}).format || "text"],
+   ["tls", (ro.tls || {}).enabled ? ((ro.tls || {}).mutual ? "mutual" : "server-only") : "off"],
+   ["config file", payload.config_path + (payload.config_file_exists ? "" : " (will be created)")],
+  ].forEach(([key, value]) => {
+    const k = document.createElement("span");
+    k.textContent = key;
+    const v = document.createElement("code");
+    v.textContent = String(value);
+    readonly.appendChild(k);
+    readonly.appendChild(v);
+  });
+
+  form.style.display = "block";
+  form.addEventListener("submit", saveConfig);
+}
+async function saveConfig(event) {
+  event.preventDefault();
+  // Redact entries are omitted: an absent rule means the default.
+  const modes = { ...extraModes };
+  document.querySelectorAll("#cfg-rules select").forEach((select) => {
+    if (select.value !== "redact") modes[select.dataset.rule] = select.value;
+  });
+  const allowlistByType = {};
+  for (const entry of lines("cfg-allowlist-by-type")) {
+    const split = entry.indexOf(":");
+    const type = split > 0 ? entry.slice(0, split).trim() : "";
+    const value = split > 0 ? entry.slice(split + 1).trim() : "";
+    if (!type || !value) {
+      note("error", "per-type allowlist lines must look like TYPE: value");
+      return;
+    }
+    (allowlistByType[type] = allowlistByType[type] || []).push(value);
+  }
+  const detection = {
+    modes: modes,
+    allowlist: lines("cfg-allowlist"),
+    allowlist_patterns: lines("cfg-allowlist-patterns"),
+    allowlist_by_type: allowlistByType,
+    deny_strings: [...document.querySelectorAll("#cfg-deny-strings tr")].map((row) => {
+      const entry = {};
+      row.querySelectorAll("input").forEach((input) => {
+        entry[input.dataset.key] =
+          input.dataset.key === "case_sensitive" ? input.checked : input.value;
+      });
+      return entry;
+    }),
+    custom_rules: [...document.querySelectorAll("#cfg-custom-rules tr")].map((row) => {
+      const rule = {};
+      row.querySelectorAll("input").forEach((input) => {
+        const key = input.dataset.key;
+        if (key === "priority") { rule[key] = Number(input.value); return; }
+        if (key === "required" || key === "anchors") {
+          const parts = input.value.split(",").map((v) => v.trim()).filter((v) => v.length > 0);
+          if (parts.length > 0) rule[key] = parts;  // omit when empty: round-trips to the same TOML
+          return;
+        }
+        if (key === "validator") {
+          if (input.value.trim().length > 0) rule[key] = input.value.trim();
+          return;
+        }
+        rule[key] = input.value;
+      });
+      return rule;
+    }),
+    ner: {
+      enabled: document.getElementById("cfg-ner-enabled").checked,
+      backends: [...document.querySelectorAll("input[data-ner-backend]")]
+        .filter((box) => box.checked).map((box) => box.dataset.nerBackend),
+      entities: document.getElementById("cfg-ner-entities").value
+        .split(",").map((s) => s.trim()).filter((s) => s.length > 0),
+      max_chars: Number(document.getElementById("cfg-ner-max-chars").value),
+      language: document.getElementById("cfg-ner-language").value.trim() || "en",
+      score_threshold: Number(document.getElementById("cfg-ner-threshold").value),
+    },
+  };
+  const mcpExempt = lines("cfg-mcp-exempt");
+  if (mcpExempt.length > 0) detection.mcp = { exempt_servers: mcpExempt };
+  const languageScope = document.getElementById("cfg-languages").value
+    .split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0);
+  if (languageScope.length > 0) detection.languages = languageScope;
+  const nerModels = {};
+  document.querySelectorAll("input[data-ner-model]").forEach((input) => {
+    const value = input.value.trim();
+    if (value) nerModels[input.dataset.nerModel] = value;
+  });
+  if (Object.keys(nerModels).length > 0) detection.ner.models = nerModels;
+  if (!detection.ner.backends.some((b) => b === "gliner" || b === "presidio")) {
+    delete detection.ner.score_threshold;  // rejected without a confidence backend
+  }
+  if (detection.ner.backends.length === 0 && !detection.ner.enabled) {
+    // Nothing checked and NER off: omit so the legacy default applies
+    // (an empty list is rejected; keep the clear error when NER is ON).
+    delete detection.ner.backends;
+  }
+  if (!document.getElementById("cfg-all-rules").checked) {
+    // Omitting `enabled` keeps the open-ended "all built-ins" default.
+    detection.enabled = [...document.querySelectorAll("#cfg-rules input")]
+      .filter((box) => box.checked).map((box) => box.value);
+  }
+  const providers = {};
+  document.querySelectorAll("#cfg-providers input[data-provider]").forEach((input) => {
+    providers[input.dataset.provider] = { upstream_base_url: input.value };
+  });
+  document.querySelectorAll("#cfg-providers input[data-provider-enabled]").forEach((toggle) => {
+    if (!toggle.checked && providers[toggle.dataset.providerEnabled]) {
+      providers[toggle.dataset.providerEnabled].enabled = false;
+    }
+  });
+  document.querySelectorAll("#cfg-providers input[data-provider-detection]").forEach((toggle) => {
+    if (!toggle.checked && providers[toggle.dataset.providerDetection]) {
+      providers[toggle.dataset.providerDetection].detection = false;
+    }
+  });
+  document.querySelectorAll("#cfg-custom-new div").forEach((row) => {
+    const name = (row.querySelector("input[data-custom-new-name]") || {}).value || "";
+    const url = (row.querySelector("input[data-custom-new-url]") || {}).value || "";
+    if (name.trim() && url.trim()) {
+      providers["custom:" + name.trim()] = { upstream_base_url: url.trim() };
+    }
+  });
+  const body = {
+    config: {
+      inject_system_note: document.getElementById("cfg-note-toggle").checked,
+      max_body_bytes: Number(document.getElementById("cfg-max-body").value),
+      rehydration: { fuzzy: document.getElementById("cfg-fuzzy").checked },
+      detection: detection,
+      providers: providers,
+    },
+  };
+  try {
+    if (configFingerprint) body.fingerprint = configFingerprint;
+    const response = await fetch("/__llm-redact/config", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "content-type": "application/json", "x-llm-redact-csrf": csrfToken },
+      body: JSON.stringify(body),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      if (response.status === 403 && String(result.error || "").includes("CSRF")) {
+        note("error", "rejected: this editor session expired (the proxy restarted?) — reload the page");
+      } else {
+        note("error", "rejected: " + result.error);
+      }
+      document.getElementById("config-note").scrollIntoView({ block: "nearest" });
+      return;
+    }
+    note("ok", "saved to " + result.path + " and applied" +
+      (result.restart_required.length
+        ? " — restart required for: " + result.restart_required.join(", ") : ""));
+    await loadConfig(); // fresh fingerprint + canonical values
+  } catch (problem) {
+    note("error", "save failed: " + problem);
+  }
+}
+loadConfig();
+
+async function runPreview() {
+  const note = document.getElementById("preview-note");
+  const summary = document.getElementById("preview-summary");
+  const output = document.getElementById("preview-output");
+  summary.replaceChildren();
+  output.value = "";
+  if (csrfToken === null) {
+    note.textContent = "preview needs the config endpoint (same-origin only)";
+    return;
+  }
+  try {
+    const response = await fetch("/__llm-redact/preview", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "content-type": "application/json", "x-llm-redact-csrf": csrfToken },
+      body: JSON.stringify({ text: document.getElementById("preview-input").value }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      note.textContent = "rejected: " + result.error;
+      return;
+    }
+    const rows = [];
+    if (result.blocked) {
+      rows.push(["BLOCKED", result.blocked.type + " (a real request would be a 400)"]);
+    }
+    Object.entries(result.detections || {}).forEach(([t, n]) => rows.push(["redact", t + " ×" + n]));
+    Object.entries(result.warnings || {}).forEach(
+      ([t, n]) => rows.push(["warn (forwarded)", t + " ×" + n]));
+    if (rows.length === 0) rows.push(["nothing detected", "—"]);
+    rows.forEach(([k, v]) => {
+      const ks = document.createElement("span"); ks.textContent = k;
+      const vs = document.createElement("code"); vs.textContent = v;
+      summary.appendChild(ks); summary.appendChild(vs);
+    });
+    output.value = result.redacted === null ? "(blocked — nothing sent)" : result.redacted;
+    note.textContent = "";
+  } catch (problem) {
+    note.textContent = "preview failed: " + problem;
+  }
+}
+document.getElementById("preview-run").addEventListener("click", runPreview);
+</script>
+</body>
+</html>

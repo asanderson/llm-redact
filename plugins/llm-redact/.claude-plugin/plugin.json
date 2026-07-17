@@ -1,0 +1,18 @@
+{
+  "name": "llm-redact",
+  "description": "llm-redact proxy control: status, live traffic, sessions, redaction preview, audit verification, and guarded config editing as slash commands",
+  "version": "1.0.0",
+  "author": {
+    "name": "llm-redact",
+    "url": "https://github.com/asanderson/llm-redact"
+  },
+  "homepage": "https://github.com/asanderson/llm-redact",
+  "license": "AGPL-3.0-only",
+  "keywords": [
+    "redaction",
+    "privacy",
+    "proxy",
+    "pii",
+    "secrets"
+  ]
+}

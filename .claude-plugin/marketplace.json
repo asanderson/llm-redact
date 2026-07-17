@@ -1,0 +1,14 @@
+{
+  "name": "llm-redact",
+  "owner": {
+    "name": "llm-redact",
+    "url": "https://github.com/asanderson/llm-redact"
+  },
+  "plugins": [
+    {
+      "name": "llm-redact",
+      "source": "./plugins/llm-redact",
+      "description": "llm-redact proxy control: status, live traffic, sessions, redaction preview, audit verification, and guarded config editing as slash commands"
+    }
+  ]
+}

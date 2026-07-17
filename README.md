@@ -161,10 +161,35 @@ bare name belongs to an unrelated project); the CLI it installs is
 ```bash
 uvx --from llm-redact-proxy llm-redact serve   # zero-install run
 pip install llm-redact-proxy                   # or a normal install
-docker run -d -p 127.0.0.1:8787:8787 ghcr.io/asanderson/llm-redact  # container
 # Homebrew (after the first PyPI release is published):
 brew tap asanderson/llm-redact https://github.com/asanderson/llm-redact
 brew install asanderson/llm-redact/llm-redact
+```
+
+Or skip Python entirely and pull the prebuilt multi-arch container
+image from GHCR with docker **or** podman — publish it **to loopback
+only** (a bare `-p 8787:8787` would expose the proxy, and the secrets
+it rehydrates, to your LAN):
+
+```bash
+docker pull ghcr.io/asanderson/llm-redact:latest      # or: podman pull …
+docker run -d --name llm-redact \
+  -p 127.0.0.1:8787:8787 -v llm-redact-data:/data \
+  ghcr.io/asanderson/llm-redact:latest                # or: podman run …
+```
+
+Config mounts, persistence, and health probes are covered in
+[Containers (docker or podman)](#containers-docker-or-podman) below.
+
+Undecided? [`scripts/install.sh`](scripts/install.sh) is an interactive
+installer: it detects what is available on your machine (uv, pipx, pip,
+Homebrew, docker, podman), asks which install you prefer, prints each
+command before running it, and does nothing else. Download it and read
+it before running — don't pipe curl into a shell:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/asanderson/llm-redact/main/scripts/install.sh
+bash install.sh                    # or non-interactive: bash install.sh --method podman
 ```
 
 Then:
@@ -281,7 +306,8 @@ container's network namespace — the host boundary is your publish spec.
 (and the secrets it rehydrates) to your LAN.
 
 ```bash
-docker build -t llm-redact .
+docker pull ghcr.io/asanderson/llm-redact:latest   # prebuilt (or: podman pull …)
+docker build -t llm-redact .                       # or build from a checkout
 docker run -d -p 127.0.0.1:8787:8787 \
   -v ./config.toml:/etc/llm-redact/config.toml:ro \
   -v llm-redact-data:/data \

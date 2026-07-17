@@ -1,7 +1,7 @@
 {
   "name": "llm-redact",
   "description": "llm-redact proxy control: status, live traffic, sessions, redaction preview, audit verification, and guarded config editing as slash commands",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": {
     "name": "llm-redact",
     "url": "https://github.com/asanderson/llm-redact"

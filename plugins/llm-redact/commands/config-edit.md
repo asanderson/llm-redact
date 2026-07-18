@@ -1,6 +1,6 @@
 ---
-description: Edit llm-redact config with the dashboard editor's guardrails: change rules, modes, deny strings, allowlists, NER, providers; validate; hot-reload
-argument-hint: [the change you want]
+description: "Edit llm-redact config with the dashboard editor's guardrails: change rules, modes, deny strings, allowlists, NER, providers; validate; hot-reload"
+argument-hint: "[the change you want]"
 allowed-tools: Read Edit Bash(llm-redact:*) Bash(pgrep:*) Bash(kill:*)
 disable-model-invocation: true
 ---

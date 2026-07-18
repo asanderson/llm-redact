@@ -11,6 +11,15 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Plugin command frontmatter: descriptions containing ": " rendered as
+  invalid YAML, so Claude Code silently dropped ALL frontmatter fields
+  (description, allowed-tools, disable-model-invocation) for the
+  `recent`, `status`, and `config-edit` commands, and
+  `claude plugin validate` rejected the plugin. The renderer now quotes
+  YAML-unsafe values; the plugin passes official validation.
+
 ## [1.0.1] - 2026-07-17
 
 ### Added

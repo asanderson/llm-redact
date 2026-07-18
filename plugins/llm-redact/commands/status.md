@@ -1,5 +1,5 @@
 ---
-description: Show llm-redact proxy status: counters, detections by type, and the protection posture
+description: "Show llm-redact proxy status: counters, detections by type, and the protection posture"
 allowed-tools: Bash(llm-redact:*)
 ---
 

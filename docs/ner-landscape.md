@@ -44,6 +44,7 @@ snapshot; the conclusions, not the version numbers, are the deliverable).
 | DeepPavlov | Apache-2.0 | very heavy, TF/torch mix | slow | RU-strong, multilingual | rejected: heavy, moves fast, overlaps HF pipeline path |
 | Apache OpenNLP | Apache-2.0 | JVM | n/a | several | rejected: Java runtime is out of the question for a pip extra |
 | SpanMarker | Apache-2.0 | torch + transformers | ~HF-class | model-dependent | fold into the HF-pipeline backend rather than a dedicated extra |
+| **LangExtract** (google/langextract) | Apache-2.0 | thin library + an LLM (Gemini API, or local via Ollama) | seconds/string (an LLM generation pass) | any (LLM-dependent) | **rejected — structural**: LLM-driven extraction inverts the threat model; see the section below |
 
 ## Recommendation
 
@@ -58,6 +59,34 @@ snapshot; the conclusions, not the version numbers, are the deliverable).
 3. Do **not** add Flair/NLTK/DeepPavlov/OpenNLP — each fails latency,
    accuracy, or runtime-class bars without adding coverage the first two
    don't.
+
+## LLM-based extractors (LangExtract and its class) — rejected as detectors
+
+LangExtract (google/langextract) and similar prompted-extraction tools
+find entities by sending the text to an LLM with few-shot instructions
+and returning grounded spans. As request-path detectors they fail
+structurally, not tunably:
+
+1. **Threat-model inversion.** A detector runs on the RAW,
+   pre-redaction request text. A cloud-backed extractor (Gemini API,
+   LangExtract's default) would transmit every secret to a cloud LLM in
+   order to decide what to hide from cloud LLMs — the exact leak this
+   proxy exists to prevent. All five shipped backends run in-process on
+   local weights precisely so the raw text never leaves the machine.
+2. **Latency.** The local-model escape hatch (Ollama) fixes privacy but
+   is a generation pass per scanned string — seconds, where bar 4 above
+   is the ~1–100 ms class and the bench gates in-process overhead at
+   ~1 ms. jsonwalk multiplies that per string in every request body.
+3. **Nondeterminism.** `python -m llm_redact.bench --check` gates
+   recall == 1.0 per rule, deterministically. Sampling-based extraction
+   cannot pin a recall gate, and a detector whose recall varies silently
+   is a silent-leak risk (the same reasoning that machine-checks
+   prefilter literals).
+
+LLM-based extraction is legitimate BESIDE the proxy, out of band:
+auditing a document corpus for PII before ingestion, or growing
+`bench/fp_corpus` — batch jobs where the text is already destined for an
+LLM or never touches the request path.
 
 ## Running NER on non-English text
 

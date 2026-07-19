@@ -1,6 +1,6 @@
 ---
 description: Dry-run llm-redact detection on sample text — see exactly what would be redacted
-argument-hint: [text to scan]
+argument-hint: "[text to scan]"
 allowed-tools: Bash(llm-redact:*)
 ---
 

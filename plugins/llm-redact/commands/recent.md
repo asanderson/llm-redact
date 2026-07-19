@@ -1,5 +1,5 @@
 ---
-description: Show the proxy's recent-request table: paths, providers, detections, status
+description: "Show the proxy's recent-request table: paths, providers, detections, status"
 allowed-tools: Bash(llm-redact:*) Bash(curl:*)
 ---
 

@@ -1,6 +1,6 @@
 ---
 description: Display the llm-redact user guide (web UIs + plugin commands)
-argument-hint: [topic]
+argument-hint: "[topic]"
 allowed-tools: Bash(llm-redact:*)
 ---
 

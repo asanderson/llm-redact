@@ -287,10 +287,28 @@ def _guarded_body(command: PluginCommand) -> str:
     return f"{PROXY_GUARD}\n{command.body}"
 
 
+def _yaml_value(value: str) -> str:
+    # A plain `key: value` scalar breaks as soon as the value contains ": "
+    # or starts with a YAML indicator, and the tools then silently drop ALL
+    # frontmatter fields (claude plugin validate rejects it). Quote exactly
+    # those cases as JSON strings (valid YAML double-quoted scalars, the
+    # config_write.py trick) — but keep safe values plain, because quoting
+    # would retype non-string scalars like `true`.
+    plain_unsafe = (
+        not value
+        or value != value.strip()
+        or value.startswith(tuple("!&*?|>%@`\"'#,[]{}-"))
+        or ": " in value
+        or value.endswith(":")
+        or " #" in value
+    )
+    return json.dumps(value) if plain_unsafe else value
+
+
 def _frontmatter(pairs: list[tuple[str, str]]) -> str:
     lines = ["---"]
     for key, value in pairs:
-        lines.append(f"{key}: {value}")
+        lines.append(f"{key}: {_yaml_value(value)}")
     lines.append("---")
     return "\n".join(lines)
 

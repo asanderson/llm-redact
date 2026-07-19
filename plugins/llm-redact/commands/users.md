@@ -1,6 +1,6 @@
 ---
 description: List llm-redact named users and seats; guide invites and revokes
-argument-hint: [invite NAME EMAIL | revoke EMAIL]
+argument-hint: "[invite NAME EMAIL | revoke EMAIL]"
 allowed-tools: Bash(llm-redact:*)
 ---
 

@@ -1,4 +1,4 @@
-# Adversarial security review — 3.1.1
+# Adversarial security review (pre-1.0 debut)
 
 A full adversarial read of the codebase, run as five independent reviewers
 each owning one attack surface: SQL construction/injection, the HTTP/WS guard
@@ -9,8 +9,8 @@ found and what changed; the standing boundary→test map lives in
 [security-testing.md](security-testing.md) and the trust boundaries in
 [threat-model.md](threat-model.md).
 
-Every finding below is either fixed with a red-team test (named
-`*_3.1.1` in the suite) or recorded as a deliberate, documented limitation.
+Every finding below is either fixed with a dedicated red-team
+regression test or recorded as a deliberate, documented limitation.
 Nothing was found that lets a network attacker read conversation data or a
 vault secret; the two substantive fixes close a never-wrong-value corner and
 an identity-credential leak, both narrow.

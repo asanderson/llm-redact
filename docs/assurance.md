@@ -32,8 +32,8 @@ equivalents — the gate script is the pass/fail arbiter.
 
 The recurring scope (`[tool.mutmut]` in pyproject.toml) is the load-bearing
 correctness core — the modules where a silent weakening becomes a leak or a
-wrong value. Round 1 (1.12.0) covered `detection/validators.py`,
-`redactor.py`, `rehydrate.py`, and `vault.py`; round 2 (1.16.0) added the
+wrong value. Round 1 covered `detection/validators.py`,
+`redactor.py`, `rehydrate.py`, and `vault.py`; round 2 added the
 byte-level codec trust boundary and session routing: `sse.py`, `ndjson.py`,
 `jsonwalk.py`, `placeholders.py`, `multipart.py`, `eventstream.py`, and
 `sessions.py`. Round-1 baseline: **1100 mutants — 968 killed, 130 reviewed
@@ -55,9 +55,9 @@ Responses `arguments` JSON-source escaping. The session-router mutants are now
 pinned in the pro repo (`test_sessions_pro.py`); the codec mutants stay here in
 `tests/test_codec_mutation_kills.py`.
 
-**R2 relocation (3.12.0) → R4 physical split (4.0.0).** The open-core split moved
+**R2 relocation → R4 physical split.** The open-core split moved
 the per-conversation session router out of the Free core into the paid package
-(Free keeps only the static router). Through 3.15.0 the package was co-located in
+(Free keeps only the static router). Before the physical split the package was co-located in
 this repo, so its mutation coverage rode the in-repo mutmut config
 (`src/llm_redact_pro` a `source_path`, `sessions.py` in `only_mutate`). R4
 physically relocated the package to the private `llm-redact-pro` repo: the

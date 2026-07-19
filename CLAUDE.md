@@ -5,9 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Purpose
 
 > Provenance note: llm-redact was developed privately before its public
-> v1.0.0 debut. Internal version references in this document and the
-> engineering docs (e.g. "3.11.0", "4.2.0", "5.0.0") refer to that
-> private lineage and predate the public numbering.
+> v1.0.0 debut. Internal version references in this document (e.g.
+> "3.11.0", "4.2.0", "5.0.0") refer to that private lineage and predate
+> the public numbering; the public docs/ tree deliberately avoids them.
 
 llm-redact is an LLM information redactor: it prevents private information from being sent to LLMs by agentic tools. It substitutes placeholders for private information on outgoing requests, then restores the real values in incoming responses, transparently to the agentic tool's user.
 

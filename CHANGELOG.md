@@ -11,6 +11,13 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-07-19
+
+### Added
+
+- Privacy policy (`docs/privacy.md`): no telemetry or phone-home; what
+  stays on the machine and what leaves it.
+
 ### Fixed
 
 - Plugin command frontmatter: descriptions containing ": " rendered as

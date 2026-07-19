@@ -51,6 +51,7 @@ reference and enforcement internals ship with it.
 | Doc | What it covers |
 | --- | --- |
 | [SECURITY.md](SECURITY.md) | The security policy: how to report a vulnerability (GitHub private reporting) and what counts as one. |
+| [privacy.md](privacy.md) | The privacy policy: no telemetry or phone-home; what stays on your machine (vault, metadata-only audit) and what leaves it (redacted provider traffic, opt-outs you configure). |
 | [threat-model.md](threat-model.md) | What the proxy defends against, what it deliberately does not, and why loopback is the default. |
 | [security-dataflows.md](security-dataflows.md) | The request-path trust boundaries with each policy decision/enforcement point mapped to code. |
 | [security-testing.md](security-testing.md) | The red-team boundary suite, canary leak harness, and differential fuzzing. |

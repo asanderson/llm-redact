@@ -88,6 +88,59 @@ auditing a document corpus for PII before ingestion, or growing
 `bench/fp_corpus` — batch jobs where the text is already destined for an
 LLM or never touches the request path.
 
+## Why SaaS NER providers are not considered
+
+Cloud PII-detection APIs — AWS Comprehend PII, Google Cloud Sensitive
+Data Protection (DLP), Azure AI Language's hosted PII endpoint,
+Nightfall, Skyflow, and the rest of the category — are excluded as a
+class, for the same root cause as cloud-backed LLM extraction: a
+detector's input is the RAW, pre-redaction request text. Sending it to
+a SaaS endpoint transmits exactly the secrets this proxy exists to keep
+local, trading the LLM provider for a second third-party data
+processor. The trust boundary grows; the product's one promise — the
+value never leaves your machine — becomes false. Three secondary
+failures follow even where a user would accept that trade:
+
+1. **Availability coupling**: a detector sits in the hot path of every
+   request; a vendor outage forces a choice between failing open
+   (scanning less, silently) and failing closed (your agent is down).
+2. **Per-request cost and quota** on a path that scans every string of
+   every body.
+3. **Posture honesty**: `docs/privacy.md` states that nothing is
+   transmitted anywhere except the redacted provider traffic; a SaaS
+   detector would falsify it.
+
+This is a data-locality objection, not a commercial one — the same
+vendors' engines become acceptable the moment they run on your own
+hardware, which is the next section.
+
+## Commercial self-hosted engines (paid, structurally acceptable)
+
+Paid engines that deploy as containers/services on the user's own
+infrastructure clear the data-locality bar; they differ from the FOSS
+backends only in licensing and in shipping as a LOCAL SERVICE rather
+than an importable model. Verified candidates (2026-07; re-check
+vendor packaging before implementation):
+
+| Engine | Deployment | Capability added | Caveats |
+|---|---|---|---|
+| **Private AI** | self-hosted container (AWS Marketplace et al.) | purpose-built PII: 50+ types, 50+ languages, file formats | the strongest fit; commercial license |
+| **Azure AI Language PII (container)** | on-prem Docker container | Microsoft-maintained PII taxonomy, multilingual | standard containers meter usage back to Azure for billing (data stays local); air-gap needs the disconnected-container commitment tier |
+| **Babel Street Analytics (Rosette)** | Analytics Server (Docker/Helm) | enterprise multilingual NER, tunable (gazetteers + patterns + models) | Java service, ~16 GB heap recommended, up to ~90 GB disk — enterprise footprint |
+| **John Snow Labs Healthcare NLP** | local Spark/JVM | best-in-class clinical de-identification | Spark+JVM runtime; healthcare-niche; external-service integration only |
+
+**Integration shape, if demand materializes**: not one backend per
+vendor but ONE generic `http` NER backend — POST the string to a
+configured **loopback-only** URL and map the vendor's entity labels in
+config. Loopback would be enforced the way the off-box vault rule is
+(non-local URL = startup ConfigError, explicit env hatch), making
+"self-hosted only" structural rather than advisory. It is
+fake-injectable for tests (HTTP client), and localhost latency sits in
+the existing 10–100 ms class. The new failure mode to design
+deliberately: a down sidecar must degrade LOUDLY (doctor FAIL, /status,
+posture warnings) — never silently scan less. Like the rest of this
+document: demand-driven, not built speculatively.
+
 ## Running NER on non-English text
 
 All five backends key their model on `[detection.ner] language` and the

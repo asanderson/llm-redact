@@ -55,7 +55,7 @@ reference and enforcement internals ship with it.
 | [threat-model.md](threat-model.md) | What the proxy defends against, what it deliberately does not, and why loopback is the default. |
 | [security-dataflows.md](security-dataflows.md) | The request-path trust boundaries with each policy decision/enforcement point mapped to code. |
 | [security-testing.md](security-testing.md) | The red-team boundary suite, canary leak harness, and differential fuzzing. |
-| [security-review-3.1.md](security-review-3.1.md) | The adversarial security review record and the 3.1.1 fixes it produced. |
+| [security-review.md](security-review.md) | The adversarial security review record and the fixes it produced. |
 | [fips.md](fips.md) | FIPS 140-3 posture: approved-algorithm selection, and why validation belongs to the host. |
 | [history-hygiene.md](history-hygiene.md) | Auditing all git history with the production detectors. |
 

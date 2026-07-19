@@ -470,6 +470,13 @@ and the optional **person-name NER backends** (spaCy, GLiNER, Presidio,
 Stanza, Hugging Face). The current rule list also ships in
 [`config.example.toml`](config.example.toml).
 
+The NER backends are backed by a research survey,
+[docs/ner-landscape.md](docs/ner-landscape.md) — the engines evaluated
+and the bar each had to clear, why LLM-based extractors and SaaS PII
+APIs are rejected as a class (the raw pre-redaction text must never
+leave your machine), and the commercial self-hosted engines that would
+qualify if demand materializes.
+
 ## Security
 
 - **Threat model**: what the proxy defends against — and deliberately

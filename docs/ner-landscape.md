@@ -1,6 +1,6 @@
 # FOSS NER landscape: candidates for future optional backends
 
-> **Update (v1.10.0):** the two top recommendations from this survey —
+> **Update:** the two top recommendations from this survey —
 > **Stanza** (`stanza` extra, `backend = "stanza"`) and a generic
 > **Hugging Face token-classification** backend (`hf` extra,
 > `backend = "hf"`, any Hub NER model via `[detection.ner.models] hf = "..."`)

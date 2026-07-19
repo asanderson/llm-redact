@@ -46,7 +46,7 @@ CLI-tag path, so write the release notes yourself in the UI).
 - **Build provenance attestations** (Sigstore) for the dist files attached
   to the GitHub Release — on PUBLIC repos only: GitHub cannot persist
   attestations for user-owned private repos, so the step self-skips there
-  (this is why the v0.6.0 tag's run failed and that release is held). PyPI uploads additionally carry PEP 740
+  (a pre-debut release run failed on exactly this and was withdrawn). PyPI uploads additionally carry PEP 740
   attestations emitted by the trusted publisher — nothing extra to do.
 
 Verify: the Releases page shows both dist files; the `publish-ghcr` job log

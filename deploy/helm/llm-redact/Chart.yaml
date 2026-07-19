@@ -8,8 +8,8 @@ description: >-
 type: application
 # The chart version tracks the app; a bump keeps the default image tag in sync
 # (pinned by tests/test_deploy_assets.py: appVersion == llm_redact.__version__).
-version: 1.0.1
-appVersion: "1.0.1"
+version: 1.0.2
+appVersion: "1.0.2"
 keywords:
   - llm
   - privacy

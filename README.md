@@ -37,6 +37,7 @@ record — is indexed in [docs/](docs/README.md).
 - [Benchmark and live validation](#benchmark-and-live-validation)
 - [Trying it without touching a real API](#trying-it-without-touching-a-real-api)
 - [Security](#security)
+- [Tech stack](#tech-stack) — detail: [software bill of materials](docs/SBOM.md), [what ships and why](docs/dependencies.md)
 - [Stability](#stability)
 - [Development](#development)
 
@@ -498,6 +499,37 @@ qualify if demand materializes.
   core gates CI on a kill-or-justify contract, and "never a wrong
   value" is one falsifiable stateful property — method and results in
   [docs/assurance.md](docs/assurance.md).
+
+## Tech stack
+
+The runtime is deliberately **three packages** — the entire audit
+surface a security tool asks you to trust:
+
+- **httpx** — the upstream HTTP client: async, streaming bodies, and a
+  transport seam that lets the whole integration suite run in-process
+  against fake upstreams.
+- **starlette** — the ASGI layer (routing, WebSockets, streaming
+  responses) *without* FastAPI's validation machinery: the proxy must
+  forward unknown JSON fields verbatim, never validate or reshape them,
+  which is why pydantic is banned from the request path.
+- **uvicorn** — the ASGI server; its `loop="auto"` and WebSocket
+  protocol auto-selection let the `perf` (uvloop) and `realtime`
+  (websockets) extras activate with zero serve-code changes.
+
+Everything else is stdlib or an opt-in extra: the NER backends (spaCy,
+GLiNER, Presidio, Stanza, Hugging Face `transformers`), `cryptography`
+for vault encryption at rest, the RDBMS vault drivers (psycopg,
+PyMySQL, oracledb), `keyring`, `uvloop`, `websockets`, and the
+OpenTelemetry SDK. Configuration and CLI ride the standard library
+(`tomllib`, `argparse`, dataclasses); Prometheus metrics text and the
+S3/Azure audit-sink signers are hand-rolled on stdlib `hmac` so no
+cloud SDK ever enters the tree.
+
+The full inventory — every extra, the runtime closure, the dev
+toolchain, and how to verify the machine-readable CycloneDX SBOM
+attached to each release — is [docs/SBOM.md](docs/SBOM.md) (pinned to
+`pyproject.toml` by test); the why-chosen record per package is
+[docs/dependencies.md](docs/dependencies.md).
 
 ## Stability
 

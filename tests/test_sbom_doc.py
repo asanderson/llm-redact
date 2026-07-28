@@ -8,7 +8,21 @@ import re
 import tomllib
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+
+def _repo_root() -> Path:
+    # Walk up to the directory that holds uv.lock: under mutmut the suite
+    # runs from the mutants/ tree copy, which carries pyproject/docs/tests
+    # but NOT uv.lock — anchoring at parent.parent there crashed the
+    # stats-collection run and took the whole mutation gate down with it.
+    p = Path(__file__).resolve().parent
+    while not (p / "uv.lock").is_file():
+        if p == p.parent:
+            raise FileNotFoundError("no uv.lock above tests/test_sbom_doc.py")
+        p = p.parent
+    return p
+
+
+ROOT = _repo_root()
 SBOM = (ROOT / "docs" / "SBOM.md").read_text()
 PYPROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text())
 

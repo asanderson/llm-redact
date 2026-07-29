@@ -25,6 +25,7 @@ TOOL_EXPORTS: dict[str, tuple[str, str]] = {
     # wrapped command.
     "claude": ("ANTHROPIC_BASE_URL", "Claude Code and other Anthropic SDK tools"),
     "codex": ("OPENAI_BASE_URL", "Codex CLI and other OpenAI-compatible tools"),
+    "opencode": ("OPENAI_BASE_URL", "OpenCode (OpenAI-compatible provider routing)"),
     "gemini": ("GOOGLE_GEMINI_BASE_URL", "Gemini CLI and google-genai SDK tools"),
     "ollama": ("OLLAMA_HOST", "the ollama CLI and other native-API clients"),
 }

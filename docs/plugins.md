@@ -6,7 +6,7 @@ inside the agent session itself: check the proxy's posture, watch recent
 traffic, preview redaction, verify the audit chain, and make guarded
 config edits — without leaving the tool the proxy is protecting.
 
-All four plugins carry the SAME nine commands, defined once in
+All four plugins carry the SAME ten commands, defined once in
 `src/llm_redact/plugin_assets.py` and rendered into each tool's command
 format.
 
@@ -191,16 +191,73 @@ the proxy exists to prevent. The exclusion is pinned by test
 (`tests/test_plugins.py::test_lookup_is_never_a_plugin_command`); run
 `lookup` yourself in a terminal when you need it.
 
-## The proxy-presence guard
+## Plugin-first onboarding
 
-Every command body starts with a guard: if the `llm-redact` CLI is not
-on PATH (a marketplace install can land on a machine that never had the
-proxy), the agent must STOP, say so, and ask your approval before
-installing it (`uv tool install llm-redact-proxy` / `pipx install
-llm-redact-proxy`) — it never installs on its own initiative. The guard
-is rendered into all four tools' files and pinned by test. On the CLI
-side, `llm-redact plugin install` ends with a proxy posture line —
-whether a proxy is answering right now, and how to start one if not.
+A marketplace install can land on a machine that never had the proxy —
+the plugin arrives FIRST and the proxy has to catch up. Every command
+body opens with a guard written for exactly that order, and the Claude
+Code plugin adds a startup posture check. Both are detection-and-offer
+only: nothing installs, and nothing claims protection, without your
+explicit approval.
+
+### The proxy-presence guard
+
+If the `llm-redact` CLI is not on PATH, the agent must STOP, say so,
+and ask which of three pinned setup tiers you want — it never installs
+on its own initiative, never improvises install commands, and only ever
+uses the package name `llm-redact-proxy` verbatim (agent-invented
+install commands are a known supply-chain vector; both directions are
+pinned by test):
+
+1. **Try it with nothing installed** — `uvx --from llm-redact-proxy
+   llm-redact serve` runs the proxy ephemerally from uv's cache;
+   nothing lands on PATH.
+2. **Install it** — `uv tool install llm-redact-proxy` (or `pipx
+   install llm-redact-proxy`), then `llm-redact init --yes --tools
+   <tool>` and `llm-redact service install` for a starter config and
+   an always-on proxy. Commands are shown before they run.
+3. **Point at an existing proxy** — export `LLM_REDACT_PROXY_URL`;
+   the same env var `llm-redact run` and `llm-redact status` honor.
+
+### Routing honesty, per tool
+
+A live proxy is not the same as a routed session, and each tool's guard
+states ITS truth rather than a generic reassurance:
+
+| Tool | Routing check | How protection actually starts |
+|---|---|---|
+| Claude Code | `ANTHROPIC_BASE_URL` points at the proxy | Relaunch via `llm-redact run -- claude` (the base URL is read once at launch — `/reload-plugins` reloads the plugin, not the routing) |
+| Codex | `OPENAI_BASE_URL` points at the proxy | Launch via `llm-redact run -- codex` |
+| OpenCode | `OPENAI_BASE_URL` points at the proxy | Launch via `llm-redact run -- opencode` |
+| Cursor | Custom-API-key mode with the base-URL override in Cursor's settings | Cursor routes AI traffic through its own backend by default — unless you confirm the custom-API-key setup, the guard says plainly that Cursor's conversation traffic is NOT protected |
+
+On the CLI side, `llm-redact plugin install` ends with the same posture
+line — whether a proxy is answering right now, and how to start one if
+not.
+
+### The SessionStart posture check (Claude Code marketplace install)
+
+The marketplace plugin ships `bin/llm-redact-posture` (a read-only POSIX
+sh script, on the Bash tool's PATH while the plugin is enabled) and a
+`SessionStart` hook that runs it with `--quiet-ok`. On every session
+start, resume, clear, and compact it reports exactly one of four states
+— CLI missing, proxy down, proxy up but session unrouted, healthy — and
+a healthy routed session injects nothing at all. The unrouted state is
+the one this exists for: a running proxy with an unrouted session is the
+silent-unprotected state, and the hook makes it loud instead. The script
+never installs anything, prefixes every message with its own name (no
+unexplained context in your session), and echoes URLs as
+scheme://host:port only — a `/u/<key>` user prefix embedded in
+`LLM_REDACT_PROXY_URL` never reaches the transcript. You can also run it
+yourself at any time: `llm-redact-posture` (verbose form prints OK).
+
+The copy-install path (`llm-redact plugin install claude`) carries the
+commands only — personal commands have no `bin/` or hooks, so the
+posture check rides the marketplace plugin alone.
+
+For OpenCode, a native JS plugin (its `event` hook on `session.created`
+could run the same posture check) is a documented future option; today
+OpenCode gets the same guard-in-body protection as Codex.
 
 The command bodies never widen what leaves the machine: status, recent,
 sessions, and audit are metadata-only surfaces by design, and preview

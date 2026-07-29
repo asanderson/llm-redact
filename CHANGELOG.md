@@ -11,6 +11,8 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-07-29
+
 ### Added
 
 - Plugin-first onboarding: every plugin command's proxy-presence guard

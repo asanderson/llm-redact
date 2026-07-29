@@ -1,0 +1,48 @@
+#!/bin/sh
+# llm-redact plugin posture check (SessionStart hook + `llm-redact-posture`).
+# Read-only: reports CLI presence, proxy liveness, and session routing.
+# Never installs anything. --quiet-ok: print nothing when fully healthy.
+set -u
+
+quiet=0
+[ "${1:-}" = "--quiet-ok" ] && quiet=1
+
+url="${LLM_REDACT_PROXY_URL:-http://127.0.0.1:8787}"
+# scheme://host:port only — never echo a path (it could embed /u/<key>).
+base=$(printf '%s' "$url" | sed -E 's#^([a-zA-Z]+://[^/]+).*#\1#')
+prefix="llm-redact posture check:"
+
+if ! command -v llm-redact >/dev/null 2>&1; then
+    echo "$prefix the llm-redact proxy CLI is not installed on this" \
+        "machine. The /llm-redact:* commands will stop and offer setup" \
+        "(ephemeral uvx run, install, or point at an existing proxy)."
+    exit 0
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+    [ "$quiet" = 1 ] || echo "$prefix cannot verify proxy state (curl" \
+        "not found); run llm-redact doctor for a full check."
+    exit 0
+fi
+
+if ! curl -sf --max-time 2 "$base/__llm-redact/healthz" >/dev/null 2>&1; then
+    echo "$prefix the CLI is installed but no proxy is answering at" \
+        "$base. Start one with \`llm-redact serve\` (or \`llm-redact" \
+        "service install\` for always-on). Conversation traffic is NOT" \
+        "protected until a routed proxy is running."
+    exit 0
+fi
+
+routed=$(printf '%s' "${ANTHROPIC_BASE_URL:-}" | sed -E 's#^([a-zA-Z]+://[^/]+).*#\1#')
+if [ "$routed" != "$base" ]; then
+    echo "$prefix a proxy is running at $base but THIS session is not" \
+        "routed through it (ANTHROPIC_BASE_URL is unset or points" \
+        "elsewhere). Conversation traffic is NOT protected. Relaunch via" \
+        "\`llm-redact run -- claude\`, or export ANTHROPIC_BASE_URL=$base" \
+        "before starting Claude Code."
+    exit 0
+fi
+
+[ "$quiet" = 1 ] || echo "$prefix OK — CLI installed, proxy answering" \
+    "at $base, session routed through it."
+exit 0

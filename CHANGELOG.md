@@ -11,6 +11,38 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- Plugin-first onboarding: every plugin command's proxy-presence guard
+  now offers three PINNED setup tiers when the `llm-redact` CLI is
+  missing — an ephemeral `uvx --from llm-redact-proxy llm-redact serve`
+  run (nothing lands on PATH), a one-approval install
+  (`uv tool install` / `pipx install` + `init --yes` +
+  `service install`), or pointing `LLM_REDACT_PROXY_URL` at an existing
+  proxy. The package name `llm-redact-proxy` is pinned verbatim in both
+  directions by test (agent-improvised install commands are a
+  supply-chain vector).
+- Per-tool routing honesty in the guards: each tool's rendering states
+  ITS routing truth — Claude Code checks `ANTHROPIC_BASE_URL` and names
+  the `llm-redact run -- claude` relaunch, Codex/OpenCode check
+  `OPENAI_BASE_URL` with their `run --` launch forms, and Cursor states
+  plainly that its traffic is NOT protected outside custom-API-key mode
+  with the base-URL override. A live proxy is never presented as a
+  routed session.
+- Claude Code marketplace plugin: `bin/llm-redact-posture` (read-only
+  POSIX sh posture check, on the Bash tool's PATH) plus a `SessionStart`
+  hook running it with `--quiet-ok` — reports CLI-missing / proxy-down /
+  session-unrouted loudly, stays silent when healthy, never installs
+  anything, and echoes URLs as scheme://host:port only. Behavioral
+  tests drive all four states against a live loopback server
+  (`tests/test_plugin_posture.py`).
+- `opencode` is now a `TOOL_EXPORTS` entry: `llm-redact init --tools
+  opencode` and `llm-redact run -- opencode` route OpenCode via
+  `OPENAI_BASE_URL`.
+- docs/plugins.md: "Plugin-first onboarding" section (the three tiers,
+  the per-tool routing-honesty table, the SessionStart posture check,
+  and the OpenCode JS plugin as a documented future option).
+
 ## [1.0.2] - 2026-07-19
 
 ### Added

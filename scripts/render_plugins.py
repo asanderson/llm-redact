@@ -24,6 +24,8 @@ def main() -> None:
         target = PLUGIN_DIR / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        if relpath.startswith("bin/"):
+            target.chmod(0o755)
         print(f"wrote {target.relative_to(REPO)}")
     for stale in sorted(PLUGIN_DIR.rglob("*")):
         if stale.is_file() and str(stale.relative_to(PLUGIN_DIR)) not in rendered:

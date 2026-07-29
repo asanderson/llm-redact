@@ -9,6 +9,7 @@ and `lookup` must never become a plugin command (it prints secret values,
 which an agent would then send upstream).
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -16,12 +17,14 @@ from llm_redact import __version__
 from llm_redact.completions import COMMANDS as CLI_COMMANDS
 from llm_redact.plugin_assets import (
     COMMANDS,
-    PROXY_GUARD,
+    HOOKS_JSON,
+    POSTURE_SCRIPT,
     claude_plugin_files,
     codex_files,
     cursor_files,
     marketplace_manifest,
     opencode_files,
+    proxy_guard,
     render_claude,
 )
 
@@ -63,7 +66,7 @@ def test_every_rendering_has_wellformed_frontmatter() -> None:
         *opencode_files().items(),
     ]
     for name, content in all_files:
-        if name.endswith(".json"):
+        if not name.endswith(".md"):
             continue
         lines = content.splitlines()
         assert lines[0] == "---", name
@@ -108,6 +111,10 @@ def test_bodies_reference_only_real_cli_subcommands() -> None:
         for sub in re.findall(r"`llm-redact ([a-z][a-z-]*)", command.body):
             assert sub in CLI_COMMANDS, (command.name, sub)
         assert re.search(r"`llm-redact [a-z]", command.body), command.name
+    # The guards' own invocations (init/service/run/serve) too — same rule.
+    for tool in ("claude", "codex", "opencode", "cursor"):
+        for sub in re.findall(r"`llm-redact ([a-z][a-z-]*)", proxy_guard(tool)):
+            assert sub in CLI_COMMANDS, (tool, sub)
 
 
 def test_non_claude_renderings_are_prefixed() -> None:
@@ -130,8 +137,15 @@ def test_cursor_renderings_are_plain_markdown() -> None:
 def test_proxy_guard_present_in_every_rendering() -> None:
     # Marketplace installs can land on machines without the proxy CLI; a
     # command that guessed instead of stopping would read as "protected"
-    # while nothing is. The guard asks BEFORE installing anything.
-    assert "ask whether to install" in PROXY_GUARD
+    # while nothing is. The guard asks BEFORE installing anything, offers
+    # only PINNED bootstrap commands (agent-improvised install commands
+    # are a supply-chain vector), and carries the per-tool routing-honesty
+    # check — a live proxy is not the same as a routed session.
+    for tool in ("claude", "codex", "opencode", "cursor"):
+        guard = proxy_guard(tool)
+        assert "ask whether to install" in guard, tool
+        assert "uvx --from llm-redact-proxy" in guard, tool
+        assert "Routing honesty" in guard, tool
     all_files = [
         *claude_plugin_files().items(),
         *codex_files().items(),
@@ -139,7 +153,64 @@ def test_proxy_guard_present_in_every_rendering() -> None:
         *cursor_files().items(),
     ]
     for name, content in all_files:
-        if name.endswith(".json"):
+        if not name.endswith(".md"):
             continue
         assert "proxy CLI is not installed" in content, name
         assert "after they approve" in content, name
+        assert "uvx --from llm-redact-proxy" in content, name
+
+
+def test_guard_routing_honesty_is_per_tool() -> None:
+    # Each tool's guard must state ITS routing truth: env-var relaunch for
+    # Claude Code, run-wrapper launch for the CLIs, and Cursor's
+    # custom-API-key-mode limitation — implying CLI-style protection on
+    # Cursor would be dishonest.
+    assert "ANTHROPIC_BASE_URL" in proxy_guard("claude")
+    assert "llm-redact run -- claude" in proxy_guard("claude")
+    assert "OPENAI_BASE_URL" in proxy_guard("codex")
+    assert "llm-redact run -- codex" in proxy_guard("codex")
+    assert "OPENAI_BASE_URL" in proxy_guard("opencode")
+    assert "llm-redact run -- opencode" in proxy_guard("opencode")
+    assert "custom-API-key mode" in proxy_guard("cursor")
+    assert "NOT protected" in proxy_guard("cursor")
+    # Every tool the guards launch via `run --` must be a real
+    # TOOL_EXPORTS entry, or the printed command errors out.
+    from llm_redact.init_cli import TOOL_EXPORTS
+
+    for tool in ("claude", "codex", "opencode"):
+        assert tool in TOOL_EXPORTS, tool
+
+
+def test_pinned_package_name_only() -> None:
+    # The one permitted package name is `llm-redact-proxy`, verbatim: a
+    # guard that let the agent improvise (`pip install llm-redact`, a
+    # guessed name) would recreate the hallucinated-package supply-chain
+    # vector the research documented. Pinned in both directions: the
+    # correct literal appears, the bare wrong name never does.
+    for tool in ("claude", "codex", "opencode", "cursor"):
+        guard = proxy_guard(tool)
+        assert "install llm-redact-proxy" in guard, tool
+        assert not re.search(r"install llm-redact(?![-a-z])", guard), tool
+
+
+def test_posture_script_and_hook_ship_in_plugin() -> None:
+    # The SessionStart posture check exists to make the unavoidable
+    # relaunch step LOUD (a running proxy with an unrouted session is the
+    # silent-unprotected state). Detection only — the script must never
+    # install; healthy sessions stay silent via --quiet-ok; messages name
+    # this check as their source; URLs echo as scheme://host:port only.
+    files = claude_plugin_files()
+    assert files["bin/llm-redact-posture"] == POSTURE_SCRIPT
+    assert files["hooks/hooks.json"] == HOOKS_JSON
+    assert POSTURE_SCRIPT.startswith("#!/bin/sh")
+    assert "llm-redact posture check" in POSTURE_SCRIPT
+    assert "--quiet-ok" in POSTURE_SCRIPT
+    assert "ANTHROPIC_BASE_URL" in POSTURE_SCRIPT
+    for verb in ("uv tool install", "pipx install", "uvx --from"):
+        assert verb not in POSTURE_SCRIPT, verb
+    hook = json.loads(HOOKS_JSON)
+    (entry,) = hook["hooks"]["SessionStart"]
+    (command,) = entry["hooks"]
+    assert command["type"] == "command"
+    assert "${CLAUDE_PLUGIN_ROOT}/bin/llm-redact-posture" in command["command"]
+    assert "--quiet-ok" in command["command"]

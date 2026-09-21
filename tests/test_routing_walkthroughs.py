@@ -184,7 +184,9 @@ cache_write = 2.5
 
 def spec_toml(vault_path: Path, *, budget_chain: bool = True) -> str:
     chain = 'on_budget_exhausted = ["ollama"]' if budget_chain else ""
-    return SPEC_TOML.format(vault_path=vault_path, budget_chain=chain)
+    # as_posix(): a Windows tmp_path would put backslash escapes into the
+    # TOML basic string (`C:\Users...` is an invalid \U escape).
+    return SPEC_TOML.format(vault_path=vault_path.as_posix(), budget_chain=chain)
 
 
 Mutator = Callable[[dict[str, Any]], None]

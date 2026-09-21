@@ -3,14 +3,17 @@
 Everything here works from the config file alone — nothing is sent
 upstream, no credential is resolved (`routes test` answers with the
 credential MODE only), and the spend report reads the sqlite vault
-file's `spend` table directly. Env var names never appear in this
-output; values could not (they are never read).
+file's `spend` table directly (read-only). The one network call is
+`routes test`'s best-effort loopback `GET /__llm-redact/status` (the call
+`llm-redact status` makes) so cooldown / budget-exhausted members can be
+annotated; it never contacts an upstream. Env var names never appear in
+this output; values could not (they are never read).
 """
 
 import argparse
 import json
-import re
-from collections.abc import Mapping
+import sqlite3
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,7 +34,7 @@ from llm_redact.routing import (
     literal_models,
     select_rule,
 )
-from llm_redact.spend import Budget, report
+from llm_redact.spend import Budget, SqliteSpendStore, report
 
 # The path `routes test` assumes when --path is not given: the protocol's
 # primary chat endpoint (a rule with `match.path` needs an explicit --path).
@@ -42,35 +45,43 @@ DEFAULT_TEST_PATHS: dict[str, str] = {
     "ollama": "/api/chat",
 }
 
-# Decision 15b: the Gemini model id lives in the path, between `/models/`
-# and the `:verb` — the same derivation the proxy uses for rule matching.
-_GEMINI_PATH_MODEL = re.compile(r"/models/([^/:?]+):")
-
 
 def model_from_gemini_path(path: str) -> str | None:
-    match = _GEMINI_PATH_MODEL.search(path)
-    return match.group(1) if match is not None else None
+    """Decision 15b: the Gemini model id between `/models/` and the `:verb`
+    — THE proxy's own derivation (`proxy.gemini_path_model`, anchored to
+    `/v1|v1beta/models|tunedModels/`), so the dry-run answers exactly what
+    `_plan_route` would compute; Vertex publisher paths yield None because
+    Vertex is never routed (decision 1)."""
+    from llm_redact.proxy import gemini_path_model
+
+    return gemini_path_model(path)
 
 
 def build_price_table(prices: PricesConfig) -> PriceTable:
     """The effective price table: builtin or `[prices] table = PATH`, with
     `[prices.override."id"]` entries winning. Raises ConfigError for a bad
-    file (the same error serve reports)."""
-    base = (
-        PriceTable.builtin()
-        if prices.table == "builtin"
-        else PriceTable.from_file(Path(prices.table).expanduser())
-    )
-    return base.with_overrides(dict(prices.overrides))
+    file. Delegates to the proxy's builder so the offline CLIs and the
+    ledger behind /status can never disagree on the table."""
+    from llm_redact.proxy import _build_price_table
+
+    return _build_price_table(prices)
 
 
 def configured_models(routing: RoutingConfig) -> list[str]:
-    """Every model id the config names literally: the /v1/models list
-    (catalog + glob-free rule models) plus model_rewrite targets — the ids
-    whose price the budget accounting will need."""
+    """Every model id the config names literally whose price the budget
+    accounting will need: the /v1/models list (catalog + glob-free rule
+    models) plus model_rewrite targets — except a rewrite target that only
+    ever reaches a zero-cost upstream (budgets are ignored there, so its
+    missing price is not a budgeting gap)."""
     seen: dict[str, None] = dict.fromkeys(literal_models(routing))
     for rule in routing.rules:
-        if rule.model_rewrite is not None:
+        if rule.model_rewrite is None:
+            continue
+        try:
+            zero_cost = routing.upstream(rule.upstream).zero_cost
+        except KeyError:  # pragma: no cover - parse_config rejects unknown upstreams
+            zero_cost = False
+        if not zero_cost:
             seen.setdefault(rule.model_rewrite, None)
     return list(seen)
 
@@ -97,15 +108,11 @@ def referenced_upstreams(routing: RoutingConfig) -> list[UpstreamConfig]:
 
 def budgets_for(routing: RoutingConfig) -> dict[str, Budget]:
     """Per-upstream Budget rows in the ledger's shape (passthrough upstreams
-    carry no budget; zero-cost ones ignore theirs)."""
-    return {
-        upstream.name: Budget(
-            usd=upstream.monthly_budget_usd,
-            tokens=upstream.monthly_budget_tokens,
-            zero_cost=upstream.zero_cost,
-        )
-        for upstream in routing.upstreams
-    }
+    carry no budget; zero-cost ones ignore theirs) — the proxy's own
+    `_budgets_for`, so `spend` and /status agree on remaining budgets."""
+    from llm_redact.proxy import _budgets_for
+
+    return _budgets_for(routing)
 
 
 def match_summary(match: RuleMatch) -> str:

@@ -85,6 +85,7 @@ from llm_redact.routing import (
     HOPS_HEADER,
     REISSUE_HEADER,
     RETRY_SAME,
+    SPECIAL_STATUS_KEYS,
     UPSTREAM_HEADER,
     MissingCredential,
     PricesConfig,
@@ -940,7 +941,9 @@ class RequestMeta(NamedTuple):
 # The Gemini model id lives in the request PATH (decision 15b):
 # /v1beta/models/{model}:generateContent. Group 2 is the id, matched on the
 # raw (still percent-encoded) path so a rewrite leaves the rest byte-exact.
-_GEMINI_MODEL_SEGMENT = re.compile(r"^(/(?:v1|v1beta)/(?:models|tunedModels)/)([^/:]+)(:[A-Za-z]+)$")
+_GEMINI_MODEL_SEGMENT = re.compile(
+    r"^(/(?:v1|v1beta)/(?:models|tunedModels)/)([^/:]+)(:[A-Za-z]+)$"
+)
 
 
 def gemini_path_model(path: str) -> str | None:
@@ -2236,6 +2239,17 @@ async def handle(request: Request) -> Response:
     # caller's trace. Trivial when telemetry is off; traceparent isn't secret.
     _INBOUND_TRACEPARENT.set(request.headers.get("traceparent"))
     started = time.perf_counter()
+
+    routing = state.config.routing
+    if (
+        routing.enabled
+        and routing.expose_models
+        and request.method == "GET"
+        and path == "/v1/models"
+    ):
+        # R-15 model discovery: answered locally, BEFORE adapter routing.
+        return _models_response(state, request, started)
+
     adapter, kind = state.route(request.method, path, request.headers)
 
     # A disabled provider fails closed before anything is read or forwarded:
@@ -2389,7 +2403,51 @@ async def handle(request: Request) -> Response:
             status_code=400,
         )
 
+    # Routing (docs/routing.md): the rule is selected BEFORE redaction
+    # because the FIRST upstream's inject_system_note governs the prepared
+    # body (decision 4; the redacted body is reused on later hops). An
+    # unrouted request — routing off, or a provider outside the four
+    # protocols — never constructs a routing object and takes the legacy
+    # path below byte-for-byte.
+    plan: _RoutePlan | None = None
+    if state.config.routing.enabled:
+        protocol = request_protocol(adapter.name if adapter is not None else None, provider_name)
+        if protocol is not None:
+            plan = _plan_route(state, request, protocol, parsed, path)
+            if plan.primary is None:
+                # No rule and no default for this protocol: proxy-generated
+                # 502, never forwarded by guesswork (decision 2).
+                return _route_refusal(
+                    state,
+                    ctx,
+                    adapter,
+                    request=request,
+                    path=path,
+                    started=started,
+                    status=502,
+                    message=(
+                        "llm-redact routing: no rule matched and no default_upstream"
+                        f" for protocol {protocol}"
+                    ),
+                    row={
+                        "rule": plan.rule.id if plan.rule is not None else None,
+                        "upstream": None,
+                        "hops": 0,
+                        "auth": plan.auth,
+                        "class": "no_route",
+                        "reissue": "no",
+                    },
+                )
+    note_wanted = (
+        plan.primary.inject_system_note
+        if plan is not None and plan.primary is not None
+        else state.config.inject_system_note
+    )
+
     outbound = body_bytes
+    # The decoded form of `outbound` (None for pass-through / non-JSON
+    # bodies): the routed path applies per-hop body rewrites to it.
+    outbound_obj: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
     detection_off = provider_conf is not None and not provider_conf.detection
     if adapter is not None and detection_off:
         # [providers.NAME] detection = false: the deliberate off-switch.
@@ -2408,12 +2466,12 @@ async def handle(request: Request) -> Response:
             prepared = adapter.prepare_request(
                 parsed,
                 ctx.redactor,
-                inject_note=state.config.inject_system_note
-                and adapter.wants_system_note(kind, path),
+                inject_note=note_wanted and adapter.wants_system_note(kind, path),
                 mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
             )
         except BlockedRequest as exc:
             return blocked_response(exc, adapter)
+        outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
         # prepare_request), so an unchanged count means the prepared body is
@@ -2434,8 +2492,7 @@ async def handle(request: Request) -> Response:
                     body_bytes,
                     boundary,
                     ctx.redactor,
-                    inject_note=state.config.inject_system_note
-                    and adapter.wants_system_note(kind, path),
+                    inject_note=note_wanted and adapter.wants_system_note(kind, path),
                 )
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the
@@ -2443,6 +2500,27 @@ async def handle(request: Request) -> Response:
                 return blocked_response(exc, adapter)
             if rewritten is not None:
                 outbound = rewritten
+
+    new_counts = _count_delta(state.detection_counts, detection_counts_before)
+    # Same diff trick for warn-mode hits: attribute forwarded-unredacted
+    # values to THIS request, not just the process-lifetime aggregate.
+    new_warned = _count_delta(state.warn_counts, warn_counts_before)
+
+    if plan is not None:
+        return await _handle_routed(
+            request,
+            state,
+            ctx,
+            plan,
+            adapter=adapter,
+            kind=kind,
+            outbound=outbound,
+            outbound_obj=outbound_obj,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
 
     upstream_base = state.upstream_for(adapter, path, request.headers)
     if not upstream_base:
@@ -2469,16 +2547,7 @@ async def handle(request: Request) -> Response:
         )
         logger.info("%s %s -> 502 upstream not configured", request.method, path)
         return JSONResponse(error, status_code=502)
-    # Forward the path exactly as the client sent it: Bedrock model ids are
-    # often percent-encoded ARNs whose %2F/%3A must reach the upstream
-    # unchanged — the decoded `path` would hand it a different path
-    # structure (httpx preserves existing %XX escapes). raw_path excludes
-    # the query per the ASGI spec; the split defends non-compliant servers.
-    raw_path: bytes | None = request.scope.get("raw_path")
-    try:
-        upstream_path = raw_path.split(b"?", 1)[0].decode("ascii") if raw_path else path
-    except UnicodeDecodeError:
-        upstream_path = path
+    upstream_path = _upstream_path(request, path)
     if provider_name.startswith("custom:"):
         # The /custom/NAME prefix is proxy-local routing, not part of the
         # upstream's namespace (names are plain [a-z0-9-], so the byte
@@ -2493,25 +2562,108 @@ async def handle(request: Request) -> Response:
     upstream_request = state.client.build_request(
         request.method, url, headers=_request_headers(request), content=outbound
     )
-    new_counts = {
-        k: v - detection_counts_before.get(k, 0)
-        for k, v in state.detection_counts.items()
-        if v - detection_counts_before.get(k, 0) > 0
-    }
-    # Same diff trick for warn-mode hits: attribute forwarded-unredacted
-    # values to THIS request, not just the process-lifetime aggregate.
-    new_warned = {
-        k: v - warn_counts_before.get(k, 0)
-        for k, v in state.warn_counts.items()
-        if v - warn_counts_before.get(k, 0) > 0
-    }
 
-    # [audit] required: no durably committed audit row, no upstream contact.
-    # The write-ahead START row commits HERE — after redaction (detections
-    # known), before any byte leaves for the provider. A None token means
-    # required mode is off and nothing below changes.
+    audit_token, audit_refusal = _begin_audit_guarded(
+        state,
+        ctx,
+        adapter,
+        request=request,
+        path=path,
+        started=started,
+        new_counts=new_counts,
+        new_warned=new_warned,
+    )
+    if audit_refusal is not None:
+        return audit_refusal
+
     try:
-        audit_token = state.begin_audit(
+        upstream = await state.client.send(upstream_request, stream=True)
+    except httpx.TransportError as exc:
+        # Connect/handshake/header fault: no response body was produced, so
+        # there is nothing to close and the streaming generators (which own
+        # their own read-fault finalization) never start.
+        return _fault_response(
+            state,
+            ctx,
+            adapter,
+            exc,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+            audit_token=audit_token,
+            route=None,
+        )
+
+    logger.info(
+        "%s %s -> %d%s",
+        request.method,
+        path,
+        upstream.status_code,
+        _redacted_summary(new_counts),
+    )
+    return await _deliver(
+        request,
+        state,
+        ctx,
+        adapter,
+        kind,
+        upstream,
+        path=path,
+        started=started,
+        new_counts=new_counts,
+        new_warned=new_warned,
+        audit_token=audit_token,
+        route=None,
+    )
+
+
+def _count_delta(after: Counter[str], before: dict[str, int]) -> dict[str, int]:
+    """Per-request attribution of a process-lifetime counter: the types
+    whose count grew during this request, with the growth."""
+    return {k: v - before.get(k, 0) for k, v in after.items() if v - before.get(k, 0) > 0}
+
+
+def _redacted_summary(new_counts: dict[str, int]) -> str:
+    return (
+        " redacted: " + " ".join(f"{k}×{v}" for k, v in sorted(new_counts.items()))
+        if new_counts
+        else ""
+    )
+
+
+def _upstream_path(request: Request, path: str) -> str:
+    """The path to forward, exactly as the client sent it: Bedrock model
+    ids are often percent-encoded ARNs whose %2F/%3A must reach the
+    upstream unchanged — the decoded `path` would hand it a different path
+    structure (httpx preserves existing %XX escapes). raw_path excludes
+    the query per the ASGI spec; the split defends non-compliant servers."""
+    raw_path: bytes | None = request.scope.get("raw_path")
+    try:
+        return raw_path.split(b"?", 1)[0].decode("ascii") if raw_path else path
+    except UnicodeDecodeError:
+        return path
+
+
+def _begin_audit_guarded(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+) -> tuple[object | None, JSONResponse | None]:
+    """[audit] required: no durably committed audit row, no upstream contact.
+    The write-ahead START row commits HERE — after redaction (detections
+    known), before any byte leaves for the provider. A None token means
+    required mode is off and nothing downstream changes; a refusal is the
+    provider-shaped 503 the caller returns instead of contacting anyone."""
+    try:
+        token = state.begin_audit(
             session=ctx.session_id,
             provider=adapter.name if adapter is not None else None,
             method=request.method,
@@ -2545,67 +2697,101 @@ async def handle(request: Request) -> Response:
         body = (
             adapter.error_body(message, status=503) if adapter is not None else {"error": message}
         )
-        return JSONResponse(body, status_code=503)
+        return None, JSONResponse(body, status_code=503)
+    return token, None
 
-    def upstream_fault_response(exc: httpx.TransportError) -> JSONResponse:
-        # The upstream connection failed — refused, reset, timed out, or
-        # dropped mid-body. Fail closed with a provider-shaped 502: the tool
-        # sees a clean gateway error, never a partial or wrong body. Record
-        # the fault so metrics/audit see it — the buffered twin of the
-        # streaming branches' finally-block finalization. By exception TYPE
-        # only: an httpx message can embed the upstream URL (query auth).
-        logger.warning("%s %s -> 502 upstream fault (%s)", request.method, path, type(exc).__name__)
+
+def _fault_response(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    exc: httpx.TransportError,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+    audit_token: object | None,
+    route: "RouteDelivery | None",
+) -> JSONResponse:
+    """The upstream connection failed — refused, reset, timed out, or
+    dropped mid-body. Fail closed with a provider-shaped 502: the tool sees
+    a clean gateway error, never a partial or wrong body. Record the fault
+    so metrics/audit see it — the buffered twin of the streaming branches'
+    finally-block finalization. By exception TYPE only: an httpx message
+    can embed the upstream URL (query auth). A routed request counts the
+    fault against its upstream NAME and closes its route as `transport`."""
+    row: dict[str, Any] | None = None
+    if route is not None:
+        route.status_class = "transport"
+        row = state.finish_route(route, 502, None)
+        state.upstream_errors[route.upstream.name] += 1
+    else:
         state.upstream_errors[adapter.name if adapter is not None else "passthrough"] += 1
-        state.record_request(
-            session=ctx.session_id,
-            provider=adapter.name if adapter is not None else None,
-            method=request.method,
-            path=path,
-            status=502,
-            started=started,
-            streamed=False,
-            detections=new_counts,
-            rehydrations={},
-            warned=new_warned,
-            audit_token=audit_token,
-        )
-        body = (
-            adapter.error_body("llm-redact: upstream request failed", status=502)
-            if adapter is not None
-            else {"error": "llm-redact: upstream request failed"}
-        )
-        return JSONResponse(body, status_code=502)
-
-    try:
-        upstream = await state.client.send(upstream_request, stream=True)
-    except httpx.TransportError as exc:
-        # Connect/handshake/header fault: no response body was produced, so
-        # there is nothing to close and the streaming generators (which own
-        # their own read-fault finalization) never start.
-        return upstream_fault_response(exc)
-
-    redacted_summary = (
-        " redacted: " + " ".join(f"{k}×{v}" for k, v in sorted(new_counts.items()))
-        if new_counts
-        else ""
+    logger.warning(
+        "%s %s -> 502 upstream fault (%s)%s",
+        request.method,
+        path,
+        type(exc).__name__,
+        _route_log_suffix(row) if row is not None else "",
     )
-    logger.info("%s %s -> %d%s", request.method, path, upstream.status_code, redacted_summary)
+    state.record_request(
+        session=ctx.session_id,
+        provider=adapter.name if adapter is not None else None,
+        method=request.method,
+        path=path,
+        status=502,
+        started=started,
+        streamed=False,
+        detections=new_counts,
+        rehydrations={},
+        warned=new_warned,
+        audit_token=audit_token,
+        route=row,
+    )
+    body = (
+        adapter.error_body("llm-redact: upstream request failed", status=502)
+        if adapter is not None
+        else {"error": "llm-redact: upstream request failed"}
+    )
+    return JSONResponse(body, status_code=502, headers=route.headers if route is not None else None)
 
+
+async def _deliver(
+    request: Request,
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    kind: RouteKind,
+    upstream: httpx.Response,
+    *,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+    audit_token: object | None,
+    route: "RouteDelivery | None",
+) -> Response:
+    """Hand an upstream response to the client: the streaming branches
+    (chosen by the upstream RESPONSE content-type, never the request's
+    stream flag) rehydrate as they go and finalize at stream end; anything
+    else is buffered. With `route` (a routed request) the same branches
+    also restore a rewritten model id, feed the usage tracker for the
+    budget ledger, and stamp the x-llm-redact-* headers."""
     content_type = upstream.headers.get("content-type", "")
+    headers = _response_headers(upstream)
+    if route is not None:
+        headers.update(route.headers)
+    request_meta = RequestMeta(request.method, path, started, new_counts, new_warned, audit_token)
 
     if kind is RouteKind.CHAT and adapter is not None and "text/event-stream" in content_type:
         return StreamingResponse(
             _stream_rehydrated(
-                upstream,
-                adapter,
-                state,
-                ctx,
-                request_meta=RequestMeta(
-                    request.method, path, started, new_counts, new_warned, audit_token
-                ),
+                upstream, adapter, state, ctx, request_meta=request_meta, route=route
             ),
             status_code=upstream.status_code,
-            headers=_response_headers(upstream),
+            headers=headers,
             media_type="text/event-stream",
         )
 
@@ -2615,18 +2801,13 @@ async def handle(request: Request) -> Response:
         and adapter.handles_eventstream
         and "application/vnd.amazon.eventstream" in content_type
     ):
+        # Bedrock only — never a routed protocol, so no route wrapper.
         return StreamingResponse(
             _stream_rehydrated_eventstream(
-                upstream,
-                adapter,
-                state,
-                ctx,
-                request_meta=RequestMeta(
-                    request.method, path, started, new_counts, new_warned, audit_token
-                ),
+                upstream, adapter, state, ctx, request_meta=request_meta
             ),
             status_code=upstream.status_code,
-            headers=_response_headers(upstream),
+            headers=headers,
             media_type="application/vnd.amazon.eventstream",
         )
 
@@ -2638,16 +2819,10 @@ async def handle(request: Request) -> Response:
     ):
         return StreamingResponse(
             _stream_rehydrated_ndjson(
-                upstream,
-                adapter,
-                state,
-                ctx,
-                request_meta=RequestMeta(
-                    request.method, path, started, new_counts, new_warned, audit_token
-                ),
+                upstream, adapter, state, ctx, request_meta=request_meta, route=route
             ),
             status_code=upstream.status_code,
-            headers=_response_headers(upstream),
+            headers=headers,
             media_type="application/x-ndjson",
         )
 
@@ -2657,10 +2832,23 @@ async def handle(request: Request) -> Response:
         # Upstream dropped mid-body on a buffered response: close the
         # connection we opened (else it leaks) and fail closed with a 502.
         await upstream.aclose()
-        return upstream_fault_response(exc)
+        return _fault_response(
+            state,
+            ctx,
+            adapter,
+            exc,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+            audit_token=audit_token,
+            route=route,
+        )
     await upstream.aclose()
 
     rehydration_counts_before = dict(state.rehydration_counts)
+    usage: Usage | None = None
     if kind is RouteKind.CHAT and adapter is not None and "application/json" in content_type:
         try:
             payload: Any = json.loads(raw)
@@ -2675,7 +2863,16 @@ async def handle(request: Request) -> Response:
             # (a miss passes through verbatim), so an unchanged count means the
             # response had no tokens to restore — forward the original bytes
             # instead of re-serializing.
-            if sum(state.rehydration_counts.values()) != sum(rehydration_counts_before.values()):
+            changed = sum(state.rehydration_counts.values()) != sum(
+                rehydration_counts_before.values()
+            )
+            if route is not None:
+                usage = parse_usage(route.protocol, payload)
+                if route.original_model is not None and _restore_model_payload(
+                    rehydrated, route.original_model, route.protocol
+                ):
+                    changed = True
+            if changed:
                 raw = json.dumps(rehydrated, ensure_ascii=False).encode("utf-8")
     elif kind is RouteKind.CHAT and adapter is not None and raw:
         # Non-JSON buffered CHAT responses: file downloads whose contents
@@ -2696,19 +2893,516 @@ async def handle(request: Request) -> Response:
         started=started,
         streamed=False,
         detections=new_counts,
-        rehydrations={
-            k: v - rehydration_counts_before.get(k, 0)
-            for k, v in state.rehydration_counts.items()
-            if v - rehydration_counts_before.get(k, 0) > 0
-        },
+        rehydrations=_count_delta(state.rehydration_counts, rehydration_counts_before),
         warned=new_warned,
         audit_token=audit_token,
+        route=(
+            state.finish_route(route, upstream.status_code, usage) if route is not None else None
+        ),
     )
 
-    return Response(
-        content=raw,
-        status_code=upstream.status_code,
-        headers=_response_headers(upstream),
+    return Response(content=raw, status_code=upstream.status_code, headers=headers)
+
+
+# ---------------------------------------------------------------------------
+# Routing (docs/routing.md): rule selection, the hop loop, local refusals.
+# ---------------------------------------------------------------------------
+
+
+class _RoutePlan(NamedTuple):
+    protocol: str
+    rule: RouteRule | None
+    primary: UpstreamConfig | None  # None = no rule and no default (502 no_route)
+    auth: str
+    model: str | None
+
+
+# Stands in for "no rule matched" in apply_body_rewrites: no model rewrite,
+# while the default upstream's body_defaults / stream_options still apply.
+_DEFAULT_RULE = RouteRule(id="", match=RuleMatch(protocol=""), upstream="")
+
+# The throttle wait (R-7 retry-same); a module attribute so tests can stub
+# the sleep without touching the event loop's own.
+_RETRY_SLEEP = asyncio.sleep
+
+
+def _plan_route(
+    state: ProxyState, request: Request, protocol: str, parsed: Any, path: str
+) -> _RoutePlan:
+    """One select_rule per request: auth from the inbound headers, model from
+    the body (or, for Gemini, from the `/models/{m}:verb` path segment),
+    then the first matching rule, else the protocol's default upstream."""
+    routing = state.config.routing
+    auth = classify_auth(request.headers, routing.oauth_beta_marker)
+    model = parsed.get("model") if isinstance(parsed, dict) else None
+    if not isinstance(model, str):
+        model = gemini_path_model(path) if protocol == "gemini" else None
+    rule = select_rule(
+        routing, protocol=protocol, model=model, headers=request.headers, path=path, auth=auth
+    )
+    name = rule.upstream if rule is not None else routing.default_for(protocol)
+    primary = state.routing_upstreams.get(name) if name is not None else None
+    return _RoutePlan(protocol, rule, primary, auth, model)
+
+
+def _route_refusal(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    status: int,
+    message: str,
+    row: dict[str, Any],
+    new_counts: dict[str, int] | None = None,
+    new_warned: dict[str, int] | None = None,
+    audit_token: object | None = None,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    """A proxy-generated routing refusal (502 no_route, 404 count_tokens,
+    402 budget): provider-shaped, recorded with its route row, no upstream
+    contact. The message names upstreams/protocols, never values."""
+    logger.info("%s %s -> %d%s", request.method, path, status, _route_log_suffix(row))
+    state.record_request(
+        session=ctx.session_id,
+        provider=adapter.name if adapter is not None else None,
+        method=request.method,
+        path=path,
+        status=status,
+        started=started,
+        streamed=False,
+        detections=new_counts or {},
+        rehydrations={},
+        warned=new_warned,
+        audit_token=audit_token,
+        route=row,
+    )
+    body = adapter.error_body(message, status=status) if adapter is not None else {"error": message}
+    return JSONResponse(body, status_code=status, headers=headers)
+
+
+def _resolved_status_key(rule: RouteRule, key: str) -> str | None:
+    """The on_status key `rule.chain_for(key)` resolves through (the class
+    the log line reports — same precedence: special > exact > class), or
+    None when the rule has no chain for this status."""
+    if key in SPECIAL_STATUS_KEYS:
+        candidates: tuple[str, ...] = (key, "429", "4xx")
+    elif key.isdigit():
+        candidates = (key, f"{key[0]}xx")
+    else:
+        candidates = (key,)
+    table = dict(rule.on_status)
+    for candidate in candidates:
+        if candidate in table:
+            return candidate
+    return None
+
+
+def _next_candidate(
+    state: ProxyState, chain: tuple[str, ...], position: int, *, count_tokens_path: bool
+) -> tuple[UpstreamConfig | None, int]:
+    """The next eligible chain member from `position`: known, not a
+    passthrough upstream (decision 3, asserted at runtime as well as at
+    parse), healthy (not in cooldown), not budget-exhausted, and able to
+    serve count_tokens when that is the path. Returns the member and the
+    position after it (None = the chain is exhausted)."""
+    while position < len(chain):
+        name = chain[position]
+        position += 1
+        candidate = state.routing_upstreams.get(name)
+        if candidate is None:
+            continue
+        if candidate.is_passthrough:
+            logger.warning("routing: chain member %s is a passthrough upstream; skipped", name)
+            continue
+        if not state.routing_state.healthy(name):
+            continue
+        if candidate.has_budget and state.budget_ledger.exhausted(name):
+            continue
+        if count_tokens_path and not candidate.count_tokens:
+            continue
+        return candidate, position
+    return None, position
+
+
+async def _discard(response: httpx.Response | None) -> None:
+    """Close an upstream response that will not be delivered (a failed hop
+    or a throttled attempt) before the next one is sent."""
+    if response is not None:
+        with suppress(Exception):
+            await response.aclose()
+
+
+def _models_response(state: ProxyState, request: Request, started: float) -> Response:
+    """R-15: `GET /v1/models` answered locally from the configured model
+    names — Anthropic shape when the request carries `anthropic-version`,
+    OpenAI shape otherwise. Recorded with provider `routing`."""
+    models = literal_models(state.config.routing)
+    body: dict[str, Any]
+    if "anthropic-version" in request.headers:
+        body = {
+            "data": [
+                {
+                    "type": "model",
+                    "id": model,
+                    "display_name": model,
+                    "created_at": "2026-01-01T00:00:00Z",
+                }
+                for model in models
+            ],
+            "has_more": False,
+            "first_id": models[0] if models else None,
+            "last_id": models[-1] if models else None,
+        }
+    else:
+        body = {
+            "object": "list",
+            "data": [
+                {"id": model, "object": "model", "created": 0, "owned_by": "llm-redact"}
+                for model in models
+            ],
+        }
+    state.record_request(
+        session=state.config.vault.session,
+        provider="routing",
+        method="GET",
+        path="/v1/models",
+        status=200,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info("GET /v1/models -> 200 answered locally (routing.expose_models)")
+    return JSONResponse(body)
+
+
+async def _handle_routed(
+    request: Request,
+    state: ProxyState,
+    ctx: RequestContext,
+    plan: _RoutePlan,
+    *,
+    adapter: ProviderAdapter | None,
+    kind: RouteKind,
+    outbound: bytes,
+    outbound_obj: dict[str, Any] | None,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+) -> Response:
+    """The routed request path (docs/routing.md): local gates (count_tokens,
+    budget), then the hop loop — per hop the outbound headers, body rewrites
+    and URL for the target upstream; the response status classified into
+    a status key; the rule's chain deciding deliver / retry-same / re-issue.
+    Every decision happens on the upstream response HEADERS, before any
+    body byte reaches the client (R-17), and a response not delivered is
+    closed before the next hop. Delivery then rides the shared branches
+    with the route wrappers."""
+    routing = state.config.routing
+    rstate = state.routing_state
+    rule = plan.rule
+    primary = plan.primary
+    assert primary is not None  # handle() answered no_route before calling
+    method = request.method
+    rule_id = rule.id if rule is not None else None
+    count_tokens_path = plan.protocol == "anthropic" and path == "/v1/messages/count_tokens"
+
+    def refusal(
+        status: int,
+        message: str,
+        status_class: str,
+        *,
+        audit_token: object | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> JSONResponse:
+        return _route_refusal(
+            state,
+            ctx,
+            adapter,
+            request=request,
+            path=path,
+            started=started,
+            status=status,
+            message=message,
+            row={
+                "rule": rule_id,
+                "upstream": primary.name,
+                "hops": 0,
+                "auth": plan.auth,
+                "class": status_class,
+                "reissue": "no",
+            },
+            new_counts=new_counts,
+            new_warned=new_warned,
+            audit_token=audit_token,
+            headers=headers,
+        )
+
+    # count_tokens gate (decision 7): no upstream contact, no fallback.
+    if count_tokens_path and not primary.count_tokens:
+        return refusal(
+            404,
+            f"llm-redact routing: upstream {primary.name} does not implement count_tokens",
+            "404",
+        )
+
+    audit_token, audit_refusal = _begin_audit_guarded(
+        state,
+        ctx,
+        adapter,
+        request=request,
+        path=path,
+        started=started,
+        new_counts=new_counts,
+        new_warned=new_warned,
+    )
+    if audit_refusal is not None:
+        return audit_refusal
+
+    # Model rewrite (R-9): the body's `model` (or, for Gemini, the path
+    # segment) is replaced before forwarding and the ORIGINAL id restored
+    # on the way back; spend is priced at the id the upstream saw.
+    upstream_path = _upstream_path(request, path)
+    rewrite_rule = rule if rule is not None else _DEFAULT_RULE
+    original_model: str | None = None
+    sent_model = plan.model
+    if rule is not None and rule.model_rewrite is not None:
+        sent_model = rule.model_rewrite
+        if plan.model != rule.model_rewrite:
+            original_model = plan.model
+        if plan.protocol == "gemini":
+            upstream_path = _rewrite_gemini_path(upstream_path, rule.model_rewrite)
+            # The body never carries `model` on this protocol — Google
+            # rejects one — so the routing helper must not add it.
+            rewrite_rule = dataclasses.replace(rule, model_rewrite=None)
+
+    inbound = _request_headers(request)
+    deadline = time.monotonic() + routing.request_deadline_seconds
+    current = primary
+    hops = 0
+    reissued = False
+    retried_same = False
+    stateful: bool | None = None  # R-22, computed once and only when needed
+    chain: tuple[str, ...] | None = None
+    position = 0
+    skip_reason: str | None = None
+    status_class = "ok"
+    response: httpx.Response | None = None
+
+    # Budget gate on the primary (decision 11): 402, unless the rule's
+    # on_budget_exhausted chain continues — the primary then counts as the
+    # attempt that was refused locally, so the first member is hop 2.
+    if primary.has_budget and state.budget_ledger.exhausted(primary.name):
+        candidate: UpstreamConfig | None = None
+        if rule is not None and rule.on_budget_exhausted:
+            chain = rule.on_budget_exhausted
+            hops = 1
+            candidate, position = _next_candidate(
+                state, chain, 0, count_tokens_path=count_tokens_path
+            )
+        if candidate is None:
+            return refusal(
+                402,
+                f"llm-redact routing: upstream {primary.name} budget exhausted for this period",
+                "budget_exhausted",
+                audit_token=audit_token,
+                headers=(
+                    {REISSUE_HEADER: "skipped; reason=no-candidate"} if chain is not None else None
+                ),
+            )
+        rstate.record_reissue(primary.name, candidate.name)
+        state.metrics.reissues[(primary.name, candidate.name)] += 1
+        reissued = True
+        current = candidate
+
+    while True:
+        hops += 1
+        rstate.record_request(current.name)
+        response = None
+        failed = False
+        retry_after: float | None = None
+        try:
+            headers_out = outbound_headers(
+                inbound, current, environ=os.environ, oauth_marker=routing.oauth_beta_marker
+            )
+        except MissingCredential as exc:
+            # The VAR vanished since startup: names the variable only.
+            logger.warning("%s %s upstream %s unavailable: %s", method, path, current.name, exc)
+            failed = True
+        else:
+            body = outbound
+            if outbound_obj is not None:
+                rewritten = apply_body_rewrites(outbound_obj, upstream=current, rule=rewrite_rule)
+                if rewritten is not None:
+                    body = json.dumps(rewritten, ensure_ascii=False).encode("utf-8")
+            url = upstream_url(current, upstream_path, request.url.query)
+            upstream_request = state.client.build_request(
+                method, url, headers=headers_out, content=body
+            )
+            try:
+                response = await state.client.send(upstream_request, stream=True)
+            except httpx.TransportError as exc:
+                # Type only: an httpx message can embed the URL (query auth).
+                logger.warning(
+                    "%s %s upstream %s fault (%s)", method, path, current.name, type(exc).__name__
+                )
+                failed = True
+        if failed:
+            # Decision 8: a transport fault is status key "502" for the
+            # chain lookup and counts against the upstream by NAME.
+            state.upstream_errors[current.name] += 1
+            key = "502"
+            status_class = "transport"
+        else:
+            assert response is not None
+            if 200 <= response.status_code < 300:
+                status_class = "ok"
+                break
+            key = status_key(
+                response.status_code,
+                protocol=plan.protocol,
+                response_headers=response.headers,
+                config=routing,
+            )
+            status_class = key
+            retry_after = parse_retry_after(response.headers.get("retry-after"))
+
+        resolved = _resolved_status_key(rule, key) if rule is not None else None
+        action = rule.chain_for(key) if rule is not None and resolved is not None else None
+        if chain is None:
+            if action is None:
+                break  # no chain for this status: deliver the response as-is
+            if action == RETRY_SAME:
+                # R-7 / decision 9: one retry of the SAME upstream after
+                # max(retry-after, 2 s); a longer wait than the throttle cap
+                # (or the deadline) hands the 429 back — the client owns
+                # long retries. Never a cooldown, never another upstream.
+                wait = max(retry_after or 0.0, 2.0)
+                if (
+                    retried_same
+                    or hops >= routing.max_hops
+                    or wait > routing.throttle_retry_max_seconds
+                    or time.monotonic() + wait > deadline
+                ):
+                    break
+                await _discard(response)
+                retried_same = True
+                await _RETRY_SLEEP(wait)
+                continue
+            assert isinstance(resolved, str) and isinstance(action, tuple)
+            status_class = resolved
+            # R-19 cooldown for the FAILED upstream: honour retry-after when
+            # it is longer (RoutingState re-applies the 3600 s cap).
+            rstate.mark_unhealthy(
+                current.name, max(current.cooldown_seconds, retry_after or 0.0), key
+            )
+            if rule is not None and rule.reissue_policy == "never":
+                break
+            if rule is not None and rule.reissue_policy == "stateless-only":
+                if stateful is None:
+                    stateful = is_stateful_request(outbound_obj)
+                if stateful:
+                    skip_reason = "stateful"
+                    break
+            chain = action
+            position = 0
+        elif isinstance(action, tuple):
+            # A chain member failed with a status the rule lists: it enters
+            # cooldown too; the chain continues with the next member either
+            # way (walkthrough 6 — an unlisted 4xx from a member still moves
+            # on to the next one).
+            assert isinstance(resolved, str)
+            status_class = resolved
+            rstate.mark_unhealthy(
+                current.name, max(current.cooldown_seconds, retry_after or 0.0), key
+            )
+        if hops >= routing.max_hops or time.monotonic() >= deadline:
+            break
+        candidate, position = _next_candidate(
+            state, chain, position, count_tokens_path=count_tokens_path
+        )
+        if candidate is None:
+            skip_reason = "no-candidate"
+            break
+        await _discard(response)
+        rstate.record_reissue(current.name, candidate.name)
+        state.metrics.reissues[(current.name, candidate.name)] += 1
+        reissued = True
+        current = candidate
+
+    reissue = f"skipped:{skip_reason}" if skip_reason is not None else ("yes" if reissued else "no")
+    extra: dict[str, str] = {}
+    if hops >= 2 or routing.debug_headers:
+        extra[UPSTREAM_HEADER] = current.name
+        extra[HOPS_HEADER] = str(hops)
+    if skip_reason is not None:
+        extra[REISSUE_HEADER] = f"skipped; reason={skip_reason}"
+    route = RouteDelivery(
+        rule_id=rule_id,
+        upstream=current,
+        hops=hops,
+        auth=plan.auth,
+        status_class=status_class,
+        reissue=reissue,
+        protocol=plan.protocol,
+        original_model=original_model,
+        sent_model=sent_model,
+        headers=extra,
+        method=method,
+        path=path,
+    )
+
+    if response is None:
+        # The last hop was a transport fault (or a vanished credential) and
+        # nothing took over: the provider-shaped 502, recorded and closed
+        # as class=transport (the fault was already warned and counted).
+        row = state.finish_route(route, 502, None)
+        logger.info("%s %s -> 502%s", method, path, _route_log_suffix(row))
+        state.record_request(
+            session=ctx.session_id,
+            provider=adapter.name if adapter is not None else None,
+            method=method,
+            path=path,
+            status=502,
+            started=started,
+            streamed=False,
+            detections=new_counts,
+            rehydrations={},
+            warned=new_warned,
+            audit_token=audit_token,
+            route=row,
+        )
+        message = "llm-redact: upstream request failed"
+        error = (
+            adapter.error_body(message, status=502) if adapter is not None else {"error": message}
+        )
+        return JSONResponse(error, status_code=502, headers=extra)
+
+    logger.info(
+        "%s %s -> %d%s%s",
+        method,
+        path,
+        response.status_code,
+        _route_log_suffix(route.as_row()),
+        _redacted_summary(new_counts),
+    )
+    return await _deliver(
+        request,
+        state,
+        ctx,
+        adapter,
+        kind,
+        response,
+        path=path,
+        started=started,
+        new_counts=new_counts,
+        new_warned=new_warned,
+        audit_token=audit_token,
+        route=route,
     )
 
 

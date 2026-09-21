@@ -994,6 +994,13 @@ def _parse_rule(
                 f"{where} on_budget_exhausted never applies: upstream {upstream_name!r}"
                 " has no monthly budget"
             )
+        elif policy == "never":
+            # The proxy consults reissue_policy before the budget chain too
+            # (an exhausted primary re-issues like a failed one).
+            warnings.append(
+                f'{where} on_budget_exhausted never applies: reissue_policy = "never"'
+                " forbids re-issuing to another upstream"
+            )
     return RouteRule(
         id=rule_id,
         match=match,

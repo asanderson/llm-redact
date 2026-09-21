@@ -802,6 +802,15 @@ def test_chain_under_never_policy_is_warned() -> None:
     )
     raw["routing"]["rule"][1]["on_status"] = {"throttle_429": "retry-same"}
     assert parse_config(raw, "<t>").routing.warnings == ()
+    # The budget chain is gated by the same policy in the proxy, so it is
+    # equally dead under "never" (a budget-less upstream keeps its own line).
+    raw["routing"]["rule"][2]["on_budget_exhausted"] = ["ollama"]
+    raw["routing"]["rule"][2]["reissue_policy"] = "never"
+    assert parse_config(raw, "<t>").routing.warnings == (
+        "[[routing.rule]] 'anthropic-key-lane' on_status 429" + suffix,
+        "[[routing.rule]] 'anthropic-key-lane' on_status 5xx" + suffix,
+        "[[routing.rule]] 'anthropic-key-lane' on_budget_exhausted" + suffix,
+    )
     raw["routing"]["rule"][1]["reissue_policy"] = 3
     _err(raw, r"'max-lane' reissue_policy must be a string, got int")
 

@@ -21,6 +21,7 @@ import os
 import re
 import secrets
 import signal
+import sqlite3
 import time
 import tomllib
 import urllib.parse
@@ -222,7 +223,17 @@ def _build_spend_store(vault: VaultConfig) -> SpendStore:
     a local operator ledger, documented as in-process there)."""
     if vault.backend == "sqlite":
         path = Path(vault.path).expanduser() if vault.path else default_vault_path()
-        return SqliteSpendStore(path)
+        try:
+            return SqliteSpendStore(path)
+        except sqlite3.Error as exc:
+            # A locked or unwritable vault file: a ConfigError, so startup,
+            # `serve --check`, a SIGHUP reload and the editor all report it
+            # the same way (reload keeps the running config; never a
+            # traceback out of the signal callback).
+            raise ConfigError(
+                f"spend table in the vault database {path} could not be opened"
+                f" ({type(exc).__name__}: {exc})"
+            ) from exc
     return InMemorySpendStore()
 
 
@@ -470,8 +481,10 @@ class ProxyState:
             # rule names, bad custom regex, missing NER extra — all deferred
             # past parse_config) leaves the running state untouched.
             self.apply_config(fresh)
-        # ConfigError and tomllib.TOMLDecodeError are both ValueErrors.
-        except (ValueError, OSError, re.error, ImportError) as exc:
+        # ConfigError and tomllib.TOMLDecodeError are both ValueErrors; the
+        # spend store (sqlite, in the vault file) is built inside
+        # apply_config too, so its faults must land here as well.
+        except (ValueError, OSError, re.error, ImportError, sqlite3.Error) as exc:
             logger.error("config reload failed; keeping current config: %s", exc)
 
     def apply_config(self, fresh: Config) -> list[str]:
@@ -521,10 +534,14 @@ class ProxyState:
         # missing raises here (ConfigError, VAR name only) and the caller
         # keeps the running config — nothing below has been swapped yet.
         resolve_credentials(effective.routing, os.environ)
-        price_table = (
-            self.price_table
-            if effective.prices == self.config.prices
-            else _build_price_table(effective.prices)
+        # The price table is rebuilt on EVERY reload (R-34): a `[prices]
+        # table = PATH` file whose contents changed leaves PricesConfig equal,
+        # so comparing configs would keep stale rates. Cheap (one file read).
+        # Ids the running table could not price stay reported unless the
+        # new table prices them.
+        price_table = _build_price_table(effective.prices)
+        price_table.unknown_models.update(
+            model for model in self.price_table.unknown_models if price_table.lookup(model) is None
         )
         # Spend storage follows the (restart-only) vault: enabling routing on
         # a sqlite vault opens the durable table now rather than at restart.
@@ -2132,7 +2149,22 @@ async def _handle_config_post(request: Request, state: ProxyState) -> Response:
     except OSError as exc:
         return JSONResponse({"error": f"could not write {path}: {exc.strerror}"}, status_code=500)
     # No await between validation and swap: SIGHUP reload cannot interleave.
-    restart_required = state.apply_config(apply_env_overrides(candidate))
+    try:
+        restart_required = state.apply_config(apply_env_overrides(candidate))
+    except (ValueError, OSError, re.error, ImportError, sqlite3.Error) as exc:
+        # The file is written and valid, but the running config is not (the
+        # spend table in a locked vault file, say): say exactly that rather
+        # than an anonymous 500 — a SIGHUP re-applies it once the cause is
+        # gone. The validated fields above cannot fail here; only a build
+        # apply_config performs beyond the dry run can.
+        logger.error("config editor: wrote %s but applying it failed: %s", path, exc)
+        return JSONResponse(
+            {
+                "error": f"written to {path} but not applied ({exc}); fix the cause and"
+                " reload (SIGHUP)"
+            },
+            status_code=500,
+        )
     logger.info("config editor: applied and wrote %s", path)
     return JSONResponse(
         {
@@ -2849,9 +2881,10 @@ async def _deliver(
 
     rehydration_counts_before = dict(state.rehydration_counts)
     usage: Usage | None = None
+    payload: Any = None
     if kind is RouteKind.CHAT and adapter is not None and "application/json" in content_type:
         try:
-            payload: Any = json.loads(raw)
+            payload = json.loads(raw)
         except ValueError:
             payload = None
         if payload is not None:
@@ -2881,6 +2914,24 @@ async def _deliver(
         raw_rehydrated = adapter.rehydrate_raw_body(path, raw, ctx.rehydrator)
         if raw_rehydrated is not None:
             raw = raw_rehydrated
+    elif route is not None and raw and "application/json" in content_type:
+        # A routed JSON response outside the CHAT branches (REDACT_ONLY —
+        # embeddings — or pass-through): nothing to rehydrate, but a
+        # rewritten model id is still restored in every top-level `model`
+        # field (decision 12), and a REDACT_ONLY body's own usage block is
+        # the billed call's (R-24) — an embeddings request on an env:
+        # upstream counts against its budget like a chat one.
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            payload = None
+        if payload is not None:
+            if kind is RouteKind.REDACT_ONLY:
+                usage = parse_usage(route.protocol, payload)
+            if route.original_model is not None and _restore_model_payload(
+                payload, route.original_model, route.protocol
+            ):
+                raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     # Every request is recorded — pass-through included (provider=None maps
     # to the "passthrough" metrics label); audit rows likewise when enabled.
@@ -3035,6 +3086,31 @@ async def _discard(response: httpx.Response | None) -> None:
             await response.aclose()
 
 
+def _streams_to_client(content_type: str) -> bool:
+    """Whether `_deliver` streams a response of this content type (SSE or
+    NDJSON) rather than buffering it — the R-17 line between a body that can
+    still be re-issued and one whose first byte is already on its way."""
+    return "text/event-stream" in content_type or any(
+        t in content_type for t in _JSONL_CONTENT_TYPES
+    )
+
+
+async def _read_buffered(response: httpx.Response) -> str | None:
+    """Read the body of a response `_deliver` would buffer, so a mid-body
+    drop surfaces while no byte has reached the client (decision 8: the
+    fault is status key "502" for the chain lookup). Returns the fault's
+    exception TYPE name (an httpx message can embed the URL), or None when
+    the body is in hand — `aread()` is idempotent, so the delivery branch
+    re-reads it for free — or will be streamed."""
+    if _streams_to_client(response.headers.get("content-type", "")):
+        return None
+    try:
+        await response.aread()
+    except httpx.TransportError as exc:
+        return type(exc).__name__
+    return None
+
+
 def _models_response(state: ProxyState, request: Request, started: float) -> Response:
     """R-15: `GET /v1/models` answered locally from the configured model
     names — Anthropic shape when the request carries `anthropic-version`,
@@ -3116,6 +3192,8 @@ async def _handle_routed(
         message: str,
         status_class: str,
         *,
+        hops: int = 0,
+        reissue: str = "no",
         audit_token: object | None = None,
         headers: dict[str, str] | None = None,
     ) -> JSONResponse:
@@ -3131,10 +3209,10 @@ async def _handle_routed(
             row={
                 "rule": rule_id,
                 "upstream": primary.name,
-                "hops": 0,
+                "hops": hops,
                 "auth": plan.auth,
                 "class": status_class,
-                "reissue": "no",
+                "reissue": reissue,
             },
             new_counts=new_counts,
             new_warned=new_warned,
@@ -3183,7 +3261,12 @@ async def _handle_routed(
     inbound = _request_headers(request)
     deadline = time.monotonic() + routing.request_deadline_seconds
     current = primary
-    hops = 0
+    # `hops` = 1 + re-issues (R-18, decision 11): the number the debug
+    # header, the log line, the spend row and the max_hops bound all see.
+    # A retry-same attempt is NOT a hop — it stays on the same upstream
+    # (bounded by `retried_same` instead), so a throttled-then-served
+    # request is still hop 1 with no re-issue spend.
+    hops = 1
     reissued = False
     retried_same = False
     stateful: bool | None = None  # R-22, computed once and only when needed
@@ -3193,34 +3276,57 @@ async def _handle_routed(
     status_class = "ok"
     response: httpx.Response | None = None
 
+    def reissue_allowed() -> bool:
+        """The rule's reissue_policy (R-8/R-22) over the redacted body —
+        consulted before ANY chain is entered, on_status and
+        on_budget_exhausted alike. `never` refuses silently (reissue=no);
+        `stateless-only` refuses a request carrying signed thinking blocks
+        and names the reason for the client (skipped:stateful)."""
+        nonlocal stateful, skip_reason
+        if rule is None or rule.reissue_policy == "always":
+            return True
+        if rule.reissue_policy == "never":
+            return False
+        if stateful is None:
+            stateful = is_stateful_request(outbound_obj)
+        if stateful:
+            skip_reason = "stateful"
+            return False
+        return True
+
     # Budget gate on the primary (decision 11): 402, unless the rule's
     # on_budget_exhausted chain continues — the primary then counts as the
-    # attempt that was refused locally, so the first member is hop 2.
+    # attempt that was refused locally (hop 1), so the first member is hop 2.
     if primary.has_budget and state.budget_ledger.exhausted(primary.name):
         candidate: UpstreamConfig | None = None
-        if rule is not None and rule.on_budget_exhausted:
+        if rule is not None and rule.on_budget_exhausted and reissue_allowed():
             chain = rule.on_budget_exhausted
-            hops = 1
             candidate, position = _next_candidate(
                 state, chain, 0, count_tokens_path=count_tokens_path
             )
+            if candidate is None:
+                skip_reason = "no-candidate"
         if candidate is None:
             return refusal(
                 402,
                 f"llm-redact routing: upstream {primary.name} budget exhausted for this period",
                 "budget_exhausted",
+                hops=1,
+                reissue=f"skipped:{skip_reason}" if skip_reason is not None else "no",
                 audit_token=audit_token,
                 headers=(
-                    {REISSUE_HEADER: "skipped; reason=no-candidate"} if chain is not None else None
+                    {REISSUE_HEADER: f"skipped; reason={skip_reason}"}
+                    if skip_reason is not None
+                    else None
                 ),
             )
         rstate.record_reissue(primary.name, candidate.name)
         state.metrics.reissues[(primary.name, candidate.name)] += 1
         reissued = True
+        hops = 2
         current = candidate
 
     while True:
-        hops += 1
         rstate.record_request(current.name)
         response = None
         failed = False
@@ -3251,6 +3357,24 @@ async def _handle_routed(
                     "%s %s upstream %s fault (%s)", method, path, current.name, type(exc).__name__
                 )
                 failed = True
+            else:
+                # R-17: a body that _deliver will BUFFER has forwarded no
+                # byte yet, so it is read here — a read fault (a mid-body
+                # drop) is still re-issuable, classified like a send fault
+                # (decision 8). A streamed body is left untouched: its
+                # first byte reaches the client as it arrives.
+                fault = await _read_buffered(response)
+                if fault is not None:
+                    logger.warning(
+                        "%s %s upstream %s fault while reading the body (%s)",
+                        method,
+                        path,
+                        current.name,
+                        fault,
+                    )
+                    await _discard(response)
+                    response = None
+                    failed = True
         if failed:
             # Decision 8: a transport fault is status key "502" for the
             # chain lookup and counts against the upstream by NAME.
@@ -3273,6 +3397,11 @@ async def _handle_routed(
 
         resolved = _resolved_status_key(rule, key) if rule is not None else None
         action = rule.chain_for(key) if rule is not None and resolved is not None else None
+        # R-19 / decision 10: a listed status parks the FAILED upstream for
+        # its cooldown — EXCEPT a throttle, which is transient by definition,
+        # whether the rule answers it with retry-same or lets it fall through
+        # to its `429`/`4xx` chain (chain_for's precedence ladder).
+        cooldown = 0.0 if key == "throttle_429" else max(current.cooldown_seconds, retry_after or 0.0)
         if chain is None:
             if action is None:
                 break  # no chain for this status: deliver the response as-is
@@ -3280,11 +3409,11 @@ async def _handle_routed(
                 # R-7 / decision 9: one retry of the SAME upstream after
                 # max(retry-after, 2 s); a longer wait than the throttle cap
                 # (or the deadline) hands the 429 back — the client owns
-                # long retries. Never a cooldown, never another upstream.
+                # long retries. Never a cooldown, never another upstream,
+                # never a hop (max_hops bounds re-issues, not this retry).
                 wait = max(retry_after or 0.0, 2.0)
                 if (
                     retried_same
-                    or hops >= routing.max_hops
                     or wait > routing.throttle_retry_max_seconds
                     or time.monotonic() + wait > deadline
                 ):
@@ -3295,31 +3424,22 @@ async def _handle_routed(
                 continue
             assert isinstance(resolved, str) and isinstance(action, tuple)
             status_class = resolved
-            # R-19 cooldown for the FAILED upstream: honour retry-after when
-            # it is longer (RoutingState re-applies the 3600 s cap).
-            rstate.mark_unhealthy(
-                current.name, max(current.cooldown_seconds, retry_after or 0.0), key
-            )
-            if rule is not None and rule.reissue_policy == "never":
+            if cooldown > 0.0:
+                rstate.mark_unhealthy(current.name, cooldown, key)
+            if not reissue_allowed():
                 break
-            if rule is not None and rule.reissue_policy == "stateless-only":
-                if stateful is None:
-                    stateful = is_stateful_request(outbound_obj)
-                if stateful:
-                    skip_reason = "stateful"
-                    break
             chain = action
             position = 0
         elif isinstance(action, tuple):
             # A chain member failed with a status the rule lists: it enters
             # cooldown too; the chain continues with the next member either
             # way (walkthrough 6 — an unlisted 4xx from a member still moves
-            # on to the next one).
+            # on to the next one, and so does a member's throttle, whose
+            # `retry-same` action belongs to the primary).
             assert isinstance(resolved, str)
             status_class = resolved
-            rstate.mark_unhealthy(
-                current.name, max(current.cooldown_seconds, retry_after or 0.0), key
-            )
+            if cooldown > 0.0:
+                rstate.mark_unhealthy(current.name, cooldown, key)
         if hops >= routing.max_hops or time.monotonic() >= deadline:
             break
         candidate, position = _next_candidate(
@@ -3332,6 +3452,7 @@ async def _handle_routed(
         rstate.record_reissue(current.name, candidate.name)
         state.metrics.reissues[(current.name, candidate.name)] += 1
         reissued = True
+        hops += 1
         current = candidate
 
     reissue = f"skipped:{skip_reason}" if skip_reason is not None else ("yes" if reissued else "no")

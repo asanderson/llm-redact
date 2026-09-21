@@ -14,6 +14,14 @@ ledger stores both. Three rules hold throughout:
 - Nothing here mutates its input: ``inject_stream_usage`` returns a new body or
   ``None`` so the proxy's forward-the-original-bytes short-circuit stays intact
   when there is nothing to change.
+- Every documented usage shape is read, streamed or buffered: the Responses
+  API nests its only usage block under ``response`` in the terminal
+  ``response.completed`` event (the tracker reads it there — no Responses
+  event carries a top-level ``usage``), and Gemini's ``streamGenerateContent``
+  without ``alt=sse`` answers a buffered JSON ARRAY whose last usage-bearing
+  element is the complete count (``parse_usage`` accepts the list). A shape
+  this module does not know yields ``None`` — never a guess — so the
+  integrator sees an unbilled row, not a wrong one.
 
 ``ModelPrice`` has a single definition in ``routing.py``; this module imports it.
 """
@@ -22,6 +30,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import math
 import re
 import tomllib
 from collections.abc import Mapping
@@ -37,7 +46,11 @@ _PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
 # A dated snapshot ("claude-sonnet-4-5-20250929") or "-latest" alias suffix.
 _SUFFIX_RE = re.compile(r"-(\d{8}|latest)$")
 # A prefix key must end at an id boundary so "gpt-5" never prices "gpt-50".
-_BOUNDARY_CHARS = "-.:@"
+# "." is deliberately NOT a boundary: "gpt-5.2" is a distinct (pricier) model,
+# not a variant of "gpt-5", and every dotted key ("gpt-4.1", "gemini-2.5-*")
+# carries its dot inside the key itself. ":" and "@" bound OpenRouter-style
+# variant / pin suffixes ("gpt-5:free").
+_BOUNDARY_CHARS = "-:@"
 
 _ANTHROPIC_USAGE_KEYS = (
     "input_tokens",
@@ -71,7 +84,11 @@ def parse_model_price(entry: Any, *, source: str) -> ModelPrice:
     """One ``{input, output, cache_read, cache_write}`` table → ModelPrice.
 
     All four rates are required (a missing one is a config error naming the
-    field, never defaulted — a silently zero rate would under-report spend)."""
+    field, never defaulted — a silently zero rate would under-report spend).
+    Rates must be FINITE: ``json.loads`` accepts the ``NaN``/``Infinity``
+    literals and TOML has ``nan``/``inf``, and a NaN rate would poison an
+    upstream's period total (``nan >= budget`` is always False, so the budget
+    could never trip) and leak ``NaN`` into /status JSON."""
     from llm_redact.config import ConfigError
 
     if not isinstance(entry, Mapping):
@@ -79,9 +96,19 @@ def parse_model_price(entry: Any, *, source: str) -> ModelPrice:
     values: dict[str, float] = {}
     for name in _PRICE_FIELDS:
         value = entry.get(name)
-        if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
-            raise ConfigError(f"{source}: {name} must be a non-negative number (USD per 1M tokens)")
-        values[name] = float(value)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ConfigError(
+                f"{source}: {name} must be a finite, non-negative number (USD per 1M tokens)"
+            )
+        try:
+            rate = float(value)
+        except OverflowError:  # an int too large for a float is as unusable as inf
+            rate = math.inf
+        if not math.isfinite(rate) or rate < 0:
+            raise ConfigError(
+                f"{source}: {name} must be a finite, non-negative number (USD per 1M tokens)"
+            )
+        values[name] = rate
     return ModelPrice(
         input=values["input"],
         output=values["output"],
@@ -178,7 +205,10 @@ class PriceTable:
         ``-YYYYMMDD`` / ``-latest``; then the LONGEST table key that is a
         boundary-aligned prefix of any of those (``claude-sonnet-5-20260401``
         → ``claude-sonnet-5``; ``o3-pro`` never falls back to ``o3`` because
-        ``o3-pro`` is its own key and longer). ``None`` when nothing applies."""
+        ``o3-pro`` is its own key and longer). That fallback is exactly what
+        would mis-price a differently-billed sibling WITHOUT its own row
+        (``gpt-5-pro`` at ``gpt-5`` rates), so prices.json lists every such
+        sibling explicitly. ``None`` when nothing applies."""
         candidates = _candidates(model)
         for candidate in candidates:
             hit = self._prices.get(candidate)
@@ -278,7 +308,21 @@ def parse_usage(protocol: str, payload: Any) -> Usage | None:
     """The usage block of one complete (non-streaming) response body, or ``None``
     when the body carries none. ``protocol`` is the routing protocol of the
     request (``anthropic`` / ``openai`` / ``gemini`` / ``ollama``); an unknown
-    protocol yields ``None`` rather than a guess."""
+    protocol yields ``None`` rather than a guess.
+
+    A JSON ARRAY body is Gemini's ``streamGenerateContent`` without ``alt=sse``
+    (the buffered form): its chunks carry ``usageMetadata`` progressively and
+    the last one bearing it is the complete count — the same last-wins rule the
+    SSE tracker applies. No other protocol has an array body shape."""
+    if isinstance(payload, list):
+        if protocol != "gemini":
+            return None
+        usage: Usage | None = None
+        for chunk in payload:
+            parsed = parse_usage(protocol, chunk)
+            if parsed is not None:
+                usage = parsed
+        return usage
     if not isinstance(payload, Mapping):
         return None
     if protocol == "anthropic":
@@ -294,6 +338,18 @@ def parse_usage(protocol: str, payload: Any) -> Usage | None:
     return None
 
 
+def _responses_event_usage(event: Mapping[str, Any]) -> Usage | None:
+    """The Responses API's streamed usage: nested under ``response`` (the
+    fixture-pinned ``{"type": "response.completed", "response": {..., "usage":
+    {...}}}`` shape). Any ``response.*`` lifecycle event is accepted — the
+    non-terminal ones carry ``usage: null`` and yield nothing, so last-wins
+    lands on the terminal event's complete count."""
+    response = event.get("response")
+    if not isinstance(response, Mapping):
+        return None
+    return _openai_usage(response.get("usage"))
+
+
 def _pick(delta: Mapping[str, Any], key: str, previous: int) -> int:
     value = delta.get(key)
     return previous if value is None else _count(value)
@@ -306,7 +362,13 @@ class StreamUsageTracker:
     proxy reads ``result()`` in the finalizer. Anthropic splits usage across
     ``message_start`` (input side) and ``message_delta`` (cumulative output side,
     plus any input fields the API repeats); every other protocol's last usage
-    block wins outright. Unparsable or usage-free events are ignored."""
+    block wins outright. For ``openai`` that block is a Chat Completions
+    chunk's top-level ``usage`` (the final chunk, when
+    ``stream_options.include_usage`` is set) OR the Responses API's
+    ``response.usage`` inside its terminal ``response.completed`` /
+    ``response.incomplete`` event — Responses streams never carry a top-level
+    ``usage`` on any event, and the lifecycle events before the terminal one
+    carry ``usage: null``. Unparsable or usage-free events are ignored."""
 
     def __init__(self, protocol: str) -> None:
         self._protocol = protocol
@@ -334,6 +396,8 @@ class StreamUsageTracker:
             self._feed_anthropic(payload)
             return
         usage = parse_usage(self._protocol, payload)
+        if usage is None and self._protocol == "openai":
+            usage = _responses_event_usage(payload)
         if usage is not None:
             self._usage = usage  # last wins
 
@@ -363,12 +427,19 @@ class StreamUsageTracker:
 
 
 def inject_stream_usage(body: Mapping[str, Any]) -> dict[str, Any] | None:
-    """OpenAI protocol, ``stream: true``: ask for the final usage chunk via
-    ``stream_options.include_usage`` when the client did not decide either way.
-    Returns the rewritten copy, or ``None`` when nothing changes (stream off,
-    the key already present with any value, or ``stream_options`` not a table —
-    the proxy then forwards the original bytes). Never mutates ``body``."""
-    if body.get("stream") is not True:
+    """OpenAI protocol, Chat Completions, ``stream: true``: ask for the final
+    usage chunk via ``stream_options.include_usage`` when the client did not
+    decide either way. The body must carry ``messages`` — the Chat Completions
+    signature. A Responses body (``input`` / ``previous_response_id``, never
+    ``messages``) is left alone: its stream always ends with
+    ``response.completed`` carrying ``response.usage`` (nothing to ask for),
+    and the Responses API does not define ``include_usage`` — OpenAI rejects
+    parameters it does not know with a 400, so injecting there would break the
+    request outright. Returns the rewritten copy, or ``None`` when nothing
+    changes (stream off, not a Chat Completions body, the key already present
+    with any value, or ``stream_options`` not a table — the proxy then forwards
+    the original bytes). Never mutates ``body``."""
+    if body.get("stream") is not True or "messages" not in body:
         return None
     options = body.get("stream_options")
     if options is None:

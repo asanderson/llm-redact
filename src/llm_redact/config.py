@@ -650,6 +650,18 @@ def _optional_str(section: Mapping[str, Any], key: str, where: str) -> str | Non
     return value
 
 
+def _str_key(section: Mapping[str, Any], key: str, default: str, where: str) -> str:
+    """A string config key with a default; any other type is a hard error
+    naming the TYPE (the _bool_key discipline — `str(3)` would hand a path
+    named "3" to the price table or a marker no request carries to the
+    OAuth classifier). The value itself is never echoed: credential-shaped
+    keys go through here."""
+    value = section.get(key, default)
+    if not isinstance(value, str):
+        raise ConfigError(f"{where} {key} must be a string, got {type(value).__name__}")
+    return value
+
+
 def _header_table(section: Mapping[str, Any], key: str, where: str) -> tuple[tuple[str, str], ...]:
     """A `NAME = "value"` table of headers -> (lowercased name, value), sorted.
 
@@ -682,18 +694,22 @@ def _parse_upstream(name: str, section: Mapping[str, Any], *, inject_note: bool)
     base_url = _required_str(section, "base_url", where).rstrip("/")
     if not base_url.startswith(("http://", "https://")):
         raise ConfigError(f"{where} base_url must start with http:// or https://")
-    credential = str(section.get("credential", "passthrough"))
+    credential = _str_key(section, "credential", "passthrough", where)
     if credential.startswith("env:"):
         if not _ENV_VAR_RE.fullmatch(credential[len("env:") :]):
             raise ConfigError(
                 f"{where} credential env:VAR needs a variable name matching [A-Z_][A-Z0-9_]*"
             )
     elif credential not in ("passthrough", "none"):
+        # NEVER echoed: the realistic mistake is pasting the key itself where
+        # `env:VAR` belongs, and this message reaches serve --check, doctor,
+        # the startup/SIGHUP log and the editor's 400 body.
         raise ConfigError(
-            f"{where} credential must be 'passthrough', 'none' or 'env:VAR', got {credential!r}"
+            f"{where} credential must be 'passthrough', 'none' or 'env:VAR'"
+            " (the value is not shown: it may be a key)"
         )
     passthrough = credential == "passthrough"
-    cost = str(section.get("cost", "metered"))
+    cost = _str_key(section, "cost", "metered", where)
     if cost not in COSTS:
         raise ConfigError(f"{where} cost must be one of {COSTS}, got {cost!r}")
     # I-4: the note is a `system` mutation, which a passthrough upstream must
@@ -809,17 +825,28 @@ def _chain_members(
     *,
     where: str,
     protocol: str,
+    own: str,
     by_name: Mapping[str, UpstreamConfig],
 ) -> tuple[str, ...]:
     """An ordered list of fallback upstream names, validated for I-5 (same
-    protocol) and decision 3 (never a passthrough member — I-1/I-2)."""
+    protocol) and decision 3 (never a passthrough member — I-1/I-2). A chain
+    continues to OTHER upstreams: naming the rule's own (`own` — the one that
+    just failed or is exhausted; `retry-same` is the retry form) or the same
+    member twice (a wasted hop against max_hops) is rejected."""
     raw = section.get(key)
     if not isinstance(raw, list) or not raw or not all(isinstance(n, str) for n in raw):
         raise ConfigError(f"{where} {key} must be a non-empty array of upstream names")
-    for member in raw:
+    for position, member in enumerate(raw):
         upstream = by_name.get(member)
         if upstream is None:
             raise ConfigError(f"{where} {key} names unknown upstream {member!r}")
+        if member == own:
+            raise ConfigError(
+                f"{where} {key} names the rule's own upstream {member!r}: a chain continues"
+                ' to other upstreams (use "retry-same" to retry this one)'
+            )
+        if member in raw[:position]:
+            raise ConfigError(f"{where} {key} lists {member!r} twice")
         if upstream.protocol != protocol:
             raise ConfigError(
                 f"{where} {key} member {member!r} speaks {upstream.protocol!r},"
@@ -854,7 +881,7 @@ def _parse_match(section: object, where: str) -> RuleMatch:
                 f"{where} match model must be a glob string or a non-empty array of globs"
             )
         models = tuple(model_raw)
-    auth = str(section.get("auth", "any"))
+    auth = _str_key(section, "auth", "any", f"{where} match")
     if auth not in AUTH_KINDS:
         raise ConfigError(f"{where} match auth must be one of {AUTH_KINDS}, got {auth!r}")
     return RuleMatch(
@@ -905,6 +932,33 @@ def _parse_rule(
             f"{where} upstream {upstream_name!r} speaks {upstream.protocol!r}, not the"
             f" matched protocol {match.protocol!r} (no protocol translation)"
         )
+    model_rewrite = _optional_str(section, "model_rewrite", where)
+    if match.protocol == "gemini":
+        # A Gemini model id lives in the URL (models/{m}:generateContent),
+        # never in the body: the proxy reads `model` from the body, so a
+        # gemini rule constraining it can never fire (dead — warned like the
+        # other never-applies keys), and a rewrite would ADD a top-level
+        # `model` field that Google rejects (harmful — refused).
+        if model_rewrite is not None:
+            raise ConfigError(
+                f"{where} model_rewrite is not supported for protocol 'gemini' (the model id"
+                " is in the request path, and a body `model` field is rejected upstream)"
+            )
+        if match.models:
+            warnings.append(
+                f"{where} match model never matches for protocol 'gemini' (the model id is in"
+                " the request path, not the body): this rule cannot fire"
+            )
+    policy = _str_key(
+        section,
+        "reissue_policy",
+        "stateless-only" if upstream.is_passthrough else "always",
+        where,
+    )
+    if policy not in REISSUE_POLICIES:
+        raise ConfigError(
+            f"{where} reissue_policy must be one of {REISSUE_POLICIES}, got {policy!r}"
+        )
     on_status_raw = section.get("on_status", {})
     if not isinstance(on_status_raw, dict):
         raise ConfigError(f"{where} on_status must be a table of status = chain")
@@ -922,20 +976,30 @@ def _parse_rule(
             on_status.append((key, RETRY_SAME))
             continue
         chain = _chain_members(
-            {key: value}, key, where=f"{where} on_status", protocol=match.protocol, by_name=by_name
+            {key: value},
+            key,
+            where=f"{where} on_status",
+            protocol=match.protocol,
+            own=upstream_name,
+            by_name=by_name,
         )
+        if policy == "never":
+            # R-8: "never" re-issues nothing after a failed hop, so a chain
+            # (unlike retry-same, which stays on the same upstream) is dead.
+            warnings.append(
+                f"{where} on_status {key} never applies: reissue_policy = \"never\""
+                " forbids re-issuing to another upstream"
+            )
         on_status.append((key, chain))
-    policy = str(
-        section.get("reissue_policy", "stateless-only" if upstream.is_passthrough else "always")
-    )
-    if policy not in REISSUE_POLICIES:
-        raise ConfigError(
-            f"{where} reissue_policy must be one of {REISSUE_POLICIES}, got {policy!r}"
-        )
     on_budget: tuple[str, ...] = ()
     if "on_budget_exhausted" in section:
         on_budget = _chain_members(
-            section, "on_budget_exhausted", where=where, protocol=match.protocol, by_name=by_name
+            section,
+            "on_budget_exhausted",
+            where=where,
+            protocol=match.protocol,
+            own=upstream_name,
+            by_name=by_name,
         )
         if not upstream.has_budget:
             warnings.append(
@@ -946,7 +1010,7 @@ def _parse_rule(
         id=rule_id,
         match=match,
         upstream=upstream_name,
-        model_rewrite=_optional_str(section, "model_rewrite", where),
+        model_rewrite=model_rewrite,
         on_status=tuple(on_status),
         reissue_policy=policy,
         on_budget_exhausted=on_budget,
@@ -1004,7 +1068,12 @@ def _parse_plan_limit_headers(
             or not all(isinstance(v, str) and v for v in values)
         ):
             raise ConfigError(f"{where}: {name!r} must map to a non-empty array of strings")
-        out.append((name.lower(), tuple(values)))
+        lowered = name.lower()
+        if any(seen == lowered for seen, _ in out):
+            # Two spellings of one header would collapse to the last one in
+            # the emitter (a lossy round trip), the _header_table rule.
+            raise ConfigError(f"{where}: header {lowered!r} is listed twice")
+        out.append((lowered, tuple(values)))
     return tuple(out)
 
 
@@ -1042,7 +1111,7 @@ def _parse_routing(
     deadline = _number_key(raw, "request_deadline_seconds", 600.0, where)
     if deadline <= 0:
         raise ConfigError("[routing] request_deadline_seconds must be positive")
-    plan_limit_detection = str(raw.get("plan_limit_detection", "headers"))
+    plan_limit_detection = _str_key(raw, "plan_limit_detection", "headers", where)
     if plan_limit_detection not in PLAN_LIMIT_DETECTION:
         raise ConfigError(
             f"[routing] plan_limit_detection must be one of {PLAN_LIMIT_DETECTION},"
@@ -1052,7 +1121,7 @@ def _parse_routing(
     plan_limit_headers = default_routing.plan_limit_headers
     if "plan_limit_headers" in raw:
         plan_limit_headers = _parse_plan_limit_headers(raw["plan_limit_headers"])
-    marker = str(raw.get("oauth_beta_marker", default_routing.oauth_beta_marker)).strip()
+    marker = _str_key(raw, "oauth_beta_marker", default_routing.oauth_beta_marker, where).strip()
     if not marker:
         raise ConfigError("[routing] oauth_beta_marker must be a non-empty string")
     throttle_max = _number_key(raw, "throttle_retry_max_seconds", 30.0, where)
@@ -1102,7 +1171,7 @@ def _parse_prices(raw: object) -> PricesConfig:
     if not isinstance(raw, dict):
         raise ConfigError("[prices] must be a table")
     _require_keys(raw, {"table", "override"}, "[prices]")
-    table = str(raw.get("table", "builtin"))
+    table = _str_key(raw, "table", "builtin", "[prices]")
     if not table:
         raise ConfigError('[prices] table must be "builtin" or a file path')
     overrides_raw = raw.get("override", {})

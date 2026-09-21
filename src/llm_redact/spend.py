@@ -14,6 +14,15 @@ Load-bearing constraints:
 - Budget periods are UTC calendar months anchored at ``reset_day`` (1..28, so
   every month has the day); the ledger rolls over LAZILY on the first call past
   the boundary and re-reads the new period's rows from the store.
+- A store READ fault (at open or at rollover) starts the period from zero in
+  memory rather than refusing requests — but it is RETRIED, at most once per
+  ``_LOAD_RETRY_SECONDS``, until the store answers: without the retry a
+  transient lock at startup would un-exhaust an over-budget upstream for the
+  rest of the month. Rows whose store write failed are kept aside
+  (``_unpersisted``) and folded back in on a successful reload, so nothing
+  recorded while the store was wedged is lost when it recovers. The retry is
+  rate-limited because a locked sqlite read blocks for its busy_timeout and
+  ``exhausted`` sits on the request path.
 - Passthrough upstreams have no budget (their usage is the subscription's to
   meter) and zero-cost upstreams ignore theirs: ``exhausted`` is False for both
   and for any name the ledger does not know.
@@ -30,7 +39,7 @@ import sqlite3
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -42,6 +51,10 @@ _TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # The memory store is in-process only (documented); bound it like the recent
 # ring so a long-lived proxy on the memory vault cannot grow without limit.
 _MEMORY_ROWS = 100_000
+# Minimum spacing between reload attempts after a store read fault: a locked
+# sqlite read blocks for its busy_timeout (5 s), and the ledger is consulted on
+# every routed request, so an unbounded retry would stall the hot path.
+_LOAD_RETRY_SECONDS = 60.0
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS spend (
@@ -335,7 +348,9 @@ class BudgetLedger:
 
     The in-memory totals are the source of truth for ``exhausted`` (the hot
     path never touches the store); the store is the durable record the
-    ``spend`` CLI reads and the source the ledger reloads from at rollover."""
+    ``spend`` CLI reads and the source the ledger reloads from at rollover —
+    and, after a read fault, on a rate-limited retry until it answers
+    (``loaded`` says whether the totals currently reflect the store)."""
 
     def __init__(
         self,
@@ -349,33 +364,73 @@ class BudgetLedger:
         self._budgets: dict[str, Budget] = dict(budgets)
         self._reset_day = reset_day
         self._clock: Callable[[], datetime] = clock if clock is not None else _utcnow
-        self._period = period_bounds(self._clock(), reset_day)
-        self._totals = self._load()
+        now = _as_utc(self._clock())
+        self._period = period_bounds(now, reset_day)
+        self._totals: dict[str, PeriodTotals] = {}
+        # Rows recorded this period whose store write failed: they exist only
+        # here, so a later reload from the store must add them back.
+        self._unpersisted: dict[str, PeriodTotals] = {}
+        self._loaded = False
+        self._retry_at = now
+        self._reload(now)
 
     @property
     def period(self) -> tuple[datetime, datetime]:
         return self._period
 
-    def _load(self) -> dict[str, PeriodTotals]:
+    @property
+    def loaded(self) -> bool:
+        """Whether the in-memory totals reflect the store for this period
+        (False after a read fault, until a retry succeeds)."""
+        return self._loaded
+
+    def _load(self) -> dict[str, PeriodTotals] | None:
         try:
             return dict(self._store.totals(*self._period))
         except Exception as exc:
-            # Start the period from zero rather than refuse every request: a
-            # loud warning is the right failure for an accounting read fault.
+            # Count the period from zero in memory rather than refuse every
+            # request; the retry (not this warning alone) is what keeps a
+            # transient fault from un-exhausting a budget for the whole period.
             logger.warning(
-                "spend store read failed (%s); starting period %s from zero",
+                "spend store read failed (%s); period %s is counted from zero in memory"
+                " until the store answers (next attempt in %ds)",
                 type(exc).__name__,
                 period_label(self._period[0]),
+                int(_LOAD_RETRY_SECONDS),
             )
-            return {}
+            return None
+
+    def _reload(self, now: datetime) -> None:
+        """Replace the in-memory totals with the store's for the current period
+        (plus the rows the store never accepted); on a read fault keep what is
+        in memory and schedule the next attempt."""
+        loaded = self._load()
+        if loaded is None:
+            self._loaded = False
+            self._retry_at = now + timedelta(seconds=_LOAD_RETRY_SECONDS)
+            return
+        for name, extra in self._unpersisted.items():
+            loaded.setdefault(name, PeriodTotals()).absorb(extra)
+        self._totals = loaded
+        self._loaded = True
 
     def _roll(self) -> None:
         now = _as_utc(self._clock())
         start, end = self._period
-        if start <= now < end:
-            return
-        self._period = period_bounds(now, self._reset_day)
-        self._totals = self._load()
+        if not start <= now < end:
+            self._period = period_bounds(now, self._reset_day)
+            # A new period starts from zero whatever the store says next; the
+            # old period's memory-only rows are its own and are dropped here.
+            self._totals = {}
+            self._unpersisted = {}
+            self._reload(now)
+        elif not self._loaded and now >= self._retry_at:
+            self._reload(now)
+            if self._loaded:
+                logger.info(
+                    "spend store read recovered; period %s totals reloaded",
+                    period_label(self._period[0]),
+                )
 
     def record(
         self, *, upstream: str, model: str, hop: int, usage: Usage, price_table: PriceTable
@@ -399,6 +454,9 @@ class BudgetLedger:
                 "spend store write failed for upstream %s (%s); the row is counted in memory only",
                 upstream,
                 type(exc).__name__,
+            )
+            self._unpersisted.setdefault(upstream, PeriodTotals()).add(
+                hop=hop, usage=usage, usd=usd
             )
         self._totals.setdefault(upstream, PeriodTotals()).add(hop=hop, usage=usage, usd=usd)
         return row

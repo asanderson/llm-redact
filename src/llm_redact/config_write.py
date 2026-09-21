@@ -40,8 +40,12 @@ _HEADER = (
 def _toml_str(value: str) -> str:
     # A JSON string with ensure_ascii=False is a valid TOML basic string:
     # both escape backslash, double quote, and control characters, and TOML
-    # accepts \uXXXX escapes. Pinned by the round-trip tests.
-    return json.dumps(value, ensure_ascii=False)
+    # accepts \uXXXX escapes. The one divergence is DEL: JSON leaves U+007F
+    # raw while TOML forbids it in a basic string, so it is escaped by hand
+    # (a value parsed from the file must emit back as parsable TOML — the
+    # routing sections carry many user strings: globs, header values,
+    # model ids). Pinned by the round-trip tests.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def _toml_value(value: str | int | float | bool) -> str:

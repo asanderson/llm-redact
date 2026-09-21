@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from fnmatch import fnmatchcase
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 # The four wire formats a rule can match. Every other adapter/provider (azure,
 # vertex, bedrock, cohere, custom:*) keeps the legacy one-upstream-per-provider
@@ -57,6 +58,10 @@ CREDENTIAL_HEADERS = frozenset({"authorization", "x-api-key"})
 # Gemini's header credential joins the drop set for none/env upstreams: the
 # client's key must never reach an upstream the proxy authenticates itself.
 _INBOUND_CREDENTIAL_HEADERS = CREDENTIAL_HEADERS | {"x-goog-api-key"}
+# Gemini clients may also authenticate with `?key=` (CLAUDE.md: the query
+# passes through the proxy). The same I-3 rule applies to that form: the
+# parameter is dropped from the URL sent to a none/env upstream.
+_CREDENTIAL_QUERY_PARAMS = frozenset({"key"})
 
 UPSTREAM_HEADER = "x-llm-redact-upstream"
 HOPS_HEADER = "x-llm-redact-hops"
@@ -461,16 +466,20 @@ def outbound_headers(
     passthrough: identical to `inbound` (the caller already dropped
     hop-by-hop headers). none/env: the client's credential headers are
     dropped, the OAuth capability is removed from anthropic-beta (the header
-    is dropped when nothing remains), `extra_headers` are appended, and an
-    env upstream gains its provider's credential header from `environ` —
-    raising MissingCredential (naming the VAR only) when it is unset.
+    is dropped when nothing remains), `extra_headers` are appended — each one
+    REPLACING an inbound header of the same name (two X-Title values would be
+    ambiguous upstream; the configured one is the operator's intent, like the
+    credential header) — and an env upstream gains its provider's credential
+    header from `environ`, raising MissingCredential (naming the VAR only)
+    when it is unset.
     """
     if upstream.is_passthrough:
         return list(inbound)
+    overridden = {name for name, _ in upstream.extra_headers}
     out: list[tuple[str, str]] = []
     for name, value in inbound:
         lowered = name.lower()
-        if lowered in _INBOUND_CREDENTIAL_HEADERS:
+        if lowered in _INBOUND_CREDENTIAL_HEADERS or lowered in overridden:
             continue
         if lowered == "anthropic-beta":
             stripped = strip_beta_marker(value, oauth_marker)
@@ -484,18 +493,43 @@ def outbound_headers(
     return out
 
 
+def _strip_credential_query(query: str) -> str:
+    # Parameter names compare after percent-decoding; everything else in the
+    # query (order, encoding, repeated params) is kept byte-for-byte.
+    kept = [
+        part
+        for part in query.split("&")
+        if part and unquote(part.split("=", 1)[0]) not in _CREDENTIAL_QUERY_PARAMS
+    ]
+    return "&".join(kept)
+
+
 def upstream_url(upstream: UpstreamConfig, path: str, query: str) -> str:
-    """base_url + path (+ ?query verbatim). An openai-protocol base ending in
-    /v1 absorbs the request path's leading /v1 so
-    https://api.openai.com/v1 + /v1/chat/completions does not double it."""
+    """base_url + path (+ ?query).
+
+    An openai-protocol base_url is the value a client would put in
+    OPENAI_BASE_URL, so whenever it already carries a path (`/v1`,
+    `/api/v1`, `/openai/v1`, `/v1beta/openai`) the request path's leading
+    `/v1` is absorbed: https://api.openai.com/v1 + /v1/chat/completions ->
+    .../v1/chat/completions, and Google's OpenAI-compatible
+    .../v1beta/openai + /v1/chat/completions -> .../v1beta/openai/chat/completions
+    (the same re-anchoring providers/custom.py does for Groq/OpenRouter
+    bases). A host-only base (http://127.0.0.1:11434) takes the full path.
+    Other protocols never fold (an anthropic base ending in /v1 stays as
+    written). The query is appended verbatim for a passthrough upstream; for
+    none/env upstreams the `key` credential parameter is dropped (I-3, the
+    query twin of the x-goog-api-key header) and the rest stays byte-exact.
+    """
     base = upstream.base_url.rstrip("/")
     if (
         upstream.protocol == "openai"
-        and base.endswith("/v1")
+        and urlsplit(base).path.strip("/")
         and (path == "/v1" or path.startswith("/v1/"))
     ):
         path = path[len("/v1") :]
     url = base + path
+    if query and not upstream.is_passthrough:
+        query = _strip_credential_query(query)
     if query:
         url = f"{url}?{query}"
     return url
@@ -510,6 +544,12 @@ def apply_body_rewrites(
     only, top-level granularity) and OpenAI `stream_options.include_usage`
     (stream = true) apply only on none/env upstreams — a passthrough body is
     never touched (R-12/R-24). The input is never mutated.
+
+    `include_usage` is a CHAT COMPLETIONS option (R-24's `prompt_tokens`
+    final-chunk rationale): the body must carry `messages`. A Responses body
+    (`input`, the Codex CLI shape) already reports usage in
+    `response.completed` and OpenAI rejects unknown `stream_options` keys
+    with a 400 that no chain would recover from, so it is left alone.
     """
     out: dict[str, Any] | None = None
     if rule.model_rewrite is not None and body.get("model") != rule.model_rewrite:
@@ -522,7 +562,7 @@ def apply_body_rewrites(
             if out is None:
                 out = dict(body)
             out[key] = value
-    if upstream.protocol == "openai" and body.get("stream") is True:
+    if upstream.protocol == "openai" and body.get("stream") is True and "messages" in body:
         options = body.get("stream_options")
         if not isinstance(options, dict):
             if out is None:
@@ -536,23 +576,26 @@ def apply_body_rewrites(
 
 
 def restore_model(payload: Any, original_model: str) -> bool:
-    """R-9, in place on a decoded payload: top-level `model` and
-    `message.model` (Anthropic message_start) become `original_model`.
-    Returns whether anything changed. Non-dict payloads are left alone."""
+    """R-9, in place on a decoded payload: top-level `model`, `message.model`
+    (Anthropic message_start) and `response.model` (OpenAI Responses
+    response.created/completed events — the Codex CLI validates it) become
+    `original_model`. Returns whether anything changed. Non-dict payloads
+    are left alone."""
     if not isinstance(payload, dict):
         return False
     changed = False
     if isinstance(payload.get("model"), str) and payload["model"] != original_model:
         payload["model"] = original_model
         changed = True
-    message = payload.get("message")
-    if (
-        isinstance(message, dict)
-        and isinstance(message.get("model"), str)
-        and message["model"] != original_model
-    ):
-        message["model"] = original_model
-        changed = True
+    for envelope in ("message", "response"):
+        inner = payload.get(envelope)
+        if (
+            isinstance(inner, dict)
+            and isinstance(inner.get("model"), str)
+            and inner["model"] != original_model
+        ):
+            inner["model"] = original_model
+            changed = True
     return changed
 
 

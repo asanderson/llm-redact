@@ -9,6 +9,7 @@ import dataclasses
 import importlib.util
 import json
 import logging
+import re
 import sys
 import tomllib
 from collections.abc import Callable
@@ -139,9 +140,11 @@ model_rewrite = "muse-64k"
 id       = "max-lane"
 match    = {{ protocol = "anthropic", model = "claude-*", auth = "oauth" }}
 upstream = "anthropic_oauth"
-on_status = {{ plan_limit_429 = ["anthropic_key", "ollama"], 529 = ["anthropic_key"], \
-               throttle_429 = "retry-same" }}
 reissue_policy = "stateless-only"
+[routing.rule.on_status]
+plan_limit_429 = ["anthropic_key", "ollama"]
+529 = ["anthropic_key"]
+throttle_429 = "retry-same"
 
 [[routing.rule]]
 id       = "anthropic-key-lane"
@@ -154,8 +157,9 @@ on_status = {{ 429 = ["ollama"], 5xx = ["ollama"] }}
 id       = "openai-lane"
 match    = {{ protocol = "openai", model = "gpt-*" }}
 upstream = "openai_key"
-on_status = {{ 429 = ["gemini_openai_compat", "ollama_openai"], \
-               5xx = ["gemini_openai_compat", "ollama_openai"] }}
+[routing.rule.on_status]
+429 = ["gemini_openai_compat", "ollama_openai"]
+5xx = ["gemini_openai_compat", "ollama_openai"]
 
 [[routing.rule]]
 id       = "gemini-lane"
@@ -693,8 +697,11 @@ async def test_walkthrough_7b_budget_chain_continues(harness_factory: Any) -> No
             "chain_to_second_passthrough",
             "member 'anthropic_oauth2' is a passthrough upstream",
         ),
-        ("inject_note_on_passthrough", "inject_system_note"),
-        ("budget_on_passthrough", "monthly_budget_usd"),
+        (
+            "inject_note_on_passthrough",
+            "inject_system_note = true is not allowed on a passthrough upstream",
+        ),
+        ("budget_on_passthrough", r"monthly_budget_\* is not allowed on a passthrough upstream"),
     ],
 )
 def test_walkthrough_8_invariant_violations_fail_check(
@@ -722,16 +729,9 @@ def test_walkthrough_8_invariant_violations_fail_check(
     with pytest.raises(ConfigError, match=expected):
         parse_config(raw, "<walkthrough>")
     # serve --check runs the same parse and fails closed.
-    from llm_redact.config_write import emit_config_toml
-
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(emit_config_toml(spec_config(tmp_path / "vault.db")))
-    text = config_file.read_text()
+    text = spec_toml(tmp_path / "vault.db")
     if mutation == "inject_note_on_passthrough":
-        text = text.replace(
-            "[upstreams.anthropic_oauth]\n",
-            "[upstreams.anthropic_oauth]\ninject_system_note = true\n",
-        )
+        text = text.replace("inject_system_note = false", "inject_system_note = true")
     elif mutation == "budget_on_passthrough":
         text = text.replace(
             "[upstreams.anthropic_oauth]\n",
@@ -742,12 +742,13 @@ def test_walkthrough_8_invariant_violations_fail_check(
             "[upstreams.anthropic_oauth]\n",
             '[upstreams.anthropic_oauth2]\nprotocol = "anthropic"\nbase_url = "http://oauth2"\n'
             'credential = "passthrough"\n\n[upstreams.anthropic_oauth]\n',
-        ).replace('"529" = ["anthropic_key"]', '"529" = ["anthropic_oauth2"]')
+        ).replace('529 = ["anthropic_key"]', '529 = ["anthropic_oauth2"]')
+    config_file = tmp_path / "config.toml"
     config_file.write_text(text)
     with pytest.raises(SystemExit) as excinfo:
         main(["serve", "--check", "--config", str(config_file)])
     assert excinfo.value.code == 1
-    assert expected in capsys.readouterr().err
+    assert re.search(expected, capsys.readouterr().err)
 
 
 # ---------------------------------------------------------------------------

@@ -79,6 +79,22 @@ def unpriced_models(routing: RoutingConfig, table: PriceTable) -> list[str]:
     return [model for model in configured_models(routing) if table.lookup(model) is None]
 
 
+def referenced_upstreams(routing: RoutingConfig) -> list[UpstreamConfig]:
+    """The upstreams traffic can actually reach: every explicit `[upstreams.*]`
+    entry plus any legacy auto-registered one that a rule, chain, budget
+    chain or default names. An unreferenced legacy provider (the built-in
+    defaults register four) is not a routing destination, so doctor does
+    not probe it."""
+    named: set[str] = set(dict(routing.default_upstreams).values())
+    for rule in routing.rules:
+        named.add(rule.upstream)
+        named.update(rule.on_budget_exhausted)
+        for _key, chain in rule.on_status:
+            if isinstance(chain, tuple):
+                named.update(chain)
+    return [u for u in routing.upstreams if not u.legacy or u.name in named]
+
+
 def budgets_for(routing: RoutingConfig) -> dict[str, Budget]:
     """Per-upstream Budget rows in the ledger's shape (passthrough upstreams
     carry no budget; zero-cost ones ignore theirs)."""

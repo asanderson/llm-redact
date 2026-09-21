@@ -565,7 +565,7 @@ def _check_routing(report: _Report, config: Config, offline: bool) -> None:
     cannot price, the memory-vault caveat (I-7), and — unless --offline —
     an unauthenticated reachability probe of every upstream base URL."""
     from llm_redact.config import resolve_credentials
-    from llm_redact.routes_cli import build_price_table, unpriced_models
+    from llm_redact.routes_cli import build_price_table, referenced_upstreams, unpriced_models
 
     routing = config.routing
     if not routing.enabled:
@@ -621,7 +621,7 @@ def _check_routing(report: _Report, config: Config, offline: bool) -> None:
     if offline:
         report.line("PASS", "routing", "upstream reachability probes skipped (--offline)")
         return
-    for upstream in routing.upstreams:
+    for upstream in referenced_upstreams(routing):
         shown = _display_url(upstream.base_url)
         failure = _probe_upstream(upstream.base_url)
         if failure is None:

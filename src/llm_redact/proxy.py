@@ -50,11 +50,13 @@ from llm_redact.config import (
     RDBMS_BACKENDS,
     Config,
     ConfigError,
+    VaultConfig,
     apply_env_overrides,
     default_config_path,
     load_config,
     parse_config,
     resolve_config_path,
+    resolve_credentials,
 )
 from llm_redact.config_write import emit_config_toml, write_config_atomic
 from llm_redact.detection.engine import (
@@ -72,15 +74,41 @@ from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
 from llm_redact.placeholders import PLACEHOLDER_RE
 from llm_redact.plugin_api import Telemetry
+from llm_redact.pricing import PriceTable, StreamUsageTracker, Usage, parse_usage
 from llm_redact.providers import ALL_ADAPTERS, ProviderAdapter, RouteKind
 from llm_redact.providers.custom import CUSTOM_ROUTE_PREFIX, build_custom_adapters, custom_prefix
 from llm_redact.realtime import ALL_WS_ADAPTERS, WsAdapter, websockets_available, ws_handle
 from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
-from llm_redact.sse import SSEParser, serialize
+from llm_redact.routing import (
+    HOPS_HEADER,
+    REISSUE_HEADER,
+    RETRY_SAME,
+    UPSTREAM_HEADER,
+    MissingCredential,
+    PricesConfig,
+    RouteRule,
+    RoutingConfig,
+    RoutingState,
+    RuleMatch,
+    UpstreamConfig,
+    apply_body_rewrites,
+    classify_auth,
+    is_stateful_request,
+    literal_models,
+    outbound_headers,
+    parse_retry_after,
+    request_protocol,
+    restore_model,
+    select_rule,
+    status_key,
+    upstream_url,
+)
+from llm_redact.spend import Budget, BudgetLedger, InMemorySpendStore, SpendStore, SqliteSpendStore
+from llm_redact.sse import SSEEvent, SSEParser, serialize
 from llm_redact.users import UsersError, UsersStore, send_verification_email
-from llm_redact.vault import Vault, VaultManager
+from llm_redact.vault import Vault, VaultManager, default_vault_path
 
 # Local endpoints under this prefix are answered by the proxy itself and are
 # never forwarded upstream (see the first statement of handle()).
@@ -174,6 +202,42 @@ def _resolve_license_info(config: Config) -> ResolvedLicense:
     return resolved
 
 
+def _build_price_table(prices: PricesConfig) -> PriceTable:
+    """The effective price table: builtin or `[prices] table = PATH`, with
+    `[prices.override."id"]` entries winning. A bad file is a ConfigError
+    (startup / serve --check / reload all report it the same way)."""
+    base = (
+        PriceTable.builtin()
+        if prices.table == "builtin"
+        else PriceTable.from_file(Path(prices.table).expanduser())
+    )
+    return base.with_overrides(dict(prices.overrides))
+
+
+def _build_spend_store(vault: VaultConfig) -> SpendStore:
+    """Where spend rows live (R-25): a `spend` table in the sqlite vault DB
+    file (own connection), in-process memory for the memory backend AND
+    for RDBMS vaults (the server-side schema is the pro package's; spend is
+    a local operator ledger, documented as in-process there)."""
+    if vault.backend == "sqlite":
+        path = Path(vault.path).expanduser() if vault.path else default_vault_path()
+        return SqliteSpendStore(path)
+    return InMemorySpendStore()
+
+
+def _budgets_for(routing: RoutingConfig) -> dict[str, Budget]:
+    # Every upstream gets an entry (budget-less ones included) so the ledger
+    # snapshot — and /status — always lists every configured upstream.
+    return {
+        upstream.name: Budget(
+            usd=upstream.monthly_budget_usd,
+            tokens=upstream.monthly_budget_tokens,
+            zero_cost=upstream.zero_cost,
+        )
+        for upstream in routing.upstreams
+    }
+
+
 class ProxyState:
     def __init__(
         self,
@@ -184,6 +248,12 @@ class ProxyState:
         self.config = config
         self.config_path = config_path
         self.started_at = time.time()
+        # Routing credentials (R-3) resolve HERE, before anything is opened:
+        # an `env:VAR` upstream whose variable is unset fails startup (and
+        # serve --check) with a ConfigError naming the VAR — never its value.
+        resolve_credentials(config.routing, os.environ)
+        for warning in config.routing.warnings:
+            logger.warning("routing: %s", warning)
         # License resolution is informational only (the FOSS core has no
         # tier gates): the tier is surfaced and handed to the pro plugin's
         # factories. What fails closed is a config that requests a
@@ -293,6 +363,26 @@ class ProxyState:
         # enforcement, no new file on disk.
         self.users_store: UsersStore | None = registry.build_users_store(
             config.users, self.license.tier
+        )
+        # Routing layer (docs/routing.md). The unrouted path never touches
+        # these; the routed path does one select_rule plus dict lookups.
+        # Cooldown/counter state is in-process and survives apply_config
+        # (prune_to drops names a reload removed).
+        self.routing_state = RoutingState()
+        self.routing_upstreams: dict[str, UpstreamConfig] = {
+            upstream.name: upstream for upstream in config.routing.upstreams
+        }
+        self.price_table: PriceTable = _build_price_table(config.prices)
+        # The durable spend table is opened in the vault file only when
+        # routing is live (a legacy sqlite vault is never touched); a reload
+        # that enables routing upgrades the store then (apply_config).
+        self.spend_store: SpendStore = (
+            _build_spend_store(config.vault) if config.routing.enabled else InMemorySpendStore()
+        )
+        self.budget_ledger = BudgetLedger(
+            self.spend_store,
+            _budgets_for(config.routing),
+            reset_day=config.routing.budget_reset_day,
         )
 
     def resolve_user(self, presented_key: str | None) -> str | None:
@@ -426,6 +516,35 @@ class ProxyState:
         # Re-resolve the license BEFORE anything is built or swapped:
         # [license] itself is hot, so renewals apply without a restart.
         license_resolved = _resolve_license_info(effective)
+        # Routing credentials likewise: a reload naming an `env:VAR` that is
+        # missing raises here (ConfigError, VAR name only) and the caller
+        # keeps the running config — nothing below has been swapped yet.
+        resolve_credentials(effective.routing, os.environ)
+        price_table = (
+            self.price_table
+            if effective.prices == self.config.prices
+            else _build_price_table(effective.prices)
+        )
+        # Spend storage follows the (restart-only) vault: enabling routing on
+        # a sqlite vault opens the durable table now rather than at restart.
+        spend_store = self.spend_store
+        if (
+            effective.routing.enabled
+            and effective.vault.backend == "sqlite"
+            and isinstance(spend_store, InMemorySpendStore)
+        ):
+            spend_store = _build_spend_store(effective.vault)
+        budgets = _budgets_for(effective.routing)
+        if (
+            spend_store is not self.spend_store
+            or effective.routing.budget_reset_day != self.config.routing.budget_reset_day
+        ):
+            budget_ledger = BudgetLedger(
+                spend_store, budgets, reset_day=effective.routing.budget_reset_day
+            )
+        else:
+            budget_ledger = self.budget_ledger
+            budget_ledger.rebudget(budgets)
 
         # Build everything first, then swap in one block: in-flight requests
         # keep their old object references.
@@ -465,6 +584,13 @@ class ProxyState:
         self._static_context = RequestContext(
             effective.vault.session, self.vault, redactor, rehydrator
         )
+        self.routing_upstreams = {u.name: u for u in effective.routing.upstreams}
+        self.price_table = price_table
+        self.spend_store = spend_store
+        self.budget_ledger = budget_ledger
+        self.routing_state.prune_to(effective.routing.upstream_names())
+        for warning in effective.routing.warnings:
+            logger.warning("routing: %s", warning)
         logger.info("config reloaded (%d detection rules)", len(detectors))
         return restart_required
 
@@ -586,6 +712,7 @@ class ProxyState:
         rehydrations: dict[str, int],
         warned: dict[str, int] | None = None,
         audit_token: object | None = None,
+        route: dict[str, Any] | None = None,
     ) -> None:
         """Always update in-memory metrics and the recent buffer; write an
         audit row when enabled (finalizing the write-ahead START row when
@@ -610,6 +737,10 @@ class ProxyState:
             # Attribution is the user NAME only — the key never leaves
             # identity extraction. None on single-user deployments.
             "user": _REQUEST_USER.get(),
+            # Routing decision (docs/routing.md): None when the request took
+            # the legacy path, else rule/upstream/hops/auth/class/reissue.
+            # Audit rows are unchanged (AuditRecord is shared with pro).
+            "route": route,
         }
         self.recent.append(row)
         for queue in list(self.event_subscribers):
@@ -654,6 +785,25 @@ class ProxyState:
             logger.critical(
                 "audit write failed AFTER response (%s %s): %s", method, path, type(exc).__name__
             )
+
+    def finish_route(
+        self, delivery: "RouteDelivery", status: int | None, usage: Usage | None
+    ) -> dict[str, Any]:
+        """Close the books on a routed request: the routed-requests metric,
+        spend attributed to the delivering upstream with its hop number
+        (2xx with a parsable usage block only — passthrough included, in
+        tokens, so `spend` shows subscription usage), and the `route` row
+        record_request stores."""
+        self.metrics.routed[(delivery.upstream.name, delivery.rule_id or "-")] += 1
+        if usage is not None and status is not None and 200 <= status < 300:
+            self.budget_ledger.record(
+                upstream=delivery.upstream.name,
+                model=delivery.sent_model or "unknown",
+                hop=delivery.hops,
+                usage=usage,
+                price_table=self.price_table,
+            )
+        return delivery.as_row()
 
     def route(
         self, method: str, path: str, headers: "Mapping[str, str] | None" = None
@@ -787,6 +937,166 @@ class RequestMeta(NamedTuple):
     audit_token: object | None = None
 
 
+# The Gemini model id lives in the request PATH (decision 15b):
+# /v1beta/models/{model}:generateContent. Group 2 is the id, matched on the
+# raw (still percent-encoded) path so a rewrite leaves the rest byte-exact.
+_GEMINI_MODEL_SEGMENT = re.compile(r"^(/(?:v1|v1beta)/(?:models|tunedModels)/)([^/:]+)(:[A-Za-z]+)$")
+
+
+def gemini_path_model(path: str) -> str | None:
+    """The model id between `/models/` and the `:verb` of a Gemini path, or
+    None when the path has no such segment."""
+    match = _GEMINI_MODEL_SEGMENT.match(path)
+    return match.group(2) if match is not None else None
+
+
+def _rewrite_gemini_path(raw_path: str, model: str) -> str:
+    match = _GEMINI_MODEL_SEGMENT.match(raw_path)
+    if match is None:
+        return raw_path
+    return match.group(1) + urllib.parse.quote(model, safe="") + match.group(3)
+
+
+def _restore_model_payload(payload: Any, original_model: str, protocol: str) -> bool:
+    """R-9 on a decoded response: the routing helper's `model` /
+    `message.model` / `response.model` fields, plus Gemini's `modelVersion`,
+    on a dict or on each element of Gemini's buffered array form. In place;
+    returns whether anything changed."""
+    if isinstance(payload, list):
+        changed = False
+        for item in payload:
+            changed = _restore_model_payload(item, original_model, protocol) or changed
+        return changed
+    changed = restore_model(payload, original_model)
+    if (
+        protocol == "gemini"
+        and isinstance(payload, dict)
+        and isinstance(payload.get("modelVersion"), str)
+        and payload["modelVersion"] != original_model
+    ):
+        payload["modelVersion"] = original_model
+        changed = True
+    return changed
+
+
+def _restore_model_text(text: str, original_model: str, protocol: str) -> str:
+    """`_restore_model_payload` over one serialized SSE data payload or NDJSON
+    line; unparsable or unchanged text comes back byte-identical."""
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return text
+    if not _restore_model_payload(payload, original_model, protocol):
+        return text
+    return json.dumps(payload, ensure_ascii=False)
+
+
+class RouteDelivery:
+    """The routing outcome of one request, threaded into the delivery branch
+    and its finalizer: which rule/upstream/hop produced the response, the
+    debug/reissue headers to add, the model id to restore, and the usage
+    tracker the budget ledger reads at the end (docs/routing.md)."""
+
+    __slots__ = (
+        "rule_id",
+        "upstream",
+        "hops",
+        "auth",
+        "status_class",
+        "reissue",
+        "protocol",
+        "original_model",
+        "sent_model",
+        "headers",
+        "tracker",
+        "method",
+        "path",
+    )
+
+    def __init__(
+        self,
+        *,
+        rule_id: str | None,
+        upstream: UpstreamConfig,
+        hops: int,
+        auth: str,
+        status_class: str,
+        reissue: str,
+        protocol: str,
+        original_model: str | None,
+        sent_model: str | None,
+        headers: dict[str, str],
+        method: str,
+        path: str,
+    ) -> None:
+        self.rule_id = rule_id
+        self.upstream = upstream
+        self.hops = hops
+        self.auth = auth
+        self.status_class = status_class
+        self.reissue = reissue
+        self.protocol = protocol
+        # Set only when the rule rewrote the model: the id the client sent
+        # (restored on the way back) vs the id the upstream saw (priced).
+        self.original_model = original_model
+        self.sent_model = sent_model
+        self.headers = headers
+        self.tracker = StreamUsageTracker(protocol)
+        self.method = method
+        self.path = path
+
+    def as_row(self) -> dict[str, Any]:
+        return {
+            "rule": self.rule_id,
+            "upstream": self.upstream.name,
+            "hops": self.hops,
+            "auth": self.auth,
+            "class": self.status_class,
+            "reissue": self.reissue,
+        }
+
+    def observe_event(self, event: SSEEvent) -> SSEEvent:
+        """Per delivered SSE event, after the adapter's rehydration: feed the
+        usage tracker and restore the original model id (R-9)."""
+        if event.data:
+            self.tracker.feed_sse_data(event.data)
+            if self.original_model is not None:
+                event.data = _restore_model_text(event.data, self.original_model, self.protocol)
+        return event
+
+    def observe_line(self, line: bytes) -> bytes:
+        """The NDJSON twin of observe_event (one line, without its newline)."""
+        self.tracker.feed_ndjson_line(line)
+        if self.original_model is None:
+            return line
+        try:
+            text = line.decode("utf-8")
+        except UnicodeDecodeError:
+            return line
+        restored = _restore_model_text(text, self.original_model, self.protocol)
+        return line if restored is text else restored.encode("utf-8")
+
+    def stream_failed(self, exc: httpx.TransportError) -> None:
+        """A fault AFTER the first byte reached the client: propagated as-is
+        (never re-issued — R-17), classified stream_error. Type only."""
+        self.status_class = "stream_error"
+        logger.warning(
+            "%s %s stream failed after first byte (%s)%s",
+            self.method,
+            self.path,
+            type(exc).__name__,
+            _route_log_suffix(self.as_row()),
+        )
+
+
+def _route_log_suffix(row: dict[str, Any]) -> str:
+    """The R-29 log fields for a routed request (unrouted lines never carry them)."""
+    return (
+        f" rule={row['rule'] or '-'} upstream={row['upstream'] or '-'} hops={row['hops']}"
+        f" auth={row['auth']} class={row['class']} reissue={row['reissue']}"
+    )
+
+
 async def _stream_rehydrated(
     upstream: httpx.Response,
     adapter: ProviderAdapter,
@@ -794,6 +1104,7 @@ async def _stream_rehydrated(
     ctx: RequestContext,
     *,
     request_meta: RequestMeta,
+    route: RouteDelivery | None = None,
 ) -> AsyncIterator[bytes]:
     method, path, started, detections, warned, audit_token = request_meta
     parser = SSEParser()
@@ -808,14 +1119,22 @@ async def _stream_rehydrated(
                         state.record_response_id(response_id, ctx.session_id)
                         response_id_seen = True
                 for out in adapter.rehydrate_event(event, pool):
+                    if route is not None:
+                        out = route.observe_event(out)
                     yield serialize(out)
         for event in parser.close():
             for out in adapter.rehydrate_event(event, pool):
+                if route is not None:
+                    out = route.observe_event(out)
                 yield serialize(out)
         # Anything still held back at stream end is emitted as raw text of a
         # final comment-free flush; adapters normally leave nothing here.
         for _key, text in pool.flush_all().items():
             logger.warning("unflushed stream leftover discarded (%d chars)", len(text))
+    except httpx.TransportError as exc:
+        if route is not None:
+            route.stream_failed(exc)
+        raise
     finally:
         with suppress(Exception):
             # A stream that errored mid-body can make aclose() itself raise;
@@ -836,6 +1155,11 @@ async def _stream_rehydrated(
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
+            route=(
+                state.finish_route(route, upstream.status_code, route.tracker.result())
+                if route is not None
+                else None
+            ),
         )
 
 
@@ -904,6 +1228,62 @@ async def _stream_rehydrated_eventstream(
             warned=warned,
             audit_token=audit_token,
         )
+
+
+_SPEND_STATUS_KEYS = (
+    "period",
+    "in_tokens",
+    "out_tokens",
+    "cache_read",
+    "cache_write",
+    "usd",
+    "budget_usd",
+    "budget_tokens",
+    "remaining_usd",
+    "remaining_tokens",
+    "unpriced_rows",
+    "reissue_usd",
+    "reissue_tokens",
+)
+
+
+def _routing_status(state: ProxyState) -> dict[str, Any]:
+    """The /status `routing` block (R-30): per-upstream health, cooldown,
+    counters and spend. Credential MODE only — variable names and values
+    never appear here. `{"enabled": false}` when routing is off."""
+    routing = state.config.routing
+    if not routing.enabled:
+        return {"enabled": False}
+    spend = state.budget_ledger.snapshot()
+    upstreams: dict[str, Any] = {}
+    for upstream in routing.upstreams:
+        snapshot = state.routing_state.snapshot(upstream.name)
+        entry = spend.get(upstream.name, {})
+        exhausted = upstream.has_budget and state.budget_ledger.exhausted(upstream.name)
+        upstreams[upstream.name] = {
+            "protocol": upstream.protocol,
+            "credential": upstream.credential_mode,
+            "cost": upstream.cost,
+            "legacy": upstream.legacy,
+            "state": "budget_exhausted" if exhausted else snapshot["state"],
+            "cooldown_remaining_seconds": snapshot["cooldown_remaining_seconds"],
+            "requests": snapshot["requests"],
+            "reissues_last_hour": snapshot["reissues_last_hour"],
+            "last_error_class": snapshot["last_error_class"],
+            "last_error_at": snapshot["last_error_at"],
+            "spend": {key: entry.get(key) for key in _SPEND_STATUS_KEYS},
+        }
+    return {
+        "enabled": True,
+        "default_upstreams": dict(routing.default_upstreams),
+        "rules": len(routing.rules),
+        "reissues_last_hour": state.routing_state.reissues_last_hour(),
+        "plan_limit_detection": routing.plan_limit_detection,
+        "expose_models": routing.expose_models,
+        "upstreams": upstreams,
+        "unpriced_models": sorted(state.price_table.unknown_models),
+        "warnings": list(routing.warnings),
+    }
 
 
 async def _handle_local(request: Request, state: ProxyState) -> Response:
@@ -1096,6 +1476,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                     "package_installed": pro_package_installed(),
                     "plugins": sorted(loaded_plugins()),
                 },
+                "routing": _routing_status(state),
             }
         )
 
@@ -1187,6 +1568,10 @@ _EDITABLE_KEYS = frozenset(
 _READONLY_KEYS = frozenset(
     {"host", "port", "vault", "audit", "log", "tls", "otel", "users", "email"}
 )
+# Hot-reloadable (SIGHUP / apply_config) but NOT editable in the dashboard:
+# the routing sections are preserved from FILE truth by the editor's merge,
+# and a POST naming one of them is refused (decision 16, docs/routing.md).
+_FILE_PRESERVED_KEYS = frozenset({"upstreams", "routing", "prices"})
 _CONFIG_BODY_LIMIT = 1024 * 1024
 CSRF_HEADER = "x-llm-redact-csrf"
 
@@ -1386,6 +1771,7 @@ async def _stream_rehydrated_ndjson(
     ctx: RequestContext,
     *,
     request_meta: RequestMeta,
+    route: RouteDelivery | None = None,
 ) -> AsyncIterator[bytes]:
     """The NDJSON twin of _stream_rehydrated (Ollama streams).
 
@@ -1399,14 +1785,24 @@ async def _stream_rehydrated_ndjson(
     try:
         async for chunk in upstream.aiter_bytes():
             for line in parser.feed(chunk):
-                yield adapter.rehydrate_ndjson_line(line, pool) + b"\n"
+                out = adapter.rehydrate_ndjson_line(line, pool)
+                if route is not None:
+                    out = route.observe_line(out)
+                yield out + b"\n"
         tail = parser.close()
         if tail:
             # A stream that ended without a final newline: the tail may
             # still be one complete JSON object.
-            yield adapter.rehydrate_ndjson_line(tail, pool)
+            out = adapter.rehydrate_ndjson_line(tail, pool)
+            if route is not None:
+                out = route.observe_line(out)
+            yield out
         for _key, text in pool.flush_all().items():
             logger.warning("unflushed stream leftover discarded (%d chars)", len(text))
+    except httpx.TransportError as exc:
+        if route is not None:
+            route.stream_failed(exc)
+        raise
     finally:
         with suppress(Exception):
             # A stream that errored mid-body can make aclose() itself raise;
@@ -1427,6 +1823,11 @@ async def _stream_rehydrated_ndjson(
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
+            route=(
+                state.finish_route(route, upstream.status_code, route.tracker.result())
+                if route is not None
+                else None
+            ),
         )
 
 
@@ -1651,6 +2052,15 @@ async def _handle_config_post(request: Request, state: ProxyState) -> Response:
             {"error": f"key(s) {readonly_hit} require a restart and cannot be edited here"},
             status_code=400,
         )
+    preserved_hit = sorted(set(edits) & _FILE_PRESERVED_KEYS)
+    if preserved_hit:
+        return JSONResponse(
+            {
+                "error": f"key(s) {preserved_hit} are not editable here: edit the file and"
+                " reload (SIGHUP, after `llm-redact serve --check`)"
+            },
+            status_code=400,
+        )
     unknown = sorted(set(edits) - _EDITABLE_KEYS)
     if unknown:
         return JSONResponse({"error": f"unknown key(s) {unknown}"}, status_code=400)
@@ -1681,7 +2091,11 @@ async def _handle_config_post(request: Request, state: ProxyState) -> Response:
                 {"error": f"the config file at {path} is not valid TOML; fix it manually"},
                 status_code=409,
             )
-    merged = {key: value for key, value in file_raw.items() if key in _READONLY_KEYS}
+    merged = {
+        key: value
+        for key, value in file_raw.items()
+        if key in _READONLY_KEYS or key in _FILE_PRESERVED_KEYS
+    }
     for key in _EDITABLE_KEYS:
         if key in edits:
             merged[key] = edits[key]
@@ -1700,6 +2114,9 @@ async def _handle_config_post(request: Request, state: ProxyState) -> Response:
         # the FOSS core has no tier gates) so a bad [license] value 400s
         # here, before the file write.
         _resolve_license_info(apply_env_overrides(candidate))
+        # The preserved routing sections re-validate with the rest: an
+        # `env:VAR` credential that vanished since startup 400s here too.
+        resolve_credentials(candidate.routing, os.environ)
     except (ValueError, TypeError, re.error, ImportError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -2366,6 +2783,7 @@ def create_app(
                 loop.remove_signal_handler(signal.SIGHUP)
             await state.client.aclose()
             state.vault_manager.close()
+            state.spend_store.close()
             if state.audit is not None:
                 state.audit.close()
             for task in background_tasks:

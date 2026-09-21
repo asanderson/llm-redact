@@ -69,8 +69,9 @@ and tags `vX.Y.Z`.
     upstreams — all refused by `serve --check` and re-asserted at
     runtime.
   - Budgets and pricing: usage parsed from Anthropic, OpenAI-compatible
-    (with `stream_options.include_usage` injected on `env:`/`none`
-    upstreams when absent), Ollama native and Gemini responses; spend
+    (with `stream_options.include_usage` injected into Chat Completions
+    streams on `env:`/`none` upstreams when absent; Responses streams
+    report usage on `response.completed`), Ollama native and Gemini responses; spend
     stored in a `spend` table inside the sqlite vault DB (in-process on
     the memory backend), attributed to the producing upstream with its
     hop number; a vendored `prices.json` (USD per 1M tokens) with

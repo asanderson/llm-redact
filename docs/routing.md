@@ -314,9 +314,10 @@ audit, log, TLS, OTel, users, email) is unchanged.
 4. **Hop loop.** Per hop the outbound headers (`passthrough` → identical
    to inbound; `env:`/`none` → credentials dropped, marker stripped,
    `extra_headers` appended, key injected) and body rewrites
-   (`model_rewrite`, `body_defaults`, and for `openai` streams
-   `stream_options.include_usage = true` when absent — never on
-   passthrough) are computed for the target and the request sent. The
+   (`model_rewrite`, `body_defaults`, and for `openai` Chat Completions
+   streams `stream_options.include_usage = true` when absent — never on
+   passthrough; Responses API streams already report usage on
+   `response.completed`) are computed for the target and the request sent. The
    response status is classified into a **status key**:
    - 2xx → deliver (`class=ok`);
    - 429 from an `anthropic` upstream → `plan_limit_429` when any
@@ -396,8 +397,10 @@ the hop number that reached it: Anthropic `usage` (`input_tokens`,
 `message_delta`), OpenAI-compatible `usage` (`prompt_tokens`,
 `completion_tokens`, `prompt_tokens_details.cached_tokens` — cached tokens
 are subtracted from the input count; on SSE the last chunk carrying
-`usage`, which is why `stream_options.include_usage` is injected on
-`env:`/`none` upstreams when absent — never on passthrough), Ollama native
+`usage`, which is why `stream_options.include_usage` is injected into
+Chat Completions bodies on `env:`/`none` upstreams when absent — never on
+passthrough; Responses API streams carry `usage` on `response.completed`
+and are read from there), Ollama native
 (`prompt_eval_count`/`eval_count` on the `done: true` line), Gemini
 `usageMetadata`. Passthrough upstreams are recorded too — in tokens, so
 `spend` shows subscription usage — they just have no budget.

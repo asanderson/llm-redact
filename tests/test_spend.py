@@ -429,20 +429,27 @@ def test_ledger_remaining_never_negative() -> None:
 
 
 class _FaultyStore:
-    """A store whose writes (and optionally reads) raise, like a wedged disk."""
+    """A real (memory) store behind switchable read / write faults, like a
+    wedged or locked disk that later recovers. Counts every attempt."""
 
-    def __init__(self, *, read_fails: bool = False) -> None:
+    def __init__(self, *, read_fails: bool = False, write_fails: bool = False) -> None:
         self.read_fails = read_fails
-        self.attempts = 0
+        self.write_fails = write_fails
+        self.inner = InMemorySpendStore()
+        self.reads = 0
+        self.writes = 0
 
     def record(self, row: SpendRow) -> None:
-        self.attempts += 1
-        raise OSError("disk full at /var/lib/secret-path")
+        self.writes += 1
+        if self.write_fails:
+            raise OSError("disk full at /var/lib/secret-path")
+        self.inner.record(row)
 
     def totals(self, start: datetime, end: datetime) -> dict[str, PeriodTotals]:
+        self.reads += 1
         if self.read_fails:
             raise sqlite3.OperationalError("database is locked")
-        return {}
+        return self.inner.totals(start, end)
 
     def close(self) -> None:
         return None
@@ -451,16 +458,17 @@ class _FaultyStore:
 def test_ledger_record_swallows_store_faults_and_keeps_counting(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    store = _FaultyStore()
+    store = _FaultyStore(write_fails=True)
     ledger, _ = _ledger({"anthropic_key": Budget(usd=1.0)}, store)
     with caplog.at_level(logging.WARNING, logger="llm_redact"):
         row = _spend(ledger)
         _spend(ledger)
     assert row.usd == pytest.approx(0.7)
-    assert store.attempts == 2
+    assert store.writes == 2
     # In-memory totals still advance, so enforcement works without the store.
     assert ledger.totals("anthropic_key").rows == 2
     assert ledger.exhausted("anthropic_key")
+    assert ledger.loaded  # the READ side was fine; only writes are lost
     # Logged by exception TYPE only — the message could carry paths or values.
     assert "OSError" in caplog.text
     assert "secret-path" not in caplog.text
@@ -471,8 +479,97 @@ def test_ledger_read_fault_at_open_starts_from_zero(caplog: pytest.LogCaptureFix
         ledger, _ = _ledger({"anthropic_key": Budget(usd=1.0)}, _FaultyStore(read_fails=True))
     assert "OperationalError" in caplog.text
     assert "database is locked" not in caplog.text
+    assert not ledger.loaded
     assert not ledger.exhausted("anthropic_key")
     assert ledger.totals("anthropic_key") == PeriodTotals()
+
+
+def test_ledger_read_fault_is_retried_until_the_store_answers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A previous run already spent $0.50 this period (persisted); at this open
+    # the file is locked for reads AND writes (a VACUUM elsewhere, say).
+    store = _FaultyStore(read_fails=True, write_fails=True)
+    store.inner.record(_row(_dt(2026, 9, 10), "anthropic_key", usd=0.5))
+    with caplog.at_level(logging.INFO, logger="llm_redact"):
+        ledger, clock = _ledger({"anthropic_key": Budget(usd=1.0)}, store)
+        assert store.reads == 1 and not ledger.loaded
+        # Counting from zero: this $0.70 row (its write fails too) is all the
+        # ledger knows, so a truly exhausted budget (1.20 >= 1.00) reads as open.
+        _spend(ledger)
+        assert ledger.totals("anthropic_key").usd == pytest.approx(0.7)
+        assert not ledger.exhausted("anthropic_key")
+        # Retries are rate-limited: within the window the store is not re-read
+        # (a locked sqlite read blocks for busy_timeout on the request path).
+        clock.now = SEPT + timedelta(seconds=30)
+        assert not ledger.exhausted("anthropic_key")
+        clock.now = SEPT + timedelta(seconds=59)
+        ledger.totals("anthropic_key")
+        assert store.reads == 1
+        # The store recovers; the next call past the window reloads: the
+        # persisted $0.50 plus the memory-only $0.70 row the store never took.
+        store.read_fails = store.write_fails = False
+        clock.now = SEPT + timedelta(seconds=60)
+        assert ledger.exhausted("anthropic_key")
+        assert store.reads == 2 and ledger.loaded
+        totals = ledger.totals("anthropic_key")
+        assert (totals.rows, totals.usd) == (2, pytest.approx(1.2))
+        # Once loaded there are no further reads, and new rows are not double
+        # counted (persisted AND in memory once each).
+        clock.now = SEPT + timedelta(seconds=200)
+        _spend(ledger)
+        assert store.reads == 2
+        assert ledger.totals("anthropic_key").rows == 3
+        assert ledger.totals("anthropic_key").usd == pytest.approx(1.9)
+        assert store.inner.totals(*ledger.period)["anthropic_key"].rows == 2
+    assert "spend store read recovered" in caplog.text
+    assert "database is locked" not in caplog.text
+
+
+def test_ledger_read_fault_retry_that_fails_again_keeps_the_memory_totals(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _FaultyStore(read_fails=True)
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        ledger, clock = _ledger({"anthropic_key": Budget(usd=1.0)}, store)
+        _spend(ledger)
+        _spend(ledger)
+        assert ledger.exhausted("anthropic_key")
+        clock.now = SEPT + timedelta(seconds=61)
+        assert ledger.exhausted("anthropic_key")  # a failed retry never resets to zero
+        assert store.reads == 2 and not ledger.loaded
+        assert ledger.totals("anthropic_key").rows == 2
+        # ... and the next attempt waits for the window again.
+        clock.now = SEPT + timedelta(seconds=90)
+        ledger.snapshot()
+        assert store.reads == 2
+        clock.now = SEPT + timedelta(seconds=121)
+        ledger.snapshot()
+        assert store.reads == 3
+    assert caplog.text.count("spend store read failed") == 3
+    assert "recovered" not in caplog.text
+
+
+def test_ledger_rollover_read_fault_starts_the_new_period_from_zero() -> None:
+    store = _FaultyStore(write_fails=True)
+    ledger, clock = _ledger({"anthropic_key": Budget(usd=1.0)}, store)
+    _spend(ledger)
+    _spend(ledger)  # September: exhausted, both rows memory-only
+    assert ledger.exhausted("anthropic_key") and ledger.loaded
+    store.read_fails = True
+    clock.now = _dt(2026, 10, 3)
+    # October starts from zero even though the store cannot be read ...
+    assert not ledger.exhausted("anthropic_key")
+    assert ledger.totals("anthropic_key") == PeriodTotals()
+    assert not ledger.loaded
+    # ... and September's memory-only rows are September's: when the store
+    # answers again (holding one persisted October row) they do not leak in.
+    store.inner.record(_row(_dt(2026, 10, 1), "anthropic_key", usd=0.25))
+    store.read_fails = False
+    clock.now = _dt(2026, 10, 3) + timedelta(seconds=60)
+    totals = ledger.totals("anthropic_key")
+    assert ledger.loaded
+    assert (totals.rows, totals.usd) == (1, pytest.approx(0.25))
 
 
 def test_ledger_reloads_persisted_totals_from_sqlite(tmp_path: Path) -> None:

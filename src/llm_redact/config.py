@@ -987,7 +987,7 @@ def _parse_rule(
             # R-8: "never" re-issues nothing after a failed hop, so a chain
             # (unlike retry-same, which stays on the same upstream) is dead.
             warnings.append(
-                f"{where} on_status {key} never applies: reissue_policy = \"never\""
+                f'{where} on_status {key} never applies: reissue_policy = "never"'
                 " forbids re-issuing to another upstream"
             )
         on_status.append((key, chain))

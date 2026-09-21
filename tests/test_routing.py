@@ -518,7 +518,10 @@ def test_upstream_url_folds_v1_for_openai_when_base_has_a_path() -> None:
         ),
         ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"),
         ("https://api.groq.com/openai/v1/", "https://api.groq.com/openai/v1/chat/completions"),
-        ("http://host.docker.internal:11434/v1", "http://host.docker.internal:11434/v1/chat/completions"),
+        (
+            "http://host.docker.internal:11434/v1",
+            "http://host.docker.internal:11434/v1/chat/completions",
+        ),
     ]:
         upstream = UpstreamConfig(name="o", protocol="openai", base_url=base, credential="none")
         assert upstream_url(upstream, "/v1/chat/completions", "") == expected
@@ -609,36 +612,37 @@ def test_apply_body_rewrites_body_defaults_absent_only() -> None:
 
 
 def test_apply_body_rewrites_include_usage_openai_stream_only() -> None:
-    body = {"model": "gpt", "stream": True, "provider": {}}
+    # Chat-completions shape (`messages`): the R-24 usage option is injected.
+    body: dict[str, Any] = {"model": "gpt", "messages": [], "stream": True, "provider": {}}
     out = apply_body_rewrites(body, upstream=OPENAI_KEY, rule=RULE_PLAIN)
     assert out == {**body, "stream_options": {"include_usage": True}}
     assert "stream_options" not in body
     # Present options gain the key without losing others; explicit false stays.
-    body = {"model": "gpt", "stream": True, "provider": {}, "stream_options": {"x": 1}}
+    body = {**body, "stream_options": {"x": 1}}
     out = apply_body_rewrites(body, upstream=OPENAI_KEY, rule=RULE_PLAIN)
     assert out is not None and out["stream_options"] == {"x": 1, "include_usage": True}
     assert body["stream_options"] == {"x": 1}
-    body = {
-        "model": "gpt",
-        "stream": True,
-        "provider": {},
-        "stream_options": {"include_usage": False},
-    }
+    body = {**body, "stream_options": {"include_usage": False}}
     assert apply_body_rewrites(body, upstream=OPENAI_KEY, rule=RULE_PLAIN) is None
     # A non-table stream_options is replaced.
-    body = {"model": "gpt", "stream": True, "provider": {}, "stream_options": None}
+    body = {**body, "stream_options": None}
     out = apply_body_rewrites(body, upstream=OPENAI_KEY, rule=RULE_PLAIN)
     assert out is not None and out["stream_options"] == {"include_usage": True}
     # Not for stream: "true" (string), not for anthropic, never on passthrough.
     assert (
         apply_body_rewrites(
-            {"stream": "true", "provider": {}}, upstream=OPENAI_KEY, rule=RULE_PLAIN
+            {"stream": "true", "messages": [], "provider": {}}, upstream=OPENAI_KEY, rule=RULE_PLAIN
         )
         is None
     )
-    assert apply_body_rewrites({"stream": True}, upstream=KEY, rule=RULE_PLAIN) is None
+    assert (
+        apply_body_rewrites({"stream": True, "messages": []}, upstream=KEY, rule=RULE_PLAIN) is None
+    )
     openai_pass = UpstreamConfig(name="p", protocol="openai", base_url="http://p.example")
-    assert apply_body_rewrites({"stream": True}, upstream=openai_pass, rule=RULE_PLAIN) is None
+    assert (
+        apply_body_rewrites({"stream": True, "messages": []}, upstream=openai_pass, rule=RULE_PLAIN)
+        is None
+    )
 
 
 def test_apply_body_rewrites_include_usage_is_chat_completions_only() -> None:

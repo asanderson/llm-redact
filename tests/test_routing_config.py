@@ -760,6 +760,87 @@ def test_i1_i2_no_passthrough_chain_member() -> None:
     _err(raw, r"'anthropic-key-lane' on_budget_exhausted member 'anthropic_oauth' is a passthrough")
 
 
+def test_chain_never_names_own_upstream_or_a_member_twice() -> None:
+    # A chain continues to OTHER upstreams: the rule's own upstream is the one
+    # that just failed (re-issuing there is retry-same without the wait, and
+    # only a cooldown > 0 would save it), and a repeated member wastes a hop
+    # against max_hops.
+    raw = _raw()
+    raw["routing"]["rule"][2]["on_status"]["429"] = ["ollama", "anthropic_key"]
+    _err(
+        raw,
+        r"'anthropic-key-lane' on_status 429 names the rule's own upstream 'anthropic_key': a"
+        r" chain continues to other upstreams \(use \"retry-same\" to retry this one\)",
+    )
+    raw = _raw()
+    raw["routing"]["rule"][2]["on_status"]["5xx"] = ["ollama", "openrouter_anthropic", "ollama"]
+    _err(raw, r"'anthropic-key-lane' on_status 5xx lists 'ollama' twice")
+    raw = _raw()
+    raw["routing"]["rule"][2]["on_budget_exhausted"] = ["anthropic_key"]
+    _err(raw, r"'anthropic-key-lane' on_budget_exhausted names the rule's own upstream")
+    raw = _raw()
+    raw["routing"]["rule"][2]["on_budget_exhausted"] = ["ollama", "ollama"]
+    _err(raw, r"'anthropic-key-lane' on_budget_exhausted lists 'ollama' twice")
+    # The zero-cost default (explore-local -> ollama) may still be a member
+    # of OTHER rules' chains; only self-reference is refused.
+    assert parse_config(_raw(), "<t>").routing.rules[1].on_status[0][1] == (
+        "anthropic_key",
+        "ollama",
+    )
+
+
+def test_chain_under_never_policy_is_warned() -> None:
+    # R-8 "never" re-issues nothing after a failed hop, so an on_status
+    # chain is dead; retry-same (same upstream, no re-issue) is not.
+    raw = _raw()
+    raw["routing"]["rule"][1]["reissue_policy"] = "never"
+    warnings = parse_config(raw, "<t>").routing.warnings
+    suffix = ' never applies: reissue_policy = "never" forbids re-issuing to another upstream'
+    assert warnings == (
+        "[[routing.rule]] 'max-lane' on_status plan_limit_429" + suffix,
+        "[[routing.rule]] 'max-lane' on_status 529" + suffix,
+    )
+    raw["routing"]["rule"][1]["on_status"] = {"throttle_429": "retry-same"}
+    assert parse_config(raw, "<t>").routing.warnings == ()
+    raw["routing"]["rule"][1]["reissue_policy"] = 3
+    _err(raw, r"'max-lane' reissue_policy must be a string, got int")
+
+
+def test_gemini_rules_model_lives_in_the_path() -> None:
+    # For protocol = "gemini" the model id is in the URL, never the body:
+    # a rule constraining `model` can never fire (warned, like the other
+    # never-applies keys) and `model_rewrite` would add a body field Google
+    # rejects (refused).
+    raw = _raw()
+    raw["upstreams"]["gemini_key"] = {
+        "protocol": "gemini",
+        "base_url": "https://generativelanguage.googleapis.com",
+        "credential": "env:GEMINI_API_KEY",
+    }
+    rule: dict[str, Any] = {
+        "id": "gemini-native",
+        "match": {"protocol": "gemini", "model": "gemini-*"},
+        "upstream": "gemini_key",
+    }
+    raw["routing"]["rule"].append(rule)
+    warnings = parse_config(raw, "<t>").routing.warnings
+    assert warnings == (
+        "[[routing.rule]] 'gemini-native' match model never matches for protocol 'gemini' (the"
+        " model id is in the request path, not the body): this rule cannot fire",
+    )
+    rule["model_rewrite"] = "gemma"
+    _err(
+        raw,
+        r"'gemini-native' model_rewrite is not supported for protocol 'gemini' \(the model id"
+        r" is in the request path",
+    )
+    # Header/path/auth constraints are fine; no model, no warning.
+    del rule["model_rewrite"]
+    rule["match"] = {"protocol": "gemini", "path": "*:generateContent", "auth": "gateway-key"}
+    parsed = parse_config(raw, "<t>").routing
+    assert parsed.warnings == () and parsed.rules[-1].match.path == "*:generateContent"
+
+
 def test_i5_chain_and_budget_members_share_protocol() -> None:
     raw = _raw()
     raw["routing"]["rule"][2]["on_budget_exhausted"] = ["openrouter"]
@@ -835,6 +916,8 @@ def test_prices_parse_and_errors() -> None:
     )
     _err({"prices": "builtin"}, r"\[prices\] must be a table")
     _err({"prices": {"table": ""}}, r"\[prices\] table must be \"builtin\" or a file path")
+    # str(3) would hand a path named "3" to PriceTable.from_file.
+    _err({"prices": {"table": 3}}, r"\[prices\] table must be a string, got int")
     _err({"prices": {"bogus": 1}}, r"unknown key\(s\) \['bogus'\] in \[prices\]")
     _err({"prices": {"override": ["x"]}}, r"\[prices.override\] must contain per-model tables")
     _err({"prices": {"override": {"m": 3}}}, r"\[prices.override.'m'\] must be a table")
@@ -860,6 +943,9 @@ NASTY_STRINGS = [
     "unicode: żółć 東京 🎉",
     'triple """ quotes',
     "control \x01 char",
+    # DEL is the one control character JSON leaves raw and TOML forbids in a
+    # basic string; the emitter escapes it by hand.
+    "del \x7f char",
     "  leading and trailing  ",
     "braces { } and = signs, commas",
 ]

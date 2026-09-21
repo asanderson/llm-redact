@@ -294,12 +294,14 @@ def test_from_file_toml_same_shape(tmp_path: Path) -> None:
         ),
         (
             "inf.json",
-            '{"models": {"m": {"input": 1, "output": Infinity, "cache_read": 3, "cache_write": 4}}}',
+            '{"models": {"m": {"input": 1, "output": Infinity, "cache_read": 3, '
+            '"cache_write": 4}}}',
             "output must be a finite, non-negative number",
         ),
         (
             "neginf.json",
-            '{"models": {"m": {"input": 1, "output": 2, "cache_read": -Infinity, "cache_write": 4}}}',
+            '{"models": {"m": {"input": 1, "output": 2, "cache_read": -Infinity, '
+            '"cache_write": 4}}}',
             "cache_read must be a finite, non-negative number",
         ),
         (
@@ -618,17 +620,10 @@ def _responses_stream(terminal: str) -> list[dict[str, Any]]:
     nested like tests/test_provider_openai_responses.py's fixtures: NO event
     carries a top-level ``usage``; the lifecycle events before the terminal
     one carry ``response.usage: null``."""
+    pending = {"id": "resp_1", "object": "response", "status": "in_progress", "usage": None}
     return [
-        {
-            "type": "response.created",
-            "sequence_number": 0,
-            "response": {"id": "resp_1", "object": "response", "status": "in_progress", "usage": None},
-        },
-        {
-            "type": "response.in_progress",
-            "sequence_number": 1,
-            "response": {"id": "resp_1", "object": "response", "status": "in_progress", "usage": None},
-        },
+        {"type": "response.created", "sequence_number": 0, "response": dict(pending)},
+        {"type": "response.in_progress", "sequence_number": 1, "response": dict(pending)},
         {"type": "response.output_item.added", "output_index": 0, "item": {"id": "item_1"}},
         {"type": "response.output_text.delta", "item_id": "item_1", "delta": "hi"},
         {"type": "response.output_text.done", "item_id": "item_1", "text": "hi"},

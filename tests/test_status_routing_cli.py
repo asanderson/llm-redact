@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
-from llm_redact.cli import _print_posture, _print_routing, run_status
+from llm_redact.cli import _print_posture, _print_routing, _spend_summary, run_status
 
 
 def _upstream(**overrides: Any) -> dict[str, Any]:
@@ -177,6 +177,31 @@ def test_posture_quiet_when_routing_is_healthy(capsys: pytest.CaptureFixture[str
     assert "all traffic redacted" in capsys.readouterr().out
 
 
+def test_zero_cost_upstream_with_inert_budget_never_reads_as_exhausted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Decision 11: zero-cost upstreams ignore budgets; the ledger reports
+    # remaining_* = None for them, which must not render as "$0.00 left".
+    zero = _upstream(credential="none", cost="zero")
+    zero["spend"] = dict(
+        zero["spend"], budget_usd=5.0, budget_tokens=1000, remaining_usd=None, remaining_tokens=None
+    )
+    _print_routing({"routing": {"enabled": True, "rules": 1, "upstreams": {"local": zero}}})
+    out = capsys.readouterr().out
+    assert "(budget ignored: zero-cost)" in out
+    assert " left" not in out and "$0.00 left" not in out
+    assert _spend_summary({"usd": 0.0, "total_tokens": 3, "budget_usd": 5.0}, zero_cost=True) == (
+        "spend $0.0000 / 3 tokens (budget ignored: zero-cost)"
+    )
+    assert _spend_summary({"usd": 0.0, "total_tokens": 3}, zero_cost=True) == (
+        "spend $0.0000 / 3 tokens"
+    )
+    # A metered upstream at $0 remaining IS exhausted and says so.
+    assert "$0.00 left" in _spend_summary(
+        {"usd": 5.0, "total_tokens": 3, "budget_usd": 5.0, "remaining_usd": 0.0}
+    )
+
+
 def test_print_routing_tolerates_sparse_upstream_entries(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -217,6 +242,10 @@ def test_dashboard_carries_routing_pill_and_table() -> None:
         assert f"<th>{column}</th>" in html or f'<th class="num">{column}</th>' in html
     assert "budget_exhausted" in html and "cooldown" in html
     assert "unpriced_models" in html
+    # The budget cell keys zero-cost off the upstream's `cost` field (the
+    # /status spend block carries no zero_cost key; remaining_* is null).
+    assert 'routingBudget(u.spend, u.cost === "zero")' in html
+    assert "if (zeroCost || spend.zero_cost)" in html
     # Self-contained and textContent-only (no innerHTML anywhere on the page).
     assert "innerHTML" not in html
     assert "http://" not in html and "https://" not in html

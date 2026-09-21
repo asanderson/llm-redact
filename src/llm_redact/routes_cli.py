@@ -567,7 +567,6 @@ def run_spend(args: argparse.Namespace) -> int:
     """R-28: per-upstream tokens/USD, the re-issue share, remaining budget —
     read straight from the sqlite vault file's spend table (the proxy need
     not be running). Month selects a past period by label."""
-    from llm_redact.spend import SqliteSpendStore
     from llm_redact.vault import default_vault_path
 
     config = _load(args)

@@ -62,6 +62,10 @@ def test_ceiling_failures() -> None:
     failures = ceiling_failures(slow)
     assert len(failures) == len(CHECK_CEILINGS_MS)
     assert ceiling_failures([]) != []  # missing stats fail too
+    # Sub-millisecond ceilings print as themselves, never as "0 ms".
+    close = [LatencyStat("route_select_10_rules", 0.3, 0.4, 3, 1000)]
+    (message,) = [f for f in ceiling_failures(close) if f.startswith("route_select_10_rules:")]
+    assert message == "route_select_10_rules: p50 0.3 ms >= ceiling 0.2 ms"
 
 
 def test_route_select_bench_uses_ten_rules_and_matches_last() -> None:

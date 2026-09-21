@@ -191,6 +191,34 @@ def test_routing_warnings_unpriced_and_memory_vault(
     assert probes == []
 
 
+def test_routing_unpriced_skips_zero_cost_rewrite_targets(
+    tmp_path: Path, probes: list[Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The spec's own explore-local shape: a rewrite target that only reaches
+    # a zero-cost upstream is not a budgeting gap (budgets are ignored there)
+    # — a recommended config must not carry a standing WARN.
+    config = _write(tmp_path)
+    config.write_text(
+        config.read_text()
+        + '\n[[routing.rule]]\nid = "explore-local"\n'
+        + 'match = { protocol = "anthropic", headers = { "x-claude-code-agent-id" = "Explore" } }\n'
+        + 'upstream = "local"\nmodel_rewrite = "muse-64k"\n'
+    )
+    assert run_doctor(_args(config, offline=True)) == 0
+    lines = _routing_lines(capsys.readouterr().out)
+    assert not any("no price for" in line for line in lines)
+    assert any("price table covers" in line for line in lines)
+    # The same rewrite on the metered lane IS listed.
+    config.write_text(
+        config.read_text().replace(
+            'upstream = "local"\nmodel_rewrite', 'upstream = "anthropic_key"\nmodel_rewrite'
+        )
+    )
+    assert run_doctor(_args(config, offline=True)) == 0
+    lines = _routing_lines(capsys.readouterr().out)
+    assert any("no price for muse-64k" in line and "zero-cost" in line for line in lines)
+
+
 def test_routing_probe_head_fails_get_answers(
     tmp_path: Path,
     probes: list[Any],
@@ -209,6 +237,28 @@ def test_routing_probe_head_fails_get_answers(
     lines = _routing_lines(capsys.readouterr().out)
     assert sum("answers at" in line for line in lines) == 2
     assert [m for m, _u, _k in probes] == ["HEAD", "GET", "HEAD", "GET"]
+
+
+def test_routing_userinfo_never_reaches_the_report(
+    tmp_path: Path, probes: list[Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    config = _write(tmp_path)
+    config.write_text(
+        config.read_text().replace(
+            'base_url = "https://api.anthropic.example/?key=querysecret"',
+            'base_url = "https://gwuser:gw-s3cret-pw@api.anthropic.example/?key=querysecret"',
+        )
+    )
+    assert run_doctor(_args(config)) == 0
+    out = capsys.readouterr().out
+    assert any(
+        "not reachable at https://api.anthropic.example (" in line for line in _routing_lines(out)
+    )
+    assert "gw-s3cret-pw" not in out and "gwuser" not in out and "querysecret" not in out
+    assert run_doctor(_args(config, json=True)) == 0
+    assert "gw-s3cret-pw" not in json.dumps(json.loads(capsys.readouterr().out))
 
 
 def test_routing_probe_failure_is_warn_with_type_only(
@@ -252,6 +302,14 @@ def test_routing_json_mode(
 
 def test_probe_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _display_url("https://h.example:8443/base/?key=abc#frag") == "https://h.example:8443"
+    # URL userinfo (httpx basic-auth form for a self-hosted gateway) is a
+    # credential: never displayed, in the terminal or the --json rows.
+    assert _display_url("https://user:s3cret@gw.example:8443/base/?key=abc") == (
+        "https://gw.example:8443"
+    )
+    assert _display_url("http://user:s3cret@[::1]:11434") == "http://[::1]:11434"
+    assert _display_url("http://127.0.0.1:11434") == "http://127.0.0.1:11434"
+    assert _display_url("https://api.example") == "https://api.example"
 
     def always_fail(method: str, url: str, **kwargs: Any) -> httpx.Response:
         raise httpx.ConnectTimeout("t")

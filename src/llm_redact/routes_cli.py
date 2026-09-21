@@ -481,6 +481,24 @@ def run_routes_test(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_read_only(path: Path) -> sqlite3.Connection:
+    """A ``mode=ro`` connection, probed once; a WAL-mode database in a
+    directory this user cannot write to (a 0400 backup copy under a 0500
+    directory) fails that probe because SQLite must create the ``-shm``
+    side file to read WAL, so it is reopened ``immutable=1`` — sound for a
+    copy nobody is writing, which is exactly that case (a live vault sits in
+    the proxy's own 0700 directory and takes the normal locking path)."""
+    uri = f"{path.absolute().as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        conn.close()
+        conn = sqlite3.connect(f"{uri}&immutable=1", uri=True)
+    return conn
+
+
 class ReadOnlySpendStore(SqliteSpendStore):
     """`SqliteSpendStore` over a `mode=ro` connection: the report never
     creates the vault file, its `spend` table, WAL side files, or chmods
@@ -489,8 +507,7 @@ class ReadOnlySpendStore(SqliteSpendStore):
 
     def __init__(self, path: Path) -> None:
         self._path = path
-        self._conn = sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True)
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn = _open_read_only(path)
 
     @property
     def has_table(self) -> bool:

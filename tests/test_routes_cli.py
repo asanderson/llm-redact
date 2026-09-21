@@ -737,13 +737,57 @@ def test_spend_is_read_only_on_a_legacy_vault(
         backup.chmod(0o600)
 
 
+def test_read_only_store_falls_back_to_immutable_when_shm_cannot_be_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A WAL-mode backup copy in a directory the user cannot write to: the
+    mode=ro probe fails (SQLite cannot create the -shm side file) and the
+    store reopens immutable=1. Root bypasses the permission check, so the
+    trigger is simulated deterministically rather than via chmod."""
+    import sqlite3
+
+    vault = tmp_path / "vault.db"
+    _seed_spend(vault, datetime.now(tz=UTC))
+    real_connect = sqlite3.connect
+    uris: list[str] = []
+
+    class _ShmDenied:
+        def execute(self, sql: str, *args: object) -> "_ShmDenied":
+            if "sqlite_master" in sql:
+                raise sqlite3.OperationalError("unable to open database file")
+            return self
+
+        def fetchone(self) -> None:
+            return None
+
+        def close(self) -> None:
+            pass
+
+    def fake_connect(database: str, *args: object, **kwargs: object) -> object:
+        uris.append(database)
+        if "immutable=1" in database:
+            return real_connect(database, *args, **kwargs)
+        return _ShmDenied()
+
+    monkeypatch.setattr(routes_cli.sqlite3, "connect", fake_connect)
+    store = routes_cli.ReadOnlySpendStore(vault)
+    try:
+        assert store.has_table
+        base = f"{vault.absolute().as_uri()}?mode=ro"
+        assert uris == [base, f"{base}&immutable=1"]
+    finally:
+        store.close()
+
+
 def test_spend_not_a_sqlite_file_is_an_error_not_a_traceback(
     routed_config: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (tmp_path / "vault.db").write_bytes(b"this is not a sqlite database at all\n" * 40)
     assert run_spend(_spend_args(routed_config)) == 1
     out = capsys.readouterr().out
-    assert out.startswith("spend: cannot read") and "DatabaseError" in out
+    # The read-only open probes the file once, so a non-database fails at
+    # open time — named by exception TYPE, never a traceback.
+    assert out.startswith("spend: cannot open") and "DatabaseError" in out
 
 
 def test_spend_json_and_past_month(

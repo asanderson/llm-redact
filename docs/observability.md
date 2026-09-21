@@ -3,7 +3,8 @@
 The proxy exposes Prometheus metrics at `/__llm-redact/metrics` (always on,
 no config). Everything there is **metadata only** — request counts by
 provider and status, detection / warning / block / rehydration counts by
-detector *type*, vault entry/session gauges, compaction-fork counts, and
+detector *type*, vault entry/session gauges, compaction-fork counts,
+routing decisions and re-issues by upstream and rule name, and
 build info. It never carries secret values or placeholder ids (see
 [threat-model.md](threat-model.md) § Logging posture), so scraping it is safe.
 
@@ -26,6 +27,9 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | `llm_redact_blocked_total` | counter | `type` | Requests rejected 400 by block-mode rules. |
 | `llm_redact_rehydrations_total` | counter | `type` | Placeholders restored in responses. |
 | `llm_redact_compaction_forks_total` | counter | — | Per-conversation sessions forked by history compaction. |
+| `llm_redact_upstream_errors_total` | counter | `provider` | Transport faults failed closed as 502 (by upstream name when routing is enabled). |
+| `llm_redact_routed_requests_total` | counter | `upstream`, `rule` | Requests delivered through the routing layer, by the upstream that produced the response and the rule that chose it ([routing.md](routing.md)). |
+| `llm_redact_reissues_total` | counter | `from_upstream`, `to_upstream` | Fallback re-issues to the next chain member. |
 | `llm_redact_vault_entries` / `_sessions` | gauge | — | Vault size. |
 | `llm_redact_uptime_seconds` / `_start_time_seconds` | gauge | — | Process liveness. |
 | `llm_redact_info` | gauge | `version` | Build info (value 1). |
@@ -52,3 +56,10 @@ counters, parented into the caller's distributed trace — is a Pro feature; it
 can run alongside Prometheus. Its setup and the off-machine trust decision it
 represents are documented in the `llm-redact-pro` repo's
 `docs/deployment-pro.md`.
+
+The routing layer's runtime state — per-upstream health (`healthy` /
+`cooldown` / `budget_exhausted`), spend against budget, re-issues in the
+last hour, unpriced models — is in the `routing` block of
+`GET /__llm-redact/status`, one line per upstream in `llm-redact status`,
+and the `route` field of every `/recent` and `/events` row; see
+[routing.md](routing.md) § Observability.

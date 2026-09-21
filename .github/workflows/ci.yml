@@ -375,6 +375,8 @@ jobs:
           python -m zipfile -l dist/*.whl | grep 'llm_redact/user_guide.html'
           tar -tzf dist/*.tar.gz | grep 'src/llm_redact/user_guide.md'
           tar -tzf dist/*.tar.gz | grep 'src/llm_redact/user_guide.html'
+          python -m zipfile -l dist/*.whl | grep 'llm_redact/prices.json'
+          tar -tzf dist/*.tar.gz | grep 'src/llm_redact/prices.json'
           python -m zipfile -l dist/*.whl | grep 'licenses/LICENSE'
           tar -tzf dist/*.tar.gz | grep -x '[^/]*/LICENSE'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

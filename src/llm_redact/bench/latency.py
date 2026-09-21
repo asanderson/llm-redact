@@ -28,11 +28,12 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from llm_redact.bench.corpus import VALUE_GENERATORS
-from llm_redact.config import Config, ProviderConfig
+from llm_redact.config import Config, ProviderConfig, parse_config
 from llm_redact.detection.engine import DetectionConfig, build_allowlist, build_detectors
 from llm_redact.proxy import create_app
 from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import Rehydrator, StreamingRehydrator
+from llm_redact.routing import RouteRule, RoutingConfig, RuleMatch, UpstreamConfig, select_rule
 from llm_redact.vault import InMemoryVault
 
 SMALL_BYTES = 2_000
@@ -108,6 +109,105 @@ def _prose_text(rng: random.Random, target_bytes: int) -> str:
     return " ".join(parts)
 
 
+ROUTE_RULE_COUNT = 10
+_ROUTE_HEADERS = {
+    "content-type": "application/json",
+    "anthropic-version": "2023-06-01",
+    "x-claude-code-agent-id": "main",
+    "user-agent": "bench/1.0",
+}
+
+
+def _routing_rules(upstream: str) -> list[dict[str, object]]:
+    """Ten anthropic rules, the LAST of which matches the bench request (the
+    worst case for first-match-wins: every earlier rule is evaluated and
+    rejected on a different field — header, path, auth, model glob)."""
+    rules: list[dict[str, object]] = [
+        {
+            "id": "explore-local",
+            "match": {"protocol": "anthropic", "headers": {"x-claude-code-agent-id": "Explore"}},
+            "upstream": upstream,
+        },
+        {
+            "id": "count-tokens",
+            "match": {"protocol": "anthropic", "path": "/v1/messages/count_tokens"},
+            "upstream": upstream,
+        },
+        {
+            "id": "oauth-lane",
+            "match": {"protocol": "anthropic", "model": "claude-*", "auth": "oauth"},
+            "upstream": upstream,
+        },
+    ]
+    for index in range(ROUTE_RULE_COUNT - len(rules) - 1):
+        rules.append(
+            {
+                "id": f"model-lane-{index}",
+                "match": {"protocol": "anthropic", "model": [f"claude-opus-{index}*", "muse-*"]},
+                "upstream": upstream,
+            }
+        )
+    rules.append(
+        {
+            "id": "default-lane",
+            "match": {"protocol": "anthropic", "model": "claude-*"},
+            "upstream": upstream,
+            "on_status": {"plan_limit_429": "retry-same", "5xx": "retry-same"},
+        }
+    )
+    return rules
+
+
+def _routing_config_pure() -> RoutingConfig:
+    """The same ten rules as dataclasses (no config parse) for the micro bench."""
+    upstream = UpstreamConfig(name="primary", protocol="anthropic", base_url="http://upstream")
+    rules = []
+    for raw in _routing_rules("primary"):
+        match = raw["match"]
+        assert isinstance(match, dict)
+        models = match.get("model", ())
+        rules.append(
+            RouteRule(
+                id=str(raw["id"]),
+                match=RuleMatch(
+                    protocol="anthropic",
+                    models=(models,) if isinstance(models, str) else tuple(models),
+                    headers=tuple(sorted(match.get("headers", {}).items())),
+                    path=match.get("path"),
+                    auth=str(match.get("auth", "any")),
+                ),
+                upstream="primary",
+            )
+        )
+    return RoutingConfig(
+        enabled=True,
+        default_upstreams=(("anthropic", "primary"),),
+        upstreams=(upstream,),
+        rules=tuple(rules),
+        present=True,
+    )
+
+
+def _routed_proxy_config() -> Config:
+    """The macro bench's routing-enabled config, parsed exactly as a file
+    would be so legacy auto-registration and validation both run: ten rules,
+    the primary upstream being the fake (legacy `anthropic` passthrough)."""
+    raw: dict[str, object] = {
+        "providers": {
+            "anthropic": {"upstream_base_url": "http://upstream"},
+            "openai": {"upstream_base_url": "http://upstream"},
+            "gemini": {"upstream_base_url": "http://upstream"},
+            "azure": {"upstream_base_url": ""},
+        },
+        "routing": {
+            "enabled": True,
+            "default_upstream": {"anthropic": "anthropic"},
+            "rule": _routing_rules("anthropic"),
+        },
+    }
+    return parse_config(raw, "<bench>")
+
+
 def _anthropic_body(text: str) -> dict[str, object]:
     return {
         "model": "claude-sonnet-4-5",
@@ -173,6 +273,33 @@ def _micro_stats(rng: random.Random, *, quick: bool) -> list[LatencyStat]:
             iterations,
             stream_bytes,
             throughput_mb_s=(stream_bytes / 1_000_000) / statistics.median(seconds),
+        )
+    )
+
+    # Route selection over a 10-rule config: the per-request cost routing
+    # adds before any hop (the spec's <= 0.2 ms budget is on THIS number).
+    routing = _routing_config_pure()
+    select = functools.partial(
+        select_rule,
+        routing,
+        protocol="anthropic",
+        model="claude-sonnet-4-5",
+        headers=_ROUTE_HEADERS,
+        path="/v1/messages",
+        auth="gateway-key",
+    )
+    hit = select()
+    assert hit is not None and hit.id == "default-lane"
+    iterations = 50 if quick else 1000
+    seconds = _time(select, iterations)
+    p50, p95 = _quantiles(seconds)
+    stats.append(
+        LatencyStat(
+            "route_select_10_rules",
+            p50,
+            p95,
+            iterations,
+            len(json.dumps(_ROUTE_HEADERS).encode()),
         )
     )
     return stats
@@ -291,6 +418,39 @@ async def _macro_stats(rng: random.Random, *, quick: bool) -> list[LatencyStat]:
                         payload,
                     )
                 )
+    # Routing enabled (ten rules, the fake as primary) on the small JSON
+    # body: the same delta as proxy_overhead_delta_json_small plus whatever
+    # rule selection and route bookkeeping cost.
+    routed_app = create_app(
+        _routed_proxy_config(), upstream_transport=httpx.ASGITransport(app=upstream)
+    )
+    body = _anthropic_body(_secret_text(rng, SMALL_BYTES))
+    payload = len(json.dumps(body).encode())
+    iterations = 3 if quick else 40
+    async with (
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=upstream), base_url="http://upstream"
+        ) as baseline_client,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=routed_app),
+            base_url="http://proxy",
+            headers=_ROUTE_HEADERS,
+        ) as routed_client,
+    ):
+        base = await _timed_requests(baseline_client, body, stream=False, iterations=iterations)
+        via = await _timed_requests(routed_client, body, stream=False, iterations=iterations)
+    base_p50, base_p95 = _quantiles(base)
+    via_p50, via_p95 = _quantiles(via)
+    stats.append(LatencyStat("proxy_routing_json_small", via_p50, via_p95, iterations, payload))
+    stats.append(
+        LatencyStat(
+            "proxy_overhead_delta_routing_json_small",
+            via_p50 - base_p50,
+            via_p95 - base_p95,
+            iterations,
+            payload,
+        )
+    )
     return stats
 
 
@@ -346,10 +506,14 @@ def to_json_list(stats: list[LatencyStat]) -> list[dict[str, object]]:
 # redact_json_prose_large (dense prose, 100 KB) bumped 60 -> 100 for the same
 # reason: a loaded runner lands at ~62 ms on a hot path unchanged since it was
 # set (a quadratic blowup would be seconds), so 60 was too tight to be jitter-proof.
+# route_select_10_rules is the spec's own budget (<= 0.2 ms per request for
+# rule selection over a 10-rule config) — healthy is ~5 us, so 0.2 ms is
+# already the ~40x cushion the others get.
 CHECK_CEILINGS_MS = {
     "redact_json_large": 150.0,
     "redact_json_prose_large": 100.0,
     "proxy_overhead_delta_json_large": 150.0,
+    "route_select_10_rules": 0.2,
 }
 
 
@@ -361,5 +525,5 @@ def ceiling_failures(stats: list[LatencyStat]) -> list[str]:
         if stat is None:
             failures.append(f"{name}: expected in latency stats but missing")
         elif stat.p50_ms >= ceiling:
-            failures.append(f"{name}: p50 {stat.p50_ms:.1f} ms >= ceiling {ceiling:.0f} ms")
+            failures.append(f"{name}: p50 {stat.p50_ms:g} ms >= ceiling {ceiling:g} ms")
     return failures

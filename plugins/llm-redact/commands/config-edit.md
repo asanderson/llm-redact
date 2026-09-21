@@ -51,7 +51,11 @@ guardrails:
    editable surface matches the dashboard editor: [detection] enabled
    rules, modes, deny strings, allowlists, languages, custom rules and
    validators, [detection.ner], [providers.*] (enabled, detection,
-   upstreams, custom providers), [rehydration], max_body_bytes.
+   upstreams, custom providers), [rehydration], max_body_bytes. The
+   routing sections — [upstreams.*], [routing], [[routing.rule]],
+   [prices] (docs/routing.md) — hot-apply through this same file flow
+   even though the web editor refuses them; a chain may never contain
+   a passthrough upstream, so never add one.
    host/port/vault/audit/log/tls/otel are RESTART-ONLY — warn the user
    and stop if the change touches them.
 3. Validate BEFORE applying: `llm-redact serve --check` must exit 0.

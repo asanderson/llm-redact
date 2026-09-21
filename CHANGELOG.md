@@ -11,6 +11,141 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-21
+
+### Added
+
+- **Rule-based upstream routing, quota-aware fallback, and monthly
+  budgets** (`docs/routing.md`), a routing layer behind the redaction
+  pipeline that is OFF by default and byte-identical to 1.0 when off:
+  - `[upstreams.NAME]` — named destinations, one protocol each
+    (`anthropic` / `openai` / `gemini` / `ollama`), with a credential
+    mode: `passthrough` (the client's auth headers and `anthropic-beta`
+    forwarded byte-exact), `env:VAR` (inbound credentials stripped, the
+    OAuth marker removed from `anthropic-beta`, the proxy-held key
+    injected as `x-api-key` / `authorization: Bearer` / `x-goog-api-key`
+    by protocol; resolved by `serve`, `serve --check` and `doctor`, never
+    at parse), or `none`. Per-upstream `cost = "zero"`, `count_tokens`
+    (`false` answers `/v1/messages/count_tokens` 404 locally — Ollama),
+    `cooldown_seconds`, `extra_headers`, `body_defaults` (absent
+    top-level keys only, never on passthrough), `monthly_budget_usd` /
+    `monthly_budget_tokens`. With a `[routing]` table present the legacy
+    `[providers.anthropic|openai|gemini|ollama]` sections auto-register
+    as passthrough upstreams of the same name (an explicit
+    `[upstreams.NAME]` wins).
+  - `[routing]` — `enabled`, a fail-closed `default_upstream` (string, or
+    a table keyed by protocol; a protocol with neither a rule nor a
+    default answers a proxy-generated 502, never a guess), `max_hops`,
+    `request_deadline_seconds`, `plan_limit_detection`,
+    `plan_limit_headers`, `oauth_beta_marker`,
+    `throttle_retry_max_seconds`, `budget_reset_day`, `debug_headers`,
+    `expose_models`, `model_catalog`; and ordered `[[routing.rule]]`
+    matchers (protocol, model globs, headers, path, `auth` ∈ oauth /
+    gateway-key / none / any) with `model_rewrite` (the original id
+    restored in JSON and SSE/NDJSON `model` fields), `on_status` chains
+    (exact status, `4xx`/`5xx`, `plan_limit_429`/`throttle_429`,
+    `retry-same`), `reissue_policy`, and `on_budget_exhausted`.
+  - Fallback semantics: re-issue only before the first byte reaches the
+    client (mid-stream faults propagate, `class=stream_error`); a
+    per-upstream cooldown (`min(3600, max(cooldown_seconds,
+    retry-after))`) on every chain-resolved status except throttles;
+    `retry-same` waits `max(retry-after, 2 s)` once, or returns the 429
+    unchanged beyond `throttle_retry_max_seconds`; transport faults
+    classify as `502` for chain lookup; Anthropic plan-limit 429s are
+    told apart from throttles by the unified rate-limit headers
+    (`anthropic-ratelimit-unified-status` / `-5h-status` / `-7d-status`
+    = `rejected`, overridable). The **statelessness guard** never
+    re-issues a request carrying signed `thinking` /
+    `redacted_thinking` blocks under `stateless-only`, answering
+    `x-llm-redact-reissue: skipped; reason=stateful` instead
+    (`reason=no-candidate` when the chain had no eligible member).
+    Re-issued responses carry `x-llm-redact-upstream` and
+    `x-llm-redact-hops` (hop-1 responses too with `debug_headers`).
+  - Policy envelope encoded as invariants, not advice: a chain may never
+    contain a passthrough upstream (no subscription pooling or credential
+    sharing), an `env:` upstream never sees inbound credentials, a
+    passthrough upstream never sees a server-held key, and
+    `inject_system_note` / budgets are config errors on passthrough
+    upstreams — all refused by `serve --check` and re-asserted at
+    runtime.
+  - Budgets and pricing: usage parsed from Anthropic, OpenAI-compatible
+    (with `stream_options.include_usage` injected into Chat Completions
+    streams on `env:`/`none` upstreams when absent; Responses streams
+    report usage on `response.completed`), Ollama native and Gemini responses; spend
+    stored in a `spend` table inside the sqlite vault DB (in-process on
+    the memory backend), attributed to the producing upstream with its
+    hop number; a vendored `prices.json` (USD per 1M tokens) with
+    `[prices] table = "<path>"` replacement and
+    `[prices.override."<model>"]`; an exhausted upstream answers 402 and
+    drops out of chains until `budget_reset_day`; unknown models cost
+    `null` (tokens only) and `doctor` WARNs.
+  - Observability: the request log line gains
+    `rule= upstream= hops= auth= class= reissue=`; `/recent` and
+    `/events` rows gain a `route` object; `/__llm-redact/status` gains a
+    `routing` block (per-upstream state healthy / cooldown /
+    budget_exhausted, spend against budget, re-issues in the last hour,
+    unpriced models, warnings); metrics
+    `llm_redact_routed_requests_total{upstream,rule}` and
+    `llm_redact_reissues_total{from_upstream,to_upstream}`; a dashboard
+    routing pill and per-upstream table.
+  - CLI: `llm-redact routes list [--json]` and `llm-redact routes test
+    --protocol P [--model M] [--header NAME=VALUE …] [--path PATH]
+    [--auth …] [--json]` (a dry-run — nothing sent, no credential
+    resolved); `llm-redact spend [--month YYYY-MM] [--json]`; `status`
+    prints one routing line per upstream and posture lines for
+    cooldown / budget-exhausted upstreams, unpriced models and routing
+    warnings; `doctor` validates the routing config, resolves every
+    `env:` credential (FAIL names the VAR only), WARNs on a non-zero-cost
+    default, unpriced models and routing on the memory vault, and probes
+    each upstream base URL (`HEAD` then `GET`, 3 s, no credentials) unless
+    `--offline`.
+  - Optional model discovery: `routing.expose_models = true` answers
+    `GET /v1/models` locally in the Anthropic or OpenAI shape from
+    `model_catalog` plus the literal model names in rules (Claude Code
+    keeps only ids containing `claude` or `anthropic`).
+  - `scripts/fake_upstream.py` gained programmable scenarios (status,
+    plan-limit headers, `retry-after`, usage blocks, mid-stream aborts,
+    model echo, fail-then-succeed) and serves `/v1/chat/completions`
+    alongside `/v1/messages` so the routing walkthroughs run in-process.
+  - Plugin commands `/llm-redact:routes` (wrapping `routes list|test`)
+    and `/llm-redact:spend`; `/llm-redact:status` and `/llm-redact:recent`
+    report the routing fields and posture lines. Twelve commands now.
+
+### Changed
+
+- `[upstreams]`, `[routing]` and `[prices]` hot-reload on SIGHUP (and via
+  `apply_config`), but are deliberately NOT editable in the dashboard
+  config editor: the editor's merge preserves them from file truth, and
+  a `POST /__llm-redact/config` naming them is a 400 ("edit the file and
+  reload"). The restart-only set is unchanged.
+- `AnthropicAdapter.error_body` maps 402 → `billing_error`, 404 →
+  `not_found_error`, 429 → `rate_limit_error` for the proxy-generated
+  routing replies; the OpenAI error shape is unchanged.
+- The in-process latency benchmark gained `route_select_10_rules`
+  (ceiling 0.2 ms) and a routing-enabled proxy-overhead macro.
+- Realtime WebSocket connections, Azure, Vertex, Claude-on-Vertex,
+  Bedrock, Cohere and `[providers.custom.*]` are never routed — they keep
+  the legacy `upstream_base_url` path unchanged (documented).
+
+### Docs
+
+- New `docs/routing.md`: concepts, the Anthropic policy envelope, the
+  full `[upstreams]` / `[routing]` / `[[routing.rule]]` / `[prices]`
+  reference with every invariant `serve --check` enforces, the
+  fallback / cooldown / plan-limit / statelessness semantics, budgets
+  and the price table, observability, the recommended single-user
+  config (PowerShell + docker notes), troubleshooting keyed by the
+  exact error strings, and limitations. Every fenced TOML block in it
+  and the commented routing block in `config.example.toml` are parsed
+  by `tests/test_routing_docs.py`.
+- `config.example.toml` gained the commented routing block (between
+  `## ROUTING-EXAMPLE-BEGIN` / `## ROUTING-EXAMPLE-END`: `# ` lines are
+  config, `## ` lines are notes), disabled by default.
+- README (Operations § Routing, fallback and budgets; Plugins), docs
+  index, providers, observability (metrics rows), troubleshooting,
+  api-coverage (`GET /v1/models` local answer), dashboard, plugins, and
+  the packaged user guide updated.
+
 ## [1.0.3] - 2026-07-29
 
 ### Added

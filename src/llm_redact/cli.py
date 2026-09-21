@@ -14,6 +14,7 @@ from llm_redact.config import (
     load_config,
     validate_bind_security,
 )
+from llm_redact.routing import AUTH_KINDS, PROTOCOLS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -205,6 +206,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument("--config", type=Path, default=None, help="path to config.toml")
     doctor.add_argument("--json", action="store_true", help="machine-readable check rows")
+    doctor.add_argument(
+        "--offline",
+        action="store_true",
+        help="skip the routing upstream reachability probes (HEAD/GET on each base_url)",
+    )
 
     config_cmd = subparsers.add_parser("config", help="inspect the effective configuration")
     config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
@@ -276,6 +282,50 @@ def build_parser() -> argparse.ArgumentParser:
     license_verify.add_argument(
         "--key", default=None, help="verify this key instead of the configured one"
     )
+
+    routes = subparsers.add_parser(
+        "routes", help="inspect [routing] rules or dry-run a route decision (nothing is sent)"
+    )
+    routes_sub = routes.add_subparsers(dest="routes_command", required=True)
+    routes_list = routes_sub.add_parser("list", help="table of routing rules in file order")
+    routes_list.add_argument("--config", type=Path, default=None, help="path to config.toml")
+    routes_list.add_argument("--json", action="store_true", help="machine-readable output")
+    routes_test = routes_sub.add_parser(
+        "test",
+        help="which rule, upstream, and fallback chain a request would take"
+        " (offline: no request sent, no credential resolved)",
+    )
+    routes_test.add_argument("--config", type=Path, default=None, help="path to config.toml")
+    routes_test.add_argument(
+        "--protocol", required=True, choices=PROTOCOLS, help="the request's wire protocol"
+    )
+    routes_test.add_argument("--model", default=None, help="the request body's model id")
+    routes_test.add_argument(
+        "--header",
+        action="append",
+        default=None,
+        metavar="NAME=VALUE",
+        help="a request header to match against (repeatable)",
+    )
+    routes_test.add_argument(
+        "--path", default=None, help="inbound path (default: the protocol's chat endpoint)"
+    )
+    routes_test.add_argument(
+        "--auth",
+        choices=AUTH_KINDS,
+        default="any",
+        help="inbound auth class (default any: match every rule's auth constraint)",
+    )
+    routes_test.add_argument("--json", action="store_true", help="machine-readable output")
+
+    spend = subparsers.add_parser(
+        "spend", help="per-upstream spend, re-issue share, and remaining monthly budget"
+    )
+    spend.add_argument("--config", type=Path, default=None, help="path to config.toml")
+    spend.add_argument(
+        "--month", default=None, metavar="YYYY-MM", help="a past budget period (default: current)"
+    )
+    spend.add_argument("--json", action="store_true", help="machine-readable output")
 
     completions = subparsers.add_parser("completions", help="print a shell completion script")
     completions.add_argument("shell", choices=("bash", "zsh", "fish"))
@@ -515,6 +565,16 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(run_users_list(args))
     elif args.command == "preview":
         raise SystemExit(run_preview(args))
+    elif args.command == "routes":
+        from llm_redact.routes_cli import run_routes_list, run_routes_test
+
+        if args.routes_command == "test":
+            raise SystemExit(run_routes_test(args))
+        raise SystemExit(run_routes_list(args))
+    elif args.command == "spend":
+        from llm_redact.routes_cli import run_spend
+
+        raise SystemExit(run_spend(args))
     elif args.command == "completions":
         from llm_redact.completions import script_for
 
@@ -697,7 +757,73 @@ def run_status(args: argparse.Namespace) -> int:
             print(f"upstream[{name}]: {upstream}")
         else:
             print(f"upstream[{name}]: (not configured — its routes answer 502)")
+    _print_routing(payload)
     return 0
+
+
+def _spend_summary(spend: dict[str, Any], *, zero_cost: bool = False) -> str:
+    """One upstream's spend-vs-budget fragment of the status line. A
+    zero-cost upstream ignores its budget (decision 11 — the ledger reports
+    remaining_* as None), so its fragment says so instead of reading as
+    exhausted."""
+    usd = spend.get("usd") or 0.0
+    tokens = spend.get("total_tokens")
+    if tokens is None:
+        tokens = sum(
+            int(spend.get(k) or 0) for k in ("in_tokens", "out_tokens", "cache_read", "cache_write")
+        )
+    text = f"spend ${usd:.4f} / {tokens} tokens"
+    if zero_cost:
+        if spend.get("budget_usd") is not None or spend.get("budget_tokens") is not None:
+            text += " (budget ignored: zero-cost)"
+        return text
+    if spend.get("budget_usd") is not None:
+        text += f" (budget ${spend['budget_usd']:.2f}, ${spend.get('remaining_usd') or 0:.2f} left)"
+    if spend.get("budget_tokens") is not None:
+        text += (
+            f" (budget {spend['budget_tokens']} tokens, {spend.get('remaining_tokens') or 0} left)"
+        )
+    unpriced = spend.get("unpriced_rows") or 0
+    if unpriced:
+        text += f" ⚠{unpriced} unpriced rows"
+    return text
+
+
+def _print_routing(payload: dict[str, Any]) -> None:
+    """R-30: the routing block — one line per upstream (name, protocol,
+    credential MODE, state, spend/budget). Older proxies omit the block;
+    print nothing rather than invent a state."""
+    routing = payload.get("routing")
+    if routing is None:
+        return
+    if not routing.get("enabled"):
+        print("routing: disabled (protocol → provider upstream, no fallback, no budgets)")
+        return
+    defaults = routing.get("default_upstreams") or {}
+    default_text = ", ".join(f"{p}→{u}" for p, u in sorted(defaults.items())) or "none"
+    print(
+        f"routing: enabled — {routing.get('rules', 0)} rules, default: {default_text},"
+        f" plan-limit detection: {routing.get('plan_limit_detection', '?')},"
+        f" re-issues last hour: {routing.get('reissues_last_hour', 0)}"
+    )
+    for name, upstream in sorted((routing.get("upstreams") or {}).items()):
+        state = upstream.get("state", "?")
+        if state == "cooldown":
+            state += f" ({upstream.get('cooldown_remaining_seconds', 0):.0f}s left)"
+        if upstream.get("last_error_class"):
+            state += (
+                f" last error: {upstream['last_error_class']} @ {upstream.get('last_error_at')}"
+            )
+        line = (
+            f"routing upstream[{name}]: protocol={upstream.get('protocol')}"
+            f" credential={upstream.get('credential')} cost={upstream.get('cost')}"
+            f"{' legacy' if upstream.get('legacy') else ''} state={state}"
+            f" requests={upstream.get('requests', 0)}"
+        )
+        spend = upstream.get("spend")
+        if spend:
+            line += " " + _spend_summary(spend, zero_cost=upstream.get("cost") == "zero")
+        print(line)
 
 
 def _print_posture(payload: dict[str, Any]) -> None:
@@ -745,9 +871,39 @@ def _print_posture(payload: dict[str, Any]) -> None:
     if disabled:
         # Fail-closed, so protection is intact — noted for completeness.
         lines.append(f"providers disabled (fail closed): {', '.join(disabled)}")
+    lines.extend(_routing_posture(payload.get("routing") or {}))
     if lines:
         print("posture:")
         for line in lines:
             print(f"  ⚠ {line}")
     else:
         print("posture: all traffic redacted (no coverage opt-outs)")
+
+
+def _routing_posture(routing: dict[str, Any]) -> list[str]:
+    """Routing's honesty lines: upstreams out of rotation (cooldown / budget
+    exhausted — traffic is going somewhere else), models the price table
+    cannot price (budgets under-count), and the config's own warnings
+    (a metered default_upstream, dead chains)."""
+    if not routing.get("enabled"):
+        return []
+    lines: list[str] = []
+    upstreams: dict[str, dict[str, Any]] = routing.get("upstreams") or {}
+    cooling = sorted(n for n, u in upstreams.items() if u.get("state") == "cooldown")
+    if cooling:
+        lines.append(f"routing: upstream(s) in cooldown: {', '.join(cooling)} (skipped in chains)")
+    exhausted = sorted(n for n, u in upstreams.items() if u.get("state") == "budget_exhausted")
+    if exhausted:
+        lines.append(
+            f"routing: budget exhausted: {', '.join(exhausted)}"
+            " (direct requests answer 402; chains skip them)"
+        )
+    unpriced = routing.get("unpriced_models") or []
+    if unpriced:
+        lines.append(
+            f"routing: unpriced models: {', '.join(sorted(unpriced))}"
+            " (tokens counted, USD not — add [prices.override])"
+        )
+    for warning in routing.get("warnings") or []:
+        lines.append(f"routing: {warning}")
+    return lines

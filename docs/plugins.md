@@ -6,7 +6,7 @@ inside the agent session itself: check the proxy's posture, watch recent
 traffic, preview redaction, verify the audit chain, and make guarded
 config edits — without leaving the tool the proxy is protecting.
 
-All four plugins carry the SAME ten commands, defined once in
+All four plugins carry the SAME twelve commands, defined once in
 `src/llm_redact/plugin_assets.py` and rendered into each tool's command
 format.
 
@@ -89,6 +89,8 @@ have edited — it refuses and asks for `--force`.
 | `doctor` | Read-only diagnostics, failures explained via troubleshooting.md | — |
 | `audit` | Tamper-evident chain verification verdict | dashboard audit block |
 | `users` | Seat usage and invite/revoke guidance (never prints per-user keys) | dashboard users card |
+| `routes` | Routing rules table, or a dry-run of which rule/upstream/chain a request would take (nothing sent) | dashboard routing table |
+| `spend` | Per-upstream spend, re-issue share, and remaining monthly budget | dashboard routing table |
 | `guide` | Displays the user guide | `/__llm-redact/guide` |
 
 `config-edit` is marked user-invocation-only in Claude Code
@@ -106,7 +108,10 @@ Claude Code session whose step outputs are likewise real and executed in
 order. Regenerate with `uv run python
 scripts/capture_plugin_screenshots.py`.
 
-Every command, in the order the plugin lists them:
+The 1.0 commands, in the order the plugin lists them (`routes` and
+`spend`, added in 1.1, have no terminal shots yet — their output is the
+`routes list|test` and `spend` tables described in
+[routing.md](routing.md)):
 
 **`/llm-redact:status`** — live totals and posture:
 

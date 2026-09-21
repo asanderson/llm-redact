@@ -380,6 +380,16 @@ def test_r2_protocol_enum() -> None:
 
 def test_r3_credential_grammar() -> None:
     _err(_upstream_raw(credential="static-key"), r"credential must be 'passthrough', 'none' or")
+    # The realistic mistake is pasting the key where env:VAR belongs; the
+    # message reaches serve --check, doctor, logs and the editor's 400 body,
+    # so the value must NEVER be echoed (R-3: values are never logged).
+    pasted = "sk-ant-api03-EXAMPLEEXAMPLEEXAMPLE"
+    with pytest.raises(ConfigError) as excinfo:
+        parse_config(_upstream_raw(credential=pasted), "<t>")
+    message = str(excinfo.value)
+    assert "[upstreams.u] credential must be 'passthrough', 'none' or 'env:VAR'" in message
+    assert pasted not in message and "EXAMPLE" not in message and "sk-ant" not in message
+    _err(_upstream_raw(credential=3), r"\[upstreams.u\] credential must be a string, got int")
     _err(_upstream_raw(credential="env:lower"), r"env:VAR needs a variable name matching")
     _err(_upstream_raw(credential="env:"), r"env:VAR needs a variable name matching")
     _err(_upstream_raw(credential="env:1BAD"), r"env:VAR needs a variable name matching")
@@ -417,6 +427,7 @@ def test_r3_resolve_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_r4_cost_enum() -> None:
     _err(_upstream_raw(cost="free"), r"\[upstreams.u\] cost must be one of")
+    _err(_upstream_raw(cost=0), r"\[upstreams.u\] cost must be a string, got int")
     assert parse_config(_upstream_raw(cost="zero"), "<t>").routing.upstream("u").zero_cost
 
 
@@ -531,7 +542,12 @@ def test_routing_scalar_validation() -> None:
         ("request_deadline_seconds", 0, r"request_deadline_seconds must be positive"),
         ("request_deadline_seconds", True, r"request_deadline_seconds must be a number"),
         ("plan_limit_detection", "maybe", r"plan_limit_detection must be one of"),
+        ("plan_limit_detection", True, r"plan_limit_detection must be a string, got bool"),
         ("oauth_beta_marker", "  ", r"oauth_beta_marker must be a non-empty string"),
+        # A wrong type is a hard error, never a coercion: str(3) would be a
+        # marker no request carries and every Claude Code request would
+        # silently classify as gateway-key.
+        ("oauth_beta_marker", 3, r"oauth_beta_marker must be a string, got int"),
         ("throttle_retry_max_seconds", -1, r"throttle_retry_max_seconds must be >= 0"),
         ("budget_reset_day", 0, r"budget_reset_day must be between 1 and 28"),
         ("budget_reset_day", 29, r"budget_reset_day must be between 1 and 28"),
@@ -581,6 +597,9 @@ def test_plan_limit_headers_table() -> None:
         ({"x-q": "a"}, r"'x-q' must map to a non-empty array of strings"),
         ({"x-q": []}, r"'x-q' must map to a non-empty array of strings"),
         ({"x-q": [""]}, r"'x-q' must map to a non-empty array of strings"),
+        # Two spellings of one header would collapse in the emitter (lossy
+        # round trip); the _header_table rule applies here too.
+        ({"X-Q": ["a"], "x-q": ["b"]}, r"plan_limit_headers: header 'x-q' is listed twice"),
     ]:
         raw["routing"]["plan_limit_headers"] = bad
         _err(raw, pattern)
@@ -628,6 +647,10 @@ def test_r5_match_fields() -> None:
     _err(
         _with_rule({**base, "match": {"protocol": "anthropic", "auth": "bearer"}}),
         r"match auth must be one of",
+    )
+    _err(
+        _with_rule({**base, "match": {"protocol": "anthropic", "auth": 1}}),
+        r"'r' match auth must be a string, got int",
     )
     _err(
         _with_rule({**base, "match": {"protocol": "anthropic", "extra": 1}}),

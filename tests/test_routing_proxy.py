@@ -8,6 +8,7 @@ hop-loop bounds. Shares the walkthrough harness and fake upstream."""
 import dataclasses
 import json
 import logging
+import sqlite3
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ import pytest
 import llm_redact.proxy as proxy_module
 from llm_redact.config import Config, ConfigError, ProviderConfig, parse_config
 from llm_redact.config_write import emit_config_toml
+from llm_redact.pricing import Usage
 from llm_redact.proxy import (
     _FILE_PRESERVED_KEYS,
     CSRF_HEADER,
@@ -382,24 +384,108 @@ async def test_transport_fault_without_chain_is_a_recorded_502(
     await harness.aclose()
 
 
-async def test_buffered_read_fault_on_a_routed_response(env: Any, tmp_path: Path) -> None:
-    class _DropsBody(httpx.AsyncBaseTransport):
+class _DroppingBodyByHost(httpx.AsyncBaseTransport):
+    """A 200 whose JSON body drops mid-read for `hosts`; everything else
+    reaches the fake. The buffered twin of a mid-stream fault — except that
+    no byte has been forwarded yet, so R-17 still allows a re-issue."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport, hosts: set[str]) -> None:
+        self._inner = inner
+        self._hosts = hosts
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host not in self._hosts:
+            return await self._inner.handle_async_request(request)
+
+        async def body() -> Any:
+            yield b'{"content": '
+            raise httpx.ReadError("dropped")
+
+        return httpx.Response(
+            200, headers={"content-type": "application/json"}, content=body(), request=request
+        )
+
+
+async def test_buffered_read_fault_on_a_routed_response(
+    env: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The max lane has no 5xx chain: the read fault is a recorded 502,
+    # class=transport, with the fault warned by exception TYPE only.
+    harness = Harness(
+        spec_config(tmp_path / "v.db"),
+        upstream_transport=_DroppingBodyByHost(
+            httpx.ASGITransport(app=fake_upstream.build_app()), {"oauth"}
+        ),
+    )
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        response = await harness.client.post(
+            "/v1/messages", json=messages_body(), headers=OAUTH_HEADERS
+        )
+    assert response.status_code == 502
+    assert response.json()["error"]["message"] == "llm-redact: upstream request failed"
+    assert route_of(harness)["class"] == "transport"
+    assert harness.state.upstream_errors == {"anthropic_oauth": 1}
+    assert "upstream anthropic_oauth fault while reading the body (ReadError)" in caplog.text
+    assert "dropped" not in caplog.text
+    await harness.aclose()
+
+
+async def test_buffered_read_fault_is_chained_before_any_byte_is_forwarded(
+    env: Any, tmp_path: Path
+) -> None:
+    # Decision 8's second half: a mid-body drop on a BUFFERED response is a
+    # "502" for the chain lookup — anthropic-key-lane's 5xx chain takes over
+    # and the failed member cools down, exactly like a send fault.
+    scenarios: dict[str, Any] = {}
+    fake = fake_upstream.build_app(scenarios)
+    harness = Harness(
+        spec_config(tmp_path / "v.db"),
+        scenarios,
+        upstream_transport=_DroppingBodyByHost(httpx.ASGITransport(app=fake), {"key"}),
+    )
+    response = await harness.client.post(
+        "/v1/messages", json=messages_body(), headers=GATEWAY_HEADERS
+    )
+    assert response.status_code == 200
+    assert response.headers[UPSTREAM_HEADER] == "ollama"
+    assert response.headers[HOPS_HEADER] == "2"
+    assert EMAIL in response.json()["content"][0]["text"]
+    assert harness.state.upstream_errors == {"anthropic_key": 1}
+    assert not harness.state.routing_state.healthy("anthropic_key")
+    assert route_of(harness)["class"] == "ok" and route_of(harness)["reissue"] == "yes"
+    await harness.aclose()
+
+
+async def test_streamed_responses_are_not_pre_read(env: Any, tmp_path: Path) -> None:
+    # The R-17 line: an SSE body is never read ahead of delivery (its first
+    # byte reaches the client as it arrives), so a mid-stream drop stays a
+    # stream_error on the streaming branch — never a re-issue.
+    class _DroppingStream(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.requests = 0
+
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            self.requests += 1
+
             async def body() -> Any:
-                yield b'{"content": '
+                yield b'event: message_start\ndata: {"type":"message_start"}\n\n'
                 raise httpx.ReadError("dropped")
 
             return httpx.Response(
-                200, headers={"content-type": "application/json"}, content=body(), request=request
+                200, headers={"content-type": "text/event-stream"}, content=body(), request=request
             )
 
-    harness = Harness(spec_config(tmp_path / "v.db"), upstream_transport=_DropsBody())
-    response = await harness.client.post(
-        "/v1/messages", json=messages_body(), headers=OAUTH_HEADERS
+    upstream = _DroppingStream()
+    harness = Harness(
+        spec_config(tmp_path / "v.db"), upstream_transport=upstream, raise_app_exceptions=False
     )
-    assert response.status_code == 502
-    assert route_of(harness)["class"] == "transport"
-    assert harness.state.upstream_errors == {"anthropic_oauth": 1}
+    response = await harness.client.post(
+        "/v1/messages", json=messages_body(stream=True), headers=GATEWAY_HEADERS
+    )
+    assert response.status_code == 200 and "message_start" in response.text
+    assert upstream.requests == 1  # the 5xx chain never ran
+    assert route_of(harness)["class"] == "stream_error"
+    assert harness.state.routing_state.healthy("anthropic_key")
     await harness.aclose()
 
 
@@ -587,7 +673,9 @@ async def test_chain_skips_count_tokens_false_members(env: Any, tmp_path: Path) 
     await harness.aclose()
 
 
-async def test_budget_chain_with_no_candidate_is_402(env: Any, tmp_path: Path) -> None:
+async def test_budget_chain_with_no_candidate_is_402(
+    env: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     raw = _raw(tmp_path / "v.db")
     raw["upstreams"]["anthropic_key"]["monthly_budget_tokens"] = 1
     harness = Harness(_config(raw))
@@ -596,10 +684,77 @@ async def test_budget_chain_with_no_candidate_is_402(env: Any, tmp_path: Path) -
         await harness.client.post("/v1/messages", json=body, headers=GATEWAY_HEADERS)
     ).status_code == 200
     harness.state.routing_state.mark_unhealthy("ollama", 60.0, "503")
-    response = await harness.client.post("/v1/messages", json=body, headers=GATEWAY_HEADERS)
+    with caplog.at_level(logging.INFO, logger="llm_redact"):
+        response = await harness.client.post("/v1/messages", json=body, headers=GATEWAY_HEADERS)
     assert response.status_code == 402
     assert response.headers[REISSUE_HEADER] == "skipped; reason=no-candidate"
     assert len(harness.received("key")) == 1
+    # The recent row and the R-29 line say what the header says: the
+    # exhausted primary was hop 1 and the chain was skipped for want of a
+    # candidate (decisions 11, 17, 18).
+    assert route_of(harness) == {
+        "rule": "anthropic-key-lane",
+        "upstream": "anthropic_key",
+        "hops": 1,
+        "auth": "gateway-key",
+        "class": "budget_exhausted",
+        "reissue": "skipped:no-candidate",
+    }
+    assert (
+        "POST /v1/messages -> 402 rule=anthropic-key-lane upstream=anthropic_key hops=1"
+        " auth=gateway-key class=budget_exhausted reissue=skipped:no-candidate"
+    ) in caplog.text
+    await harness.aclose()
+
+
+async def test_budget_chain_honours_reissue_policy(
+    env: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # R-22 applies to the on_budget_exhausted chain like any re-issue: under
+    # stateless-only a request carrying signed thinking blocks gets the 402
+    # plus the stateful header instead of a credential/upstream swap.
+    raw = _raw(tmp_path / "v.db")
+    raw["upstreams"]["anthropic_key"]["monthly_budget_tokens"] = 1
+    raw["routing"]["rule"][2]["reissue_policy"] = "stateless-only"
+    harness = Harness(_config(raw))
+    first = await harness.client.post("/v1/messages", json=messages_body(), headers=GATEWAY_HEADERS)
+    assert first.status_code == 200  # 15 tokens > the 1-token budget: exhausted now
+    with caplog.at_level(logging.INFO, logger="llm_redact"):
+        response = await harness.client.post(
+            "/v1/messages", json=messages_body(stateful=True), headers=GATEWAY_HEADERS
+        )
+    assert response.status_code == 402
+    assert response.headers[REISSUE_HEADER] == "skipped; reason=stateful"
+    assert response.json()["error"]["type"] == "billing_error"
+    assert not harness.received("ollama") and len(harness.received("key")) == 1
+    assert route_of(harness) == {
+        "rule": "anthropic-key-lane",
+        "upstream": "anthropic_key",
+        "hops": 1,
+        "auth": "gateway-key",
+        "class": "budget_exhausted",
+        "reissue": "skipped:stateful",
+    }
+    assert "class=budget_exhausted reissue=skipped:stateful" in caplog.text
+    # A stateless request under the same policy continues along the chain.
+    response = await harness.client.post(
+        "/v1/messages", json=messages_body(), headers=GATEWAY_HEADERS
+    )
+    assert response.status_code == 200 and response.headers[UPSTREAM_HEADER] == "ollama"
+    assert response.headers[HOPS_HEADER] == "2"
+    await harness.aclose()
+
+    # `never` refuses silently (reissue=no, no header) — the spend table in
+    # the same vault file still says the budget is exhausted.
+    raw["routing"]["rule"][2]["reissue_policy"] = "never"
+    harness = Harness(_config(raw))
+    response = await harness.client.post(
+        "/v1/messages", json=messages_body(), headers=GATEWAY_HEADERS
+    )
+    assert response.status_code == 402
+    assert REISSUE_HEADER not in response.headers
+    assert not harness.received("ollama") and not harness.received("key")
+    assert route_of(harness)["reissue"] == "no" and route_of(harness)["hops"] == 1
     await harness.aclose()
 
 
@@ -645,6 +800,40 @@ async def test_detection_off_provider_is_still_routed(env: Any, tmp_path: Path) 
     assert EMAIL in seen.body["messages"][0]["content"]  # unredacted, as documented
     assert seen.body["model"] == "muse-64k"  # routing still rewrote the model
     assert response.json()["model"] == "claude-sonnet-5"
+    await harness.aclose()
+
+
+async def test_redact_only_routed_response_restores_model_and_records_usage(
+    env: Any, tmp_path: Path
+) -> None:
+    # /v1/embeddings is REDACT_ONLY: no rehydration, but a rule's
+    # model_rewrite is still undone in the response (decision 12) and the
+    # prompt-only usage block counts against the env: upstream's budget.
+    raw = _raw(tmp_path / "v.db")
+    raw["routing"]["rule"].insert(
+        0,
+        {
+            "id": "embed",
+            "match": {"protocol": "openai", "path": "/v1/embeddings"},
+            "upstream": "openai_key",
+            "model_rewrite": "text-embedding-3-small",
+        },
+    )
+    harness = Harness(_config(raw), {"openai-key": Scenario(echo_model=True)})
+    response = await harness.client.post(
+        "/v1/embeddings",
+        json={"model": "text-embedding-3-large", "input": f"mail {EMAIL}"},
+        headers={"authorization": "Bearer gateway-local"},
+    )
+    assert response.status_code == 200
+    assert response.json()["model"] == "text-embedding-3-large"
+    assert response.json()["data"][0]["embedding"] == [0.1, 0.2, 0.3]
+    [seen] = harness.received("openai-key")
+    assert seen.body["model"] == "text-embedding-3-small"
+    assert seen.body["input"] == "mail «EMAIL_001»"
+    assert route_of(harness)["rule"] == "embed" and route_of(harness)["class"] == "ok"
+    totals = harness.state.budget_ledger.totals("openai_key")
+    assert (totals.rows, totals.in_tokens, totals.out_tokens) == (1, 10, 0)
     await harness.aclose()
 
 
@@ -709,6 +898,204 @@ async def test_deadline_stops_reissues(env: Any, tmp_path: Path) -> None:
     assert response.status_code == 503 and route_of(harness)["hops"] == 1
     assert not harness.received("gemini-compat")
     await harness.aclose()
+
+
+async def test_throttle_through_a_plain_429_chain_reissues_without_cooldown(
+    env: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # R-19 excludes throttles from cooldown; chain_for lets throttle_429 fall
+    # back to the rule's `429` chain (anthropic-key-lane: 429 = [ollama]),
+    # so the request IS re-issued but anthropic_key stays healthy — one
+    # transient throttle must not divert every chain for a minute.
+    harness = Harness(spec_config(tmp_path / "v.db"), {"key": Scenario(status=429, retry_after=30)})
+    with caplog.at_level(logging.INFO, logger="llm_redact"):
+        response = await harness.client.post(
+            "/v1/messages", json=messages_body(), headers=GATEWAY_HEADERS
+        )
+    assert response.status_code == 200
+    assert response.headers[UPSTREAM_HEADER] == "ollama"
+    assert response.headers[HOPS_HEADER] == "2"
+    assert len(harness.received("key")) == 1 and len(harness.received("ollama")) == 1
+    assert harness.state.routing_state.healthy("anthropic_key")
+    assert harness.state.routing_state.cooldown_remaining("anthropic_key") == 0.0
+    assert harness.state.metrics.reissues[("anthropic_key", "ollama")] == 1
+    assert "upstream=ollama hops=2 auth=gateway-key class=ok reissue=yes" in caplog.text
+    status = (await harness.client.get("/__llm-redact/status")).json()["routing"]
+    assert status["upstreams"]["anthropic_key"]["state"] == "healthy"
+    assert status["upstreams"]["anthropic_key"]["last_error_class"] is None
+    await harness.aclose()
+
+
+async def test_chain_member_throttle_moves_on_without_cooldown(
+    env: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # In-chain, the max lane's `throttle_429 = "retry-same"` belongs to the
+    # primary: a throttled MEMBER is neither retried nor cooled down — the
+    # chain simply continues (oauth plan-limit → key throttle → ollama).
+    async def never(_seconds: float) -> None:
+        raise AssertionError("must not sleep")
+
+    monkeypatch.setattr(proxy_module, "_RETRY_SLEEP", never)
+    harness = Harness(
+        spec_config(tmp_path / "v.db"),
+        {"oauth": Scenario(status=429, plan_limit=True), "key": Scenario(status=429)},
+    )
+    response = await harness.client.post(
+        "/v1/messages", json=messages_body(), headers=OAUTH_HEADERS
+    )
+    assert response.status_code == 200
+    assert response.headers[UPSTREAM_HEADER] == "ollama"
+    assert response.headers[HOPS_HEADER] == "3"
+    assert len(harness.received("key")) == 1
+    assert not harness.state.routing_state.healthy("anthropic_oauth")
+    assert harness.state.routing_state.healthy("anthropic_key")
+    assert harness.state.metrics.reissues[("anthropic_oauth", "anthropic_key")] == 1
+    assert harness.state.metrics.reissues[("anthropic_key", "ollama")] == 1
+    assert route_of(harness)["hops"] == 3 and route_of(harness)["reissue"] == "yes"
+    await harness.aclose()
+
+
+def _collect_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    waits: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr(proxy_module, "_RETRY_SLEEP", fake_sleep)
+    return waits
+
+
+async def test_retry_same_is_not_a_hop(
+    env: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A throttle answered by retry-same and then served by the SAME upstream
+    # is hop 1: no re-issue spend (R-28), no debug headers on the
+    # passthrough lane (Q5), no reissue counted anywhere.
+    waits = _collect_waits(monkeypatch)
+    harness = Harness(
+        spec_config(tmp_path / "v.db"),
+        {"oauth": Scenario(fail_count=1, fail_status=429, retry_after=1)},
+    )
+    response = await harness.client.post(
+        "/v1/messages", json=messages_body(), headers=OAUTH_HEADERS
+    )
+    assert response.status_code == 200 and waits == [2.0]
+    assert len(harness.received("oauth")) == 2
+    assert UPSTREAM_HEADER not in response.headers and HOPS_HEADER not in response.headers
+    assert route_of(harness) == {
+        "rule": "max-lane",
+        "upstream": "anthropic_oauth",
+        "hops": 1,
+        "auth": "oauth",
+        "class": "ok",
+        "reissue": "no",
+    }
+    totals = harness.state.budget_ledger.totals("anthropic_oauth")
+    assert (totals.rows, totals.reissue_rows, totals.reissue_tokens) == (1, 0, 0)
+    assert harness.state.metrics.reissues == {}
+    assert harness.state.routing_state.reissues_last_hour() == 0
+    status = (await harness.client.get("/__llm-redact/status")).json()["routing"]
+    assert status["upstreams"]["anthropic_oauth"]["spend"]["reissue_tokens"] == 0
+    # Both attempts were requests to that upstream, though.
+    assert status["upstreams"]["anthropic_oauth"]["requests"] == 2
+    await harness.aclose()
+
+
+class _ThrottleThenPlanLimit(Scenario):
+    """A 429 upstream whose second answer carries the plan-limit headers."""
+
+    def error_headers(self) -> dict[str, str]:
+        headers = super().error_headers()
+        if len(self.received) >= 2:
+            headers.update(fake_upstream.PLAN_LIMIT_HEADERS)
+        return headers
+
+
+async def test_throttle_retry_does_not_consume_a_max_hops_slot(
+    env: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # max_hops = 2: throttle → retry-same → plan-limit → the chain still has
+    # its one re-issue left (the retry was not a hop).
+    waits = _collect_waits(monkeypatch)
+    raw = _raw(tmp_path / "v.db")
+    raw["routing"]["max_hops"] = 2
+    harness = Harness(_config(raw), {"oauth": _ThrottleThenPlanLimit(status=429)})
+    response = await harness.client.post(
+        "/v1/messages", json=messages_body(), headers=OAUTH_HEADERS
+    )
+    assert response.status_code == 200 and waits == [2.0]
+    assert response.headers[UPSTREAM_HEADER] == "anthropic_key"
+    assert response.headers[HOPS_HEADER] == "2"
+    assert len(harness.received("oauth")) == 2 and len(harness.received("key")) == 1
+    assert not harness.state.routing_state.healthy("anthropic_oauth")
+    await harness.aclose()
+
+
+async def test_max_hops_one_still_allows_the_throttle_retry(
+    env: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # max_hops bounds re-issues; the single retry-same is bounded by itself.
+    waits = _collect_waits(monkeypatch)
+    raw = _raw(tmp_path / "v.db")
+    raw["routing"]["max_hops"] = 1
+    harness = Harness(_config(raw), {"oauth": Scenario(status=429)})
+    response = await harness.client.post(
+        "/v1/messages", json=messages_body(), headers=OAUTH_HEADERS
+    )
+    assert response.status_code == 429 and waits == [2.0]
+    assert len(harness.received("oauth")) == 2
+    assert route_of(harness)["hops"] == 1 and route_of(harness)["reissue"] == "no"
+    assert harness.state.routing_state.healthy("anthropic_oauth")
+    await harness.aclose()
+
+
+async def test_deadline_blocks_the_throttle_retry(
+    env: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def never(_seconds: float) -> None:
+        raise AssertionError("must not sleep")
+
+    monkeypatch.setattr(proxy_module, "_RETRY_SLEEP", never)
+    raw = _raw(tmp_path / "v.db")
+    raw["routing"]["request_deadline_seconds"] = 0.000001
+    harness = Harness(_config(raw), {"oauth": Scenario(status=429, retry_after=1)})
+    response = await harness.client.post(
+        "/v1/messages", json=messages_body(), headers=OAUTH_HEADERS
+    )
+    assert response.status_code == 429 and len(harness.received("oauth")) == 1
+    assert route_of(harness)["hops"] == 1 and route_of(harness)["class"] == "throttle_429"
+    await harness.aclose()
+
+
+def test_finish_route_records_spend_only_for_2xx(env: Any, tmp_path: Path) -> None:
+    state = ProxyState(spec_config(tmp_path / "v.db"), None)
+    delivery = RouteDelivery(
+        rule_id="r",
+        upstream=state.routing_upstreams["anthropic_key"],
+        hops=2,
+        auth="gateway-key",
+        status_class="503",
+        reissue="yes",
+        protocol="anthropic",
+        original_model=None,
+        sent_model="claude-sonnet-5",
+        headers={},
+        method="POST",
+        path="/v1/messages",
+    )
+    usage = Usage(input_tokens=5, output_tokens=1)
+    # A delivered error body that happens to carry usage is not spend.
+    assert state.finish_route(delivery, 503, usage)["hops"] == 2
+    assert state.finish_route(delivery, None, usage)["class"] == "503"
+    assert state.finish_route(delivery, 200, None)["reissue"] == "yes"
+    assert state.budget_ledger.totals("anthropic_key").rows == 0
+    state.finish_route(delivery, 200, usage)
+    totals = state.budget_ledger.totals("anthropic_key")
+    assert (totals.rows, totals.reissue_rows, totals.in_tokens) == (1, 1, 5)
+    # The routed-requests metric counts every close, spend or not.
+    assert state.metrics.routed[("anthropic_key", "r")] == 4
+    state.spend_store.close()
+    state.vault_manager.close()
 
 
 async def test_reissue_policy_never_delivers_the_error(env: Any, tmp_path: Path) -> None:
@@ -855,6 +1242,107 @@ def test_reload_hot_swaps_routing_and_prices(
     assert state.config is before
     assert "GEMINI_API_KEY (upstream 'gemini_openai_compat')" in caplog.text
     state.spend_store.close()
+    state.vault_manager.close()
+
+
+def _rates(per_million: float) -> dict[str, float]:
+    return {name: per_million for name in ("input", "output", "cache_read", "cache_write")}
+
+
+def test_reload_rereads_a_price_table_file(env: Any, tmp_path: Path) -> None:
+    # R-34: editing the `[prices] table = PATH` file leaves PricesConfig
+    # equal, so the table is rebuilt on every reload — the new rates apply
+    # and ids the old table could not price stay listed until one can.
+    price_file = tmp_path / "prices.json"
+    price_file.write_text(json.dumps({"version": "t", "models": {"gpt-5": _rates(1.0)}}))
+    raw = _raw(tmp_path / "v.db")
+    raw["prices"]["table"] = price_file.as_posix()
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(emit_config_toml(_config(raw)))
+    state = ProxyState(_config(raw), None, config_path=config_file)
+    state.price_table.cost_usd("mystery-model", Usage(input_tokens=1))
+    state.price_table.cost_usd("laguna-9", Usage(input_tokens=1))
+    assert state.price_table.unknown_models == {"mystery-model", "laguna-9"}
+    price_file.write_text(
+        json.dumps(
+            {
+                "version": "t",
+                "models": {"gpt-5": _rates(3.0), "laguna-9": _rates(0.0)},
+            }
+        )
+    )
+    state.reload()
+    price = state.price_table.lookup("gpt-5")
+    assert price is not None and price.input == 3.0
+    assert state.price_table.unknown_models == {"mystery-model"}
+    state.spend_store.close()
+    state.vault_manager.close()
+
+
+def _locked(_path: Path) -> Any:
+    raise sqlite3.OperationalError("database is locked")
+
+
+def test_reload_survives_a_spend_store_open_fault(
+    env: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A reload that enables routing opens the spend table in the vault
+    # file; a locked file must log "reload failed" and keep the running
+    # config — never raise out of the SIGHUP callback.
+    config_file = tmp_path / "config.toml"
+    raw = _raw(tmp_path / "v.db")
+    raw["routing"]["enabled"] = False
+    config_file.write_text(emit_config_toml(_config(raw)))
+    state = ProxyState(_config(raw), None, config_path=config_file)
+    raw["routing"]["enabled"] = True
+    config_file.write_text(emit_config_toml(_config(raw)))
+    monkeypatch.setattr(proxy_module, "SqliteSpendStore", _locked)
+    with caplog.at_level(logging.ERROR, logger="llm_redact"):
+        state.reload()
+    assert state.config.routing.enabled is False
+    assert isinstance(state.spend_store, InMemorySpendStore)
+    assert "config reload failed; keeping current config" in caplog.text
+    assert "spend table in the vault database" in caplog.text
+    assert "OperationalError: database is locked" in caplog.text
+    # Startup fails closed with the same ConfigError (serve --check shape).
+    with pytest.raises(ConfigError, match="spend table in the vault database"):
+        ProxyState(_config(raw), None)
+    state.vault_manager.close()
+
+
+async def test_editor_reports_an_apply_failure_after_writing(
+    env: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The editor merges over FILE truth: a file that meanwhile enabled
+    # routing makes apply_config open the spend table after the write. A
+    # fault there is an explicit 500 naming the written path, not an
+    # anonymous traceback; the running config stays as it was.
+    config_file = tmp_path / "config.toml"
+    raw = _raw(tmp_path / "v.db")
+    raw["routing"]["enabled"] = False
+    config_file.write_text(emit_config_toml(_config(raw)))
+    app = create_app(
+        _config(raw),
+        upstream_transport=httpx.ASGITransport(app=fake_upstream.build_app()),
+        config_path=config_file,
+    )
+    state: ProxyState = app.state.proxy
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
+    token = (await client.get("/__llm-redact/config")).json()["csrf_token"]
+    raw["routing"]["enabled"] = True
+    config_file.write_text(emit_config_toml(_config(raw)))
+    monkeypatch.setattr(proxy_module, "SqliteSpendStore", _locked)
+    response = await client.post(
+        "/__llm-redact/config",
+        json={"config": {"max_body_bytes": 123456}},
+        headers={CSRF_HEADER: token, "content-type": "application/json"},
+    )
+    assert response.status_code == 500
+    assert response.json()["error"].startswith(f"written to {config_file} but not applied (")
+    assert "reload (SIGHUP)" in response.json()["error"]
+    assert tomllib.loads(config_file.read_text())["max_body_bytes"] == 123456
+    assert state.config.max_body_bytes != 123456 and state.config.routing.enabled is False
+    await client.aclose()
     state.vault_manager.close()
 
 

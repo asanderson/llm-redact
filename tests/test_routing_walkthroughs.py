@@ -501,7 +501,10 @@ async def test_walkthrough_4_throttle_retries_same_upstream_once(
     # A throttle never puts the upstream into cooldown.
     assert harness.state.routing_state.healthy("anthropic_oauth")
     assert "class=throttle_429 reissue=no" in caplog.text
-    assert route_of(harness)["hops"] == 2
+    # The retry is an attempt on the SAME upstream, not a hop (R-18: hops
+    # count re-issues; decision 11: the spend row's hop is that number).
+    assert route_of(harness)["hops"] == 1
+    assert UPSTREAM_HEADER not in response.headers and HOPS_HEADER not in response.headers
     await harness.aclose()
 
 

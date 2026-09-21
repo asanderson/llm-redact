@@ -3398,10 +3398,13 @@ async def _handle_routed(
         resolved = _resolved_status_key(rule, key) if rule is not None else None
         action = rule.chain_for(key) if rule is not None and resolved is not None else None
         # R-19 / decision 10: a listed status parks the FAILED upstream for
-        # its cooldown — EXCEPT a throttle, which is transient by definition,
+        # its cooldown (honouring a longer retry-after; RoutingState caps at
+        # 3600 s) — EXCEPT a throttle, which is transient by definition,
         # whether the rule answers it with retry-same or lets it fall through
-        # to its `429`/`4xx` chain (chain_for's precedence ladder).
-        cooldown = 0.0 if key == "throttle_429" else max(current.cooldown_seconds, retry_after or 0.0)
+        # to its `429`/`4xx` chain (chain_for's precedence ladder). A zero
+        # cooldown still records the error class for /status.
+        throttled = key == "throttle_429"
+        cooldown = max(current.cooldown_seconds, retry_after or 0.0)
         if chain is None:
             if action is None:
                 break  # no chain for this status: deliver the response as-is
@@ -3424,7 +3427,7 @@ async def _handle_routed(
                 continue
             assert isinstance(resolved, str) and isinstance(action, tuple)
             status_class = resolved
-            if cooldown > 0.0:
+            if not throttled:
                 rstate.mark_unhealthy(current.name, cooldown, key)
             if not reissue_allowed():
                 break
@@ -3438,7 +3441,7 @@ async def _handle_routed(
             # `retry-same` action belongs to the primary).
             assert isinstance(resolved, str)
             status_class = resolved
-            if cooldown > 0.0:
+            if not throttled:
                 rstate.mark_unhealthy(current.name, cooldown, key)
         if hops >= routing.max_hops or time.monotonic() >= deadline:
             break

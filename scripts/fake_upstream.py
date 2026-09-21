@@ -25,7 +25,8 @@ body ends after the first content event, and the response carries
 into a real connection drop — ASGITransport itself buffers whole bodies),
 ``echo_model`` (the reply's ``model`` echoes the request's, so a proxy
 model rewrite/restore is testable) and ``fail_count`` (the first N requests
-fail with ``status``, later ones succeed). Every request an upstream saw is
+fail with ``fail_status`` — 503 unless set — later ones succeed). Every
+request an upstream saw is
 appended to its ``Scenario.received`` (headers + decoded body) for
 assertions — received bodies are printed only by the CLI (``--quiet`` off).
 
@@ -93,6 +94,9 @@ class Scenario:
     abort_mid_stream: bool = False
     echo_model: bool = False
     fail_count: int = 0
+    # The status of the first ``fail_count`` failures (a 429 throttle that
+    # clears on retry, say); ``status`` itself when that is not a success.
+    fail_status: int = 503
     received: list[Received] = field(default_factory=list)
 
     def failing(self) -> bool:
@@ -105,7 +109,7 @@ class Scenario:
         return not 200 <= self.status < 300
 
     def error_status(self) -> int:
-        return self.status if not 200 <= self.status < 300 else 503
+        return self.status if not 200 <= self.status < 300 else self.fail_status
 
     def error_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -279,22 +283,43 @@ class _ScenarioApp:
             )
         return JSONResponse({"input_tokens": sc.usage["input"]})
 
+    @staticmethod
+    def openai_error(sc: Scenario) -> Response:
+        status = sc.error_status()
+        return JSONResponse(
+            {
+                "error": {
+                    "message": "fake upstream",
+                    "type": "rate_limit_error" if status == 429 else "server_error",
+                    "code": None,
+                }
+            },
+            status_code=status,
+            headers=sc.error_headers(),
+        )
+
+    async def embeddings(self, request: Request) -> Response:
+        """OpenAI /v1/embeddings: a REDACT_ONLY route whose response carries
+        a prompt-only usage block and (with ``echo_model``) the model id."""
+        body = await request.json()
+        sc = self.scenario_for(request, body)
+        if sc.failing():
+            return self.openai_error(sc)
+        model = body.get("model", "fake") if sc.echo_model else "fake"
+        return JSONResponse(
+            {
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
+                "model": model,
+                "usage": {"prompt_tokens": sc.usage["input"], "total_tokens": sc.usage["input"]},
+            }
+        )
+
     async def chat_completions(self, request: Request) -> Response:
         body = await request.json()
         sc = self.scenario_for(request, body)
         if sc.failing():
-            status = sc.error_status()
-            return JSONResponse(
-                {
-                    "error": {
-                        "message": "fake upstream",
-                        "type": "rate_limit_error" if status == 429 else "server_error",
-                        "code": None,
-                    }
-                },
-                status_code=status,
-                headers=sc.error_headers(),
-            )
+            return self.openai_error(sc)
         reply = _echo(json.dumps(body.get("messages", []), ensure_ascii=False))
         model = body.get("model", "fake") if sc.echo_model else "fake"
         usage = sc.openai_usage()
@@ -583,6 +608,7 @@ def build_app(scenarios: Scenarios | None = None) -> Starlette:
             Route("/v1/messages", handlers.messages, methods=["POST"]),
             Route("/v1/messages/count_tokens", handlers.count_tokens, methods=["POST"]),
             Route("/v1/chat/completions", handlers.chat_completions, methods=["POST"]),
+            Route("/v1/embeddings", handlers.embeddings, methods=["POST"]),
             # OpenAI-compatible surfaces under their own base paths (the
             # proxy folds the inbound /v1 into the upstream's base URL).
             Route("/v1beta/openai/chat/completions", handlers.chat_completions, methods=["POST"]),
@@ -635,6 +661,9 @@ def main() -> None:
     parser.add_argument(
         "--fail-count", type=int, default=0, help="the first N requests fail, later ones succeed"
     )
+    parser.add_argument(
+        "--fail-status", type=int, default=503, help="the status those first N failures answer"
+    )
     parser.add_argument("--quiet", action="store_true", help="do not print received bodies")
     args = parser.parse_args()
     MANGLE = args.mangle
@@ -646,6 +675,7 @@ def main() -> None:
         abort_mid_stream=args.abort_mid_stream,
         echo_model=args.echo_model,
         fail_count=args.fail_count,
+        fail_status=args.fail_status,
     )
     app = build_app({"*": scenario})
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

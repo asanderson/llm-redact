@@ -18,12 +18,12 @@ from typing import Any
 from llm_redact.config import (
     Config,
     ConfigError,
-    PricesConfig,
     apply_env_overrides,
     load_config,
 )
 from llm_redact.pricing import PriceTable
 from llm_redact.routing import (
+    PricesConfig,
     RouteRule,
     RoutingConfig,
     RuleMatch,
@@ -106,7 +106,9 @@ def match_summary(match: RuleMatch) -> str:
 
 
 def _chains(rule: RouteRule) -> dict[str, list[str] | str]:
-    return {key: list(chain) if isinstance(chain, tuple) else chain for key, chain in rule.on_status}
+    return {
+        key: list(chain) if isinstance(chain, tuple) else chain for key, chain in rule.on_status
+    }
 
 
 def _chain_text(chains: Mapping[str, list[str] | str]) -> str:
@@ -361,7 +363,7 @@ def _spend_store_note(config: Config) -> str | None:
     if config.vault.backend == "memory":
         return (
             "spend is in-process only with the memory vault backend (it resets on"
-            ' restart) — read it from a running proxy with `llm-redact status`, or set'
+            " restart) — read it from a running proxy with `llm-redact status`, or set"
             ' [vault] backend = "sqlite" to persist it'
         )
     if config.vault.backend != "sqlite":
@@ -457,4 +459,3 @@ def run_spend(args: argparse.Namespace) -> int:
         print(_routing_state_line(routing))
     _print_spend(data)
     return 0
-

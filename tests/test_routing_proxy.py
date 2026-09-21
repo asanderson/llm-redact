@@ -503,12 +503,15 @@ async def test_editor_preserves_routing_sections(env: Any, tmp_path: Path) -> No
         assert refused.status_code == 400
         assert "edit the file and reload" in refused.json()["error"]
 
+    # (max_body_bytes rather than inject_system_note: the latter is the
+    # default every upstream's own inject_system_note resolves from, so
+    # editing it legitimately changes the parsed [upstreams].)
     applied = await client.post(
-        "/__llm-redact/config", json={"config": {"inject_system_note": False}}, headers=headers
+        "/__llm-redact/config", json={"config": {"max_body_bytes": 123456}}, headers=headers
     )
     assert applied.status_code == 200, applied.text
     written = tomllib.loads(config_file.read_text())
-    assert written["inject_system_note"] is False
+    assert written["max_body_bytes"] == 123456
     # Every routing section survived byte-for-byte in meaning.
     reparsed = parse_config(written, str(config_file))
     assert reparsed.routing == config.routing and reparsed.prices == config.prices

@@ -34,7 +34,7 @@ from llm_redact.routing import (
     literal_models,
     select_rule,
 )
-from llm_redact.spend import Budget, SqliteSpendStore, report
+from llm_redact.spend import Budget, SpendRow, SqliteSpendStore, report
 
 # The path `routes test` assumes when --path is not given: the protocol's
 # primary chat endpoint (a rule with `match.path` needs an explicit --path).
@@ -75,13 +75,8 @@ def configured_models(routing: RoutingConfig) -> list[str]:
     missing price is not a budgeting gap)."""
     seen: dict[str, None] = dict.fromkeys(literal_models(routing))
     for rule in routing.rules:
-        if rule.model_rewrite is None:
-            continue
-        try:
-            zero_cost = routing.upstream(rule.upstream).zero_cost
-        except KeyError:  # pragma: no cover - parse_config rejects unknown upstreams
-            zero_cost = False
-        if not zero_cost:
+        # parse_config rejects a rule naming an unknown upstream, so lookup is total.
+        if rule.model_rewrite is not None and not routing.upstream(rule.upstream).zero_cost:
             seen.setdefault(rule.model_rewrite, None)
     return list(seen)
 
@@ -250,10 +245,70 @@ def _parse_headers(raw: list[str] | None) -> dict[str, str]:
     return headers
 
 
-def _annotate_member(name: str, routing: RoutingConfig, rule_upstream: UpstreamConfig) -> str:
-    """Chain member with the offline-knowable annotations: passthrough
-    (decision 3 — never re-issued to), zero-cost, budgeted, no count_tokens.
-    Cooldown/budget-exhausted are runtime state: `llm-redact status`."""
+# Per-upstream runtime state from a running proxy's /status `routing`
+# block (name -> {"state", "cooldown_remaining_seconds", ...}); {} when no
+# proxy answered.
+LiveStates = dict[str, dict[str, Any]]
+
+# How long `routes test` waits for the loopback /status answer: a proxy
+# that is not running refuses instantly; one that is answers in ms.
+_STATUS_TIMEOUT_S = 1.0
+
+
+def probe_live_states(config: Config) -> LiveStates:
+    """Best-effort `GET /__llm-redact/status` on the configured plain-http
+    listener (the call `llm-redact status` makes). Never raises: no proxy,
+    a TLS listener (client certs are `status`'s business), or an answer
+    without a routing block all yield {} — the dry-run then says "not
+    probed". No upstream is ever contacted."""
+    if config.tls.enabled:
+        return {}
+    import httpx
+
+    from llm_redact.proxy import RESERVED_PREFIX
+
+    url = f"http://{config.host}:{config.port}{RESERVED_PREFIX}/status"
+    try:
+        response = httpx.get(url, timeout=_STATUS_TIMEOUT_S)
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        return {}
+    routing = payload.get("routing") if isinstance(payload, dict) else None
+    if not isinstance(routing, dict) or not routing.get("enabled"):
+        return {}
+    upstreams = routing.get("upstreams")
+    if not isinstance(upstreams, dict):
+        return {}
+    return {name: entry for name, entry in upstreams.items() if isinstance(entry, dict)}
+
+
+# Injectable for tests (nothing here may touch a real socket).
+_status_probe: Callable[[Config], LiveStates] = probe_live_states
+
+
+def _state_note(name: str, live: LiveStates) -> str | None:
+    """The runtime annotation a chain member or primary gets when a running
+    proxy reported it out of rotation; None when healthy or unknown."""
+    entry = live.get(name)
+    if entry is None:
+        return None
+    state = entry.get("state")
+    if state == "cooldown":
+        left = entry.get("cooldown_remaining_seconds") or 0
+        return f"in cooldown {float(left):.0f}s — skipped"
+    if state == "budget_exhausted":
+        return "budget exhausted — skipped"
+    return None
+
+
+def _annotate_member(
+    name: str, routing: RoutingConfig, rule_upstream: UpstreamConfig, live: LiveStates
+) -> str:
+    """Chain member with the offline-knowable annotations — passthrough
+    (decision 3 — never re-issued to), zero-cost, budgeted, no count_tokens
+    — plus the running proxy's cooldown / budget-exhausted state when one
+    answered (`live`); without a proxy those two are simply unknown."""
     try:
         member = routing.upstream(name)
     except KeyError:
@@ -261,6 +316,9 @@ def _annotate_member(name: str, routing: RoutingConfig, rule_upstream: UpstreamC
     notes: list[str] = []
     if member.is_passthrough:
         notes.append("passthrough — never a re-issue target")
+    state = _state_note(name, live)
+    if state is not None:
+        notes.append(state)
     if member.zero_cost:
         notes.append("zero-cost")
     elif member.has_budget:
@@ -280,8 +338,12 @@ def route_decision(
     headers: Mapping[str, str],
     path: str,
     auth: str,
+    live: LiveStates | None = None,
 ) -> dict[str, Any]:
-    """The dry-run answer `routes test` prints (also its --json shape)."""
+    """The dry-run answer `routes test` prints (also its --json shape).
+    `live` is the running proxy's per-upstream state block, {} / None
+    when no proxy answered."""
+    live = live or {}
     rule = select_rule(
         routing, protocol=protocol, model=model, headers=headers, path=path, auth=auth
     )
@@ -299,23 +361,47 @@ def route_decision(
         "reissue_policy": rule.reissue_policy if rule is not None else None,
         "model_rewrite": rule.model_rewrite if rule is not None else None,
         "count_tokens_404": False,
+        "state": None,
     }
     if upstream_name is None:
         return decision
     upstream = routing.upstream(upstream_name)
     decision["upstream"] = upstream_view(upstream)
     decision["count_tokens_404"] = not upstream.count_tokens and path.endswith("/count_tokens")
+    live_entry = live.get(upstream_name)
+    if live_entry is not None:
+        decision["state"] = {
+            "state": live_entry.get("state"),
+            "cooldown_remaining_seconds": live_entry.get("cooldown_remaining_seconds"),
+            "last_error_class": live_entry.get("last_error_class"),
+        }
     if rule is not None:
         decision["chains"] = {
             key: chain
             if isinstance(chain, str)
-            else [_annotate_member(name, routing, upstream) for name in chain]
+            else [_annotate_member(name, routing, upstream, live) for name in chain]
             for key, chain in rule.on_status
         }
         decision["on_budget_exhausted"] = [
-            _annotate_member(name, routing, upstream) for name in rule.on_budget_exhausted
+            _annotate_member(name, routing, upstream, live) for name in rule.on_budget_exhausted
         ]
     return decision
+
+
+def _state_line(decision: dict[str, Any], probed: bool) -> str:
+    live = decision["state"]
+    if live is None:
+        if probed:
+            return "state:    unknown (the running proxy reports no such upstream — reload?)"
+        return "state:    not probed (no proxy answered on the configured listener)"
+    text = f"state:    {live['state']}"
+    if live["state"] == "cooldown":
+        text += f" ({float(live['cooldown_remaining_seconds'] or 0):.0f}s left)"
+    if live["state"] == "budget_exhausted":
+        text += " (a direct request answers 402)"
+    if live["last_error_class"]:
+        text += f" last error: {live['last_error_class']}"
+    return text
 
 
 def run_routes_test(args: argparse.Namespace) -> int:
@@ -331,14 +417,28 @@ def run_routes_test(args: argparse.Namespace) -> int:
     protocol: str = args.protocol
     model: str | None = args.model
     path: str = args.path if args.path is not None else DEFAULT_TEST_PATHS[protocol]
+    # Rules match the PATH only (`request.url.path`); a pasted `?alt=sse`
+    # or `?key=` is not part of the glob (and the latter must not print).
+    path = path.partition("?")[0]
     if protocol == "gemini":
-        if model is None and args.path is not None:
-            model = model_from_gemini_path(path)
         path = path.replace("{model}", model or "gemini-2.5-flash")
+        if model is None:
+            # Decision 15b: derived AFTER the stand-in is filled in, so the
+            # dry-run matches model globs exactly as the proxy would for
+            # this path and a body without `model`.
+            model = model_from_gemini_path(path)
+    live = _status_probe(config)
     decision = route_decision(
-        routing, protocol=protocol, model=model, headers=headers, path=path, auth=args.auth
+        routing,
+        protocol=protocol,
+        model=model,
+        headers=headers,
+        path=path,
+        auth=args.auth,
+        live=live,
     )
     decision["routing_enabled"] = routing.enabled
+    decision["live"] = bool(live)
     if args.json:
         print(json.dumps(decision, indent=2))
         return 0
@@ -363,7 +463,7 @@ def run_routes_test(args: argparse.Namespace) -> int:
         f" credential={upstream['credential']} cost={upstream['cost']}"
         f"{' legacy' if upstream['legacy'] else ''})"
     )
-    print("state:    not probed (offline dry-run; `llm-redact status` shows cooldown/budget)")
+    print(_state_line(decision, bool(live)))
     if decision["rule"]:
         chains: dict[str, list[str] | str] = decision["chains"]
         if chains:
@@ -379,6 +479,28 @@ def run_routes_test(args: argparse.Namespace) -> int:
     if decision["count_tokens_404"]:
         print("count_tokens: this upstream does not implement it — the proxy answers 404")
     return 0
+
+
+class ReadOnlySpendStore(SqliteSpendStore):
+    """`SqliteSpendStore` over a `mode=ro` connection: the report never
+    creates the vault file, its `spend` table, WAL side files, or chmods
+    anything — a 0400 backup copy reads fine. `has_table` is False on a
+    legacy vault the proxy has not yet recorded spend into."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._conn = sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True)
+        self._conn.execute("PRAGMA busy_timeout=5000")
+
+    @property
+    def has_table(self) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'spend'"
+        ).fetchone()
+        return row is not None
+
+    def record(self, row: SpendRow) -> None:
+        raise sqlite3.OperationalError("read-only spend store")
 
 
 def _spend_store_note(config: Config) -> str | None:
@@ -406,9 +528,13 @@ def _print_spend(data: dict[str, Any]) -> None:
         print("no spend recorded")
         return
     for name, entry in upstreams.items():
-        usd = f"${entry['usd']:.4f}" if entry["rows"] - entry["unpriced_rows"] else "unpriced"
-        if entry["unpriced_rows"] and entry["rows"] - entry["unpriced_rows"]:
-            usd += f" (+{entry['unpriced_rows']} unpriced rows)"
+        priced_rows = entry["rows"] - entry["unpriced_rows"]
+        if entry["unpriced_rows"] and not priced_rows:
+            usd = "unpriced"
+        else:
+            usd = f"${entry['usd']:.4f}"
+            if entry["unpriced_rows"]:
+                usd += f" (+{entry['unpriced_rows']} unpriced rows)"
         hops = entry["hops"]
         line = (
             f"{name}: in={entry['in_tokens']} out={entry['out_tokens']}"
@@ -461,8 +587,16 @@ def run_spend(args: argparse.Namespace) -> int:
         message = f"no spend recorded yet ({path} does not exist)"
         print(json.dumps({"backend": "sqlite", "note": message}) if args.json else message)
         return 0
-    store = SqliteSpendStore(path)
     try:
+        store = ReadOnlySpendStore(path)
+    except sqlite3.Error as problem:
+        print(f"spend: cannot open {path} read-only ({type(problem).__name__})")
+        return 1
+    try:
+        if not store.has_table:
+            message = f"no spend recorded yet ({path} has no spend table)"
+            print(json.dumps({"backend": "sqlite", "note": message}) if args.json else message)
+            return 0
         data = report(
             store,
             month=args.month,
@@ -473,6 +607,9 @@ def run_spend(args: argparse.Namespace) -> int:
     except ValueError as problem:  # a malformed --month
         print(f"spend: {problem}")
         return 2
+    except sqlite3.Error as problem:  # corrupted / not a sqlite file / locked
+        print(f"spend: cannot read {path} ({type(problem).__name__})")
+        return 1
     finally:
         store.close()
     if args.json:

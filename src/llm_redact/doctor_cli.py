@@ -548,12 +548,19 @@ def _probe_upstream(base_url: str) -> str | None:
 
 
 def _display_url(base_url: str) -> str:
-    """scheme://netloc only — a base URL never legitimately carries a query,
-    but a `?key=` pasted into one must not reach the terminal."""
+    """scheme://host[:port] only — never the path, the query (a `?key=`
+    pasted into a base URL) or the userinfo (`https://user:s3cret@gw…`,
+    httpx's basic-auth form for a self-hosted gateway) — none of which may
+    reach the terminal or the --json rows."""
     from urllib.parse import urlsplit
 
     parts = urlsplit(base_url)
-    return f"{parts.scheme}://{parts.netloc}"
+    host = parts.hostname or ""
+    if ":" in host:  # IPv6 literal: hostname strips the brackets
+        host = f"[{host}]"
+    if parts.port is not None:
+        host += f":{parts.port}"
+    return f"{parts.scheme}://{host}"
 
 
 def _check_routing(report: _Report, config: Config, offline: bool) -> None:
@@ -606,7 +613,9 @@ def _check_routing(report: _Report, config: Config, offline: bool) -> None:
                 "WARN",
                 "routing",
                 f"no price for {', '.join(unpriced)} — their spend counts tokens only;"
-                ' add [prices.override."<id>"] to budget them in USD',
+                ' add [prices.override."<id>"] to budget them in USD (rewrite targets'
+                " that only reach a zero-cost upstream are not listed: budgets are"
+                " ignored there)",
             )
         else:
             report.line("PASS", "routing", "price table covers every configured model id")

@@ -525,5 +525,5 @@ def ceiling_failures(stats: list[LatencyStat]) -> list[str]:
         if stat is None:
             failures.append(f"{name}: expected in latency stats but missing")
         elif stat.p50_ms >= ceiling:
-            failures.append(f"{name}: p50 {stat.p50_ms:.1f} ms >= ceiling {ceiling:.0f} ms")
+            failures.append(f"{name}: p50 {stat.p50_ms:g} ms >= ceiling {ceiling:g} ms")
     return failures

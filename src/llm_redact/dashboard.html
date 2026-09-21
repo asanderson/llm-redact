@@ -439,12 +439,14 @@ async function refreshStatus() {
     upstreams.appendChild(row);
   });
 }
-function routingBudget(spend) {
+function routingBudget(spend, zeroCost) {
   // The budget column: remaining/limit in USD and/or tokens, "zero-cost"
-  // when budgets are ignored, "none" for passthrough (subscription usage
-  // is the provider's to meter).
+  // when budgets are ignored (the upstream's cost field — the /status spend
+  // block carries no zero_cost key, and remaining_* is null there, which
+  // must not read as exhausted), "none" for passthrough (subscription
+  // usage is the provider's to meter).
   if (!spend) return "";
-  if (spend.zero_cost) return "zero-cost (ignored)";
+  if (zeroCost || spend.zero_cost) return "zero-cost (ignored)";
   const parts = [];
   if (spend.budget_usd !== null && spend.budget_usd !== undefined)
     parts.push("$" + Number(spend.remaining_usd || 0).toFixed(2) + " of $"
@@ -494,7 +496,7 @@ function renderRouting(routing) {
       : (spend.in_tokens || 0) + (spend.out_tokens || 0) + (spend.cache_read || 0) + (spend.cache_write || 0);
     cell(row, String(tokens), true);
     cell(row, Number(spend.usd || 0).toFixed(4) + (spend.unpriced_rows ? " ⚠" + spend.unpriced_rows + " unpriced" : ""), true);
-    cell(row, routingBudget(u.spend));
+    cell(row, routingBudget(u.spend, u.cost === "zero"));
     rows.appendChild(row);
     if (u.state === "cooldown") notes.push(name + " in cooldown (skipped in chains)");
     if (u.state === "budget_exhausted") notes.push(name + " budget exhausted (402 direct; chains skip it)");

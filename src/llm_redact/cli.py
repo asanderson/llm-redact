@@ -761,8 +761,11 @@ def run_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _spend_summary(spend: dict[str, Any]) -> str:
-    """One upstream's spend-vs-budget fragment of the status line."""
+def _spend_summary(spend: dict[str, Any], *, zero_cost: bool = False) -> str:
+    """One upstream's spend-vs-budget fragment of the status line. A
+    zero-cost upstream ignores its budget (decision 11 — the ledger reports
+    remaining_* as None), so its fragment says so instead of reading as
+    exhausted."""
     usd = spend.get("usd") or 0.0
     tokens = spend.get("total_tokens")
     if tokens is None:
@@ -770,6 +773,10 @@ def _spend_summary(spend: dict[str, Any]) -> str:
             int(spend.get(k) or 0) for k in ("in_tokens", "out_tokens", "cache_read", "cache_write")
         )
     text = f"spend ${usd:.4f} / {tokens} tokens"
+    if zero_cost:
+        if spend.get("budget_usd") is not None or spend.get("budget_tokens") is not None:
+            text += " (budget ignored: zero-cost)"
+        return text
     if spend.get("budget_usd") is not None:
         text += f" (budget ${spend['budget_usd']:.2f}, ${spend.get('remaining_usd') or 0:.2f} left)"
     if spend.get("budget_tokens") is not None:
@@ -815,7 +822,7 @@ def _print_routing(payload: dict[str, Any]) -> None:
         )
         spend = upstream.get("spend")
         if spend:
-            line += " " + _spend_summary(spend)
+            line += " " + _spend_summary(spend, zero_cost=upstream.get("cost") == "zero")
         print(line)
 
 

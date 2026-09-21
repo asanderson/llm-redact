@@ -19,6 +19,11 @@ At a glance:
 | Ollama (native) | `OLLAMA_HOST` | /api/chat, /api/generate (+NDJSON streaming), /api/embed |
 | Any OpenAI-compatible | `[providers.custom.NAME]` → `/custom/NAME/` | full OpenAI surface per named upstream, several side by side |
 
+One upstream per provider is the default model. Several upstreams per
+protocol — a subscription lane, your own API keys, a local Ollama —
+selected by rules with fallback chains, cooldowns and monthly budgets
+is the routing layer: [routing.md](routing.md).
+
 ## Anthropic, OpenAI, Gemini, Ollama (env-var providers)
 
 These need no configuration — point the tool's base-URL variable at the
@@ -120,6 +125,22 @@ stance as images). Without the extra, WebSocket upgrades are refused
 outright, so nothing silently bypasses redaction. Realtime connections
 use the static vault session — the per-conversation mode's
 first-message anchor does not exist at connection time.
+
+## Routing, fallback and budgets
+
+`[upstreams.NAME]` + `[routing]` (off by default; [routing.md](routing.md))
+replaces the one-upstream-per-provider model for the four env-var
+protocols — `anthropic`, `openai`, `gemini`, and native `ollama`: named
+destinations with a credential mode (`passthrough` byte-exact, `env:VAR`
+injected by the proxy, `none`), first-match rules on protocol / model
+glob / headers / path / auth kind, `on_status` fallback chains with
+cooldowns and Anthropic plan-limit detection, and per-upstream monthly
+budgets. When a `[routing]` table is present the legacy
+`[providers.anthropic|openai|gemini|ollama]` sections auto-register as
+passthrough upstreams of the same name, so existing configs keep
+working and rules can reference them. Azure, Vertex, Bedrock, Cohere,
+custom providers and the realtime relay keep the `upstream_base_url`
+path described above and are never routed.
 
 ## Disabling providers, and the deliberate opt-outs
 

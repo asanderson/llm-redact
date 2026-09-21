@@ -35,6 +35,16 @@ Classifications:
 | `GET /v1/organizations/...` (Admin API) | pass-through | org metadata |
 | WebSocket realtime | websocket | not offered by Anthropic today |
 
+`GET /v1/models` stays pass-through in both provider tables (the
+Anthropic row above, the OpenAI row below). With
+`[routing] expose_models = true` the proxy answers it
+**locally** instead, before adapter routing — Anthropic shape when the
+request carries `anthropic-version`, OpenAI shape otherwise — listing
+`model_catalog` plus the literal model names in routing rules, so
+Claude Code's gateway model discovery works ([routing.md](routing.md)).
+The row does not change: that answer is a routing feature, not a
+redaction classification.
+
 Anthropic's beta Files API shares its paths (`/v1/files...`) with
 OpenAI's. Routing is header-aware here: requests carrying an
 `anthropic-version` header pass through to the ANTHROPIC upstream

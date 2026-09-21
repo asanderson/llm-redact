@@ -8,7 +8,7 @@
     {
       "name": "llm-redact",
       "source": "./plugins/llm-redact",
-      "description": "llm-redact proxy control: status, live traffic, sessions, redaction preview, audit verification, and guarded config editing as slash commands"
+      "description": "llm-redact proxy control: status, live traffic, sessions, redaction preview, routing and spend, audit verification, and guarded config editing as slash commands"
     }
   ]
 }

@@ -2,6 +2,7 @@
 
 import dataclasses
 import ipaddress
+import json
 import os
 import re
 import tomllib
@@ -12,6 +13,23 @@ from typing import Any
 
 from llm_redact.detection.deny import DenyEntry
 from llm_redact.detection.engine import CustomRule, DetectionConfig, NerConfig
+from llm_redact.routing import (
+    AUTH_KINDS,
+    CLASS_KEYS,
+    COSTS,
+    CREDENTIAL_HEADERS,
+    PLAN_LIMIT_DETECTION,
+    PROTOCOLS,
+    REISSUE_POLICIES,
+    RETRY_SAME,
+    SPECIAL_STATUS_KEYS,
+    ModelPrice,
+    PricesConfig,
+    RouteRule,
+    RoutingConfig,
+    RuleMatch,
+    UpstreamConfig,
+)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -271,6 +289,11 @@ class Config:
     license: LicenseConfig = field(default_factory=LicenseConfig)
     users: UsersConfig = field(default_factory=UsersConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
+    # [upstreams] + [routing] (rule-based upstream selection, fallback chains,
+    # budgets — docs/routing.md) and [prices] (the budget price table). All
+    # three reload on SIGHUP; a config without them behaves exactly as before.
+    routing: RoutingConfig = field(default_factory=RoutingConfig)
+    prices: PricesConfig = field(default_factory=PricesConfig)
 
 
 class ConfigError(ValueError):
@@ -546,6 +569,586 @@ def _deny_entry(value: str, case_sensitive: bool, detector_type: str, where: str
     return DenyEntry(value=value, case_sensitive=case_sensitive, detector_type=detector_type)
 
 
+# --- [upstreams] / [routing] / [prices] (docs/routing.md) --------------------
+#
+# Upstream names and rule ids become metrics labels, response header values
+# (x-llm-redact-upstream) and log fields, so they stay in a plain token
+# alphabet. Env var names follow the POSIX portable set; header names are
+# RFC 7230 tokens (lowercased at parse — names compare case-insensitively).
+_ROUTE_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,63}\Z")
+_ENV_VAR_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
+_UPSTREAM_KEYS = {
+    "protocol",
+    "base_url",
+    "credential",
+    "cost",
+    "inject_system_note",
+    "count_tokens",
+    "monthly_budget_usd",
+    "monthly_budget_tokens",
+    "cooldown_seconds",
+    "extra_headers",
+    "body_defaults",
+}
+_ROUTING_KEYS = {
+    "enabled",
+    "default_upstream",
+    "max_hops",
+    "request_deadline_seconds",
+    "plan_limit_detection",
+    "plan_limit_headers",
+    "oauth_beta_marker",
+    "throttle_retry_max_seconds",
+    "budget_reset_day",
+    "debug_headers",
+    "expose_models",
+    "model_catalog",
+    "rule",
+}
+_RULE_KEYS = {
+    "id",
+    "match",
+    "upstream",
+    "model_rewrite",
+    "on_status",
+    "reissue_policy",
+    "on_budget_exhausted",
+}
+_MATCH_KEYS = {"protocol", "model", "headers", "path", "auth"}
+
+
+def _number_key(section: Mapping[str, Any], key: str, default: float, where: str) -> float:
+    """An int-or-float config key; booleans and strings are rejected, never
+    coerced (the _bool_key discipline)."""
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ConfigError(f"{where} {key} must be a number, got {type(value).__name__}")
+    return float(value)
+
+
+def _int_key(section: Mapping[str, Any], key: str, default: int, where: str) -> int:
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{where} {key} must be an integer, got {type(value).__name__}")
+    return value
+
+
+def _required_str(section: Mapping[str, Any], key: str, where: str) -> str:
+    value = section.get(key)
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{where} {key} is required and must be a non-empty string")
+    return value
+
+
+def _optional_str(section: Mapping[str, Any], key: str, where: str) -> str | None:
+    if key not in section:
+        return None
+    value = section[key]
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{where} {key} must be a non-empty string")
+    return value
+
+
+def _header_table(section: Mapping[str, Any], key: str, where: str) -> tuple[tuple[str, str], ...]:
+    """A `NAME = "value"` table of headers -> (lowercased name, value), sorted.
+
+    Names are validated as HTTP tokens and lowercased (two spellings of one
+    header are a duplicate); values are opaque strings (globs in rule
+    matches, literal values in extra_headers) and never echoed.
+    """
+    raw = section.get(key, {})
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} {key} must be a table of header = string")
+    out: dict[str, str] = {}
+    for name, value in raw.items():
+        if not isinstance(value, str):
+            raise ConfigError(f"{where} {key}: header {name!r} must map to a string")
+        if not _HEADER_NAME_RE.fullmatch(name):
+            raise ConfigError(f"{where} {key}: {name!r} is not a valid header name")
+        lowered = name.lower()
+        if lowered in out:
+            raise ConfigError(f"{where} {key}: header {lowered!r} is listed twice")
+        out[lowered] = value
+    return tuple(sorted(out.items()))
+
+
+def _parse_upstream(name: str, section: Mapping[str, Any], *, inject_note: bool) -> UpstreamConfig:
+    where = f"[upstreams.{name}]"
+    _require_keys(dict(section), _UPSTREAM_KEYS, where)
+    protocol = _required_str(section, "protocol", where)
+    if protocol not in PROTOCOLS:
+        raise ConfigError(f"{where} protocol must be one of {PROTOCOLS}, got {protocol!r}")
+    base_url = _required_str(section, "base_url", where).rstrip("/")
+    if not base_url.startswith(("http://", "https://")):
+        raise ConfigError(f"{where} base_url must start with http:// or https://")
+    credential = str(section.get("credential", "passthrough"))
+    if credential.startswith("env:"):
+        if not _ENV_VAR_RE.fullmatch(credential[len("env:") :]):
+            raise ConfigError(
+                f"{where} credential env:VAR needs a variable name matching [A-Z_][A-Z0-9_]*"
+            )
+    elif credential not in ("passthrough", "none"):
+        raise ConfigError(
+            f"{where} credential must be 'passthrough', 'none' or 'env:VAR', got {credential!r}"
+        )
+    passthrough = credential == "passthrough"
+    cost = str(section.get("cost", "metered"))
+    if cost not in COSTS:
+        raise ConfigError(f"{where} cost must be one of {COSTS}, got {cost!r}")
+    # I-4: the note is a `system` mutation, which a passthrough upstream must
+    # never see; the default for every other upstream is the top-level switch.
+    inject = _bool_key(section, "inject_system_note", False if passthrough else inject_note, where)
+    if passthrough and inject:
+        raise ConfigError(
+            f"{where} inject_system_note = true is not allowed on a passthrough upstream"
+            " (its system array is forwarded unchanged)"
+        )
+    budget_usd: float | None = None
+    if "monthly_budget_usd" in section:
+        budget_usd = _number_key(section, "monthly_budget_usd", 0.0, where)
+        if budget_usd <= 0:
+            raise ConfigError(f"{where} monthly_budget_usd must be positive")
+    budget_tokens: int | None = None
+    if "monthly_budget_tokens" in section:
+        budget_tokens = _int_key(section, "monthly_budget_tokens", 0, where)
+        if budget_tokens <= 0:
+            raise ConfigError(f"{where} monthly_budget_tokens must be a positive integer")
+    if passthrough and (budget_usd is not None or budget_tokens is not None):
+        raise ConfigError(
+            f"{where} monthly_budget_* is not allowed on a passthrough upstream"
+            " (subscription usage is the provider's to meter)"
+        )
+    cooldown = _number_key(section, "cooldown_seconds", 60.0, where)
+    if cooldown < 0:
+        raise ConfigError(f"{where} cooldown_seconds must be >= 0")
+    extra_headers = _header_table(section, "extra_headers", where)
+    for header_name, _value in extra_headers:
+        if header_name in CREDENTIAL_HEADERS or header_name == "x-goog-api-key":
+            raise ConfigError(
+                f"{where} extra_headers may not set {header_name!r}: credentials come"
+                ' from credential = "env:VAR", never the config file'
+            )
+    body_raw = section.get("body_defaults", {})
+    if not isinstance(body_raw, dict):
+        raise ConfigError(f"{where} body_defaults must be a table")
+    try:
+        body_json = json.dumps(body_raw, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        # TOML datetimes / inf / nan (or a JSON null via the editor path) have
+        # no JSON body representation.
+        raise ConfigError(
+            f"{where} body_defaults must contain only JSON-representable values"
+        ) from exc
+    if passthrough and (extra_headers or body_raw):
+        raise ConfigError(
+            f"{where} extra_headers/body_defaults apply only to none/env upstreams"
+            " (a passthrough request is forwarded byte-exact)"
+        )
+    return UpstreamConfig(
+        name=name,
+        protocol=protocol,
+        base_url=base_url,
+        credential=credential,
+        cost=cost,
+        inject_system_note=inject,
+        count_tokens=_bool_key(section, "count_tokens", True, where),
+        monthly_budget_usd=budget_usd,
+        monthly_budget_tokens=budget_tokens,
+        cooldown_seconds=cooldown,
+        extra_headers=extra_headers,
+        body_defaults_json=body_json,
+    )
+
+
+def _parse_upstreams(
+    raw: object,
+    *,
+    providers: Mapping[str, ProviderConfig],
+    routing_present: bool,
+    inject_note: bool,
+) -> tuple[UpstreamConfig, ...]:
+    """[upstreams.NAME] tables plus, when a [routing] table exists, the legacy
+    auto-registration of [providers.{anthropic,openai,gemini,ollama}] as
+    passthrough upstreams of the same name (R-1; explicit wins)."""
+    if not isinstance(raw, dict):
+        raise ConfigError("[upstreams] must contain named subtables")
+    upstreams: dict[str, UpstreamConfig] = {}
+    for name, section in raw.items():
+        if not _ROUTE_NAME_RE.fullmatch(name):
+            raise ConfigError(
+                f"[upstreams] name {name!r} must match [A-Za-z0-9_][A-Za-z0-9_-]{{0,63}}"
+            )
+        if not isinstance(section, dict):
+            raise ConfigError(f"[upstreams.{name}] must be a table")
+        upstreams[name] = _parse_upstream(name, section, inject_note=inject_note)
+    if routing_present:
+        for legacy in PROTOCOLS:
+            provider = providers.get(legacy)
+            if (
+                provider is None
+                or legacy in upstreams
+                or not provider.enabled
+                or not provider.upstream_base_url
+            ):
+                continue
+            upstreams[legacy] = UpstreamConfig(
+                name=legacy,
+                protocol=legacy,
+                base_url=provider.upstream_base_url.rstrip("/"),
+                credential="passthrough",
+                inject_system_note=False,
+                legacy=True,
+            )
+    return tuple(upstreams[name] for name in sorted(upstreams))
+
+
+def _chain_members(
+    section: Mapping[str, Any],
+    key: str,
+    *,
+    where: str,
+    protocol: str,
+    by_name: Mapping[str, UpstreamConfig],
+) -> tuple[str, ...]:
+    """An ordered list of fallback upstream names, validated for I-5 (same
+    protocol) and decision 3 (never a passthrough member — I-1/I-2)."""
+    raw = section.get(key)
+    if not isinstance(raw, list) or not raw or not all(isinstance(n, str) for n in raw):
+        raise ConfigError(f"{where} {key} must be a non-empty array of upstream names")
+    for member in raw:
+        upstream = by_name.get(member)
+        if upstream is None:
+            raise ConfigError(f"{where} {key} names unknown upstream {member!r}")
+        if upstream.protocol != protocol:
+            raise ConfigError(
+                f"{where} {key} member {member!r} speaks {upstream.protocol!r},"
+                f" not the rule's protocol {protocol!r} (no protocol translation)"
+            )
+        if upstream.is_passthrough:
+            raise ConfigError(
+                f"{where} {key} member {member!r} is a passthrough upstream: a chain may"
+                " only continue to env:/none upstreams (no credential pooling)"
+            )
+    return tuple(raw)
+
+
+def _parse_match(section: object, where: str) -> RuleMatch:
+    if not isinstance(section, dict):
+        raise ConfigError(f"{where} match must be a table")
+    _require_keys(section, _MATCH_KEYS, f"{where} match")
+    protocol = _required_str(section, "protocol", f"{where} match")
+    if protocol not in PROTOCOLS:
+        raise ConfigError(f"{where} match protocol must be one of {PROTOCOLS}, got {protocol!r}")
+    models: tuple[str, ...] = ()
+    if "model" in section:
+        model_raw = section["model"]
+        if isinstance(model_raw, str):
+            model_raw = [model_raw]
+        if (
+            not isinstance(model_raw, list)
+            or not model_raw
+            or not all(isinstance(m, str) and m for m in model_raw)
+        ):
+            raise ConfigError(
+                f"{where} match model must be a glob string or a non-empty array of globs"
+            )
+        models = tuple(model_raw)
+    auth = str(section.get("auth", "any"))
+    if auth not in AUTH_KINDS:
+        raise ConfigError(f"{where} match auth must be one of {AUTH_KINDS}, got {auth!r}")
+    return RuleMatch(
+        protocol=protocol,
+        models=models,
+        headers=_header_table(section, "headers", f"{where} match"),
+        path=_optional_str(section, "path", f"{where} match"),
+        auth=auth,
+    )
+
+
+def _status_key(key: object, where: str) -> str:
+    text = str(key)
+    if text in SPECIAL_STATUS_KEYS or text in CLASS_KEYS:
+        return text
+    if text.isdigit() and 100 <= int(text) <= 599:
+        return str(int(text))
+    raise ConfigError(
+        f"{where} on_status key {text!r} must be an HTTP status (100-599), a class"
+        f" ({', '.join(CLASS_KEYS)}) or one of {SPECIAL_STATUS_KEYS}"
+    )
+
+
+def _parse_rule(
+    section: object,
+    position: int,
+    *,
+    by_name: Mapping[str, UpstreamConfig],
+    warnings: list[str],
+) -> RouteRule:
+    where = f"[[routing.rule]] #{position + 1}"
+    if not isinstance(section, dict):
+        raise ConfigError(f"{where} must be a table")
+    _require_keys(section, _RULE_KEYS, where)
+    rule_id = _required_str(section, "id", where)
+    if not _ROUTE_NAME_RE.fullmatch(rule_id):
+        raise ConfigError(f"{where} id {rule_id!r} must match [A-Za-z0-9_][A-Za-z0-9_-]{{0,63}}")
+    where = f"[[routing.rule]] {rule_id!r}"
+    if "match" not in section:
+        raise ConfigError(f"{where} match is required")
+    match = _parse_match(section["match"], where)
+    upstream_name = _required_str(section, "upstream", where)
+    upstream = by_name.get(upstream_name)
+    if upstream is None:
+        raise ConfigError(f"{where} names unknown upstream {upstream_name!r}")
+    if upstream.protocol != match.protocol:
+        raise ConfigError(
+            f"{where} upstream {upstream_name!r} speaks {upstream.protocol!r}, not the"
+            f" matched protocol {match.protocol!r} (no protocol translation)"
+        )
+    on_status_raw = section.get("on_status", {})
+    if not isinstance(on_status_raw, dict):
+        raise ConfigError(f"{where} on_status must be a table of status = chain")
+    on_status: list[tuple[str, tuple[str, ...] | str]] = []
+    for raw_key, value in on_status_raw.items():
+        key = _status_key(raw_key, where)
+        if any(seen == key for seen, _ in on_status):
+            raise ConfigError(f"{where} on_status key {key!r} is listed twice")
+        if key in SPECIAL_STATUS_KEYS and match.protocol != "anthropic":
+            warnings.append(
+                f"{where} on_status key {key!r} never fires for protocol"
+                f" {match.protocol!r} (plan-limit classification is Anthropic-only)"
+            )
+        if value == RETRY_SAME:
+            on_status.append((key, RETRY_SAME))
+            continue
+        chain = _chain_members(
+            {key: value}, key, where=f"{where} on_status", protocol=match.protocol, by_name=by_name
+        )
+        on_status.append((key, chain))
+    policy = str(
+        section.get("reissue_policy", "stateless-only" if upstream.is_passthrough else "always")
+    )
+    if policy not in REISSUE_POLICIES:
+        raise ConfigError(
+            f"{where} reissue_policy must be one of {REISSUE_POLICIES}, got {policy!r}"
+        )
+    on_budget: tuple[str, ...] = ()
+    if "on_budget_exhausted" in section:
+        on_budget = _chain_members(
+            section, "on_budget_exhausted", where=where, protocol=match.protocol, by_name=by_name
+        )
+        if not upstream.has_budget:
+            warnings.append(
+                f"{where} on_budget_exhausted never applies: upstream {upstream_name!r}"
+                " has no monthly budget"
+            )
+    return RouteRule(
+        id=rule_id,
+        match=match,
+        upstream=upstream_name,
+        model_rewrite=_optional_str(section, "model_rewrite", where),
+        on_status=tuple(on_status),
+        reissue_policy=policy,
+        on_budget_exhausted=on_budget,
+    )
+
+
+def _parse_defaults(
+    raw: object, by_name: Mapping[str, UpstreamConfig]
+) -> tuple[tuple[str, str], ...]:
+    """`default_upstream = "name"` (that upstream's protocol only) or a
+    protocol-keyed table -> sorted (protocol, name) pairs."""
+    where = "[routing] default_upstream"
+    if isinstance(raw, str):
+        upstream = by_name.get(raw)
+        if upstream is None:
+            raise ConfigError(f"{where} names unknown upstream {raw!r}")
+        return ((upstream.protocol, raw),)
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be an upstream name or a table of protocol = name")
+    pairs: list[tuple[str, str]] = []
+    for protocol, name in raw.items():
+        if protocol not in PROTOCOLS:
+            raise ConfigError(f"{where} key {protocol!r} must be one of {PROTOCOLS}")
+        if not isinstance(name, str):
+            raise ConfigError(f"{where} {protocol} must be an upstream name")
+        upstream = by_name.get(name)
+        if upstream is None:
+            raise ConfigError(f"{where} {protocol} names unknown upstream {name!r}")
+        if upstream.protocol != protocol:
+            raise ConfigError(
+                f"{where} {protocol} = {name!r}: that upstream speaks {upstream.protocol!r}"
+            )
+        pairs.append((protocol, name))
+    return tuple(sorted(pairs))
+
+
+def _parse_plan_limit_headers(
+    raw: object,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    where = "[routing] plan_limit_headers"
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table of header = [values]")
+    if not raw:
+        raise ConfigError(
+            f'{where} must not be empty; set plan_limit_detection = "off" to disable'
+            " classification instead"
+        )
+    out: list[tuple[str, tuple[str, ...]]] = []
+    for name, values in raw.items():
+        if not _HEADER_NAME_RE.fullmatch(name):
+            raise ConfigError(f"{where}: {name!r} is not a valid header name")
+        if (
+            not isinstance(values, list)
+            or not values
+            or not all(isinstance(v, str) and v for v in values)
+        ):
+            raise ConfigError(f"{where}: {name!r} must map to a non-empty array of strings")
+        out.append((name.lower(), tuple(values)))
+    return tuple(out)
+
+
+def _parse_routing(
+    raw: object, *, upstreams: tuple[UpstreamConfig, ...], present: bool
+) -> RoutingConfig:
+    if not present:
+        # [upstreams] alone is parsed and kept but drives nothing: say so
+        # rather than let a half-configured feature look active.
+        warnings = (
+            ("[upstreams] is configured but there is no [routing] table: upstreams are inert",)
+            if upstreams
+            else ()
+        )
+        return RoutingConfig(upstreams=upstreams, warnings=warnings)
+    if not isinstance(raw, dict):
+        raise ConfigError("[routing] must be a table")
+    where = "[routing]"
+    _require_keys(raw, _ROUTING_KEYS, where)
+    by_name = {upstream.name: upstream for upstream in upstreams}
+    enabled = _bool_key(raw, "enabled", False, where)
+    defaults = (
+        _parse_defaults(raw["default_upstream"], by_name) if "default_upstream" in raw else ()
+    )
+    if enabled and not defaults:
+        # I-6 / R-11: the fail-closed destination for unmatched traffic must
+        # be explicit whenever rules are live.
+        raise ConfigError(
+            "[routing] default_upstream is required when enabled = true (the fail-closed"
+            " destination for requests no rule matches)"
+        )
+    max_hops = _int_key(raw, "max_hops", 3, where)
+    if max_hops < 1:
+        raise ConfigError("[routing] max_hops must be >= 1 (the original attempt counts)")
+    deadline = _number_key(raw, "request_deadline_seconds", 600.0, where)
+    if deadline <= 0:
+        raise ConfigError("[routing] request_deadline_seconds must be positive")
+    plan_limit_detection = str(raw.get("plan_limit_detection", "headers"))
+    if plan_limit_detection not in PLAN_LIMIT_DETECTION:
+        raise ConfigError(
+            f"[routing] plan_limit_detection must be one of {PLAN_LIMIT_DETECTION},"
+            f" got {plan_limit_detection!r}"
+        )
+    default_routing = RoutingConfig()
+    plan_limit_headers = default_routing.plan_limit_headers
+    if "plan_limit_headers" in raw:
+        plan_limit_headers = _parse_plan_limit_headers(raw["plan_limit_headers"])
+    marker = str(raw.get("oauth_beta_marker", default_routing.oauth_beta_marker)).strip()
+    if not marker:
+        raise ConfigError("[routing] oauth_beta_marker must be a non-empty string")
+    throttle_max = _number_key(raw, "throttle_retry_max_seconds", 30.0, where)
+    if throttle_max < 0:
+        raise ConfigError("[routing] throttle_retry_max_seconds must be >= 0")
+    reset_day = _int_key(raw, "budget_reset_day", 1, where)
+    if not 1 <= reset_day <= 28:
+        raise ConfigError("[routing] budget_reset_day must be between 1 and 28")
+    rules_raw = raw.get("rule", [])
+    if not isinstance(rules_raw, list):
+        raise ConfigError("[[routing.rule]] must be an array of tables")
+    warnings_list: list[str] = []
+    rules: list[RouteRule] = []
+    for position, section in enumerate(rules_raw):
+        rule = _parse_rule(section, position, by_name=by_name, warnings=warnings_list)
+        if any(existing.id == rule.id for existing in rules):
+            raise ConfigError(f"[[routing.rule]] id {rule.id!r} is used twice")
+        rules.append(rule)
+    if enabled:
+        for protocol, name in defaults:
+            if not by_name[name].zero_cost:
+                warnings_list.append(
+                    f"[routing] default_upstream for {protocol} is {name!r}, which is not"
+                    ' cost = "zero": unmatched traffic will spend there'
+                )
+    return RoutingConfig(
+        enabled=enabled,
+        default_upstreams=defaults,
+        max_hops=max_hops,
+        request_deadline_seconds=deadline,
+        plan_limit_detection=plan_limit_detection,
+        plan_limit_headers=plan_limit_headers,
+        oauth_beta_marker=marker,
+        throttle_retry_max_seconds=throttle_max,
+        budget_reset_day=reset_day,
+        debug_headers=_bool_key(raw, "debug_headers", False, where),
+        expose_models=_bool_key(raw, "expose_models", False, where),
+        model_catalog=_str_list(raw, "model_catalog", (), where),
+        upstreams=upstreams,
+        rules=tuple(rules),
+        warnings=tuple(warnings_list),
+        present=True,
+    )
+
+
+def _parse_prices(raw: object) -> PricesConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("[prices] must be a table")
+    _require_keys(raw, {"table", "override"}, "[prices]")
+    table = str(raw.get("table", "builtin"))
+    if not table:
+        raise ConfigError('[prices] table must be "builtin" or a file path')
+    overrides_raw = raw.get("override", {})
+    if not isinstance(overrides_raw, dict):
+        raise ConfigError(
+            '[prices.override] must contain per-model tables ([prices.override."id"])'
+        )
+    overrides: list[tuple[str, ModelPrice]] = []
+    for model_id, entry in overrides_raw.items():
+        where = f"[prices.override.{model_id!r}]"
+        if not model_id or not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be a table with input and output prices")
+        _require_keys(entry, {"input", "output", "cache_read", "cache_write"}, where)
+        missing = {"input", "output"} - entry.keys()
+        if missing:
+            raise ConfigError(f"{where} is missing required key(s) {sorted(missing)}")
+        price = ModelPrice(
+            input=_number_key(entry, "input", 0.0, where),
+            output=_number_key(entry, "output", 0.0, where),
+            cache_read=_number_key(entry, "cache_read", 0.0, where),
+            cache_write=_number_key(entry, "cache_write", 0.0, where),
+        )
+        if min(price.input, price.output, price.cache_read, price.cache_write) < 0:
+            raise ConfigError(f"{where} prices must be >= 0 (USD per 1M tokens)")
+        overrides.append((model_id, price))
+    return PricesConfig(table=table, overrides=tuple(sorted(overrides)))
+
+
+def resolve_credentials(routing: RoutingConfig, environ: Mapping[str, str]) -> None:
+    """R-3: every `env:VAR` credential of an ENABLED routing config must be
+    set and non-empty. Raises ConfigError naming the variable(s) and their
+    upstreams — never a value. Called by the proxy at build, serve --check
+    and doctor (parse_config deliberately does not read the environment)."""
+    if not routing.enabled:
+        return
+    missing = [
+        f"{upstream.env_var} (upstream {upstream.name!r})"
+        for upstream in routing.upstreams
+        if upstream.credential_mode == "env" and not environ.get(upstream.env_var or "")
+    ]
+    if missing:
+        raise ConfigError(
+            "[upstreams] credential environment variable(s) unset or empty: " + ", ".join(missing)
+        )
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load configuration.
 
@@ -610,6 +1213,9 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
             "license",
             "users",
             "email",
+            "upstreams",
+            "routing",
+            "prices",
         },
         where,
     )
@@ -967,10 +1573,25 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     if (email_cfg.smtp_host is None) != (email_cfg.from_address is None):
         raise ConfigError("[email] smtp_host and from_address must be set together")
 
+    # Routing last: it depends on the resolved providers (legacy
+    # auto-registration) and the top-level note switch (per-upstream default),
+    # and keeping it after every pre-existing check leaves the error order of
+    # older configs untouched.
+    inject_system_note = _bool_key(raw, "inject_system_note", True, "top-level")
+    routing_present = "routing" in raw
+    upstreams = _parse_upstreams(
+        raw.get("upstreams", {}),
+        providers=providers,
+        routing_present=routing_present,
+        inject_note=inject_system_note,
+    )
+    routing = _parse_routing(raw.get("routing"), upstreams=upstreams, present=routing_present)
+    prices = _parse_prices(raw.get("prices", {}))
+
     return Config(
         host=str(raw.get("host", DEFAULT_HOST)),
         port=int(raw.get("port", DEFAULT_PORT)),
-        inject_system_note=_bool_key(raw, "inject_system_note", True, "top-level"),
+        inject_system_note=inject_system_note,
         max_body_bytes=max_body_bytes,
         providers=providers,
         detection=detection,
@@ -983,6 +1604,8 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         license=license_cfg,
         users=users_cfg,
         email=email_cfg,
+        routing=routing,
+        prices=prices,
     )
 
 

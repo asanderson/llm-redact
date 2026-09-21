@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import stat
 from collections.abc import Callable, Iterator
@@ -188,8 +189,11 @@ def test_sqlite_store_creates_private_file_and_is_idempotent(tmp_path: Path) -> 
     path = tmp_path / "data" / "vault.db"
     store = SqliteSpendStore(path)
     assert store.path == path
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    if os.name == "posix":
+        # POSIX mode bits are synthetic on Windows (regular files report 666);
+        # the 0600/0700 discipline is a POSIX guarantee, like the vault's own.
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     store.record(_row(SEPT, "anthropic_key"))
     store.close()
     # Reopening runs CREATE TABLE IF NOT EXISTS again: no error, rows kept, one table.

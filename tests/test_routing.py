@@ -456,6 +456,20 @@ def test_outbound_headers_env_openai_extra_headers_and_bearer() -> None:
     )
 
 
+def test_outbound_headers_extra_headers_replace_same_named_inbound() -> None:
+    # An inbound header that extra_headers also sets is dropped (any case):
+    # two X-Title values would be ambiguous upstream, and the configured one
+    # is the operator's intent — exclusive like the credential header.
+    inbound = [*INBOUND, ("X-Title", "client-app"), ("HTTP-Referer", "http://client.example")]
+    out = outbound_headers(inbound, OPENAI_KEY, environ=ENV, oauth_marker=OAUTH_BETA_MARKER)
+    names = [name.lower() for name, _ in out]
+    assert names.count("x-title") == 1 and names.count("http-referer") == 1
+    assert ("x-title", "llm-redact") in out and ("http-referer", "http://localhost") in out
+    assert ("X-Title", "client-app") not in out
+    # Passthrough never carries extra_headers, so nothing is dropped there.
+    assert outbound_headers(inbound, OAUTH, environ=ENV, oauth_marker=OAUTH_BETA_MARKER) == inbound
+
+
 def test_outbound_headers_env_gemini_and_ollama() -> None:
     out = outbound_headers(INBOUND, GEMINI_KEY, environ=ENV, oauth_marker=OAUTH_BETA_MARKER)
     assert ("x-goog-api-key", "AIzaTestNotReal") in out
@@ -484,7 +498,7 @@ def test_outbound_headers_missing_credential_names_var_only() -> None:
 # --- upstream_url (decision 6) -------------------------------------------------
 
 
-def test_upstream_url_folds_v1_for_openai_only() -> None:
+def test_upstream_url_folds_v1_for_openai_when_base_has_a_path() -> None:
     assert (
         upstream_url(OPENAI_KEY, "/v1/chat/completions", "")
         == "https://api.openai.com/v1/chat/completions"
@@ -493,15 +507,62 @@ def test_upstream_url_folds_v1_for_openai_only() -> None:
     assert upstream_url(OPENAI_KEY, "/v1/models", "a=1&b=2") == (
         "https://api.openai.com/v1/models?a=1&b=2"
     )
+    assert upstream_url(OPENAI_KEY, "/v1/responses", "") == "https://api.openai.com/v1/responses"
+    # The base is what a client would put in OPENAI_BASE_URL: any path
+    # segment absorbs the inbound /v1 — the spec's gemini_openai_compat base
+    # (.../v1beta/openai) and the Groq/OpenRouter/Fireworks shapes alike.
+    for base, expected in [
+        (
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        ),
+        ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"),
+        ("https://api.groq.com/openai/v1/", "https://api.groq.com/openai/v1/chat/completions"),
+        ("http://host.docker.internal:11434/v1", "http://host.docker.internal:11434/v1/chat/completions"),
+    ]:
+        upstream = UpstreamConfig(name="o", protocol="openai", base_url=base, credential="none")
+        assert upstream_url(upstream, "/v1/chat/completions", "") == expected
+    # A host-only base takes the full path; a non-/v1 inbound path never folds.
     no_v1 = UpstreamConfig(name="o", protocol="openai", base_url="http://127.0.0.1:11434")
     assert upstream_url(no_v1, "/v1/chat/completions", "") == (
         "http://127.0.0.1:11434/v1/chat/completions"
     )
-    # An anthropic-protocol base ending in /v1 is left alone (no folding).
+    assert upstream_url(OPENAI_KEY, "/v1beta/x", "") == "https://api.openai.com/v1/v1beta/x"
+    # An anthropic-protocol base with a path is left alone (no folding):
+    # OpenRouter's Anthropic-compatible endpoint IS .../api/v1/messages.
     anth = UpstreamConfig(name="a", protocol="anthropic", base_url="http://h.example/v1")
     assert upstream_url(anth, "/v1/messages", "") == "http://h.example/v1/v1/messages"
+    router = UpstreamConfig(name="r", protocol="anthropic", base_url="https://openrouter.ai/api")
+    assert upstream_url(router, "/v1/messages", "") == "https://openrouter.ai/api/v1/messages"
     assert upstream_url(OLLAMA, "/v1/messages", "beta=true") == (
         "http://ollama.example:11434/v1/messages?beta=true"
+    )
+
+
+def test_upstream_url_strips_key_query_for_none_env_upstreams() -> None:
+    # I-3 for Gemini's `?key=` form: the client's key never reaches an
+    # upstream the proxy authenticates itself; every other parameter is
+    # kept byte-exact (order, encoding, repeats).
+    path = "/v1beta/models/gemini-2.5-pro:generateContent"
+    assert upstream_url(GEMINI_KEY, path, "key=AIzaCLIENT") == GEMINI_KEY.base_url + path
+    assert upstream_url(GEMINI_KEY, path, "alt=sse&key=AIzaCLIENT&x=%20y&x=2") == (
+        f"{GEMINI_KEY.base_url}{path}?alt=sse&x=%20y&x=2"
+    )
+    # Percent-encoded names, a bare `key`, and repeated keys are all dropped;
+    # `apikey`/`keyx` are different parameters and stay.
+    assert upstream_url(GEMINI_KEY, path, "%6bey=a&key&key=b&apikey=c&keyx=d") == (
+        f"{GEMINI_KEY.base_url}{path}?apikey=c&keyx=d"
+    )
+    assert upstream_url(OLLAMA, "/v1/messages", "key=x&&=y") == (
+        "http://ollama.example:11434/v1/messages?=y"
+    )
+    # A passthrough upstream forwards the query verbatim — the client's key
+    # is its own credential there.
+    gemini_pass = UpstreamConfig(
+        name="g", protocol="gemini", base_url="https://generativelanguage.googleapis.com"
+    )
+    assert upstream_url(gemini_pass, path, "key=AIzaCLIENT&alt=sse") == (
+        f"https://generativelanguage.googleapis.com{path}?key=AIzaCLIENT&alt=sse"
     )
 
 
@@ -580,6 +641,26 @@ def test_apply_body_rewrites_include_usage_openai_stream_only() -> None:
     assert apply_body_rewrites({"stream": True}, upstream=openai_pass, rule=RULE_PLAIN) is None
 
 
+def test_apply_body_rewrites_include_usage_is_chat_completions_only() -> None:
+    # A Responses body (Codex CLI: `input`, no `messages`) must NOT gain
+    # stream_options.include_usage — OpenAI answers an unknown parameter
+    # with a 400 that no chain recovers from, and response.completed already
+    # carries usage. `provider` is present so body_defaults stay quiet.
+    responses = {"model": "gpt-5", "input": "hi", "stream": True, "provider": {}}
+    assert apply_body_rewrites(responses, upstream=OPENAI_KEY, rule=RULE_PLAIN) is None
+    responses_with_options = {**responses, "stream_options": {"include_obfuscation": False}}
+    assert apply_body_rewrites(responses_with_options, upstream=OPENAI_KEY, rule=RULE_PLAIN) is None
+    # Same body with a model rewrite: only the model changes.
+    out = apply_body_rewrites(responses, upstream=OPENAI_KEY, rule=RULE_REWRITE)
+    assert out == {**responses, "model": "muse-64k"}
+    # The chat-completions shape still gains it.
+    chat = {"model": "gpt-5", "messages": [], "stream": True, "provider": {}}
+    assert apply_body_rewrites(chat, upstream=OPENAI_KEY, rule=RULE_PLAIN) == {
+        **chat,
+        "stream_options": {"include_usage": True},
+    }
+
+
 # --- restore_model (R-9) ------------------------------------------------------
 
 
@@ -594,10 +675,17 @@ def test_restore_model_shapes() -> None:
     line = {"model": "muse", "message": {"role": "assistant", "content": "x"}, "done": True}
     assert restore_model(line, "claude-haiku-4-5") and line["model"] == "claude-haiku-4-5"
     assert line["message"] == {"role": "assistant", "content": "x"}
+    # OpenAI Responses events carry the id under `response` (the Codex CLI
+    # validates it on response.created / response.completed).
+    created = {"type": "response.created", "response": {"id": "r", "model": "gemma", "output": []}}
+    assert restore_model(created, "gpt-5") and created["response"]["model"] == "gpt-5"
+    assert created["response"]["output"] == []
     # Unchanged / absent / non-string / non-dict.
     assert not restore_model({"model": "gpt-5"}, "gpt-5")
     assert not restore_model({"type": "ping"}, "gpt-5")
     assert not restore_model({"model": None, "message": {"model": 3}}, "gpt-5")
+    assert not restore_model({"response": {"model": "gpt-5"}}, "gpt-5")
+    assert not restore_model({"response": "text", "message": None}, "gpt-5")
     assert not restore_model(["model"], "gpt-5")
 
 
@@ -607,6 +695,11 @@ def test_restore_model_in_json_text() -> None:
     assert json.loads(out) == {
         "type": "message_start",
         "message": {"model": "claude-sonnet-5", "content": []},
+    }
+    event = '{"type":"response.completed","response":{"model":"gemma","usage":{"total_tokens":1}}}'
+    assert json.loads(restore_model_in_json_text(event, "gpt-5")) == {
+        "type": "response.completed",
+        "response": {"model": "gpt-5", "usage": {"total_tokens": 1}},
     }
     # Unparsable, non-object, and unchanged inputs come back byte-identical.
     assert restore_model_in_json_text("[DONE]", "m") == "[DONE]"

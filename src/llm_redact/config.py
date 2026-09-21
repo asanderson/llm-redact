@@ -932,23 +932,11 @@ def _parse_rule(
             f"{where} upstream {upstream_name!r} speaks {upstream.protocol!r}, not the"
             f" matched protocol {match.protocol!r} (no protocol translation)"
         )
+    # A Gemini model id lives in the URL (models/{m}:generateContent), never
+    # in the body: the proxy derives `model` from that path segment for rule
+    # matching and applies `model_rewrite` to the SAME segment (decision 15b),
+    # so gemini rules take model globs and rewrites like every other protocol.
     model_rewrite = _optional_str(section, "model_rewrite", where)
-    if match.protocol == "gemini":
-        # A Gemini model id lives in the URL (models/{m}:generateContent),
-        # never in the body: the proxy reads `model` from the body, so a
-        # gemini rule constraining it can never fire (dead — warned like the
-        # other never-applies keys), and a rewrite would ADD a top-level
-        # `model` field that Google rejects (harmful — refused).
-        if model_rewrite is not None:
-            raise ConfigError(
-                f"{where} model_rewrite is not supported for protocol 'gemini' (the model id"
-                " is in the request path, and a body `model` field is rejected upstream)"
-            )
-        if match.models:
-            warnings.append(
-                f"{where} match model never matches for protocol 'gemini' (the model id is in"
-                " the request path, not the body): this rule cannot fire"
-            )
     policy = _str_key(
         section,
         "reissue_policy",

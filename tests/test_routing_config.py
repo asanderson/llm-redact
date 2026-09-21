@@ -807,10 +807,10 @@ def test_chain_under_never_policy_is_warned() -> None:
 
 
 def test_gemini_rules_model_lives_in_the_path() -> None:
-    # For protocol = "gemini" the model id is in the URL, never the body:
-    # a rule constraining `model` can never fire (warned, like the other
-    # never-applies keys) and `model_rewrite` would add a body field Google
-    # rejects (refused).
+    # For protocol = "gemini" the model id is in the URL, never the body: the
+    # proxy derives `model` from the `/models/{m}:verb` path segment for rule
+    # matching and rewrites that same segment for `model_rewrite` (decision
+    # 15b), so both are accepted without a warning.
     raw = _raw()
     raw["upstreams"]["gemini_key"] = {
         "protocol": "gemini",
@@ -821,20 +821,14 @@ def test_gemini_rules_model_lives_in_the_path() -> None:
         "id": "gemini-native",
         "match": {"protocol": "gemini", "model": "gemini-*"},
         "upstream": "gemini_key",
+        "model_rewrite": "gemma",
     }
     raw["routing"]["rule"].append(rule)
-    warnings = parse_config(raw, "<t>").routing.warnings
-    assert warnings == (
-        "[[routing.rule]] 'gemini-native' match model never matches for protocol 'gemini' (the"
-        " model id is in the request path, not the body): this rule cannot fire",
-    )
-    rule["model_rewrite"] = "gemma"
-    _err(
-        raw,
-        r"'gemini-native' model_rewrite is not supported for protocol 'gemini' \(the model id"
-        r" is in the request path",
-    )
-    # Header/path/auth constraints are fine; no model, no warning.
+    parsed = parse_config(raw, "<t>").routing
+    assert parsed.warnings == ()
+    assert parsed.rules[-1].match.models == ("gemini-*",)
+    assert parsed.rules[-1].model_rewrite == "gemma"
+    # Header/path/auth constraints are fine too.
     del rule["model_rewrite"]
     rule["match"] = {"protocol": "gemini", "path": "*:generateContent", "auth": "gateway-key"}
     parsed = parse_config(raw, "<t>").routing

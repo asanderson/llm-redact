@@ -8,7 +8,8 @@ Both directions are pinned, mirroring the old gate suite's discipline:
   Kubernetes, the cloud LLM adapters) now start cleanly;
 * a config that requests a subsystem only llm-redact-pro implements
   (vault encryption, RDBMS vaults, the audit log, OTel, per-conversation
-  sessions) still fails closed, but from the registry/factory seams,
+  sessions, rule-based upstream routing) still fails closed, but from the
+  registry/factory seams,
   naming the PACKAGE — package presence (distribution) is the boundary,
   never a license key.
 """
@@ -26,6 +27,8 @@ from llm_redact.config import (
     ConfigError,
     OtelConfig,
     RdbmsConfig,
+    RoutingConfig,
+    UpstreamConfig,
     VaultConfig,
 )
 from llm_redact.proxy import create_app
@@ -87,3 +90,19 @@ def test_per_conversation_fails_closed_naming_package() -> None:
 def test_otel_fails_closed_naming_package() -> None:
     with pytest.raises(ConfigError, match="llm-redact-pro"):
         create_app(_with(otel=OtelConfig(enabled=True)))
+
+
+def test_routing_fails_closed_naming_package() -> None:
+    # The config SHAPES parse in core, so `[routing] enabled = true` reaches
+    # the app build — where the Free factory refuses by package name rather
+    # than quietly routing every protocol to its one provider upstream.
+    routing = RoutingConfig(
+        enabled=True,
+        present=True,
+        default_upstreams=(("anthropic", "x"),),
+        upstreams=(UpstreamConfig(name="x", protocol="anthropic", base_url="http://x"),),
+    )
+    with pytest.raises(ConfigError, match="llm-redact-pro"):
+        create_app(_with(routing=routing))
+    # Present-but-disabled is the [otel] enabled = false precedent: keyless.
+    create_app(_with(routing=RoutingConfig(present=True)))

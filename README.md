@@ -127,7 +127,7 @@ out-of-scope table — is written down in
 
 ## Plugins
 
-Ten slash commands mirror the dashboard and config editor inside
+Twelve slash commands mirror the dashboard and config editor inside
 Claude Code, Codex, OpenCode, and Cursor, so the proxy can be driven
 without leaving the tool:
 
@@ -139,6 +139,9 @@ without leaving the tool:
 - `/llm-redact:config-show` and a guarded `/llm-redact:config-edit`
   (effective-config read → TOML edit → `serve --check` gate → SIGHUP
   reload → posture read-back);
+- `/llm-redact:routes` and `/llm-redact:spend` (pro routing layer) —
+  which rule and upstream a request would take (no upstream contacted),
+  and per-upstream spend against the monthly budgets;
 - `/llm-redact:doctor`, `/llm-redact:audit`, `/llm-redact:users`, and
   `/llm-redact:guide`.
 
@@ -224,7 +227,9 @@ and point tools at it via their base-URL variables (`ANTHROPIC_BASE_URL`,
   OpenAI-compatible upstreams), per-provider setup, batch APIs, and the
   realtime WebSocket relay: [docs/providers.md](docs/providers.md);
   endpoint-by-endpoint coverage:
-  [docs/api-coverage.md](docs/api-coverage.md).
+  [docs/api-coverage.md](docs/api-coverage.md). Several upstreams per
+  protocol, with fallback chains and monthly budgets, are the
+  llm-redact-pro routing layer (see [docs/editions.md](docs/editions.md)).
 - **Agent plugins** — drive the proxy without leaving Claude Code,
   Codex, OpenCode, or Cursor: `/llm-redact:status`,
   `/llm-redact:recent`, `/llm-redact:preview`, and a guarded
@@ -403,6 +408,13 @@ essentials:
   [docs/fips.md](docs/fips.md).
 - **Event loop**: `pip install 'llm-redact-proxy[perf]'` adds uvloop;
   uvicorn picks it up automatically — no configuration.
+
+Rule-based upstream routing, quota-aware fallback and monthly budgets
+are a Pro feature of llm-redact-pro; the core parses and validates
+`[upstreams]`/`[routing]`/`[prices]`, carries every surface (dashboard
+card, `routes`/`spend`, doctor/status lines, the `/status` block, two
+metrics), and refuses to start with `[routing] enabled = true` without
+the package (see [docs/editions.md](docs/editions.md)).
 
 ## Benchmark and live validation
 

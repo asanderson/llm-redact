@@ -9,10 +9,10 @@ importing concrete implementations, and an installed plugin — discovered via
 the ``llm_redact.plugins`` entry-point group — replaces the factories for the
 capabilities it provides.
 
-Wiring only. This module holds no policy: the license gate stays the single
-``features.check_license`` chokepoint, and the fail-closed rule (paid config
+Wiring only. This module holds no policy: the fail-closed rule (paid config
 without the paid package is a ``ConfigError``, never a silent downgrade) lives
-in the factories the registry dispatches to.
+in the factories the registry dispatches to, and the pro package's own
+factories honor the key's tier — the core has no tier gate.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from .audit import build_audit as _build_audit
 from .audit_s3 import build_audit_sinks as _build_audit_sinks
+from .free_defaults import build_router as _build_router
 from .free_defaults import build_telemetry as _build_telemetry
 from .free_defaults import resolve_license as _resolve_license
 from .sessions import build_session_router as _build_session_router
@@ -36,9 +37,9 @@ from .vault import cipher_from_key as _cipher_from_key
 if TYPE_CHECKING:
     from .audit import AuditLog
     from .audit_s3 import AzureAuditSink, S3AuditSink
-    from .config import AuditConfig, OtelConfig, UsersConfig, VaultConfig
+    from .config import AuditConfig, Config, OtelConfig, UsersConfig, VaultConfig
     from .licensing import ResolvedLicense
-    from .plugin_api import SessionRouter, Telemetry, VaultCipher
+    from .plugin_api import Router, SessionRouter, Telemetry, VaultCipher
     from .users import UsersStore
     from .vault import VaultManager
 
@@ -57,7 +58,8 @@ def pro_package_installed() -> bool:
     surfaced by ``doctor``, ``/status``, and the dashboard (llm-redact-pro docs/licensing.md).
     A pure import-spec probe — it does NOT import the package, trigger plugin
     discovery, or consult any license: package presence and license *tier* are
-    independent (a tier is enforced by ``features.check_license``). "Installed"
+    independent (the fail-closed rule lives in the factories the registry
+    dispatches to; the pro package's own factories honor the key's tier). "Installed"
     means only that the paid code is on the path; whether its plugin actually
     registered is a separate question ``loaded_plugins()`` answers.
     """
@@ -81,6 +83,7 @@ class Registry:
     build_audit: Callable[[AuditConfig], AuditLog | None]
     build_audit_sinks: Callable[[AuditConfig], tuple[S3AuditSink | None, AzureAuditSink | None]]
     build_users_store: Callable[[UsersConfig, str], UsersStore | None]
+    build_router: Callable[[Config, str], Router | None]
 
     def __init__(self) -> None:
         # Assigned as INSTANCE attributes (not class attributes) so a bare
@@ -101,6 +104,10 @@ class Registry:
         self.build_audit = _build_audit
         self.build_audit_sinks = _build_audit_sinks
         self.build_users_store = _build_users_store
+        # Rule-based upstream routing (the Router contract in plugin_api) is a
+        # paid subsystem; the Free default returns None while [routing] is
+        # off and fails closed naming the package when it is enabled.
+        self.build_router = _build_router
 
 
 def load_plugins(registry: Registry) -> list[str]:

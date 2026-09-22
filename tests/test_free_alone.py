@@ -23,7 +23,16 @@ from pathlib import Path
 
 import pytest
 
-from llm_redact.config import AuditConfig, Config, ConfigError, OtelConfig, UsersConfig, VaultConfig
+from llm_redact.config import (
+    AuditConfig,
+    Config,
+    ConfigError,
+    OtelConfig,
+    RoutingConfig,
+    UpstreamConfig,
+    UsersConfig,
+    VaultConfig,
+)
 from llm_redact.proxy import create_app
 from llm_redact.registry import get_registry, loaded_plugins
 from llm_redact.vault import InMemoryVaultManager, SqliteVaultManager
@@ -104,6 +113,22 @@ def test_named_users_fail_closed() -> None:
     assert reg.build_users_store(UsersConfig(), "free") is None
     with pytest.raises(ConfigError, match="llm-redact-pro"):
         reg.build_users_store(UsersConfig(path="x"), "pro")
+
+
+def test_routing_fails_closed() -> None:
+    reg = get_registry()
+    # [routing] off → no router, keyless; enabled → the package is named.
+    assert reg.build_router(Config(), "free") is None
+    routed = Config(
+        routing=RoutingConfig(
+            enabled=True,
+            present=True,
+            default_upstreams=(("anthropic", "x"),),
+            upstreams=(UpstreamConfig(name="x", protocol="anthropic", base_url="http://x"),),
+        )
+    )
+    with pytest.raises(ConfigError, match="llm-redact-pro"):
+        reg.build_router(routed, "free")
 
 
 def test_license_key_without_pro_resolves_free_with_notice() -> None:

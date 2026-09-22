@@ -116,3 +116,25 @@ def test_invalid_allowlist_pattern_fails_named(
     err = capsys.readouterr().err
     assert "allowlist_patterns entry" in err
     assert "invalid regex" in err
+
+
+def test_routing_without_pro_fails_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The routing config shapes parse in core; ENABLING routing is the paid
+    # subsystem, so the deploy gate fails closed naming the package (the
+    # same refusal serve itself would raise), while a present-but-disabled
+    # [routing] table stays a plain OK.
+    routed = (
+        '[upstreams.x]\nprotocol = "anthropic"\nbase_url = "http://x.example"\n'
+        '[routing]\nenabled = true\ndefault_upstream = "x"\n'
+    )
+    config_file = _write(tmp_path, routed)
+    assert _run(["serve", "--check", "--config", str(config_file)]) == 1
+    err = capsys.readouterr().err
+    assert "FAIL" in err and "llm-redact-pro" in err
+    assert "Traceback" not in err
+
+    config_file = _write(tmp_path, routed.replace("enabled = true", "enabled = false"))
+    assert _run(["serve", "--check", "--config", str(config_file)]) == 0
+    assert "OK" in capsys.readouterr().out

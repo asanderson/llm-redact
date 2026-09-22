@@ -1,6 +1,8 @@
 import json
 from typing import Any
 
+import pytest
+
 from llm_redact.providers.anthropic import AnthropicAdapter
 from llm_redact.providers.base import SYSTEM_NOTE, RouteKind
 from llm_redact.rehydrate import RehydratorPool
@@ -22,6 +24,25 @@ def test_routing() -> None:
     assert adapter.matches("POST", "/v1/messages/count_tokens") is RouteKind.REDACT_ONLY
     assert adapter.matches("POST", "/v1/complete") is RouteKind.CHAT
     assert adapter.matches("GET", "/v1/messages") is RouteKind.NONE
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (402, "billing_error"),
+        (404, "not_found_error"),
+        (429, "rate_limit_error"),
+        (413, "request_too_large"),
+        (502, "api_error"),
+        (400, "invalid_request_error"),
+        (503, "invalid_request_error"),
+    ],
+)
+def test_error_body_maps_status_to_sdk_error_class(status: int, error_type: str) -> None:
+    # Provider-shaped error typing is the adapter's: the routing layer's
+    # budget 402 and count_tokens 404 must classify like the API's own.
+    body = AnthropicAdapter().error_body("why", status=status)
+    assert body == {"type": "error", "error": {"type": error_type, "message": "why"}}
 
 
 def test_system_note_string_and_blocks() -> None:

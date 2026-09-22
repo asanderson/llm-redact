@@ -35,6 +35,24 @@ Classifications:
 | `GET /v1/organizations/...` (Admin API) | pass-through | org metadata |
 | WebSocket realtime | websocket | not offered by Anthropic today |
 
+`GET /v1/models` stays pass-through in both provider tables (the
+Anthropic row above, the OpenAI row below). With the llm-redact-pro
+routing layer and `[routing] expose_models = true`, `GET /v1/models` is
+answered **locally** instead (never forwarded) — Anthropic shape when
+the request carries `anthropic-version`, OpenAI shape otherwise — so
+Claude Code's gateway model discovery works; the adapter matrix row
+stays pass-through. The local answer sits behind the same gates as every
+proxy-generated reply for a real API path: the path infers provider
+`openai`, so `[providers.openai] enabled = false` refuses it 502 (the
+Anthropic-shaped call too), and 2+ verified named users refuse an
+unauthenticated client 403, before the catalog is consulted. The row
+does not change: that answer is a routing feature, not a redaction
+classification. Under `[routing]` the id-only rows here and below —
+`GET /v1/responses/{id}`, conversation item reads,
+`GET /v1/files/{id}/content`, batch polls and results — carry no model,
+so they take the protocol's `default_upstream` unless a path-matched
+rule names another; their classification is unchanged.
+
 Anthropic's beta Files API shares its paths (`/v1/files...`) with
 OpenAI's. Routing is header-aware here: requests carrying an
 `anthropic-version` header pass through to the ANTHROPIC upstream

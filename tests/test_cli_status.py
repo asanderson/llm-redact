@@ -180,3 +180,87 @@ def test_serve_port_override_reaches_config(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["port"] == 19999
     assert captured["config"].port == 19999  # /status reads this
     assert captured["access_log"] is False
+
+
+def test_routes_and_spend_require_pro(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The parsers are core; the implementation is llm-redact-pro. Pin the
+    # ImportError arm even where the package happens to be installed.
+    import sys
+
+    monkeypatch.setitem(sys.modules, "llm_redact_pro.routes_cli", None)
+    expected = (
+        "routing tooling requires the llm-redact-pro package (rule-based upstream"
+        " routing, fallback chains and budgets are pro subsystems; without it the"
+        " proxy forwards each protocol to its one provider upstream); see"
+        " docs/editions.md"
+    )
+    for argv in (["routes", "list"], ["routes", "test", "--protocol", "anthropic"], ["spend"]):
+        with pytest.raises(SystemExit) as excinfo:
+            main(argv)
+        assert excinfo.value.code == 1
+        assert capsys.readouterr().out.strip() == expected
+
+
+@pytest.mark.skipif(
+    __import__("importlib.util").util.find_spec("llm_redact_pro") is not None,
+    reason="the real pro package would shadow the fake module",
+)
+def test_routes_and_spend_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A fake `llm_redact_pro.routes_cli` in sys.modules exercises the three
+    # dispatch arms without the package: each entry point receives the
+    # parsed namespace and its exit code propagates.
+    import importlib.machinery
+    import sys
+    import types
+
+    calls: dict[str, argparse.Namespace] = {}
+    package = types.ModuleType("llm_redact_pro")
+    package.__path__ = []
+    package.__spec__ = importlib.machinery.ModuleSpec("llm_redact_pro", None, is_package=True)
+    module = types.ModuleType("llm_redact_pro.routes_cli")
+
+    def _entry(name: str, code: int) -> Any:
+        def run(args: argparse.Namespace) -> int:
+            calls[name] = args
+            return code
+
+        return run
+
+    module.run_routes_list = _entry("list", 3)  # type: ignore[attr-defined]
+    module.run_routes_test = _entry("test", 4)  # type: ignore[attr-defined]
+    module.run_spend = _entry("spend", 5)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "llm_redact_pro", package)
+    monkeypatch.setitem(sys.modules, "llm_redact_pro.routes_cli", module)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["routes", "list", "--json"])
+    assert excinfo.value.code == 3 and calls["list"].json is True
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "routes",
+                "test",
+                "--protocol",
+                "openai",
+                "--model",
+                "m",
+                "--header",
+                "x-a=1",
+                "--header",
+                "x-b=2",
+                "--path",
+                "/v1/chat/completions",
+                "--auth",
+                "none",
+            ]
+        )
+    assert excinfo.value.code == 4
+    test_args = calls["test"]
+    assert test_args.protocol == "openai" and test_args.model == "m"
+    assert test_args.header == ["x-a=1", "x-b=2"] and test_args.auth == "none"
+    assert test_args.path == "/v1/chat/completions"
+    with pytest.raises(SystemExit) as excinfo:
+        main(["spend", "--month", "2026-09"])
+    assert excinfo.value.code == 5 and calls["spend"].month == "2026-09"

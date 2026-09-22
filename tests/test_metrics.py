@@ -61,3 +61,23 @@ def test_label_escaping() -> None:
     metrics = Metrics('ver"si\\on')
     text = _render(metrics)
     assert 'version="ver\\"si\\\\on"' in text
+
+
+def test_routing_counters_render_keyless() -> None:
+    # The two routing counters are core-owned and emitted unconditionally
+    # (the deploy assets may reference them); without the pro routing layer
+    # they simply carry no samples.
+    text = _render(Metrics("1.1.0"))
+    assert "# TYPE llm_redact_routed_requests_total counter" in text
+    assert "# TYPE llm_redact_reissues_total counter" in text
+    assert "llm_redact_routed_requests_total{" not in text
+    assert "llm_redact_reissues_total{" not in text
+
+
+def test_routing_counter_samples_and_label_escaping() -> None:
+    metrics = Metrics("1.1.0")
+    metrics.routed[('up"a\\', "-")] += 2
+    metrics.reissues[("a", "b")] += 1
+    text = _render(metrics)
+    assert 'llm_redact_routed_requests_total{upstream="up\\"a\\\\",rule="-"} 2' in text
+    assert 'llm_redact_reissues_total{from_upstream="a",to_upstream="b"} 1' in text

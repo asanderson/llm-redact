@@ -98,6 +98,81 @@ audit row, no service". Free disk space or repair the audit DB path; the
 matching CRITICAL log line names the exception type. If availability
 matters more than a guaranteed-complete trail, disable `required`.
 
+## "[routing] enabled = true requires the llm-redact-pro package"
+
+Rule-based upstream routing, fallback chains and budgets are an
+llm-redact-pro feature; the core parses and validates the
+`[upstreams]`/`[routing]`/`[prices]` sections but never runs them. Three
+surfaces say so, each naming the package: `serve`, `serve --check`, a
+SIGHUP reload (`config reload failed; keeping current config: …`) and
+the config editor's dry-run (a 400) refuse a config with
+`[routing] enabled = true` (`… requires the llm-redact-pro package
+(0.3+) …`); `llm-redact routes …` and `llm-redact spend` print
+`routing tooling requires the llm-redact-pro package …` and exit 1; and
+`doctor` FAILs its `routing` line (`… the proxy will refuse to start …`).
+Install the package (see [editions.md](editions.md)) or set
+`enabled = false` — `[upstreams]` and `[prices]` are then inert and the
+proxy forwards each protocol to its one `[providers.NAME]` upstream, as
+`llm-redact status` reports (`routing: disabled`). The routing layer's
+own runtime messages are documented in that package's routing guide.
+
+## "[SECTION] KEY must be a finite number (nan/inf are not accepted)"
+
+`serve --check` / `serve` / `doctor` / SIGHUP refuse a routing or price
+number that is `nan` or `inf` (TOML spells both natively:
+`monthly_budget_usd = inf`, `cooldown_seconds = nan`,
+`[prices.override."m"] input = inf`) or an integer literal too large
+for a `float` (a `monthly_budget_tokens` of hundreds of digits). Such a value would pass
+every other check and then never trip a threshold, break `/status` JSON
+and the editor's reparse guard; write a real number.
+
+## "edit the file and reload" (HTTP 400 from the config editor)
+
+The editor POST named `[upstreams]`, `[routing]` or `[prices]`. Those
+sections are deliberately file-only (the editor preserves them from file
+truth): edit the TOML, run `llm-redact serve --check`, then `kill -HUP`.
+
+## "written to PATH but not applied (…); fix the cause and reload (SIGHUP)" (HTTP 500 from the config editor)
+
+The POST validated and the TOML was written (with its `.bak`), but
+hot-applying it failed after the dry run — a fault only the routing
+layer's live swap can hit (the spend table in a locked vault file, say;
+the message carries the exception type). The file on disk is the new
+config, the running proxy still has the old one; remove the cause, then
+`kill -HUP`.
+
+## "on_status KEY never applies: reissue_policy = "never" …" / "on_budget_exhausted never applies: reissue_policy = "never" …"
+
+Parse-time WARNINGs (build log, `routes list`): the rule lists a chain
+but `reissue_policy = "never"` means no request ever leaves the primary,
+so the chain is dead configuration — `retry-same` still works, it stays
+on the same upstream. Drop the chain or set `stateless-only` / `always`.
+The sibling `on_budget_exhausted never applies: upstream 'X' has no
+monthly budget` means the chain can never be entered because nothing
+exhausts.
+
+## `serve --check` refuses `[upstreams]` / `[routing]` / `[prices]`
+
+The message names the section, rule id or key (never a value). The
+invariants it enforces: a chain may never contain a passthrough upstream
+(no subscription pooling; `is a passthrough upstream: a chain may only
+continue to env:/none upstreams`); `inject_system_note = true`,
+`monthly_budget_*`, `extra_headers` and `body_defaults` are errors on
+passthrough upstreams; a rule's upstream and every chain member and
+default must share the rule's protocol; every referenced upstream must
+exist; a chain may not name the rule's own upstream
+(`names the rule's own upstream 'X'` — use `"retry-same"`) or a member
+twice (`lists 'X' twice`); `env:VAR` must resolve in the *proxy's*
+environment (a container
+needs `-e VAR`); and `enabled = true` requires `default_upstream`
+(`[routing] default_upstream is required when enabled = true`). A
+metered or passthrough `default_upstream` is a WARNING, not an error.
+What it does NOT check is per-protocol coverage: a protocol with neither
+a rule nor a default is a runtime 502 `no_route` — the gate cannot know
+which protocols your tools will send. Probe each one with `llm-redact
+routes test --protocol X` (llm-redact-pro) before traffic arrives. The
+full refusal list is in the llm-redact-pro routing guide.
+
 ## Tool sees `«EMAIL_001»`-style tokens in responses
 
 A placeholder reached the tool unrestored. Almost always one of: the

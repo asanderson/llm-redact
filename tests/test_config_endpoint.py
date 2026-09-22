@@ -559,3 +559,141 @@ async def test_post_without_fingerprint_still_applies(config_file: Path) -> None
         json={"config": {"rehydration": {"fuzzy": False}}},
     )
     assert response.status_code == 200, response.text
+
+
+ROUTING_TOML = (
+    BASE_TOML + '\n[upstreams.x]\nprotocol = "anthropic"\nbase_url = "http://x.example"\n'
+    '\n[routing]\nenabled = false\ndefault_upstream = "x"\n'
+)
+
+
+@pytest.mark.parametrize("key", ["routing", "upstreams", "prices"])
+async def test_editor_refuses_routing_sections_400(config_file: Path, key: str) -> None:
+    client = _make_client(config_file)
+    before = config_file.read_text()
+    token = await _token(client)
+    response = await client.post(
+        "/__llm-redact/config", headers={CSRF_HEADER: token}, json={"config": {key: {}}}
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == (
+        f"key(s) ['{key}'] are not editable here: edit the file and reload"
+        " (SIGHUP, after `llm-redact serve --check`)"
+    )
+    assert config_file.read_text() == before
+
+
+async def test_editor_preserves_routing_sections_on_save(tmp_path: Path) -> None:
+    # File-only sections come from FILE truth in the merge: the first save
+    # through the editor can never drop them.
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(ROUTING_TOML)
+    client = _make_client(config_file)
+    token = await _token(client)
+    response = await client.post(
+        "/__llm-redact/config",
+        headers={CSRF_HEADER: token},
+        json={"config": {"detection": {"enabled": ["email"]}}},
+    )
+    assert response.status_code == 200, response.text
+    reloaded = load_config(config_file)
+    assert reloaded.detection.enabled == ("email",)
+    assert reloaded.routing.present is True and reloaded.routing.enabled is False
+    # The explicit upstream survived; the legacy [providers.*] registrations
+    # (R-1: auto-registered while a [routing] table exists) are re-derived,
+    # never written.
+    assert reloaded.routing.upstream("x").base_url == "http://x.example"
+    assert not reloaded.routing.upstream("x").legacy
+    assert all(u.legacy for u in reloaded.routing.upstreams if u.name != "x")
+    assert "[upstreams.anthropic]" not in config_file.read_text()
+
+
+async def test_editor_dry_run_calls_router_validate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fake_router import FakeRouter, install
+    from llm_redact.config import ConfigError
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(ROUTING_TOML.replace("enabled = false", "enabled = true"))
+    router = FakeRouter()
+    install(monkeypatch, router)
+    client = _make_client(config_file)
+    token = await _token(client)
+    response = await client.post(
+        "/__llm-redact/config",
+        headers={CSRF_HEADER: token},
+        json={"config": {"rehydration": {"fuzzy": False}}},
+    )
+    assert response.status_code == 200, response.text
+    # The dry-run handed the candidate to the running router, then the
+    # apply reconfigured it in place.
+    assert [c.rehydration.fuzzy for c in router.validated] == [False]
+    assert [c.rehydration.fuzzy for c in router.reconfigured] == [False]
+    assert load_config(config_file).routing.enabled is True
+
+    # A raising validate is a 400 BEFORE the write: nothing changes on disk.
+    router.validate_error = ConfigError("price table: nope")
+    before = config_file.read_text()
+    token = await _token(client)
+    response = await client.post(
+        "/__llm-redact/config",
+        headers={CSRF_HEADER: token},
+        json={"config": {"rehydration": {"fuzzy": True}}},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "price table: nope"
+    assert config_file.read_text() == before
+    assert len(router.reconfigured) == 1
+
+
+async def test_editor_probe_builds_and_closes_when_file_enabled_routing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fake_router import FakeRouter, install
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(ROUTING_TOML)  # disabled at startup: no router held
+    created: list[FakeRouter] = []
+
+    def make() -> FakeRouter:
+        created.append(FakeRouter())
+        return created[-1]
+
+    _reg, calls = install(monkeypatch, make)
+    client = _make_client(config_file)
+    assert client is not None and len(calls) == 1 and created == []
+    # A hand edit enabled routing since startup (no SIGHUP yet).
+    config_file.write_text(ROUTING_TOML.replace("enabled = false", "enabled = true"))
+    token = await _token(client)
+    response = await client.post(
+        "/__llm-redact/config",
+        headers={CSRF_HEADER: token},
+        json={"config": {"rehydration": {"fuzzy": False}}},
+    )
+    assert response.status_code == 200, response.text
+    # The dry-run PROBED the build (and closed the probe) before the write;
+    # apply_config then built the live router through the same factory.
+    assert len(created) == 2
+    assert created[0].closed == 1
+    assert created[1].closed == 0
+    assert load_config(config_file).routing.enabled is True
+
+
+async def test_editor_probe_refusal_is_a_400_naming_the_package(tmp_path: Path) -> None:
+    # Default registry: the Free factory refuses an enabled [routing] naming
+    # llm-redact-pro — a 400 here, never a 500 after the write.
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(ROUTING_TOML)
+    client = _make_client(config_file)
+    config_file.write_text(ROUTING_TOML.replace("enabled = false", "enabled = true"))
+    before = config_file.read_text()
+    token = await _token(client)
+    response = await client.post(
+        "/__llm-redact/config",
+        headers={CSRF_HEADER: token},
+        json={"config": {"rehydration": {"fuzzy": False}}},
+    )
+    assert response.status_code == 400
+    assert "llm-redact-pro" in response.json()["error"]
+    assert config_file.read_text() == before

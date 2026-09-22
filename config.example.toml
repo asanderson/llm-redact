@@ -66,6 +66,13 @@ upstream_base_url = "http://127.0.0.1:11434"
 # [providers.bedrock]
 # upstream_base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
 
+## [upstreams.*] / [routing] / [prices]: rule-based upstream routing, fallback
+## chains and monthly budgets are an llm-redact-pro feature; the core parses
+## and validates these sections but refuses to start with
+## `[routing] enabled = true` until that package is installed. The full
+## example (named upstreams, credential modes, rules, chains, budgets, price
+## overrides) lives in that package's docs/routing.md.
+
 [log]
 # "text" (default) or "json" — one JSON object per line, for log shippers.
 # Content is identical either way: paths, statuses, and detection counts;

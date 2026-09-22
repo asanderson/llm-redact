@@ -55,6 +55,7 @@ from llm_redact.config import (
     load_config,
     parse_config,
     resolve_config_path,
+    resolve_credentials,
 )
 from llm_redact.config_write import emit_config_toml, write_config_atomic
 from llm_redact.detection.engine import (
@@ -71,7 +72,17 @@ from llm_redact.metrics import Metrics
 from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
 from llm_redact.placeholders import PLACEHOLDER_RE
-from llm_redact.plugin_api import Telemetry
+from llm_redact.plugin_api import (
+    HopRequest,
+    HopResult,
+    LocalAnswer,
+    RouteDelivery,
+    RouteInbound,
+    RoutePlan,
+    Router,
+    RouteRefusal,
+    Telemetry,
+)
 from llm_redact.providers import ALL_ADAPTERS, ProviderAdapter, RouteKind
 from llm_redact.providers.custom import CUSTOM_ROUTE_PREFIX, build_custom_adapters, custom_prefix
 from llm_redact.realtime import ALL_WS_ADAPTERS, WsAdapter, websockets_available, ws_handle
@@ -294,6 +305,9 @@ class ProxyState:
         self.users_store: UsersStore | None = registry.build_users_store(
             config.users, self.license.tier
         )
+        for warning in config.routing.warnings:  # parser-owned (inert upstreams, metered
+            logger.warning("routing: %s", warning)  # defaults, dead chains) — always logged
+        self.router: Router | None = registry.build_router(config, self.license.tier)
 
     def resolve_user(self, presented_key: str | None) -> str | None:
         if presented_key is None or self.users_store is None:
@@ -455,6 +469,20 @@ class ProxyState:
             self.adapters = [cls() for cls in ALL_ADAPTERS] + build_custom_adapters(
                 effective.providers
             )
+        # Routing is hot (decision 16 / R-34). The router validates-then-swaps
+        # its own state; it raises only ConfigError and changes nothing when
+        # it does, so this sits after every other build and before the swap.
+        # A reload that turns routing ON builds through the registry (where
+        # the tier is checked — like users_store, a running router is never
+        # re-gated); one that turns it OFF drops it (closed at swap time).
+        router = self.router
+        if effective.routing.enabled:
+            if router is None:
+                router = get_registry().build_router(effective, license_resolved.tier)
+            else:
+                router.reconfigure(effective)
+        else:
+            router = None
         self.config = effective
         self.license = license_resolved
         self.detectors = detectors
@@ -465,6 +493,11 @@ class ProxyState:
         self._static_context = RequestContext(
             effective.vault.session, self.vault, redactor, rehydrator
         )
+        if self.router is not None and router is not self.router:
+            self.router.close()
+        self.router = router
+        for warning in effective.routing.warnings:
+            logger.warning("routing: %s", warning)
         logger.info("config reloaded (%d detection rules)", len(detectors))
         return restart_required
 
@@ -586,6 +619,7 @@ class ProxyState:
         rehydrations: dict[str, int],
         warned: dict[str, int] | None = None,
         audit_token: object | None = None,
+        route: dict[str, Any] | None = None,
     ) -> None:
         """Always update in-memory metrics and the recent buffer; write an
         audit row when enabled (finalizing the write-ahead START row when
@@ -610,6 +644,11 @@ class ProxyState:
             # Attribution is the user NAME only — the key never leaves
             # identity extraction. None on single-user deployments.
             "user": _REQUEST_USER.get(),
+            # Routing decision (the llm-redact-pro routing layer): None when
+            # the request took the legacy path, else the router's row —
+            # rule/upstream/hops/auth/class/reissue. Audit rows are unchanged
+            # (AuditRecord is shared with pro).
+            "route": route,
         }
         self.recent.append(row)
         for queue in list(self.event_subscribers):
@@ -654,6 +693,13 @@ class ProxyState:
             logger.critical(
                 "audit write failed AFTER response (%s %s): %s", method, path, type(exc).__name__
             )
+
+    def finish_route(self, delivery: RouteDelivery, status: int | None) -> dict[str, Any]:
+        """Close the books on a routed request: the routed-requests metric
+        (every routed outcome, 502s included — decision 19) and the router's
+        own finish (spend), returning the `route` row record_request stores."""
+        self.metrics.routed[(delivery.upstream, delivery.rule or "-")] += 1
+        return delivery.finish(status)
 
     def route(
         self, method: str, path: str, headers: "Mapping[str, str] | None" = None
@@ -787,6 +833,17 @@ class RequestMeta(NamedTuple):
     audit_token: object | None = None
 
 
+def _route_log_suffix(row: Mapping[str, Any]) -> str:
+    """The R-29 log fields for a routed request (unrouted lines never carry
+    them). Fixed keys from the router's row: names, ids, modes and classes
+    only — the core prints nothing else the router hands it."""
+    return (
+        f" rule={row.get('rule') or '-'} upstream={row.get('upstream') or '-'}"
+        f" hops={row.get('hops', 0)} auth={row.get('auth', '-')}"
+        f" class={row.get('class', '-')} reissue={row.get('reissue', '-')}"
+    )
+
+
 async def _stream_rehydrated(
     upstream: httpx.Response,
     adapter: ProviderAdapter,
@@ -794,6 +851,7 @@ async def _stream_rehydrated(
     ctx: RequestContext,
     *,
     request_meta: RequestMeta,
+    route: RouteDelivery | None = None,
 ) -> AsyncIterator[bytes]:
     method, path, started, detections, warned, audit_token = request_meta
     parser = SSEParser()
@@ -808,14 +866,31 @@ async def _stream_rehydrated(
                         state.record_response_id(response_id, ctx.session_id)
                         response_id_seen = True
                 for out in adapter.rehydrate_event(event, pool):
+                    if route is not None:
+                        out = route.observe_event(out)
                     yield serialize(out)
         for event in parser.close():
             for out in adapter.rehydrate_event(event, pool):
+                if route is not None:
+                    out = route.observe_event(out)
                 yield serialize(out)
         # Anything still held back at stream end is emitted as raw text of a
         # final comment-free flush; adapters normally leave nothing here.
         for _key, text in pool.flush_all().items():
             logger.warning("unflushed stream leftover discarded (%d chars)", len(text))
+    except httpx.TransportError as exc:
+        if route is not None:
+            # A fault AFTER the first byte reached the client: propagated
+            # as-is (never re-issued — R-17), classified stream_error. Type only.
+            route.mark_failed("stream_error")
+            logger.warning(
+                "%s %s stream failed after first byte (%s)%s",
+                method,
+                path,
+                type(exc).__name__,
+                _route_log_suffix(route.row()),
+            )
+        raise
     finally:
         with suppress(Exception):
             # A stream that errored mid-body can make aclose() itself raise;
@@ -836,6 +911,7 @@ async def _stream_rehydrated(
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
+            route=(state.finish_route(route, upstream.status_code) if route is not None else None),
         )
 
 
@@ -1096,6 +1172,12 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                     "package_installed": pro_package_installed(),
                     "plugins": sorted(loaded_plugins()),
                 },
+                # The routing block (R-30): produced by the router (metadata
+                # only — credential MODES, never variable names or values);
+                # `{"enabled": false}` whenever no router is held.
+                "routing": state.router.status()
+                if state.router is not None
+                else {"enabled": False},
             }
         )
 
@@ -1187,6 +1269,11 @@ _EDITABLE_KEYS = frozenset(
 _READONLY_KEYS = frozenset(
     {"host", "port", "vault", "audit", "log", "tls", "otel", "users", "email"}
 )
+# Hot-reloadable (SIGHUP / apply_config) but NOT editable in the dashboard:
+# the routing sections are preserved from FILE truth by the editor's merge,
+# and a POST naming one of them is refused (decision 16; the llm-redact-pro
+# routing layer).
+_FILE_PRESERVED_KEYS = frozenset({"upstreams", "routing", "prices"})
 _CONFIG_BODY_LIMIT = 1024 * 1024
 CSRF_HEADER = "x-llm-redact-csrf"
 
@@ -1386,6 +1473,7 @@ async def _stream_rehydrated_ndjson(
     ctx: RequestContext,
     *,
     request_meta: RequestMeta,
+    route: RouteDelivery | None = None,
 ) -> AsyncIterator[bytes]:
     """The NDJSON twin of _stream_rehydrated (Ollama streams).
 
@@ -1399,14 +1487,33 @@ async def _stream_rehydrated_ndjson(
     try:
         async for chunk in upstream.aiter_bytes():
             for line in parser.feed(chunk):
-                yield adapter.rehydrate_ndjson_line(line, pool) + b"\n"
+                out = adapter.rehydrate_ndjson_line(line, pool)
+                if route is not None:
+                    out = route.observe_line(out)
+                yield out + b"\n"
         tail = parser.close()
         if tail:
             # A stream that ended without a final newline: the tail may
             # still be one complete JSON object.
-            yield adapter.rehydrate_ndjson_line(tail, pool)
+            out = adapter.rehydrate_ndjson_line(tail, pool)
+            if route is not None:
+                out = route.observe_line(out)
+            yield out
         for _key, text in pool.flush_all().items():
             logger.warning("unflushed stream leftover discarded (%d chars)", len(text))
+    except httpx.TransportError as exc:
+        if route is not None:
+            # A fault AFTER the first byte reached the client: propagated
+            # as-is (never re-issued — R-17), classified stream_error. Type only.
+            route.mark_failed("stream_error")
+            logger.warning(
+                "%s %s stream failed after first byte (%s)%s",
+                method,
+                path,
+                type(exc).__name__,
+                _route_log_suffix(route.row()),
+            )
+        raise
     finally:
         with suppress(Exception):
             # A stream that errored mid-body can make aclose() itself raise;
@@ -1427,6 +1534,7 @@ async def _stream_rehydrated_ndjson(
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
+            route=(state.finish_route(route, upstream.status_code) if route is not None else None),
         )
 
 
@@ -1651,6 +1759,15 @@ async def _handle_config_post(request: Request, state: ProxyState) -> Response:
             {"error": f"key(s) {readonly_hit} require a restart and cannot be edited here"},
             status_code=400,
         )
+    preserved_hit = sorted(set(edits) & _FILE_PRESERVED_KEYS)
+    if preserved_hit:
+        return JSONResponse(
+            {
+                "error": f"key(s) {preserved_hit} are not editable here: edit the file and"
+                " reload (SIGHUP, after `llm-redact serve --check`)"
+            },
+            status_code=400,
+        )
     unknown = sorted(set(edits) - _EDITABLE_KEYS)
     if unknown:
         return JSONResponse({"error": f"unknown key(s) {unknown}"}, status_code=400)
@@ -1681,7 +1798,11 @@ async def _handle_config_post(request: Request, state: ProxyState) -> Response:
                 {"error": f"the config file at {path} is not valid TOML; fix it manually"},
                 status_code=409,
             )
-    merged = {key: value for key, value in file_raw.items() if key in _READONLY_KEYS}
+    merged = {
+        key: value
+        for key, value in file_raw.items()
+        if key in _READONLY_KEYS or key in _FILE_PRESERVED_KEYS
+    }
     for key in _EDITABLE_KEYS:
         if key in edits:
             merged[key] = edits[key]
@@ -1699,7 +1820,21 @@ async def _handle_config_post(request: Request, state: ProxyState) -> Response:
         # License resolution runs at VALIDATION time (informational only —
         # the FOSS core has no tier gates) so a bad [license] value 400s
         # here, before the file write.
-        _resolve_license_info(apply_env_overrides(candidate))
+        resolved = _resolve_license_info(apply_env_overrides(candidate))
+        # The preserved routing sections re-validate with the rest: an
+        # `env:VAR` credential that vanished since startup 400s here too.
+        resolve_credentials(candidate.routing, os.environ)
+        if state.router is not None:
+            # The router's own checks (price file, spend table): a 400
+            # here, before the write, never a swap.
+            state.router.validate(candidate)
+        elif candidate.routing.enabled:
+            # The file enabled routing since startup: probe the build now so
+            # a refusal (package absent / Free tier / bad price file) is a 400
+            # here, not a 500 after the write.
+            probe = get_registry().build_router(apply_env_overrides(candidate), resolved.tier)
+            if probe is not None:
+                probe.close()
     except (ValueError, TypeError, re.error, ImportError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -1712,7 +1847,22 @@ async def _handle_config_post(request: Request, state: ProxyState) -> Response:
     except OSError as exc:
         return JSONResponse({"error": f"could not write {path}: {exc.strerror}"}, status_code=500)
     # No await between validation and swap: SIGHUP reload cannot interleave.
-    restart_required = state.apply_config(apply_env_overrides(candidate))
+    try:
+        restart_required = state.apply_config(apply_env_overrides(candidate))
+    except (ValueError, OSError, re.error, ImportError) as exc:
+        # The file is written and valid, but the running config is not (the
+        # spend table in a locked vault file, say): say exactly that rather
+        # than an anonymous 500 — a SIGHUP re-applies it once the cause is
+        # gone. The validated fields above cannot fail here; only a build
+        # apply_config performs beyond the dry run can.
+        logger.error("config editor: wrote %s but applying it failed: %s", path, exc)
+        return JSONResponse(
+            {
+                "error": f"written to {path} but not applied ({exc}); fix the cause and"
+                " reload (SIGHUP)"
+            },
+            status_code=500,
+        )
     logger.info("config editor: applied and wrote %s", path)
     return JSONResponse(
         {
@@ -1897,6 +2047,16 @@ async def handle(request: Request) -> Response:
         logger.info("%s %s -> 403 named-user key required", request.method, path)
         return JSONResponse(error, status_code=403)
 
+    if state.router is not None:
+        answer = state.router.local_answer(request.method, path, request.headers)
+        if answer is not None:
+            # R-15 model discovery: a local answer (never forwarded), placed
+            # where every other proxy-generated reply for a real API path sits —
+            # AFTER the disabled-provider 502 and the named-user 403, so an
+            # unauthenticated client on a team deployment learns nothing the
+            # gates would refuse. It needs nothing from the body.
+            return _answer_locally(state, request, answer, path=path, started=started)
+
     if adapter is not None:
         # Redactable routes fail closed on oversized bodies: the proxy must
         # buffer the whole body to redact it, and forwarding unredacted is
@@ -1972,7 +2132,41 @@ async def handle(request: Request) -> Response:
             status_code=400,
         )
 
+    # Routing (the llm-redact-pro routing layer): the router plans BEFORE
+    # redaction because the FIRST upstream's inject_system_note governs the
+    # prepared body (decision 4; the redacted body is reused on later hops).
+    # An unrouted request — no router held, or a provider outside the
+    # router's protocols (plan() returns None) — never constructs a routing
+    # object and takes the legacy path below byte-for-byte.
+    plan: RoutePlan | None = None
+    if state.router is not None:
+        model = parsed.get("model") if isinstance(parsed, dict) else None
+        planned = state.router.plan(
+            RouteInbound(
+                adapter_name=adapter.name if adapter is not None else None,
+                provider_name=provider_name,
+                method=request.method,
+                path=path,
+                raw_path=_upstream_path(request, path),
+                query=request.url.query,
+                headers=request.headers,
+                model=model if isinstance(model, str) else None,
+            )
+        )
+        if isinstance(planned, RouteRefusal):
+            # No rule and no default for this protocol: proxy-generated
+            # 502, never forwarded by guesswork (decision 2) — before
+            # redaction, like the router decided it.
+            return _route_refusal(
+                state, ctx, adapter, planned, request=request, path=path, started=started
+            )
+        plan = planned
+    note_wanted = plan.inject_system_note if plan is not None else state.config.inject_system_note
+
     outbound = body_bytes
+    # The decoded form of `outbound` (None for pass-through / non-JSON
+    # bodies): the routed path applies per-hop body rewrites to it.
+    outbound_obj: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
     detection_off = provider_conf is not None and not provider_conf.detection
     if adapter is not None and detection_off:
         # [providers.NAME] detection = false: the deliberate off-switch.
@@ -1991,12 +2185,12 @@ async def handle(request: Request) -> Response:
             prepared = adapter.prepare_request(
                 parsed,
                 ctx.redactor,
-                inject_note=state.config.inject_system_note
-                and adapter.wants_system_note(kind, path),
+                inject_note=note_wanted and adapter.wants_system_note(kind, path),
                 mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
             )
         except BlockedRequest as exc:
             return blocked_response(exc, adapter)
+        outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
         # prepare_request), so an unchanged count means the prepared body is
@@ -2017,8 +2211,7 @@ async def handle(request: Request) -> Response:
                     body_bytes,
                     boundary,
                     ctx.redactor,
-                    inject_note=state.config.inject_system_note
-                    and adapter.wants_system_note(kind, path),
+                    inject_note=note_wanted and adapter.wants_system_note(kind, path),
                 )
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the
@@ -2026,6 +2219,27 @@ async def handle(request: Request) -> Response:
                 return blocked_response(exc, adapter)
             if rewritten is not None:
                 outbound = rewritten
+
+    new_counts = _count_delta(state.detection_counts, detection_counts_before)
+    # Same diff trick for warn-mode hits: attribute forwarded-unredacted
+    # values to THIS request, not just the process-lifetime aggregate.
+    new_warned = _count_delta(state.warn_counts, warn_counts_before)
+
+    if plan is not None:
+        return await _handle_routed(
+            request,
+            state,
+            ctx,
+            plan,
+            adapter=adapter,
+            kind=kind,
+            outbound=outbound,
+            outbound_obj=outbound_obj,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
 
     upstream_base = state.upstream_for(adapter, path, request.headers)
     if not upstream_base:
@@ -2052,16 +2266,7 @@ async def handle(request: Request) -> Response:
         )
         logger.info("%s %s -> 502 upstream not configured", request.method, path)
         return JSONResponse(error, status_code=502)
-    # Forward the path exactly as the client sent it: Bedrock model ids are
-    # often percent-encoded ARNs whose %2F/%3A must reach the upstream
-    # unchanged — the decoded `path` would hand it a different path
-    # structure (httpx preserves existing %XX escapes). raw_path excludes
-    # the query per the ASGI spec; the split defends non-compliant servers.
-    raw_path: bytes | None = request.scope.get("raw_path")
-    try:
-        upstream_path = raw_path.split(b"?", 1)[0].decode("ascii") if raw_path else path
-    except UnicodeDecodeError:
-        upstream_path = path
+    upstream_path = _upstream_path(request, path)
     if provider_name.startswith("custom:"):
         # The /custom/NAME prefix is proxy-local routing, not part of the
         # upstream's namespace (names are plain [a-z0-9-], so the byte
@@ -2076,25 +2281,108 @@ async def handle(request: Request) -> Response:
     upstream_request = state.client.build_request(
         request.method, url, headers=_request_headers(request), content=outbound
     )
-    new_counts = {
-        k: v - detection_counts_before.get(k, 0)
-        for k, v in state.detection_counts.items()
-        if v - detection_counts_before.get(k, 0) > 0
-    }
-    # Same diff trick for warn-mode hits: attribute forwarded-unredacted
-    # values to THIS request, not just the process-lifetime aggregate.
-    new_warned = {
-        k: v - warn_counts_before.get(k, 0)
-        for k, v in state.warn_counts.items()
-        if v - warn_counts_before.get(k, 0) > 0
-    }
 
-    # [audit] required: no durably committed audit row, no upstream contact.
-    # The write-ahead START row commits HERE — after redaction (detections
-    # known), before any byte leaves for the provider. A None token means
-    # required mode is off and nothing below changes.
+    audit_token, audit_refusal = _begin_audit_guarded(
+        state,
+        ctx,
+        adapter,
+        request=request,
+        path=path,
+        started=started,
+        new_counts=new_counts,
+        new_warned=new_warned,
+    )
+    if audit_refusal is not None:
+        return audit_refusal
+
     try:
-        audit_token = state.begin_audit(
+        upstream = await state.client.send(upstream_request, stream=True)
+    except httpx.TransportError as exc:
+        # Connect/handshake/header fault: no response body was produced, so
+        # there is nothing to close and the streaming generators (which own
+        # their own read-fault finalization) never start.
+        return _fault_response(
+            state,
+            ctx,
+            adapter,
+            exc,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+            audit_token=audit_token,
+            route=None,
+        )
+
+    logger.info(
+        "%s %s -> %d%s",
+        request.method,
+        path,
+        upstream.status_code,
+        _redacted_summary(new_counts),
+    )
+    return await _deliver(
+        request,
+        state,
+        ctx,
+        adapter,
+        kind,
+        upstream,
+        path=path,
+        started=started,
+        new_counts=new_counts,
+        new_warned=new_warned,
+        audit_token=audit_token,
+        route=None,
+    )
+
+
+def _count_delta(after: Counter[str], before: dict[str, int]) -> dict[str, int]:
+    """Per-request attribution of a process-lifetime counter: the types
+    whose count grew during this request, with the growth."""
+    return {k: v - before.get(k, 0) for k, v in after.items() if v - before.get(k, 0) > 0}
+
+
+def _redacted_summary(new_counts: dict[str, int]) -> str:
+    return (
+        " redacted: " + " ".join(f"{k}×{v}" for k, v in sorted(new_counts.items()))
+        if new_counts
+        else ""
+    )
+
+
+def _upstream_path(request: Request, path: str) -> str:
+    """The path to forward, exactly as the client sent it: Bedrock model
+    ids are often percent-encoded ARNs whose %2F/%3A must reach the
+    upstream unchanged — the decoded `path` would hand it a different path
+    structure (httpx preserves existing %XX escapes). raw_path excludes
+    the query per the ASGI spec; the split defends non-compliant servers."""
+    raw_path: bytes | None = request.scope.get("raw_path")
+    try:
+        return raw_path.split(b"?", 1)[0].decode("ascii") if raw_path else path
+    except UnicodeDecodeError:
+        return path
+
+
+def _begin_audit_guarded(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+) -> tuple[object | None, JSONResponse | None]:
+    """[audit] required: no durably committed audit row, no upstream contact.
+    The write-ahead START row commits HERE — after redaction (detections
+    known), before any byte leaves for the provider. A None token means
+    required mode is off and nothing downstream changes; a refusal is the
+    provider-shaped 503 the caller returns instead of contacting anyone."""
+    try:
+        token = state.begin_audit(
             session=ctx.session_id,
             provider=adapter.name if adapter is not None else None,
             method=request.method,
@@ -2128,67 +2416,104 @@ async def handle(request: Request) -> Response:
         body = (
             adapter.error_body(message, status=503) if adapter is not None else {"error": message}
         )
-        return JSONResponse(body, status_code=503)
+        return None, JSONResponse(body, status_code=503)
+    return token, None
 
-    def upstream_fault_response(exc: httpx.TransportError) -> JSONResponse:
-        # The upstream connection failed — refused, reset, timed out, or
-        # dropped mid-body. Fail closed with a provider-shaped 502: the tool
-        # sees a clean gateway error, never a partial or wrong body. Record
-        # the fault so metrics/audit see it — the buffered twin of the
-        # streaming branches' finally-block finalization. By exception TYPE
-        # only: an httpx message can embed the upstream URL (query auth).
-        logger.warning("%s %s -> 502 upstream fault (%s)", request.method, path, type(exc).__name__)
+
+def _fault_response(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    exc: httpx.TransportError,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+    audit_token: object | None,
+    route: RouteDelivery | None,
+) -> JSONResponse:
+    """The upstream connection failed — refused, reset, timed out, or
+    dropped mid-body. Fail closed with a provider-shaped 502: the tool sees
+    a clean gateway error, never a partial or wrong body. Record the fault
+    so metrics/audit see it — the buffered twin of the streaming branches'
+    finally-block finalization. By exception TYPE only: an httpx message
+    can embed the upstream URL (query auth). A routed request counts the
+    fault against its upstream NAME and closes its route as `transport`."""
+    row: dict[str, Any] | None = None
+    if route is not None:
+        route.mark_failed("transport")
+        row = state.finish_route(route, 502)
+        state.upstream_errors[route.upstream] += 1
+    else:
         state.upstream_errors[adapter.name if adapter is not None else "passthrough"] += 1
-        state.record_request(
-            session=ctx.session_id,
-            provider=adapter.name if adapter is not None else None,
-            method=request.method,
-            path=path,
-            status=502,
-            started=started,
-            streamed=False,
-            detections=new_counts,
-            rehydrations={},
-            warned=new_warned,
-            audit_token=audit_token,
-        )
-        body = (
-            adapter.error_body("llm-redact: upstream request failed", status=502)
-            if adapter is not None
-            else {"error": "llm-redact: upstream request failed"}
-        )
-        return JSONResponse(body, status_code=502)
-
-    try:
-        upstream = await state.client.send(upstream_request, stream=True)
-    except httpx.TransportError as exc:
-        # Connect/handshake/header fault: no response body was produced, so
-        # there is nothing to close and the streaming generators (which own
-        # their own read-fault finalization) never start.
-        return upstream_fault_response(exc)
-
-    redacted_summary = (
-        " redacted: " + " ".join(f"{k}×{v}" for k, v in sorted(new_counts.items()))
-        if new_counts
-        else ""
+    logger.warning(
+        "%s %s -> 502 upstream fault (%s)%s",
+        request.method,
+        path,
+        type(exc).__name__,
+        _route_log_suffix(row) if row is not None else "",
     )
-    logger.info("%s %s -> %d%s", request.method, path, upstream.status_code, redacted_summary)
+    state.record_request(
+        session=ctx.session_id,
+        provider=adapter.name if adapter is not None else None,
+        method=request.method,
+        path=path,
+        status=502,
+        started=started,
+        streamed=False,
+        detections=new_counts,
+        rehydrations={},
+        warned=new_warned,
+        audit_token=audit_token,
+        route=row,
+    )
+    body = (
+        adapter.error_body("llm-redact: upstream request failed", status=502)
+        if adapter is not None
+        else {"error": "llm-redact: upstream request failed"}
+    )
+    return JSONResponse(
+        body, status_code=502, headers=dict(route.headers) if route is not None else None
+    )
 
+
+async def _deliver(
+    request: Request,
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    kind: RouteKind,
+    upstream: httpx.Response,
+    *,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+    audit_token: object | None,
+    route: RouteDelivery | None,
+) -> Response:
+    """Hand an upstream response to the client: the streaming branches
+    (chosen by the upstream RESPONSE content-type, never the request's
+    stream flag) rehydrate as they go and finalize at stream end; anything
+    else is buffered. With `route` (a routed request) the same branches
+    also run the router's delivery hooks (a rewritten model id restored,
+    usage tracked for its budget ledger) and stamp the x-llm-redact-*
+    headers."""
     content_type = upstream.headers.get("content-type", "")
+    headers = _response_headers(upstream)
+    if route is not None:
+        headers.update(route.headers)
+    request_meta = RequestMeta(request.method, path, started, new_counts, new_warned, audit_token)
 
     if kind is RouteKind.CHAT and adapter is not None and "text/event-stream" in content_type:
         return StreamingResponse(
             _stream_rehydrated(
-                upstream,
-                adapter,
-                state,
-                ctx,
-                request_meta=RequestMeta(
-                    request.method, path, started, new_counts, new_warned, audit_token
-                ),
+                upstream, adapter, state, ctx, request_meta=request_meta, route=route
             ),
             status_code=upstream.status_code,
-            headers=_response_headers(upstream),
+            headers=headers,
             media_type="text/event-stream",
         )
 
@@ -2198,18 +2523,13 @@ async def handle(request: Request) -> Response:
         and adapter.handles_eventstream
         and "application/vnd.amazon.eventstream" in content_type
     ):
+        # Bedrock only — never a routed protocol, so no route wrapper.
         return StreamingResponse(
             _stream_rehydrated_eventstream(
-                upstream,
-                adapter,
-                state,
-                ctx,
-                request_meta=RequestMeta(
-                    request.method, path, started, new_counts, new_warned, audit_token
-                ),
+                upstream, adapter, state, ctx, request_meta=request_meta
             ),
             status_code=upstream.status_code,
-            headers=_response_headers(upstream),
+            headers=headers,
             media_type="application/vnd.amazon.eventstream",
         )
 
@@ -2221,16 +2541,10 @@ async def handle(request: Request) -> Response:
     ):
         return StreamingResponse(
             _stream_rehydrated_ndjson(
-                upstream,
-                adapter,
-                state,
-                ctx,
-                request_meta=RequestMeta(
-                    request.method, path, started, new_counts, new_warned, audit_token
-                ),
+                upstream, adapter, state, ctx, request_meta=request_meta, route=route
             ),
             status_code=upstream.status_code,
-            headers=_response_headers(upstream),
+            headers=headers,
             media_type="application/x-ndjson",
         )
 
@@ -2240,13 +2554,26 @@ async def handle(request: Request) -> Response:
         # Upstream dropped mid-body on a buffered response: close the
         # connection we opened (else it leaks) and fail closed with a 502.
         await upstream.aclose()
-        return upstream_fault_response(exc)
+        return _fault_response(
+            state,
+            ctx,
+            adapter,
+            exc,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+            audit_token=audit_token,
+            route=route,
+        )
     await upstream.aclose()
 
     rehydration_counts_before = dict(state.rehydration_counts)
+    payload: Any = None
     if kind is RouteKind.CHAT and adapter is not None and "application/json" in content_type:
         try:
-            payload: Any = json.loads(raw)
+            payload = json.loads(raw)
         except ValueError:
             payload = None
         if payload is not None:
@@ -2258,7 +2585,12 @@ async def handle(request: Request) -> Response:
             # (a miss passes through verbatim), so an unchanged count means the
             # response had no tokens to restore — forward the original bytes
             # instead of re-serializing.
-            if sum(state.rehydration_counts.values()) != sum(rehydration_counts_before.values()):
+            changed = sum(state.rehydration_counts.values()) != sum(
+                rehydration_counts_before.values()
+            )
+            if route is not None and route.observe_payload(rehydrated, kind):
+                changed = True
+            if changed:
                 raw = json.dumps(rehydrated, ensure_ascii=False).encode("utf-8")
     elif kind is RouteKind.CHAT and adapter is not None and raw:
         # Non-JSON buffered CHAT responses: file downloads whose contents
@@ -2267,6 +2599,25 @@ async def handle(request: Request) -> Response:
         raw_rehydrated = adapter.rehydrate_raw_body(path, raw, ctx.rehydrator)
         if raw_rehydrated is not None:
             raw = raw_rehydrated
+    elif (
+        route is not None
+        and raw
+        and "application/json" in content_type
+        and route.wants_payload(kind)
+    ):
+        # A routed JSON response outside the CHAT branches (REDACT_ONLY —
+        # embeddings — or pass-through): nothing to rehydrate, but the router
+        # may still want the body (a rewritten model id restored in every
+        # top-level `model` field — decision 12 — and a REDACT_ONLY body's
+        # own usage block, the billed call's, R-24). A body the router does
+        # not want is not parsed at all (a large file listing forwards
+        # untouched).
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            payload = None
+        if payload is not None and route.observe_payload(payload, kind):
+            raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     # Every request is recorded — pass-through included (provider=None maps
     # to the "passthrough" metrics label); audit rows likewise when enabled.
@@ -2279,19 +2630,306 @@ async def handle(request: Request) -> Response:
         started=started,
         streamed=False,
         detections=new_counts,
-        rehydrations={
-            k: v - rehydration_counts_before.get(k, 0)
-            for k, v in state.rehydration_counts.items()
-            if v - rehydration_counts_before.get(k, 0) > 0
-        },
+        rehydrations=_count_delta(state.rehydration_counts, rehydration_counts_before),
         warned=new_warned,
         audit_token=audit_token,
+        route=(state.finish_route(route, upstream.status_code) if route is not None else None),
     )
 
-    return Response(
-        content=raw,
-        status_code=upstream.status_code,
-        headers=_response_headers(upstream),
+    return Response(content=raw, status_code=upstream.status_code, headers=headers)
+
+
+# ---------------------------------------------------------------------------
+# Routing: the policy-free driver of a routed request. Every DECISION (rule
+# selection, credentials, chains, cooldowns, plan-limit classification,
+# budgets, prices, model rewrite/restore) is the registered Router's — the
+# llm-redact-pro routing layer behind the plugin_api contract; the core only
+# issues hops, closes what it does not deliver, delivers through the shared
+# branches above, and finalizes.
+# ---------------------------------------------------------------------------
+
+
+def _route_refusal(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    refusal: RouteRefusal,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int] | None = None,
+    new_warned: dict[str, int] | None = None,
+    audit_token: object | None = None,
+) -> JSONResponse:
+    """A proxy-generated routing refusal (the router's 502 no_route, 404
+    count_tokens, 402 budget): provider-shaped, recorded with its route
+    row, no upstream contact."""
+    row = dict(refusal.row)
+    logger.info("%s %s -> %d%s", request.method, path, refusal.status, _route_log_suffix(row))
+    state.record_request(
+        session=ctx.session_id,
+        provider=adapter.name if adapter is not None else None,
+        method=request.method,
+        path=path,
+        status=refusal.status,
+        started=started,
+        streamed=False,
+        detections=new_counts or {},
+        rehydrations={},
+        warned=new_warned,
+        audit_token=audit_token,
+        route=row,
+    )
+    body = (
+        adapter.error_body(refusal.message, status=refusal.status)
+        if adapter is not None
+        else {"error": refusal.message}
+    )
+    return JSONResponse(
+        body,
+        status_code=refusal.status,
+        headers=dict(refusal.headers) if refusal.headers else None,
+    )
+
+
+def _answer_locally(
+    state: ProxyState, request: Request, answer: LocalAnswer, *, path: str, started: float
+) -> Response:
+    """A request the router answers before the body is read (R-15): recorded
+    under the router's provider label, logged with its reason token."""
+    state.record_request(
+        session=state.config.vault.session,
+        provider=answer.provider,
+        method=request.method,
+        path=path,
+        status=answer.status,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info(
+        "%s %s -> %d answered locally (%s)", request.method, path, answer.status, answer.reason
+    )
+    return JSONResponse(dict(answer.body), status_code=answer.status)
+
+
+def _hop_timeout(remaining: float) -> httpx.Timeout:
+    """The httpx timeout for one hop, derived from the deadline's remaining
+    budget (R-18: `request_deadline_seconds` bounds the TOTAL wall time, so
+    a hop that accepts the connection and then hangs must fail inside it —
+    not after the shared client's 600 s). Each phase is capped by what is
+    left; the caps never exceed the client's own (600 s read/write/pool,
+    10 s connect), so the default 600 s deadline changes nothing. The
+    floor keeps a deadline that expires mid-hop from turning into a zero
+    timeout (httpx treats 0 as "no timeout"). A DELIVERED stream keeps this
+    per-read timeout for its lifetime: under a short deadline a stream that
+    falls silent for longer than the budget is cut off (finalized as a
+    stream error) rather than allowed to outlive it."""
+    budget = max(remaining, 0.001)
+    return httpx.Timeout(min(budget, 600.0), connect=min(budget, 10.0))
+
+
+async def _discard(response: httpx.Response | None) -> None:
+    """Close an upstream response that will not be delivered (a failed hop
+    or a throttled attempt) before the next one is sent."""
+    if response is not None:
+        with suppress(Exception):
+            await response.aclose()
+
+
+def _streams_to_client(content_type: str) -> bool:
+    """Whether `_deliver` streams a response of this content type (SSE or
+    NDJSON) rather than buffering it — the R-17 line between a body that can
+    still be re-issued and one whose first byte is already on its way."""
+    return "text/event-stream" in content_type or any(
+        t in content_type for t in _JSONL_CONTENT_TYPES
+    )
+
+
+async def _read_buffered(response: httpx.Response) -> str | None:
+    """Read the body of a response `_deliver` would buffer, so a mid-body
+    drop surfaces while no byte has reached the client (decision 8: the
+    fault is status key "502" for the chain lookup). Returns the fault's
+    exception TYPE name (an httpx message can embed the URL), or None when
+    the body is in hand — `aread()` is idempotent, so the delivery branch
+    re-reads it for free — or will be streamed."""
+    if _streams_to_client(response.headers.get("content-type", "")):
+        return None
+    try:
+        await response.aread()
+    except httpx.TransportError as exc:
+        return type(exc).__name__
+    return None
+
+
+async def _issue_hop(
+    state: ProxyState, hop: HopRequest, deadline: float, *, method: str, path: str
+) -> tuple[HopResult, httpx.Response | None]:
+    """Send one attempt and classify what came back — mechanics only. A hop
+    the router marked unavailable is a fault without a send (the text names
+    the variable only). Faults log by exception TYPE (an httpx message can
+    embed the URL) and count against the upstream NAME (decision 8). A body
+    the delivery branch would BUFFER is read now (R-17: no byte has reached
+    the client, so a mid-body drop is still re-issuable); a streamed body is
+    left untouched."""
+    if hop.unavailable is not None:
+        logger.warning(
+            "%s %s upstream %s unavailable: %s", method, path, hop.upstream, hop.unavailable
+        )
+        state.upstream_errors[hop.upstream] += 1
+        return HopResult(hop.upstream, None, {}, "MissingCredential"), None
+    upstream_request = state.client.build_request(
+        method,
+        hop.url,
+        headers=list(hop.headers),
+        content=hop.body,
+        timeout=_hop_timeout(deadline - time.monotonic()),
+    )
+    try:
+        response = await state.client.send(upstream_request, stream=True)
+    except httpx.TransportError as exc:
+        logger.warning(
+            "%s %s upstream %s fault (%s)", method, path, hop.upstream, type(exc).__name__
+        )
+        state.upstream_errors[hop.upstream] += 1
+        return HopResult(hop.upstream, None, {}, type(exc).__name__), None
+    fault = await _read_buffered(response)
+    if fault is not None:
+        logger.warning(
+            "%s %s upstream %s fault while reading the body (%s)", method, path, hop.upstream, fault
+        )
+        await _discard(response)
+        state.upstream_errors[hop.upstream] += 1
+        return HopResult(hop.upstream, None, {}, fault), None
+    return HopResult(hop.upstream, response.status_code, response.headers, None), response
+
+
+async def _handle_routed(
+    request: Request,
+    state: ProxyState,
+    ctx: RequestContext,
+    plan: RoutePlan,
+    *,
+    adapter: ProviderAdapter | None,
+    kind: RouteKind,
+    outbound: bytes,
+    outbound_obj: dict[str, Any] | None,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+) -> Response:
+    """The routed request path: the router's pre-audit refusal, the
+    write-ahead audit START row, the first hop, then issue/decide until the
+    router stops; delivery rides the shared branches with the router's
+    delivery hooks. Every decision is the router's; every byte moved is the
+    core's."""
+    method = request.method
+    # The count_tokens 404 (decision 7): a refusal that never counts as an
+    # attempt, so it precedes the write-ahead START row.
+    refused = plan.local_refusal()
+    if refused is not None:
+        return _route_refusal(
+            state,
+            ctx,
+            adapter,
+            refused,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
+    audit_token, audit_refusal = _begin_audit_guarded(
+        state,
+        ctx,
+        adapter,
+        request=request,
+        path=path,
+        started=started,
+        new_counts=new_counts,
+        new_warned=new_warned,
+    )
+    if audit_refusal is not None:
+        return audit_refusal
+    # The budget 402 (an attempt that was refused locally, so it carries the
+    # audit token) or the first hop (hop 1, or hop 2 of the budget chain).
+    first = plan.begin(outbound, outbound_obj, _request_headers(request))
+    if isinstance(first, RouteRefusal):
+        return _route_refusal(
+            state,
+            ctx,
+            adapter,
+            first,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+            audit_token=audit_token,
+        )
+    hop: HopRequest = first
+    response: httpx.Response | None = None
+    while True:
+        if hop.reissued_from is not None:
+            state.metrics.reissues[(hop.reissued_from, hop.upstream)] += 1
+        result, response = await _issue_hop(state, hop, plan.deadline, method=method, path=path)
+        decision = plan.decide(result)
+        if decision.next is None:
+            break
+        await _discard(response)
+        response = None
+        if decision.wait_seconds > 0:
+            await plan.wait(decision.wait_seconds)
+        hop = decision.next
+    route = plan.delivery()
+    if response is None:
+        # The last hop faulted (or its credential vanished) and nothing took
+        # over: the provider-shaped 502, recorded and closed by the router.
+        row = state.finish_route(route, 502)
+        logger.info("%s %s -> 502%s", method, path, _route_log_suffix(row))
+        state.record_request(
+            session=ctx.session_id,
+            provider=adapter.name if adapter is not None else None,
+            method=method,
+            path=path,
+            status=502,
+            started=started,
+            streamed=False,
+            detections=new_counts,
+            rehydrations={},
+            warned=new_warned,
+            audit_token=audit_token,
+            route=row,
+        )
+        message = "llm-redact: upstream request failed"
+        error = (
+            adapter.error_body(message, status=502) if adapter is not None else {"error": message}
+        )
+        return JSONResponse(error, status_code=502, headers=dict(route.headers))
+    logger.info(
+        "%s %s -> %d%s%s",
+        method,
+        path,
+        response.status_code,
+        _route_log_suffix(route.row()),
+        _redacted_summary(new_counts),
+    )
+    return await _deliver(
+        request,
+        state,
+        ctx,
+        adapter,
+        kind,
+        response,
+        path=path,
+        started=started,
+        new_counts=new_counts,
+        new_warned=new_warned,
+        audit_token=audit_token,
+        route=route,
     )
 
 
@@ -2366,6 +3004,8 @@ def create_app(
                 loop.remove_signal_handler(signal.SIGHUP)
             await state.client.aclose()
             state.vault_manager.close()
+            if state.router is not None:
+                state.router.close()
             if state.audit is not None:
                 state.audit.close()
             for task in background_tasks:

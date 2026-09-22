@@ -7,11 +7,18 @@ from pathlib import Path
 import pytest
 
 from llm_redact.config import (
+    RETRY_SAME,
     AuditConfig,
     Config,
     LogConfig,
+    ModelPrice,
+    PricesConfig,
     ProviderConfig,
     RehydrationConfig,
+    RouteRule,
+    RoutingConfig,
+    RuleMatch,
+    UpstreamConfig,
     VaultConfig,
     parse_config,
 )
@@ -102,8 +109,114 @@ def test_every_field_nondefault_round_trips() -> None:
         rehydration=RehydrationConfig(fuzzy=False),
         audit=AuditConfig(enabled=True, required=True, path="/tmp/a.db", max_rows=5),
         log=LogConfig(format="json"),
+        routing=_ROUTING,
+        prices=PricesConfig(
+            table="/tmp/prices.json",
+            overrides=(
+                ("fast-large", ModelPrice(input=1.0, output=2.0, cache_read=0.5, cache_write=0.25)),
+                ("slow-small", ModelPrice(input=3.0, output=4.0, cache_read=0.0, cache_write=0.0)),
+            ),
+        ),
     )
     assert _round_trip(config) == config
+
+
+def _legacy(name: str, base_url: str) -> UpstreamConfig:
+    # R-1: with a [routing] table present, the enabled [providers.*] of the
+    # four protocols auto-register as passthrough upstreams. The emitter never
+    # writes them (they re-register at parse), so the constructed config must
+    # carry them for the round trip to compare equal — `ollama` is disabled in
+    # the providers above and therefore absent here.
+    return UpstreamConfig(name=name, protocol=name, base_url=base_url, legacy=True)
+
+
+# Every routing/prices field off its default, built by hand (parse-canonical
+# order: upstreams sorted by name, headers lowercased+sorted, default table
+# sorted, `present` set). The top-level switch above is False, so the one
+# `inject_system_note = true` upstream is the non-default form.
+_ROUTING = RoutingConfig(
+    enabled=True,
+    present=True,
+    default_upstreams=(("anthropic", "local"),),  # zero-cost: no metered-default warning
+    max_hops=5,
+    request_deadline_seconds=30.0,
+    plan_limit_detection="off",
+    plan_limit_headers=(("x-a", ("1",)), ("x-b", ("2", "3"))),
+    oauth_beta_marker="oauth-2099-01-01",
+    throttle_retry_max_seconds=5.0,
+    budget_reset_day=15,
+    debug_headers=True,
+    expose_models=True,
+    model_catalog=("fast-large",),
+    upstreams=(
+        _legacy("anthropic", "http://a.example"),
+        UpstreamConfig(
+            name="anthropic_key",
+            protocol="anthropic",
+            base_url="https://api.anthropic.com",
+            credential="env:ANTHROPIC_API_KEY",
+            inject_system_note=True,
+            monthly_budget_usd=100.0,
+            monthly_budget_tokens=123456,
+            cooldown_seconds=0.0,
+            extra_headers=(("x-title", "llm-redact"),),
+            body_defaults_json='{"provider": {"order": ["a"]}}',
+        ),
+        _legacy("gemini", "http://g.example"),
+        UpstreamConfig(
+            name="local",
+            protocol="anthropic",
+            base_url="http://127.0.0.1:11434",
+            credential="none",
+            cost="zero",
+            count_tokens=False,
+            cooldown_seconds=1.25,
+        ),
+        _legacy("openai", "http://o.example"),
+        UpstreamConfig(
+            name="openai_key",
+            protocol="openai",
+            base_url="https://api.openai.com/v1",
+            credential="env:OPENAI_API_KEY",
+            monthly_budget_usd=50.0,
+        ),
+    ),
+    rules=(
+        RouteRule(
+            id="max-lane",
+            match=RuleMatch(
+                protocol="anthropic",
+                models=("fast-*",),
+                headers=(("x-agent", "Explore"),),
+                path="/v1/messages",
+                auth="oauth",
+            ),
+            upstream="anthropic",
+            on_status=(
+                ("plan_limit_429", ("anthropic_key", "local")),
+                ("529", ("anthropic_key",)),
+                ("throttle_429", RETRY_SAME),
+                ("5xx", ("local",)),
+            ),
+            reissue_policy="stateless-only",
+        ),
+        RouteRule(
+            id="key-lane",
+            match=RuleMatch(protocol="anthropic", models=("fast-*",), auth="gateway-key"),
+            upstream="anthropic_key",
+            on_status=(("429", ("local",)), ("4xx", RETRY_SAME)),
+            reissue_policy="always",
+            on_budget_exhausted=("local",),
+        ),
+        RouteRule(
+            id="openai-lane",
+            match=RuleMatch(protocol="openai", models=("fast-*", "slow-?")),
+            upstream="openai_key",
+            model_rewrite="fast-large",
+            reissue_policy="never",
+        ),
+    ),
+)
 
 
 def test_custom_rule_validator_and_prefilter_round_trip() -> None:

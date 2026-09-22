@@ -20,6 +20,10 @@ and tags `vX.Y.Z`.
   a still-configured `[providers.custom.NAME]` upstream lost its adapter and
   its traffic was forwarded unredacted until the next good reload. The
   adapter list is now swapped together with the rest of the config.
+- Keyless, `doctor`, `llm-redact status` and the dashboard no longer say
+  "nothing gated" when llm-redact-pro is installed: that package runs the
+  Free tier without a key and refuses its paid subsystems, so they now say
+  its features need a key.
 - The routing requires-package messages from `llm-redact routes|spend` and
   `doctor` now say `0.3 or newer`, so an installed llm-redact-pro that
   predates the routing layer is not mistaken for a missing one.

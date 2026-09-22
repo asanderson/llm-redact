@@ -722,7 +722,10 @@ def run_status(args: argparse.Namespace) -> int:
         # carry are meaningless, so show the honest "nothing gated" line
         # instead of a phantom "users: 1".
         if license_info.get("tier", "free") == "free" and not license_info.get("expires"):
-            print("license: none (FOSS core — nothing gated)")
+            if license_info.get("package_installed"):
+                print("license: none (Free tier — llm-redact-pro features need a key)")
+            else:
+                print("license: none (FOSS core — nothing gated)")
         else:
             users = license_info.get("max_users")
             users_text = "unlimited" if users is None else str(users)

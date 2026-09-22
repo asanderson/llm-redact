@@ -3,7 +3,6 @@
 import dataclasses
 import ipaddress
 import json
-import math
 import os
 import re
 import tomllib
@@ -619,43 +618,19 @@ _RULE_KEYS = {
 _MATCH_KEYS = {"protocol", "model", "headers", "path", "auth"}
 
 
-def _finite(value: int | float, key: str, where: str) -> float:
-    """``value`` as a float, or a ConfigError naming ``where``/``key`` (never
-    the value) when it is not FINITE: TOML spells ``nan``/``inf`` natively and
-    an int beyond ``float`` range overflows on conversion. Either would pass
-    ``serve --check`` and then break every consumer downstream — ``nan`` is
-    unequal to itself (the editor's reparse-equality guard answers 500 on
-    every later edit), ``inf``/``nan`` reach /status through the budget
-    snapshot and Starlette serializes JSON with ``allow_nan=False``, and a
-    ``nan`` budget/rate can never trip a threshold. One helper for every
-    numeric routing/price key so the gap cannot reopen per call site."""
-    try:
-        as_float = float(value)
-    except OverflowError:  # an int too large for a float is as unusable as inf
-        as_float = math.inf
-    if not math.isfinite(as_float):
-        raise ConfigError(f"{where} {key} must be a finite number (nan/inf are not accepted)")
-    return as_float
-
-
 def _number_key(section: Mapping[str, Any], key: str, default: float, where: str) -> float:
     """An int-or-float config key; booleans and strings are rejected, never
-    coerced (the _bool_key discipline), and the value must be finite."""
+    coerced (the _bool_key discipline)."""
     value = section.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{where} {key} must be a number, got {type(value).__name__}")
-    return _finite(value, key, where)
+    return float(value)
 
 
 def _int_key(section: Mapping[str, Any], key: str, default: int, where: str) -> int:
-    """An integer config key (bool is not an int here). The finite check
-    rejects ints beyond float range: ``monthly_budget_tokens`` and friends are
-    compared against float arithmetic and rendered by JavaScript, where such
-    an int is Infinity."""
     value = section.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigError(f"{where} {key} must be an integer, got {type(value).__name__}")
-    _finite(value, key, where)
     return value
 
 

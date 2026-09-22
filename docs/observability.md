@@ -58,9 +58,8 @@ represents are documented in the `llm-redact-pro` repo's
 `docs/deployment-pro.md`.
 
 The routing layer's runtime state — per-upstream health (`healthy` /
-`cooldown` / `budget_exhausted`), spend against budget (a passthrough
-upstream's USD is a list-price equivalent), re-issues in the last hour,
-runtime-observed unpriced models — is in the `routing` block of
+`cooldown` / `budget_exhausted`), spend against budget, re-issues in the
+last hour, unpriced models — is in the `routing` block of
 `GET /__llm-redact/status`, one line per upstream in `llm-redact status`,
 and the `route` field of every `/recent` and `/events` row; see
 [routing.md](routing.md) § Observability.

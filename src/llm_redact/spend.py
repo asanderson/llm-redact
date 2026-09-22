@@ -44,7 +44,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from llm_redact.pricing import PriceTable, Usage
-from llm_redact.routing import PricesConfig, RoutingConfig
 
 logger = logging.getLogger("llm_redact")
 
@@ -53,17 +52,9 @@ _TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # ring so a long-lived proxy on the memory vault cannot grow without limit.
 _MEMORY_ROWS = 100_000
 # Minimum spacing between reload attempts after a store read fault: a locked
-# sqlite read blocks for its busy_timeout, and the ledger is consulted on
+# sqlite read blocks for its busy_timeout (5 s), and the ledger is consulted on
 # every routed request, so an unbounded retry would stall the hot path.
 _LOAD_RETRY_SECONDS = 60.0
-# The request-path store's lock wait (R-25: a spend write never blocks the
-# request for long). The INSERT runs synchronously in the response
-# finalizers on the event loop — the vault's own writes make the same call —
-# so a write lock held by another process on the shared vault file (a second
-# proxy, a tool holding a transaction) must cost milliseconds, not the 5 s
-# the offline CLIs can afford: the row is dropped (type-only warning) and
-# the request finishes on time.
-REQUEST_PATH_BUSY_TIMEOUT_MS = 250
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS spend (
@@ -89,37 +80,6 @@ class Budget:
     usd: float | None = None
     tokens: int | None = None
     zero_cost: bool = False
-
-
-def budgets_for(routing: RoutingConfig) -> dict[str, Budget]:
-    """Per-upstream Budget rows in the ledger's shape — THE one derivation
-    the proxy's ledger, /status and the offline ``spend`` report share.
-    Every upstream gets an entry (budget-less ones included) so the ledger
-    snapshot always lists every configured upstream; passthrough upstreams
-    carry no budget (parse rejects one) and zero-cost ones ignore theirs."""
-    return {
-        upstream.name: Budget(
-            usd=upstream.monthly_budget_usd,
-            tokens=upstream.monthly_budget_tokens,
-            zero_cost=upstream.zero_cost,
-        )
-        for upstream in routing.upstreams
-    }
-
-
-def build_price_table(prices: PricesConfig) -> PriceTable:
-    """The effective price table: builtin or `[prices] table = PATH`, with
-    `[prices.override."id"]` entries winning. A bad file raises the
-    ConfigError PriceTable.from_file raises (startup, `serve --check`, a
-    SIGHUP reload, doctor and the spend CLI all report it the same way) —
-    one builder, so the ledger behind /status and the offline CLIs can
-    never disagree on the table."""
-    base = (
-        PriceTable.builtin()
-        if prices.table == "builtin"
-        else PriceTable.from_file(Path(prices.table).expanduser())
-    )
-    return base.with_overrides(dict(prices.overrides))
 
 
 @dataclass(frozen=True)
@@ -317,9 +277,7 @@ class InMemorySpendStore:
         return None
 
 
-def _open_connection(
-    path: Path, *, busy_timeout_ms: int = REQUEST_PATH_BUSY_TIMEOUT_MS
-) -> sqlite3.Connection:
+def _open_connection(path: Path) -> sqlite3.Connection:
     # The vault's discipline (vault.py _open_connection): private directory,
     # file pre-created 0600 BEFORE SQLite touches it. The spend table normally
     # lives in the vault file itself, which already exists with these modes.
@@ -332,19 +290,17 @@ def _open_connection(
     # NORMAL rather than the vault's FULL: losing a spend row on power loss is
     # acceptable (the audit log makes the same call); losing a vault row is not.
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(_SCHEMA)
     return conn
 
 
 class SqliteSpendStore:
-    """The ``spend`` table in a sqlite file (normally the vault DB), own
-    connection. ``busy_timeout_ms`` defaults to the short request-path wait
-    (REQUEST_PATH_BUSY_TIMEOUT_MS); an offline caller may pass a longer one."""
+    """The ``spend`` table in a sqlite file (normally the vault DB), own connection."""
 
-    def __init__(self, path: Path, *, busy_timeout_ms: int = REQUEST_PATH_BUSY_TIMEOUT_MS) -> None:
+    def __init__(self, path: Path) -> None:
         self._path = path
-        self._conn = _open_connection(path, busy_timeout_ms=busy_timeout_ms)
+        self._conn = _open_connection(path)
 
     @property
     def path(self) -> Path:

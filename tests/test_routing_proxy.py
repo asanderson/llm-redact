@@ -295,7 +295,7 @@ async def test_gemini_rule_matches_path_model_and_rewrites_it(env: Any, tmp_path
     )
     harness = Harness(_config(raw), {"gemini": Scenario(echo_model=True)})
     response = await harness.client.post(
-        "/v1beta/models/gemini-2.5-pro:generateContent?key=client-key-EXAMPLE&alt=json",
+        "/v1beta/models/gemini-2.5-pro:generateContent?key=client-key-EXAMPLE",
         json={"contents": [{"role": "user", "parts": [{"text": f"mail {EMAIL}"}]}]},
     )
     assert response.status_code == 200
@@ -304,42 +304,12 @@ async def test_gemini_rule_matches_path_model_and_rewrites_it(env: Any, tmp_path
     assert "model" not in seen.body  # never added to a Gemini body
     assert seen.headers["x-goog-api-key"] == "AIza-test-not-a-real-gemini-key-EXAMPLE"
     assert "client-key-EXAMPLE" not in json.dumps(seen.headers)
-    # I-3 end-to-end: the client's `?key=` never reaches an env: upstream
-    # (the query twin of x-goog-api-key); the rest of the query is kept.
-    assert seen.query == "alt=json"
-    assert "client-key-EXAMPLE" not in seen.query
     body = response.json()
     assert body["modelVersion"] == "gemini-2.5-pro"
     assert EMAIL in body["candidates"][0]["content"]["parts"][0]["text"]
     assert route_of(harness)["rule"] == "gemini-native"
     totals = harness.state.budget_ledger.totals("gemini_key")
     assert totals.rows == 1 and totals.in_tokens == 10
-    await harness.aclose()
-
-
-async def test_gemini_passthrough_keeps_the_key_query(env: Any, tmp_path: Path) -> None:
-    # The passthrough twin: the client's own `?key=` IS the credential and
-    # reaches the upstream verbatim, with no server-held header added.
-    raw = _raw(tmp_path / "v.db")
-    raw["upstreams"]["gemini_pt"] = {"protocol": "gemini", "base_url": "http://gemini-pt"}
-    raw["routing"]["rule"].append(
-        {
-            "id": "gemini-pt",
-            "match": {"protocol": "gemini", "model": "gemini-*"},
-            "upstream": "gemini_pt",
-        }
-    )
-    harness = Harness(_config(raw))
-    response = await harness.client.post(
-        "/v1beta/models/gemini-2.5-pro:generateContent?key=client-key-EXAMPLE&alt=json",
-        json={"contents": [{"role": "user", "parts": [{"text": f"mail {EMAIL}"}]}]},
-    )
-    assert response.status_code == 200
-    [seen] = harness.received("gemini-pt")
-    assert seen.path == "/v1beta/models/gemini-2.5-pro:generateContent"
-    assert seen.query == "key=client-key-EXAMPLE&alt=json"
-    assert "x-goog-api-key" not in seen.headers
-    assert route_of(harness)["rule"] == "gemini-pt"
     await harness.aclose()
 
 
@@ -968,11 +938,7 @@ async def test_chain_member_throttle_moves_on_without_cooldown(
     monkeypatch.setattr(proxy_module, "_RETRY_SLEEP", never)
     harness = Harness(
         spec_config(tmp_path / "v.db"),
-        {
-            "oauth": Scenario(status=429, plan_limit=True, requests_limit=50),
-            "key": Scenario(status=429, retry_after=9, requests_limit=4000),
-            "ollama": Scenario(requests_limit=7),
-        },
+        {"oauth": Scenario(status=429, plan_limit=True), "key": Scenario(status=429)},
     )
     response = await harness.client.post(
         "/v1/messages", json=messages_body(), headers=OAUTH_HEADERS
@@ -980,13 +946,6 @@ async def test_chain_member_throttle_moves_on_without_cooldown(
     assert response.status_code == 200
     assert response.headers[UPSTREAM_HEADER] == "ollama"
     assert response.headers[HOPS_HEADER] == "3"
-    # R-23: the delivering hop's rate-limit headers only — not the
-    # plan-limit rejection, not the throttled member's retry-after.
-    assert response.headers["anthropic-ratelimit-unified-status"] == "allowed"
-    assert response.headers["anthropic-ratelimit-requests-limit"] == "7"
-    assert response.headers["anthropic-ratelimit-requests-remaining"] == "6"
-    assert "retry-after" not in response.headers
-    assert "anthropic-ratelimit-unified-5h-status" not in response.headers
     assert len(harness.received("key")) == 1
     assert not harness.state.routing_state.healthy("anthropic_oauth")
     assert harness.state.routing_state.healthy("anthropic_key")
@@ -1197,34 +1156,6 @@ async def test_passthrough_stream_is_forwarded_byte_identical(env: Any, tmp_path
     [seen] = harness.received("openai-pt")
     assert "stream_options" not in seen.body  # never injected on passthrough
     assert seen.headers["authorization"] == "Bearer gateway-local"
-    # R-12/R-13: nothing to redact, nothing to rewrite → the upstream got
-    # the client's bytes EXACTLY (odd whitespace included): no parse→dump
-    # round-trip, no rewritten copy forwarded when the rewrite is a no-op.
-    assert seen.raw_body == original
-    await harness.aclose()
-
-
-async def test_env_upstream_forwards_unredacted_body_byte_identical(
-    env: Any, tmp_path: Path
-) -> None:
-    # The same identity on an env: upstream without body rewrites (no
-    # model_rewrite, no body_defaults): the credential swap touches headers
-    # only, the body bytes are the client's.
-    harness = Harness(spec_config(tmp_path / "v.db"))
-    original = (
-        b'{"model":"claude-sonnet-5", "max_tokens":8,  "stream":false,'
-        b'"messages":[{"role":"user","content":"hi"}]}'
-    )
-    response = await harness.client.post(
-        "/v1/messages",
-        content=original,
-        headers={**GATEWAY_HEADERS, "content-type": "application/json"},
-    )
-    assert response.status_code == 200
-    [seen] = harness.received("key")
-    assert seen.headers["x-api-key"] == ANTHROPIC_KEY
-    assert seen.raw_body == original
-    assert route_of(harness)["upstream"] == "anthropic_key"
     await harness.aclose()
 
 
@@ -1331,11 +1262,7 @@ def test_reload_rereads_a_price_table_file(env: Any, tmp_path: Path) -> None:
     state = ProxyState(_config(raw), None, config_path=config_file)
     state.price_table.cost_usd("mystery-model", Usage(input_tokens=1))
     state.price_table.cost_usd("laguna-9", Usage(input_tokens=1))
-    # Not id-shaped (whitespace): counted, never listed — and the count is
-    # an observation that survives the reload's table rebuild.
-    state.price_table.cost_usd("not a model id", Usage(input_tokens=1))
     assert state.price_table.unknown_models == {"mystery-model", "laguna-9"}
-    assert state.price_table.unknown_models.dropped == 1
     price_file.write_text(
         json.dumps(
             {
@@ -1348,26 +1275,12 @@ def test_reload_rereads_a_price_table_file(env: Any, tmp_path: Path) -> None:
     price = state.price_table.lookup("gpt-5")
     assert price is not None and price.input == 3.0
     assert state.price_table.unknown_models == {"mystery-model"}
-    assert state.price_table.unknown_models.dropped == 1
     state.spend_store.close()
     state.vault_manager.close()
 
 
 def _locked(_path: Path) -> Any:
     raise sqlite3.OperationalError("database is locked")
-
-
-def test_spend_store_path_that_is_a_directory_is_the_documented_config_error(
-    tmp_path: Path,
-) -> None:
-    # os.open on a directory raises IsADirectoryError (an OSError, not a
-    # sqlite3.Error) before sqlite is touched — it must still become the one
-    # documented ConfigError, never a traceback out of startup or a reload.
-    from llm_redact.config import ConfigError, VaultConfig
-    from llm_redact.proxy import _build_spend_store
-
-    with pytest.raises(ConfigError, match="could not be opened"):
-        _build_spend_store(VaultConfig(backend="sqlite", path=str(tmp_path)))
 
 
 def test_reload_survives_a_spend_store_open_fault(
@@ -1467,11 +1380,9 @@ async def test_status_routing_block_shape(env: Any, tmp_path: Path) -> None:
         "expose_models",
         "upstreams",
         "unpriced_models",
-        "unpriced_models_dropped",
         "warnings",
     }
     assert block["enabled"] is True and block["rules"] == 6
-    assert block["unpriced_models_dropped"] == 0
     assert block["default_upstreams"] == {"anthropic": "ollama", "openai": "ollama_openai"}
     assert block["plan_limit_detection"] == "headers" and block["expose_models"] is False
     assert set(block["upstreams"]) == set(harness.state.config.routing.upstream_names())

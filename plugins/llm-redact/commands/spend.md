@@ -43,17 +43,13 @@ Run `llm-redact spend --json`, adding the month the user asked for
 current budget period.
 
 Report per upstream: input / output / cache tokens, USD (say "unpriced"
-where the price table had no entry — those rows count in tokens only;
-on a passthrough (subscription) upstream the USD is a list-price
-equivalent, not a bill — report the tokens as the real number), how
-much came from fallback re-issues versus direct requests, and the
+where the price table had no entry — those rows count in tokens only),
+how much came from fallback re-issues versus direct requests, and the
 remaining budget or that the upstream has no budget (passthrough and
 zero-cost upstreams never do). Call out any upstream that is budget
-exhausted. If the command says spend is in-process only (memory or an
-RDBMS vault backend), say that the numbers reset on restart and that
-`[vault] backend = "sqlite"` persists them; if it says no spend is
-recorded yet, the proxy has not written a row (the report never
-creates the table).
+exhausted. If the command says spend is in-process only (memory vault
+backend), say that the numbers reset on restart and that
+`[vault] backend = "sqlite"` persists them.
 
 Only report what the command printed — never estimate or invent
 amounts.

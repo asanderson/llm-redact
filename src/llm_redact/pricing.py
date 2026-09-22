@@ -10,12 +10,7 @@ ledger stores both. Three rules hold throughout:
   ``total_tokens`` is therefore always the plain sum of the four classes.
 - An unknown model is never guessed at: ``cost_usd`` returns ``None`` and
   records the id in ``unknown_models`` (doctor WARNs per id); the row is still
-  counted in tokens. That ledger is BOUNDED (``UnknownModels``): the id is the
-  one request-body field detection never scans and it is surfaced verbatim on
-  /status, the dashboard and ``llm-redact status``, so at most
-  ``UNKNOWN_MODELS_CAP`` distinct ids are kept and only ids that LOOK like a
-  model id (short, printable, no whitespace) are stored — everything else is
-  counted in ``unknown_models.dropped``, never listed.
+  counted in tokens.
 - Nothing here mutates its input: ``inject_stream_usage`` returns a new body or
   ``None`` so the proxy's forward-the-original-bytes short-circuit stays intact
   when there is nothing to change.
@@ -38,8 +33,7 @@ import json
 import math
 import re
 import tomllib
-from collections.abc import Iterable, Iterator, Mapping
-from collections.abc import Set as AbstractSet
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -158,74 +152,12 @@ def _is_prefix(key: str, candidate: str) -> bool:
     return len(candidate) == len(key) or candidate[len(key)] in _BOUNDARY_CHARS
 
 
-# Distinct unpriced ids kept for the ops surfaces; the rest are counted.
-UNKNOWN_MODELS_CAP = 100
-# Longest id shape worth listing: a Bedrock inference-profile ARN is ~110
-# chars; anything longer is not a model id, whatever the client called it.
-MAX_UNKNOWN_MODEL_ID_LEN = 200
-
-
-def looks_like_model_id(model: str) -> bool:
-    """A non-empty, bounded, printable string with no whitespace or control
-    characters — the only shape that is ever LISTED as an unpriced model. The
-    ``model`` body field is client text that detection never scans; a pasted
-    prompt, a multi-line blob or a control-character payload is counted as
-    unpriced but never carried onto /status or the dashboard."""
-    return (
-        0 < len(model) <= MAX_UNKNOWN_MODEL_ID_LEN
-        and model.isprintable()
-        and not any(ch.isspace() for ch in model)
-    )
-
-
-class UnknownModels(AbstractSet[str]):
-    """A bounded set of unpriced model ids (set-comparable and iterable like
-    the plain set it replaces). ``add`` keeps at most ``UNKNOWN_MODELS_CAP``
-    ids that pass ``looks_like_model_id`` and counts every other addition in
-    ``dropped``; an id already kept is a no-op either way, so the ledger is
-    idempotent per model. Nothing here is ever removed at runtime — the
-    proxy rebuilds the table on reload and copies over only the ids the new
-    table still cannot price."""
-
-    __slots__ = ("_ids", "dropped")
-
-    def __init__(self, ids: Iterable[str] = ()) -> None:
-        self._ids: set[str] = set()
-        self.dropped = 0
-        self.update(ids)
-
-    def add(self, model: str) -> None:
-        if model in self._ids:
-            return
-        if len(self._ids) >= UNKNOWN_MODELS_CAP or not looks_like_model_id(model):
-            self.dropped += 1
-            return
-        self._ids.add(model)
-
-    def update(self, ids: Iterable[str]) -> None:
-        for model in ids:
-            self.add(model)
-
-    def __contains__(self, model: object) -> bool:
-        return model in self._ids
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._ids)
-
-    def __len__(self) -> int:
-        return len(self._ids)
-
-    def __repr__(self) -> str:
-        return f"UnknownModels({sorted(self._ids)!r}, dropped={self.dropped})"
-
-
 class PriceTable:
-    """Model id → ModelPrice with a forgiving lookup and a bounded unknown-id
-    ledger (``unknown_models``, see ``UnknownModels``)."""
+    """Model id → ModelPrice with a forgiving lookup and an unknown-id ledger."""
 
     def __init__(self, prices: Mapping[str, ModelPrice]) -> None:
         self._prices: dict[str, ModelPrice] = dict(prices)
-        self.unknown_models = UnknownModels()
+        self.unknown_models: set[str] = set()
 
     @classmethod
     def builtin(cls) -> PriceTable:
@@ -292,8 +224,7 @@ class PriceTable:
 
     def cost_usd(self, model: str, usage: Usage) -> float | None:
         """USD for ``usage`` at ``model``'s per-1M rates; ``None`` (and the id
-        recorded in the bounded ``unknown_models`` ledger) when the table has
-        no entry."""
+        recorded in ``unknown_models``) when the table has no entry."""
         price = self.lookup(model)
         if price is None:
             self.unknown_models.add(model)

@@ -26,24 +26,15 @@ from llm_redact.config import (
 )
 from llm_redact.pricing import PriceTable
 from llm_redact.routing import (
+    PricesConfig,
     RouteRule,
     RoutingConfig,
     RuleMatch,
     UpstreamConfig,
-    gemini_path_model,
-    is_count_tokens_path,
     literal_models,
     select_rule,
 )
-from llm_redact.spend import SpendRow, SqliteSpendStore, budgets_for, build_price_table, report
-
-# The proxy and these CLIs share ONE implementation of each config-derived
-# helper (routing.gemini_path_model, spend.budgets_for / build_price_table),
-# so `routes test` and `spend` can never disagree with the hop loop, /status
-# or the ledger. `model_from_gemini_path` is the spelling test_routes_cli
-# pins; `budgets_for`/`build_price_table` are re-exported under their own.
-model_from_gemini_path = gemini_path_model
-__all__ = ["budgets_for", "build_price_table", "model_from_gemini_path"]
+from llm_redact.spend import Budget, SpendRow, SqliteSpendStore, report
 
 # The path `routes test` assumes when --path is not given: the protocol's
 # primary chat endpoint (a rule with `match.path` needs an explicit --path).
@@ -53,6 +44,27 @@ DEFAULT_TEST_PATHS: dict[str, str] = {
     "gemini": "/v1beta/models/{model}:generateContent",
     "ollama": "/api/chat",
 }
+
+
+def model_from_gemini_path(path: str) -> str | None:
+    """Decision 15b: the Gemini model id between `/models/` and the `:verb`
+    — THE proxy's own derivation (`proxy.gemini_path_model`, anchored to
+    `/v1|v1beta/models|tunedModels/`), so the dry-run answers exactly what
+    `_plan_route` would compute; Vertex publisher paths yield None because
+    Vertex is never routed (decision 1)."""
+    from llm_redact.proxy import gemini_path_model
+
+    return gemini_path_model(path)
+
+
+def build_price_table(prices: PricesConfig) -> PriceTable:
+    """The effective price table: builtin or `[prices] table = PATH`, with
+    `[prices.override."id"]` entries winning. Raises ConfigError for a bad
+    file. Delegates to the proxy's builder so the offline CLIs and the
+    ledger behind /status can never disagree on the table."""
+    from llm_redact.proxy import _build_price_table
+
+    return _build_price_table(prices)
 
 
 def configured_models(routing: RoutingConfig) -> list[str]:
@@ -87,6 +99,15 @@ def referenced_upstreams(routing: RoutingConfig) -> list[UpstreamConfig]:
             if isinstance(chain, tuple):
                 named.update(chain)
     return [u for u in routing.upstreams if not u.legacy or u.name in named]
+
+
+def budgets_for(routing: RoutingConfig) -> dict[str, Budget]:
+    """Per-upstream Budget rows in the ledger's shape (passthrough upstreams
+    carry no budget; zero-cost ones ignore theirs) — the proxy's own
+    `_budgets_for`, so `spend` and /status agree on remaining budgets."""
+    from llm_redact.proxy import _budgets_for
+
+    return _budgets_for(routing)
 
 
 def match_summary(match: RuleMatch) -> str:
@@ -346,10 +367,7 @@ def route_decision(
         return decision
     upstream = routing.upstream(upstream_name)
     decision["upstream"] = upstream_view(upstream)
-    # The proxy's own gate (decision 7): Anthropic's canonical endpoint only.
-    decision["count_tokens_404"] = not upstream.count_tokens and is_count_tokens_path(
-        protocol, path
-    )
+    decision["count_tokens_404"] = not upstream.count_tokens and path.endswith("/count_tokens")
     live_entry = live.get(upstream_name)
     if live_entry is not None:
         decision["state"] = {

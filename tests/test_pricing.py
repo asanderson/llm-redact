@@ -13,14 +13,10 @@ import pytest
 from llm_redact.config import ConfigError
 from llm_redact.pricing import (
     BUILTIN_PRICES_RESOURCE,
-    MAX_UNKNOWN_MODEL_ID_LEN,
-    UNKNOWN_MODELS_CAP,
     PriceTable,
     StreamUsageTracker,
-    UnknownModels,
     Usage,
     inject_stream_usage,
-    looks_like_model_id,
     parse_model_price,
     parse_price_table,
     parse_usage,
@@ -201,81 +197,6 @@ def test_cost_usd_unknown_model_is_none_and_recorded(table: PriceTable) -> None:
     assert table.cost_usd("muse-64k", Usage(10, 10)) is None
     assert table.cost_usd("muse-64k", Usage(10, 10)) is None
     assert table.unknown_models == {"muse-64k"}
-
-
-def test_unknown_models_ledger_is_bounded_and_counts_the_rest(table: PriceTable) -> None:
-    # The model id is client text detection never scans and it is surfaced
-    # verbatim on /status — so the ledger keeps at most UNKNOWN_MODELS_CAP
-    # distinct ids and counts every further one instead of listing it.
-    ids = [f"mystery-{n}" for n in range(UNKNOWN_MODELS_CAP + 25)]
-    for model in ids:
-        assert table.cost_usd(model, Usage(1, 1)) is None
-    assert len(table.unknown_models) == UNKNOWN_MODELS_CAP
-    assert set(table.unknown_models) == set(ids[:UNKNOWN_MODELS_CAP])
-    assert table.unknown_models.dropped == 25
-    # An id already kept is idempotent (no drop counted); a repeat of a dropped
-    # one counts again (it is still not listed).
-    table.cost_usd(ids[0], Usage(1, 1))
-    assert table.unknown_models.dropped == 25
-    table.cost_usd(ids[-1], Usage(1, 1))
-    assert table.unknown_models.dropped == 26
-    assert ids[-1] not in table.unknown_models
-    # Priced models never touch the ledger, even once it is full.
-    assert table.cost_usd("claude-opus-5", Usage(1, 1)) is not None
-    assert table.unknown_models.dropped == 26
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "",
-        "two words",
-        "line\nbreak",
-        "tab\tbed",
-        "ctrl\x01char",
-        "x" * (MAX_UNKNOWN_MODEL_ID_LEN + 1),
-        "sk-ant-api03-" + "A" * 300,
-    ],
-)
-def test_unknown_models_never_lists_a_non_id_shape(table: PriceTable, bad: str) -> None:
-    assert not looks_like_model_id(bad)
-    assert table.cost_usd(bad, Usage(1, 1)) is None  # still unpriced (tokens count)
-    assert table.unknown_models == set()  # never surfaced
-    assert table.unknown_models.dropped == 1
-
-
-@pytest.mark.parametrize(
-    "good",
-    [
-        "muse-64k",
-        "vendor/muse-64k",  # the ladder strips the prefix but muse-64k is unpriced
-        "muse-64k:free",
-        "us.anthropic.claude-sonnet-5-v1:0",
-        "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-5",
-        "x" * MAX_UNKNOWN_MODEL_ID_LEN,
-        "żółć-東京",
-    ],
-)
-def test_unknown_models_keeps_real_id_shapes(table: PriceTable, good: str) -> None:
-    assert looks_like_model_id(good)
-    table.cost_usd(good, Usage(1, 1))
-    assert table.unknown_models == {good} and table.unknown_models.dropped == 0
-
-
-def test_unknown_models_is_set_compatible() -> None:
-    # The proxy copies ids across reloads with update() and /status sorts the
-    # ledger; tests compare it with plain sets in both directions.
-    ledger = UnknownModels(["b", "a", "b"])
-    assert ledger == {"a", "b"} and {"a", "b"} == ledger
-    assert ledger >= {"a"} and ledger != {"a"}
-    assert sorted(ledger) == ["a", "b"] and "a" in ledger and "z" not in ledger
-    ledger.update(["c", "bad id"])
-    assert ledger == {"a", "b", "c"} and ledger.dropped == 1
-    assert repr(ledger) == "UnknownModels(['a', 'b', 'c'], dropped=1)"
-    # update() through the cap behaves exactly like add(): kept up to the cap,
-    # counted beyond it.
-    ledger.update(f"m{n}" for n in range(UNKNOWN_MODELS_CAP))
-    assert len(ledger) == UNKNOWN_MODELS_CAP and ledger.dropped == 4
 
 
 # --- cost arithmetic ----------------------------------------------------------

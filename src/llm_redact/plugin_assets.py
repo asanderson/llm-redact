@@ -267,7 +267,7 @@ _ROUTES = PluginCommand(
     name="routes",
     description=(
         "Show llm-redact routing rules, or dry-run which rule, upstream, and "
-        "fallback chain a request would take (no upstream is contacted)"
+        "fallback chain a request would take (nothing is sent)"
     ),
     argument_hint="[test --protocol … --model …]",
     allowed_tools="Bash(llm-redact:*)",
@@ -282,12 +282,7 @@ the matched rule id (or that the protocol's default applied), the
 upstream with its protocol, credential MODE, cost and state, the
 fallback chain per status key with any passthrough/cooldown
 annotations, the reissue policy, and the model rewrite. This is a
-DRY-RUN: no upstream is contacted and no credential is resolved. The
-`state` line and the cooldown/budget annotations come from a plain-http
-probe of the running proxy's configured listener; `not probed` means
-nothing answered there (proxy not running, a TLS listener, or a proxy
-reachable only through LLM_REDACT_PROXY_URL) — say so and offer
-`llm-redact status` for the live state.
+DRY-RUN: nothing is sent and no credential is resolved.
 
 Otherwise run `llm-redact routes list` and render the rules table in
 file order (id, protocol, match summary, upstream, chains, reissue
@@ -315,17 +310,13 @@ Run `llm-redact spend --json`, adding the month the user asked for
 current budget period.
 
 Report per upstream: input / output / cache tokens, USD (say "unpriced"
-where the price table had no entry — those rows count in tokens only;
-on a passthrough (subscription) upstream the USD is a list-price
-equivalent, not a bill — report the tokens as the real number), how
-much came from fallback re-issues versus direct requests, and the
+where the price table had no entry — those rows count in tokens only),
+how much came from fallback re-issues versus direct requests, and the
 remaining budget or that the upstream has no budget (passthrough and
 zero-cost upstreams never do). Call out any upstream that is budget
-exhausted. If the command says spend is in-process only (memory or an
-RDBMS vault backend), say that the numbers reset on restart and that
-`[vault] backend = "sqlite"` persists them; if it says no spend is
-recorded yet, the proxy has not written a row (the report never
-creates the table).
+exhausted. If the command says spend is in-process only (memory vault
+backend), say that the numbers reset on restart and that
+`[vault] backend = "sqlite"` persists them.
 
 Only report what the command printed — never estimate or invent
 amounts.

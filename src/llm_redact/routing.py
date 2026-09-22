@@ -22,6 +22,7 @@ Load-bearing constraints:
 """
 
 import json
+import re
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -30,7 +31,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from fnmatch import fnmatchcase
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 # The four wire formats a rule can match. Every other adapter/provider (azure,
 # vertex, bedrock, cohere, custom:*) keeps the legacy one-upstream-per-provider
@@ -179,12 +180,17 @@ class RouteRule:
     reissue_policy: str = "stateless-only"  # resolved default per R-8
     on_budget_exhausted: tuple[str, ...] = ()
 
-    def chain_for(self, status_key: str) -> tuple[str, ...] | str | None:
-        """The chain (or RETRY_SAME) for a resolved status key, or None.
+    def resolve(self, status_key: str) -> tuple[str, tuple[str, ...] | str] | None:
+        """The on_status entry a status key resolves through: the KEY it
+        matched (the class the proxy's log line and route row report) and
+        its chain (or RETRY_SAME), or None when the rule lists nothing for
+        this status.
 
         Precedence: special key > exact status > class key. A special key
         ("plan_limit_429") falls back to "429" and then "4xx"; a transport
         fault is classified "502" by the proxy, so it matches "502"/"5xx".
+        This is the ONE precedence ladder — chain_for and the proxy's hop
+        loop both go through it, so the two can never drift.
         """
         candidates: tuple[str, ...]
         if status_key in SPECIAL_STATUS_KEYS:
@@ -196,8 +202,14 @@ class RouteRule:
         table = dict(self.on_status)
         for key in candidates:
             if key in table:
-                return table[key]
+                return key, table[key]
         return None
+
+    def chain_for(self, status_key: str) -> tuple[str, ...] | str | None:
+        """The chain (or RETRY_SAME) for a status key, or None (`resolve`
+        without the matched key)."""
+        resolved = self.resolve(status_key)
+        return None if resolved is None else resolved[1]
 
 
 @dataclass(frozen=True)
@@ -241,6 +253,41 @@ class RoutingConfig:
             if proto == protocol:
                 return name
         return None
+
+
+# The Gemini model id lives in the request PATH (decision 15b):
+# /v1beta/models/{model}:generateContent. Group 2 is the id, matched on the
+# raw (still percent-encoded) path so a rewrite leaves the rest byte-exact.
+_GEMINI_MODEL_SEGMENT = re.compile(
+    r"^(/(?:v1|v1beta)/(?:models|tunedModels)/)([^/:]+)(:[A-Za-z]+)$"
+)
+
+
+def gemini_path_model(path: str) -> str | None:
+    """The model id between `/models/` and the `:verb` of a Gemini path, or
+    None when the path has no such segment (a Vertex publisher path yields
+    None too — Vertex is never routed, decision 1). THE derivation the proxy
+    plans with and `routes test` dry-runs against."""
+    match = _GEMINI_MODEL_SEGMENT.match(path)
+    return match.group(2) if match is not None else None
+
+
+def rewrite_gemini_path(raw_path: str, model: str) -> str:
+    """The same raw path with its model segment replaced by `model`
+    (percent-encoded); a path without the segment comes back unchanged."""
+    match = _GEMINI_MODEL_SEGMENT.match(raw_path)
+    if match is None:
+        return raw_path
+    return match.group(1) + quote(model, safe="") + match.group(3)
+
+
+def is_count_tokens_path(protocol: str | None, path: str) -> bool:
+    """Decision 7's gate, shared by the proxy (404 + chain-member skip) and
+    `routes test`'s note: ONLY Anthropic's canonical count_tokens endpoint.
+    Any other path — an OpenAI-protocol `/v1/x/count_tokens`, a non-canonical
+    spelling — is forwarded like any request, so the dry-run must not claim
+    a 404 the proxy would never answer."""
+    return protocol == "anthropic" and path == "/v1/messages/count_tokens"
 
 
 def request_protocol(adapter_name: str | None, inferred_provider: str) -> str | None:

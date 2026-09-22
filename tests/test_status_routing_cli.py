@@ -161,6 +161,26 @@ def test_status_routing_disabled_and_absent(
     assert "routing" not in out
 
 
+def test_posture_names_the_unlisted_unpriced_count(capsys: pytest.CaptureFixture[str]) -> None:
+    routing: dict[str, Any] = {
+        "enabled": True,
+        "upstreams": {"a": _upstream()},
+        "unpriced_models": ["muse-64k"],
+        "unpriced_models_dropped": 3,
+        "warnings": [],
+    }
+    _print_posture({"detection": {}, "audit": {}, "routing": routing})
+    assert "⚠ routing: unpriced models: muse-64k (+3 more not listed)" in capsys.readouterr().out
+    # Every observed id was beyond the cap or not id-shaped: still loud.
+    routing["unpriced_models"] = []
+    _print_posture({"detection": {}, "audit": {}, "routing": routing})
+    assert "⚠ routing: unpriced models: none listed (+3 more not listed)" in capsys.readouterr().out
+    # A pre-cap /status (no key) prints exactly what it did before.
+    del routing["unpriced_models_dropped"]
+    _print_posture({"detection": {}, "audit": {}, "routing": routing})
+    assert "unpriced" not in capsys.readouterr().out
+
+
 def test_posture_quiet_when_routing_is_healthy(capsys: pytest.CaptureFixture[str]) -> None:
     _print_posture(
         {
@@ -241,7 +261,7 @@ def test_dashboard_carries_routing_pill_and_table() -> None:
     for column in ("upstream", "protocol", "credential", "cost", "state", "budget"):
         assert f"<th>{column}</th>" in html or f'<th class="num">{column}</th>' in html
     assert "budget_exhausted" in html and "cooldown" in html
-    assert "unpriced_models" in html
+    assert "unpriced_models" in html and "unpriced_models_dropped" in html
     # The budget cell keys zero-cost off the upstream's `cost` field (the
     # /status spend block carries no zero_cost key; remaining_* is null).
     assert 'routingBudget(u.spend, u.cost === "zero")' in html

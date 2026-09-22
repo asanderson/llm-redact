@@ -570,9 +570,12 @@ def _check_routing(report: _Report, config: Config, offline: bool) -> None:
     (FAIL naming the VAR only — never a value), the parser's own warnings
     (a metered default_upstream, dead chains), models the price table
     cannot price, the memory-vault caveat (I-7), and — unless --offline —
-    an unauthenticated reachability probe of every upstream base URL."""
+    an unauthenticated reachability probe of each REFERENCED upstream's base
+    URL (routes_cli.referenced_upstreams: explicit `[upstreams.*]` entries
+    plus the legacy auto-registrations a rule, chain or default names)."""
     from llm_redact.config import resolve_credentials
-    from llm_redact.routes_cli import build_price_table, referenced_upstreams, unpriced_models
+    from llm_redact.routes_cli import referenced_upstreams, unpriced_models
+    from llm_redact.spend import build_price_table
 
     routing = config.routing
     if not routing.enabled:

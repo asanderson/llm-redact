@@ -108,7 +108,8 @@ for the protocol (the table form covers several:
 or a catch-all rule. An explicit `[upstreams.NAME]` named after a legacy
 provider replaces its auto-registration *protocol included*, which is the
 usual way native Ollama traffic loses its route. `llm-redact routes test
---protocol X` reproduces the decision without sending anything.
+--protocol X` reproduces the decision without contacting any upstream
+(its `state` line is a plain-http probe of the configured listener).
 Reference: [routing.md](routing.md).
 
 ## "llm-redact routing: upstream NAME does not implement count_tokens"
@@ -119,15 +120,41 @@ upstream with `count_tokens = false` — Ollama, which serves
 asked for a token count. Expected on the local lane; tools treat it as
 "no count available".
 
-## "budget exhausted" (HTTP 402)
+## "llm-redact routing: upstream NAME budget exhausted for this period" (HTTP 402)
 
 The named upstream's `monthly_budget_usd` / `monthly_budget_tokens` is
 spent for the current period (`[budget_reset_day of this month,
 budget_reset_day of next month)` in UTC). `llm-redact spend` shows the
 period, totals and the
 share that came from re-issues; raise the cap, wait for the reset, or
-give the rule an `on_budget_exhausted` chain. Chains already skip
+give the rule an `on_budget_exhausted` chain (gated by the rule's
+`reissue_policy`: `never` keeps the 402, `stateless-only` keeps it for a
+request carrying signed thinking blocks and adds
+`x-llm-redact-reissue: skipped; reason=stateful`). Chains already skip
 exhausted members, so only *direct* requests see the 402.
+
+## "spend store write failed for upstream NAME (Type); the row is counted in memory only"
+
+A WARNING (exception type only) from the response finalizer: the spend
+INSERT into the sqlite vault file could not commit. It runs
+synchronously on the event loop with a **250 ms** lock wait
+(`REQUEST_PATH_BUSY_TIMEOUT_MS` — the offline `llm-redact spend` waits
+5 s), so the usual cause is another process holding the vault's write
+lock (a second proxy on the same file, a tool inside a transaction) or a
+full/unwritable disk. The request finished normally and the row still
+counts toward this period's budget in memory until restart; it is just
+not persisted, so `llm-redact spend` and the next proxy start under-read
+by it. Free the lock (one proxy per vault file) or the disk.
+
+## "[SECTION] KEY must be a finite number (nan/inf are not accepted)"
+
+`serve --check` / `serve` / `doctor` / SIGHUP refuse a routing or price
+number that is `nan` or `inf` (TOML spells both natively:
+`monthly_budget_usd = inf`, `cooldown_seconds = nan`,
+`[prices.override."m"] input = inf`) or an integer literal too large
+for a `float` (a `monthly_budget_tokens` of hundreds of digits). Such a value would pass
+every other check and then never trip a threshold, break `/status` JSON
+and the editor's reparse guard; write a real number.
 
 ## `x-llm-redact-reissue: skipped; reason=stateful` / `reason=no-candidate`
 
@@ -148,6 +175,45 @@ The editor POST named `[upstreams]`, `[routing]` or `[prices]`. Those
 sections are deliberately file-only (the editor preserves them from file
 truth): edit the TOML, run `llm-redact serve --check`, then `kill -HUP`.
 
+## "spend table in the vault database PATH could not be opened (Type: message)"
+
+A `ConfigError` from `serve`, `serve --check`, a SIGHUP reload or the
+config editor: routing is enabled on `[vault] backend = "sqlite"` and
+the vault file's `spend` table could not be opened — the file or its
+directory is unwritable, another process holds a lock, or the file is
+not a sqlite database (the exception type and sqlite's message are in
+the parentheses). A reload logs `config reload failed; keeping current
+config` and keeps serving on the old config. Fix the file (`0600` /
+`0700`, the lock, the path) and reload again.
+
+## "written to PATH but not applied (…); fix the cause and reload (SIGHUP)" (HTTP 500 from the config editor)
+
+The POST validated and the TOML was written (with its `.bak`), but
+hot-applying it failed after the dry run — typically the spend-table
+error above. The file on disk is the new config, the running proxy still
+has the old one; remove the cause, then `kill -HUP`.
+
+## "on_status KEY never applies: reissue_policy = "never" …" / "on_budget_exhausted never applies: reissue_policy = "never" …"
+
+Parse-time WARNINGs (build log, `routes list`): the rule lists a chain
+but `reissue_policy = "never"` means no request ever leaves the primary,
+so the chain is dead configuration — `retry-same` still works, it stays
+on the same upstream. Drop the chain or set `stateless-only` / `always`.
+The sibling `on_budget_exhausted never applies: upstream 'X' has no
+monthly budget` means the chain can never be entered because nothing
+exhausts.
+
+## "state:    not probed (no proxy answered on the configured listener)" (from `routes test`)
+
+The routing decision is complete; only the live state and the
+cooldown/budget annotations are missing. They come from a best-effort
+plain-http `GET /__llm-redact/status` of the config file's `host`/`port`
+(1 s), which is skipped for a `[tls]` listener and never uses
+`LLM_REDACT_PROXY_URL` — so a proxy that is not running, an mTLS
+listener, or a pointed-at proxy all read `not probed`. `llm-redact
+status` (with `--ca/--cert/--key`) reports the live state in those
+cases. No upstream is ever contacted by `routes test`.
+
 ## `serve --check` refuses `[upstreams]` / `[routing]` / `[prices]`
 
 The message names the section, rule id or key (never a value). The
@@ -156,7 +222,10 @@ invariants it enforces: a chain may never contain a passthrough upstream
 `monthly_budget_*`, `extra_headers` and `body_defaults` are errors on
 passthrough upstreams; a rule's upstream and every chain member and
 default must share the rule's protocol; every referenced upstream must
-exist; `env:VAR` must resolve in the *proxy's* environment (a container
+exist; a chain may not name the rule's own upstream
+(`names the rule's own upstream 'X'` — use `"retry-same"`) or a member
+twice (`lists 'X' twice`); `env:VAR` must resolve in the *proxy's*
+environment (a container
 needs `-e VAR`); and `enabled = true` requires `default_upstream`
 (`[routing] default_upstream is required when enabled = true`). A
 metered or passthrough `default_upstream` is a WARNING, not an error.

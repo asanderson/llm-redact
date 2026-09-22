@@ -86,28 +86,35 @@ from llm_redact.routing import (
     HOPS_HEADER,
     REISSUE_HEADER,
     RETRY_SAME,
-    SPECIAL_STATUS_KEYS,
     UPSTREAM_HEADER,
     MissingCredential,
-    PricesConfig,
     RouteRule,
-    RoutingConfig,
     RoutingState,
     RuleMatch,
     UpstreamConfig,
     apply_body_rewrites,
     classify_auth,
+    gemini_path_model,
+    is_count_tokens_path,
     is_stateful_request,
     literal_models,
     outbound_headers,
     parse_retry_after,
     request_protocol,
     restore_model,
+    rewrite_gemini_path,
     select_rule,
     status_key,
     upstream_url,
 )
-from llm_redact.spend import Budget, BudgetLedger, InMemorySpendStore, SpendStore, SqliteSpendStore
+from llm_redact.spend import (
+    BudgetLedger,
+    InMemorySpendStore,
+    SpendStore,
+    SqliteSpendStore,
+    budgets_for,
+    build_price_table,
+)
 from llm_redact.sse import SSEEvent, SSEParser, serialize
 from llm_redact.users import UsersError, UsersStore, send_verification_email
 from llm_redact.vault import Vault, VaultManager, default_vault_path
@@ -204,18 +211,6 @@ def _resolve_license_info(config: Config) -> ResolvedLicense:
     return resolved
 
 
-def _build_price_table(prices: PricesConfig) -> PriceTable:
-    """The effective price table: builtin or `[prices] table = PATH`, with
-    `[prices.override."id"]` entries winning. A bad file is a ConfigError
-    (startup / serve --check / reload all report it the same way)."""
-    base = (
-        PriceTable.builtin()
-        if prices.table == "builtin"
-        else PriceTable.from_file(Path(prices.table).expanduser())
-    )
-    return base.with_overrides(dict(prices.overrides))
-
-
 def _build_spend_store(vault: VaultConfig) -> SpendStore:
     """Where spend rows live (R-25): a `spend` table in the sqlite vault DB
     file (own connection), in-process memory for the memory backend AND
@@ -225,8 +220,9 @@ def _build_spend_store(vault: VaultConfig) -> SpendStore:
         path = Path(vault.path).expanduser() if vault.path else default_vault_path()
         try:
             return SqliteSpendStore(path)
-        except sqlite3.Error as exc:
-            # A locked or unwritable vault file: a ConfigError, so startup,
+        except (sqlite3.Error, OSError) as exc:
+            # A locked or unwritable vault file, or a path that is not a
+            # file at all (OSError from the 0600 create): a ConfigError, so startup,
             # `serve --check`, a SIGHUP reload and the editor all report it
             # the same way (reload keeps the running config; never a
             # traceback out of the signal callback).
@@ -237,17 +233,11 @@ def _build_spend_store(vault: VaultConfig) -> SpendStore:
     return InMemorySpendStore()
 
 
-def _budgets_for(routing: RoutingConfig) -> dict[str, Budget]:
-    # Every upstream gets an entry (budget-less ones included) so the ledger
-    # snapshot — and /status — always lists every configured upstream.
-    return {
-        upstream.name: Budget(
-            usd=upstream.monthly_budget_usd,
-            tokens=upstream.monthly_budget_tokens,
-            zero_cost=upstream.zero_cost,
-        )
-        for upstream in routing.upstreams
-    }
+# The ledger's config-derived inputs live in spend.py (one implementation
+# shared with the routes/spend CLIs and doctor); these private spellings are
+# the names tests/test_routes_cli.py pins the CLI against.
+_build_price_table = build_price_table
+_budgets_for = budgets_for
 
 
 class ProxyState:
@@ -384,7 +374,7 @@ class ProxyState:
         self.routing_upstreams: dict[str, UpstreamConfig] = {
             upstream.name: upstream for upstream in config.routing.upstreams
         }
-        self.price_table: PriceTable = _build_price_table(config.prices)
+        self.price_table: PriceTable = build_price_table(config.prices)
         # The durable spend table is opened in the vault file only when
         # routing is live (a legacy sqlite vault is never touched); a reload
         # that enables routing upgrades the store then (apply_config).
@@ -393,7 +383,7 @@ class ProxyState:
         )
         self.budget_ledger = BudgetLedger(
             self.spend_store,
-            _budgets_for(config.routing),
+            budgets_for(config.routing),
             reset_day=config.routing.budget_reset_day,
         )
 
@@ -539,10 +529,13 @@ class ProxyState:
         # so comparing configs would keep stale rates. Cheap (one file read).
         # Ids the running table could not price stay reported unless the
         # new table prices them.
-        price_table = _build_price_table(effective.prices)
+        price_table = build_price_table(effective.prices)
         price_table.unknown_models.update(
             model for model in self.price_table.unknown_models if price_table.lookup(model) is None
         )
+        # The never-listed count (beyond the cap / not id-shaped) is an
+        # observation, not a table fact: it carries over untouched.
+        price_table.unknown_models.dropped += self.price_table.unknown_models.dropped
         # Spend storage follows the (restart-only) vault: enabling routing on
         # a sqlite vault opens the durable table now rather than at restart.
         spend_store = self.spend_store
@@ -552,7 +545,7 @@ class ProxyState:
             and isinstance(spend_store, InMemorySpendStore)
         ):
             spend_store = _build_spend_store(effective.vault)
-        budgets = _budgets_for(effective.routing)
+        budgets = budgets_for(effective.routing)
         if (
             spend_store is not self.spend_store
             or effective.routing.budget_reset_day != self.config.routing.budget_reset_day
@@ -809,9 +802,10 @@ class ProxyState:
     ) -> dict[str, Any]:
         """Close the books on a routed request: the routed-requests metric,
         spend attributed to the delivering upstream with its hop number
-        (2xx with a parsable usage block only — passthrough included, in
-        tokens, so `spend` shows subscription usage), and the `route` row
-        record_request stores."""
+        (2xx with a parsable usage block only — passthrough included, priced
+        through the same table, so `spend` shows subscription usage as
+        tokens plus a list-price USD equivalent; docs/routing.md § Budgets),
+        and the `route` row record_request stores."""
         self.metrics.routed[(delivery.upstream.name, delivery.rule_id or "-")] += 1
         if usage is not None and status is not None and 200 <= status < 300:
             self.budget_ledger.record(
@@ -955,26 +949,9 @@ class RequestMeta(NamedTuple):
     audit_token: object | None = None
 
 
-# The Gemini model id lives in the request PATH (decision 15b):
-# /v1beta/models/{model}:generateContent. Group 2 is the id, matched on the
-# raw (still percent-encoded) path so a rewrite leaves the rest byte-exact.
-_GEMINI_MODEL_SEGMENT = re.compile(
-    r"^(/(?:v1|v1beta)/(?:models|tunedModels)/)([^/:]+)(:[A-Za-z]+)$"
-)
-
-
-def gemini_path_model(path: str) -> str | None:
-    """The model id between `/models/` and the `:verb` of a Gemini path, or
-    None when the path has no such segment."""
-    match = _GEMINI_MODEL_SEGMENT.match(path)
-    return match.group(2) if match is not None else None
-
-
-def _rewrite_gemini_path(raw_path: str, model: str) -> str:
-    match = _GEMINI_MODEL_SEGMENT.match(raw_path)
-    if match is None:
-        return raw_path
-    return match.group(1) + urllib.parse.quote(model, safe="") + match.group(3)
+# The Gemini path-model helpers live in routing.py (decision 15b, shared
+# with `routes test`); this private spelling is the name the proxy tests pin.
+_rewrite_gemini_path = rewrite_gemini_path
 
 
 def _restore_model_payload(payload: Any, original_model: str, protocol: str) -> bool:
@@ -1302,6 +1279,9 @@ def _routing_status(state: ProxyState) -> dict[str, Any]:
         "expose_models": routing.expose_models,
         "upstreams": upstreams,
         "unpriced_models": sorted(state.price_table.unknown_models),
+        # Ids seen unpriced but never listed: beyond UNKNOWN_MODELS_CAP or not
+        # shaped like a model id (pricing.looks_like_model_id).
+        "unpriced_models_dropped": state.price_table.unknown_models.dropped,
         "warnings": list(routing.warnings),
     }
 
@@ -2273,15 +2253,6 @@ async def handle(request: Request) -> Response:
     started = time.perf_counter()
 
     routing = state.config.routing
-    if (
-        routing.enabled
-        and routing.expose_models
-        and request.method == "GET"
-        and path == "/v1/models"
-    ):
-        # R-15 model discovery: answered locally, BEFORE adapter routing.
-        return _models_response(state, request, started)
-
     adapter, kind = state.route(request.method, path, request.headers)
 
     # A disabled provider fails closed before anything is read or forwarded:
@@ -2359,6 +2330,19 @@ async def handle(request: Request) -> Response:
         )
         logger.info("%s %s -> 403 named-user key required", request.method, path)
         return JSONResponse(error, status_code=403)
+
+    if (
+        routing.enabled
+        and routing.expose_models
+        and request.method == "GET"
+        and path == "/v1/models"
+    ):
+        # R-15 model discovery: a local answer (never forwarded), placed
+        # where every other proxy-generated reply for a real API path sits —
+        # AFTER the disabled-provider 502 and the named-user 403, so an
+        # unauthenticated client on a team deployment learns nothing the
+        # gates would refuse. It needs nothing from the body.
+        return _models_response(state, request, started)
 
     if adapter is not None:
         # Redactable routes fail closed on oversized bodies: the proxy must
@@ -2914,13 +2898,20 @@ async def _deliver(
         raw_rehydrated = adapter.rehydrate_raw_body(path, raw, ctx.rehydrator)
         if raw_rehydrated is not None:
             raw = raw_rehydrated
-    elif route is not None and raw and "application/json" in content_type:
+    elif (
+        route is not None
+        and raw
+        and "application/json" in content_type
+        and (kind is RouteKind.REDACT_ONLY or route.original_model is not None)
+    ):
         # A routed JSON response outside the CHAT branches (REDACT_ONLY —
         # embeddings — or pass-through): nothing to rehydrate, but a
         # rewritten model id is still restored in every top-level `model`
         # field (decision 12), and a REDACT_ONLY body's own usage block is
         # the billed call's (R-24) — an embeddings request on an env:
-        # upstream counts against its budget like a chat one.
+        # upstream counts against its budget like a chat one. A pass-through
+        # body with no rewrite to restore is not parsed at all (nothing to
+        # bill or restore — a large file listing forwards untouched).
         try:
             payload = json.loads(raw)
         except ValueError:
@@ -3034,23 +3025,6 @@ def _route_refusal(
     return JSONResponse(body, status_code=status, headers=headers)
 
 
-def _resolved_status_key(rule: RouteRule, key: str) -> str | None:
-    """The on_status key `rule.chain_for(key)` resolves through (the class
-    the log line reports — same precedence: special > exact > class), or
-    None when the rule has no chain for this status."""
-    if key in SPECIAL_STATUS_KEYS:
-        candidates: tuple[str, ...] = (key, "429", "4xx")
-    elif key.isdigit():
-        candidates = (key, f"{key[0]}xx")
-    else:
-        candidates = (key,)
-    table = dict(rule.on_status)
-    for candidate in candidates:
-        if candidate in table:
-            return candidate
-    return None
-
-
 def _next_candidate(
     state: ProxyState, chain: tuple[str, ...], position: int, *, count_tokens_path: bool
 ) -> tuple[UpstreamConfig | None, int]:
@@ -3076,6 +3050,22 @@ def _next_candidate(
             continue
         return candidate, position
     return None, position
+
+
+def _hop_timeout(remaining: float) -> httpx.Timeout:
+    """The httpx timeout for one hop, derived from the deadline's remaining
+    budget (R-18: `request_deadline_seconds` bounds the TOTAL wall time, so
+    a hop that accepts the connection and then hangs must fail inside it —
+    not after the shared client's 600 s). Each phase is capped by what is
+    left; the caps never exceed the client's own (600 s read/write/pool,
+    10 s connect), so the default 600 s deadline changes nothing. The
+    floor keeps a deadline that expires mid-hop from turning into a zero
+    timeout (httpx treats 0 as "no timeout"). A DELIVERED stream keeps this
+    per-read timeout for its lifetime: under a short deadline a stream that
+    falls silent for longer than the budget is cut off (finalized as a
+    stream error) rather than allowed to outlive it."""
+    budget = max(remaining, 0.001)
+    return httpx.Timeout(min(budget, 600.0), connect=min(budget, 10.0))
 
 
 async def _discard(response: httpx.Response | None) -> None:
@@ -3185,7 +3175,7 @@ async def _handle_routed(
     assert primary is not None  # handle() answered no_route before calling
     method = request.method
     rule_id = rule.id if rule is not None else None
-    count_tokens_path = plan.protocol == "anthropic" and path == "/v1/messages/count_tokens"
+    count_tokens_path = is_count_tokens_path(plan.protocol, path)
 
     def refusal(
         status: int,
@@ -3253,7 +3243,7 @@ async def _handle_routed(
         if plan.model != rule.model_rewrite:
             original_model = plan.model
         if plan.protocol == "gemini":
-            upstream_path = _rewrite_gemini_path(upstream_path, rule.model_rewrite)
+            upstream_path = rewrite_gemini_path(upstream_path, rule.model_rewrite)
             # The body never carries `model` on this protocol — Google
             # rejects one — so the routing helper must not add it.
             rewrite_rule = dataclasses.replace(rule, model_rewrite=None)
@@ -3347,7 +3337,11 @@ async def _handle_routed(
                     body = json.dumps(rewritten, ensure_ascii=False).encode("utf-8")
             url = upstream_url(current, upstream_path, request.url.query)
             upstream_request = state.client.build_request(
-                method, url, headers=headers_out, content=body
+                method,
+                url,
+                headers=headers_out,
+                content=body,
+                timeout=_hop_timeout(deadline - time.monotonic()),
             )
             try:
                 response = await state.client.send(upstream_request, stream=True)
@@ -3395,8 +3389,11 @@ async def _handle_routed(
             status_class = key
             retry_after = parse_retry_after(response.headers.get("retry-after"))
 
-        resolved = _resolved_status_key(rule, key) if rule is not None else None
-        action = rule.chain_for(key) if rule is not None and resolved is not None else None
+        # One lookup through the rule's precedence ladder (special > exact >
+        # class): the matched KEY is the class the row/log reports, its
+        # value the action.
+        entry = rule.resolve(key) if rule is not None else None
+        resolved, action = entry if entry is not None else (None, None)
         # R-19 / decision 10: a listed status parks the FAILED upstream for
         # its cooldown (honouring a longer retry-after; RoutingState caps at
         # 3600 s) — EXCEPT a throttle, which is transient by definition,
@@ -3426,7 +3423,12 @@ async def _handle_routed(
                 await _RETRY_SLEEP(wait)
                 continue
             assert isinstance(resolved, str) and isinstance(action, tuple)
-            status_class = resolved
+            # Decision 17: a transport fault stays class=transport whatever
+            # chain key it resolved through ("502"/"5xx") — the row and the
+            # R-29 line report what happened, not the table key; a listed
+            # STATUS reports the key it matched.
+            if not failed:
+                status_class = resolved
             if not throttled:
                 rstate.mark_unhealthy(current.name, cooldown, key)
             if not reissue_allowed():
@@ -3440,7 +3442,8 @@ async def _handle_routed(
             # on to the next one, and so does a member's throttle, whose
             # `retry-same` action belongs to the primary).
             assert isinstance(resolved, str)
-            status_class = resolved
+            if not failed:
+                status_class = resolved
             if not throttled:
                 rstate.mark_unhealthy(current.name, cooldown, key)
         if hops >= routing.max_hops or time.monotonic() >= deadline:

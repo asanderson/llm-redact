@@ -24,11 +24,16 @@ body ends after the first content event, and the response carries
 ``x-fake-abort-after-first-event: 1`` so a wrapping transport can turn that
 into a real connection drop — ASGITransport itself buffers whole bodies),
 ``echo_model`` (the reply's ``model`` echoes the request's, so a proxy
-model rewrite/restore is testable) and ``fail_count`` (the first N requests
-fail with ``fail_status`` — 503 unless set — later ones succeed). Every
-request an upstream saw is
-appended to its ``Scenario.received`` (headers + decoded body) for
-assertions — received bodies are printed only by the CLI (``--quiet`` off).
+model rewrite/restore is testable), ``fail_count`` (the first N requests
+fail with ``fail_status`` — 503 unless set — later ones succeed) and
+``requests_limit`` (the per-upstream request quota EVERY answer, success or
+error, reports in the provider's own rate-limit headers —
+``anthropic-ratelimit-requests-limit`` / ``x-ratelimit-limit-requests`` —
+so a test can tell WHOSE rate-limit headers the proxy delivered after a
+fallback hop, R-23). Every request an upstream saw is appended to its
+``Scenario.received`` (path, query string, headers, the RAW body bytes and
+the decoded body) for assertions — received bodies are printed only by the
+CLI (``--quiet`` off).
 
 --mangle makes the echo imitate an LLM that rewrites placeholders
 (lowercased, hyphens, stripped zero-padding): with [rehydration] fuzzy = true
@@ -37,7 +42,7 @@ the proxy still restores them; with fuzzy = false they come back verbatim.
 Usage:
     uv run python scripts/fake_upstream.py --port 9999 [--mangle]
         [--status 429 --plan-limit --retry-after 5 --abort-mid-stream
-         --echo-model --fail-count 2]
+         --echo-model --fail-count 2 --requests-limit 4000]
 """
 
 import argparse
@@ -73,11 +78,15 @@ TOKEN_RE = re.compile("«[A-Z0-9_]+»")
 
 @dataclass
 class Received:
-    """One request as the fake upstream saw it."""
+    """One request as the fake upstream saw it: ``raw_body`` is the exact
+    byte string the proxy forwarded (byte-identity assertions), ``body`` its
+    decoded JSON, ``query`` the raw query string (``""`` when none)."""
 
     path: str
     headers: dict[str, str]
     body: Any
+    raw_body: bytes = b""
+    query: str = ""
 
 
 @dataclass
@@ -97,6 +106,9 @@ class Scenario:
     # The status of the first ``fail_count`` failures (a 429 throttle that
     # clears on retry, say); ``status`` itself when that is not a success.
     fail_status: int = 503
+    # The request quota this upstream reports in its rate-limit headers (on
+    # every answer); give each upstream its own value to tell them apart.
+    requests_limit: int = 50
     received: list[Received] = field(default_factory=list)
 
     def failing(self) -> bool:
@@ -117,6 +129,34 @@ class Scenario:
             headers.update(PLAN_LIMIT_HEADERS)
         if self.retry_after is not None:
             headers["retry-after"] = str(int(self.retry_after))
+        return headers
+
+    def anthropic_headers(self, *, error: bool) -> dict[str, str]:
+        """Headers a real Anthropic answer carries (the proxy relays them):
+        the quota pair on every answer (remaining 0 on an error), plus the
+        unified status marked allowed on a success or the programmed
+        error headers otherwise."""
+        headers = {
+            "anthropic-ratelimit-requests-limit": str(self.requests_limit),
+            "anthropic-ratelimit-requests-remaining": (
+                "0" if error else str(self.requests_limit - 1)
+            ),
+        }
+        if error:
+            headers.update(self.error_headers())
+        else:
+            headers["anthropic-ratelimit-unified-status"] = "allowed"
+            headers["request-id"] = "req_fake"
+        return headers
+
+    def openai_headers(self, *, error: bool) -> dict[str, str]:
+        """OpenAI's `x-ratelimit-*` twins of :meth:`anthropic_headers`."""
+        headers = {
+            "x-ratelimit-limit-requests": str(self.requests_limit),
+            "x-ratelimit-remaining-requests": "0" if error else str(self.requests_limit - 1),
+        }
+        if error:
+            headers.update(self.error_headers())
         return headers
 
     def anthropic_usage(self) -> dict[str, int]:
@@ -171,7 +211,14 @@ class _ScenarioApp:
     def __init__(self, scenarios: Scenarios) -> None:
         self.scenarios = scenarios
 
-    def scenario_for(self, request: Request, body: Any) -> Scenario:
+    async def read(self, request: Request) -> tuple[Scenario, Any]:
+        """Read the request's raw body, decode it as JSON and record both
+        (with the path, query and headers) on the request's scenario."""
+        raw = await request.body()
+        body = json.loads(raw)
+        return self.scenario_for(request, body, raw), body
+
+    def scenario_for(self, request: Request, body: Any, raw: bytes = b"") -> Scenario:
         """The scenario for this request's upstream identity (the
         ``x-fake-upstream`` header, else ``Host`` with and without its port,
         else the ``*`` wildcard); an unknown upstream gets a fresh default
@@ -185,27 +232,33 @@ class _ScenarioApp:
                 break
         if scenario is None:
             scenario = self.scenarios.setdefault(host or "*", Scenario())
-        scenario.received.append(Received(request.url.path, dict(request.headers), body))
+        scenario.received.append(
+            Received(
+                request.url.path,
+                dict(request.headers),
+                body,
+                raw_body=raw,
+                query=request.url.query,
+            )
+        )
         _log(f"--- request body received by upstream {host} ({request.url.path}) ---")
         _log(json.dumps(body, indent=2, ensure_ascii=False))
         return scenario
 
     async def messages(self, request: Request) -> Response:
-        body = await request.json()
-        sc = self.scenario_for(request, body)
+        sc, body = await self.read(request)
         if sc.failing():
             status = sc.error_status()
             error_type = "rate_limit_error" if status == 429 else "api_error"
             return JSONResponse(
                 {"type": "error", "error": {"type": error_type, "message": "fake upstream"}},
                 status_code=status,
-                headers=sc.error_headers(),
+                headers=sc.anthropic_headers(error=True),
             )
         reply = _echo(json.dumps(body.get("messages", []), ensure_ascii=False))
         model = body.get("model", "fake") if sc.echo_model else "fake"
         usage = sc.anthropic_usage()
-        # Headers a real Anthropic answer carries; the proxy relays them.
-        headers = {"anthropic-ratelimit-unified-status": "allowed", "request-id": "req_fake"}
+        headers = sc.anthropic_headers(error=False)
 
         if not body.get("stream"):
             return JSONResponse(
@@ -273,15 +326,16 @@ class _ScenarioApp:
         return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
 
     async def count_tokens(self, request: Request) -> Response:
-        body = await request.json()
-        sc = self.scenario_for(request, body)
+        sc, body = await self.read(request)
         if sc.failing():
             return JSONResponse(
                 {"type": "error", "error": {"type": "api_error", "message": "fake upstream"}},
                 status_code=sc.error_status(),
-                headers=sc.error_headers(),
+                headers=sc.anthropic_headers(error=True),
             )
-        return JSONResponse({"input_tokens": sc.usage["input"]})
+        return JSONResponse(
+            {"input_tokens": sc.usage["input"]}, headers=sc.anthropic_headers(error=False)
+        )
 
     @staticmethod
     def openai_error(sc: Scenario) -> Response:
@@ -295,14 +349,13 @@ class _ScenarioApp:
                 }
             },
             status_code=status,
-            headers=sc.error_headers(),
+            headers=sc.openai_headers(error=True),
         )
 
     async def embeddings(self, request: Request) -> Response:
         """OpenAI /v1/embeddings: a REDACT_ONLY route whose response carries
         a prompt-only usage block and (with ``echo_model``) the model id."""
-        body = await request.json()
-        sc = self.scenario_for(request, body)
+        sc, body = await self.read(request)
         if sc.failing():
             return self.openai_error(sc)
         model = body.get("model", "fake") if sc.echo_model else "fake"
@@ -312,12 +365,12 @@ class _ScenarioApp:
                 "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
                 "model": model,
                 "usage": {"prompt_tokens": sc.usage["input"], "total_tokens": sc.usage["input"]},
-            }
+            },
+            headers=sc.openai_headers(error=False),
         )
 
     async def chat_completions(self, request: Request) -> Response:
-        body = await request.json()
-        sc = self.scenario_for(request, body)
+        sc, body = await self.read(request)
         if sc.failing():
             return self.openai_error(sc)
         reply = _echo(json.dumps(body.get("messages", []), ensure_ascii=False))
@@ -338,7 +391,8 @@ class _ScenarioApp:
                         }
                     ],
                     "usage": usage,
-                }
+                },
+                headers=sc.openai_headers(error=False),
             )
 
         include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
@@ -376,14 +430,15 @@ class _ScenarioApp:
                 )
             yield b"data: [DONE]\n\n"
 
-        headers = {ABORT_HEADER: "1"} if sc.abort_mid_stream else {}
+        headers = sc.openai_headers(error=False)
+        if sc.abort_mid_stream:
+            headers[ABORT_HEADER] = "1"
         return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
 
     async def gemini_generate(self, request: Request) -> Response:
         """Gemini-shaped generateContent: the model id comes from the PATH
         (models/{m}:generateContent) and is echoed as `modelVersion`."""
-        body = await request.json()
-        sc = self.scenario_for(request, body)
+        sc, body = await self.read(request)
         if sc.failing():
             status = sc.error_status()
             return JSONResponse(
@@ -414,8 +469,7 @@ class _ScenarioApp:
         """Ollama's native /api/chat + /api/generate: NDJSON streams (7-char
         pieces split placeholders across lines) with the token counts on the
         done:true line; stream:false answers one JSON object."""
-        body = await request.json()
-        sc = self.scenario_for(request, body)
+        sc, body = await self.read(request)
         if sc.failing():
             return JSONResponse(
                 {"error": "fake upstream"},
@@ -664,6 +718,12 @@ def main() -> None:
     parser.add_argument(
         "--fail-status", type=int, default=503, help="the status those first N failures answer"
     )
+    parser.add_argument(
+        "--requests-limit",
+        type=int,
+        default=50,
+        help="the request quota reported in every answer's rate-limit headers",
+    )
     parser.add_argument("--quiet", action="store_true", help="do not print received bodies")
     args = parser.parse_args()
     MANGLE = args.mangle
@@ -676,6 +736,7 @@ def main() -> None:
         echo_model=args.echo_model,
         fail_count=args.fail_count,
         fail_status=args.fail_status,
+        requests_limit=args.requests_limit,
     )
     app = build_app({"*": scenario})
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

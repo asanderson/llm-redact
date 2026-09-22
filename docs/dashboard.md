@@ -52,7 +52,10 @@ The agent plugin commands have their own terminal-output screenshots in
   when enabled, a per-upstream table — name, protocol, credential mode
   (never the key), state (`healthy` / `cooldown` / `budget_exhausted`),
   spend against budget — mirroring `llm-redact status`'s routing lines
-  ([routing.md](routing.md)).
+  ([routing.md](routing.md)). The USD column of a passthrough
+  (subscription) upstream is a list-price equivalent, not a bill; the
+  recent-request table does not render the `route` fields (they are in
+  the `/recent` JSON rows).
 - **Metrics**: `GET /__llm-redact/metrics` exposes Prometheus text format
   (always on, in-memory): `llm_redact_requests_total{provider,status}`, a
   request-duration histogram labeled by `provider` and `streamed` (so

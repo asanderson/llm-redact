@@ -1829,7 +1829,7 @@ async def _handle_config_post(request: Request, state: ProxyState) -> Response:
         # `env:VAR` credential that vanished since startup 400s here too.
         resolve_credentials(candidate.routing, os.environ)
         if state.router is not None:
-            # The router's own checks (price file, spend table): a 400
+            # The router's own checks (e.g. the price table): a 400
             # here, before the write, never a swap.
             state.router.validate(candidate)
         elif candidate.routing.enabled:

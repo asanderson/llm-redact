@@ -899,9 +899,12 @@ def _routing_posture(routing: dict[str, Any]) -> list[str]:
             " (direct requests answer 402; chains skip them)"
         )
     unpriced = routing.get("unpriced_models") or []
-    if unpriced:
+    not_listed = routing.get("unpriced_models_dropped") or 0
+    if unpriced or not_listed:
+        listed = ", ".join(sorted(unpriced)) if unpriced else "none listed"
+        more = f" (+{not_listed} more not listed)" if not_listed else ""
         lines.append(
-            f"routing: unpriced models: {', '.join(sorted(unpriced))}"
+            f"routing: unpriced models: {listed}{more}"
             " (tokens counted, USD not — add [prices.override])"
         )
     for warning in routing.get("warnings") or []:

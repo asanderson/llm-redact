@@ -501,8 +501,10 @@ function renderRouting(routing) {
     if (u.state === "cooldown") notes.push(name + " in cooldown (skipped in chains)");
     if (u.state === "budget_exhausted") notes.push(name + " budget exhausted (402 direct; chains skip it)");
   });
-  if ((routing.unpriced_models || []).length)
-    notes.push("unpriced models (tokens counted, USD not): " + routing.unpriced_models.join(", "));
+  if ((routing.unpriced_models || []).length || routing.unpriced_models_dropped)
+    notes.push("unpriced models (tokens counted, USD not): " +
+      ((routing.unpriced_models || []).join(", ") || "none listed") +
+      (routing.unpriced_models_dropped ? " (+" + routing.unpriced_models_dropped + " more not listed)" : ""));
   (routing.warnings || []).forEach((w) => notes.push(w));
   warnings.textContent = notes.length ? "⚠ routing: " + notes.join(" · ") : "";
 }

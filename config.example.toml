@@ -85,6 +85,9 @@ upstream_base_url = "http://127.0.0.1:11434"
 ## "none" strips them and sends nothing. Budgets are USD or tokens per
 ## calendar month (UTC, budget_reset_day); a budget on a passthrough
 ## upstream is a config error. cost = "zero" ignores budgets entirely.
+## Passthrough spend is recorded too — its USD is a list-price equivalent
+## (tokens are the honest number). On none/env upstreams the client's
+## credential headers and a ?key= query parameter are dropped.
 # [upstreams.anthropic_oauth]
 # protocol   = "anthropic"
 # base_url   = "https://api.anthropic.com"
@@ -100,7 +103,7 @@ upstream_base_url = "http://127.0.0.1:11434"
 #
 # [upstreams.openai_key]
 # protocol   = "openai"
-# base_url   = "https://api.openai.com/v1"   # a /v1 base absorbs the request's /v1
+# base_url   = "https://api.openai.com/v1"   # any path-bearing openai base absorbs the request's /v1
 # credential = "env:OPENAI_API_KEY"
 # monthly_budget_usd = 50
 # cooldown_seconds   = 60
@@ -213,6 +216,17 @@ upstream_base_url = "http://127.0.0.1:11434"
 # match    = { protocol = "openai", model = "gemini-*" }
 # upstream = "gemini_openai_compat"
 # on_status = { 429 = ["ollama_openai"] }
+#
+## Id-only follow-ups carry no model (GET /v1/responses/{id} and its
+## /input_items, conversation item reads, GET /v1/files/{id}/content), so
+## the model-globbed rules above miss them and they would take the openai
+## default — local Ollama, which never produced the object. A path-matched,
+## model-free rule pins them to the lane that did (add siblings for
+## /v1/conversations/* and /v1/files/* when those live on a key).
+# [[routing.rule]]
+# id       = "openai-followups"
+# match    = { protocol = "openai", path = "/v1/responses/*" }
+# upstream = "openai_key"
 #
 # [[routing.rule]]
 # id       = "local-openai"

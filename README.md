@@ -140,8 +140,8 @@ without leaving the tool:
   (effective-config read → TOML edit → `serve --check` gate → SIGHUP
   reload → posture read-back);
 - `/llm-redact:routes` and `/llm-redact:spend` — which rule and upstream
-  a request would take (nothing sent), and per-upstream spend against
-  the monthly budgets;
+  a request would take (no upstream contacted), and per-upstream spend
+  against the monthly budgets;
 - `/llm-redact:doctor`, `/llm-redact:audit`, `/llm-redact:users`, and
   `/llm-redact:guide`.
 
@@ -432,8 +432,9 @@ against a vendored price table with overrides; an exhausted upstream
 answers 402 and drops out of chains. Every decision is visible: the log
 line (`rule= upstream= hops= auth= class= reissue=`), the `route` field
 of recent rows, the `/status` routing block, two metrics, `llm-redact
-routes list|test` (dry-run a decision, nothing sent) and `llm-redact
-spend`. `[upstreams]`, `[routing]` and `[prices]` hot-reload on SIGHUP
+routes list|test` (dry-run a decision; no upstream contacted) and
+`llm-redact spend` (a passthrough lane's USD is a list-price
+equivalent — tokens are the honest number). `[upstreams]`, `[routing]` and `[prices]` hot-reload on SIGHUP
 and are file-only (not in the dashboard editor). Realtime WebSocket
 connections are never routed. The full reference, policy envelope,
 recommended single-user config and troubleshooting are in

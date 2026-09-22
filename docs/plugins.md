@@ -89,7 +89,7 @@ have edited — it refuses and asks for `--force`.
 | `doctor` | Read-only diagnostics, failures explained via troubleshooting.md | — |
 | `audit` | Tamper-evident chain verification verdict | dashboard audit block |
 | `users` | Seat usage and invite/revoke guidance (never prints per-user keys) | dashboard users card |
-| `routes` | Routing rules table, or a dry-run of which rule/upstream/chain a request would take (nothing sent) | dashboard routing table |
+| `routes` | Routing rules table, or a dry-run of which rule/upstream/chain a request would take (no upstream is contacted; the live state annotations come from one best-effort `GET /__llm-redact/status` of the local proxy) | dashboard routing table |
 | `spend` | Per-upstream spend, re-issue share, and remaining monthly budget | dashboard routing table |
 | `guide` | Displays the user guide | `/__llm-redact/guide` |
 

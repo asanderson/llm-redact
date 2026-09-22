@@ -1,5 +1,5 @@
 ---
-description: Show llm-redact routing rules, or dry-run which rule, upstream, and fallback chain a request would take (nothing is sent)
+description: Show llm-redact routing rules, or dry-run which rule, upstream, and fallback chain a request would take (no upstream is contacted)
 argument-hint: "[test --protocol \u2026 --model \u2026]"
 allowed-tools: Bash(llm-redact:*)
 ---
@@ -48,7 +48,12 @@ the matched rule id (or that the protocol's default applied), the
 upstream with its protocol, credential MODE, cost and state, the
 fallback chain per status key with any passthrough/cooldown
 annotations, the reissue policy, and the model rewrite. This is a
-DRY-RUN: nothing is sent and no credential is resolved.
+DRY-RUN: no upstream is contacted and no credential is resolved. The
+`state` line and the cooldown/budget annotations come from a plain-http
+probe of the running proxy's configured listener; `not probed` means
+nothing answered there (proxy not running, a TLS listener, or a proxy
+reachable only through LLM_REDACT_PROXY_URL) — say so and offer
+`llm-redact status` for the live state.
 
 Otherwise run `llm-redact routes list` and render the rules table in
 file order (id, protocol, match summary, upstream, chains, reissue

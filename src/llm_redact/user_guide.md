@@ -108,9 +108,12 @@ Claude Code and Cursor `/llm-redact-<name>`, Codex
 - **routes** — the routing rules table, or a dry-run of which rule,
   upstream, and fallback chain a request would take
   (`routes test --protocol anthropic --model claude-sonnet-5 --auth oauth`);
-  nothing is sent.
+  no upstream is contacted — the live `state` line comes from the
+  running proxy's own listener, or reads `not probed`.
 - **spend** — per-upstream tokens and USD for the month, how much came
-  from fallback re-issues, and the remaining budget.
+  from fallback re-issues, and the remaining budget. On a subscription
+  (passthrough) lane the USD is a list-price equivalent, not a bill —
+  the token counts are the real number.
 - **guide** — displays this guide.
 
 Every command begins by checking that the `llm-redact` CLI is present
@@ -131,8 +134,10 @@ own key or a local model, never a second subscription, and a
 conversation that already carries signed thinking blocks is never
 swapped mid-conversation (the response says so:
 `x-llm-redact-reissue: skipped; reason=stateful`). Every decision is
-visible in `llm-redact status`, the recent-requests table (rule,
-upstream, hops, class), and the **routes** / **spend** commands. The
+visible in `llm-redact status`, the `route` field of the
+`/__llm-redact/recent` rows shown by the **recent** command (rule,
+upstream, hops, class — the dashboard's own recent table does not render
+them), and the **routes** / **spend** commands. The
 reference, the policy it respects, and a recommended single-user
 config are in the repository's `docs/routing.md`.
 

@@ -24,7 +24,6 @@ read [src/llm_redact/user_guide.md](../src/llm_redact/user_guide.md).
 | Doc | What it covers |
 | --- | --- |
 | [deployment.md](deployment.md) | The end-to-end guide: bind policy and mTLS, containers, health probes, the Helm chart, SIGHUP reloads, vault lifecycle, service units, log rotation. |
-| [routing.md](routing.md) | Rule-based upstream routing behind redaction: named upstreams and credential modes, fallback chains with cooldowns and Anthropic plan-limit detection, per-upstream monthly budgets and the price table, the `routes`/`spend` CLIs, and the recommended single-user config. |
 | [observability.md](observability.md) | Prometheus scrape/alert examples and the Grafana dashboard, mapped to the emitted metrics. |
 | [resilience.md](resilience.md) | The failure-mode catalogue: what happens on every upstream fault, stream truncation, and vault write error — and the tests that pin it. |
 | [api-coverage.md](api-coverage.md) | The endpoint matrix: every provider route and how the proxy treats it (pinned by test in both directions). |

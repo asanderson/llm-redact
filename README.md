@@ -32,7 +32,7 @@ record — is indexed in [docs/](docs/README.md).
 - [Editions and licensing](#editions-and-licensing) — detail: [tiers, keys, and the open-core boundary](docs/editions.md)
 - [Containers (docker or podman)](#containers-docker-or-podman)
 - [Status, dashboard, metrics, and audit log](#status-dashboard-metrics-and-audit-log) — detail: [the local ops surface](docs/dashboard.md)
-- [Operations](#operations) — detail: [the deployment guide](docs/deployment.md), [routing, fallback and budgets](docs/routing.md)
+- [Operations](#operations) — detail: [the deployment guide](docs/deployment.md)
 - [What gets detected](#what-gets-detected) — detail: [the detection reference](docs/detection.md)
 - [Benchmark and live validation](#benchmark-and-live-validation)
 - [Trying it without touching a real API](#trying-it-without-touching-a-real-api)
@@ -127,7 +127,7 @@ out-of-scope table — is written down in
 
 ## Plugins
 
-Twelve slash commands mirror the dashboard and config editor inside
+Ten slash commands mirror the dashboard and config editor inside
 Claude Code, Codex, OpenCode, and Cursor, so the proxy can be driven
 without leaving the tool:
 
@@ -139,9 +139,6 @@ without leaving the tool:
 - `/llm-redact:config-show` and a guarded `/llm-redact:config-edit`
   (effective-config read → TOML edit → `serve --check` gate → SIGHUP
   reload → posture read-back);
-- `/llm-redact:routes` and `/llm-redact:spend` — which rule and upstream
-  a request would take (no upstream contacted), and per-upstream spend
-  against the monthly budgets;
 - `/llm-redact:doctor`, `/llm-redact:audit`, `/llm-redact:users`, and
   `/llm-redact:guide`.
 
@@ -227,9 +224,7 @@ and point tools at it via their base-URL variables (`ANTHROPIC_BASE_URL`,
   OpenAI-compatible upstreams), per-provider setup, batch APIs, and the
   realtime WebSocket relay: [docs/providers.md](docs/providers.md);
   endpoint-by-endpoint coverage:
-  [docs/api-coverage.md](docs/api-coverage.md). Several upstreams per
-  protocol, with fallback chains and monthly budgets:
-  [docs/routing.md](docs/routing.md).
+  [docs/api-coverage.md](docs/api-coverage.md).
 - **Agent plugins** — drive the proxy without leaving Claude Code,
   Codex, OpenCode, or Cursor: `/llm-redact:status`,
   `/llm-redact:recent`, `/llm-redact:preview`, and a guarded
@@ -408,37 +403,6 @@ essentials:
   [docs/fips.md](docs/fips.md).
 - **Event loop**: `pip install 'llm-redact-proxy[perf]'` adds uvloop;
   uvicorn picks it up automatically — no configuration.
-
-### Routing, fallback and budgets
-
-Off by default, and byte-identical to before when off: a `[routing]`
-table turns the proxy into the single local gateway for one power
-user — named `[upstreams.NAME]` destinations (each with one protocol
-and a credential mode: `passthrough` forwards the client's own auth
-byte-exact, `env:VAR` strips it and injects a key the proxy holds,
-`none` sends nothing), ordered `[[routing.rule]]` matchers on protocol,
-model glob, headers, path and auth kind, and a fail-closed
-`default_upstream` per protocol (no rule and no default is a 502, never
-a guess). Rules carry `on_status` fallback chains with per-upstream
-cooldowns; an Anthropic 429 is told apart as a subscription
-**plan-limit** or a **throttle** from its unified rate-limit headers,
-and a plan-limit re-issue may only reach your own API key or a local
-Ollama — a chain can never contain a passthrough upstream, so no
-subscription is ever pooled or intermediated, and a request carrying
-signed thinking blocks is never swapped mid-conversation
-(`x-llm-redact-reissue: skipped; reason=stateful`). Per-upstream
-monthly budgets (USD or tokens) are metered from provider `usage`
-against a vendored price table with overrides; an exhausted upstream
-answers 402 and drops out of chains. Every decision is visible: the log
-line (`rule= upstream= hops= auth= class= reissue=`), the `route` field
-of recent rows, the `/status` routing block, two metrics, `llm-redact
-routes list|test` (dry-run a decision; no upstream contacted) and
-`llm-redact spend` (a passthrough lane's USD is a list-price
-equivalent — tokens are the honest number). `[upstreams]`, `[routing]` and `[prices]` hot-reload on SIGHUP
-and are file-only (not in the dashboard editor). Realtime WebSocket
-connections are never routed. The full reference, policy envelope,
-recommended single-user config and troubleshooting are in
-[docs/routing.md](docs/routing.md).
 
 ## Benchmark and live validation
 

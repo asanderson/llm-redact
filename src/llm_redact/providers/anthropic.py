@@ -139,18 +139,9 @@ class AnthropicAdapter(ProviderAdapter):
         return path != "/v1/complete"
 
     def error_body(self, message: str, *, status: int = 413) -> dict[str, Any]:
-        # Routing (docs/routing.md) adds the budget 402 and the local
-        # count_tokens 404; each maps to the SDK's matching error class so the
-        # tool classifies the refusal the way the API would. The 429 entry is
-        # the API's own class for completeness only: no proxy-generated 429
-        # exists — every 429 a client sees is the upstream's own body.
-        error_type = {
-            402: "billing_error",
-            404: "not_found_error",
-            413: "request_too_large",
-            429: "rate_limit_error",
-            502: "api_error",
-        }.get(status, "invalid_request_error")
+        error_type = {413: "request_too_large", 502: "api_error"}.get(
+            status, "invalid_request_error"
+        )
         return {"type": "error", "error": {"type": error_type, "message": message}}
 
     def prepare_request(

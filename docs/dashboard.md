@@ -34,10 +34,7 @@ The agent plugin commands have their own terminal-output screenshots in
   enable/disable, fuzzy/system-note/size-limit) and applies them
   immediately, rewriting the config file (comments are not preserved; one
   `.bak` is kept). Restart-only settings (host/port/vault/audit/log/tls/
-  otel) stay read-only, and the routing sections (`[upstreams]`,
-  `[routing]`, `[prices]`) are file-only — hot on SIGHUP, preserved from
-  file truth by the editor's merge, and a POST naming them is a 400
-  (`edit the file and reload`). This is the
+  otel) stay read-only. This is the
   reserved namespace's one mutating endpoint (`POST /__llm-redact/config`)
   and it is layered against cross-site abuse: Host-header validation (DNS
   rebinding), Origin validation, and a per-process CSRF token that only
@@ -46,16 +43,7 @@ The agent plugin commands have their own terminal-output screenshots in
   allowlist *values* (an editor can't edit counts) — still metadata-free of
   vault contents.
 - **Status**: `llm-redact status` (or `GET /__llm-redact/status`) reports the
-  same live totals as JSON — including the `routing` block (per-upstream
-  health, spend against budget, re-issues) when routing is enabled.
-- **Routing**: a `routing` pill (enabled/disabled) in the header and,
-  when enabled, a per-upstream table — name, protocol, credential mode
-  (never the key), state (`healthy` / `cooldown` / `budget_exhausted`),
-  spend against budget — mirroring `llm-redact status`'s routing lines
-  ([routing.md](routing.md)). The USD column of a passthrough
-  (subscription) upstream is a list-price equivalent, not a bill; the
-  recent-request table does not render the `route` fields (they are in
-  the `/recent` JSON rows).
+  same live totals as JSON.
 - **Metrics**: `GET /__llm-redact/metrics` exposes Prometheus text format
   (always on, in-memory): `llm_redact_requests_total{provider,status}`, a
   request-duration histogram labeled by `provider` and `streamed` (so
@@ -90,8 +78,7 @@ The agent plugin commands have their own terminal-output screenshots in
   Cursor —
   `/llm-redact:status`, `/llm-redact:recent`, `/llm-redact:preview`, a
   guarded `/llm-redact:config-edit` (effective-config read → TOML edit →
-  `serve --check` gate → SIGHUP → posture read-back), `/llm-redact:routes`
-  and `/llm-redact:spend`, and more. Claude
+  `serve --check` gate → SIGHUP → posture read-back), and more. Claude
   Code installs the repo as a plugin marketplace
   (`/plugin marketplace add asanderson/llm-redact`); every tool can also
   use `llm-redact plugin install claude|codex|opencode|cursor`. Command

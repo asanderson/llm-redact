@@ -24,7 +24,7 @@ COMMANDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("--print-only", "--force", "--proxy-url", "--install-proxy"),
     ),
     "run": ((), ("--config", "--port", "--tools", "--set-env", "--proxy-url")),
-    "doctor": ((), ("--config", "--json", "--offline")),
+    "doctor": ((), ("--config", "--json")),
     "guide": ((), ()),
     "config": (("show",), ("--config", "--path")),
     "preview": ((), ("--config", "--text", "--json")),
@@ -33,11 +33,6 @@ COMMANDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("invite", "verify", "list", "revoke"),
         ("--config", "--db", "--print-code", "--json", "--yes", "--purge"),
     ),
-    "routes": (
-        ("list", "test"),
-        ("--config", "--json", "--protocol", "--model", "--header", "--path", "--auth"),
-    ),
-    "spend": ((), ("--config", "--month", "--json")),
     "completions": (("bash", "zsh", "fish"), ()),
     "fips-check": ((), ()),
 }

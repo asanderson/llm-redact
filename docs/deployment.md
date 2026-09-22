@@ -106,8 +106,7 @@ own restarts and log retention:
 Config changes apply on **SIGHUP** without dropping in-flight requests
 (`kill -HUP $(pgrep -f 'llm-redact serve')`, or `docker kill
 --signal=HUP`). Detection rules, allowlists, NER, fuzzy rehydration, note
-injection, `max_body_bytes`, upstream URLs, and the routing sections
-`[upstreams]`/`[routing]`/`[prices]` hot-reload; vault, audit,
+injection, `max_body_bytes`, and upstream URLs hot-reload; vault, audit,
 host, port, log, TLS, OTel, users, and email changes warn "require restart"
 and keep the old value. A broken config file is logged and ignored — the running config
 stays live. There is deliberately no HTTP reload endpoint (it would be a

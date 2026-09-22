@@ -61,9 +61,7 @@
   <span class="pill" title="OpenTelemetry export (metadata only, like the audit log)">otel <span id="otel">–</span></span>
   <span class="pill" title="object-store audit backup sinks: batches uploaded, rows dropped on failure">audit sinks <span id="audit-sinks">–</span></span>
   <span class="pill" title="license tier in effect (see README.md)">license <span id="license">–</span></span>
-  <span class="pill" title="rule-based upstream routing, fallback chains and budgets ([routing] in the config; docs/routing.md)">routing <span id="routing">–</span></span>
 </div>
-<p id="routing-warnings" class="warn"></p>
 <p id="license-warnings" class="warn"></p>
 <p id="posture"></p>
 <p id="error"></p>
@@ -81,16 +79,6 @@
     <h2>Upstreams</h2>
     <table><tbody id="upstreams"></tbody></table>
   </div>
-</div>
-
-<div class="card" id="routing-card" style="margin-top:1.5rem" hidden>
-  <h2>Routing upstreams <span class="muted" style="font-weight:normal;font-size:.85rem">state and spend this period — credential MODE only, never a value</span></h2>
-  <table>
-    <thead><tr><th>upstream</th><th>protocol</th><th>credential</th><th>cost</th><th>state</th>
-      <th class="num">requests</th><th class="num" title="re-issues that LEFT this upstream in the last hour">re-issues/h</th>
-      <th class="num">tokens</th><th class="num">USD</th><th>budget</th></tr></thead>
-    <tbody id="routing-upstreams"></tbody>
-  </table>
 </div>
 
 <div class="card" style="margin-top:1.5rem">
@@ -423,8 +411,6 @@ async function refreshStatus() {
     totals.appendChild(row);
   });
 
-  renderRouting(s.routing || { enabled: false });
-
   const upstreams = document.getElementById("upstreams");
   upstreams.replaceChildren();
   const disabled = new Set(s.providers_disabled || []);
@@ -438,73 +424,6 @@ async function refreshStatus() {
     cell(row, url);
     upstreams.appendChild(row);
   });
-}
-function routingBudget(spend, zeroCost) {
-  // The budget column: remaining/limit in USD and/or tokens, "zero-cost"
-  // when budgets are ignored (the upstream's cost field — the /status spend
-  // block carries no zero_cost key, and remaining_* is null there, which
-  // must not read as exhausted), "none" for passthrough (subscription
-  // usage is the provider's to meter).
-  if (!spend) return "";
-  if (zeroCost || spend.zero_cost) return "zero-cost (ignored)";
-  const parts = [];
-  if (spend.budget_usd !== null && spend.budget_usd !== undefined)
-    parts.push("$" + Number(spend.remaining_usd || 0).toFixed(2) + " of $"
-      + Number(spend.budget_usd).toFixed(2) + " left");
-  if (spend.budget_tokens !== null && spend.budget_tokens !== undefined)
-    parts.push((spend.remaining_tokens || 0) + " of " + spend.budget_tokens + " tokens left");
-  return parts.length ? parts.join(", ") : "none";
-}
-function renderRouting(routing) {
-  // The routing pill + per-upstream table (R-30). Older proxies omit the
-  // block entirely; an absent or disabled block hides the card. Every
-  // write is textContent — the payload is data, never markup.
-  const pill = document.getElementById("routing");
-  const card = document.getElementById("routing-card");
-  const warnings = document.getElementById("routing-warnings");
-  const rows = document.getElementById("routing-upstreams");
-  rows.replaceChildren();
-  if (!routing.enabled) {
-    pill.textContent = "off";
-    card.hidden = true;
-    warnings.textContent = "";
-    return;
-  }
-  const defaults = Object.entries(routing.default_upstreams || {})
-    .map(([p, u]) => p + "→" + u).join(", ");
-  pill.textContent = "on · " + (routing.rules || 0) + " rules"
-    + (defaults ? " · default " + defaults : "")
-    + (routing.reissues_last_hour ? " · ⚠" + routing.reissues_last_hour + " re-issues/h" : "");
-  card.hidden = false;
-  const notes = [];
-  const upstreams = routing.upstreams || {};
-  Object.entries(upstreams).sort(([a], [b]) => a.localeCompare(b)).forEach(([name, u]) => {
-    const row = document.createElement("tr");
-    cell(row, name + (u.legacy ? " (legacy)" : ""));
-    cell(row, u.protocol || "");
-    cell(row, u.credential || "");
-    cell(row, u.cost || "");
-    let state = u.state || "?";
-    if (state === "cooldown") state += " (" + Math.round(u.cooldown_remaining_seconds || 0) + "s)";
-    if (state !== "healthy") state = "⚠ " + state;
-    if (u.last_error_class) state += " · last " + u.last_error_class;
-    cell(row, state);
-    cell(row, String(u.requests || 0), true);
-    cell(row, String(u.reissues_last_hour || 0), true);
-    const spend = u.spend || {};
-    const tokens = spend.total_tokens !== undefined ? spend.total_tokens
-      : (spend.in_tokens || 0) + (spend.out_tokens || 0) + (spend.cache_read || 0) + (spend.cache_write || 0);
-    cell(row, String(tokens), true);
-    cell(row, Number(spend.usd || 0).toFixed(4) + (spend.unpriced_rows ? " ⚠" + spend.unpriced_rows + " unpriced" : ""), true);
-    cell(row, routingBudget(u.spend, u.cost === "zero"));
-    rows.appendChild(row);
-    if (u.state === "cooldown") notes.push(name + " in cooldown (skipped in chains)");
-    if (u.state === "budget_exhausted") notes.push(name + " budget exhausted (402 direct; chains skip it)");
-  });
-  if ((routing.unpriced_models || []).length)
-    notes.push("unpriced models (tokens counted, USD not): " + routing.unpriced_models.join(", "));
-  (routing.warnings || []).forEach((w) => notes.push(w));
-  warnings.textContent = notes.length ? "⚠ routing: " + notes.join(" · ") : "";
 }
 function recentRow(entry) {
   const row = document.createElement("tr");

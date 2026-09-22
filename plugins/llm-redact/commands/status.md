@@ -47,16 +47,11 @@ Report back:
   warnings — an expired or rejected key silently running as Free is
   exactly what the user needs to hear about
 - detections and rehydrations by placeholder type
-- the routing summary when routing is enabled: one line per upstream
-  (name, protocol, credential MODE — never a key —, state healthy /
-  cooldown / budget_exhausted, spend against budget); if it says routing
-  is disabled, report that in one line
 - EVERY line of the posture block verbatim (warn-mode rules, providers
   with detection disabled, MCP-exempt servers, language-inactive rules,
-  compaction forks, audit-sink drops, upstreams in cooldown or budget
-  exhausted, unpriced models, routing warnings). These are deliberate
-  protection opt-outs and degraded lanes the user must see; if the block
-  is absent, say the posture is clean.
+  compaction forks, audit-sink drops). These are deliberate protection
+  opt-outs the user must see; if the block is absent, say the posture is
+  clean.
 
 Keep it to a short table plus a one-line verdict. Never invent numbers —
 only report what the command printed.

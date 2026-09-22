@@ -530,120 +530,6 @@ def _check_posture(report: _Report, config: Config) -> None:
         report.line("PASS", "posture", "no coverage opt-outs configured (all traffic redacted)")
 
 
-def _probe_upstream(base_url: str) -> str | None:
-    """HEAD then GET on the base URL (3 s, no credentials, no query). Returns
-    the failure's exception TYPE name, or None when ANY HTTP status came back
-    — a 401/404 from the base URL still proves the host answers."""
-    import httpx
-
-    failure: str | None = None
-    for method in ("HEAD", "GET"):
-        try:
-            httpx.request(method, base_url, timeout=3.0, follow_redirects=False)
-        except httpx.HTTPError as problem:
-            failure = type(problem).__name__
-            continue
-        return None
-    return failure
-
-
-def _display_url(base_url: str) -> str:
-    """scheme://host[:port] only — never the path, the query (a `?key=`
-    pasted into a base URL) or the userinfo (`https://user:s3cret@gw…`,
-    httpx's basic-auth form for a self-hosted gateway) — none of which may
-    reach the terminal or the --json rows."""
-    from urllib.parse import urlsplit
-
-    parts = urlsplit(base_url)
-    host = parts.hostname or ""
-    if ":" in host:  # IPv6 literal: hostname strips the brackets
-        host = f"[{host}]"
-    if parts.port is not None:
-        host += f":{parts.port}"
-    return f"{parts.scheme}://{host}"
-
-
-def _check_routing(report: _Report, config: Config, offline: bool) -> None:
-    """R-31: the routing posture. The §5 invariants are already enforced by
-    parse_config (a config that violates one never reaches here), so the
-    first line reports the validated shape; then env credentials resolve
-    (FAIL naming the VAR only — never a value), the parser's own warnings
-    (a metered default_upstream, dead chains), models the price table
-    cannot price, the memory-vault caveat (I-7), and — unless --offline —
-    an unauthenticated reachability probe of every upstream base URL."""
-    from llm_redact.config import resolve_credentials
-    from llm_redact.routes_cli import build_price_table, referenced_upstreams, unpriced_models
-
-    routing = config.routing
-    if not routing.enabled:
-        report.line(
-            "PASS",
-            "routing",
-            "disabled ([routing] enabled = false)"
-            if routing.present
-            else "not configured (protocol → provider upstream, no fallback, no budgets)",
-        )
-        return
-    report.line(
-        "PASS",
-        "routing",
-        f"config valid: {len(routing.upstreams)} upstreams, {len(routing.rules)} rules"
-        f" (invariants I-1..I-6 enforced at parse)",
-    )
-    try:
-        resolve_credentials(routing, os.environ)
-    except ConfigError as problem:
-        report.line("FAIL", "routing", f"{problem} — the proxy will refuse to start")
-    else:
-        env_upstreams = [u.name for u in routing.upstreams if u.credential_mode == "env"]
-        if env_upstreams:
-            report.line(
-                "PASS", "routing", f"env credentials resolve for {', '.join(env_upstreams)}"
-            )
-    for warning in routing.warnings:
-        report.line("WARN", "routing", warning)
-    try:
-        table = build_price_table(config.prices)
-    except ConfigError as problem:
-        report.line("FAIL", "routing", f"price table: {problem}")
-    else:
-        unpriced = unpriced_models(routing, table)
-        if unpriced:
-            report.line(
-                "WARN",
-                "routing",
-                f"no price for {', '.join(unpriced)} — their spend counts tokens only;"
-                ' add [prices.override."<id>"] to budget them in USD (rewrite targets'
-                " that only reach a zero-cost upstream are not listed: budgets are"
-                " ignored there)",
-            )
-        else:
-            report.line("PASS", "routing", "price table covers every configured model id")
-    if config.vault.backend == "memory":
-        report.line(
-            "WARN",
-            "routing",
-            'vault backend "memory" with routing enabled: placeholder numbering and'
-            " spend reset on restart — prompt caches and preserved thinking on any"
-            ' Anthropic lane need [vault] backend = "sqlite" (I-7)',
-        )
-    if offline:
-        report.line("PASS", "routing", "upstream reachability probes skipped (--offline)")
-        return
-    for upstream in referenced_upstreams(routing):
-        shown = _display_url(upstream.base_url)
-        failure = _probe_upstream(upstream.base_url)
-        if failure is None:
-            report.line("PASS", "routing", f"upstream {upstream.name} answers at {shown}")
-        else:
-            report.line(
-                "WARN",
-                "routing",
-                f"upstream {upstream.name} not reachable at {shown} ({failure}) — chains"
-                " will skip it after its first failure",
-            )
-
-
 def run_doctor(args: argparse.Namespace) -> int:
     report = _Report(json_mode=getattr(args, "json", False))
     config = _check_config(report, args)
@@ -660,7 +546,6 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_vault(report, config)
     _check_extras(report, config)
     _check_posture(report, config)
-    _check_routing(report, config, bool(getattr(args, "offline", False)))
     if config.audit.enabled:
         from llm_redact.audit import default_audit_path
 

@@ -44,11 +44,7 @@ host/port, use that. Then:
     curl -sS http://127.0.0.1:8787/__llm-redact/recent
 
 Render the JSON newest-first as a table: time, method, path, provider,
-status, detections, rehydrations, duration. When a row's `route` field
-is not null, add its routing columns — rule, upstream, hops, auth,
-class, reissue — and call out any row whose class is not `ok` or whose
-reissue is `yes` or `skipped:*` (a fallback fired, or was refused for a
-stateful request). The rows are metadata-only by design — they never
-contain redacted values, so they are safe to show.
+status, detections, rehydrations, duration. The rows are metadata-only
+by design — they never contain redacted values, so they are safe to show.
 If the endpoint is unreachable, say the proxy is not running and suggest
 `llm-redact serve` or `llm-redact run -- <tool>`.

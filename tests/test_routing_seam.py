@@ -525,6 +525,53 @@ async def test_loop_waits_then_reissues(monkeypatch: pytest.MonkeyPatch) -> None
     assert state.recent[-1]["route"]["upstream"] == "b"
 
 
+async def test_undelivered_streamed_hop_is_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A streamed (SSE) response is NOT pre-read by _issue_hop, so only the
+    # loop's own discard can close it when the router moves to another hop;
+    # a buffered first hop would be closed by its pre-read either way.
+    # A real async stream: httpx reads a bytes body eagerly (closing it at
+    # construction), which would make this assertion hold with no discard.
+    async def chunks() -> Any:
+        yield _sse("from a")
+
+    def streamed(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=chunks(),
+            request=request,
+        )
+
+    upstream = _Upstream({URL_A: streamed, URL_B: b'{"which":"b"}'})
+    router = FakeRouter({"chain": [Hop("a", URL_A), Hop("b", URL_B, reissued_from="a"), Stop()]})
+    _state, client = _app(monkeypatch, router, upstream)
+    response = await client.post(
+        "/v1/messages", json=_messages("hi"), headers={ROUTE_HEADER: "chain"}
+    )
+    assert response.json() == {"which": "b"}
+    assert upstream.responses[0].headers["content-type"] == "text/event-stream"
+    assert upstream.responses[0].is_closed
+
+
+async def test_hop_timeout_is_derived_from_the_plan_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The per-hop httpx timeout comes from the plan's deadline, not the
+    # shared client's 600 s: with 5 s left the sent request carries <= 5 s.
+    upstream = _Upstream()
+    router = FakeRouter(
+        {"short": [Hop("a", URL_A), Stop()]}, plan_kwargs={"short": {"deadline_seconds": 5.0}}
+    )
+    _state, client = _app(monkeypatch, router, upstream)
+    response = await client.post(
+        "/v1/messages", json=_messages("hi"), headers={ROUTE_HEADER: "short"}
+    )
+    assert response.status_code == 200
+    timeout = upstream.calls[0].extensions["timeout"]
+    assert 4.0 < timeout["read"] <= 5.0
+    assert 4.0 < timeout["connect"] <= 5.0
+
+
 async def test_retry_same_waits_without_reissue_count(monkeypatch: pytest.MonkeyPatch) -> None:
     upstream = _Upstream()
     router = FakeRouter(
@@ -911,14 +958,19 @@ async def test_unrouted_path_never_consults_router(monkeypatch: pytest.MonkeyPat
     baseline = await _fixture_traffic(app.state.proxy, client, upstream)
     assert all(snapshot["row"]["route"] is None for snapshot in baseline)
 
-    # An every-method-raises router is registered; with [routing] absent the
-    # factory returns None and the same traffic round-trips byte-identical.
+    # An every-method-raises router is registered. With [routing] absent the
+    # factory is consulted once, sees routing disabled and returns None, so
+    # the proxy never HOLDS a router: this pins that the factory decision is
+    # driven by the config (routing off => None) and that the same traffic
+    # then round-trips byte-identical. The router-held-but-declining case is
+    # test_plan_none_takes_legacy_path below.
     router = FakeRouter(raise_everything=True)
     _reg, calls = install(monkeypatch, router)
     upstream = _fixture_upstream()
     app = create_app(Config(), upstream_transport=upstream)
     state: ProxyState = app.state.proxy
     assert state.router is None and len(calls) == 1
+    assert calls[0][0].routing.enabled is False
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy.test")
     assert await _fixture_traffic(state, client, upstream) == baseline
     # /status reads the router attribute only.

@@ -191,8 +191,8 @@ def test_routes_and_spend_require_pro(
 
     monkeypatch.setitem(sys.modules, "llm_redact_pro.routes_cli", None)
     expected = (
-        "routing tooling requires the llm-redact-pro package (rule-based upstream"
-        " routing, fallback chains and budgets are pro subsystems; without it the"
+        "routing tooling requires the llm-redact-pro package 0.3 or newer (rule-based"
+        " upstream routing, fallback chains and budgets are pro subsystems; without it the"
         " proxy forwards each protocol to its one provider upstream); see"
         " docs/editions.md"
     )

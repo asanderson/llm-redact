@@ -443,9 +443,9 @@ def test_routing_check_without_pro_fails(monkeypatch: pytest.MonkeyPatch) -> Non
         {
             "level": "FAIL",
             "area": "routing",
-            "message": "[routing] enabled = true requires the llm-redact-pro package — the proxy"
-            " will refuse to start (rule-based upstream routing, fallback chains and budgets"
-            " are pro subsystems; see docs/editions.md)",
+            "message": "[routing] enabled = true requires the llm-redact-pro package 0.3 or"
+            " newer — the proxy will refuse to start (rule-based upstream routing, fallback"
+            " chains and budgets are pro subsystems; see docs/editions.md)",
         }
     ]
 

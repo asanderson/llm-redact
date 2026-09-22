@@ -266,3 +266,31 @@ def test_raising_reconfigure_keeps_config(
         "reload failed" in record.getMessage() and "price table: nope" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_failed_router_build_does_not_half_apply_the_adapter_list(tmp_path: Path) -> None:
+    # A reload that changes the provider set AND enables routing without the
+    # pro package: the router build raises after the new adapter list was
+    # built. The adapter list must be swapped only with the rest of the
+    # config — a half-applied reload (old config still naming custom:x, new
+    # adapters without it) would forward /custom/x/ traffic unredacted.
+    config_path = tmp_path / "config.toml"
+    _write(
+        config_path,
+        '[providers.custom.x]\nupstream_base_url = "http://x.example/v1"\n',
+    )
+    state = _state(config_path)
+    before_config = state.config
+    before_adapters = state.adapters
+    assert any(a.name == "custom:x" for a in before_adapters)
+
+    _write(
+        config_path,
+        '[upstreams.u]\nprotocol = "anthropic"\nbase_url = "http://u.example"\n'
+        '[routing]\nenabled = true\ndefault_upstream = "u"\n',
+    )
+    state.reload()  # the Free default raises: routing needs llm-redact-pro
+
+    assert state.config is before_config
+    assert state.adapters is before_adapters
+    assert any(a.name == "custom:x" for a in state.adapters)

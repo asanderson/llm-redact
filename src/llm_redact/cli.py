@@ -569,8 +569,8 @@ def main(argv: list[str] | None = None) -> None:
             from llm_redact_pro.routes_cli import run_routes_list, run_routes_test, run_spend
         except ImportError:
             print(
-                "routing tooling requires the llm-redact-pro package (rule-based upstream"
-                " routing, fallback chains and budgets are pro subsystems; without it the"
+                "routing tooling requires the llm-redact-pro package 0.3 or newer (rule-based"
+                " upstream routing, fallback chains and budgets are pro subsystems; without it the"
                 " proxy forwards each protocol to its one provider upstream); see"
                 " docs/editions.md"
             )

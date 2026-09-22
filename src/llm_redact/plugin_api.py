@@ -96,7 +96,8 @@ class SessionRouter(Protocol):
 # and asks the Router for every decision through the objects below.
 # Metadata discipline binds every field the core may log or surface:
 # upstream NAMES, rule ids, credential MODES, status classes; never header
-# values, key material, environment variable names, or body text.
+# values, key material, environment variable VALUES, or body text (an
+# unavailable hop names the unset variable, never its value).
 
 
 @dataclass(frozen=True)

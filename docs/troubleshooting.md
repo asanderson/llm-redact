@@ -108,8 +108,10 @@ SIGHUP reload (`config reload failed; keeping current config: …`) and
 the config editor's dry-run (a 400) refuse a config with
 `[routing] enabled = true` (`… requires the llm-redact-pro package
 (0.3+) …`); `llm-redact routes …` and `llm-redact spend` print
-`routing tooling requires the llm-redact-pro package …` and exit 1; and
-`doctor` FAILs its `routing` line (`… the proxy will refuse to start …`).
+`routing tooling requires the llm-redact-pro package 0.3 or newer …` and
+exit 1; and `doctor` FAILs its `routing` line (`… the proxy will refuse to
+start …`). An installed llm-redact-pro older than 0.3 has no routing layer
+and gets the same messages: upgrade it.
 Install the package (see [editions.md](editions.md)) or set
 `enabled = false` — `[upstreams]` and `[prices]` are then inert and the
 proxy forwards each protocol to its one `[providers.NAME]` upstream, as

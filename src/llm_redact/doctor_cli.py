@@ -549,9 +549,9 @@ def _check_routing(report: _Report, config: Config, offline: bool) -> None:
         report.line(
             "FAIL",
             "routing",
-            "[routing] enabled = true requires the llm-redact-pro package — the proxy will"
-            " refuse to start (rule-based upstream routing, fallback chains and budgets are"
-            " pro subsystems; see docs/editions.md)",
+            "[routing] enabled = true requires the llm-redact-pro package 0.3 or newer — the"
+            " proxy will refuse to start (rule-based upstream routing, fallback chains and"
+            " budgets are pro subsystems; see docs/editions.md)",
         )
         return
     for level, message in routing_checks(config, offline=offline, environ=os.environ):

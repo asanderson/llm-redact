@@ -230,6 +230,31 @@ def test_licensed_features_line_reports_not_installed() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("installed", "message"),
+    [
+        (False, "no key configured (FOSS core: nothing is gated)"),
+        (
+            True,
+            "no key configured (Free tier: llm-redact-pro features refuse to start"
+            " without a key that selects a paid tier)",
+        ),
+    ],
+)
+def test_keyless_license_line_depends_on_the_pro_package(
+    monkeypatch: pytest.MonkeyPatch, installed: bool, message: str
+) -> None:
+    import llm_redact.registry as registry_mod
+    from llm_redact.config import Config
+    from llm_redact.doctor_cli import _check_license, _Report
+
+    monkeypatch.delenv("LLM_REDACT_LICENSE_KEY", raising=False)
+    monkeypatch.setattr(registry_mod, "pro_package_installed", lambda: installed)
+    report = _Report(json_mode=True)
+    _check_license(report, Config())
+    assert report.rows == [{"level": "PASS", "area": "license", "message": message}]
+
+
 def test_licensed_features_line_reports_installed_and_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

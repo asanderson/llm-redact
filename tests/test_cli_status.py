@@ -146,6 +146,26 @@ def test_status_prints_licensed_features_installed_active(
     assert "licensed-features package: installed (llm_redact_pro active)" in capsys.readouterr().out
 
 
+def test_status_keyless_license_line_names_the_pro_gate_when_installed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Keyless with llm-redact-pro installed, the Free tier refuses the pro
+    # subsystems: "nothing gated" would contradict those refusals.
+    _status_run(
+        monkeypatch, _full_status_payload(package_installed=True, plugins=["llm_redact_pro"])
+    )
+    out = capsys.readouterr().out
+    assert "license: none (Free tier — llm-redact-pro features need a key)" in out
+    assert "nothing gated" not in out
+
+
+def test_status_keyless_license_line_without_pro_says_nothing_gated(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _status_run(monkeypatch, _full_status_payload(package_installed=False, plugins=[]))
+    assert "license: none (FOSS core — nothing gated)" in capsys.readouterr().out
+
+
 def test_status_omits_licensed_features_line_on_old_proxy(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

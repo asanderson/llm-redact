@@ -357,7 +357,7 @@ async function refreshStatus() {
   if (lic.tier !== "free" && lic.max_users !== null && lic.max_users !== undefined)
     licLabel += " · " + lic.max_users + " user" + (lic.max_users === 1 ? "" : "s");
   else if (lic.tier !== "free") licLabel += " · unlimited users";
-  else licLabel += " · nothing gated";
+  else licLabel += lic.package_installed ? " · pro features need a key" : " · nothing gated";
   if ((lic.clouds || []).length) licLabel += " · " + lic.clouds.join("+");
   if (lic.expires) licLabel += " · exp " + lic.expires;
   if (lic.in_grace) licLabel += " ⚠ GRACE";

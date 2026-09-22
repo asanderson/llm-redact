@@ -428,7 +428,18 @@ def _check_license(report: _Report, config: Config) -> None:
     for warning in resolved.warnings:
         report.line("WARN", "license", warning)
     if resolved.license is None:
-        report.line("PASS", "license", "no key configured (FOSS core: nothing is gated)")
+        from llm_redact.registry import pro_package_installed
+
+        # Keyless the FOSS core gates nothing; with llm-redact-pro installed
+        # its factories run the Free tier and refuse its paid subsystems, so
+        # "nothing is gated" would contradict the FAIL rows those produce.
+        message = (
+            "no key configured (Free tier: llm-redact-pro features refuse to start"
+            " without a key that selects a paid tier)"
+            if pro_package_installed()
+            else "no key configured (FOSS core: nothing is gated)"
+        )
+        report.line("PASS", "license", message)
     else:
         report.line(
             "PASS",

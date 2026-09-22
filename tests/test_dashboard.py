@@ -238,6 +238,8 @@ def test_dashboard_surfaces_licensed_features_package() -> None:
     html = importlib.resources.files("llm_redact").joinpath("dashboard.html").read_text("utf-8")
     assert "package_installed" in html
     assert "pro pkg" in html
+    # keyless: "nothing gated" only without the pro package, which gates on Free
+    assert 'lic.package_installed ? " · pro features need a key" : " · nothing gated"' in html
     assert "no plugin registered" in html
     assert "FORWARDED upstream unredacted" in html  # warned column tooltip
     assert "configFingerprint" in html  # stale-form guard wired

@@ -11,7 +11,16 @@ from __future__ import annotations
 import pytest
 
 import llm_redact.registry as registry_mod
-from llm_redact.config import AuditConfig, ConfigError, OtelConfig, UsersConfig, VaultConfig
+from llm_redact.config import (
+    AuditConfig,
+    Config,
+    ConfigError,
+    OtelConfig,
+    RoutingConfig,
+    UpstreamConfig,
+    UsersConfig,
+    VaultConfig,
+)
 from llm_redact.registry import Registry, get_registry, load_plugins, loaded_plugins
 from llm_redact.sessions import StaticSessionRouter
 from llm_redact.vault import InMemoryVaultManager
@@ -46,6 +55,7 @@ def test_defaults_are_the_free_factories() -> None:
     assert reg.build_vault_manager.__name__ == "build_vault_manager"
     assert reg.build_session_router.__name__ == "build_session_router"
     assert reg.build_telemetry.__name__ == "build_telemetry"
+    assert reg.build_router.__name__ == "build_router"
 
 
 def test_default_factories_build_free_subsystems() -> None:
@@ -56,6 +66,23 @@ def test_default_factories_build_free_subsystems() -> None:
     # in the Free default (the load-bearing open-core rule), never downgrades.
     with pytest.raises(ConfigError, match="llm-redact-pro"):
         reg.build_telemetry(OtelConfig(enabled=True))
+    # Rule-based upstream routing is a paid feature too: [routing] absent or
+    # disabled builds no router (None, keyless); enabled fails closed naming
+    # the package — never a silent one-upstream-per-protocol downgrade.
+    assert reg.build_router(Config(), "free") is None
+    with pytest.raises(ConfigError, match="llm-redact-pro"):
+        reg.build_router(_routed_config(), "free")
+
+
+def _routed_config() -> Config:
+    return Config(
+        routing=RoutingConfig(
+            enabled=True,
+            present=True,
+            default_upstreams=(("anthropic", "x"),),
+            upstreams=(UpstreamConfig(name="x", protocol="anthropic", base_url="http://x"),),
+        )
+    )
 
 
 def test_build_cipher_default_factory() -> None:

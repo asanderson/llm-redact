@@ -11,6 +11,39 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-22
+
+### Added
+
+- Routing seam for the llm-redact-pro routing layer: the
+  `[upstreams]`/`[routing]`/`[prices]` config shapes, parser invariants and
+  emitter (file-only, hot on SIGHUP, preserved by the config editor); the
+  `plugin_api` `Router`/`RoutePlan`/`RouteDelivery` contract with
+  `Registry.build_router` (the Free default fails closed naming the
+  package); the policy-free routed-delivery driver in `proxy.py` (a request
+  is routed only when a registered router plans it — the unrouted path is
+  byte-identical); `llm_redact_routed_requests_total` /
+  `llm_redact_reissues_total`; the `/status` `routing` block; the
+  `routes list|test` / `spend` / `doctor --offline` parsers (dispatching to
+  the pro package); the `/llm-redact:routes` and `/llm-redact:spend` plugin
+  commands; the dashboard routing pill/table; the Anthropic 402/404 error
+  types. Every surface reports honestly without the package;
+  `[routing] enabled = true` without llm-redact-pro is a startup ConfigError
+  naming it.
+
+### Changed
+
+- recent/events rows carry a `route` key (`null` on the unrouted path); the
+  legacy delivery tail is the extracted
+  `_deliver`/`_fault_response`/`_begin_audit_guarded` (behaviour-identical,
+  pinned by the existing suites).
+
+### Removed
+
+- The routing implementation that landed in #31/#32 was reverted (#33) and
+  ships in llm-redact-pro 0.3 instead (the owner's directive: routing is a
+  Pro feature).
+
 ## [1.0.3] - 2026-07-29
 
 ### Added

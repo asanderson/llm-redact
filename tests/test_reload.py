@@ -170,3 +170,99 @@ def test_reload_picks_up_deny_strings(tmp_path: Path) -> None:
     _write(config_path, '[detection]\nenabled = ["email"]\n')
     state.reload()
     assert state.redactor.redact_text("ship aurora again") == "ship aurora again"
+
+
+def test_reload_reconfigures_running_router(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from fake_router import ROUTED_TOML, FakeRouter, install
+
+    router = FakeRouter()
+    install(monkeypatch, router)
+    config_path = tmp_path / "config.toml"
+    _write(config_path, ROUTED_TOML)
+    state = _state(config_path)
+    assert state.router is router
+
+    _write(config_path, ROUTED_TOML + "max_hops = 4\n")
+    with caplog.at_level("WARNING", logger="llm_redact"):
+        state.reload()
+    # Reconfigured in place — never rebuilt, never closed (D10: a running
+    # router is not re-gated on reload).
+    assert state.router is router and router.closed == 0
+    assert [cfg.routing.max_hops for cfg in router.reconfigured] == [4]
+    assert state.config.routing.max_hops == 4
+    # The parser's own routing warnings are logged by the core on every
+    # reload (D20) — here the metered default_upstream.
+    assert any(
+        record.getMessage().startswith("routing: ")
+        for record in caplog.records
+        if record.levelname == "WARNING"
+    )
+
+
+def test_reload_builds_router_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fake_router import ROUTED_TOML, FakeRouter, install
+
+    router = FakeRouter()
+    _reg, calls = install(monkeypatch, router)
+    config_path = tmp_path / "config.toml"
+    _write(config_path, ROUTED_TOML.replace("enabled = true", "enabled = false"))
+    state = _state(config_path)
+    assert state.router is None
+    assert len(calls) == 1  # the startup factory call returned None (disabled)
+
+    _write(config_path, ROUTED_TOML)
+    state.reload()
+    # A reload that turns routing ON builds through the registry with the
+    # re-resolved tier (keyless: free).
+    assert state.router is router
+    assert len(calls) == 2
+    built_config, tier = calls[-1]
+    assert built_config.routing.enabled is True and tier == "free"
+    assert router.reconfigured == []
+
+
+def test_reload_drops_and_closes_router_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fake_router import ROUTED_TOML, FakeRouter, install
+
+    router = FakeRouter()
+    install(monkeypatch, router)
+    config_path = tmp_path / "config.toml"
+    _write(config_path, ROUTED_TOML)
+    state = _state(config_path)
+    assert state.router is router
+
+    _write(config_path, ROUTED_TOML.replace("enabled = true", "enabled = false"))
+    state.reload()
+    assert state.router is None
+    assert router.closed == 1  # closed AT SWAP TIME, after the other builds
+    assert state.config.routing.enabled is False
+
+
+def test_raising_reconfigure_keeps_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from fake_router import ROUTED_TOML, FakeRouter, install
+    from llm_redact.config import ConfigError
+
+    router = FakeRouter(reconfigure_error=ConfigError("price table: nope"))
+    install(monkeypatch, router)
+    config_path = tmp_path / "config.toml"
+    _write(config_path, ROUTED_TOML)
+    state = _state(config_path)
+    before = state.config
+
+    _write(config_path, ROUTED_TOML + "max_hops = 4\n")
+    with caplog.at_level("ERROR", logger="llm_redact"):
+        state.reload()
+    # reconfigure raised (ConfigError is a ValueError) before the swap: the
+    # running config and router are untouched, nothing closed.
+    assert state.config is before
+    assert state.router is router and router.closed == 0
+    assert any(
+        "reload failed" in record.getMessage() and "price table: nope" in record.getMessage()
+        for record in caplog.records
+    )

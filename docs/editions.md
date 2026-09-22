@@ -25,7 +25,7 @@ proprietary **`llm-redact-pro`** package.
 | ALL provider adapters — Anthropic/OpenAI/Gemini/Ollama/Cohere/custom **and** AWS Bedrock / Azure OpenAI / GCP Vertex | ✓ | ✓ | ✓ | ✓ |
 | In-memory + persistent unencrypted SQLite vault, JSON logs, dashboard/editor/preview, doctor, plugins | ✓ | ✓ | ✓ | ✓ |
 | Non-loopback (mTLS) serving; Kubernetes deployment (Helm chart + HPA) | ✓ | ✓ | ✓ | ✓ |
-| Server persistent vault (PostgreSQL / MySQL / Oracle / any DB-API RDBMS, incl. cloud-managed DBMS), vault encryption at rest, audit log + tamper chain + backup sinks (with batch encryption), OTel, per-conversation sessions, named users | | ✓ | ✓ | ✓ |
+| Server persistent vault (PostgreSQL / MySQL / Oracle / any DB-API RDBMS, incl. cloud-managed DBMS), vault encryption at rest, audit log + tamper chain + backup sinks (with batch encryption), OTel, per-conversation sessions, named users, rule-based upstream routing (named upstreams, fallback chains with cooldown + Anthropic plan-limit detection, monthly budgets) | | ✓ | ✓ | ✓ |
 
 ## How keys work
 

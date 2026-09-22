@@ -62,6 +62,13 @@ class Metrics:
         # (provider, streamed) -> histogram: per-provider p95 plus a streamed
         # dimension. The provider set is bounded, so label cardinality is safe.
         self._durations: dict[tuple[str, str], DurationHistogram] = {}
+        # Routing layer (llm-redact-pro; the core counts from the plugin_api
+        # contract's facts): (upstream, rule) -> requests the routing layer
+        # delivered, and (from_upstream, to_upstream) -> fallback re-issues.
+        # Both label sets are config-bounded (upstream names, rule ids),
+        # never request-derived.
+        self.routed: Counter[tuple[str, str]] = Counter()
+        self.reissues: Counter[tuple[str, str]] = Counter()
 
     def observe_request(
         self, provider: str | None, status: int | None, seconds: float, streamed: bool = False
@@ -139,6 +146,28 @@ class Metrics:
         for provider, count in sorted((upstream_errors or Counter()).items()):
             lines.append(
                 f'llm_redact_upstream_errors_total{{provider="{_escape_label(provider)}"}} {count}'
+            )
+
+        lines.append(
+            "# HELP llm_redact_routed_requests_total Requests delivered through the routing"
+            " layer, by the upstream that produced the response and the rule that chose it."
+        )
+        lines.append("# TYPE llm_redact_routed_requests_total counter")
+        for (upstream, rule), count in sorted(self.routed.items()):
+            lines.append(
+                f'llm_redact_routed_requests_total{{upstream="{_escape_label(upstream)}",'
+                f'rule="{_escape_label(rule)}"}} {count}'
+            )
+
+        lines.append(
+            "# HELP llm_redact_reissues_total Fallback re-issues to the next chain member,"
+            " by the upstream that failed and the one that took over."
+        )
+        lines.append("# TYPE llm_redact_reissues_total counter")
+        for (from_upstream, to_upstream), count in sorted(self.reissues.items()):
+            lines.append(
+                f'llm_redact_reissues_total{{from_upstream="{_escape_label(from_upstream)}",'
+                f'to_upstream="{_escape_label(to_upstream)}"}} {count}'
             )
 
         for name, help_text, value in (

@@ -23,7 +23,8 @@ from llm_redact import __version__
 PLUGIN_NAME = "llm-redact"
 PLUGIN_DESCRIPTION = (
     "llm-redact proxy control: status, live traffic, sessions, redaction "
-    "preview, audit verification, and guarded config editing as slash commands"
+    "preview, routing and spend, audit verification, and guarded config "
+    "editing as slash commands"
 )
 
 
@@ -56,11 +57,16 @@ Report back:
   warnings — an expired or rejected key silently running as Free is
   exactly what the user needs to hear about
 - detections and rehydrations by placeholder type
+- the routing summary when routing is enabled: one line per upstream
+  (name, protocol, credential MODE — never a key —, state healthy /
+  cooldown / budget_exhausted, spend against budget); if it says routing
+  is disabled, report that in one line
 - EVERY line of the posture block verbatim (warn-mode rules, providers
   with detection disabled, MCP-exempt servers, language-inactive rules,
-  compaction forks, audit-sink drops). These are deliberate protection
-  opt-outs the user must see; if the block is absent, say the posture is
-  clean.
+  compaction forks, audit-sink drops, upstreams in cooldown or budget
+  exhausted, unpriced models, routing warnings). These are deliberate
+  protection opt-outs and degraded lanes the user must see; if the block
+  is absent, say the posture is clean.
 
 Keep it to a short table plus a one-line verdict. Never invent numbers —
 only report what the command printed.
@@ -79,8 +85,12 @@ host/port, use that. Then:
     curl -sS http://127.0.0.1:8787/__llm-redact/recent
 
 Render the JSON newest-first as a table: time, method, path, provider,
-status, detections, rehydrations, duration. The rows are metadata-only
-by design — they never contain redacted values, so they are safe to show.
+status, detections, rehydrations, duration. When a row's `route` field
+is not null, add its routing columns — rule, upstream, hops, auth,
+class, reissue — and call out any row whose class is not `ok` or whose
+reissue is `yes` or `skipped:*` (a fallback fired, or was refused for a
+stateful request). The rows are metadata-only by design — they never
+contain redacted values, so they are safe to show.
 If the endpoint is unreachable, say the proxy is not running and suggest
 `llm-redact serve` or `llm-redact run -- <tool>`.
 """,
@@ -140,7 +150,11 @@ guardrails:
    editable surface matches the dashboard editor: [detection] enabled
    rules, modes, deny strings, allowlists, languages, custom rules and
    validators, [detection.ner], [providers.*] (enabled, detection,
-   upstreams, custom providers), [rehydration], max_body_bytes.
+   upstreams, custom providers), [rehydration], max_body_bytes. The
+   routing sections — [upstreams.*], [routing], [[routing.rule]],
+   [prices] (the llm-redact-pro routing guide) — hot-apply through this
+   same file flow even though the web editor refuses them; a chain may
+   never contain a passthrough upstream, so never add one.
    host/port/vault/audit/log/tls/otel are RESTART-ONLY — warn the user
    and stop if the change touches them.
 3. Validate BEFORE applying: `llm-redact serve --check` must exit 0.
@@ -249,6 +263,81 @@ served by a running proxy at /__llm-redact/guide for a formatted view.
 """,
 )
 
+_ROUTES = PluginCommand(
+    name="routes",
+    description=(
+        "Show llm-redact routing rules, or dry-run which rule, upstream, and "
+        "fallback chain a request would take (no upstream is contacted)"
+    ),
+    argument_hint="[test --protocol … --model …]",
+    allowed_tools="Bash(llm-redact:*)",
+    body="""\
+Routing request: $ARGUMENTS
+
+If the arguments start with `test`, run `llm-redact routes test` with
+the rest of them verbatim (`--protocol anthropic|openai|gemini|ollama`
+is required; optional `--model M`, `--header NAME=VALUE` (repeatable),
+`--path PATH`, `--auth oauth|gateway-key|none|any`, `--json`). Report
+the matched rule id (or that the protocol's default applied), the
+upstream with its protocol, credential MODE, cost and state, the
+fallback chain per status key with any passthrough/cooldown
+annotations, the reissue policy, and the model rewrite. This is a
+DRY-RUN: no upstream is contacted and no credential is resolved. The
+`state` line and the cooldown/budget annotations come from a plain-http
+probe of the running proxy's configured listener; `not probed` means
+nothing answered there (proxy not running, a TLS listener, or a proxy
+reachable only through LLM_REDACT_PROXY_URL) — say so and offer
+`llm-redact status` for the live state.
+
+Otherwise run `llm-redact routes list` and render the rules table in
+file order (id, protocol, match summary, upstream, chains, reissue
+policy, model rewrite). If it reports that routing is disabled or no
+[routing] section exists, say so and point at the llm-redact-pro
+routing guide (docs/routing.md in that package). If the command says
+routing tooling requires the llm-redact-pro package, report that
+verbatim — without it the proxy forwards each protocol to its one
+provider upstream (no rules, no fallback, no budgets).
+
+Credential VALUES and env var names never appear in this output and
+must never be asked for. If the command fails to parse the config, run
+`llm-redact doctor` and report its routing lines.
+""",
+)
+
+_SPEND = PluginCommand(
+    name="spend",
+    description=(
+        "Report llm-redact per-upstream spend, the share from fallback re-issues, "
+        "and remaining monthly budget"
+    ),
+    argument_hint="[--month YYYY-MM]",
+    allowed_tools="Bash(llm-redact:*)",
+    body="""\
+Run `llm-redact spend --json`, adding the month the user asked for
+($ARGUMENTS, as `--month YYYY-MM`) when given; the default is the
+current budget period.
+
+Report per upstream: input / output / cache tokens, USD (say "unpriced"
+where the price table had no entry — those rows count in tokens only;
+on a passthrough (subscription) upstream the USD is a list-price
+equivalent, not a bill — report the tokens as the real number), how
+much came from fallback re-issues versus direct requests, and the
+remaining budget or that the upstream has no budget (passthrough and
+zero-cost upstreams never do). Call out any upstream that is budget
+exhausted. If the command says spend is in-process only (memory or an
+RDBMS vault backend), say that the numbers reset on restart and that
+`[vault] backend = "sqlite"` persists them; if it says no spend is
+recorded yet, the proxy has not written a row (the report never
+creates the table). If the command says routing tooling requires the
+llm-redact-pro package, report that verbatim — without it the proxy
+forwards each protocol to its one provider upstream (no rules, no
+fallback, no budgets).
+
+Only report what the command printed — never estimate or invent
+amounts.
+""",
+)
+
 COMMANDS: tuple[PluginCommand, ...] = (
     _STATUS,
     _RECENT,
@@ -259,6 +348,8 @@ COMMANDS: tuple[PluginCommand, ...] = (
     _DOCTOR,
     _AUDIT,
     _USERS,
+    _ROUTES,
+    _SPEND,
     _GUIDE,
 )
 

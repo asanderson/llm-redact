@@ -4,6 +4,7 @@ import argparse
 import socket
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -394,3 +395,102 @@ def test_windows_platform_note_and_no_false_perm_fails(
     # The POSIX mode FAIL never fired — assert on its signature, not the bare
     # "666" (a random free port can also contain those digits and flake this).
     assert "group/world accessible" not in out
+
+
+def _routing_rows(report: Any) -> list[dict[str, str]]:
+    return [row for row in report.rows if row["area"] == "routing"]
+
+
+def test_routing_check_absent() -> None:
+    from llm_redact.config import Config
+    from llm_redact.doctor_cli import _check_routing, _Report
+
+    report = _Report(json_mode=True)
+    _check_routing(report, Config(), False)
+    assert report.failed is False
+    assert _routing_rows(report) == [
+        {
+            "level": "PASS",
+            "area": "routing",
+            "message": "not configured (protocol → provider upstream, no fallback, no budgets)",
+        }
+    ]
+
+
+def test_routing_check_disabled() -> None:
+    from llm_redact.config import Config, RoutingConfig
+    from llm_redact.doctor_cli import _check_routing, _Report
+
+    report = _Report(json_mode=True)
+    _check_routing(report, Config(routing=RoutingConfig(present=True, enabled=False)), True)
+    assert report.failed is False
+    assert _routing_rows(report) == [
+        {"level": "PASS", "area": "routing", "message": "disabled ([routing] enabled = false)"}
+    ]
+
+
+def test_routing_check_without_pro_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fake_router import routed_config
+    from llm_redact.doctor_cli import _check_routing, _Report
+
+    # Holds locally even with the package installed: a None entry makes the
+    # import raise.
+    monkeypatch.setitem(sys.modules, "llm_redact_pro.routing_doctor", None)
+    report = _Report(json_mode=True)
+    _check_routing(report, routed_config(), False)
+    assert report.failed is True
+    assert _routing_rows(report) == [
+        {
+            "level": "FAIL",
+            "area": "routing",
+            "message": "[routing] enabled = true requires the llm-redact-pro package — the proxy"
+            " will refuse to start (rule-based upstream routing, fallback chains and budgets"
+            " are pro subsystems; see docs/editions.md)",
+        }
+    ]
+
+
+@pytest.mark.skipif(
+    __import__("importlib.util").util.find_spec("llm_redact_pro") is not None,
+    reason="the real pro package would shadow the fake module",
+)
+def test_routing_check_with_fake_pro_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib.machinery
+    import os
+    import types
+
+    from fake_router import routed_config
+    from llm_redact.doctor_cli import _check_routing, _Report
+
+    seen: dict[str, Any] = {}
+
+    def routing_checks(config: Any, *, offline: bool, environ: Any) -> list[tuple[str, str]]:
+        seen.update(config=config, offline=offline, environ=environ)
+        return [("PASS", "config valid: 1 upstreams, 0 rules"), ("WARN", "something to know")]
+
+    package = types.ModuleType("llm_redact_pro")
+    package.__path__ = []
+    package.__spec__ = importlib.machinery.ModuleSpec("llm_redact_pro", None, is_package=True)
+    module = types.ModuleType("llm_redact_pro.routing_doctor")
+    module.routing_checks = routing_checks  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "llm_redact_pro", package)
+    monkeypatch.setitem(sys.modules, "llm_redact_pro.routing_doctor", module)
+
+    config = routed_config()
+    report = _Report(json_mode=True)
+    _check_routing(report, config, True)
+    assert report.failed is False
+    assert _routing_rows(report) == [
+        {"level": "PASS", "area": "routing", "message": "config valid: 1 upstreams, 0 rules"},
+        {"level": "WARN", "area": "routing", "message": "something to know"},
+    ]
+    assert seen["config"] is config and seen["offline"] is True
+    assert seen["environ"] is os.environ
+
+
+def test_doctor_offline_flag_in_parser() -> None:
+    from llm_redact.cli import build_parser
+
+    args = build_parser().parse_args(["doctor", "--offline"])
+    assert args.offline is True
+    assert build_parser().parse_args(["doctor"]).offline is False

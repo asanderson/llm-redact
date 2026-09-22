@@ -530,6 +530,34 @@ def _check_posture(report: _Report, config: Config) -> None:
         report.line("PASS", "posture", "no coverage opt-outs configured (all traffic redacted)")
 
 
+def _check_routing(report: _Report, config: Config, offline: bool) -> None:
+    """R-31 lives in llm-redact-pro (routing is a pro subsystem); this shell
+    reports the config/package posture and hands the checks to the package."""
+    routing = config.routing
+    if not routing.enabled:
+        report.line(
+            "PASS",
+            "routing",
+            "disabled ([routing] enabled = false)"
+            if routing.present
+            else "not configured (protocol → provider upstream, no fallback, no budgets)",
+        )
+        return
+    try:
+        from llm_redact_pro.routing_doctor import routing_checks
+    except ImportError:
+        report.line(
+            "FAIL",
+            "routing",
+            "[routing] enabled = true requires the llm-redact-pro package — the proxy will"
+            " refuse to start (rule-based upstream routing, fallback chains and budgets are"
+            " pro subsystems; see docs/editions.md)",
+        )
+        return
+    for level, message in routing_checks(config, offline=offline, environ=os.environ):
+        report.line(level, "routing", message)
+
+
 def run_doctor(args: argparse.Namespace) -> int:
     report = _Report(json_mode=getattr(args, "json", False))
     config = _check_config(report, args)
@@ -546,6 +574,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_vault(report, config)
     _check_extras(report, config)
     _check_posture(report, config)
+    _check_routing(report, config, bool(getattr(args, "offline", False)))
     if config.audit.enabled:
         from llm_redact.audit import default_audit_path
 

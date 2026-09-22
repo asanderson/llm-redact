@@ -23,8 +23,8 @@ from .config import ConfigError
 from .licensing import ENV_KEY, FREE, ResolvedLicense
 
 if TYPE_CHECKING:
-    from .config import OtelConfig
-    from .plugin_api import Telemetry
+    from .config import Config, OtelConfig
+    from .plugin_api import Router, Telemetry
 
 _PRO_HINT = "install the llm-redact-pro package to enable it"
 
@@ -39,6 +39,29 @@ def build_telemetry(config: OtelConfig) -> Telemetry | None:
     if not config.enabled:
         return None
     raise ConfigError(f"[otel] enabled = true requires OpenTelemetry export; {_PRO_HINT}")
+
+
+def build_router(config: Config, tier: str) -> Router | None:
+    """None when ``[routing]`` is not enabled; otherwise the pro package is required.
+
+    Rule-based upstream routing (named upstreams, credential modes, fallback
+    chains with cooldowns and plan-limit detection, monthly budgets) is a paid
+    feature whose implementation lives in llm-redact-pro. With that package
+    installed this factory is replaced by the real builder (which also
+    honors the key's tier); without it, enabling ``[routing]`` fails closed
+    here — never a silent "one upstream per protocol" downgrade that would
+    quietly ignore the operator's rules, credentials and budgets. ``tier``
+    is part of the factory contract and unused here: the Free core enforces
+    no tier.
+    """
+    del tier
+    if not config.routing.enabled:
+        return None
+    raise ConfigError(
+        "[routing] enabled = true requires the llm-redact-pro package (0.3+): rule-based"
+        " upstream routing, fallback chains and budgets are pro subsystems;"
+        f" {_PRO_HINT}"
+    )
 
 
 def resolve_license(

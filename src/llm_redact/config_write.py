@@ -14,6 +14,7 @@ Comments from a hand-edited file are NOT preserved; the editor keeps one
 
 import json
 import os
+import re
 from pathlib import Path
 
 from llm_redact.config import (
@@ -21,11 +22,17 @@ from llm_redact.config import (
     Config,
     EmailConfig,
     OtelConfig,
+    PricesConfig,
     RdbmsConfig,
+    RouteRule,
+    RoutingConfig,
     S3AuditConfig,
+    UpstreamConfig,
     UsersConfig,
 )
 from llm_redact.detection.engine import DetectionConfig
+
+_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 
 _HEADER = (
     "# Written by the llm-redact config editor. Comments are not preserved;\n"
@@ -36,8 +43,12 @@ _HEADER = (
 def _toml_str(value: str) -> str:
     # A JSON string with ensure_ascii=False is a valid TOML basic string:
     # both escape backslash, double quote, and control characters, and TOML
-    # accepts \uXXXX escapes. Pinned by the round-trip tests.
-    return json.dumps(value, ensure_ascii=False)
+    # accepts \uXXXX escapes. The one divergence is DEL: JSON leaves U+007F
+    # raw while TOML forbids it in a basic string, so it is escaped by hand
+    # (a value parsed from the file must emit back as parsable TOML — the
+    # routing sections carry many user strings: globs, header values,
+    # model ids). Pinned by the round-trip tests.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def _toml_value(value: str | int | float | bool) -> str:
@@ -53,6 +64,136 @@ def _toml_list(values: tuple[str, ...] | list[str]) -> str:
         return "[]"
     items = ",\n".join(f"    {_toml_str(v)}" for v in values)
     return f"[\n{items},\n]"
+
+
+def _toml_key(key: str) -> str:
+    # Bare where TOML allows it (protocol names, header names, "529"),
+    # quoted otherwise — a quoted key is a basic string, same escaping.
+    return key if _BARE_KEY_RE.fullmatch(key) else _toml_str(key)
+
+
+def _toml_inline(value: object) -> str:
+    """One TOML value on one line: the routing sections live inside
+    array-of-tables entries and inline tables, where the multi-line
+    `_toml_list` form is not allowed. Covers exactly the JSON-representable
+    scalars/containers that parse_config admits (never None/datetime)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, str):
+        return _toml_str(value)
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(_toml_inline(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return _toml_inline_table(value)
+    raise TypeError(f"no TOML form for {type(value).__name__}")
+
+
+def _toml_inline_table(table: dict[str, object]) -> str:
+    if not table:
+        return "{}"
+    return "{ " + ", ".join(f"{_toml_key(k)} = {_toml_inline(v)}" for k, v in table.items()) + " }"
+
+
+def _emit_upstream(lines: list[str], upstream: UpstreamConfig, *, inject_default: bool) -> None:
+    lines.append(f"\n[upstreams.{upstream.name}]")
+    lines.append(f"protocol = {_toml_str(upstream.protocol)}")
+    lines.append(f"base_url = {_toml_str(upstream.base_url)}")
+    lines.append(f"credential = {_toml_str(upstream.credential)}")
+    lines.append(f"cost = {_toml_str(upstream.cost)}")
+    resolved_default = False if upstream.is_passthrough else inject_default
+    if upstream.inject_system_note != resolved_default:
+        # Omitted when it equals the resolved default (false on passthrough,
+        # the top-level switch otherwise) so the file tracks that switch.
+        lines.append(f"inject_system_note = {_toml_value(upstream.inject_system_note)}")
+    lines.append(f"count_tokens = {_toml_value(upstream.count_tokens)}")
+    if upstream.monthly_budget_usd is not None:
+        lines.append(f"monthly_budget_usd = {upstream.monthly_budget_usd}")
+    if upstream.monthly_budget_tokens is not None:
+        lines.append(f"monthly_budget_tokens = {upstream.monthly_budget_tokens}")
+    lines.append(f"cooldown_seconds = {upstream.cooldown_seconds}")
+    if upstream.extra_headers:
+        lines.append(f"extra_headers = {_toml_inline_table(dict(upstream.extra_headers))}")
+    body_defaults = upstream.body_defaults()
+    if body_defaults:
+        lines.append(f"body_defaults = {_toml_inline_table(body_defaults)}")
+
+
+def _emit_rule(lines: list[str], rule: RouteRule) -> None:
+    # `match` and `on_status` MUST be inline tables: a [routing.rule.match]
+    # header inside an array-of-tables entry is not addressable in TOML.
+    match: dict[str, object] = {"protocol": rule.match.protocol}
+    if rule.match.models:
+        match["model"] = list(rule.match.models)
+    if rule.match.headers:
+        match["headers"] = dict(rule.match.headers)
+    if rule.match.path is not None:
+        match["path"] = rule.match.path
+    match["auth"] = rule.match.auth
+    lines.append("\n[[routing.rule]]")
+    lines.append(f"id = {_toml_str(rule.id)}")
+    lines.append(f"match = {_toml_inline_table(match)}")
+    lines.append(f"upstream = {_toml_str(rule.upstream)}")
+    if rule.model_rewrite is not None:
+        lines.append(f"model_rewrite = {_toml_str(rule.model_rewrite)}")
+    if rule.on_status:
+        on_status: dict[str, object] = {
+            key: (list(chain) if isinstance(chain, tuple) else chain)
+            for key, chain in rule.on_status
+        }
+        lines.append(f"on_status = {_toml_inline_table(on_status)}")
+    lines.append(f"reissue_policy = {_toml_str(rule.reissue_policy)}")
+    if rule.on_budget_exhausted:
+        lines.append(f"on_budget_exhausted = {_toml_inline(list(rule.on_budget_exhausted))}")
+
+
+def _emit_routing(lines: list[str], routing: RoutingConfig, *, inject_default: bool) -> None:
+    for upstream in routing.upstreams:
+        # Legacy upstreams are never written: they re-register from the
+        # [providers.*] sections above whenever a [routing] table exists.
+        if not upstream.legacy:
+            _emit_upstream(lines, upstream, inject_default=inject_default)
+    if not routing.present:
+        return
+    default_routing = RoutingConfig()
+    lines.append("\n[routing]")
+    lines.append(f"enabled = {_toml_value(routing.enabled)}")
+    if routing.default_upstreams:
+        # Always the table form; the string form folds into it at parse.
+        lines.append(f"default_upstream = {_toml_inline_table(dict(routing.default_upstreams))}")
+    lines.append(f"max_hops = {routing.max_hops}")
+    lines.append(f"request_deadline_seconds = {routing.request_deadline_seconds}")
+    lines.append(f"plan_limit_detection = {_toml_str(routing.plan_limit_detection)}")
+    if routing.plan_limit_headers != default_routing.plan_limit_headers:
+        # Omitted while default: the table REPLACES the built-in one, so
+        # writing it out would pin today's header names against future
+        # defaults (the same open-endedness as the omitted `enabled` list).
+        table = {name: list(values) for name, values in routing.plan_limit_headers}
+        lines.append(f"plan_limit_headers = {_toml_inline_table(dict(table))}")
+    lines.append(f"oauth_beta_marker = {_toml_str(routing.oauth_beta_marker)}")
+    lines.append(f"throttle_retry_max_seconds = {routing.throttle_retry_max_seconds}")
+    lines.append(f"budget_reset_day = {routing.budget_reset_day}")
+    lines.append(f"debug_headers = {_toml_value(routing.debug_headers)}")
+    lines.append(f"expose_models = {_toml_value(routing.expose_models)}")
+    if routing.model_catalog:
+        lines.append(f"model_catalog = {_toml_list(routing.model_catalog)}")
+    for rule in routing.rules:
+        _emit_rule(lines, rule)
+
+
+def _emit_prices(lines: list[str], prices: PricesConfig) -> None:
+    if prices == PricesConfig():
+        # Like [otel]: an all-defaults section is omitted.
+        return
+    lines.append("\n[prices]")
+    lines.append(f"table = {_toml_str(prices.table)}")
+    for model_id, price in prices.overrides:
+        lines.append(f"\n[prices.override.{_toml_key(model_id)}]")
+        lines.append(f"input = {price.input}")
+        lines.append(f"output = {price.output}")
+        lines.append(f"cache_read = {price.cache_read}")
+        lines.append(f"cache_write = {price.cache_write}")
 
 
 def emit_config_toml(config: Config, *, banner: bool = True) -> str:
@@ -274,6 +415,11 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
             lines.append(f"key = {_toml_str(config.license.key)}")
         if config.license.key_file is not None:
             lines.append(f"key_file = {_toml_str(config.license.key_file)}")
+
+    # Routing sections LAST: [[routing.rule]] is an array of tables, and any
+    # top-level key emitted after one would parse into that rule.
+    _emit_routing(lines, config.routing, inject_default=config.inject_system_note)
+    _emit_prices(lines, config.prices)
 
     return "\n".join(lines) + "\n"
 

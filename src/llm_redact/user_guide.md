@@ -57,6 +57,10 @@ no external resources, no data leaves your machine.
   honestly what would be forwarded.
 - **NER card** — the optional model-based detectors: per-backend
   toggles, model names, and the live folded-type state.
+- **Routing pill and table** — whether rule-based upstream routing is
+  enabled and, when it is, one row per upstream: protocol, credential
+  mode (never the key itself), state (healthy, in cooldown, or budget
+  exhausted), and spend against its monthly budget.
 
 ## The config editor
 
@@ -72,6 +76,10 @@ The editor card edits the proxy's TOML config file with guardrails:
   OTel, users, email) are shown read-only; change those in the file and
   restart (or send SIGHUP on macOS/Linux — on Windows, where SIGHUP
   does not exist, the editor and restarts are the reload paths).
+- The routing sections (`[upstreams]`, `[routing]`, `[prices]`) are
+  file-only: the editor preserves them untouched and refuses an edit
+  that names them. Edit the file, run `llm-redact serve --check`, and
+  send SIGHUP — they hot-apply without a restart.
 
 The CLI equivalents: `llm-redact config show` prints the effective
 config; `llm-redact serve --check` runs the full startup build without
@@ -97,6 +105,15 @@ Claude Code and Cursor `/llm-redact-<name>`, Codex
 - **audit** — audit log status, tamper-chain verification, and whether
   the zero-loss `required` mode is on.
 - **users** — seat usage and invitations (never prints per-user keys).
+- **routes** — the routing rules table, or a dry-run of which rule,
+  upstream, and fallback chain a request would take
+  (`routes test --protocol anthropic --model claude-* --auth oauth`);
+  no upstream is contacted — the live `state` line comes from the
+  running proxy's own listener, or reads `not probed`.
+- **spend** — per-upstream tokens and USD for the month, how much came
+  from fallback re-issues, and the remaining budget. On a subscription
+  (passthrough) lane the USD is a list-price equivalent, not a bill —
+  the token counts are the real number.
 - **guide** — displays this guide.
 
 Every command begins by checking that the `llm-redact` CLI is present
@@ -105,14 +122,41 @@ command (resolving a placeholder back to its secret value) is
 deliberately NOT a plugin command: an agent that read a secret would
 send it upstream on its next turn.
 
+## Routing, fallback and budgets
+
+Routing, fallback and budgets are supplied by the llm-redact-pro
+package; without it the proxy forwards each protocol to its one
+provider upstream, `status` shows `routing: disabled`, and a config
+with `[routing] enabled = true` refuses to start naming the package.
+With it, a `[routing]` section in the config file lets one proxy serve
+several upstreams per protocol — your subscription lane forwarded
+byte-exact, your own API keys, a local Ollama — chosen by first-match
+rules, with fallback chains on configurable statuses, per-upstream
+cooldowns, Anthropic plan-limit detection, and monthly budgets metered
+from the providers' usage counts. A fallback can only ever reach your
+own key or a local model, never a second subscription, and a
+conversation that already carries signed thinking blocks is never
+swapped mid-conversation (the response says so:
+`x-llm-redact-reissue: skipped; reason=stateful`). Every decision is
+visible in `llm-redact status`, the `route` field of the
+`/__llm-redact/recent` rows shown by the **recent** command (rule,
+upstream, hops, class — the dashboard's own recent table does not render
+them), and the **routes** / **spend** commands. The reference, the
+policy it respects, and a recommended single-user config are in the
+llm-redact-pro package's `docs/routing.md`.
+
 ## Honesty surfaces
 
-Anything that reduces coverage is surfaced, never silent: warn-mode
-rules (matches are observed and FORWARDED), per-provider detection
-off, MCP server exemptions, language-scoped-out national-ID rules,
-the remote-plaintext vault hatch, and audit-backup upload failures all
-appear in `/__llm-redact/status`, `llm-redact status`'s posture block,
-`doctor`, and the dashboard.
+Anything that reduces coverage is surfaced, never silent. Configured
+opt-outs — warn-mode rules (matches are observed and FORWARDED),
+per-provider detection off, MCP server exemptions, language-scoped-out
+national-ID rules, the remote-plaintext vault hatch — appear in
+`/__llm-redact/status`, `llm-redact status`'s posture block, `doctor`,
+and the dashboard. Runtime state — audit-backup upload failures,
+routing upstreams in cooldown or over budget — appears in
+`/__llm-redact/status`, `llm-redact status`, and the dashboard;
+`doctor` checks the routing config and its credentials, never the
+running proxy's cooldown or budget state.
 
 ## Going deeper
 
@@ -120,5 +164,6 @@ In the repository: `README.md` (overview), `docs/editions.md` (editions
 and the tier matrix), `docs/quickstart.md`, `docs/troubleshooting.md`,
 `docs/deployment.md`,
 `docs/threat-model.md`, and `docs/plugins.md`. Paid-feature guides (server
-database vaults, named users, the paid deployment surface) and the full
-licensing reference live in the `llm-redact-pro` repo's `docs/`.
+database vaults, named users, the paid deployment surface, and the
+routing guide `docs/routing.md`) and the full licensing reference live
+in the `llm-redact-pro` repo's `docs/`.

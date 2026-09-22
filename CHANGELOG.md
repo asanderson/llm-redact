@@ -11,6 +11,19 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed hot reload no longer half-applies the provider list.** When a
+  reload changed the `[providers.*]` set and then failed in the routing
+  factory (for example `[routing] enabled = true` without llm-redact-pro),
+  the new adapter list was already installed while the old config stayed:
+  a still-configured `[providers.custom.NAME]` upstream lost its adapter and
+  its traffic was forwarded unredacted until the next good reload. The
+  adapter list is now swapped together with the rest of the config.
+- The routing requires-package messages from `llm-redact routes|spend` and
+  `doctor` now say `0.3 or newer`, so an installed llm-redact-pro that
+  predates the routing layer is not mistaken for a missing one.
+
 ## [1.1.0] - 2026-09-22
 
 ### Added

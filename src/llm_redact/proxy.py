@@ -463,12 +463,15 @@ class ProxyState:
             self.vault, fuzzy=effective.rehydration.fuzzy, counts=self.rehydration_counts
         )
 
+        adapters = self.adapters
         if set(effective.providers) != set(self.config.providers):
             # Custom upstreams appeared/vanished: rebuild the adapter list
-            # (in-flight requests keep their old adapter references).
-            self.adapters = [cls() for cls in ALL_ADAPTERS] + build_custom_adapters(
-                effective.providers
-            )
+            # (in-flight requests keep their old adapter references). Built
+            # into a local and swapped with everything else: the router
+            # build below can raise, and a half-applied reload (new adapters
+            # under the old config) would leave a still-configured custom
+            # upstream with no adapter, i.e. forwarded unredacted.
+            adapters = [cls() for cls in ALL_ADAPTERS] + build_custom_adapters(effective.providers)
         # Routing is hot (decision 16 / R-34). The router validates-then-swaps
         # its own state; it raises only ConfigError and changes nothing when
         # it does, so this sits after every other build and before the swap.
@@ -485,6 +488,7 @@ class ProxyState:
             router = None
         self.config = effective
         self.license = license_resolved
+        self.adapters = adapters
         self.detectors = detectors
         self.allowlist = allowlist
         self.modes = modes

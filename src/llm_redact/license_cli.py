@@ -40,7 +40,6 @@ def run_license_show(args: argparse.Namespace) -> int:
             "in_grace": resolved.in_grace,
             "warnings": list(resolved.warnings),
             "max_users": resolved.max_users,
-            "clouds": list(resolved.clouds),
             "license": None
             if lic is None
             else {
@@ -48,7 +47,6 @@ def run_license_show(args: argparse.Namespace) -> int:
                 "org": lic.org,
                 "email": lic.email,
                 "max_users": lic.max_users,
-                "clouds": list(lic.clouds),
                 "issued": lic.issued.isoformat(),
                 "expires": lic.expires.isoformat(),
                 "license_id": lic.license_id,
@@ -63,9 +61,8 @@ def run_license_show(args: argparse.Namespace) -> int:
     print(f"effective tier: {resolved.tier}  (key source: {resolved.source})")
     if lic is not None:
         users = "unlimited" if lic.max_users is None else str(lic.max_users)
-        clouds = ", ".join(lic.clouds) or "none"
         print(f"licensee: {lic.org} <{lic.email}>  license_id: {lic.license_id}")
-        print(f"signed tier: {lic.tier}  users: {users}  clouds: {clouds}")
+        print(f"signed tier: {lic.tier}  users: {users}")
         print(
             f"issued: {lic.issued.isoformat()}  expires: {lic.expires.isoformat()}  kid: {lic.kid}"
         )

@@ -729,11 +729,7 @@ def run_status(args: argparse.Namespace) -> int:
         else:
             users = license_info.get("max_users")
             users_text = "unlimited" if users is None else str(users)
-            clouds = ", ".join(license_info.get("clouds") or []) or "none"
-            line = (
-                f"license: {license_info.get('tier', 'free')}  users: {users_text}"
-                f"  clouds: {clouds}"
-            )
+            line = f"license: {license_info.get('tier', 'free')}  users: {users_text}"
             if license_info.get("expires"):
                 line += f"  expires: {license_info['expires']}"
             print(line)

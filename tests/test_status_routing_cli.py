@@ -101,7 +101,7 @@ def _full_status_payload(routing: dict[str, Any] | None) -> dict[str, Any]:
         "rehydration": {"fuzzy": True},
         "detection": {"ner_enabled": False},
         "providers": {"anthropic": "https://api.anthropic.com"},
-        "license": {"tier": "free", "max_users": 1, "clouds": []},
+        "license": {"tier": "free", "max_users": 1},
     }
     if routing is not None:
         payload["routing"] = routing

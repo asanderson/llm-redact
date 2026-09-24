@@ -11,6 +11,14 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Removed
+
+- The retired per-cloud license entitlement is no longer surfaced: `/status`'s `license`
+  block, `llm-redact status`, and `llm-redact license show` (text and `--json`) drop the
+  `clouds` field, and `ResolvedLicense.clouds` is gone. Nothing gated on it — the core
+  enforces no tier. `License.clouds` (now defaulted and ignored) and the `CLOUDS` constant
+  remain only so llm-redact-pro 0.4 and earlier keep working against this core.
+
 ### Changed
 
 - The user guide's dashboard section describes the redesigned llm-redact-pro dashboard

@@ -10,6 +10,7 @@ whichever resolver is registered).
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import date
 
 from llm_redact.licensing import (
@@ -28,7 +29,6 @@ def test_free_sentinel() -> None:
     assert FREE.license is None
     assert FREE.source == "absent"
     assert FREE.max_users == 1
-    assert FREE.clouds == ()
 
 
 def test_tier_map_and_caps() -> None:
@@ -43,13 +43,12 @@ def test_tier_map_and_caps() -> None:
     }
 
 
-def _license(tier: str, *, max_users: int | None, clouds: list[str]) -> License:
+def _license(tier: str, *, max_users: int | None) -> License:
     return License(
         tier=tier,
         org="Org",
         email="a@corp.example",
         max_users=max_users,
-        clouds=tuple(clouds),
         issued=date(2026, 1, 1),
         expires=date(2027, 1, 1),
         license_id="x",
@@ -58,7 +57,7 @@ def _license(tier: str, *, max_users: int | None, clouds: list[str]) -> License:
 
 
 def test_resolved_max_users_prefers_license_then_cap() -> None:
-    lic = _license("team", max_users=10, clouds=["aws"])
+    lic = _license("team", max_users=10)
     assert ResolvedLicense(tier="team", license=lic, source="env", warnings=()).max_users == 10
     # A tier mismatch (e.g. a post-grace downgrade to free) falls back to the
     # tier's default cap, never the lapsed license's number.
@@ -66,15 +65,26 @@ def test_resolved_max_users_prefers_license_then_cap() -> None:
     assert downgraded.max_users == 1
 
 
-def test_resolved_clouds_unlimited_implies_all() -> None:
-    unlimited = _license("unlimited", max_users=None, clouds=[])
-    assert ResolvedLicense(
-        tier="unlimited", license=unlimited, source="env", warnings=()
-    ).clouds == (CLOUDS)
-    team = _license("team", max_users=25, clouds=["aws"])
-    assert ResolvedLicense(tier="team", license=team, source="env", warnings=()).clouds == ("aws",)
-    # No license (or a tier mismatch) carries no cloud entitlements.
-    assert ResolvedLicense(tier="free", license=None, source="absent", warnings=()).clouds == ()
+def test_clouds_is_retired_but_still_accepted_from_old_pro() -> None:
+    # Licenses no longer carry cloud entitlements: ResolvedLicense exposes no
+    # clouds at all, and License.clouds defaults to empty.
+    assert not hasattr(ResolvedLicense, "clouds")
+    assert _license("team", max_users=25).clouds == ()
+    # llm-redact-pro 0.4 and earlier still import CLOUDS and pass clouds=...
+    # when building a License; both must keep working against this core.
+    assert CLOUDS == ("aws", "azure", "gcp")
+    legacy = License(
+        tier="team",
+        org="Org",
+        email="a@corp.example",
+        max_users=25,
+        clouds=("aws",),
+        issued=date(2026, 1, 1),
+        expires=date(2027, 1, 1),
+        license_id="x",
+        kid="dev-1",
+    )
+    assert dataclasses.replace(legacy, clouds=()) == _license("team", max_users=25)
 
 
 def test_resolve_license_no_key_is_free() -> None:

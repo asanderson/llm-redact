@@ -112,7 +112,7 @@ def _full_status_payload(**license_extra: Any) -> dict[str, Any]:
         "rehydration": {"fuzzy": True},
         "detection": {"ner_enabled": False},
         "providers": {},
-        "license": {"tier": "free", "max_users": 1, "clouds": [], **license_extra},
+        "license": {"tier": "free", "max_users": 1, **license_extra},
     }
 
 

@@ -1234,7 +1234,6 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                     "in_grace": state.license.in_grace,
                     "warnings": list(state.license.warnings),
                     "max_users": state.license.max_users,
-                    "clouds": list(state.license.clouds),
                     "org": (
                         state.license.license.org if state.license.license is not None else None
                     ),

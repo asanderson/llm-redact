@@ -18,16 +18,14 @@ __all__ = ["FREE", "resolved"]
 
 def resolved(
     tier: str,
-    clouds: list[str] | None = None,
     *,
     max_users: int | None = None,
     in_grace: bool = False,
 ) -> ResolvedLicense:
-    """A ResolvedLicense at `tier` (with `clouds`), built directly as data.
+    """A ResolvedLicense at `tier`, built directly as data.
 
-    The inner License carries the same tier so ResolvedLicense.max_users /
-    .clouds resolve from it (Unlimited/Managed still imply every cloud). Pass
-    tier="free" for the keyless Free result (`FREE`).
+    The inner License carries the same tier so ResolvedLicense.max_users
+    resolves from it. Pass tier="free" for the keyless Free result (`FREE`).
     """
     if tier == "free":
         return FREE
@@ -36,7 +34,6 @@ def resolved(
         org="Test Org",
         email="test@corp.example",
         max_users=max_users if max_users is not None else TIER_USER_CAPS[tier],
-        clouds=tuple(clouds or ()),
         issued=date(2026, 1, 1),
         expires=date(2099, 1, 1),
         license_id="test-license",

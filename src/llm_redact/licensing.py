@@ -7,7 +7,7 @@ Free-only deployment cannot verify (and therefore cannot claim) a paid tier:
 distribution control is the primary protection, the signed key the second gate.
 This module keeps only the parts that are pure *data*, not secret and not
 tamper-sensitive: the ``License`` / ``ResolvedLicense`` dataclasses, the tier
-map (``TIER_ORDER`` / ``TIER_USER_CAPS`` / ``CLOUDS`` / ``LEGACY_TIER_ALIASES``),
+map (``TIER_ORDER`` / ``TIER_USER_CAPS`` / ``LEGACY_TIER_ALIASES``),
 the grace/expiry windows, and the ``FREE`` sentinel — plus a thin
 ``resolve_license`` that delegates to the registered enforcement resolver.
 
@@ -31,14 +31,14 @@ ENV_ALLOW_DEV = "LLM_REDACT_LICENSE_ALLOW_DEV"
 
 TIERS = ("free", "pro", "team", "unlimited", "managed")
 TIER_ORDER = {name: rank for rank, name in enumerate(TIERS)}
+# Retired: licenses no longer carry cloud entitlements (the FOSS core gates
+# nothing and llm-redact-pro never did). Kept only because llm-redact-pro
+# 0.4 and earlier import it; nothing reads it.
 CLOUDS = ("aws", "azure", "gcp")
 
 # The pre-3.11 tier names. A signed key still carrying them is accepted and
 # normalized to the current name, so outstanding licenses never need re-issue.
 LEGACY_TIER_ALIASES = {"gold": "team", "platinum": "unlimited"}
-
-# Tiers whose entitlements include every cloud implicitly ("all features").
-_ALL_CLOUD_TIERS = frozenset({"unlimited", "managed"})
 
 # Default named-user ceilings per tier; None = unlimited. A signed key may
 # carry a lower max_users but issuance never exceeds these.
@@ -68,11 +68,13 @@ class License:
     org: str
     email: str
     max_users: int | None
-    clouds: tuple[str, ...]
     issued: date
     expires: date
     license_id: str
     kid: str
+    # Retired and ignored: llm-redact-pro 0.4 and earlier still pass the old
+    # payload's cloud list here. Nothing reads it, and nothing surfaces it.
+    clouds: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -90,16 +92,6 @@ class ResolvedLicense:
         if self.license is not None and self.tier == self.license.tier:
             return self.license.max_users
         return TIER_USER_CAPS[self.tier]
-
-    @property
-    def clouds(self) -> tuple[str, ...]:
-        if self.license is None or self.tier != self.license.tier:
-            return ()
-        # Unlimited/Managed carry every cloud entitlement by definition, no
-        # matter what the payload listed.
-        if self.tier in _ALL_CLOUD_TIERS:
-            return CLOUDS
-        return self.license.clouds
 
 
 FREE = ResolvedLicense(tier="free", license=None, source="absent", warnings=())

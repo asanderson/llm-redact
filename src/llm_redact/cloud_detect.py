@@ -1,11 +1,10 @@
-"""Best-effort cloud-platform detection for license placement checks.
+"""Best-effort cloud-platform detection (detection only).
 
-Team licenses carry ONE cloud entitlement and Unlimited/Managed all three
-(llm-redact-pro docs/licensing.md); when the proxy runs on Kubernetes, this module asks
-the instance metadata services which cloud is underneath so a Team/aws key
-cannot quietly serve from GKE. It is deliberately best-effort — metadata
-endpoints can be firewalled, and the deterministic gate on each cloud's
-FEATURE stack (features.required_clouds) does not depend on it.
+This module asks the instance metadata services which cloud the proxy runs on.
+It was written for the retired per-cloud license entitlement; licenses no
+longer carry clouds and nothing in the core gates on placement, so it has no
+consumer today. It is deliberately best-effort — metadata endpoints can be
+firewalled.
 
 Order of authority:
 1. ``LLM_REDACT_CLOUD`` env override: ``aws`` | ``azure`` | ``gcp`` |

@@ -43,7 +43,7 @@ running (doctor's read-only checks still describe the configuration).
 
 Report back:
 - proxy version, listen address, and per-provider request counters
-- the license line (tier, user cap, clouds, expiry) and any license
+- the license line (tier, user cap, expiry) and any license
   warnings — an expired or rejected key silently running as Free is
   exactly what the user needs to hear about
 - detections and rehydrations by placeholder type

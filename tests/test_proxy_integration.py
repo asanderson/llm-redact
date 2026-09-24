@@ -564,6 +564,8 @@ async def test_reserved_endpoints_never_forwarded(client: httpx.AsyncClient) -> 
     # package, so the licensed-features signal reports absent and no plugins.
     assert payload["license"]["package_installed"] is False
     assert payload["license"]["plugins"] == []
+    # Licenses no longer carry cloud entitlements, so none is surfaced.
+    assert "clouds" not in payload["license"]
 
     audit = await client.get("/__llm-redact/audit")
     assert audit.status_code == 404  # disabled by default

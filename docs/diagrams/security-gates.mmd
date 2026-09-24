@@ -9,7 +9,7 @@ flowchart TB
 
     route -- yes --> g2{"② ops guard chain<br/>GET-only + Host · Origin · CSRF<br/>header · content-type · 1 MiB cap<br/>on the guarded POST exceptions"}
     g2 -- any layer fails --> r2([4xx — never forwarded])
-    g2 -- ok --> ops(["ops surface: status, metrics, recent,<br/>events, sessions (+ llm-redact-pro dashboard) —<br/>types and counts only, never values"])
+    g2 -- ok --> ops(["ops surface: status, metrics, recent,<br/>events, sessions — types and counts only,<br/>never values (+ the Pro browser dashboard:<br/>status view, config editor, preview —<br/>llm-redact-pro, same guard chain)"])
 
     route -- no --> g3{"③ provider routing<br/>adapter match (incl. /custom/NAME)<br/>+ enabled? + detection on?"}
     g3 -- "provider disabled or<br/>unknown custom name" --> r3([proxy-generated 502 —<br/>never falls through to pass-through])

@@ -18,6 +18,10 @@ and tags `vX.Y.Z`.
   `clouds` field, and `ResolvedLicense.clouds` is gone. Nothing gated on it — the core
   enforces no tier. `License.clouds` (now defaulted and ignored) and the `CLOUDS` constant
   remain only so llm-redact-pro 0.4 and earlier keep working against this core.
+- `llm_redact.cloud_detect` (best-effort cloud-platform detection via instance metadata
+  probes, with the `LLM_REDACT_CLOUD` / `LLM_REDACT_SKIP_CLOUD_DETECT` env vars) is removed.
+  It existed for the retired per-cloud license placement check and had no consumer; the
+  proxy never called it.
 
 ### Changed
 

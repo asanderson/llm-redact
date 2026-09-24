@@ -12,7 +12,6 @@ import argparse
 import socket
 from pathlib import Path
 
-import httpx
 import pytest
 
 from llm_redact.config import Config
@@ -158,25 +157,6 @@ def test_init_ask_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _ask_yes_no("go?", default=False) is True  # "y"
     assert _ask_yes_no("go?", default=True) is False  # "n"
     assert _ask_yes_no("go?", default=True) is True  # empty -> default
-
-
-# --- cloud_detect._http_probe (network probe, faked) -------------------------
-
-
-def test_http_probe_faked(monkeypatch: pytest.MonkeyPatch) -> None:
-    import llm_redact.cloud_detect as cloud_detect
-
-    class _Resp:
-        status_code = 200
-
-    monkeypatch.setattr(cloud_detect.httpx, "request", lambda *a, **k: _Resp())
-    assert cloud_detect._http_probe("GET", "http://meta.example", {}) is True
-
-    def _boom(*a, **k):
-        raise httpx.ConnectError("unreachable")
-
-    monkeypatch.setattr(cloud_detect.httpx, "request", _boom)
-    assert cloud_detect._http_probe("GET", "http://meta.example", {}) is False
 
 
 # --- vault_cli._proxy_reachable (socket probe against a closed port) ---------

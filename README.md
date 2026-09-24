@@ -8,15 +8,18 @@
 
 Large Language Model (LLM) information redactor that prevents private information from being sent to LLMs from agentic tools by substituting placeholders for private information on outgoing requests and then replaces the placeholders on the incoming responses seamlessly for the agentic tool users.
 
-![System data flow: agentic tool (with the llm-redact plugin slash commands inside it), proxy, and local vault on your machine; only placeholder tokens reach the LLM provider. A dashed box marks the audit log and its object-store sinks, and the audit-row flow into them, as Pro](docs/diagrams/architecture.png)
+![System data flow: agentic tool (with the llm-redact plugin slash commands inside it), proxy, and local vault on your machine; only placeholder tokens reach the LLM provider. Dashed boxes mark as Pro the browser dashboard on your machine (live status, config editor, redaction preview) and the audit log with its object-store sinks, plus the flows into each](docs/diagrams/architecture.png)
 
 Only placeholder tokens cross the trust boundary; the vault mapping never
-leaves your machine. The dashed box marks the audit subsystem — the audit
-log, its object-store sinks, and the audit-row flow into them — as
-**Pro** (supplied by the proprietary `llm-redact-pro` package, like vault
-at-rest encryption and the server RDBMS vault backends the diagram
-doesn't draw); everything else pictured is part of this repository's
-**FOSS core** (matrix in [docs/editions.md](docs/editions.md)). The full
+leaves your machine. The dashed boxes mark what is **Pro** — supplied by
+the proprietary `llm-redact-pro` package: the browser dashboard at
+`/__llm-redact/` (live status view, config editor, redaction preview —
+it stays on your machine and reads the same metadata-only APIs the core
+serves) and the audit subsystem (the audit log, its object-store sinks,
+and the audit-row flow into them). Vault at-rest encryption, the server
+RDBMS vault backends, and upstream routing are Pro too but not drawn;
+everything else pictured is part of this repository's **FOSS core**
+(matrix in [docs/editions.md](docs/editions.md)). The full
 documentation set — quickstart, deployment, security, engineering
 record — is indexed in [docs/](docs/README.md).
 

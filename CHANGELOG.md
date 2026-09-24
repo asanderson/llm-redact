@@ -11,6 +11,12 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+
+- The user guide's dashboard section describes the redesigned llm-redact-pro dashboard
+  (sidebar views, picklists and type-ahead in the config editor, the unsaved-changes save
+  bar).
+
 ## [1.2.0] - 2026-09-24
 
 ### Removed

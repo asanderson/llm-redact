@@ -48,15 +48,23 @@ pointing at the free surfaces: `llm-redact status`,
 itself — self-contained, no external resources, no data leaves your
 machine.
 
-- **Status pill** — proxy version, uptime, vault backend, session mode,
-  and the license tier. License warnings (invalid key, expiry grace)
-  appear here loudly; they are never silent.
-- **Counters** — detections, rehydrations, warn-mode observations, and
-  blocked requests by placeholder type; upstream errors per provider.
-- **Recent requests** — the last 200 requests (path, provider, status,
+A sidebar switches between views (each deep-linkable, e.g.
+`/__llm-redact/#config`); the top bar shows whether the live feed is
+connected.
+
+- **Overview** — the protection-posture banner (green when every
+  enabled rule redacts; an amber list of every coverage opt-out
+  otherwise), counters for values redacted, restored, warned (and
+  forwarded) and blocked, detections by placeholder type, the runtime
+  panel (version, uptime, vault, session mode, license tier — license
+  warnings such as an invalid key or expiry grace appear loudly, never
+  silently), and each provider's upstream with its state and upstream
+  errors.
+- **Traffic** — the last 200 requests (path, provider, status,
   duration, detection counts — never values), updated live over a
-  server-sent event stream. This works without the audit log.
-- **Sessions** — vault sessions with entry counts and idle times;
+  server-sent event stream, with a text filter and provider / kind
+  picklists. This works without the audit log.
+- **Vault sessions** — vault sessions with entry counts and idle times;
   whole idle sessions can be pruned from here (sqlite backend). The
   active session is never pruned.
 - **Named users** (Pro+) — invite teammates by email, see seat usage
@@ -64,21 +72,25 @@ machine.
   delivered by your `[email]` SMTP settings or shown once for manual
   delivery. Per-user keys are shown once, at verification, to the
   invitee — never stored, never re-displayed.
-- **Preview** — paste text and see exactly what the live detector set
-  would redact, without sending anything upstream or writing anything
-  to the vault. Warn-mode matches are shown unmasked, because that is
-  honestly what would be forwarded.
-- **NER card** — the optional model-based detectors: per-backend
-  toggles, model names, and the live folded-type state.
-- **Routing pill and table** — whether rule-based upstream routing is
-  enabled and, when it is, one row per upstream: protocol, credential
-  mode (never the key itself), state (healthy, in cooldown, or budget
-  exhausted), and spend against its monthly budget.
+- **Redaction preview** — paste text and see exactly what the live
+  detector set would redact, without sending anything upstream or
+  writing anything to the vault. Warn-mode matches are shown unmasked,
+  because that is honestly what would be forwarded.
+- **Configuration** — the config editor (below), with picklists and
+  type-ahead: a searchable, filterable rule grid with per-rule mode
+  picklists, a language picker, placeholder-type suggestions, NER
+  backend chips and entity suggestions, and a save bar that tracks
+  unsaved changes.
+- **System** — the restart-required settings and the local endpoints.
+- **Routing** — whether rule-based upstream routing is enabled and,
+  when it is, one row per upstream: protocol, credential mode (never
+  the key itself), state (healthy, in cooldown, or budget exhausted),
+  and spend against its monthly budget.
 
 ## The config editor (llm-redact-pro)
 
-The dashboard's editor card edits the proxy's TOML config file with
-guardrails:
+The dashboard's Configuration view edits the proxy's TOML config file
+with guardrails:
 
 - It always merges over **file truth** — environment-variable overrides
   are never baked into the file.

@@ -329,14 +329,6 @@ async def test_status_reports_detection_off_providers(client: httpx.AsyncClient)
 
 
 @pytest.mark.anyio
-async def test_editor_view_carries_both_settings(client: httpx.AsyncClient) -> None:
-    payload = (await client.get("/__llm-redact/config")).json()
-    assert payload["editable"]["providers"]["openai"]["detection"] is False
-    assert payload["editable"]["providers"]["anthropic"]["detection"] is True
-    assert payload["editable"]["detection"]["mcp"] == {"exempt_servers": []}
-
-
-@pytest.mark.anyio
 async def test_mcp_exemption_end_to_end() -> None:
     received.clear()
     config = Config(

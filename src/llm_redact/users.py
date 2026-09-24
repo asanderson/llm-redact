@@ -13,7 +13,8 @@ the seam:
   (``UsersError``),
 - the identity constants (``USER_KEY_PREFIX``) and default path, and
 - ``send_verification_email`` — generic stdlib SMTP glue with no paid secrecy
-  value, called by the dashboard's invite endpoint; inert until a store exists.
+  value, called by the core's ``/users/invite`` endpoint; inert until a store
+  exists.
 
 The fail-closed ``build_users_store`` default lives here too: the Free tier is
 the implicit single local user (no registry), and a Pro+ tier without the pro
@@ -70,7 +71,7 @@ class UsersStore(Protocol):
 
     The concrete SQLite implementation is ``llm_redact_pro.users.UsersStore``;
     the Free core holds only this structural contract. Methods mirror what the
-    request path (``lookup_key``) and the dashboard endpoints
+    request path (``lookup_key``) and the ``/__llm-redact/users*`` endpoints
     (invite/revoke/list, the counts) call.
     """
 

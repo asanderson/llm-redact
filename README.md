@@ -31,7 +31,7 @@ record — is indexed in [docs/](docs/README.md).
 - [How it works](#how-it-works) — detail: [round trip, worked example, persistence, sessions](docs/how-it-works.md)
 - [Editions and licensing](#editions-and-licensing) — detail: [tiers, keys, and the open-core boundary](docs/editions.md)
 - [Containers (docker or podman)](#containers-docker-or-podman)
-- [Status, dashboard, metrics, and audit log](#status-dashboard-metrics-and-audit-log) — detail: [the local ops surface](docs/dashboard.md)
+- [Status, metrics, and audit log](#status-metrics-and-audit-log) — detail: [the local ops surface](docs/dashboard.md)
 - [Operations](#operations) — detail: [the deployment guide](docs/deployment.md)
 - [What gets detected](#what-gets-detected) — detail: [the detection reference](docs/detection.md)
 - [Benchmark and live validation](#benchmark-and-live-validation)
@@ -118,8 +118,8 @@ that cannot cover:
 - **Anything you opt out of.** Warn-mode rules observe and *forward*
   the matched value; `[providers.NAME] detection = false`, MCP server
   exemptions, and language scoping likewise forward what they exempt.
-  Every such opt-out is surfaced in `/status`, `doctor`, and the
-  dashboard — never silent.
+  Every such opt-out is surfaced in `/status`, `llm-redact status`, and
+  `doctor` — never silent.
 
 The precise boundary — assets, trust assumptions, and the full
 out-of-scope table — is written down in
@@ -127,9 +127,9 @@ out-of-scope table — is written down in
 
 ## Plugins
 
-Twelve slash commands mirror the dashboard and config editor inside
-Claude Code, Codex, OpenCode, and Cursor, so the proxy can be driven
-without leaving the tool:
+Twelve slash commands put the proxy's CLI workflows — status, preview,
+and a guarded config edit — inside Claude Code, Codex, OpenCode, and
+Cursor, so the proxy can be driven without leaving the tool:
 
 - `/llm-redact:status`, `/llm-redact:recent`, `/llm-redact:sessions` —
   live coverage posture, the recent-request table, and the vault's
@@ -203,7 +203,7 @@ Then:
 - `llm-redact service install` — runs the proxy at login
   (launchd/systemd user unit).
 - `llm-redact plugin install claude|codex|opencode|cursor` — the
-  dashboard and config-editor workflows as **agent slash commands**
+  status, preview, and config-edit workflows as **agent slash commands**
   (Claude Code can instead add this repo as a plugin marketplace:
   `/plugin marketplace add asanderson/llm-redact`); see
   [docs/plugins.md](docs/plugins.md).
@@ -240,8 +240,9 @@ and point tools at it via their base-URL variables (`ANTHROPIC_BASE_URL`,
   PASS/WARN/FAIL report incl. a detector-build dry-run; `--json` for
   machines) and `llm-redact serve --check` (the deploy/reload gate);
   error-by-error fixes: [docs/troubleshooting.md](docs/troubleshooting.md).
-- **User guide** — the dashboard, config editor, and plugin commands,
-  written for the person *using* the proxy: served at
+- **User guide** — the CLI, the plugin commands, and (with
+  llm-redact-pro) the dashboard and config editor, written for the
+  person *using* the proxy: served at
   `/__llm-redact/guide` (also `llm-redact guide`, or packaged as
   [src/llm_redact/user_guide.md](src/llm_redact/user_guide.md)). Full
   doc index: [docs/README.md](docs/README.md).
@@ -325,40 +326,36 @@ docker compose up   # demo stack: proxy + bundled fake upstream
 The sqlite vault and audit log live under `/data` — mount a volume to
 persist sessions across container restarts.
 
-## Status, dashboard, metrics, and audit log
+## Status, metrics, and audit log
 
 Reserved `/__llm-redact/*` paths are answered locally, never forwarded, and
 carry metadata only — never redacted values. The namespace is GET-only
-except the guarded config-editor, session-prune, and preview POSTs, and
+except the guarded session-prune and user invite/revoke POSTs, and
 every reply is hardened with a strict CSP and framing/sniffing headers.
 
-![The dashboard: status pills, detections and restores by type, upstreams, and the recent-request table](docs/screenshots/dashboard.png)
-
-- **Dashboard** — <http://127.0.0.1:8787/__llm-redact/>, a single
-  self-contained page (no CDNs, works offline): live detection/restore
-  totals by type and the recent-request table with an instant
-  server-sent-event feed.
-- **Config editor** — every hot-reloadable setting (rules, modes,
-  allowlists, deny strings, custom rules, NER, providers), guarded with
-  layered Host/Origin/CSRF protection.
-- **Redaction preview** — paste text, see what the current config
-  *would* redact — entirely locally, nothing sent upstream, nothing
-  written.
-- **Scriptable surface** — `llm-redact status`, Prometheus
+- **Scriptable surface** — `llm-redact status` (and the JSON
+  `GET /__llm-redact/status` behind it), Prometheus
   `GET /__llm-redact/metrics` (always on), DB-free `healthz`/`readyz`
-  probes.
+  probes, the `/recent` request table and its `/events` server-sent-event
+  feed, and the `/sessions` vault list.
+- **Redaction preview** — `llm-redact preview` shows what the current
+  config *would* redact, warn on, or block — entirely locally, nothing
+  sent upstream, nothing written.
+- **Browser dashboard** (Pro) — the browser dashboard (config editor,
+  redaction preview) is part of llm-redact-pro; without it,
+  `/__llm-redact/` answers a local 404 pointing at the surfaces above.
 - **Agent slash commands** — the same workflows inside Claude Code,
   Codex, OpenCode, and Cursor
   (`/plugin marketplace add asanderson/llm-redact`, or
   `llm-redact plugin install`; see [docs/plugins.md](docs/plugins.md)).
 - **Coverage posture, surfaced loudly** — every configured opt-out that
-  lets traffic through unredacted is reported by `status`, `doctor`, and
-  the dashboard; never silently.
+  lets traffic through unredacted is reported by `/status`,
+  `llm-redact status`, and `doctor`; never silently.
 - **Audit log** (Pro) — with its tamper-evident chain and off-machine
   object-store sinks; metadata only (types, counts, paths, durations —
   never values).
 
-The full tour of every endpoint and screen — with screenshots — is
+The full tour of every endpoint is
 [docs/dashboard.md](docs/dashboard.md).
 
 ## Operations
@@ -411,8 +408,8 @@ essentials:
 
 Rule-based upstream routing, quota-aware fallback and monthly budgets
 are a Pro feature of llm-redact-pro; the core parses and validates
-`[upstreams]`/`[routing]`/`[prices]`, carries every surface (dashboard
-card, `routes`/`spend`, doctor/status lines, the `/status` block, two
+`[upstreams]`/`[routing]`/`[prices]`, carries every surface
+(`routes`/`spend`, doctor/status lines, the `/status` block, two
 metrics), and refuses to start with `[routing] enabled = true` without
 the package (see [docs/editions.md](docs/editions.md)).
 
@@ -498,7 +495,7 @@ qualify if demand materializes.
   with each policy decision and enforcement point mapped to code, are
   diagrammed in
   [docs/security-dataflows.md](docs/security-dataflows.md).
-- **Hardened local endpoints**: the dashboard and ops endpoints carry a
+- **Hardened local endpoints**: every reserved ops endpoint carries a
   strict `Content-Security-Policy` plus
   `X-Frame-Options`/`nosniff`/`Referrer-Policy` headers, on top of the
   Host/Origin/CSRF gates on the mutating endpoints.

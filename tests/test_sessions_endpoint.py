@@ -36,11 +36,19 @@ def _make_client(
         vault=vault if vault is not None else VaultConfig(),
     )
     app = create_app(config, upstream_transport=httpx.ASGITransport(app=_fake_upstream()))
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
+    _tokens[id(client)] = app.state.proxy.csrf_token
+    return client
+
+
+# The per-process CSRF token. The pro dashboard hands it to same-origin
+# pages via GET /config; the free core has no page, so tests read it off
+# the live ProxyState.
+_tokens: dict[int, str] = {}
 
 
 async def _token(client: httpx.AsyncClient) -> str:
-    return str((await client.get("/__llm-redact/config")).json()["csrf_token"])
+    return _tokens[id(client)]
 
 
 def _age_session(db: Path, session_id: str, days: int) -> None:

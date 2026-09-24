@@ -56,9 +56,9 @@ session" INFO line. A new per-conversation session whose first message
 *already contains* placeholder-shaped tokens is the compaction signature
 — a genuinely new conversation cannot know the token grammar. The proxy
 now counts these (`compaction_forks` in `/status`,
-`llm_redact_compaction_forks_total` in metrics, a dashboard pill, and a
-specific INFO line), so a user wondering why tokens stopped restoring
-mid-conversation has the answer in front of them, along with the
-recovery path: `llm-redact lookup «TOKEN»` resolves any token from any
+`llm_redact_compaction_forks_total` in metrics, a `llm-redact status`
+posture line, and a specific INFO line), so a user wondering why tokens
+stopped restoring mid-conversation has the answer in front of them,
+along with the recovery path: `llm-redact lookup «TOKEN»` resolves any token from any
 session, and sqlite-backed vaults keep the original session's mappings
 until pruned.

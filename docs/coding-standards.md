@@ -118,9 +118,11 @@ domains (`corp.example`). Never a real credential, not even a revoked one. The
 
 - Config edits and CLI output are **honest and value-free**: every deliberate
   coverage opt-out (warn mode, per-provider detection off, MCP exempt servers,
-  language-scoped rules) is surfaced in `/status`, `doctor`, and the dashboard —
-  never silent.
-- The dashboard is self-contained package data with a strict CSP: **textContent
+  language-scoped rules) is surfaced in `/status`, `llm-redact status`, and
+  `doctor` — never silent.
+- HTML served under the reserved prefix (the packaged user guide here; the
+  llm-redact-pro dashboard) is self-contained with a strict CSP: **textContent
   DOM writes only**, no inline event handlers, no remote fetches.
-- Reserved `/__llm-redact/*` endpoints are GET-only (with the three guarded
-  POST exceptions) and provably never forwarded upstream.
+- Reserved `/__llm-redact/*` endpoints are GET-only (with the guarded POST
+  exceptions: session prune and user invite/revoke) and provably never
+  forwarded upstream.

@@ -72,7 +72,7 @@ A deny match wins any overlap against rule matches (even longer ones),
 bypasses the allowlist, and is never subject to per-rule modes — it always
 redacts. Matching is literal substring ("Auroras" gets its "Aurora"
 redacted); each casing variant round-trips back to exactly what was sent.
-The dashboard's config editor has a deny-strings table.
+The llm-redact-pro dashboard's config editor has a deny-strings table.
 
 ## Per-rule modes: redact, warn, block
 
@@ -88,13 +88,14 @@ private_key = "block"    # reject the whole request with a 400 before
 ```
 
 Warn-mode hits show up in `/status` (`warnings_total`), Prometheus
-(`llm_redact_warnings_total`), and the dashboard, so you can measure a
+(`llm_redact_warnings_total`), and `llm-redact status`, so you can measure a
 rule's noise on your real traffic before trusting it with redaction. Be
 aware warn is *observation only* — the matched value (and anything a longer
 warn-mode match overlaps) is sent to the provider. Block-mode rejections
 return a provider-shaped 400 whose message names the rule type, which
-agentic tools surface directly. The dashboard's config editor has a
-three-way selector per rule.
+agentic tools surface directly. `llm-redact preview` shows which mode a
+given text would trigger; the llm-redact-pro dashboard's config editor has
+a three-way selector per rule.
 
 ## Person-name detection (optional NER)
 

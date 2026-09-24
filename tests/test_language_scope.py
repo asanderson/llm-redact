@@ -205,10 +205,4 @@ async def test_scope_end_to_end_and_surfaced() -> None:
     assert status["detection"]["languages"] == ["en"]
     assert "french_nir" in status["detection"]["language_inactive_rules"]
     assert "us_ssn" not in status["detection"]["language_inactive_rules"]
-
-    editor = (await client.get("/__llm-redact/config")).json()
-    assert editor["editable"]["detection"]["languages"] == ["en"]
-    assert editor["builtin_rule_languages"]["french_nir"] == ["fr"]
-    assert "email" not in editor["builtin_rule_languages"]  # universal: untagged
-    assert "french_nir" in editor["language_inactive_rules"]
     await client.aclose()

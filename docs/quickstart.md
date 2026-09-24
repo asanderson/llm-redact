@@ -57,9 +57,11 @@ llm-redact preview --text "mail jane.doe@corp.example about AKIAIOSFODNN7EXAMPLE
 ```
 
 shows exactly what the current config would redact — entirely locally, no
-proxy, no upstream. Then open the dashboard at
-`http://127.0.0.1:8787/__llm-redact/` to watch live traffic: detections
-and restores by type, per provider, with a recent-request table.
+proxy, no upstream. Then run `llm-redact status` (or read
+`http://127.0.0.1:8787/__llm-redact/status` and `/__llm-redact/recent`)
+to watch live traffic: detections and restores by type, and the recent
+requests. The browser dashboard (config editor, redaction
+preview) is part of llm-redact-pro.
 
 `llm-redact lookup «EMAIL_001»` resolves a token back to its value
 (locally; the mapping never leaves the machine).
@@ -90,8 +92,8 @@ in the README; production hardening lives in [deployment.md](deployment.md).
 
 ## 6. Where to go next
 
-`llm-redact guide` prints the packaged **user guide** — the dashboard, the
-config editor, and the agent plugin commands, end to end. A running proxy
-also serves it at `http://127.0.0.1:8787/__llm-redact/guide`, and agents
+`llm-redact guide` prints the packaged **user guide** — the CLI, the agent
+plugin commands, and the llm-redact-pro dashboard, end to end. A running
+proxy also serves it at `http://127.0.0.1:8787/__llm-redact/guide`, and agents
 with the plugin installed get it as `/llm-redact-guide`. Everything else
 is indexed in [docs/README.md](README.md).

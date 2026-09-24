@@ -21,8 +21,8 @@ only change in a MAJOR release, with a documented migration.
 - **Local API** (`/__llm-redact/*`): existing endpoints and JSON fields
   keep their shape; new fields and endpoints are additive. The reserved
   prefix itself never changes. Anything under it remains metadata-only
-  (the documented exceptions: `lookup`-equivalent config-editor GET
-  returns allowlist and deny values).
+  (the documented exception: the llm-redact-pro config-editor GET, a
+  `lookup`-equivalent, returns allowlist and deny values).
 - **Proxying behavior contracts**: unrecognized traffic forwards
   verbatim; oversized redactable bodies fail closed (413); block mode
   answers 400 before upstream contact; streaming output equals

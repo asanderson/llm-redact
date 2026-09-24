@@ -28,9 +28,9 @@ Bedrock's binary eventstream, and realtime WebSocket deltas):
 
 ![Sequence diagram of streaming rehydration reassembling a placeholder split across two SSE deltas](diagrams/sequence-streaming.png)
 
-Watch the round trip live: the dashboard ([dashboard.md](dashboard.md))
-shows detections and restores per request, and an agent with the
-slash-command plugins installed can do the same in-tool with
+Watch the round trip live: `llm-redact status` and the `/recent` feed
+([dashboard.md](dashboard.md)) show detections and restores, and an
+agent with the slash-command plugins installed can do the same in-tool with
 `/llm-redact:status`, `/llm-redact:recent`, and `/llm-redact:preview`
 ([plugins.md](plugins.md)).
 

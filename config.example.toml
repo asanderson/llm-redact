@@ -338,7 +338,7 @@ allowlist_patterns = ['^10\.', '^192\.168\.']
 enabled = false
 backend = "spacy"
 # Run several backends at once, each toggled individually (wins over
-# `backend`; the config editor UI writes this form):
+# `backend`; the llm-redact-pro config editor writes this form):
 # backends = ["spacy", "presidio"]
 # Per-backend model overrides (the single `model` key below applies only
 # when exactly one backend is active):

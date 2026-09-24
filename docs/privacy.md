@@ -1,8 +1,8 @@
 # Privacy policy
 
-llm-redact is local software. The proxy, the vault, the dashboard, and
-the agent plugin commands all run on your machine, and the project
-collects nothing.
+llm-redact is local software. The proxy, the vault, the agent plugin
+commands, and (with llm-redact-pro) the dashboard all run on your
+machine, and the project collects nothing.
 
 ## What we (the authors) receive from you
 
@@ -29,7 +29,7 @@ running it.
 - **Configured opt-outs are honest.** If you enable warn-mode rules,
   disable detection for a provider, or exempt an MCP server, matched
   values in that scope ARE forwarded — every such opt-out is surfaced in
-  `/status`, `llm-redact doctor`, and the dashboard, never silent.
+  `/status`, `llm-redact status`, and `llm-redact doctor`, never silent.
 - **Optional audit sinks you configure.** The S3/Azure audit sinks
   upload the same metadata-only rows to object storage *you* control,
   optionally client-side encrypted. Off by default.

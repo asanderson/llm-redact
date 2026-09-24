@@ -139,9 +139,9 @@ silently rehydrate the *wrong* secret. Treat it accordingly.
   idle longer than N days via a background task (never the active
   session); `0` (default) disables it. For manual control,
   `llm-redact sessions prune --older-than 90d` deletes whole idle sessions
-  (partial deletion could reuse a still-referenced number). The dashboard
-  and `POST /__llm-redact/sessions/prune` do the same, safe against the
-  live process.
+  (partial deletion could reuse a still-referenced number).
+  `POST /__llm-redact/sessions/prune` (and the llm-redact-pro dashboard,
+  which calls it) does the same, safe against the live process.
 
 At-rest **encryption** of the vault (`[vault] encryption = "fernet"`), **key
 rotation** (`vault rotate-key`), and the **server RDBMS** backends are Pro
@@ -169,8 +169,9 @@ never a value or a placeholder id. That contract holds across every sink.
   fires on a sustained rate). Ready-to-use scrape config, alert rules, and an
   importable Grafana dashboard live in [`deploy/`](../deploy) — see
   [observability.md](observability.md).
-- **Live tail**: `GET /__llm-redact/recent` (last 200 rows) and the
-  dashboard's SSE feed (`/__llm-redact/events`) work without the audit DB.
+- **Live tail**: `GET /__llm-redact/recent` (last 200 rows) and the SSE
+  feed `GET /__llm-redact/events` (what the llm-redact-pro dashboard
+  subscribes to) work without the audit DB.
 - **JSON logs**: `[log] format = "json"` (or `serve --log-format json`)
   switches to one JSON object per line for log shippers — content is
   unchanged (paths, statuses, counts; never values or headers).
@@ -192,7 +193,7 @@ sinks) and **OpenTelemetry** export (`[otel]`) are Pro features of the
 
 Several settings deliberately let some traffic through unredacted, and the
 docs must never imply otherwise. Each is surfaced in `/status`, by
-`doctor`/`status` posture output, and in the dashboard — never silently:
+`doctor`/`status` posture output — never silently:
 
 - `warn` mode forwards the matched value (and anything a longer warn match
   overlaps) upstream — it is observation only.

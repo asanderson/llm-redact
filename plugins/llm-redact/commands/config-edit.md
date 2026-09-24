@@ -1,5 +1,5 @@
 ---
-description: "Edit llm-redact config with the dashboard editor's guardrails: change rules, modes, deny strings, allowlists, NER, providers; validate; hot-reload"
+description: "Edit llm-redact config with guardrails: change rules, modes, deny strings, allowlists, NER, providers; validate; hot-reload"
 argument-hint: "[the change you want]"
 allowed-tools: Read Edit Bash(llm-redact:*) Bash(pgrep:*) Bash(kill:*)
 disable-model-invocation: true
@@ -41,23 +41,23 @@ command output.
 
 Apply this llm-redact configuration change: $ARGUMENTS
 
-Follow this flow exactly — it mirrors the dashboard config editor's
-guardrails:
+Follow this flow exactly — it applies the same guardrails as the
+llm-redact-pro dashboard's config editor:
 
 1. Locate and read the truth: `llm-redact config show --path` for the
    file, `llm-redact config show` for the EFFECTIVE config. Values the
    output marks as env overrides must NOT be baked into the file.
 2. Edit the TOML file, changing only what the request needs. The
-   editable surface matches the dashboard editor: [detection] enabled
+   editable surface is the hot-reloadable one: [detection] enabled
    rules, modes, deny strings, allowlists, languages, custom rules and
    validators, [detection.ner], [providers.*] (enabled, detection,
    upstreams, custom providers), [rehydration], max_body_bytes. The
    routing sections — [upstreams.*], [routing], [[routing.rule]],
    [prices] (the llm-redact-pro routing guide) — hot-apply through this
-   same file flow even though the web editor refuses them; a chain may
-   never contain a passthrough upstream, so never add one.
-   host/port/vault/audit/log/tls/otel are RESTART-ONLY — warn the user
-   and stop if the change touches them.
+   same file flow (the llm-redact-pro web editor refuses them); a chain
+   may never contain a passthrough upstream, so never add one.
+   host/port/vault/audit/log/tls/otel/users/email are RESTART-ONLY —
+   warn the user and stop if the change touches them.
 3. Validate BEFORE applying: `llm-redact serve --check` must exit 0.
    If it fails, fix the file or revert it — never leave the config
    failing --check, because a SIGHUP would silently keep the old config

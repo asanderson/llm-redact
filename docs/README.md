@@ -2,9 +2,9 @@
 
 Start with the repository [README](../README.md) (what the proxy does, the
 full configuration surface, the provider matrix) — then come here to find
-the right deep-dive. The packaged **user guide** (dashboard, config editor,
-agent plugin commands) is a separate document that ships inside the wheel:
-run `llm-redact guide`, open `/__llm-redact/guide` on a running proxy, or
+the right deep-dive. The packaged **user guide** (CLI and agent plugin
+commands, plus the llm-redact-pro dashboard and config editor) is a
+separate document that ships inside the wheel: run `llm-redact guide`, open `/__llm-redact/guide` on a running proxy, or
 read [src/llm_redact/user_guide.md](../src/llm_redact/user_guide.md).
 
 ## Getting started
@@ -15,9 +15,9 @@ read [src/llm_redact/user_guide.md](../src/llm_redact/user_guide.md).
 | [how-it-works.md](how-it-works.md) | The mechanism end to end: the round-trip diagrams, a worked example (placeholder body, vault rows, audit row), persistence and fuzzy token restoration, and session isolation. |
 | [providers.md](providers.md) | Per-provider setup: Azure/Vertex/Bedrock/Ollama/custom upstreams, embeddings, batch APIs, the realtime relay, and the opt-out switches. |
 | [detection.md](detection.md) | The full detection reference: built-in rules, deny strings, per-rule modes, allowlists, and the person-name NER backends. |
-| [dashboard.md](dashboard.md) | The local ops surface: dashboard, config editor, status/metrics/health endpoints, redaction preview, and the agent plugins. |
+| [dashboard.md](dashboard.md) | The local ops surface: status/metrics/health endpoints, the recent-request and event feeds, `llm-redact preview`, and the agent plugins (the browser dashboard — config editor, redaction preview — is part of llm-redact-pro). |
 | [troubleshooting.md](troubleshooting.md) | Keyed by the exact error strings you will see, with the fix for each. |
-| [plugins.md](plugins.md) | The dashboard and config editor as agent slash commands (Claude Code, Codex, OpenCode, Cursor). |
+| [plugins.md](plugins.md) | The proxy's status, preview, and config-edit workflows as agent slash commands (Claude Code, Codex, OpenCode, Cursor). |
 
 ## Running it in production
 

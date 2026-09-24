@@ -1,4 +1,5 @@
-"""Emit a Config back to TOML for the /__llm-redact/config editor.
+"""Emit a Config back to TOML (`config show`, `init`, and the llm-redact-pro
+/__llm-redact/config editor).
 
 The stdlib parses TOML (tomllib) but cannot write it, and the runtime-deps
 rule (httpx/starlette/uvicorn only) rules out tomli-w. The schema here is

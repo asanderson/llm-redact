@@ -21,6 +21,24 @@ from llm_redact import plugin_api
 
 # Protocol name -> (data attribute names in declaration order, {method: signature}).
 PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
+    "Dashboard": (
+        (),
+        {"handle": "(self, request: 'Request', host: 'DashboardHost') -> 'Response'"},
+    ),
+    "DashboardHost": (
+        ("config", "csrf_token"),
+        {
+            "config_file_path": "(self) -> 'Path'",
+            "host_allowed": "(self, request: 'Request') -> 'bool'",
+            "origin_allowed": "(self, request: 'Request') -> 'bool'",
+            "guarded_post_json": (
+                "(self, request: 'Request') -> 'tuple[Any, None] | tuple[None, Response]'"
+            ),
+            "validate_config": "(self, candidate: 'Config') -> 'None'",
+            "apply_config": "(self, fresh: 'Config') -> 'list[str]'",
+            "preview": "(self, text: 'str') -> 'dict[str, Any]'",
+        },
+    ),
     "Telemetry": (
         (),
         {
@@ -117,6 +135,8 @@ DATACLASSES: dict[str, str] = {
 }
 
 ALL: tuple[str, ...] = (
+    "Dashboard",
+    "DashboardHost",
     "HopDecision",
     "HopRequest",
     "HopResult",

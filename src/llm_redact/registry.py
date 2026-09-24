@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from .audit import build_audit as _build_audit
 from .audit_s3 import build_audit_sinks as _build_audit_sinks
+from .free_defaults import build_dashboard as _build_dashboard
 from .free_defaults import build_router as _build_router
 from .free_defaults import build_telemetry as _build_telemetry
 from .free_defaults import resolve_license as _resolve_license
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
     from .audit_s3 import AzureAuditSink, S3AuditSink
     from .config import AuditConfig, Config, OtelConfig, UsersConfig, VaultConfig
     from .licensing import ResolvedLicense
-    from .plugin_api import Router, SessionRouter, Telemetry, VaultCipher
+    from .plugin_api import Dashboard, Router, SessionRouter, Telemetry, VaultCipher
     from .users import UsersStore
     from .vault import VaultManager
 
@@ -55,7 +56,8 @@ def pro_package_installed() -> bool:
     """True when the paid ``llm-redact-pro`` package is importable.
 
     The honest "licensed-features package: installed / not installed" signal
-    surfaced by ``doctor``, ``/status``, and the dashboard (llm-redact-pro docs/licensing.md).
+    surfaced by ``doctor``, ``/status``, and the llm-redact-pro dashboard
+    (llm-redact-pro docs/licensing.md).
     A pure import-spec probe — it does NOT import the package, trigger plugin
     discovery, or consult any license: package presence and license *tier* are
     independent (the fail-closed rule lives in the factories the registry
@@ -84,6 +86,7 @@ class Registry:
     build_audit_sinks: Callable[[AuditConfig], tuple[S3AuditSink | None, AzureAuditSink | None]]
     build_users_store: Callable[[UsersConfig, str], UsersStore | None]
     build_router: Callable[[Config, str], Router | None]
+    build_dashboard: Callable[[str], Dashboard | None]
 
     def __init__(self) -> None:
         # Assigned as INSTANCE attributes (not class attributes) so a bare
@@ -108,6 +111,11 @@ class Registry:
         # paid subsystem; the Free default returns None while [routing] is
         # off and fails closed naming the package when it is enabled.
         self.build_router = _build_router
+        # The browser dashboard (status view, config editor, redaction
+        # preview) is a paid surface; the Free default is None and the core
+        # answers its paths with a 404 naming the package. Built with the
+        # resolved tier, rebuilt when a reload changes it.
+        self.build_dashboard = _build_dashboard
 
 
 def load_plugins(registry: Registry) -> list[str]:

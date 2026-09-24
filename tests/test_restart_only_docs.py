@@ -1,6 +1,6 @@
-"""The restart-only key lists in the docs must match ``proxy._READONLY_KEYS``.
+"""The restart-only key lists in the docs must match ``config.RESTART_ONLY_KEYS``.
 
-The config editor and SIGHUP reload treat these config sections as
+SIGHUP reload and the (llm-redact-pro) dashboard config editor treat these config sections as
 restart-only; README.md and docs/deployment.md each enumerate them in prose.
 A key added to the code set without updating the docs (or a doc claiming a
 key the code does not treat as restart-only) fails here — the
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_redact.proxy import _READONLY_KEYS
+from llm_redact.config import RESTART_ONLY_KEYS
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -31,6 +31,6 @@ def test_docs_enumerate_exactly_the_readonly_keys(doc: str) -> None:
         for part in match.group(1).split(",")
         if part.strip()
     }
-    assert names == set(_READONLY_KEYS), (
-        f"{doc} restart-only list {sorted(names)} != code {sorted(_READONLY_KEYS)}"
+    assert names == set(RESTART_ONLY_KEYS), (
+        f"{doc} restart-only list {sorted(names)} != code {sorted(RESTART_ONLY_KEYS)}"
     )

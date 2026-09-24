@@ -1,10 +1,13 @@
-# Agent plugins: the dashboard and config editor as slash commands
+# Agent plugins: the proxy's workflows as slash commands
 
 llm-redact ships slash-command plugins for **Claude Code**, **Codex**,
-**OpenCode**, and **Cursor** that put the web dashboard's and config editor's workflows
-inside the agent session itself: check the proxy's posture, watch recent
+**OpenCode**, and **Cursor** that put the proxy's ops workflows inside
+the agent session itself: check the proxy's posture, watch recent
 traffic, preview redaction, verify the audit chain, and make guarded
-config edits — without leaving the tool the proxy is protecting.
+config edits — without leaving the tool the proxy is protecting. They
+run on the free core's CLI and JSON endpoints; the browser dashboard
+(config editor, redaction preview) that the right-hand column below maps
+them to is part of llm-redact-pro and is not needed.
 
 All four plugins carry the SAME twelve commands, defined once in
 `src/llm_redact/plugin_assets.py` and rendered into each tool's command
@@ -78,7 +81,7 @@ have edited — it refuses and asks for `--force`.
 
 ## The commands
 
-| Command | What it does | Web-UI equivalent |
+| Command | What it does | llm-redact-pro dashboard equivalent |
 |---|---|---|
 | `status` | Proxy counters, detections by type, and the FULL protection-posture block | dashboard header + posture pills |
 | `recent` | Newest-first table of recent requests (path, provider, status, detections) | dashboard recent-request table |
@@ -130,8 +133,9 @@ guide, or the requires-pro line without that package):
 
 ![llm-redact config show: source path, host/port, provider upstreams, and detection settings as TOML](screenshots/plugins/config-show.svg)
 
-**`/llm-redact:config-edit`** — the web config editor's workflow, driven
-from inside the agent: read the effective config, edit the TOML, gate on
+**`/llm-redact:config-edit`** — a guarded config change driven from
+inside the agent (what the llm-redact-pro config editor does in the
+browser): read the effective config, edit the TOML, gate on
 `serve --check`, reload via SIGHUP, and read the coverage posture back.
 A session as Claude Code presents it (the agent narration is
 illustrative; every command output is the fixture rig's real output,

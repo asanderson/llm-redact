@@ -11,6 +11,40 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-24
+
+### Removed
+
+- **The browser dashboard moved to llm-redact-pro.** The web page at
+  `/__llm-redact/` (status pills, totals, upstreams, recent requests,
+  sessions, users and routing cards), its config editor
+  (`GET/POST /__llm-redact/config`) and its redaction-preview card
+  (`POST /__llm-redact/preview`) are now part of the separately-installed
+  llm-redact-pro package (Pro tier; 0.4 or newer). Without it those paths
+  answer a local 404 that names the package (or the missing key, or a
+  plugin that did not register) — still answered before routing, never
+  forwarded, still hardened. Everything else stays free: the JSON
+  `/status`, Prometheus `/metrics`, `/healthz`, `/readyz`, `/recent`,
+  `/events`, `/sessions` (+ prune), `/audit`, `/users` and `/guide`
+  endpoints, and every CLI — `llm-redact status`, `llm-redact preview`
+  (the local dry run), `llm-redact config show` and the
+  `/llm-redact:config-edit` plugin command. The dashboard screenshots and
+  `scripts/capture_screenshots.py` moved with it.
+
+### Added
+
+- The dashboard seam: `plugin_api.Dashboard` / `plugin_api.DashboardHost`
+  and `Registry.build_dashboard(tier)` (Free default: None). The core
+  dispatches only its fixed dashboard paths (`proxy.DASHBOARD_PATHS`) to a
+  registered dashboard, so a plugin can never shadow a core endpoint, and
+  rebuilds it when a reload changes the resolved license tier.
+  `ProxyState` satisfies `DashboardHost`: `config_file_path()`, the guard
+  methods, `validate_config(candidate)` (the editor's dry run, extracted
+  unchanged) and `preview(text)` (the live-pipeline dry run, extracted
+  unchanged).
+- `config.RESTART_ONLY_KEYS`: the one list `apply_config` pins and the
+  editor shows read-only (it was duplicated in both).
+
 ### Fixed
 
 - **A failed hot reload no longer half-applies the provider list.** When a

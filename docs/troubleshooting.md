@@ -43,8 +43,8 @@ message names the exact offender; fix it and re-run `serve --check`.
 Log lines from a `kill -HUP`. The first means the new file failed to parse
 or build — the proxy deliberately keeps serving the old config rather than
 crash; fix the file (`serve --check` shows the error) and HUP again. The
-second lists fields (host, port, vault, audit, log, tls, otel) that only
-apply on a full restart.
+second lists fields (host, port, vault, audit, log, tls, otel, users,
+email) that only apply on a full restart.
 
 ## "the vault at {path} is encrypted; set [vault] encryption = \"fernet\" …"
 
@@ -105,7 +105,7 @@ llm-redact-pro feature; the core parses and validates the
 `[upstreams]`/`[routing]`/`[prices]` sections but never runs them. Three
 surfaces say so, each naming the package: `serve`, `serve --check`, a
 SIGHUP reload (`config reload failed; keeping current config: …`) and
-the config editor's dry-run (a 400) refuse a config with
+the llm-redact-pro config editor's dry-run (a 400) refuse a config with
 `[routing] enabled = true` (`… requires the llm-redact-pro package
 (0.3+) …`); `llm-redact routes …` and `llm-redact spend` print
 `routing tooling requires the llm-redact-pro package 0.3 or newer …` and
@@ -126,18 +126,18 @@ number that is `nan` or `inf` (TOML spells both natively:
 `[prices.override."m"] input = inf`) or an integer literal too large
 for a `float` (a `monthly_budget_tokens` of hundreds of digits). Such a value would pass
 every other check and then never trip a threshold, break `/status` JSON
-and the editor's reparse guard; write a real number.
+and the (llm-redact-pro) config editor's reparse guard; write a real number.
 
 ## "edit the file and reload" (HTTP 400 from the config editor)
 
-The editor POST named `[upstreams]`, `[routing]` or `[prices]`. Those
-sections are deliberately file-only (the editor preserves them from file
-truth): edit the TOML, run `llm-redact serve --check`, then `kill -HUP`.
+(llm-redact-pro dashboard only.) The editor POST named `[upstreams]`,
+`[routing]` or `[prices]`. Those sections are deliberately file-only
+(the editor preserves them from file truth): edit the TOML, run `llm-redact serve --check`, then `kill -HUP`.
 
 ## "written to PATH but not applied (…); fix the cause and reload (SIGHUP)" (HTTP 500 from the config editor)
 
-The POST validated and the TOML was written (with its `.bak`), but
-hot-applying it failed after the dry run — a fault only the routing
+(llm-redact-pro dashboard only.) The POST validated and the TOML was
+written (with its `.bak`), but hot-applying it failed after the dry run — a fault only the routing
 layer's live swap can hit (the spend table in a locked vault file, say;
 the message carries the exception type). The file on disk is the new
 config, the running proxy still has the old one; remove the cause, then
@@ -192,4 +192,5 @@ rules, `[providers.NAME] detection = false`, MCP exempt servers, and
 language-scoped-out rules all deliberately forward values and are loudly
 listed there. If posture is clean, confirm the tool actually points at the
 proxy: `llm-redact run -- <tool>` injects the variable for you, and the
-dashboard's recent-request table shows whether traffic is arriving at all.
+recent-request feed (`GET /__llm-redact/recent`, or `/llm-redact:recent`
+in an agent) shows whether traffic is arriving at all.

@@ -144,7 +144,7 @@ if [[ "$method" == docker || "$method" == podman ]]; then
   cat <<'EOF'
   - point your tools at it: export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
     (OPENAI_BASE_URL / GOOGLE_GEMINI_BASE_URL / OLLAMA_HOST likewise)
-  - dashboard: http://127.0.0.1:8787/
+  - status: http://127.0.0.1:8787/__llm-redact/status (the browser dashboard is part of llm-redact-pro)
   - mount a config: -v ./config.toml:/etc/llm-redact/config.toml:ro
   - the sqlite vault lives on the llm-redact-data volume (persists restarts)
 EOF

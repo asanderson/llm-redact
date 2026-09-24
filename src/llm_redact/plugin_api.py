@@ -30,6 +30,11 @@ from .vault import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
+    from starlette.requests import Request
+    from starlette.responses import Response
+
     from .config import Config
 
 
@@ -313,7 +318,71 @@ class Router(Protocol):
     def close(self) -> None: ...
 
 
+# --- browser dashboard seam ---------------------------------------------------
+# The browser ops UI (the dashboard page, its config editor and redaction
+# preview) is a paid surface implemented in llm-redact-pro. The core keeps
+# the machine APIs every CLI and monitor depends on (/status, /metrics,
+# /healthz, /readyz, /recent, /events, /sessions, /audit, /users, /guide)
+# and dispatches ONLY its fixed dashboard paths (the bare prefix, /config,
+# /preview) to a registered Dashboard — a plugin can never shadow a core
+# endpoint. The core stamps the security headers on whatever it returns.
+
+
+class DashboardHost(Protocol):
+    """What the core exposes to a plugin-served dashboard (``ProxyState``
+    satisfies it structurally).
+
+    ``config`` is the live effective config (env overrides applied);
+    ``csrf_token`` the per-process token the guarded POSTs require in the
+    ``x-llm-redact-csrf`` header (the dashboard hands it to same-origin
+    pages). ``config_file_path`` is the file an edit is written to.
+    ``host_allowed`` / ``origin_allowed`` are the DNS-rebinding and Origin
+    checks; ``guarded_post_json`` runs the POST guard chain (CSRF header,
+    content type, 1 MiB cap, JSON parse) and returns ``(payload, None)`` or
+    ``(None, refusal)``. ``validate_config`` is the dry run of everything
+    ``apply_config`` builds (detectors, allowlists, modes, license, routing
+    credentials, the router's own checks) — it raises ``ValueError`` /
+    ``TypeError`` / ``re.error`` / ``ImportError`` and changes nothing.
+    ``apply_config`` is the SIGHUP hot-apply path and returns the
+    restart-required section names. ``preview`` runs the LIVE detection
+    pipeline over caller text on a throwaway vault (no upstream, vault,
+    metrics or audit write) and returns ``{redacted, detections, warnings,
+    blocked}`` — ``blocked`` is ``{"type": T}`` or None, never a value.
+    """
+
+    config: Config
+    csrf_token: str
+
+    def config_file_path(self) -> Path: ...
+
+    def host_allowed(self, request: Request) -> bool: ...
+
+    def origin_allowed(self, request: Request) -> bool: ...
+
+    async def guarded_post_json(
+        self, request: Request
+    ) -> tuple[Any, None] | tuple[None, Response]: ...
+
+    def validate_config(self, candidate: Config) -> None: ...
+
+    def apply_config(self, fresh: Config) -> list[str]: ...
+
+    def preview(self, text: str) -> dict[str, Any]: ...
+
+
+class Dashboard(Protocol):
+    """The browser dashboard a plugin serves (``Registry.build_dashboard``;
+    ``ProxyState.dashboard`` is None without one, and the core answers the
+    dashboard paths with a 404 naming the package). ``handle`` receives
+    only requests for the core's fixed dashboard paths and returns the
+    complete reply; it must never forward anything upstream."""
+
+    async def handle(self, request: Request, host: DashboardHost) -> Response: ...
+
+
 __all__ = [
+    "Dashboard",
+    "DashboardHost",
     "HopDecision",
     "HopRequest",
     "HopResult",

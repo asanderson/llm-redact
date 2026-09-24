@@ -576,9 +576,11 @@ async def test_reserved_endpoints_never_forwarded(client: httpx.AsyncClient) -> 
     assert unknown.status_code == 404
     posted = await client.post("/__llm-redact/status", content=b"{}")
     assert posted.status_code == 405
+    # The browser dashboard is the llm-redact-pro surface: without it the
+    # page answers a local 404 naming the package (test_dashboard_seam.py).
     dashboard = await client.get("/__llm-redact/")
-    assert dashboard.status_code == 200
-    assert "data-llm-redact-dashboard" in dashboard.text
+    assert dashboard.status_code == 404
+    assert "llm-redact-pro" in dashboard.json()["error"]
     # The non-forwarding guarantee: nothing above reached the fake upstream.
     assert received == {}
 

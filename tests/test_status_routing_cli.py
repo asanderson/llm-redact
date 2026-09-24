@@ -1,9 +1,8 @@
-"""`llm-redact status`'s routing summary + posture lines, and the dashboard's
-routing surface — driven by literal /status payloads in the contract's shape
-(the proxy is never started here)."""
+"""`llm-redact status`'s routing summary + posture lines — driven by literal
+/status payloads in the contract's shape (the proxy is never started here).
+The browser dashboard's routing card is pinned in llm-redact-pro."""
 
 import argparse
-import importlib.resources
 from typing import Any
 
 import httpx
@@ -248,24 +247,3 @@ def test_print_routing_tolerates_sparse_upstream_entries(
     assert "routing: enabled — 0 rules, default: none" in out
     assert "routing upstream[bare]: protocol=openai credential=none cost=zero state=?" in out
     assert "routing upstream[totalled]:" in out and "spend $0.5000 / 77 tokens" in out
-
-
-def test_dashboard_carries_routing_pill_and_table() -> None:
-    html = importlib.resources.files("llm_redact").joinpath("dashboard.html").read_text("utf-8")
-    assert 'id="routing"' in html  # the pill
-    assert 'id="routing-card"' in html and 'id="routing-upstreams"' in html
-    assert 'id="routing-warnings"' in html
-    assert "function renderRouting" in html and "renderRouting(s.routing" in html
-    # Per-upstream columns the contract names, and the budget-exhausted /
-    # cooldown states surfaced loudly.
-    for column in ("upstream", "protocol", "credential", "cost", "state", "budget"):
-        assert f"<th>{column}</th>" in html or f'<th class="num">{column}</th>' in html
-    assert "budget_exhausted" in html and "cooldown" in html
-    assert "unpriced_models" in html and "unpriced_models_dropped" in html
-    # The budget cell keys zero-cost off the upstream's `cost` field (the
-    # /status spend block carries no zero_cost key; remaining_* is null).
-    assert 'routingBudget(u.spend, u.cost === "zero")' in html
-    assert "if (zeroCost || spend.zero_cost)" in html
-    # Self-contained and textContent-only (no innerHTML anywhere on the page).
-    assert "innerHTML" not in html
-    assert "http://" not in html and "https://" not in html

@@ -9,8 +9,10 @@ threat-model boundary, each named for the attack it repels and cross-referenced
 to the doc section it guards, so a weakened gate fails HERE even when the
 feature it protects still works.
 
-Individual endpoints have their own deep suites (`test_config_endpoint.py`,
-`test_tls.py`, `test_proxy_integration.py`); this file deliberately overlaps
+Individual endpoints have their own deep suites (`test_sessions_endpoint.py`,
+`test_tls.py`, `test_proxy_integration.py`; the llm-redact-pro dashboard's
+config editor and preview carry the same map in that package's
+`test_security_boundaries_dashboard.py`); this file deliberately overlaps
 them — the value is the single, complete map from boundary to guard, and
 parametrization over EVERY guarded endpoint so a newly added one that forgets a
 layer is caught.
@@ -53,27 +55,32 @@ from llm_redact.detection.engine import DetectionConfig
 from llm_redact.proxy import (
     _SECURITY_HEADERS,
     CSRF_HEADER,
+    DASHBOARD_PATHS,
     RESERVED_PREFIX,
     create_app,
 )
 
 LOOPBACK = "http://127.0.0.1:8787"
 
-# The three guarded mutating endpoints share ONE guard chain in the code
+# The guarded mutating endpoints share ONE guard chain in the code
 # (`_guarded_post_json`, wrapped by per-endpoint Host/Origin checks). A minimal
 # valid body per endpoint lets us prove each layer independently of the
 # endpoint's own payload validation, which runs strictly after the guards.
+# (The core's user invite/revoke POSTs answer 403 before the chain without
+# the llm-redact-pro users registry; the dashboard's /config and /preview
+# POSTs are pinned by the pro package's own boundary suite.)
 GUARDED_POSTS = {
-    f"{RESERVED_PREFIX}/config": {"config": {}},
     f"{RESERVED_PREFIX}/sessions/prune": {"older_than_days": 30},
-    f"{RESERVED_PREFIX}/preview": {"text": "hello"},
 }
 
-# Every local endpoint that consults Host/Origin before doing anything —
-# the GET reads plus the guarded POSTs.
+# Every local endpoint that consults Host before doing anything — the GET
+# reads plus the guarded POSTs.
 HOST_GATED = [
-    f"{RESERVED_PREFIX}/config",
     f"{RESERVED_PREFIX}/sessions",
+    f"{RESERVED_PREFIX}/recent",
+    f"{RESERVED_PREFIX}/events",
+    f"{RESERVED_PREFIX}/audit",
+    f"{RESERVED_PREFIX}/users",
     *GUARDED_POSTS,
 ]
 
@@ -99,7 +106,15 @@ def _echo_upstream() -> Starlette:
 
 def _client(config: Config, *, base_url: str = LOOPBACK) -> httpx.AsyncClient:
     app = create_app(config, upstream_transport=httpx.ASGITransport(app=_echo_upstream()))
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
+    _tokens[id(client)] = app.state.proxy.csrf_token
+    return client
+
+
+# The per-process CSRF token. The llm-redact-pro dashboard hands it to
+# same-origin pages; without that package there is no page, so the positive
+# controls read it off the live ProxyState.
+_tokens: dict[int, str] = {}
 
 
 def _base_config(**overrides) -> Config:
@@ -107,9 +122,7 @@ def _base_config(**overrides) -> Config:
 
 
 async def _csrf(client: httpx.AsyncClient) -> str:
-    resp = await client.get(f"{RESERVED_PREFIX}/config")
-    assert resp.status_code == 200
-    return str(resp.json()["csrf_token"])
+    return _tokens[id(client)]
 
 
 # --- B1: reserved paths answered before routing, provably never forwarded ----
@@ -121,10 +134,18 @@ async def test_b1_reserved_paths_never_reach_upstream() -> None:
     any routing/upstream code. The echo upstream tags every path it sees; a
     reserved path must never carry that tag."""
     client = _client(_base_config())
-    for path in ("/status", "/metrics", "/recent", "/config"):
+    for path in ("/status", "/metrics", "/recent", "/sessions"):
         resp = await client.get(f"{RESERVED_PREFIX}{path}")
         assert resp.status_code == 200, path
         assert "seen_path" not in resp.text, f"{path} was forwarded upstream"
+    # The dashboard paths without llm-redact-pro: a local 404 naming the
+    # package — still answered before routing, never forwarded.
+    for path in sorted(DASHBOARD_PATHS):
+        for method in ("GET", "POST"):
+            resp = await client.request(method, path)
+            assert resp.status_code == 404, path
+            assert "llm-redact-pro" in resp.json()["error"], path
+            assert "seen_path" not in resp.text, f"{path} was forwarded upstream"
 
 
 # --- B2: Host validation (DNS rebinding) -------------------------------------
@@ -155,7 +176,7 @@ async def test_b3_hostile_origin_rejected(origin: str) -> None:
     origin. `null` (sandboxed iframe / file://) and any remote origin are
     refused. Without TLS, even an https loopback origin is refused."""
     client = _client(_base_config())
-    resp = await client.get(f"{RESERVED_PREFIX}/config", headers={"origin": origin})
+    resp = await client.get(f"{RESERVED_PREFIX}/sessions", headers={"origin": origin})
     assert resp.status_code == 403
 
 
@@ -165,7 +186,7 @@ async def test_b3_https_origin_refused_without_tls() -> None:
     acceptable when the proxy itself serves TLS."""
     client = _client(_base_config())
     resp = await client.get(
-        f"{RESERVED_PREFIX}/config", headers={"origin": "https://127.0.0.1:8787"}
+        f"{RESERVED_PREFIX}/sessions", headers={"origin": "https://127.0.0.1:8787"}
     )
     assert resp.status_code == 403
 
@@ -173,7 +194,7 @@ async def test_b3_https_origin_refused_without_tls() -> None:
 @pytest.mark.anyio
 async def test_b3_local_origin_accepted() -> None:
     client = _client(_base_config())
-    resp = await client.get(f"{RESERVED_PREFIX}/config", headers={"origin": LOOPBACK})
+    resp = await client.get(f"{RESERVED_PREFIX}/sessions", headers={"origin": LOOPBACK})
     assert resp.status_code == 200
 
 
@@ -406,7 +427,8 @@ async def test_b11_query_auth_never_logged() -> None:
 async def test_b12_status_and_metrics_carry_no_values() -> None:
     """Threat-model § Local ops surface: status/metrics expose types and counts
     only. Even the allowlist (a configured value list) must not surface there —
-    the config-editor GET is the single documented exception for allowlists."""
+    the (llm-redact-pro) config-editor GET is the single documented exception
+    for allowlists, pinned in that package."""
     secret_allow = "allowlisted.person@corp.example"
     client = _client(_base_config(detection=DetectionConfig(allowlist=(secret_allow,))))
     # Drive traffic so counters populate.
@@ -417,9 +439,6 @@ async def test_b12_status_and_metrics_carry_no_values() -> None:
     metrics = (await client.get(f"{RESERVED_PREFIX}/metrics")).text
     assert secret_allow not in status
     assert secret_allow not in metrics
-    # The config-editor GET IS allowed to echo the allowlist (documented).
-    editor = (await client.get(f"{RESERVED_PREFIX}/config")).json()
-    assert secret_allow in editor["editable"]["detection"]["allowlist"]
 
 
 # --- B13 (1.16.0): disabled provider fails closed on inferred MEDIA paths ----

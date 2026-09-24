@@ -24,7 +24,7 @@ from .licensing import ENV_KEY, FREE, ResolvedLicense
 
 if TYPE_CHECKING:
     from .config import Config, OtelConfig
-    from .plugin_api import Router, Telemetry
+    from .plugin_api import Dashboard, Router, Telemetry
 
 _PRO_HINT = "install the llm-redact-pro package to enable it"
 
@@ -62,6 +62,21 @@ def build_router(config: Config, tier: str) -> Router | None:
         " upstream routing, fallback chains and budgets are pro subsystems;"
         f" {_PRO_HINT}"
     )
+
+
+def build_dashboard(tier: str) -> Dashboard | None:
+    """Always None: the browser dashboard (status view, config editor,
+    redaction preview) is implemented in llm-redact-pro.
+
+    Unlike a paid CONFIG section there is nothing to fail closed on — the
+    dashboard is never requested by config — so the core simply answers
+    the dashboard paths with a 404 naming the package, while the machine
+    APIs (/status, /metrics, …) and the CLI twins (``llm-redact status``,
+    ``llm-redact preview``) keep working keyless. ``tier`` is part of the
+    factory contract (the pro builder honors it) and unused here.
+    """
+    del tier
+    return None
 
 
 def resolve_license(

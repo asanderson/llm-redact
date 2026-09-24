@@ -366,8 +366,8 @@ def _serve_config(args: argparse.Namespace) -> Config:
             config, vault=dataclasses.replace(config.vault, session=args.session)
         )
     if args.port is not None:
-        # Bake the override into the config so /status and the config
-        # editor report the port actually being served.
+        # Bake the override into the config so /status (and the
+        # llm-redact-pro config editor) report the port actually being served.
         config = dataclasses.replace(config, port=args.port)
     return config
 
@@ -434,12 +434,12 @@ def main(argv: list[str] | None = None) -> None:
         # One startup line: uvicorn's own "running on ..." banner is
         # suppressed by log_level="warning", so without this the proxy
         # started in TOTAL silence — no confirmation, no port, no pointer
-        # to the dashboard for a first-time user.
+        # to the status endpoint for a first-time user.
         from llm_redact import __version__
 
         scheme = "https" if config.tls.enabled else "http"
         logging.getLogger("llm_redact").info(
-            "llm-redact %s serving on %s://%s:%d — dashboard %s://%s:%d/__llm-redact/",
+            "llm-redact %s serving on %s://%s:%d — status %s://%s:%d/__llm-redact/status",
             __version__,
             scheme,
             config.host,

@@ -79,14 +79,15 @@ def _check_platform(report: _Report) -> None:
     """Windows-specific posture (silent elsewhere — no noise on the
     platforms where nothing differs). The supported Windows scope is the
     Free tier plus the agent plugins; SIGHUP does not exist there, so the
-    reload path is the dashboard config editor (hot-apply) or a restart."""
+    reload path is a restart (or, with llm-redact-pro, the dashboard config
+    editor's hot-apply)."""
     if sys.platform != "win32":
         return
     report.line(
         "PASS",
         "platform",
         "Windows: supported scope is the Free tier + agent plugins; reload via"
-        " the config editor or a restart (SIGHUP is unavailable), and run the"
+        " a restart or the llm-redact-pro config editor (SIGHUP is unavailable), and run the"
         " proxy as a foreground/logon task (`llm-redact service install`"
         " prints a Task Scheduler command)",
     )

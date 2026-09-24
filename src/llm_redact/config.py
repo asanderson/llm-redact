@@ -132,6 +132,12 @@ class RehydrationConfig:
 # operator names the driver module and the store uses its portable SQL subset.
 RDBMS_BACKENDS = ("postgresql", "mysql", "oracle", "dbapi")
 
+# Config sections a hot reload (SIGHUP / the pro dashboard's editor) pins to
+# their running values: changing them requires a restart. The single source
+# of truth for apply_config and the editor's read-only set (README.md and
+# docs/deployment.md enumerate it — pinned by test_restart_only_docs.py).
+RESTART_ONLY_KEYS = ("vault", "audit", "host", "port", "log", "tls", "otel", "users", "email")
+
 
 @dataclass(frozen=True)
 class RdbmsConfig:
@@ -261,8 +267,9 @@ DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MiB: covers 200k-token bodies
 # Rule-based upstream routing is a paid subsystem implemented in the
 # llm-redact-pro package; the core keeps only the config SHAPES (these
 # constants and dataclasses, the parser below and the emitter in
-# config_write.py) so `serve --check`, `config show`, doctor and the config
-# editor validate the same schema with or without the package. Every
+# config_write.py) so `serve --check`, `config show`, doctor and the
+# (llm-redact-pro) config editor validate the same schema with or without
+# the package. Every
 # routing DECISION — rule selection, credentials, chains, cooldowns,
 # plan-limit detection, budgets, prices — lives in that package.
 
@@ -1424,7 +1431,8 @@ def load_config(path: Path | None = None) -> Config:
 def resolve_config_path() -> Path | None:
     """The effective config file per the search order, or None if none exists.
 
-    Also used by the config editor to decide which file an edit rewrites, so
+    Also used by the (llm-redact-pro) config editor to decide which file an
+    edit rewrites, so
     an env-selected or /etc config is edited in place rather than shadowed by
     a freshly created XDG file.
     """
@@ -1444,9 +1452,9 @@ def resolve_config_path() -> Path | None:
 def parse_config(raw: dict[str, Any], where: str) -> Config:
     """Validate an already-parsed TOML document into a Config.
 
-    The single validation path: load_config and the /__llm-redact/config
-    editor endpoint both go through here, so a value the editor accepts is
-    exactly a value the file would accept.
+    The single validation path: load_config and the llm-redact-pro
+    dashboard's /__llm-redact/config editor endpoint both go through here,
+    so a value the editor accepts is exactly a value the file would accept.
     """
     _require_keys(
         raw,
@@ -1489,7 +1497,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
                 _add_custom_provider(providers, custom_name, custom_section)
             continue
         if name.startswith("custom:"):
-            # Flat spelling of the same thing — the config editor posts
+            # Flat spelling of the same thing — the (pro) config editor posts
             # this form; the emitter always writes the nested canonical.
             _add_custom_provider(providers, name.removeprefix("custom:"), section)
             continue
@@ -1564,7 +1572,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     allowlist_by_type = tuple(sorted(by_type_entries))
     modes_raw = detection_raw.get("modes", {})
     if not isinstance(modes_raw, dict):
-        # TOML can't produce a non-table here, but the /config editor feeds
+        # TOML can't produce a non-table here, but the (pro) /config editor feeds
         # arbitrary JSON through this same path: 400, not a 500.
         raise ConfigError("[detection.modes] must be a table of rule_name = mode")
     for rule_name, mode in modes_raw.items():
@@ -1876,8 +1884,9 @@ def _is_loopback_host(host: str) -> bool:
 def validate_bind_security(host: str, tls: TlsConfig, environ: Mapping[str, str]) -> None:
     """Fail-closed bind policy, checked by `serve` before the socket opens.
 
-    A non-loopback bind exposes the vault's rehydrated values, the config
-    editor, and detection metadata to the network, so it requires FULL
+    A non-loopback bind exposes the vault's rehydrated values, the ops
+    surface (and the llm-redact-pro config editor), and detection metadata
+    to the network, so it requires FULL
     mutual TLS — server certfile+keyfile AND client_ca. Server-only TLS is
     allowed on loopback (encrypting local traffic is harmless). The
     LLM_REDACT_INSECURE_BIND=1 hatch exists solely for confined wider

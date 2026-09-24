@@ -52,7 +52,7 @@ TIER_USER_CAPS: dict[str, int | None] = {
 
 GRACE_DAYS = 14
 # A valid license this close to expiry starts warning (startup log, /status,
-# doctor, dashboard — everything that reads ResolvedLicense.warnings), so
+# doctor, the pro dashboard — everything that reads ResolvedLicense.warnings), so
 # renewal is prompted before the grace window is ever needed.
 EXPIRY_WARN_DAYS = 30
 

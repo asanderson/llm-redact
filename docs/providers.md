@@ -158,4 +158,4 @@ Detection can also be scoped by language
 rules; universal rules always run) and per MCP server
 (`[detection.mcp] exempt_servers` exempts a trusted server's MCP
 content blocks). Every such opt-out is surfaced in `/status`, `doctor`,
-and the dashboard — never silent.
+and `llm-redact status` — never silent.

@@ -23,7 +23,8 @@ proprietary **`llm-redact-pro`** package.
 | Named users (email-verified seats) | implicit single local user | 1 | 25 | unlimited |
 | The entire redaction/rehydration path: every rule, mode, NER backend, deny/allow lists, the realtime relay | ✓ | ✓ | ✓ | ✓ |
 | ALL provider adapters — Anthropic/OpenAI/Gemini/Ollama/Cohere/custom **and** AWS Bedrock / Azure OpenAI / GCP Vertex | ✓ | ✓ | ✓ | ✓ |
-| In-memory + persistent unencrypted SQLite vault, JSON logs, dashboard/editor/preview, doctor, plugins | ✓ | ✓ | ✓ | ✓ |
+| In-memory + persistent unencrypted SQLite vault, JSON logs, JSON `/status` + Prometheus `/metrics` + `/recent`/`/events` feeds, `llm-redact status`/`preview`/`doctor`, agent plugins | ✓ | ✓ | ✓ | ✓ |
+| Browser dashboard: live status view, config editor, redaction-preview card (`/__llm-redact/`) | | ✓ | ✓ | ✓ |
 | Non-loopback (mTLS) serving; Kubernetes deployment (Helm chart + HPA) | ✓ | ✓ | ✓ | ✓ |
 | Server persistent vault (PostgreSQL / MySQL / Oracle / any DB-API RDBMS, incl. cloud-managed DBMS), vault encryption at rest, audit log + tamper chain + backup sinks (with batch encryption), OTel, per-conversation sessions, named users, rule-based upstream routing (named upstreams, fallback chains with cooldown + Anthropic plan-limit detection, monthly budgets) | | ✓ | ✓ | ✓ |
 
@@ -31,7 +32,7 @@ proprietary **`llm-redact-pro`** package.
 
 - **The core never asks for one.** A key matters only to the pro
   package's subsystems; the core resolves and displays it (status,
-  dashboard, doctor) but enforces nothing.
+  doctor) but enforces nothing.
 - **Verification is entirely offline** — the proxy never phones home.
 - **Resolution order**: `LLM_REDACT_LICENSE_KEY` env var → `[license] key`
   → `[license] key_file`.
@@ -40,7 +41,7 @@ proprietary **`llm-redact-pro`** package.
   downgrade; with the package installed, its own factories honor the
   key's tier, seats, and expiry.
 - **Expiry**: a valid key starts warning 30 days before expiry (startup
-  log, `/status`, doctor, dashboard) and keeps its tier for a 14-day
+  log, `/status`, doctor) and keeps its tier for a 14-day
   grace window after it.
 - `llm-redact license show` decodes your key.
 - **Named seats** (`llm-redact users`) live in the pro package; the
@@ -77,7 +78,12 @@ boundary, the signed key the secondary tier gate. In practice:
 - A paid config without that package **fails closed** with a
   `ConfigError` naming the feature and the package — never a silent
   downgrade.
-- `doctor`, `/status`, and the dashboard each carry a
+- The browser dashboard's paths (`/__llm-redact/`, `/config`,
+  `/preview`) answer a local 404 naming the package (or, keyless with
+  the package installed, the missing key); the machine APIs it reads
+  (`/status`, `/metrics`, `/recent`, `/events`, `/sessions`) and the CLI
+  twins stay in the core.
+- `doctor` and `/status` each carry a
   **licensed-features package: installed / not installed** line, so the
   boundary is never a guess.
 - The redaction/rehydration core stays wholly in the FOSS wheel — and

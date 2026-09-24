@@ -60,8 +60,9 @@ not, so a rebinding page could poll `/recent` to defeat the `/events`
 protection. Both now run the same `_host_allowed` check. `/metrics`,
 `/healthz`, and `/readyz` stay open by design (Prometheus scraping and k8s
 probes legitimately arrive from non-loopback with the configured host, which is
-in the allowlist). Test: `test_recent_and_audit_reject_foreign_host`
-(parametrized) in `test_dashboard.py`.
+in the allowlist). Test: `test_b2_hostile_host_rejected` (parametrized
+over every host-gated endpoint, `/recent` and `/audit` included) in
+`test_security_boundaries.py`.
 
 ### Defense-in-depth hardening (all operator-input only)
 

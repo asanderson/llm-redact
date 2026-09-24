@@ -12,7 +12,6 @@ Design rules enforced here:
 
 import asyncio
 import dataclasses
-import hashlib
 import importlib.resources
 import importlib.util
 import json
@@ -22,7 +21,6 @@ import re
 import secrets
 import signal
 import time
-import tomllib
 import urllib.parse
 from collections import Counter, deque
 from collections.abc import AsyncIterator, Mapping
@@ -48,23 +46,21 @@ from llm_redact.audit import (
 from llm_redact.audit_s3 import AzureAuditSink, S3AuditSink
 from llm_redact.config import (
     RDBMS_BACKENDS,
+    RESTART_ONLY_KEYS,
     Config,
     ConfigError,
     apply_env_overrides,
     default_config_path,
     load_config,
-    parse_config,
     resolve_config_path,
     resolve_credentials,
 )
-from llm_redact.config_write import emit_config_toml, write_config_atomic
 from llm_redact.detection.engine import (
     active_rule_names,
     build_allowlist,
     build_detectors,
     build_modes,
 )
-from llm_redact.detection.regex_rules import BUILTIN_RULES
 from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
 from llm_redact.licensing import ResolvedLicense, resolve_license
@@ -73,6 +69,7 @@ from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
 from llm_redact.placeholders import PLACEHOLDER_RE
 from llm_redact.plugin_api import (
+    Dashboard,
     HopRequest,
     HopResult,
     LocalAnswer,
@@ -96,6 +93,17 @@ from llm_redact.vault import Vault, VaultManager
 # Local endpoints under this prefix are answered by the proxy itself and are
 # never forwarded upstream (see the first statement of handle()).
 RESERVED_PREFIX = "/__llm-redact"
+# The browser dashboard's paths (the bare prefix and trailing-slash form
+# serve the page; /config is its editor, /preview its dry run). Answered by
+# the registered llm-redact-pro Dashboard, else a 404 naming the package.
+DASHBOARD_PATHS = frozenset(
+    {
+        RESERVED_PREFIX,
+        f"{RESERVED_PREFIX}/",
+        f"{RESERVED_PREFIX}/config",
+        f"{RESERVED_PREFIX}/preview",
+    }
+)
 
 # How often the [vault] session_ttl_days background task sweeps for idle
 # sessions. Retention is a slow signal; hourly is ample and keeps the sqlite
@@ -262,15 +270,11 @@ class ProxyState:
         # bounded queue; a slow consumer drops events (it still has the
         # dashboard's poll fallback) rather than backpressuring the proxy.
         self.event_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
-        # Per-process CSRF token for the config editor: readable only via a
-        # same-origin GET (the proxy never sends CORS headers), required as a
-        # custom header on POST /__llm-redact/config.
+        # Per-process CSRF token for the guarded local POSTs (session prune,
+        # user invite/revoke, the pro dashboard's editor and preview): handed
+        # out only by the dashboard's same-origin GET (the proxy never sends
+        # CORS headers), required as a custom header on every such POST.
         self.csrf_token = secrets.token_urlsafe(32)
-        # Package data, read once: the dashboard is a single self-contained
-        # HTML file (inline CSS/JS, no CDNs) polling the local endpoints.
-        self.dashboard_html = (
-            importlib.resources.files("llm_redact").joinpath("dashboard.html").read_text("utf-8")
-        )
         # The packaged user guide, served at /__llm-redact/guide — same
         # self-contained, load-once treatment as the dashboard.
         self.guide_html = (
@@ -308,6 +312,10 @@ class ProxyState:
         for warning in config.routing.warnings:  # parser-owned (inert upstreams, metered
             logger.warning("routing: %s", warning)  # defaults, dead chains) — always logged
         self.router: Router | None = registry.build_router(config, self.license.tier)
+        # The browser dashboard (llm-redact-pro): None without the package
+        # or when it declines the tier; the dashboard paths then 404 with
+        # the reason. Rebuilt by apply_config when a reload changes the tier.
+        self.dashboard: Dashboard | None = registry.build_dashboard(self.license.tier)
 
     def resolve_user(self, presented_key: str | None) -> str | None:
         if presented_key is None or self.users_store is None:
@@ -407,17 +415,7 @@ class ProxyState:
         """
         restart_required = [
             field_name
-            for field_name in (
-                "vault",
-                "audit",
-                "host",
-                "port",
-                "log",
-                "tls",
-                "otel",
-                "users",
-                "email",
-            )
+            for field_name in RESTART_ONLY_KEYS
             if getattr(fresh, field_name) != getattr(self.config, field_name)
         ]
         for field_name in restart_required:
@@ -425,16 +423,7 @@ class ProxyState:
                 "config reload: [%s] changes require restart; keeping current", field_name
             )
         effective = dataclasses.replace(
-            fresh,
-            vault=self.config.vault,
-            audit=self.config.audit,
-            host=self.config.host,
-            port=self.config.port,
-            log=self.config.log,
-            tls=self.config.tls,
-            otel=self.config.otel,
-            users=self.config.users,
-            email=self.config.email,
+            fresh, **{name: getattr(self.config, name) for name in RESTART_ONLY_KEYS}
         )
 
         # Re-resolve the license BEFORE anything is built or swapped:
@@ -486,6 +475,9 @@ class ProxyState:
                 router.reconfigure(effective)
         else:
             router = None
+        dashboard = self.dashboard
+        if license_resolved.tier != self.license.tier:
+            dashboard = get_registry().build_dashboard(license_resolved.tier)
         self.config = effective
         self.license = license_resolved
         self.adapters = adapters
@@ -500,10 +492,73 @@ class ProxyState:
         if self.router is not None and router is not self.router:
             self.router.close()
         self.router = router
+        self.dashboard = dashboard
         for warning in effective.routing.warnings:
             logger.warning("routing: %s", warning)
         logger.info("config reloaded (%d detection rules)", len(detectors))
         return restart_required
+
+    # --- DashboardHost (plugin_api): what the pro dashboard may use --------
+
+    def config_file_path(self) -> Path:
+        """The file a dashboard config edit is written to."""
+        if self.config_path is not None:
+            return self.config_path
+        return resolve_config_path() or default_config_path()
+
+    def host_allowed(self, request: Request) -> bool:
+        return _host_allowed(request, self)
+
+    def origin_allowed(self, request: Request) -> bool:
+        return _origin_allowed(request, self)
+
+    async def guarded_post_json(self, request: Request) -> tuple[Any, None] | tuple[None, Response]:
+        return await _guarded_post_json(request, self)
+
+    def validate_config(self, candidate: Config) -> None:
+        """Dry-run everything apply_config would build for ``candidate``
+        (the file-level config, env overrides NOT yet applied), changing
+        nothing: detectors/allowlists/modes (bad regexes, unknown rules,
+        missing NER extras), license resolution (a bad [license] value),
+        the routing credentials (an ``env:VAR`` that vanished), and the
+        router's own checks — or, when the file enabled routing since
+        startup, a build-and-close probe so a refusal (package absent,
+        Free tier, bad price file) surfaces here rather than after a write.
+        """
+        build_detectors(candidate.detection)
+        build_allowlist(candidate.detection)
+        build_modes(candidate.detection)
+        effective = apply_env_overrides(candidate)
+        resolved = _resolve_license_info(effective)
+        resolve_credentials(candidate.routing, os.environ)
+        if self.router is not None:
+            self.router.validate(candidate)
+        elif candidate.routing.enabled:
+            probe = get_registry().build_router(effective, resolved.tier)
+            if probe is not None:
+                probe.close()
+
+    def preview(self, text: str) -> dict[str, Any]:
+        """Run the LIVE detectors/allowlist/modes over ``text`` on a
+        throwaway vault with fresh counters: no upstream request, and the
+        live vault, metrics and audit are never touched. Warn-mode values
+        stay in ``redacted`` — a real request forwards them (honest); a
+        block-mode match reports its type only, never the value."""
+        from llm_redact.vault import InMemoryVault
+
+        redactor = Redactor(self.detectors, InMemoryVault(), self.allowlist, modes=self.modes)
+        blocked: dict[str, str] | None = None
+        redacted: str | None = None
+        try:
+            redacted = redactor.redact_text(text)
+        except BlockedRequest as exc:
+            blocked = {"type": exc.detector_type}
+        return {
+            "redacted": redacted,
+            "detections": dict(redactor.counts),
+            "warnings": dict(redactor.warn_counts),
+            "blocked": blocked,
+        }
 
     def refresh_license_warnings(self, *, today: date | None = None) -> None:
         """Re-resolve the license for WARNING purposes only.
@@ -986,17 +1041,46 @@ async def _stream_rehydrated_eventstream(
         )
 
 
+def _dashboard_unavailable(state: ProxyState) -> str:
+    """Why the dashboard paths 404 — never a guess: the package is absent,
+    present but its plugin did not register, or present but it declined
+    the dashboard (the pro builder honors the license tier)."""
+    free_apis = (
+        "the free core serves JSON status at /__llm-redact/status and Prometheus"
+        " metrics at /__llm-redact/metrics (see `llm-redact status` and"
+        " `llm-redact preview`)"
+    )
+    if not pro_package_installed():
+        return (
+            "the web dashboard (status view, config editor, redaction preview) is"
+            f" provided by the llm-redact-pro package, which is not installed; {free_apis}"
+        )
+    if not loaded_plugins():
+        return (
+            "llm-redact-pro is installed but its plugin did not register (see the"
+            f" startup log), so the web dashboard is unavailable; {free_apis}"
+        )
+    return (
+        "llm-redact-pro did not enable the web dashboard: it needs a Pro license key"
+        f" (current tier: {state.license.tier}) and llm-redact-pro 0.4 or newer; {free_apis}"
+    )
+
+
 async def _handle_local(request: Request, state: ProxyState) -> Response:
     """Answer reserved /__llm-redact endpoints locally. Metadata only —
-    never values; allowlists reported as counts. The /config editor endpoint
-    is the one exception on both fronts: it accepts POST (behind the layered
-    checks in _handle_config) and returns allowlist values."""
+    never values; allowlists reported as counts. The dashboard paths are
+    delegated to the llm-redact-pro Dashboard (its config editor is the one
+    exception on both fronts: it accepts POST behind the guard chain and
+    returns allowlist values)."""
     path = request.url.path
 
-    if path == f"{RESERVED_PREFIX}/config":
-        return await _handle_config(request, state)
-    if path == f"{RESERVED_PREFIX}/preview":
-        return await _handle_preview(request, state)
+    # The browser dashboard (page, config editor, redaction preview) is the
+    # llm-redact-pro surface: only these fixed paths are ever dispatched to
+    # it, so a plugin can never shadow a core endpoint below.
+    if path in DASHBOARD_PATHS:
+        if state.dashboard is not None:
+            return await state.dashboard.handle(request, state)
+        return JSONResponse({"error": _dashboard_unavailable(state)}, status_code=404)
     if path in (f"{RESERVED_PREFIX}/sessions", f"{RESERVED_PREFIX}/sessions/prune"):
         return await _handle_sessions(request, state)
     if path in (
@@ -1016,15 +1100,6 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
     if path == f"{RESERVED_PREFIX}/readyz":
         return JSONResponse(
             {"status": "ready", "version": __version__, "realtime": websockets_available()}
-        )
-
-    # The dashboard fetches absolute /__llm-redact/* paths, so both the bare
-    # prefix and the trailing-slash form serve it (no redirect round-trip).
-    if path in (RESERVED_PREFIX, f"{RESERVED_PREFIX}/"):
-        return Response(
-            content=state.dashboard_html,
-            media_type="text/html; charset=utf-8",
-            headers={"cache-control": "no-store"},
         )
 
     if path == f"{RESERVED_PREFIX}/guide":
@@ -1265,19 +1340,8 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
     return JSONResponse({"error": "unknown llm-redact endpoint"}, status_code=404)
 
 
-# Keys the editor may change; host/port/vault/audit are restart-only and are
-# always taken from the on-disk file, never from the request.
-_EDITABLE_KEYS = frozenset(
-    {"inject_system_note", "max_body_bytes", "rehydration", "detection", "providers", "license"}
-)
-_READONLY_KEYS = frozenset(
-    {"host", "port", "vault", "audit", "log", "tls", "otel", "users", "email"}
-)
-# Hot-reloadable (SIGHUP / apply_config) but NOT editable in the dashboard:
-# the routing sections are preserved from FILE truth by the editor's merge,
-# and a POST naming one of them is refused (decision 16; the llm-redact-pro
-# routing layer).
-_FILE_PRESERVED_KEYS = frozenset({"upstreams", "routing", "prices"})
+# Body cap for the guarded local POSTs (session prune, user invite/revoke,
+# and the pro dashboard's config editor and preview).
 _CONFIG_BODY_LIMIT = 1024 * 1024
 CSRF_HEADER = "x-llm-redact-csrf"
 
@@ -1305,169 +1369,6 @@ def _origin_allowed(request: Request, state: ProxyState) -> bool:
     parsed = urllib.parse.urlsplit(origin)
     schemes = ("http", "https") if state.config.tls.enabled else ("http",)
     return parsed.scheme in schemes and (parsed.hostname or "").lower() in _allowed_hostnames(state)
-
-
-def _config_target_path(state: ProxyState) -> Path:
-    if state.config_path is not None:
-        return state.config_path
-    return resolve_config_path() or default_config_path()
-
-
-def _config_fingerprint(path: Path) -> str | None:
-    """Content hash of the config file, used by the editor's stale-form
-    guard: a Save against a file that changed since the form loaded (a CLI
-    edit, a SIGHUP'd rewrite, another browser tab) must not silently
-    last-writer-wins over it."""
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return None
-
-
-def _editable_view(config: Config) -> dict[str, Any]:
-    ner = config.detection.ner
-    return {
-        "inject_system_note": config.inject_system_note,
-        "max_body_bytes": config.max_body_bytes,
-        "rehydration": {"fuzzy": config.rehydration.fuzzy},
-        "detection": {
-            "enabled": list(config.detection.enabled),
-            "languages": (
-                list(config.detection.languages) if config.detection.languages is not None else None
-            ),
-            "allowlist": list(config.detection.allowlist),
-            "allowlist_patterns": list(config.detection.allowlist_patterns),
-            "allowlist_by_type": {
-                detector_type: list(values)
-                for detector_type, values in config.detection.allowlist_by_type
-            },
-            "modes": {name: mode for name, mode in config.detection.modes},
-            "mcp": {"exempt_servers": list(config.detection.mcp_exempt_servers)},
-            "deny_strings": [
-                {
-                    "value": entry.value,
-                    "case_sensitive": entry.case_sensitive,
-                    "type": entry.detector_type,
-                }
-                for entry in config.detection.deny_strings
-            ],
-            "custom_rules": [
-                {
-                    "name": rule.name,
-                    "type": rule.detector_type,
-                    "pattern": rule.pattern,
-                    "priority": rule.priority,
-                    # Only surface the optional gate/prefilter fields when set,
-                    # so a rule without them round-trips to the same TOML.
-                    **({"validator": rule.validator} if rule.validator is not None else {}),
-                    **({"required": list(rule.required)} if rule.required else {}),
-                    **({"anchors": list(rule.anchors)} if rule.anchors else {}),
-                }
-                for rule in config.detection.custom_rules
-            ],
-            "ner": {
-                "enabled": ner.enabled,
-                "backend": ner.backend,
-                "backends": list(ner.active_backends()),
-                "entities": list(ner.entities),
-                "max_chars": ner.max_chars,
-                "score_threshold": ner.score_threshold,
-                "language": ner.language,
-                "model": ner.model,
-                "models": dict(ner.models),
-            },
-        },
-        "providers": {
-            name: {
-                "upstream_base_url": provider.upstream_base_url,
-                "enabled": provider.enabled,
-                "detection": provider.detection,
-            }
-            for name, provider in config.providers.items()
-        },
-    }
-
-
-async def _handle_config(request: Request, state: ProxyState) -> Response:
-    """The config editor endpoint. Layered checks, in order: Host (DNS
-    rebinding), Origin, then for POST the CSRF header, content type, and a
-    1 MiB body cap. OPTIONS gets 405 with no CORS headers, so cross-origin
-    fetches carrying the custom header die at preflight."""
-    if not _host_allowed(request, state):
-        return JSONResponse({"error": "host not allowed"}, status_code=403)
-    if not _origin_allowed(request, state):
-        return JSONResponse({"error": "origin not allowed"}, status_code=403)
-
-    if request.method == "GET":
-        target = _config_target_path(state)
-        return JSONResponse(
-            {
-                "csrf_token": state.csrf_token,
-                "config_path": str(target),
-                "config_file_exists": target.exists(),
-                "config_fingerprint": _config_fingerprint(target),
-                "editable": _editable_view(state.config),
-                "readonly": {
-                    "host": state.config.host,
-                    "port": state.config.port,
-                    "vault": {
-                        "backend": state.config.vault.backend,
-                        "path": state.config.vault.path,
-                        "session": state.config.vault.session,
-                        "session_mode": state.config.vault.session_mode,
-                        "encryption": state.config.vault.encryption,
-                    },
-                    "audit": {
-                        "enabled": state.config.audit.enabled,
-                        "path": state.config.audit.path,
-                        "max_rows": state.config.audit.max_rows,
-                        "tamper_evident": state.config.audit.tamper_evident,
-                        "required": state.config.audit.required,
-                        "s3": {
-                            "enabled": state.config.audit.s3.enabled,
-                            "provider": state.config.audit.s3.provider,
-                            "bucket": state.config.audit.s3.bucket,
-                        },
-                        "azure": {
-                            "enabled": state.config.audit.azure.enabled,
-                            "account": state.config.audit.azure.account,
-                            "container": state.config.audit.azure.container,
-                        },
-                    },
-                    "log": {"format": state.config.log.format},
-                    "tls": {
-                        "enabled": state.config.tls.enabled,
-                        "mutual": state.config.tls.mutual,
-                    },
-                    "otel": {
-                        "enabled": state.config.otel.enabled,
-                        "endpoint": state.config.otel.endpoint,
-                        "service_name": state.config.otel.service_name,
-                    },
-                },
-                "builtin_rules": sorted(rule.name for rule in BUILTIN_RULES),
-                # Language tags per rule (untagged rules are universal) plus
-                # the enabled-but-scoped-out list, so the editor's effective-
-                # rule display can never disagree with what actually runs.
-                "builtin_rule_languages": {
-                    rule.name: list(rule.languages)
-                    for rule in BUILTIN_RULES
-                    if rule.languages is not None
-                },
-                "language_inactive_rules": sorted(
-                    set(state.config.detection.enabled)
-                    - set(active_rule_names(state.config.detection))
-                ),
-                "warnings": [
-                    "saving rewrites the config file; comments are not preserved "
-                    "(one .bak of the previous file is kept)"
-                ],
-            },
-            headers={"cache-control": "no-store"},
-        )
-    if request.method != "POST":
-        return JSONResponse({"error": "method not allowed"}, status_code=405)
-    return await _handle_config_post(request, state)
 
 
 async def _stream_rehydrated_ndjson(
@@ -1680,52 +1581,6 @@ async def _handle_users(request: Request, state: ProxyState) -> Response:
     return JSONResponse({"revoked": email_addr})
 
 
-async def _handle_preview(request: Request, state: ProxyState) -> Response:
-    """Config dry-run: run the LIVE detection pipeline over caller-supplied
-    text and report what WOULD be redacted / warned / blocked — no upstream
-    request, no vault write, no metrics, no audit. The caller's text comes
-    back masked, so no new value ever leaves the box; behind the same
-    Host/Origin/CSRF guard as the config editor."""
-    if not _host_allowed(request, state):
-        return JSONResponse({"error": "host not allowed"}, status_code=403)
-    if not _origin_allowed(request, state):
-        return JSONResponse({"error": "origin not allowed"}, status_code=403)
-    if request.method != "POST":
-        return JSONResponse({"error": "method not allowed"}, status_code=405)
-    payload, guard_error = await _guarded_post_json(request, state)
-    if guard_error is not None:
-        return guard_error
-    text = payload.get("text") if isinstance(payload, dict) else None
-    if not isinstance(text, str):
-        return JSONResponse({"error": 'body must be {"text": "..."}'}, status_code=400)
-
-    # A throwaway vault + fresh counters: the live vault, metrics, and audit
-    # are never touched. Reuses the live detectors/allowlist/modes so the
-    # preview matches exactly what a real request would do.
-    from llm_redact.vault import InMemoryVault
-
-    redactor = Redactor(state.detectors, InMemoryVault(), state.allowlist, modes=state.modes)
-    blocked: dict[str, str] | None = None
-    redacted: str | None = None
-    try:
-        redacted = redactor.redact_text(text)
-    except BlockedRequest as exc:
-        # A block-mode rule matched: the real request would be a 400 before
-        # any upstream contact. Report the type (never the value).
-        blocked = {"type": exc.detector_type}
-    return JSONResponse(
-        {
-            "redacted": redacted,
-            "detections": dict(redactor.counts),
-            # Warn-mode values are LEFT IN the redacted text and forwarded on
-            # a real request — the preview shows exactly that (honest).
-            "warnings": dict(redactor.warn_counts),
-            "blocked": blocked,
-        },
-        headers={"cache-control": "no-store"},
-    )
-
-
 async def _guarded_post_json(
     request: Request, state: ProxyState
 ) -> tuple[Any, None] | tuple[None, Response]:
@@ -1747,135 +1602,6 @@ async def _guarded_post_json(
         return json.loads(raw_body), None
     except json.JSONDecodeError as exc:
         return None, JSONResponse({"error": f"invalid JSON: {exc}"}, status_code=400)
-
-
-async def _handle_config_post(request: Request, state: ProxyState) -> Response:
-    payload, guard_error = await _guarded_post_json(request, state)
-    if guard_error is not None:
-        return guard_error
-    if not isinstance(payload, dict) or not isinstance(payload.get("config"), dict):
-        return JSONResponse({"error": 'body must be {"config": {...}}'}, status_code=400)
-    edits: dict[str, Any] = payload["config"]
-
-    readonly_hit = sorted(set(edits) & _READONLY_KEYS)
-    if readonly_hit:
-        return JSONResponse(
-            {"error": f"key(s) {readonly_hit} require a restart and cannot be edited here"},
-            status_code=400,
-        )
-    preserved_hit = sorted(set(edits) & _FILE_PRESERVED_KEYS)
-    if preserved_hit:
-        return JSONResponse(
-            {
-                "error": f"key(s) {preserved_hit} are not editable here: edit the file and"
-                " reload (SIGHUP, after `llm-redact serve --check`)"
-            },
-            status_code=400,
-        )
-    unknown = sorted(set(edits) - _EDITABLE_KEYS)
-    if unknown:
-        return JSONResponse({"error": f"unknown key(s) {unknown}"}, status_code=400)
-
-    path = _config_target_path(state)
-    fingerprint = payload.get("fingerprint")
-    if isinstance(fingerprint, str) and fingerprint:
-        current = _config_fingerprint(path)
-        if current is not None and current != fingerprint:
-            return JSONResponse(
-                {
-                    "error": "the config file changed since this editor loaded"
-                    " (another edit or a reload) — reload the page and re-apply"
-                    " your changes"
-                },
-                status_code=409,
-            )
-
-    # Merge over FILE truth: readonly sections come from the file verbatim
-    # (so env-var host/port overrides are never baked in), and editable keys
-    # not present in the request keep their file values.
-    file_raw: dict[str, Any] = {}
-    if path.exists():
-        try:
-            file_raw = tomllib.loads(path.read_text())
-        except (tomllib.TOMLDecodeError, OSError):
-            return JSONResponse(
-                {"error": f"the config file at {path} is not valid TOML; fix it manually"},
-                status_code=409,
-            )
-    merged = {
-        key: value
-        for key, value in file_raw.items()
-        if key in _READONLY_KEYS or key in _FILE_PRESERVED_KEYS
-    }
-    for key in _EDITABLE_KEYS:
-        if key in edits:
-            merged[key] = edits[key]
-        elif key in file_raw:
-            merged[key] = file_raw[key]
-
-    # Validation runs the exact production paths: parse_config, then a
-    # dry-run build of detectors/allowlists (bad regexes, unknown rules,
-    # missing NER extras).
-    try:
-        candidate = parse_config(merged, "<config editor>")
-        build_detectors(candidate.detection)
-        build_allowlist(candidate.detection)
-        build_modes(candidate.detection)
-        # License resolution runs at VALIDATION time (informational only —
-        # the FOSS core has no tier gates) so a bad [license] value 400s
-        # here, before the file write.
-        resolved = _resolve_license_info(apply_env_overrides(candidate))
-        # The preserved routing sections re-validate with the rest: an
-        # `env:VAR` credential that vanished since startup 400s here too.
-        resolve_credentials(candidate.routing, os.environ)
-        if state.router is not None:
-            # The router's own checks (e.g. the price table): a 400
-            # here, before the write, never a swap.
-            state.router.validate(candidate)
-        elif candidate.routing.enabled:
-            # The file enabled routing since startup: probe the build now so
-            # a refusal (package absent / Free tier / bad price file) is a 400
-            # here, not a 500 after the write.
-            probe = get_registry().build_router(apply_env_overrides(candidate), resolved.tier)
-            if probe is not None:
-                probe.close()
-    except (ValueError, TypeError, re.error, ImportError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-
-    text = emit_config_toml(candidate)
-    if parse_config(tomllib.loads(text), "<emitter check>") != candidate:
-        logger.error("config editor: emitter round-trip mismatch; nothing written")
-        return JSONResponse({"error": "internal emitter round-trip mismatch"}, status_code=500)
-    try:
-        backup = write_config_atomic(path, text)
-    except OSError as exc:
-        return JSONResponse({"error": f"could not write {path}: {exc.strerror}"}, status_code=500)
-    # No await between validation and swap: SIGHUP reload cannot interleave.
-    try:
-        restart_required = state.apply_config(apply_env_overrides(candidate))
-    except (ValueError, OSError, re.error, ImportError) as exc:
-        # The file is written and valid, but the running config is not (the
-        # spend table in a locked vault file, say): say exactly that rather
-        # than an anonymous 500 — a SIGHUP re-applies it once the cause is
-        # gone. The validated fields above cannot fail here; only a build
-        # apply_config performs beyond the dry run can.
-        logger.error("config editor: wrote %s but applying it failed: %s", path, exc)
-        return JSONResponse(
-            {
-                "error": f"written to {path} but not applied ({exc}); fix the cause and"
-                " reload (SIGHUP)"
-            },
-            status_code=500,
-        )
-    logger.info("config editor: applied and wrote %s", path)
-    return JSONResponse(
-        {
-            "applied": True,
-            "path": str(path),
-            "backup": str(backup) if backup is not None else None,
-            "restart_required": restart_required,
-        }
-    )
 
 
 async def _read_capped(request: Request, limit: int) -> bytes | None:

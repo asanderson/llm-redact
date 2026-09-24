@@ -111,7 +111,8 @@ def render(markdown: str) -> str:
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         "<title>llm-redact user guide</title>\n"
         f"<style>\n{_STYLE}</style>\n</head>\n<body>\n"
-        '<p class="top"><a href="/__llm-redact/">&larr; back to the dashboard</a></p>\n'
+        '<p class="top"><a href="/__llm-redact/">&larr; back to the dashboard'
+        " (llm-redact-pro)</a></p>\n"
         f"{body}\n</body>\n</html>\n"
     )
 

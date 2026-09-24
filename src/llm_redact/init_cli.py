@@ -3,7 +3,7 @@
 Asks (or takes flags for) the handful of decisions a new user actually
 faces — which tools to route, whether the vault should persist, whether to
 encrypt it, which port — then writes a normalized config through the same
-emitter + atomic writer the config editor uses, and prints the per-tool
+emitter + atomic writer the llm-redact-pro config editor uses, and prints the per-tool
 environment exports and next steps. It never overwrites an existing config
 without --force (or an explicit interactive confirmation).
 """
@@ -140,7 +140,7 @@ def run_init(args: argparse.Namespace) -> int:
     print(f"  llm-redact run -- {first_tool}            # one-liner: proxy + tool together")
     print("  # or: add the export line(s) above to your shell profile and use serve:")
     print("  llm-redact serve                 # run the proxy")
-    print(f"  open {base_url}/__llm-redact/   # live dashboard + config editor")
+    print("  llm-redact status                # live counters + coverage posture")
     print('  llm-redact preview --text "mail me at a@corp.example"  # see redaction work')
     if encryption == "fernet":
         print("  llm-redact vault gen-key         # then export LLM_REDACT_VAULT_KEY")

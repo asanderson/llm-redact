@@ -57,10 +57,6 @@ async def test_guide_endpoint_serves_html_with_hardening_headers() -> None:
     await client.aclose()
 
 
-def test_dashboard_links_to_the_guide() -> None:
-    assert 'href="/__llm-redact/guide"' in _package_text("dashboard.html")
-
-
 def test_guide_ships_as_package_data_and_is_self_contained() -> None:
     # The same importlib.resources lookup the proxy does at startup — fails
     # if either guide file is ever dropped from the package. Self-contained

@@ -102,12 +102,15 @@ both:
 scripts/render_diagrams.sh   # needs Node; see the header for sandboxed-Chromium setups
 ```
 
-Web-UI screenshots (`docs/screenshots/`, referenced from the README ops
-section) are captured against fixture traffic:
+The agent-plugin terminal screenshots (`docs/screenshots/plugins/`,
+referenced from docs/plugins.md) are rendered against fixture traffic:
 
 ```bash
-uv run --with playwright python scripts/capture_screenshots.py
+uv run python scripts/capture_plugin_screenshots.py
 ```
+
+The browser-dashboard screenshots and their capture script moved to the
+llm-redact-pro package along with the dashboard itself.
 
 ## Licensing of contributions (CLA)
 

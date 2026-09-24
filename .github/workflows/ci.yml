@@ -365,12 +365,13 @@ jobs:
           python-version: "3.13"
       - run: uv build
       - run: uvx twine check dist/*
-      # twine cannot catch missing package data; assert the dashboard, the
-      # user guide, and the license text ship in both distributions.
+      # twine cannot catch missing package data; assert the user guide and
+      # the license text ship in both distributions — and that the browser
+      # dashboard (an llm-redact-pro surface) does not.
       - name: check package data
         run: |
-          python -m zipfile -l dist/*.whl | grep 'llm_redact/dashboard.html'
-          tar -tzf dist/*.tar.gz | grep 'src/llm_redact/dashboard.html'
+          ! python -m zipfile -l dist/*.whl | grep 'dashboard.html'
+          ! tar -tzf dist/*.tar.gz | grep 'dashboard.html'
           python -m zipfile -l dist/*.whl | grep 'llm_redact/user_guide.md'
           python -m zipfile -l dist/*.whl | grep 'llm_redact/user_guide.html'
           tar -tzf dist/*.tar.gz | grep 'src/llm_redact/user_guide.md'

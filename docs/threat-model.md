@@ -55,7 +55,7 @@ because breaking the tool teaches users to bypass the proxy).
   user's files; the proxy adds privacy, not sandboxing.
 - **The browser is hostile.** Any web page can issue requests to
   127.0.0.1. This is the one boundary where an active network attacker is
-  in scope — see the config editor below.
+  in scope — see the local ops surface below.
 
 ## Defenses at each boundary
 
@@ -110,29 +110,33 @@ because breaking the tool teaches users to bypass the proxy).
 ### Local ops surface (`/__llm-redact/*`)
 
 - Answered before any routing logic runs; provably never forwarded.
-- GET-only, with THREE exceptions sharing one guard chain — `POST /config`,
-  `POST /sessions/prune`, and `POST /preview` — defended in layers: Host
-  validation (DNS rebinding), Origin validation, a per-process CSRF token
-  bound to a custom header (forcing a CORS preflight that 405s with no CORS
-  headers), a JSON content-type requirement, and a 1 MiB body cap.
-  Config edits revalidate through the production config parser plus
-  dry-run detector/mode builds before anything is written or applied;
-  prune deletes whole idle sessions only and never the active one;
-  `/preview` runs the live detectors over caller-supplied text on a
-  throwaway vault and writes nothing (no upstream request, no vault,
-  metrics, or audit write).
+- GET-only, with guarded POST exceptions sharing one guard chain —
+  `POST /sessions/prune` and `POST /users/invite|revoke` in the core, plus
+  the llm-redact-pro dashboard's `POST /config` and `POST /preview` —
+  defended in layers: Host validation (DNS rebinding), Origin validation,
+  a per-process CSRF token bound to a custom header (forcing a CORS
+  preflight that 405s with no CORS headers), a JSON content-type
+  requirement, and a 1 MiB body cap. Prune deletes whole idle sessions
+  only and never the active one. The dashboard paths (`/`, `/config`,
+  `/preview`) are dispatched to the llm-redact-pro plugin only when it is
+  registered — otherwise they answer a local 404 — and are never
+  forwarded either way; that package's config editor revalidates every
+  edit through the production config parser plus dry-run detector/mode
+  builds before anything is written or applied, and its preview runs the
+  live detectors on a throwaway vault and writes nothing.
 - Every reserved reply also carries browser-hardening response headers —
   a strict `Content-Security-Policy` (`default-src 'none'`, only inline
   script/style and same-origin `connect-src`, `frame-ancestors 'none'`),
   `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and
-  `Referrer-Policy: no-referrer` — so a hostile page cannot frame the
-  dashboard, run injected remote code, or leak a Referer. These are
+  `Referrer-Policy: no-referrer` — so a hostile page cannot frame a
+  reserved page, run injected remote code, or leak a Referer. These are
   defense-in-depth on top of the Host/Origin/CSRF gates, not a substitute.
 - Status/metrics/audit — and the `/events` live feed, which streams the
   same rows `/recent` serves — expose **types and counts only**: never
-  values, never placeholder ids, never allowlist contents (the config
-  editor GET is the documented exception for allowlists; it sits behind
-  the same Host/Origin checks, as do `/sessions` and `/events`).
+  values, never placeholder ids, never allowlist contents (the
+  llm-redact-pro config editor GET is the documented exception for
+  allowlists; it sits behind the same Host/Origin checks, as do
+  `/sessions` and `/events`).
 
 ### Logging posture
 
@@ -172,14 +176,15 @@ silent:
 
 - `[providers.NAME] detection = false` forwards that provider's requests
   unredacted (rehydration stays active). Logged per request, listed in
-  `/status` `providers_detection_off`, marked on the dashboard. Meant
+  `/status` `providers_detection_off` and the `status`/`doctor` posture
+  output. Meant
   for upstreams you own end to end (a local Ollama).
 - `[detection.mcp] exempt_servers` exempts MCP content blocks addressed
   to named servers. Result blocks that cannot be correlated to an exempt
   server stay redacted (fail-closed).
 - `[detection] languages` narrows which national-id rules are built;
   universal rules (emails, keys, cards, IBANs, phones) always run, and
-  the scoped-out rules are listed in `/status` and the editor.
+  the scoped-out rules are listed in `/status` and by `doctor`.
 
 ### Supply chain
 

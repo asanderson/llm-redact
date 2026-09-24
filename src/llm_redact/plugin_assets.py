@@ -1,5 +1,7 @@
-"""Agent-plugin command definitions: the dashboard and config-editor
-workflows as slash commands for Claude Code, Codex, and OpenCode.
+"""Agent-plugin command definitions: the proxy's status, preview, and
+config-edit workflows as slash commands for Claude Code, Codex, OpenCode,
+and Cursor. They drive the free core's CLI and JSON endpoints only (the
+browser dashboard is part of llm-redact-pro).
 
 ONE canonical command set, rendered into each tool's markdown-command
 format. The bodies are deliberately portable prompts (run CLI commands,
@@ -130,7 +132,7 @@ values), allowlists, NER backends, providers and any with
 _CONFIG_EDIT = PluginCommand(
     name="config-edit",
     description=(
-        "Edit llm-redact config with the dashboard editor's guardrails: "
+        "Edit llm-redact config with guardrails: "
         "change rules, modes, deny strings, allowlists, NER, providers; "
         "validate; hot-reload"
     ),
@@ -140,23 +142,23 @@ _CONFIG_EDIT = PluginCommand(
     body="""\
 Apply this llm-redact configuration change: $ARGUMENTS
 
-Follow this flow exactly — it mirrors the dashboard config editor's
-guardrails:
+Follow this flow exactly — it applies the same guardrails as the
+llm-redact-pro dashboard's config editor:
 
 1. Locate and read the truth: `llm-redact config show --path` for the
    file, `llm-redact config show` for the EFFECTIVE config. Values the
    output marks as env overrides must NOT be baked into the file.
 2. Edit the TOML file, changing only what the request needs. The
-   editable surface matches the dashboard editor: [detection] enabled
+   editable surface is the hot-reloadable one: [detection] enabled
    rules, modes, deny strings, allowlists, languages, custom rules and
    validators, [detection.ner], [providers.*] (enabled, detection,
    upstreams, custom providers), [rehydration], max_body_bytes. The
    routing sections — [upstreams.*], [routing], [[routing.rule]],
    [prices] (the llm-redact-pro routing guide) — hot-apply through this
-   same file flow even though the web editor refuses them; a chain may
-   never contain a passthrough upstream, so never add one.
-   host/port/vault/audit/log/tls/otel are RESTART-ONLY — warn the user
-   and stop if the change touches them.
+   same file flow (the llm-redact-pro web editor refuses them); a chain
+   may never contain a passthrough upstream, so never add one.
+   host/port/vault/audit/log/tls/otel/users/email are RESTART-ONLY —
+   warn the user and stop if the change touches them.
 3. Validate BEFORE applying: `llm-redact serve --check` must exit 0.
    If it fails, fix the file or revert it — never leave the config
    failing --check, because a SIGHUP would silently keep the old config
@@ -249,13 +251,13 @@ this session. Tell the invitee to run it on the proxy machine instead.
 
 _GUIDE = PluginCommand(
     name="guide",
-    description="Display the llm-redact user guide (web UIs + plugin commands)",
+    description="Display the llm-redact user guide (CLI, plugin commands, pro dashboard)",
     argument_hint="[topic]",
     allowed_tools="Bash(llm-redact:*)",
     body="""\
 Run `llm-redact guide` and show its output to the user. It is the
-packaged user guide covering the web dashboard, the config editor's
-guardrails, every plugin command, and the honesty surfaces.
+packaged user guide covering the CLI, every plugin command, the honesty
+surfaces, and the llm-redact-pro web dashboard and config editor.
 
 If the user named a topic ($ARGUMENTS), quote the relevant section(s)
 rather than the whole document, and mention that the same guide is

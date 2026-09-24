@@ -7,9 +7,11 @@ emails, keys, national IDs, custom patterns — with placeholder tokens like
 `«EMAIL_001»`; on the way back it restores the real values. The mapping
 lives in a local vault; the provider only ever sees placeholders.
 
-This guide covers the two user interfaces: the **web dashboard** (with its
-config editor) and the **agent plugin commands**. The deeper design
-documents live in the repository's `docs/` directory.
+This guide covers the **command line** and the **agent plugin
+commands**, which are part of the free core, and the **web dashboard**
+(with its config editor and redaction preview), which is part of the
+separately installed llm-redact-pro package. The deeper design documents
+live in the repository's `docs/` directory.
 
 ## Quick start
 
@@ -22,6 +24,11 @@ documents live in the repository's `docs/` directory.
   Windows this prints a Task Scheduler command to run yourself).
 - `llm-redact doctor` — read-only diagnostics: config, extras,
   permissions, ports, and every coverage opt-out.
+- `llm-redact status` — the running proxy's counters and coverage
+  posture (the JSON behind it is `GET /__llm-redact/status`; Prometheus
+  metrics are at `/__llm-redact/metrics`).
+- `llm-redact preview` — run text through the configured detectors
+  locally and see what would be redacted, warned on, or blocked.
 
 Already running a proxy elsewhere (a team server, another machine)?
 Point everything at it with `LLM_REDACT_PROXY_URL` — `run`, `status`, and
@@ -29,11 +36,17 @@ the plugin commands all honor it, and
 `llm-redact plugin install <tool> --proxy-url URL` sets it up for you.
 Plain http is loopback-only; a remote proxy must be https.
 
-## The web dashboard
+## The web dashboard (llm-redact-pro)
 
-Open `http://127.0.0.1:8787/__llm-redact/` (your host/port may differ).
-Everything on the page is served by the proxy itself — self-contained,
-no external resources, no data leaves your machine.
+The browser dashboard (config editor, redaction preview) is part of
+llm-redact-pro. With it installed and a Pro license key, open
+`http://127.0.0.1:8787/__llm-redact/` (your host/port may differ).
+Without it, that URL answers a short JSON error naming the package and
+pointing at the free surfaces: `llm-redact status`,
+`/__llm-redact/status`, `/__llm-redact/metrics`, and
+`llm-redact preview`. Everything on the page is served by the proxy
+itself — self-contained, no external resources, no data leaves your
+machine.
 
 - **Status pill** — proxy version, uptime, vault backend, session mode,
   and the license tier. License warnings (invalid key, expiry grace)
@@ -62,9 +75,10 @@ no external resources, no data leaves your machine.
   mode (never the key itself), state (healthy, in cooldown, or budget
   exhausted), and spend against its monthly budget.
 
-## The config editor
+## The config editor (llm-redact-pro)
 
-The editor card edits the proxy's TOML config file with guardrails:
+The dashboard's editor card edits the proxy's TOML config file with
+guardrails:
 
 - It always merges over **file truth** — environment-variable overrides
   are never baked into the file.
@@ -81,9 +95,11 @@ The editor card edits the proxy's TOML config file with guardrails:
   that names them. Edit the file, run `llm-redact serve --check`, and
   send SIGHUP — they hot-apply without a restart.
 
-The CLI equivalents: `llm-redact config show` prints the effective
-config; `llm-redact serve --check` runs the full startup build without
-binding a socket — the deploy gate.
+The free-core equivalents: `llm-redact config show` prints the
+effective config; `llm-redact serve --check` runs the full startup build
+without binding a socket — the deploy gate; edit the file and send
+SIGHUP to apply; and the **config-edit** plugin command walks that same
+flow with guardrails.
 
 ## Agent plugin commands
 
@@ -98,8 +114,9 @@ Claude Code and Cursor `/llm-redact-<name>`, Codex
 - **recent** — the recent-requests table, summarized by the agent.
 - **sessions** — vault sessions and what pruning would remove.
 - **config-show** — the effective configuration as TOML.
-- **config-edit** — guided config editing with the editor's guardrails
-  (validate with `serve --check` before applying; only on your ask).
+- **config-edit** — guided config-file editing with guardrails
+  (validate with `serve --check` before a SIGHUP reload; only on your
+  ask).
 - **preview** — run text through the live detectors locally.
 - **doctor** — the diagnostics report, interpreted.
 - **audit** — audit log status, tamper-chain verification, and whether
@@ -140,8 +157,8 @@ swapped mid-conversation (the response says so:
 `x-llm-redact-reissue: skipped; reason=stateful`). Every decision is
 visible in `llm-redact status`, the `route` field of the
 `/__llm-redact/recent` rows shown by the **recent** command (rule,
-upstream, hops, class — the dashboard's own recent table does not render
-them), and the **routes** / **spend** commands. The reference, the
+upstream, hops, class — the llm-redact-pro dashboard's recent table does
+not render them), and the **routes** / **spend** commands. The reference, the
 policy it respects, and a recommended single-user config are in the
 llm-redact-pro package's `docs/routing.md`.
 
@@ -152,9 +169,9 @@ opt-outs — warn-mode rules (matches are observed and FORWARDED),
 per-provider detection off, MCP server exemptions, language-scoped-out
 national-ID rules, the remote-plaintext vault hatch — appear in
 `/__llm-redact/status`, `llm-redact status`'s posture block, `doctor`,
-and the dashboard. Runtime state — audit-backup upload failures,
-routing upstreams in cooldown or over budget — appears in
-`/__llm-redact/status`, `llm-redact status`, and the dashboard;
+and (with llm-redact-pro) the dashboard. Runtime state — audit-backup
+upload failures, routing upstreams in cooldown or over budget — appears
+in `/__llm-redact/status`, `llm-redact status`, and the dashboard;
 `doctor` checks the routing config and its credentials, never the
 running proxy's cooldown or budget state.
 

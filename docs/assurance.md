@@ -118,8 +118,8 @@ host → origin → CSRF-token → content-type → size-cap guard),
 `_read_capped` **were killed by the existing security-boundary suite**
 (`test_security_boundaries.py`, the B1–B12 battery) — full killing power,
 zero new tests needed. The same full-file pass left 861 survivors in the
-rest of proxy.py (streaming plumbing, dashboard/config rendering,
-bookkeeping); they are outside the assured scope and deliberately
+rest of proxy.py (streaming plumbing, dashboard/config rendering — since
+moved to llm-redact-pro — and bookkeeping); they are outside the assured scope and deliberately
 untriaged — extending the recurring scope there would trade meaningful
 signal for hours of CI.
 

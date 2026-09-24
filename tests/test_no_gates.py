@@ -29,6 +29,7 @@ from llm_redact.config import (
     RdbmsConfig,
     RoutingConfig,
     UpstreamConfig,
+    UsersConfig,
     VaultConfig,
 )
 from llm_redact.proxy import create_app
@@ -46,6 +47,15 @@ def test_non_loopback_app_builds_keyless() -> None:
     # validate_bind_security's job at serve time and is unchanged; what is
     # gone is the licensing gate that refused a non-loopback host outright.
     create_app(_with(host="0.0.0.0"))
+
+
+def test_kubernetes_startup_keyless(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Formerly Team-gated (the proxy refused to start on k8s below Team);
+    # the FOSS core has no placement gate, so a keyless proxy on Kubernetes
+    # starts cleanly.
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.delenv("LLM_REDACT_LICENSE_KEY", raising=False)
+    create_app(_with(users=UsersConfig(path=str(tmp_path / "users.db"))))
 
 
 @pytest.mark.parametrize("provider", ["bedrock", "azure", "vertex"])

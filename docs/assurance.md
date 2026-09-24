@@ -51,28 +51,24 @@ call*, and several mutants there route a request to a **different vault
 session** (a wrong-value leak); and in `jsonwalk.py`, where dropping
 `skip_keys`/`key_overrides` in the list, dict, and `object:list` recursion
 branches would redact a protected realtime `audio`/enum field or break the
-Responses `arguments` JSON-source escaping. The session-router mutants are now
-pinned in the pro repo (`test_sessions_pro.py`); the codec mutants stay here in
-`tests/test_codec_mutation_kills.py`.
+Responses `arguments` JSON-source escaping. The session-router mutants are
+pinned in the llm-redact-pro repo (`test_sessions_pro.py`); the codec mutants
+are pinned here in `tests/test_codec_mutation_kills.py`.
 
-**R2 relocation → R4 physical split.** The open-core split moved
-the per-conversation session router out of the Free core into the paid package
-(Free keeps only the static router). Before the physical split the package was co-located in
-this repo, so its mutation coverage rode the in-repo mutmut config
-(`src/llm_redact_pro` a `source_path`, `sessions.py` in `only_mutate`). R4
-physically relocated the package to the private `llm-redact-pro` repo: the
-session-router mutation coverage (the same `resolve()`/`_canonical`/
-`orphan_session_id` mutants) now runs in that repo's CI, and this repo's mutmut
-`source_paths`/`only_mutate` and `scripts/mutation_equivalents.py` cover only the
-Free codecs and vault.
+**Where the paid code's mutation coverage runs.** The per-conversation
+session router is part of the separately-installed `llm-redact-pro` package
+(the Free core ships only the static router), so its mutation coverage (the
+`resolve()`/`_canonical`/`orphan_session_id` mutants) runs in that repo's
+CI. This repo's mutmut `source_paths`/`only_mutate` and
+`scripts/mutation_equivalents.py` cover only the Free codecs and vault.
 
 `vault.py` stays fully mutation-covered here, including its ENCRYPTED arms (the
 memory-encrypted vault, the cipher-threading manager, key rotation's rollback
 path, `open_sqlite_vault`'s ownership). The tests that killed those crypto-path
-mutants used the real Fernet cipher and moved to the pro repo with the rest of
-the crypto suite; `tests/test_vault_crypto_free.py` reproduces exactly that
-mutation coverage over the Free-side `FakeVaultCipher`, so a weakened crypto arm
-still fails a Free-side test even though the paid cipher lives elsewhere.
+mutants use the real Fernet cipher and live in the pro repo with the rest of
+the crypto suite; `tests/test_vault_crypto_free.py` gives the same mutation
+coverage over the Free-side `FakeVaultCipher`, so a weakened crypto arm still
+fails a Free-side test even though the paid cipher lives elsewhere.
 
 The equivalents fall into reviewed classes (each entry in
 `scripts/mutation_equivalents.py` carries its specific justification):
@@ -118,8 +114,8 @@ host → origin → CSRF-token → content-type → size-cap guard),
 `_read_capped` **were killed by the existing security-boundary suite**
 (`test_security_boundaries.py`, the B1–B12 battery) — full killing power,
 zero new tests needed. The same full-file pass left 861 survivors in the
-rest of proxy.py (streaming plumbing, dashboard/config rendering — since
-moved to llm-redact-pro — and bookkeeping); they are outside the assured scope and deliberately
+rest of proxy.py (streaming plumbing, the dashboard seam and bookkeeping);
+they are outside the assured scope and deliberately
 untriaged — extending the recurring scope there would trade meaningful
 signal for hours of CI.
 

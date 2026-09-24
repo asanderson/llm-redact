@@ -66,7 +66,7 @@ otel = [
 [project.scripts]
 llm-redact = "llm_redact.cli:main"
 
-# Paid-tier plugin discovery (open-core split, llm-redact-pro docs/licensing.md). The
+# Paid-tier plugin discovery (open-core boundary, llm-redact-pro docs/licensing.md). The
 # Free core discovers plugins registered under the `llm_redact.plugins`
 # entry-point group via importlib.metadata; installing the separate
 # `llm-redact-pro` distribution is what supplies that hook and overrides the
@@ -151,7 +151,7 @@ ignore_missing_imports = true
 module = "keyring.*"
 ignore_missing_imports = true
 
-# The paid distribution (open-core split, llm-redact-pro docs/licensing.md). The Free
+# The paid distribution (open-core boundary, llm-redact-pro docs/licensing.md). The Free
 # core reaches it only through lazy, fail-closed guarded imports (cli.py audit /
 # users subcommands) and the entry-point-discovered plugin; it is never a build
 # or runtime dependency of the Free wheel, so its absence must not fail typing.
@@ -169,8 +169,8 @@ ignore_missing_imports = true
 # docs/assurance.md.
 [tool.mutmut]
 # Free-core only: the paid subsystems (and their per-conversation session
-# routing) moved to the llm-redact-pro repo in the R4 physical split, where
-# their mutation coverage now lives.
+# routing) live in the llm-redact-pro repo, whose CI carries their mutation
+# coverage.
 source_paths = ["src/llm_redact"]
 only_mutate = [
     "src/llm_redact/detection/validators.py",

@@ -11,6 +11,8 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-25
+
 ### Removed
 
 - The retired per-cloud license entitlement is no longer surfaced: `/status`'s `license`
@@ -28,6 +30,8 @@ and tags `vX.Y.Z`.
 - The user guide's dashboard section describes the redesigned llm-redact-pro dashboard
   (sidebar views, picklists and type-ahead in the config editor, the unsaved-changes save
   bar).
+- The architecture diagram draws the browser dashboard inside the llm-redact-pro box, and
+  the documentation describes the current Free/Pro layout rather than how it came about.
 
 ## [1.2.0] - 2026-09-24
 

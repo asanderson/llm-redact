@@ -109,8 +109,8 @@ referenced from docs/plugins.md) are rendered against fixture traffic:
 uv run python scripts/capture_plugin_screenshots.py
 ```
 
-The browser-dashboard screenshots and their capture script moved to the
-llm-redact-pro package along with the dashboard itself.
+The browser dashboard is part of the llm-redact-pro package, so its
+screenshots and their capture script live in that repo.
 
 ## Licensing of contributions (CLA)
 

@@ -11,6 +11,14 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+
+- The editions matrix (`docs/editions.md`) and the README list the llm-redact-pro Team
+  deployment kit: a shared mutual-TLS team server on Docker, Podman and Kubernetes, for Team
+  and above. This repository's Helm chart and container images stay keyless.
+- `scripts/render_diagrams.sh` pins mermaid-cli 11, which reproduces the committed diagrams
+  (12.0 changed the layout engine).
+
 ## [1.3.0] - 2026-09-25
 
 ### Removed

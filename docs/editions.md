@@ -27,6 +27,7 @@ proprietary **`llm-redact-pro`** package.
 | Browser dashboard: live status view, config editor, redaction-preview card (`/__llm-redact/`) | | ✓ | ✓ | ✓ |
 | Non-loopback (mTLS) serving; Kubernetes deployment (Helm chart + HPA) | ✓ | ✓ | ✓ | ✓ |
 | Server persistent vault (PostgreSQL / MySQL / Oracle / any DB-API RDBMS, incl. cloud-managed DBMS), vault encryption at rest, audit log + tamper chain + backup sinks (with batch encryption), OTel, per-conversation sessions, named users, rule-based upstream routing (named upstreams, fallback chains with cooldown + Anthropic plan-limit detection, monthly budgets) | | ✓ | ✓ | ✓ |
+| Team deployment kit: one installer for a shared mutual-TLS team server on Docker, Podman and Kubernetes (its own Helm chart), with named users, an encrypted vault and a tamper-evident audit log | | | ✓ | ✓ |
 
 ## How keys work
 

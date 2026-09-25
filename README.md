@@ -302,7 +302,8 @@ the commercial packaging of the separately-installed, **proprietary**
 **coming soon**, not yet generally available), which supplies additional
 operational subsystems — persistent server vaults and encryption at
 rest, the audit log and its off-machine sinks, OTel, per-conversation
-sessions, and named users. Configuring one of those without the package
+sessions, and named users — and, on Team and above, a deployment kit for
+one shared mutual-TLS team server. Configuring one of those without the package
 fails closed naming it — never a silent downgrade. The matrix and
 licensing model are in [docs/editions.md](docs/editions.md).
 

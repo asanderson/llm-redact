@@ -26,7 +26,9 @@ for src in docs/diagrams/*.mmd; do
     out="${src%.mmd}.png"
     # -s 2: 2x pixel density so text stays crisp; white background because
     # GitHub renders READMEs on both light and dark pages.
-    npx -y @mermaid-js/mermaid-cli -p "$PUPPETEER_CONFIG" \
+    # Pinned to mermaid-cli 11: 12.0 changed the layout engine, and the
+    # committed PNGs were drawn with 11.x.
+    npx -y @mermaid-js/mermaid-cli@11 -p "$PUPPETEER_CONFIG" \
         -i "$src" -o "$out" -b white -s 2 --quiet
     echo "rendered $out"
 done

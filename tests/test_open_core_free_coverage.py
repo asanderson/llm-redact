@@ -3,11 +3,11 @@ llm-redact-pro repo in the R4 open-core split.
 
 These functions are Free CODE (they live in ``src/llm_redact``) but are only
 reachable behind a paid feature — audit HMAC/backup key resolution, the vault
-key resolvers, the Bedrock/Vertex cloud adapters, encrypted-vault rotation, the
-named-user surface. Their behavioural coverage lives in the pro repo (which
-boots a licensed proxy); here we drive each one directly, without a license, so
-the Free suite still EXECUTES every branching function (the complexity gate) and
-a Free-side regression is caught in Free CI.
+key resolvers, the Bedrock/Vertex cloud adapters, encrypted-vault rotation.
+Their behavioural coverage lives in the pro repo (which boots a licensed
+proxy); here we drive each one directly, without a license, so the Free suite
+still EXECUTES every branching function (the complexity gate) and a Free-side
+regression is caught in Free CI.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def test_decode_master_key_validation() -> None:
         decode_master_key(short, "TEST")
 
 
-# --- config / users value objects --------------------------------------------
+# --- config value objects --------------------------------------------
 
 
 def test_email_config_configured() -> None:
@@ -87,60 +87,6 @@ def test_email_config_configured() -> None:
     assert EmailConfig().configured is False
     assert EmailConfig(smtp_host="mail.example").configured is False
     assert EmailConfig(smtp_host="mail.example", from_address="a@example").configured is True
-
-
-def test_user_row_status() -> None:
-    from llm_redact.users import UserRow
-
-    base = dict(name="Ada", email="a@corp.example", invited_at="t0")
-    invited = UserRow(**base, verified_at=None, revoked_at=None)
-    verified = UserRow(**base, verified_at="t1", revoked_at=None)
-    revoked = UserRow(**base, verified_at="t1", revoked_at="t2")
-    assert invited.status == "invited"
-    assert verified.status == "verified"
-    assert revoked.status == "revoked"  # revoked wins over verified
-
-
-def test_send_verification_email_uses_operator_smtp(monkeypatch: pytest.MonkeyPatch) -> None:
-    from email.message import EmailMessage
-
-    from llm_redact.users import send_verification_email
-
-    sent: dict[str, object] = {}
-
-    class _FakeSMTP:
-        def __init__(self, host: str, port: int, timeout: int) -> None:
-            sent["host"], sent["port"] = host, port
-
-        def starttls(self) -> None:
-            sent["starttls"] = True
-
-        def login(self, user: str, password: str) -> None:
-            sent["login"] = (user, password)
-
-        def send_message(self, msg: EmailMessage) -> None:
-            sent["body"] = msg.get_content()
-
-        def quit(self) -> None:
-            sent["quit"] = True
-
-    monkeypatch.setenv("SMTP_PW", "hunter2")
-    send_verification_email(
-        smtp_host="mail.example",
-        smtp_port=587,
-        starttls=True,
-        username="mailer",
-        password_env="SMTP_PW",
-        from_address="admin@corp.example",
-        to_address="ada@corp.example",
-        display_name="Ada",
-        code="12345678",
-        smtp_factory=_FakeSMTP,  # type: ignore[arg-type]
-    )
-    assert sent["starttls"] is True and sent["login"] == ("mailer", "hunter2")
-    assert sent["quit"] is True
-    # The code appears in the body; the SMTP password never does.
-    assert "12345678" in str(sent["body"]) and "hunter2" not in str(sent["body"])
 
 
 # --- cloud adapters (Team-gated; instantiating one needs no license) ---------
@@ -244,7 +190,7 @@ def test_check_vault_key_matches_memory_backend() -> None:
     assert any(r["level"] == "PASS" and r["area"] == "vault" for r in report.rows)
 
 
-# --- proxy: license-warning refresh + users endpoint (Free fail-closed) ------
+# --- proxy: license-warning refresh + access endpoints (Free fail-closed) ----
 
 
 def test_refresh_license_warnings_on_free_app(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -257,15 +203,15 @@ def test_refresh_license_warnings_on_free_app(monkeypatch: pytest.MonkeyPatch) -
     assert state.license.tier == "free"
 
 
-async def test_users_endpoint_free_tier_403() -> None:
+async def test_users_endpoint_without_access_gate_404() -> None:
     from llm_redact.config import Config
     from llm_redact.proxy import create_app
 
     app = create_app(Config())
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
     resp = await client.get("/__llm-redact/users")
-    assert resp.status_code == 403
-    assert "llm-redact-pro" in resp.json()["error"]  # users live in the pro package
+    assert resp.status_code == 404
+    assert "llm-redact-pro" in resp.json()["error"]  # access control lives in the pro package
     await client.aclose()
 
 

@@ -9,7 +9,7 @@ run on the free core's CLI and JSON endpoints; the browser dashboard
 (config editor, redaction preview) that the right-hand column below maps
 them to is part of llm-redact-pro and is not needed.
 
-All four plugins carry the SAME twelve commands, defined once in
+All four plugins carry the SAME eleven commands, defined once in
 `src/llm_redact/plugin_assets.py` and rendered into each tool's command
 format.
 
@@ -91,7 +91,6 @@ have edited — it refuses and asks for `--force`.
 | `preview` | Local dry-run: what WOULD be redacted in a sample text | dashboard preview card |
 | `doctor` | Read-only diagnostics, failures explained via troubleshooting.md | — |
 | `audit` | Tamper-evident chain verification verdict | dashboard audit block |
-| `users` | Seat usage and invite/revoke guidance (never prints per-user keys) | dashboard users card |
 | `routes` | Routing rules table, or a dry-run of which rule/upstream/chain a request would take (no upstream is contacted; the live state annotations come from one best-effort `GET /__llm-redact/status` of the local proxy); prints the requires-pro line without the llm-redact-pro package | dashboard routing table |
 | `spend` | Per-upstream spend, re-issue share, and remaining monthly budget; prints the requires-pro line without the llm-redact-pro package | dashboard routing table |
 | `guide` | Displays the user guide | `/__llm-redact/guide` |
@@ -176,12 +175,6 @@ enabled it reports rows checked and the chain verdict:
 
 ![llm-redact audit verify without the llm-redact-pro package: the refusal naming the package](screenshots/plugins/audit.svg)
 
-**`/llm-redact:users`** — likewise an `llm-redact-pro` subsystem
-(**coming soon**); with it installed this lists named seats (active vs
-pending vs the tier cap):
-
-![llm-redact users list without the llm-redact-pro package: the refusal naming the package](screenshots/plugins/users.svg)
-
 **`/llm-redact:guide`** — the packaged user guide (shot truncated; the
 command prints the whole document):
 
@@ -256,8 +249,8 @@ the one this exists for: a running proxy with an unrouted session is the
 silent-unprotected state, and the hook makes it loud instead. The script
 never installs anything, prefixes every message with its own name (no
 unexplained context in your session), and echoes URLs as
-scheme://host:port only — a `/u/<key>` user prefix embedded in
-`LLM_REDACT_PROXY_URL` never reaches the transcript. You can also run it
+scheme://host:port only — a path (which could carry a credential)
+embedded in `LLM_REDACT_PROXY_URL` never reaches the transcript. You can also run it
 yourself at any time: `llm-redact-posture` (verbose form prints OK).
 
 The copy-install path (`llm-redact plugin install claude`) carries the

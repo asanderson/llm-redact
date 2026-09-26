@@ -24,7 +24,7 @@ from .licensing import ENV_KEY, FREE, ResolvedLicense
 
 if TYPE_CHECKING:
     from .config import Config, OtelConfig
-    from .plugin_api import Dashboard, Router, Telemetry
+    from .plugin_api import AccessGate, Dashboard, Router, Telemetry
 
 _PRO_HINT = "install the llm-redact-pro package to enable it"
 
@@ -77,6 +77,38 @@ def build_dashboard(tier: str) -> Dashboard | None:
     """
     del tier
     return None
+
+
+def build_access_gate(config: Config, license: ResolvedLicense) -> AccessGate | None:
+    """None on the Free tier with no named-user config; otherwise fail closed.
+
+    Client admission (named users, per-user keys, seats, and every future
+    authentication method) is a paid subsystem implemented entirely in
+    llm-redact-pro — the core holds no credential logic. This default runs
+    only when no plugin replaced it, so a paid tier or an explicit
+    ``[users]`` section here means the operator expects access control the
+    proxy cannot provide: refuse to start rather than serve an open proxy.
+    A paid tier can only resolve when a pro license resolver is registered,
+    so reaching that branch means an llm-redact-pro that predates this seam.
+    """
+    if license.tier != "free":
+        raise ConfigError(
+            f"the {license.tier} license includes named-user access control, but the"
+            " installed llm-redact-pro does not provide it (no access gate registered);"
+            " upgrade llm-redact-pro to 0.8 or later"
+        )
+    if config.users.path is not None:
+        raise ConfigError(f"[users] configures named users, a paid feature; {_PRO_HINT}")
+    return None
+
+
+def tool_base_url(base_url: str) -> str:
+    """The base URL ``llm-redact run`` exports to wrapped tools, unchanged.
+
+    A plugin may decorate it (for instance with a client identity); the
+    Free core adds nothing.
+    """
+    return base_url
 
 
 def resolve_license(

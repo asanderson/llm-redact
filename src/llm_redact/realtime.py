@@ -83,7 +83,6 @@ _HOP_HEADERS = frozenset(
         "sec-websocket-version",
         "sec-websocket-extensions",
         "sec-websocket-protocol",  # negotiated separately, see subprotocols
-        "x-llm-redact-user",  # OUR credential: identity only, never forwarded
         "content-length",
     }
 )
@@ -614,10 +613,12 @@ def _upstream_ws_url(base_url: str, path: str, query_string: bytes) -> str:
 
 
 def _filtered_headers(websocket: WebSocket) -> list[tuple[str, str]]:
+    # The proxy's own x-llm-redact-* namespace never reaches the upstream,
+    # whether or not an access gate consumed it (same rule as HTTP).
     return [
         (name, value)
         for name, value in websocket.headers.items()
-        if name.lower() not in _HOP_HEADERS
+        if name.lower() not in _HOP_HEADERS and not name.lower().startswith("x-llm-redact-")
     ]
 
 
@@ -642,15 +643,23 @@ async def ws_handle(websocket: WebSocket) -> None:
     if path.startswith("/__llm-redact"):
         await _reject(websocket, "reserved path")
         return
-    # Named-user enforcement (2.0 licensing): same rule as HTTP. The header
-    # is the WS identity channel (it is in _HOP_HEADERS, so it can never
-    # reach the upstream); refusal is accept-then-close so the reason
-    # reaches the client library.
-    user_name = state.resolve_user(websocket.headers.get("x-llm-redact-user"))
-    if state.user_enforcement_required() and user_name is None:
-        logger.info("WS %s -> refused (named-user key required)", path)
-        await _reject(websocket, "a named-user key is required (x-llm-redact-user header)")
+    # Client admission (llm-redact-pro's access gate): same rule as HTTP.
+    # The gate scrubs its credentials from the scope; its refusal is
+    # accept-then-close so the reason reaches the client library.
+    admission = state.admit(websocket, "websocket")
+    path = websocket.scope["path"]
+    if admission.refusal is not None:
+        logger.info("WS %s -> refused by the access gate", path)
+        await _reject(websocket, admission.refusal)
         return
+    if path.startswith("/__llm-redact"):
+        await _reject(websocket, "reserved path")
+        return
+    # Attribute the connection's single record_request row (at close; same
+    # task, so the proxy's contextvar carries it).
+    from llm_redact.proxy import _REQUEST_USER
+
+    _REQUEST_USER.set(admission.subject)
     adapter = ws_adapter_for(path, state.ws_adapters)
     if adapter is None:
         # Unlike unmatched HTTP traffic there is no default upstream to

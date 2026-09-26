@@ -250,10 +250,9 @@ def main() -> int:
                 f"Email {EMAIL} and rotate {AWS_KEY} before the launch review.",
             ],
             "doctor": ["doctor", "--config", str(config_path)],
-            # audit/users are Pro subsystems: keyless without llm-redact-pro,
-            # the honest Free-tier output IS the refusal naming the package.
+            # audit is a Pro subsystem: keyless without llm-redact-pro, the
+            # honest Free-tier output IS the refusal naming the package.
             "audit": ["audit", "verify"],
-            "users": ["users", "list"],
             "guide": ["guide"],
             "install": ["plugin", "install", "claude"],
         }
@@ -265,7 +264,6 @@ def main() -> int:
             "preview": f'llm-redact preview --text "Email {EMAIL} and rotate {AWS_KEY} ..."',
             "doctor": "llm-redact doctor",
             "audit": "llm-redact audit verify",
-            "users": "llm-redact users list",
             "guide": "llm-redact guide",
             "install": "llm-redact plugin install claude",
         }

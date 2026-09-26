@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from license_fixtures import FREE, resolved
 from llm_redact.config import (
     AuditConfig,
     Config,
@@ -107,12 +108,15 @@ def test_audit_and_otel_fail_closed() -> None:
         reg.build_telemetry(OtelConfig(enabled=True))
 
 
-def test_named_users_fail_closed() -> None:
+def test_access_control_fails_closed() -> None:
     reg = get_registry()
-    # Free → no registry; Pro+ needs the pro package, so it fails closed.
-    assert reg.build_users_store(UsersConfig(), "free") is None
+    # Free → no gate (the implicit single local user); a paid tier or an
+    # explicit [users] section expects access control no gate provides.
+    assert reg.build_access_gate(Config(), FREE) is None
     with pytest.raises(ConfigError, match="llm-redact-pro"):
-        reg.build_users_store(UsersConfig(path="x"), "pro")
+        reg.build_access_gate(Config(users=UsersConfig(path="x")), FREE)
+    with pytest.raises(ConfigError, match="upgrade llm-redact-pro"):
+        reg.build_access_gate(Config(), resolved("team"))
 
 
 def test_routing_fails_closed() -> None:

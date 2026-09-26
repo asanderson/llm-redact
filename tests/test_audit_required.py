@@ -81,7 +81,7 @@ def fake_registry(monkeypatch: pytest.MonkeyPatch) -> Registry:
     """A registry resolving a Pro license and building a fake audit log."""
     reg = Registry()
     reg.resolve_license = lambda *args, **kwargs: resolved("pro")
-    reg.build_users_store = lambda cfg, tier: None  # single-user deployment
+    reg.build_access_gate = lambda cfg, lic: None  # single-user deployment
     monkeypatch.setattr(registry_mod, "_registry", reg)
     return reg
 

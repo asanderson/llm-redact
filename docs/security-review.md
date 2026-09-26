@@ -50,7 +50,9 @@ after `/u/`, encoding-agnostic) and **fails closed** (rebuild from the scrubbed
 decoded path) if `raw_path` doesn't start with `/u/`. The encoded remainder
 (Bedrock ARN model ids) is preserved. Tests:
 `test_percent_encoded_user_key_is_scrubbed_from_raw_path`,
-`test_user_key_scrub_preserves_encoded_remainder`.
+`test_user_key_scrub_preserves_encoded_remainder`. The scrub has since moved,
+with all named-user code, into llm-redact-pro's access gate (the tests moved
+with it); this repository now answers any unclaimed `/u/…` path locally.
 
 ### DNS-rebinding gap: `/recent` and `/audit` now host-gated (`proxy.py`)
 
@@ -98,10 +100,11 @@ were genuine correctness inconsistencies:
   different-port local origin passes the Origin check, but the per-process CSRF
   token (unreadable cross-origin, no CORS) still gates every mutating POST, so
   this is not exploitable.
-- **`/u/<key>/__llm-redact/...`** is forwarded to the provider (404) rather
-  than reaching the local reserved handler — it violates "reserved paths are
-  never forwarded" cosmetically but reaches the provider, not the guarded local
-  handler, so there is no CSRF bypass or local-state read.
+- **`/u/<key>/__llm-redact/...`** was forwarded to the provider (404) rather
+  than reaching the local reserved handler — it violated "reserved paths are
+  never forwarded" cosmetically. **Fixed**: a reserved path reached through a
+  stripped prefix is now answered locally with a 404, and any `/u/…` path no
+  access gate claimed is answered locally too (never forwarded or recorded).
 - **`adapt_sql` `%`/`::` handling** (`vault_rdbms.py`): the paramstyle adapter
   assumes vault SQL templates carry no literal `%`, `LIKE` pattern, or `::`
   cast (none currently do). A future template with such syntax would produce a

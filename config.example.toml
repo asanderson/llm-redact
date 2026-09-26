@@ -422,12 +422,15 @@ max_rows = 10000
 # endpoint = "http://127.0.0.1:4318"   # unset: OTEL_EXPORTER_OTLP_* env applies
 # service_name = "llm-redact"
 
-# Named-user registry (Pro+ tiers): where the users database lives.
-# Default: $XDG_DATA_HOME/llm-redact/users.db. Restart to apply.
+# Named users (llm-redact-pro, Pro+ tiers — this repository has no
+# authentication code): where the users database lives. Default:
+# $XDG_DATA_HOME/llm-redact/users.db. Restart to apply. Without the
+# llm-redact-pro package, setting it refuses startup rather than serving an
+# open proxy.
 # [users]
 # path = "/var/lib/llm-redact/users.db"
 
-# Verification-email delivery for `llm-redact users invite` — YOUR SMTP
+# Verification-email delivery for llm-redact-pro's `llm-redact users invite` — YOUR SMTP
 # server, nothing goes through a vendor service. The SMTP password comes
 # from the environment variable named by password_env, never this file.
 # Restart to apply. Without this section, invite requires --print-code.

@@ -32,7 +32,7 @@ from typing import Any, NamedTuple
 
 import httpx
 from starlette.applications import Starlette
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 
@@ -69,6 +69,8 @@ from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
 from llm_redact.placeholders import PLACEHOLDER_RE
 from llm_redact.plugin_api import (
+    AccessGate,
+    Admission,
     Dashboard,
     HopRequest,
     HopResult,
@@ -87,7 +89,6 @@ from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEParser, serialize
-from llm_redact.users import UsersError, UsersStore, send_verification_email
 from llm_redact.vault import Vault, VaultManager
 
 # Local endpoints under this prefix are answered by the proxy itself and are
@@ -115,9 +116,9 @@ _LICENSE_REFRESH_INTERVAL_SECONDS = 86400.0
 # read at finalization time so the OTel span (built then) can parent into the
 # caller's trace even across the streaming boundary — same task, same context.
 _INBOUND_TRACEPARENT: ContextVar[str | None] = ContextVar("llm_redact_traceparent", default=None)
-# The resolved named-user for the current request (2.0 licensing): set once
-# in handle() after identity extraction, read at finalization by
-# record_request — the same task-context trick as the traceparent, so the
+# The subject the access gate (llm-redact-pro) admitted the current request
+# as: set once in handle()/ws_handle() after admission, read at finalization
+# by record_request — the same task-context trick as the traceparent, so the
 # streaming finalizers attribute without threading a parameter through.
 _REQUEST_USER: ContextVar[str | None] = ContextVar("llm_redact_user", default=None)
 
@@ -160,8 +161,24 @@ class RequestContext:
 
 
 # Hop-by-hop / recomputed headers dropped when forwarding either direction.
-_SKIP_REQUEST_HEADERS = frozenset(
-    {"host", "content-length", "connection", "accept-encoding", "x-llm-redact-user"}
+_SKIP_REQUEST_HEADERS = frozenset({"host", "content-length", "connection", "accept-encoding"})
+# Every request header in the proxy's own namespace is for the proxy, never
+# the provider: dropped before forwarding whether or not a plugin consumed
+# it (a named-user key sent to a proxy without an access gate must still
+# never leave the machine).
+OWN_HEADER_PREFIX = "x-llm-redact-"
+# The named-user base-path prefix. Only an access gate (llm-redact-pro)
+# can accept it; a path still carrying it after admission is answered
+# locally and never forwarded or recorded (its next segment is a key).
+IDENTITY_PATH_PREFIX = "/u/"
+# The access gate's admin endpoints (llm-redact-pro): dispatched only to a
+# registered gate, like DASHBOARD_PATHS to the dashboard.
+ACCESS_PATHS = frozenset(
+    {
+        f"{RESERVED_PREFIX}/users",
+        f"{RESERVED_PREFIX}/users/invite",
+        f"{RESERVED_PREFIX}/users/revoke",
+    }
 )
 _SKIP_RESPONSE_HEADERS = frozenset({"content-length", "content-encoding", "transfer-encoding"})
 
@@ -303,12 +320,10 @@ class ProxyState:
         # None unless [otel] enabled = true (then the extra must be
         # installed — build_telemetry fails loudly with the install hint).
         self.telemetry: Telemetry | None = registry.build_telemetry(config.otel)
-        # Named-user registry (2.0 licensing): opened on Pro+ tiers only.
-        # The Free tier is the implicit single local user — no registry, no
-        # enforcement, no new file on disk.
-        self.users_store: UsersStore | None = registry.build_users_store(
-            config.users, self.license.tier
-        )
+        # Client admission (llm-redact-pro): None serves the implicit single
+        # local user; the Free default fails closed when a paid tier or
+        # [users] config expects access control no gate provides.
+        self.access_gate: AccessGate | None = registry.build_access_gate(config, self.license)
         for warning in config.routing.warnings:  # parser-owned (inert upstreams, metered
             logger.warning("routing: %s", warning)  # defaults, dead chains) — always logged
         self.router: Router | None = registry.build_router(config, self.license.tier)
@@ -317,23 +332,13 @@ class ProxyState:
         # the reason. Rebuilt by apply_config when a reload changes the tier.
         self.dashboard: Dashboard | None = registry.build_dashboard(self.license.tier)
 
-    def resolve_user(self, presented_key: str | None) -> str | None:
-        if presented_key is None or self.users_store is None:
-            return None
-        return self.users_store.lookup_key(presented_key)
-
-    def user_enforcement_required(self) -> bool:
-        """Named-user keys become mandatory once there are two or more
-        verified users to tell apart (the llm-redact-pro users registry —
-        without it there is nothing to enforce). This is access control
-        for a multi-user deployment, not a license restriction: a solo
-        user stays implicit with zero setup friction, and binding beyond
-        loopback is purely a TLS question (validate_bind_security), never
-        a seat question. Reads the live registry so a CLI invite/revoke
-        applies immediately."""
-        if self.users_store is None:
-            return False
-        return self.users_store.verified_count() >= 2
+    def admit(self, conn: HTTPConnection, surface: str) -> Admission:
+        """The access gate's verdict (it scrubs its own credentials from the
+        scope first); without a gate every client is the implicit single
+        local user."""
+        if self.access_gate is None:
+            return Admission()
+        return self.access_gate.admit(conn, surface)
 
     def context_for(
         self, adapter: ProviderAdapter | None, method: str, path: str, parsed_body: Any
@@ -465,7 +470,7 @@ class ProxyState:
         # its own state; it raises only ConfigError and changes nothing when
         # it does, so this sits after every other build and before the swap.
         # A reload that turns routing ON builds through the registry (where
-        # the tier is checked — like users_store, a running router is never
+        # the tier is checked — like the access gate, a running router is never
         # re-gated); one that turns it OFF drops it (closed at swap time).
         router = self.router
         if effective.routing.enabled:
@@ -865,6 +870,7 @@ def _request_headers(request: Request) -> list[tuple[str, str]]:
         (name, value)
         for name, value in request.headers.items()
         if name.lower() not in _SKIP_REQUEST_HEADERS
+        and not name.lower().startswith(OWN_HEADER_PREFIX)
     ]
     # Compressed upstream bodies would force re-encoding bookkeeping on the
     # streaming path; identity keeps the byte stream directly rewritable.
@@ -1083,12 +1089,19 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
         return JSONResponse({"error": _dashboard_unavailable(state)}, status_code=404)
     if path in (f"{RESERVED_PREFIX}/sessions", f"{RESERVED_PREFIX}/sessions/prune"):
         return await _handle_sessions(request, state)
-    if path in (
-        f"{RESERVED_PREFIX}/users",
-        f"{RESERVED_PREFIX}/users/invite",
-        f"{RESERVED_PREFIX}/users/revoke",
-    ):
-        return await _handle_users(request, state)
+    if path in ACCESS_PATHS:
+        # Host/Origin checked here too (defense in depth — the gate runs the
+        # full guard chain itself) so a rebinding page learns nothing.
+        if not _host_allowed(request, state):
+            return JSONResponse({"error": "host not allowed"}, status_code=403)
+        if not _origin_allowed(request, state):
+            return JSONResponse({"error": "origin not allowed"}, status_code=403)
+        if state.access_gate is not None:
+            return await state.access_gate.handle(request, state)
+        return JSONResponse(
+            {"error": "named users and access control require the llm-redact-pro package"},
+            status_code=404,
+        )
     if request.method != "GET":
         return JSONResponse({"error": "method not allowed"}, status_code=405)
 
@@ -1218,16 +1231,13 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 # cap, cloud entitlements, expiry — metadata only, never the
                 # key itself. Warnings surface invalid-key-fell-to-Free and
                 # the expiry grace window (never silent).
-                "users": {
-                    "registry": state.users_store is not None,
-                    "verified": (
-                        state.users_store.verified_count() if state.users_store is not None else 0
-                    ),
-                    "active": (
-                        state.users_store.active_count() if state.users_store is not None else 0
-                    ),
-                    "enforcement": state.user_enforcement_required(),
-                },
+                # The access gate's own block (llm-redact-pro); without one,
+                # no registry and nothing enforced.
+                "users": (
+                    state.access_gate.status()
+                    if state.access_gate is not None
+                    else {"registry": False, "enforcement": False}
+                ),
                 "license": {
                     "tier": state.license.tier,
                     "source": state.license.source,
@@ -1489,97 +1499,6 @@ async def _handle_sessions(request: Request, state: ProxyState) -> Response:
     return JSONResponse({"pruned": pruned})
 
 
-async def _handle_users(request: Request, state: ProxyState) -> Response:
-    """Named-user browser (GET /users) and invite/revoke (POST, behind the
-    full config-editor guard stack). Metadata only: names, emails, statuses
-    — never verification codes, never key hashes. Invite returns the code
-    to the dashboard for manual delivery (or sends email when [email] is
-    configured), mirroring the CLI."""
-    if not _host_allowed(request, state):
-        return JSONResponse({"error": "host not allowed"}, status_code=403)
-    if not _origin_allowed(request, state):
-        return JSONResponse({"error": "origin not allowed"}, status_code=403)
-    if state.users_store is None:
-        return JSONResponse(
-            {"error": "user management requires the llm-redact-pro package (see docs/editions.md)"},
-            status_code=403,
-        )
-
-    if request.url.path == f"{RESERVED_PREFIX}/users":
-        if request.method != "GET":
-            return JSONResponse({"error": "method not allowed"}, status_code=405)
-        return JSONResponse(
-            {
-                "max_users": state.license.max_users,
-                "active": state.users_store.active_count(),
-                "verified": state.users_store.verified_count(),
-                "enforcement": state.user_enforcement_required(),
-                "users": [
-                    {
-                        "name": row.name,
-                        "email": row.email,
-                        "status": row.status,
-                        "invited_at": row.invited_at,
-                        "verified_at": row.verified_at,
-                    }
-                    for row in state.users_store.list_users()
-                ],
-            },
-            headers={"cache-control": "no-store"},
-        )
-
-    if request.method != "POST":
-        return JSONResponse({"error": "method not allowed"}, status_code=405)
-    payload, guard_error = await _guarded_post_json(request, state)
-    if guard_error is not None:
-        return guard_error
-    if not isinstance(payload, dict):
-        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
-
-    if request.url.path == f"{RESERVED_PREFIX}/users/invite":
-        name = payload.get("name")
-        email_addr = payload.get("email")
-        if not isinstance(name, str) or not isinstance(email_addr, str):
-            return JSONResponse(
-                {"error": 'body must be {"name": "...", "email": "..."}'}, status_code=400
-            )
-        try:
-            code = state.users_store.invite(name, email_addr, max_users=state.license.max_users)
-        except UsersError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        sent = False
-        if state.config.email.configured:
-            assert state.config.email.smtp_host is not None
-            assert state.config.email.from_address is not None
-            try:
-                send_verification_email(
-                    smtp_host=state.config.email.smtp_host,
-                    smtp_port=state.config.email.smtp_port,
-                    starttls=state.config.email.starttls,
-                    username=state.config.email.username,
-                    password_env=state.config.email.password_env,
-                    from_address=state.config.email.from_address,
-                    to_address=email_addr,
-                    display_name=name,
-                    code=code,
-                )
-                sent = True
-            except (OSError, UsersError) as exc:
-                logger.warning("verification email failed: %s", exc)
-        # The code goes back to the ADMIN's same-origin dashboard only when
-        # it was not emailed — manual delivery mirrors the CLI --print-code.
-        return JSONResponse({"invited": email_addr, "sent": sent, "code": None if sent else code})
-
-    email_addr = payload.get("email")
-    if not isinstance(email_addr, str):
-        return JSONResponse({"error": 'body must be {"email": "..."}'}, status_code=400)
-    try:
-        state.users_store.revoke(email_addr, purge=bool(payload.get("purge", False)))
-    except UsersError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    return JSONResponse({"revoked": email_addr})
-
-
 async def _guarded_post_json(
     request: Request, state: ProxyState
 ) -> tuple[Any, None] | tuple[None, Response]:
@@ -1619,59 +1538,6 @@ async def _read_capped(request: Request, limit: int) -> bytes | None:
     return b"".join(chunks)
 
 
-USER_KEY_HEADER = "x-llm-redact-user"
-_USER_PATH_PREFIX = "/u/"
-
-
-def _extract_user_key(request: Request) -> str | None:
-    """Pull the named-user key off the request and SCRUB it in place.
-
-    Two channels (llm-redact-pro docs/licensing.md): the universal ``/u/<key>/`` base-path
-    prefix (the one knob every tool has is its base URL) and the
-    ``x-llm-redact-user`` header. Both are removed here — from
-    scope["path"], scope["raw_path"], and scope["headers"] — before any
-    routing, logging, recording, or forwarding code can see them: the key
-    is OUR credential and must never reach a provider or a log line.
-    """
-    scope = request.scope
-    key: str | None = None
-    path: str = scope["path"]
-    if path.startswith(_USER_PATH_PREFIX):
-        candidate, _, remainder = path[len(_USER_PATH_PREFIX) :].partition("/")
-        if candidate:
-            key = candidate
-            scope["path"] = "/" + remainder
-            # Scrub raw_path too (forwarding builds the upstream URL from it).
-            # A byte-prefix match on the DECODED candidate silently fails when
-            # the key segment is percent-encoded (`/u/lrk_%41BC/...`), which
-            # would leave our identity credential in the forwarded URL. Strip
-            # the first RAW segment after /u/ instead — encoding-agnostic — and
-            # if raw_path doesn't start with /u/ at all (an encoded prefix),
-            # fail closed by rebuilding it from the already-scrubbed path.
-            raw: bytes | None = scope.get("raw_path")
-            prefix_bytes = _USER_PATH_PREFIX.encode("latin-1")
-            if raw is not None:
-                if raw.startswith(prefix_bytes):
-                    _, _, remainder_raw = raw[len(prefix_bytes) :].partition(b"/")
-                    scope["raw_path"] = (b"/" + remainder_raw) if remainder_raw else b"/"
-                else:
-                    scope["raw_path"] = scope["path"].encode("latin-1")
-    remaining: list[tuple[bytes, bytes]] = []
-    header_key: str | None = None
-    for name, value in scope["headers"]:
-        if name.lower() == USER_KEY_HEADER.encode("ascii"):
-            header_key = value.decode("latin-1").strip()
-        else:
-            remaining.append((name, value))
-    if header_key is not None:
-        scope["headers"] = remaining
-        # Starlette caches Headers on first access; drop any cache so the
-        # scrubbed list is what every later reader (incl. forwarding) sees.
-        if hasattr(request, "_headers"):
-            del request._headers
-    return key if key is not None else (header_key or None)
-
-
 async def handle(request: Request) -> Response:
     state: ProxyState = request.app.state.proxy
     path = request.url.path
@@ -1686,12 +1552,24 @@ async def handle(request: Request) -> Response:
             response.headers.setdefault(header, value)
         return response
 
-    # Named-user identity (2.0 licensing): extract and SCRUB the key before
-    # anything else reads the path or headers, then resolve it to a name.
-    user_key = _extract_user_key(request)
-    path = request.scope["path"]  # the /u/<key> prefix is gone from here on
-    user_name = state.resolve_user(user_key)
-    _REQUEST_USER.set(user_name)
+    # Client admission (llm-redact-pro's access gate): it removes every
+    # credential it recognizes from the scope before anything else reads
+    # the path or headers. Its refusal, if any, is applied further down.
+    admission = state.admit(request, "http")
+    path = request.scope["path"]
+    if path.startswith(RESERVED_PREFIX):
+        # Only reachable through a stripped prefix (/u/<key>/__llm-redact/…):
+        # reserved endpoints are served at their own path, never forwarded.
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if path.startswith(IDENTITY_PATH_PREFIX):
+        # An identity prefix no gate claimed: its next segment is a key, so
+        # the request is neither forwarded nor recorded (both would carry it).
+        logger.info("%s /u/... -> 404 unclaimed identity path prefix", request.method)
+        return JSONResponse(
+            {"error": "this proxy does not accept /u/<key>/ identity paths (no access gate)"},
+            status_code=404,
+        )
+    _REQUEST_USER.set(admission.subject)
 
     # Captured once per request; read at finalization (incl. the streaming
     # finalizer, same task context) so an OTel span can parent into the
@@ -1749,16 +1627,11 @@ async def handle(request: Request) -> Response:
         logger.info("%s %s -> 502 provider %s disabled", request.method, path, provider_name)
         return JSONResponse(error, status_code=502)
 
-    if state.user_enforcement_required() and user_name is None:
-        # Named-user enforcement (llm-redact-pro docs/licensing.md): required on team
-        # deployments (2+ verified users, or any non-loopback bind). The
-        # refusal carries instructions, never echoes a presented key, and
-        # is recorded like every other proxy-generated response.
-        message = (
-            "this llm-redact proxy requires a named-user key: pass it via the"
-            f" /u/<key>/ URL path prefix or the {USER_KEY_HEADER} header"
-            " (llm-redact users verify issues keys)"
-        )
+    if admission.refusal is not None:
+        # The access gate's refusal (llm-redact-pro), applied after the
+        # disabled-provider 502 and recorded like every other proxy-generated
+        # response. The gate's message never echoes a presented credential.
+        message = admission.refusal
         error = (
             adapter.error_body(message, status=403) if adapter is not None else {"error": message}
         )
@@ -1773,7 +1646,7 @@ async def handle(request: Request) -> Response:
             detections={},
             rehydrations={},
         )
-        logger.info("%s %s -> 403 named-user key required", request.method, path)
+        logger.info("%s %s -> 403 refused by the access gate", request.method, path)
         return JSONResponse(error, status_code=403)
 
     if state.router is not None:
@@ -2735,6 +2608,8 @@ def create_app(
             state.vault_manager.close()
             if state.router is not None:
                 state.router.close()
+            if state.access_gate is not None:
+                state.access_gate.close()
             if state.audit is not None:
                 state.audit.close()
             for task in background_tasks:

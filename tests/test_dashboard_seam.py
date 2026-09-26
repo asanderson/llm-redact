@@ -87,8 +87,8 @@ def _install(monkeypatch: pytest.MonkeyPatch, tiers: list[str]) -> list[FakeDash
         return built[-1]
 
     reg.build_dashboard = build_dashboard
-    # A fake pro tier must not make the Free users factory demand the package.
-    reg.build_users_store = lambda config, tier: None
+    # A fake pro tier must not make the Free access factory demand the package.
+    reg.build_access_gate = lambda config, license: None
     monkeypatch.setattr(registry_mod, "_registry", reg)
     return built
 

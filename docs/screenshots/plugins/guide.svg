@@ -15,10 +15,10 @@
 <text x="22" y="208" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">`«EMAIL_001»`; on the way back it restores the real values. The mapping</text>
 <text x="22" y="227" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">lives in a local vault; the provider only ever sees placeholders.</text>
 <text x="22" y="246" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
-<text x="22" y="265" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">This guide covers the two user interfaces: the **web dashboard** (with its</text>
-<text x="22" y="284" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">config editor) and the **agent plugin commands**. The deeper design</text>
-<text x="22" y="303" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">documents live in the repository's `docs/` directory.</text>
-<text x="22" y="322" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
-<text x="22" y="341" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">## Quick start</text>
-<text x="22" y="360" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">… (+110 more lines)</text>
+<text x="22" y="265" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">This guide covers the **command line** and the **agent plugin</text>
+<text x="22" y="284" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">commands**, which are part of the free core, and the **web dashboard**</text>
+<text x="22" y="303" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">(with its config editor and redaction preview), which is part of the</text>
+<text x="22" y="322" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">separately installed llm-redact-pro package. The deeper design documents</text>
+<text x="22" y="341" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">live in the repository's `docs/` directory.</text>
+<text x="22" y="360" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">… (+184 more lines)</text>
 </svg>

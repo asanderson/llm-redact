@@ -25,7 +25,7 @@
 <text x="22" y="398" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  (No content)</text>
 <text x="22" y="417" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
 <text x="22" y="436" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Bash(llm-redact status)</text>
-<text x="22" y="455" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  llm-redact 1.0.0 — up 0.3s</text>
+<text x="22" y="455" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  ⎿  llm-redact 1.3.0 — up 0.5s</text>
 <text x="22" y="474" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     license: none (FOSS core — nothing gated)</text>
 <text x="22" y="493" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     licensed-features package: not installed (FOSS core is complete)</text>
 <text x="22" y="512" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     session: default  vault: sqlite (0 entries)</text>
@@ -37,7 +37,7 @@
 <text x="22" y="626" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">       ⚠ language-inactive rules: brazilian_cpf, chinese_resident_id, finnish_hetu, french_nir, it</text>
 <text x="22" y="645" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  alian_codice_fiscale, japanese_my_number, korean_rrn, mexican_curp, norwegian_fnr, spanish_dni, </text>
 <text x="22" y="664" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  swedish_personnummer, thai_id (not detected)</text>
-<text x="22" y="683" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     … (+8 more lines)</text>
+<text x="22" y="683" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">     … (+9 more lines)</text>
 <text x="22" y="702" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve"></text>
 <text x="22" y="721" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">⏺ Scoping applied. The posture line is deliberately loud: every</text>
 <text x="22" y="740" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  national-id rule outside en/de is NOT BUILT and its values</text>

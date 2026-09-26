@@ -11,6 +11,8 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-26
+
 ### Removed
 
 - All named-user and client-authentication code, which moves to llm-redact-pro:

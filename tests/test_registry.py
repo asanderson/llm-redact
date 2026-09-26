@@ -156,6 +156,25 @@ def test_build_access_gate_default_factory() -> None:
         reg.build_access_gate(Config(users=UsersConfig(path="x")), FREE)
 
 
+def test_access_gate_default_refuses_when_pro_failed_to_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A key is configured and llm-redact-pro is installed, but its plugin did
+    # not register (e.g. an llm-redact-pro too old for this core): the key fell
+    # to Free only because the package failed, so refuse to serve without the
+    # access control it was licensed for.
+    from llm_redact.licensing import ResolvedLicense
+
+    keyed_free = ResolvedLicense(tier="free", license=None, source="env", warnings=())
+    reg = Registry()
+    monkeypatch.setattr(registry_mod, "pro_package_installed", lambda: True)
+    with pytest.raises(ConfigError, match="plugin did not load"):
+        reg.build_access_gate(Config(), keyed_free)
+    assert reg.build_access_gate(Config(), FREE) is None  # no key: the Free tier
+    monkeypatch.setattr(registry_mod, "pro_package_installed", lambda: False)
+    assert reg.build_access_gate(Config(), keyed_free) is None  # key without pro
+
+
 def test_default_tool_base_url_and_cli_commands() -> None:
     reg = Registry()
     assert reg.tool_base_url("http://127.0.0.1:8787") == "http://127.0.0.1:8787"

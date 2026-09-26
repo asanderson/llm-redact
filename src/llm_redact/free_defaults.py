@@ -97,6 +97,19 @@ def build_access_gate(config: Config, license: ResolvedLicense) -> AccessGate | 
             " installed llm-redact-pro does not provide it (no access gate registered);"
             " upgrade llm-redact-pro to 0.8 or later"
         )
+    from .registry import pro_package_installed
+
+    if license.source != "absent" and pro_package_installed():
+        # A license key is configured and llm-redact-pro is installed, yet its
+        # plugin did not register (an llm-redact-pro that no longer loads on
+        # this core, e.g. one older than 0.8): the key resolved to Free only
+        # because the package failed, and serving on would silently drop the
+        # access control the deployment was licensed for.
+        raise ConfigError(
+            "a license key is configured and llm-redact-pro is installed, but its plugin"
+            " did not load, so its access control is unavailable; upgrade llm-redact-pro"
+            " to 0.8 or later (or remove the key to run the Free tier)"
+        )
     if config.users.path is not None:
         raise ConfigError(f"[users] configures named users, a paid feature; {_PRO_HINT}")
     return None

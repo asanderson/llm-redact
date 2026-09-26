@@ -45,6 +45,9 @@ and tags `vX.Y.Z`.
 - Startup now fails with a clear error when a paid license tier or a `[users]` section
   expects access control that the installed llm-redact-pro does not provide. This happens
   with llm-redact-pro older than 0.8, or without the package.
+- Startup also fails when a license key is configured and llm-redact-pro is installed but its
+  plugin did not load, as happens with a pre-0.8 llm-redact-pro on this core. Before, the key
+  fell back to Free and the proxy served with no access control.
 - WebSocket connections are now recorded with the admitted user.
 - The editions matrix (`docs/editions.md`) and the README list the llm-redact-pro Team
   deployment kit: a shared mutual-TLS team server on Docker, Podman and Kubernetes, for Team

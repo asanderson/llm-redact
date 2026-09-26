@@ -39,7 +39,7 @@
 <li><strong>Overview</strong> — the protection-posture banner (green when every enabled rule redacts; an amber list of every coverage opt-out otherwise), counters for values redacted, restored, warned (and forwarded) and blocked, detections by placeholder type, the runtime panel (version, uptime, vault, session mode, license tier — license warnings such as an invalid key or expiry grace appear loudly, never silently), and each provider's upstream with its state and upstream errors.</li>
 <li><strong>Traffic</strong> — the last 200 requests (path, provider, status, duration, detection counts — never values), updated live over a server-sent event stream, with a text filter and provider / kind picklists. This works without the audit log.</li>
 <li><strong>Vault sessions</strong> — vault sessions with entry counts and idle times; whole idle sessions can be pruned from here (sqlite backend). The active session is never pruned.</li>
-<li><strong>Named users</strong> (Pro+) — invite teammates by email, see seat usage against the license cap, revoke access. Verification codes are delivered by your <code>[email]</code> SMTP settings or shown once for manual delivery. Per-user keys are shown once, at verification, to the invitee — never stored, never re-displayed.</li>
+<li><strong>Named users</strong> (Pro+) — invite teammates by email, see seat usage against the license cap, revoke access. Named users, per-user keys and the <code>llm-redact users</code> command all come with llm-redact-pro; its own guide covers them.</li>
 <li><strong>Redaction preview</strong> — paste text and see exactly what the live detector set would redact, without sending anything upstream or writing anything to the vault. Warn-mode matches are shown unmasked, because that is honestly what would be forwarded.</li>
 <li><strong>Configuration</strong> — the config editor (below), with picklists and type-ahead: a searchable, filterable rule grid with per-rule mode picklists, a language picker, placeholder-type suggestions, NER backend chips and entity suggestions, and a save bar that tracks unsaved changes.</li>
 <li><strong>System</strong> — the restart-required settings and the local endpoints.</li>
@@ -66,7 +66,6 @@
 <li><strong>preview</strong> — run text through the live detectors locally.</li>
 <li><strong>doctor</strong> — the diagnostics report, interpreted.</li>
 <li><strong>audit</strong> — audit log status, tamper-chain verification, and whether the zero-loss <code>required</code> mode is on.</li>
-<li><strong>users</strong> — seat usage and invitations (never prints per-user keys).</li>
 <li><strong>routes</strong> — the routing rules table, or a dry-run of which rule, upstream, and fallback chain a request would take (<code>routes test --protocol anthropic --model claude-* --auth oauth</code>); no upstream is contacted — the live <code>state</code> line comes from the running proxy's own listener, or reads <code>not probed</code>.</li>
 <li><strong>spend</strong> — per-upstream tokens and USD for the month, how much came from fallback re-issues, and the remaining budget. On a subscription (passthrough) lane the USD is a list-price equivalent, not a bill — the token counts are the real number.</li>
 <li><strong>guide</strong> — displays this guide.</li>

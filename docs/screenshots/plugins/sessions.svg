@@ -7,5 +7,5 @@
 <text x="410" y="24" text-anchor="middle" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">llm-redact sessions list</text>
 <text x="22" y="75" fill="#7ee787" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">$ llm-redact sessions list</text>
 <text x="22" y="94" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">SESSION  ENTRIES  FIRST                 LAST</text>
-<text x="22" y="113" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">default        2  2026-07-17T02:35:49Z  2026-07-17T02:35:50Z</text>
+<text x="22" y="113" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">default        2  2026-09-26T21:50:17Z  2026-09-26T21:50:17Z</text>
 </svg>

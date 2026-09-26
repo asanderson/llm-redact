@@ -20,7 +20,7 @@ proprietary **`llm-redact-pro`** package.
 
 | | FOSS core (this repo) | + llm-redact-pro (Pro) | Team | Unlimited / Managed |
 | --- | --- | --- | --- | --- |
-| Named users (email-verified seats) | implicit single local user | 1 | 25 | unlimited |
+| Named users (email-verified seats) and client authentication | implicit single local user (no authentication code in this repository) | 1 | 25 | unlimited |
 | The entire redaction/rehydration path: every rule, mode, NER backend, deny/allow lists, the realtime relay | ✓ | ✓ | ✓ | ✓ |
 | ALL provider adapters — Anthropic/OpenAI/Gemini/Ollama/Cohere/custom **and** AWS Bedrock / Azure OpenAI / GCP Vertex | ✓ | ✓ | ✓ | ✓ |
 | In-memory + persistent unencrypted SQLite vault, JSON logs, JSON `/status` + Prometheus `/metrics` + `/recent`/`/events` feeds, `llm-redact status`/`preview`/`doctor`, agent plugins | ✓ | ✓ | ✓ | ✓ |
@@ -45,8 +45,14 @@ proprietary **`llm-redact-pro`** package.
   log, `/status`, doctor) and keeps its tier for a 14-day
   grace window after it.
 - `llm-redact license show` decodes your key.
-- **Named seats** (`llm-redact users`) live in the pro package; the
-  invite→verify→key walkthrough ships with it.
+- **Named seats and client authentication live entirely in the pro
+  package** — the `llm-redact users` command, the per-user keys, the
+  seat checks and the admin endpoints. This repository only exposes a
+  generic admission hook, and even without the package it never
+  forwards a proxy credential: every `x-llm-redact-*` request header is
+  dropped before forwarding, and a `/u/<key>/` path is answered locally.
+  Transport mutual TLS (`[tls] client_ca`) stays here as the bind-safety
+  rule for non-loopback serving; it identifies no user.
 
 ## The licenses
 

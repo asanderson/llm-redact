@@ -2,7 +2,7 @@
 
 The open-core split (llm-redact-pro docs/licensing.md) keeps the Free tier in this
 public package and moves the paid subsystems (vault encryption, RDBMS vault,
-audit, OTel, per-conversation sessions, named users) to a separately-distributed
+audit, OTel, per-conversation sessions, access control) to a separately-distributed
 ``llm-redact-pro`` package. This module is the seam between them: the proxy
 builds its swappable subsystems through a ``Registry`` of factories rather than
 importing concrete implementations, and an installed plugin — discovered via
@@ -25,12 +25,13 @@ from typing import TYPE_CHECKING
 
 from .audit import build_audit as _build_audit
 from .audit_s3 import build_audit_sinks as _build_audit_sinks
+from .free_defaults import build_access_gate as _build_access_gate
 from .free_defaults import build_dashboard as _build_dashboard
 from .free_defaults import build_router as _build_router
 from .free_defaults import build_telemetry as _build_telemetry
 from .free_defaults import resolve_license as _resolve_license
+from .free_defaults import tool_base_url as _tool_base_url
 from .sessions import build_session_router as _build_session_router
-from .users import build_users_store as _build_users_store
 from .vault import build_cipher as _build_cipher
 from .vault import build_vault_manager as _build_vault_manager
 from .vault import cipher_from_key as _cipher_from_key
@@ -38,10 +39,17 @@ from .vault import cipher_from_key as _cipher_from_key
 if TYPE_CHECKING:
     from .audit import AuditLog
     from .audit_s3 import AzureAuditSink, S3AuditSink
-    from .config import AuditConfig, Config, OtelConfig, UsersConfig, VaultConfig
+    from .config import AuditConfig, Config, OtelConfig, VaultConfig
     from .licensing import ResolvedLicense
-    from .plugin_api import Dashboard, Router, SessionRouter, Telemetry, VaultCipher
-    from .users import UsersStore
+    from .plugin_api import (
+        AccessGate,
+        CliCommand,
+        Dashboard,
+        Router,
+        SessionRouter,
+        Telemetry,
+        VaultCipher,
+    )
     from .vault import VaultManager
 
 logger = logging.getLogger("llm_redact")
@@ -84,9 +92,11 @@ class Registry:
     build_telemetry: Callable[[OtelConfig], Telemetry | None]
     build_audit: Callable[[AuditConfig], AuditLog | None]
     build_audit_sinks: Callable[[AuditConfig], tuple[S3AuditSink | None, AzureAuditSink | None]]
-    build_users_store: Callable[[UsersConfig, str], UsersStore | None]
+    build_access_gate: Callable[[Config, ResolvedLicense], AccessGate | None]
     build_router: Callable[[Config, str], Router | None]
     build_dashboard: Callable[[str], Dashboard | None]
+    tool_base_url: Callable[[str], str]
+    cli_commands: list[CliCommand]
 
     def __init__(self) -> None:
         # Assigned as INSTANCE attributes (not class attributes) so a bare
@@ -106,7 +116,11 @@ class Registry:
         self.build_telemetry = _build_telemetry
         self.build_audit = _build_audit
         self.build_audit_sinks = _build_audit_sinks
-        self.build_users_store = _build_users_store
+        # Client admission (named users, per-user keys, seats — every
+        # authentication method) is a paid subsystem with NO core logic:
+        # the Free default returns None on the Free tier and fails closed
+        # when a paid tier or [users] config expects access control.
+        self.build_access_gate = _build_access_gate
         # Rule-based upstream routing (the Router contract in plugin_api) is a
         # paid subsystem; the Free default returns None while [routing] is
         # off and fails closed naming the package when it is enabled.
@@ -116,6 +130,11 @@ class Registry:
         # answers its paths with a 404 naming the package. Built with the
         # resolved tier, rebuilt when a reload changes it.
         self.build_dashboard = _build_dashboard
+        # `llm-redact run` passes the base URL it exports to wrapped tools
+        # through this hook (identity-free in the core).
+        self.tool_base_url = _tool_base_url
+        # Paid CLI subcommands (the plugin's own parsers and handlers).
+        self.cli_commands = []
 
 
 def load_plugins(registry: Registry) -> list[str]:

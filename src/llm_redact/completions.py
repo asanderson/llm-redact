@@ -1,9 +1,10 @@
 """`llm-redact completions bash|zsh`: shell completion scripts.
 
 Hand-written templates (no runtime deps, nothing to install at import
-time); the COMMANDS table below is the single source of truth and a test
-cross-checks it against the real argparse parser so the two cannot drift
-apart silently.
+time); the COMMANDS table below is the single source of truth for the core
+commands and a test cross-checks it against the real argparse parser so the
+two cannot drift apart silently. Plugin-supplied commands carry their own
+completion words (``CliCommand.completion``), merged in by ``all_commands``.
 """
 
 # command -> (subcommands, options) — completion surface only.
@@ -29,10 +30,6 @@ COMMANDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "config": (("show",), ("--config", "--path")),
     "preview": ((), ("--config", "--text", "--json")),
     "license": (("show", "verify"), ("--config", "--key", "--json")),
-    "users": (
-        ("invite", "verify", "list", "revoke"),
-        ("--config", "--db", "--print-code", "--json", "--yes", "--purge"),
-    ),
     "routes": (
         ("list", "test"),
         ("--config", "--json", "--protocol", "--model", "--header", "--path", "--auth"),
@@ -43,10 +40,22 @@ COMMANDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 }
 
 
+def all_commands() -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """COMMANDS plus the completion words of plugin-supplied commands
+    (llm-redact-pro's), which never shadow a core command."""
+    from llm_redact.registry import get_registry
+
+    merged = dict(COMMANDS)
+    for command in get_registry().cli_commands:
+        merged.setdefault(command.name, command.completion)
+    return merged
+
+
 def bash_script() -> str:
-    top = " ".join(COMMANDS)
+    commands = all_commands()
+    top = " ".join(commands)
     cases = []
-    for name, (subs, opts) in COMMANDS.items():
+    for name, (subs, opts) in commands.items():
         words = " ".join((*subs, *opts))
         cases.append(f'        {name}) words="{words}" ;;')
     case_block = "\n".join(cases)
@@ -71,9 +80,10 @@ complete -F _llm_redact llm-redact
 
 
 def zsh_script() -> str:
-    top = " ".join(COMMANDS)
+    commands = all_commands()
+    top = " ".join(commands)
     cases = []
-    for name, (subs, opts) in COMMANDS.items():
+    for name, (subs, opts) in commands.items():
         words = " ".join((*subs, *opts))
         cases.append(f"        {name}) compadd -- {words} ;;")
     case_block = "\n".join(cases)
@@ -101,9 +111,10 @@ def fish_script() -> str:
         "complete -c llm-redact -f",
         "complete -c llm-redact -n __fish_use_subcommand -l version",
     ]
-    for name in COMMANDS:
+    commands = all_commands()
+    for name in commands:
         lines.append(f"complete -c llm-redact -n __fish_use_subcommand -a {name}")
-    for name, (subs, opts) in COMMANDS.items():
+    for name, (subs, opts) in commands.items():
         condition = f'"__fish_seen_subcommand_from {name}"'
         for sub in subs:
             lines.append(f"complete -c llm-redact -n {condition} -a {sub}")

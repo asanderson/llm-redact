@@ -11,8 +11,44 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Removed
+
+- All named-user and client-authentication code, which moves to llm-redact-pro:
+  - the `/u/<key>/` and `x-llm-redact-user` key handling
+  - the rule that requires a key once two users are verified
+  - the `/__llm-redact/users` admin endpoints
+  - the `llm-redact users` command and the verification-email sender
+  - the `llm_redact.users` module
+  - the `users` agent slash command
+
+  With llm-redact-pro 0.8 installed, all of these work as before.
+
+### Added
+
+- A generic admission hook (`plugin_api.AccessGate`, `Registry.build_access_gate`). Before
+  routing, it lets llm-redact-pro admit or refuse each HTTP request and WebSocket upgrade, and
+  record which user each request belongs to.
+- `plugin_api.CliCommand` and `Registry.cli_commands`, so a plugin can supply its own
+  `llm-redact` subcommands, including their shell completions.
+- `Registry.tool_base_url`, which lets a plugin change the base URL that `llm-redact run`
+  passes to wrapped tools.
+
 ### Changed
 
+- Every `x-llm-redact-*` request header is now dropped before forwarding, on HTTP and
+  WebSocket. Before, only `x-llm-redact-user` was.
+- Without llm-redact-pro, a `/u/<key>/…` path is answered locally with a 404. It is never
+  forwarded or recorded, so the key cannot leak.
+- A reserved `/__llm-redact/…` path reached through a stripped prefix is now answered
+  locally. Before, it was forwarded to the provider.
+- `/__llm-redact/users*` without llm-redact-pro now returns 404 instead of 403.
+- Startup now fails with a clear error when a paid license tier or a `[users]` section
+  expects access control that the installed llm-redact-pro does not provide. This happens
+  with llm-redact-pro older than 0.8, or without the package.
+- Startup also fails when a license key is configured and llm-redact-pro is installed but its
+  plugin did not load, as happens with a pre-0.8 llm-redact-pro on this core. Before, the key
+  fell back to Free and the proxy served with no access control.
+- WebSocket connections are now recorded with the admitted user.
 - The editions matrix (`docs/editions.md`) and the README list the llm-redact-pro Team
   deployment kit: a shared mutual-TLS team server on Docker, Podman and Kubernetes, for Team
   and above. This repository's Helm chart and container images stay keyless.

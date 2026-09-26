@@ -44,8 +44,8 @@ Claude Code's gateway model discovery works; the adapter matrix row
 stays pass-through. The local answer sits behind the same gates as every
 proxy-generated reply for a real API path: the path infers provider
 `openai`, so `[providers.openai] enabled = false` refuses it 502 (the
-Anthropic-shaped call too), and 2+ verified named users refuse an
-unauthenticated client 403, before the catalog is consulted. The row
+Anthropic-shaped call too), and an llm-redact-pro access gate refuses an
+unadmitted client 403, before the catalog is consulted. The row
 does not change: that answer is a routing feature, not a redaction
 classification. Under `[routing]` the id-only rows here and below —
 `GET /v1/responses/{id}`, conversation item reads,

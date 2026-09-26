@@ -68,10 +68,9 @@ connected.
   whole idle sessions can be pruned from here (sqlite backend). The
   active session is never pruned.
 - **Named users** (Pro+) — invite teammates by email, see seat usage
-  against the license cap, revoke access. Verification codes are
-  delivered by your `[email]` SMTP settings or shown once for manual
-  delivery. Per-user keys are shown once, at verification, to the
-  invitee — never stored, never re-displayed.
+  against the license cap, revoke access. Named users, per-user keys and
+  the `llm-redact users` command all come with llm-redact-pro; its own
+  guide covers them.
 - **Redaction preview** — paste text and see exactly what the live
   detector set would redact, without sending anything upstream or
   writing anything to the vault. Warn-mode matches are shown unmasked,
@@ -133,7 +132,6 @@ Claude Code and Cursor `/llm-redact-<name>`, Codex
 - **doctor** — the diagnostics report, interpreted.
 - **audit** — audit log status, tamper-chain verification, and whether
   the zero-loss `required` mode is on.
-- **users** — seat usage and invitations (never prints per-user keys).
 - **routes** — the routing rules table, or a dry-run of which rule,
   upstream, and fallback chain a request would take
   (`routes test --protocol anthropic --model claude-* --auth oauth`);

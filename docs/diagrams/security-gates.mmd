@@ -13,8 +13,10 @@ flowchart TB
 
     route -- no --> g3{"③ provider routing<br/>adapter match (incl. /custom/NAME)<br/>+ enabled? + detection on?"}
     g3 -- "provider disabled or<br/>unknown custom name" --> r3([proxy-generated 502 —<br/>never falls through to pass-through])
-    g3 -- "unrecognized traffic" --> pass([verbatim pass-through —<br/>never break the tool])
-    g3 -- matched --> g4{"④ body size<br/>≤ max_body_bytes?"}
+    g3 -- "provider ok" --> ga{"access (llm-redact-pro gate):<br/>who is this client? The gate removes<br/>its credentials first. Without the package:<br/>implicit local user; x-llm-redact-* headers<br/>dropped, /u/… paths answered locally"}
+    ga -- "refused" --> ra([403 — never forwarded])
+    ga -- "unrecognized traffic" --> pass([verbatim pass-through —<br/>never break the tool])
+    ga -- matched --> g4{"④ body size<br/>≤ max_body_bytes?"}
     g4 -- "too large to redact" --> r4([413 — nothing sent upstream])
     g4 -- ok --> g5{"⑤ detection + per-rule modes<br/>deny strings win every overlap,<br/>then rules + allowlists<br/>(scoped by [detection] languages);<br/>redact / warn / block;<br/>[detection.mcp] exempt_servers<br/>blocks bypass this gate"}
 
@@ -36,7 +38,7 @@ flowchart TB
     classDef gate fill:#ddf4ff,stroke:#0969da,stroke-width:1px;
     classDef okPath fill:#dafbe1,stroke:#1a7f37,stroke-width:1px;
     classDef vaultBox fill:#fff8c5,stroke:#9a6700,stroke-width:1.5px;
-    class r1,r2,r3,r4,r5,r6 refuse;
-    class g1,g2,g3,g4,g5,g6 gate;
+    class r1,r2,r3,ra,r4,r5,r6 refuse;
+    class g1,g2,g3,ga,g4,g5,g6 gate;
     class up,resp,out,ops,pass okPath;
     class vault,sink vaultBox;

@@ -6,7 +6,7 @@
 <circle cx="68" cy="20" r="6" fill="#28c840"/>
 <text x="410" y="24" text-anchor="middle" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">llm-redact plugin install claude</text>
 <text x="22" y="75" fill="#7ee787" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">$ llm-redact plugin install claude</text>
-<text x="22" y="94" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">claude: 10 file(s) written, 0 already current in ~/.claude/commands</text>
+<text x="22" y="94" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">claude: 11 file(s) written, 0 already current in ~/.claude/commands</text>
 <text x="22" y="113" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">claude: commands available as /llm-redact-&lt;name&gt; (e.g. /llm-redact-status). Repo checkouts can ins</text>
 <text x="22" y="132" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  tead use `/plugin marketplace add asanderson/llm-redact` for namespaced /llm-redact:&lt;name&gt; comma</text>
 <text x="22" y="151" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">  nds.</text>

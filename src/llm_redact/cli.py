@@ -5,7 +5,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from llm_redact.config import (
     AUTH_KINDS,
@@ -16,6 +16,9 @@ from llm_redact.config import (
     load_config,
     validate_bind_security,
 )
+
+if TYPE_CHECKING:
+    from llm_redact.plugin_api import CliCommand
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -231,41 +234,6 @@ def build_parser() -> argparse.ArgumentParser:
     preview.add_argument("--text", default=None, help="text to scan (default: read stdin)")
     preview.add_argument("--json", action="store_true", help="machine-readable output")
 
-    users = subparsers.add_parser(
-        "users", help="named-user management (Pro+ tiers; email-verified seats)"
-    )
-    users_sub = users.add_subparsers(dest="users_command", required=True)
-
-    def _users_args(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument("--config", type=Path, default=None, help="path to config.toml")
-        sub.add_argument("--db", type=Path, default=None, help="users database path")
-
-    users_invite = users_sub.add_parser("invite", help="invite a named user (sends a code)")
-    _users_args(users_invite)
-    users_invite.add_argument("name", help="display name")
-    users_invite.add_argument("email", help="the user's email address")
-    users_invite.add_argument(
-        "--print-code",
-        action="store_true",
-        help="print the verification code instead of emailing it",
-    )
-    users_verify = users_sub.add_parser("verify", help="redeem a code; prints the per-user key")
-    _users_args(users_verify)
-    users_verify.add_argument("email")
-    users_verify.add_argument("code")
-    users_list = users_sub.add_parser("list", help="seats used vs the license cap")
-    _users_args(users_list)
-    users_list.add_argument("--json", action="store_true", help="machine-readable output")
-    users_revoke = users_sub.add_parser("revoke", help="revoke a user (key stops working)")
-    _users_args(users_revoke)
-    users_revoke.add_argument("email")
-    users_revoke.add_argument("--yes", action="store_true", help="skip confirmation")
-    users_revoke.add_argument(
-        "--purge",
-        action="store_true",
-        help="delete the row entirely (frees the email for re-invite)",
-    )
-
     license_cmd = subparsers.add_parser("license", help="inspect the configured license key")
     license_sub = license_cmd.add_subparsers(dest="license_command", required=True)
     license_show = license_sub.add_parser(
@@ -336,7 +304,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="report the host's FIPS posture (kernel, OpenSSL, python hashlib)",
     )
 
+    # Plugin-supplied subcommands (llm-redact-pro's `users`, …): parsed and
+    # run by the plugin; a name colliding with a core command is ignored so
+    # a plugin can never shadow one.
+    for command in plugin_commands(set(subparsers.choices)).values():
+        sub = subparsers.add_parser(command.name, help=command.help)
+        command.add_arguments(sub)
+        sub.set_defaults(_plugin_command=command)
+
     return parser
+
+
+def plugin_commands(core_names: set[str]) -> "dict[str, CliCommand]":
+    """The registered plugin CLI commands whose names the core leaves free."""
+    from llm_redact.registry import get_registry
+
+    return {
+        command.name: command
+        for command in get_registry().cli_commands
+        if command.name not in core_names
+    }
 
 
 def _serve_config(args: argparse.Namespace) -> Config:
@@ -400,6 +387,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    plugin_command = getattr(args, "_plugin_command", None)
+    if plugin_command is not None:
+        raise SystemExit(plugin_command.run(args))
     if args.command == "serve":
         import uvicorn
 
@@ -541,29 +531,6 @@ def main(argv: list[str] | None = None) -> None:
         if args.license_command == "verify":
             raise SystemExit(run_license_verify(args))
         raise SystemExit(run_license_show(args))
-    elif args.command == "users":
-        try:
-            from llm_redact_pro.users_cli import (
-                run_users_invite,
-                run_users_list,
-                run_users_revoke,
-                run_users_verify,
-            )
-        except ImportError:
-            print(
-                "user management requires the llm-redact-pro package (without it"
-                " the proxy serves the implicit single local user); see"
-                " docs/editions.md"
-            )
-            raise SystemExit(1) from None
-
-        if args.users_command == "invite":
-            raise SystemExit(run_users_invite(args))
-        if args.users_command == "verify":
-            raise SystemExit(run_users_verify(args))
-        if args.users_command == "revoke":
-            raise SystemExit(run_users_revoke(args))
-        raise SystemExit(run_users_list(args))
     elif args.command in ("routes", "spend"):
         try:
             from llm_redact_pro.routes_cli import run_routes_list, run_routes_test, run_spend

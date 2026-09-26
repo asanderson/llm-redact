@@ -145,8 +145,7 @@ Cursor, so the proxy can be driven without leaving the tool:
 - `/llm-redact:routes` and `/llm-redact:spend` (pro routing layer) —
   which rule and upstream a request would take (no upstream contacted),
   and per-upstream spend against the monthly budgets;
-- `/llm-redact:doctor`, `/llm-redact:audit`, `/llm-redact:users`, and
-  `/llm-redact:guide`.
+- `/llm-redact:doctor`, `/llm-redact:audit`, and `/llm-redact:guide`.
 
 Install with `llm-redact plugin install claude|codex|opencode|cursor`,
 or in Claude Code add this repo as a plugin marketplace:
@@ -302,9 +301,11 @@ the commercial packaging of the separately-installed, **proprietary**
 **coming soon**, not yet generally available), which supplies additional
 operational subsystems — persistent server vaults and encryption at
 rest, the audit log and its off-machine sinks, OTel, per-conversation
-sessions, and named users — and, on Team and above, a deployment kit for
-one shared mutual-TLS team server. Configuring one of those without the package
-fails closed naming it — never a silent downgrade. The matrix and
+sessions, and named users with every client-authentication feature
+(this repository contains no authentication code) — and, on Team and
+above, a deployment kit for one shared mutual-TLS team server.
+Configuring one of those without the package fails closed naming it —
+never a silent downgrade. The matrix and
 licensing model are in [docs/editions.md](docs/editions.md).
 
 ## Containers (docker or podman)

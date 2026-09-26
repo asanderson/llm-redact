@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 import llm_redact.registry as registry_mod
+from license_fixtures import resolved
 from llm_redact.config import (
     AuditConfig,
     Config,
@@ -21,6 +22,7 @@ from llm_redact.config import (
     UsersConfig,
     VaultConfig,
 )
+from llm_redact.licensing import FREE
 from llm_redact.registry import Registry, get_registry, load_plugins, loaded_plugins
 from llm_redact.sessions import StaticSessionRouter
 from llm_redact.vault import InMemoryVaultManager
@@ -143,13 +145,40 @@ def test_build_audit_sinks_default_factory() -> None:
         reg.build_audit_sinks(AuditConfig(s3=S3AuditConfig(enabled=True, bucket="b")))
 
 
-def test_build_users_store_default_factory() -> None:
+def test_build_access_gate_default_factory() -> None:
     reg = Registry()
-    assert reg.build_users_store(UsersConfig(), "free") is None  # Free → no registry
-    # On Pro+ the named-user registry is a paid subsystem; the Free default
-    # fails closed rather than running enforcement without a store.
+    assert reg.build_access_gate(Config(), FREE) is None  # Free → implicit local user
+    # Access control is a paid subsystem with no core logic: a paid tier (only
+    # resolvable with an older pro) or [users] config fails closed.
+    with pytest.raises(ConfigError, match="upgrade llm-redact-pro"):
+        reg.build_access_gate(Config(), resolved("pro"))
     with pytest.raises(ConfigError, match="llm-redact-pro"):
-        reg.build_users_store(UsersConfig(path="x"), "pro")
+        reg.build_access_gate(Config(users=UsersConfig(path="x")), FREE)
+
+
+def test_access_gate_default_refuses_when_pro_failed_to_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A key is configured and llm-redact-pro is installed, but its plugin did
+    # not register (e.g. an llm-redact-pro too old for this core): the key fell
+    # to Free only because the package failed, so refuse to serve without the
+    # access control it was licensed for.
+    from llm_redact.licensing import ResolvedLicense
+
+    keyed_free = ResolvedLicense(tier="free", license=None, source="env", warnings=())
+    reg = Registry()
+    monkeypatch.setattr(registry_mod, "pro_package_installed", lambda: True)
+    with pytest.raises(ConfigError, match="plugin did not load"):
+        reg.build_access_gate(Config(), keyed_free)
+    assert reg.build_access_gate(Config(), FREE) is None  # no key: the Free tier
+    monkeypatch.setattr(registry_mod, "pro_package_installed", lambda: False)
+    assert reg.build_access_gate(Config(), keyed_free) is None  # key without pro
+
+
+def test_default_tool_base_url_and_cli_commands() -> None:
+    reg = Registry()
+    assert reg.tool_base_url("http://127.0.0.1:8787") == "http://127.0.0.1:8787"
+    assert reg.cli_commands == []
 
 
 def test_get_registry_is_cached_and_discovers_once(monkeypatch: pytest.MonkeyPatch) -> None:

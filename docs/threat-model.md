@@ -111,8 +111,9 @@ because breaking the tool teaches users to bypass the proxy).
 
 - Answered before any routing logic runs; provably never forwarded.
 - GET-only, with guarded POST exceptions sharing one guard chain —
-  `POST /sessions/prune` and `POST /users/invite|revoke` in the core, plus
-  the llm-redact-pro dashboard's `POST /config` and `POST /preview` —
+  `POST /sessions/prune` in the core, plus llm-redact-pro's dashboard
+  `POST /config` and `POST /preview` and its access gate's
+  `POST /users/invite|revoke` —
   defended in layers: Host validation (DNS rebinding), Origin validation,
   a per-process CSRF token bound to a custom header (forcing a CORS
   preflight that 405s with no CORS headers), a JSON content-type

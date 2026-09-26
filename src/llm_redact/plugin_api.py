@@ -2,7 +2,7 @@
 package registers against these names).
 
 The open-core split (llm-redact-pro docs/licensing.md) lets a separately-distributed
-package supply the paid vault/audit/session/telemetry/users implementations.
+package supply the paid vault/audit/session/telemetry/access implementations.
 Those implementations must bind to a *supported* surface, not to private
 internals that move between releases. This module is that surface: re-exports
 promoted from the Free core with public names. Everything here is part of the
@@ -30,9 +30,10 @@ from .vault import (
 )
 
 if TYPE_CHECKING:
+    import argparse
     from pathlib import Path
 
-    from starlette.requests import Request
+    from starlette.requests import HTTPConnection, Request
     from starlette.responses import Response
 
     from .config import Config
@@ -290,7 +291,7 @@ class Router(Protocol):
     (``ProxyState.router`` is None otherwise — the unrouted path never
     consults it).
 
-    ``local_answer`` is consulted after the disabled-provider / named-user
+    ``local_answer`` is consulted after the disabled-provider / access
     gates and before the body is read. ``plan`` returns None for a request
     the layer does not route (a provider outside its protocols — the request
     then takes the unrouted path byte-for-byte), a RouteRefusal (no_route),
@@ -322,7 +323,7 @@ class Router(Protocol):
 # The browser ops UI (the dashboard page, its config editor and redaction
 # preview) is a paid surface implemented in llm-redact-pro. The core keeps
 # the machine APIs every CLI and monitor depends on (/status, /metrics,
-# /healthz, /readyz, /recent, /events, /sessions, /audit, /users, /guide)
+# /healthz, /readyz, /recent, /events, /sessions, /audit, /guide)
 # and dispatches ONLY its fixed dashboard paths (the bare prefix, /config,
 # /preview) to a registered Dashboard — a plugin can never shadow a core
 # endpoint. The core stamps the security headers on whatever it returns.
@@ -380,7 +381,80 @@ class Dashboard(Protocol):
     async def handle(self, request: Request, host: DashboardHost) -> Response: ...
 
 
+# --- access seam ---------------------------------------------------------------
+# Who may use the proxy (client authentication, named users, seats) is a
+# paid subsystem implemented in llm-redact-pro; the core holds no
+# credential logic at all. It asks a registered AccessGate to ADMIT each
+# request before routing, applies the verdict at its fixed place in the
+# request path, attributes the request to the admitted subject, and
+# dispatches the gate's fixed admin paths to it. Without a gate the core
+# serves the implicit single local user and guards two leak paths itself
+# (every x-llm-redact-* request header is dropped before forwarding; an
+# unclaimed /u/... path is answered locally, never forwarded).
+
+
+@dataclass(frozen=True)
+class Admission:
+    """A gate's verdict on one connection.
+
+    ``subject`` is attributed as the request's user (recent, events and
+    audit rows); ``refusal``, when set, makes the core refuse the request
+    — a provider-shaped 403 on HTTP, an accept-then-close on WebSocket —
+    with that message. Messages must never echo a presented credential.
+    """
+
+    subject: str | None = None
+    refusal: str | None = None
+
+
+class AccessGate(Protocol):
+    """Client admission (``Registry.build_access_gate``).
+
+    ``admit`` runs before routing on every HTTP request and WebSocket
+    upgrade outside the reserved prefix, and MUST remove every credential
+    it recognizes from the connection's ASGI scope (path, raw path,
+    headers) before returning: whatever it leaves is routed, logged and
+    forwarded. ``status`` is the ``users`` block of ``/status`` (metadata
+    only). ``handle`` answers the core's fixed ``ACCESS_PATHS`` (the admin
+    endpoints) and must never forward anything upstream; the core stamps
+    the security headers on its reply. ``close`` runs at shutdown.
+    """
+
+    def admit(self, conn: HTTPConnection, surface: str) -> Admission: ...
+
+    def status(self) -> dict[str, Any]: ...
+
+    async def handle(self, request: Request, host: DashboardHost) -> Response: ...
+
+    def close(self) -> None: ...
+
+
+# --- CLI seam -------------------------------------------------------------------
+# Paid command-line subcommands register here instead of living in the core
+# parser: the core adds each registered command's subparser, dispatches to
+# its ``run``, and merges its completion words into the shell completions.
+
+
+class CliCommand(Protocol):
+    """One ``llm-redact <name>`` subcommand supplied by a plugin.
+
+    ``completion`` is ``(subcommands, options)`` for the shell completion
+    scripts; ``run`` returns the process exit code.
+    """
+
+    name: str
+    help: str
+    completion: tuple[tuple[str, ...], tuple[str, ...]]
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None: ...
+
+    def run(self, args: argparse.Namespace) -> int: ...
+
+
 __all__ = [
+    "AccessGate",
+    "Admission",
+    "CliCommand",
     "Dashboard",
     "DashboardHost",
     "HopDecision",

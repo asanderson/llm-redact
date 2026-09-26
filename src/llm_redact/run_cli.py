@@ -28,8 +28,8 @@ _READY_TIMEOUT_SECONDS = 15.0
 # Names an EXISTING llm-redact proxy (this machine or a team server) for
 # every client-side command: `run` routes tools at it instead of spawning
 # an ephemeral serve, `status` queries it, and `plugin install --proxy-url`
-# writes it. Identity still rides LLM_REDACT_USER_KEY — never embed /u/<key>
-# in this URL (log lines print the URL's host).
+# writes it. Never embed credentials in this URL; a plugin that attaches an
+# identity does so through Registry.tool_base_url.
 ENV_PROXY_URL = "LLM_REDACT_PROXY_URL"
 
 
@@ -154,14 +154,11 @@ def run_run(args: argparse.Namespace) -> int:
                 return 1
             origin = f"started for this run (pid {ephemeral.pid})"
 
-    # Named-user identity (2.0 licensing): with LLM_REDACT_USER_KEY set, the
-    # exported base URLs carry the /u/<key>/ prefix — the one knob every
-    # tool has is its base URL, so identity rides it universally. The proxy
-    # strips the prefix before routing and the key never appears in logs.
-    tool_base = base_url
-    user_key = os.environ.get("LLM_REDACT_USER_KEY", "").strip()
-    if user_key:
-        tool_base = f"{base_url}/u/{user_key}"
+    # A plugin may decorate the exported base URL (llm-redact-pro attaches
+    # a named-user identity); the core exports it unchanged.
+    from llm_redact.registry import get_registry
+
+    tool_base = get_registry().tool_base_url(base_url)
 
     env = dict(os.environ)
     for tool in tools:
@@ -169,14 +166,14 @@ def run_run(args: argparse.Namespace) -> int:
     for name in extra_env:
         env[name] = tool_base
     routed = ",".join([*tools, *extra_env])
-    # base_url (never tool_base) in the log line: the key stays out of
-    # terminals — and only scheme://host:port of a pointed-at URL, in case
-    # someone embedded a path (an /u/<key> there would otherwise echo).
+    # base_url (never tool_base) in the log line: whatever a plugin added
+    # stays out of terminals — and only scheme://host:port of a pointed-at
+    # URL, in case someone embedded a path (a credential would echo).
     from urllib.parse import urlsplit
 
     parts = urlsplit(base_url)
     shown = f"{parts.scheme}://{parts.netloc}"
-    identified = " as a named user" if user_key else ""
+    identified = " with a client identity" if tool_base != base_url else ""
     print(f"llm-redact: routing {routed} via {shown}{identified} ({origin})", file=sys.stderr)
 
     try:

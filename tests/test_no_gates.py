@@ -29,7 +29,6 @@ from llm_redact.config import (
     RdbmsConfig,
     RoutingConfig,
     UpstreamConfig,
-    UsersConfig,
     VaultConfig,
 )
 from llm_redact.proxy import create_app
@@ -55,7 +54,8 @@ def test_kubernetes_startup_keyless(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     # starts cleanly.
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
     monkeypatch.delenv("LLM_REDACT_LICENSE_KEY", raising=False)
-    create_app(_with(users=UsersConfig(path=str(tmp_path / "users.db"))))
+    del tmp_path
+    create_app(_with())
 
 
 @pytest.mark.parametrize("provider", ["bedrock", "azure", "vertex"])

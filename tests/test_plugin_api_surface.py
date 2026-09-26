@@ -21,6 +21,22 @@ from llm_redact import plugin_api
 
 # Protocol name -> (data attribute names in declaration order, {method: signature}).
 PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
+    "AccessGate": (
+        (),
+        {
+            "admit": "(self, conn: 'HTTPConnection', surface: 'str') -> 'Admission'",
+            "status": "(self) -> 'dict[str, Any]'",
+            "handle": "(self, request: 'Request', host: 'DashboardHost') -> 'Response'",
+            "close": "(self) -> 'None'",
+        },
+    ),
+    "CliCommand": (
+        ("name", "help", "completion"),
+        {
+            "add_arguments": "(self, parser: 'argparse.ArgumentParser') -> 'None'",
+            "run": "(self, args: 'argparse.Namespace') -> 'int'",
+        },
+    ),
     "Dashboard": (
         (),
         {"handle": "(self, request: 'Request', host: 'DashboardHost') -> 'Response'"},
@@ -111,6 +127,7 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
 
 # Frozen dataclass name -> its generated __init__ signature.
 DATACLASSES: dict[str, str] = {
+    "Admission": "(subject: 'str | None' = None, refusal: 'str | None' = None) -> None",
     "RouteInbound": (
         "(adapter_name: 'str | None', provider_name: 'str', method: 'str', path: 'str',"
         " raw_path: 'str', query: 'str', headers: 'Mapping[str, str]', model: 'str | None')"
@@ -135,6 +152,9 @@ DATACLASSES: dict[str, str] = {
 }
 
 ALL: tuple[str, ...] = (
+    "AccessGate",
+    "Admission",
+    "CliCommand",
     "Dashboard",
     "DashboardHost",
     "HopDecision",

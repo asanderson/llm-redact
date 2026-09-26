@@ -246,3 +246,33 @@ def test_missing_command_exits_127_and_tears_down_ephemeral(
     while time.monotonic() < deadline and _status_ok(port):
         time.sleep(0.1)
     assert not _status_ok(port)
+
+
+def test_plugin_decorates_the_exported_base_url(
+    config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    # Registry.tool_base_url: a plugin (llm-redact-pro attaches a named-user
+    # identity) decorates what wrapped tools receive; the routing log line
+    # still shows only scheme://host:port.
+    import llm_redact.registry as registry_mod
+    import llm_redact.run_cli as run_cli_mod
+    from llm_redact.registry import Registry
+
+    reg = Registry()
+    reg.tool_base_url = lambda base: f"{base}/u/lrk_secret"
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    monkeypatch.setattr(run_cli_mod, "_proxy_running", lambda url: True)
+    code = run_run(
+        _proxy_args(
+            config_file,
+            ["--", sys.executable, "-c", CHILD_SNIPPET],
+            proxy_url="http://127.0.0.1:9",
+        )
+    )
+    assert code == 7
+    out, err = capfd.readouterr()
+    assert "ANTH=http://127.0.0.1:9/u/lrk_secret" in out
+    assert "with a client identity" in err
+    assert "lrk_secret" not in err

@@ -19,9 +19,15 @@ filled in. What a missing or failed identity MEANS (refuse or serve
 unattributed) is the caller's policy, not the chain's — today the proxy
 refuses only while named-user enforcement is on.
 
-The chain has one method today, ``user_key`` (the named-user key via the
-``/u/<key>/`` base-path prefix or the ``x-llm-redact-user`` header). Further
-methods (client-certificate identity, OIDC bearer tokens) plug in here.
+Open-core split: authentication is a PAID feature (llm-redact-pro, Pro
+tier and above). The core holds only this seam and the credential
+scrubbing, which is unconditional: a credential sent to a Free proxy must
+still never reach a provider or a log line. The one method today,
+``user_key`` (the named-user key via the ``/u/<key>/`` base-path prefix or
+the ``x-llm-redact-user`` header), verifies only against the named-user
+registry, which exists only when llm-redact-pro builds it (never on Free).
+Further methods (client-certificate identity, OIDC, Basic/LDAP, brokered
+provider credentials) are implemented in llm-redact-pro, never here.
 """
 
 from __future__ import annotations

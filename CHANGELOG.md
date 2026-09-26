@@ -13,6 +13,12 @@ and tags `vX.Y.Z`.
 
 ### Changed
 
+- Client authentication runs through one chain (`src/llm_redact/auth.py`): each method
+  extracts and scrubs its own credential, then the first credential presented decides who the
+  request belongs to. The named-user key (the `/u/<key>/` path prefix or the
+  `x-llm-redact-user` header) is its first method, and HTTP and WebSocket traffic share it.
+  Behavior is unchanged; this is the groundwork for further methods such as client-certificate
+  identity and OIDC.
 - The editions matrix (`docs/editions.md`) and the README list the llm-redact-pro Team
   deployment kit: a shared mutual-TLS team server on Docker, Podman and Kubernetes, for Team
   and above. This repository's Helm chart and container images stay keyless.

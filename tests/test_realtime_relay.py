@@ -216,3 +216,34 @@ async def test_connection_recorded_metadata_only() -> None:
     assert row["provider"] == "openai"
     assert row["streamed"] is True
     assert row["status"] == 101
+
+
+async def test_named_user_key_on_websocket(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The auth chain on the WS surface (auth.py): with enforcement on, no key
+    # is refused before any upstream contact; a valid header key connects,
+    # and the header never reaches the upstream.
+    import llm_redact.registry as registry_mod
+    from license_fixtures import resolved
+    from llm_redact.auth import USER_KEY_HEADER
+    from llm_redact.registry import Registry
+    from test_auth import KEYS, FakeUsersStore
+
+    reg = Registry()
+    reg.resolve_license = lambda *args, **kwargs: resolved("team")
+    reg.build_users_store = lambda cfg, tier: FakeUsersStore(KEYS)
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    async with _relay_setup() as (fake, proxy_host):
+        async with websockets.connect(f"ws://{proxy_host}/v1/realtime") as client:
+            with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
+                await client.recv()
+            assert closed.value.rcvd is not None
+            assert closed.value.rcvd.code == 1011
+            assert "named-user key" in closed.value.rcvd.reason
+        assert fake.paths == []
+        async with websockets.connect(
+            f"ws://{proxy_host}/v1/realtime", additional_headers={USER_KEY_HEADER: "lrk_ada"}
+        ) as client:
+            await client.send('{"type": "noop"}')
+            assert json.loads(await client.recv()) == {"type": "noop"}
+    assert fake.paths == ["/v1/realtime"]
+    assert USER_KEY_HEADER not in fake.headers[0]

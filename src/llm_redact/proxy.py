@@ -32,7 +32,7 @@ from typing import Any, NamedTuple
 
 import httpx
 from starlette.applications import Starlette
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 
@@ -44,6 +44,13 @@ from llm_redact.audit import (
     WriteAheadAudit,
 )
 from llm_redact.audit_s3 import AzureAuditSink, S3AuditSink
+from llm_redact.auth import (
+    USER_KEY_HEADER,
+    AuthChain,
+    AuthResult,
+    Surface,
+    UserKeyAuthenticator,
+)
 from llm_redact.config import (
     RDBMS_BACKENDS,
     RESTART_ONLY_KEYS,
@@ -160,8 +167,10 @@ class RequestContext:
 
 
 # Hop-by-hop / recomputed headers dropped when forwarding either direction.
+# USER_KEY_HEADER is already scrubbed from the scope by the auth chain;
+# listing it here too is defense in depth for the forwarding path.
 _SKIP_REQUEST_HEADERS = frozenset(
-    {"host", "content-length", "connection", "accept-encoding", "x-llm-redact-user"}
+    {"host", "content-length", "connection", "accept-encoding", USER_KEY_HEADER}
 )
 _SKIP_RESPONSE_HEADERS = frozenset({"content-length", "content-encoding", "transfer-encoding"})
 
@@ -316,11 +325,15 @@ class ProxyState:
         # or when it declines the tier; the dashboard paths then 404 with
         # the reason. Rebuilt by apply_config when a reload changes the tier.
         self.dashboard: Dashboard | None = registry.build_dashboard(self.license.tier)
+        # Client authentication (auth.py): the named-user key today. The
+        # authenticator reads users_store live, so the chain never needs a
+        # rebuild when the registry does.
+        self.auth = AuthChain((UserKeyAuthenticator(lambda: self.users_store),))
 
-    def resolve_user(self, presented_key: str | None) -> str | None:
-        if presented_key is None or self.users_store is None:
-            return None
-        return self.users_store.lookup_key(presented_key)
+    def authenticate(self, conn: HTTPConnection, surface: Surface) -> AuthResult:
+        """Identify the client and SCRUB every credential it presented from
+        the scope — the one place credentials are handled (auth.py)."""
+        return self.auth.authenticate(conn, surface)
 
     def user_enforcement_required(self) -> bool:
         """Named-user keys become mandatory once there are two or more
@@ -1619,57 +1632,14 @@ async def _read_capped(request: Request, limit: int) -> bytes | None:
     return b"".join(chunks)
 
 
-USER_KEY_HEADER = "x-llm-redact-user"
-_USER_PATH_PREFIX = "/u/"
-
-
 def _extract_user_key(request: Request) -> str | None:
-    """Pull the named-user key off the request and SCRUB it in place.
+    """Extract (and SCRUB) the named-user key; the key string or None.
 
-    Two channels (llm-redact-pro docs/licensing.md): the universal ``/u/<key>/`` base-path
-    prefix (the one knob every tool has is its base URL) and the
-    ``x-llm-redact-user`` header. Both are removed here — from
-    scope["path"], scope["raw_path"], and scope["headers"] — before any
-    routing, logging, recording, or forwarding code can see them: the key
-    is OUR credential and must never reach a provider or a log line.
+    Kept for callers that predate the auth chain (llm-redact-pro's tests);
+    the proxy itself goes through ``ProxyState.authenticate``.
     """
-    scope = request.scope
-    key: str | None = None
-    path: str = scope["path"]
-    if path.startswith(_USER_PATH_PREFIX):
-        candidate, _, remainder = path[len(_USER_PATH_PREFIX) :].partition("/")
-        if candidate:
-            key = candidate
-            scope["path"] = "/" + remainder
-            # Scrub raw_path too (forwarding builds the upstream URL from it).
-            # A byte-prefix match on the DECODED candidate silently fails when
-            # the key segment is percent-encoded (`/u/lrk_%41BC/...`), which
-            # would leave our identity credential in the forwarded URL. Strip
-            # the first RAW segment after /u/ instead — encoding-agnostic — and
-            # if raw_path doesn't start with /u/ at all (an encoded prefix),
-            # fail closed by rebuilding it from the already-scrubbed path.
-            raw: bytes | None = scope.get("raw_path")
-            prefix_bytes = _USER_PATH_PREFIX.encode("latin-1")
-            if raw is not None:
-                if raw.startswith(prefix_bytes):
-                    _, _, remainder_raw = raw[len(prefix_bytes) :].partition(b"/")
-                    scope["raw_path"] = (b"/" + remainder_raw) if remainder_raw else b"/"
-                else:
-                    scope["raw_path"] = scope["path"].encode("latin-1")
-    remaining: list[tuple[bytes, bytes]] = []
-    header_key: str | None = None
-    for name, value in scope["headers"]:
-        if name.lower() == USER_KEY_HEADER.encode("ascii"):
-            header_key = value.decode("latin-1").strip()
-        else:
-            remaining.append((name, value))
-    if header_key is not None:
-        scope["headers"] = remaining
-        # Starlette caches Headers on first access; drop any cache so the
-        # scrubbed list is what every later reader (incl. forwarding) sees.
-        if hasattr(request, "_headers"):
-            del request._headers
-    return key if key is not None else (header_key or None)
+    credential = UserKeyAuthenticator(lambda: None).extract(request, "http")
+    return credential.secret if credential is not None else None
 
 
 async def handle(request: Request) -> Response:
@@ -1686,11 +1656,11 @@ async def handle(request: Request) -> Response:
             response.headers.setdefault(header, value)
         return response
 
-    # Named-user identity (2.0 licensing): extract and SCRUB the key before
-    # anything else reads the path or headers, then resolve it to a name.
-    user_key = _extract_user_key(request)
+    # Client identity: extract and SCRUB every credential before anything
+    # else reads the path or headers, then resolve it to a name.
+    identity = state.authenticate(request, "http").identity
     path = request.scope["path"]  # the /u/<key> prefix is gone from here on
-    user_name = state.resolve_user(user_key)
+    user_name = identity.subject if identity is not None else None
     _REQUEST_USER.set(user_name)
 
     # Captured once per request; read at finalization (incl. the streaming

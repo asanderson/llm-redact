@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from llm_redact.audit import AuditWriteError
+from llm_redact.auth import USER_KEY_HEADER
 from llm_redact.jsonwalk import STRUCTURAL_KEYS, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
 from llm_redact.redactor import BlockedRequest, Redactor
@@ -83,7 +84,7 @@ _HOP_HEADERS = frozenset(
         "sec-websocket-version",
         "sec-websocket-extensions",
         "sec-websocket-protocol",  # negotiated separately, see subprotocols
-        "x-llm-redact-user",  # OUR credential: identity only, never forwarded
+        USER_KEY_HEADER,  # OUR credential (auth.py scrubs it too): never forwarded
         "content-length",
     }
 )
@@ -642,14 +643,14 @@ async def ws_handle(websocket: WebSocket) -> None:
     if path.startswith("/__llm-redact"):
         await _reject(websocket, "reserved path")
         return
-    # Named-user enforcement (2.0 licensing): same rule as HTTP. The header
-    # is the WS identity channel (it is in _HOP_HEADERS, so it can never
-    # reach the upstream); refusal is accept-then-close so the reason
-    # reaches the client library.
-    user_name = state.resolve_user(websocket.headers.get("x-llm-redact-user"))
-    if state.user_enforcement_required() and user_name is None:
+    # Named-user enforcement: same rule as HTTP. The auth chain scrubs the
+    # credential from the scope (the header is also in _HOP_HEADERS, so it
+    # can never reach the upstream); refusal is accept-then-close so the
+    # reason reaches the client library.
+    identity = state.authenticate(websocket, "websocket").identity
+    if state.user_enforcement_required() and identity is None:
         logger.info("WS %s -> refused (named-user key required)", path)
-        await _reject(websocket, "a named-user key is required (x-llm-redact-user header)")
+        await _reject(websocket, f"a named-user key is required ({USER_KEY_HEADER} header)")
         return
     adapter = ws_adapter_for(path, state.ws_adapters)
     if adapter is None:

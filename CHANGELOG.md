@@ -11,6 +11,8 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-27
+
 ### Added
 
 - `plugin_api.ConfigSection` and `Registry.config_sections`: a plugin can own a top-level config

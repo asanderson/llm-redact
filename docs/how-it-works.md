@@ -172,6 +172,21 @@ while the vault row is the secret store and is never exported.
   never-restore-across-sessions behavior. Ships in the `llm-redact-pro`
   package (**coming soon**), with setup and the history-compaction
   limitation documented alongside it.
+- **Per-user namespaces** (named users, **Pro**): every request the
+  `llm-redact-pro` access gate attributes to a named user resolves inside
+  that user's own copy of the session — static and per-conversation mode
+  alike, HTTP and realtime — so a placeholder one user's traffic produced
+  can never be restored for another user. Wherever these docs say a flow
+  uses "the static vault session" (realtime connections, batches, the
+  Conversations API, Gemini context caching), read "the user's own copy of
+  it" when named users are on; unattributed traffic keeps the configured
+  behavior. The live prune (`session_ttl_days`, `POST
+  /__llm-redact/sessions/prune`) keeps each user's copy like the static
+  session itself.
+- `compaction_forks` counts only a session first seen by this process
+  whose history carries placeholders it cannot own: a persisted session
+  resumed after a restart (its vault already holds the tokens) and a
+  per-user copy of the static session are not forks.
 - The engineering record for why compaction-fork relinking was rejected
   (it cannot meet the never-restore-a-wrong-value bar) stays public in
   [compaction-relink.md](compaction-relink.md).

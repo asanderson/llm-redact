@@ -127,7 +127,8 @@ provider in the clear, while their responses carry only a cache/operation
 name (nothing to rehydrate). Both are stored/async — the cache is reused
 and batch results are fetched later through the operations API with no
 first-message anchor — so they use the STATIC vault session (the batch
-stance), keeping redact/rehydrate always in agreement. The per-cache
+stance; with llm-redact-pro's named users, the user's own copy of it),
+keeping redact/rehydrate always in agreement. The per-cache
 GET/PATCH/DELETE and list return metadata only and pass through.
 
 Gemini **Imagen** (`models/{m}:predict`) and **Veo**

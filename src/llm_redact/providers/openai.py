@@ -11,7 +11,8 @@ byte-identically. ``GET /v1/files/{id}/content`` rehydrates batch OUTPUT
 files the same way, line by line. ``/v1/batches`` itself carries only file
 ids and processing metadata: deliberate pass-through, pinned by test.
 Batch flows use the static vault session (an async fetch has no
-conversation anchor — the realtime WS stance).
+conversation anchor — the realtime WS stance); a user-scoping session
+router (llm-redact-pro's named users) makes that the user's own copy.
 """
 
 import json

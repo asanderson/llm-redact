@@ -374,6 +374,18 @@ class ProxyState:
             return await verdict
         return verdict
 
+    def _is_compaction_fork(self, session_id: str, vault: Vault, flat_body: str) -> bool:
+        """A session first seen by this process is a compaction fork only when
+        its history carries placeholders it cannot own: the session must be
+        EMPTY (a persisted session resumed after a restart owns its tokens)
+        and conversation-derived (a session the router marks durable, e.g.
+        llm-redact-pro's per-user copy of the static session, is not anchored
+        on a first message, so compaction cannot fork it)."""
+        if not PLACEHOLDER_RE.search(flat_body) or len(vault) > 0:
+            return False
+        is_durable = getattr(self.session_router, "is_durable", None)
+        return not (is_durable is not None and is_durable(session_id))
+
     def context_for(
         self, adapter: ProviderAdapter | None, method: str, path: str, parsed_body: Any
     ) -> RequestContext:
@@ -384,10 +396,11 @@ class ProxyState:
         )
         if session_id == self._static_context.session_id:
             return self._static_context
+        vault = self.vault_manager.get(session_id)
         if session_id not in self._known_sessions:
             self._known_sessions.add(session_id)
             flat = json.dumps(parsed_body, ensure_ascii=False) if parsed_body is not None else ""
-            if PLACEHOLDER_RE.search(flat):
+            if self._is_compaction_fork(session_id, vault, flat):
                 # A brand-new conversation whose history already contains
                 # placeholder tokens: the compaction signature. Tokens owned
                 # by the original session pass through verbatim from here on
@@ -405,7 +418,6 @@ class ProxyState:
                     session_id,
                     len(self._known_sessions),
                 )
-        vault = self.vault_manager.get(session_id)
         # Thin per-request wrappers over the shared detectors, allowlist and
         # counters: object construction only — no regex compilation, no DB open.
         redactor = Redactor(

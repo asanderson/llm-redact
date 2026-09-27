@@ -106,7 +106,8 @@ results stream restored line by line) and OpenAI Files + Batches (the
 uploaded JSONL file part — batch inputs and fine-tuning examples — is
 redacted line by line with every other byte of the multipart body
 preserved; batch output downloads are restored the same way) are
-covered. Batch flows use the static vault session, and uploads larger
+covered. Batch flows use the static vault session (with llm-redact-pro's
+named users, the submitting user's own copy of it), and uploads larger
 than `max_body_bytes` are rejected 413 fail-closed — raise the cap for
 large batch files (`llm-redact doctor` reminds you).
 
@@ -125,7 +126,9 @@ base64 audio passes through untouched (audio is not scanned, the same
 stance as images). Without the extra, WebSocket upgrades are refused
 outright, so nothing silently bypasses redaction. Realtime connections
 use the static vault session — the per-conversation mode's
-first-message anchor does not exist at connection time.
+first-message anchor does not exist at connection time. With
+llm-redact-pro's named users, each user's connection uses that user's own
+copy of the static session ([per-user namespaces](how-it-works.md#session-isolation)).
 
 ## Routing, fallback and budgets (llm-redact-pro)
 

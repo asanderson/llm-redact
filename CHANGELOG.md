@@ -11,6 +11,8 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-27
+
 ### Added
 
 - Session routers may mark sessions as durable (`SessionRouter.is_durable(session_id)`, an
@@ -19,6 +21,20 @@ and tags `vX.Y.Z`.
   because provider-side state (Responses chains, batches) still points into them and a recreated
   session would issue the same placeholder numbers for new values. llm-redact-pro uses it for each
   named user's copy of the static session. Routers without the member are unaffected.
+
+### Fixed
+
+- `compaction_forks` no longer counts a session this process has not seen yet whose vault already
+  holds entries — a persisted conversation resumed after a restart owns the placeholders in its
+  history — nor a session the router marks durable (llm-redact-pro's per-user copy of the static
+  session has no first-message anchor for compaction to fork). The metric, the `/status` field and
+  the dashboard pill now reflect only real history-compaction forks.
+
+### Documentation
+
+- The session docs (how-it-works, providers, api-coverage) now say that with llm-redact-pro's named
+  users, the flows described as using "the static vault session" — realtime connections, batches,
+  the Conversations API, Gemini context caching — use the requesting user's own copy of it.
 
 ## [1.5.0] - 2026-09-27
 

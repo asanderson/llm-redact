@@ -21,11 +21,14 @@ Design rules, matching the HTTP side:
   detection/rehydration counts) — metrics, /recent, /events, audit, and
   otel all inherit from that single call.
 
-Sessions: realtime connections always use the STATIC vault session. The
+Sessions: realtime connections use the STATIC vault session. The
 per-conversation router derives namespaces from a first-user-message
 anchor that does not exist at upgrade time; rather than guess (and risk
 cross-conversation restores), the fallback session owns WS traffic. The
-README documents this.
+session comes from ``state.context_for`` like HTTP, so a session router
+that scopes by user (llm-redact-pro's named users) hands each user's
+connection that user's own copy of the static session. docs/providers.md
+documents this.
 """
 
 import asyncio

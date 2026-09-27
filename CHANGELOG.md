@@ -11,6 +11,8 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-27
+
 ### Added
 
 - Session routers may mark sessions as durable (`SessionRouter.is_durable(session_id)`, an

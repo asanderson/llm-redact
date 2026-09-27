@@ -16,6 +16,7 @@ Comments from a hand-edited file are NOT preserved; the editor keeps one
 import json
 import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 from llm_redact.config import (
@@ -95,6 +96,49 @@ def _toml_inline_table(table: dict[str, object]) -> str:
     if not table:
         return "{}"
     return "{ " + ", ".join(f"{_toml_key(k)} = {_toml_inline(v)}" for k, v in table.items()) + " }"
+
+
+def _is_table_list(value: object) -> bool:
+    return (
+        isinstance(value, list | tuple)
+        and bool(value)
+        and all(isinstance(item, Mapping) for item in value)
+    )
+
+
+def _emit_table(
+    lines: list[str], header: str, table: Mapping[str, object], *, array: bool = False
+) -> None:
+    """A TOML table (or one array-of-tables entry) and, after its own keys,
+    its nested tables — so no key ever lands under the wrong header. None
+    values are omitted (TOML has no null)."""
+    lines.append(f"\n[[{header}]]" if array else f"\n[{header}]")
+    nested: list[tuple[str, object]] = []
+    for key, value in table.items():
+        if value is None:
+            continue
+        if isinstance(value, Mapping) or _is_table_list(value):
+            nested.append((key, value))
+            continue
+        lines.append(f"{_toml_key(key)} = {_toml_inline(value)}")
+    for key, value in nested:
+        child = f"{header}.{_toml_key(key)}"
+        if isinstance(value, Mapping):
+            _emit_table(lines, child, value)
+        else:
+            assert isinstance(value, list | tuple)
+            for item in value:
+                _emit_table(lines, child, item, array=True)
+
+
+def _emit_extensions(lines: list[str], config: Config) -> None:
+    from llm_redact.registry import get_registry  # lazy, like parse_config
+
+    by_name = {section.name: section for section in get_registry().config_sections}
+    for name, value in config.extensions.items():
+        section = by_name.get(name)
+        if section is not None:
+            _emit_table(lines, _toml_key(name), section.emit(value))
 
 
 def _emit_upstream(lines: list[str], upstream: UpstreamConfig, *, inject_default: bool) -> None:
@@ -416,6 +460,12 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
             lines.append(f"key = {_toml_str(config.license.key)}")
         if config.license.key_file is not None:
             lines.append(f"key_file = {_toml_str(config.license.key_file)}")
+
+    # Plugin-owned sections (plugin_api.ConfigSection): each plugin turns its
+    # parsed value back into a TOML-shaped mapping so the section survives
+    # `config show` and the editor's rewrite. Every line is under a table
+    # header, so the routing sections below still start on their own.
+    _emit_extensions(lines, config)
 
     # Routing sections LAST: [[routing.rule]] is an array of tables, and any
     # top-level key emitted after one would parse into that rule.

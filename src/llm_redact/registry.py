@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from .plugin_api import (
         AccessGate,
         CliCommand,
+        ConfigSection,
         Dashboard,
         Router,
         SessionRouter,
@@ -97,6 +98,7 @@ class Registry:
     build_dashboard: Callable[[str], Dashboard | None]
     tool_base_url: Callable[[str], str]
     cli_commands: list[CliCommand]
+    config_sections: list[ConfigSection]
 
     def __init__(self) -> None:
         # Assigned as INSTANCE attributes (not class attributes) so a bare
@@ -135,6 +137,9 @@ class Registry:
         self.tool_base_url = _tool_base_url
         # Paid CLI subcommands (the plugin's own parsers and handlers).
         self.cli_commands = []
+        # Plugin-owned top-level config tables (parsed, emitted and pinned
+        # restart-only by the core; see plugin_api.ConfigSection).
+        self.config_sections = []
 
 
 def load_plugins(registry: Registry) -> list[str]:

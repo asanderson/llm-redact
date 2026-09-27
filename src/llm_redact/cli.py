@@ -413,8 +413,14 @@ def main(argv: list[str] | None = None) -> None:
             if config.tls.client_ca is not None:
                 import ssl
 
+                from llm_redact.tls_scope import uvicorn_protocol_kwargs
+
                 run_kwargs["ssl_ca_certs"] = config.tls.client_ca
                 run_kwargs["ssl_cert_reqs"] = ssl.CERT_REQUIRED
+                # The verified client certificate reaches the app as the
+                # ASGI TLS extension (uvicorn drops it otherwise), for an
+                # access gate that maps certificates to users.
+                run_kwargs.update(uvicorn_protocol_kwargs())
             logging.getLogger("llm_redact").info(
                 "TLS enabled (%s)",
                 "mutual: clients must present a certificate"

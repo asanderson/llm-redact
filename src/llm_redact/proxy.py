@@ -14,6 +14,7 @@ import asyncio
 import dataclasses
 import importlib.resources
 import importlib.util
+import inspect
 import json
 import logging
 import os
@@ -33,7 +34,7 @@ from typing import Any, NamedTuple
 import httpx
 from starlette.applications import Starlette
 from starlette.requests import HTTPConnection, Request
-from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 
 from llm_redact import __version__
@@ -180,6 +181,28 @@ ACCESS_PATHS = frozenset(
         f"{RESERVED_PREFIX}/users/revoke",
     }
 )
+# The gate's browser sign-in endpoints (llm-redact-pro): reachable WITHOUT
+# dashboard admission — they are how a browser obtains it.
+AUTH_PATHS = frozenset(
+    {
+        f"{RESERVED_PREFIX}/auth/login",
+        f"{RESERVED_PREFIX}/auth/callback",
+        f"{RESERVED_PREFIX}/auth/logout",
+    }
+)
+# SCIM 2.0 provisioning (llm-redact-pro): everything under this prefix goes
+# to the gate, which authenticates the identity provider's bearer token
+# itself (no browser: no Origin check, no dashboard admission).
+SCIM_PREFIX = f"{RESERVED_PREFIX}/scim/v2"
+# Reserved endpoints a monitoring system polls: never behind dashboard
+# admission (metadata-free probes and Prometheus counters).
+PROBE_PATHS = frozenset(
+    {
+        f"{RESERVED_PREFIX}/healthz",
+        f"{RESERVED_PREFIX}/readyz",
+        f"{RESERVED_PREFIX}/metrics",
+    }
+)
 _SKIP_RESPONSE_HEADERS = frozenset({"content-length", "content-encoding", "transfer-encoding"})
 
 # Line-framed JSON response types, all served by the same NDJSON rehydration
@@ -324,6 +347,14 @@ class ProxyState:
         # local user; the Free default fails closed when a paid tier or
         # [users] config expects access control no gate provides.
         self.access_gate: AccessGate | None = registry.build_access_gate(config, self.license)
+        # Optional gate members (plugin_api.AccessGate): dashboard admission,
+        # and the public origin it makes reachable. The origin is honored
+        # only together with admission, so a wider Host is never accepted
+        # without the gate authenticating the reserved endpoints.
+        self.guards_dashboard = bool(getattr(self.access_gate, "guards_dashboard", False))
+        self.public_origin: tuple[str, str, str] | None = (
+            _parse_public_origin(self.access_gate) if self.guards_dashboard else None
+        )
         for warning in config.routing.warnings:  # parser-owned (inert upstreams, metered
             logger.warning("routing: %s", warning)  # defaults, dead chains) — always logged
         self.router: Router | None = registry.build_router(config, self.license.tier)
@@ -332,13 +363,16 @@ class ProxyState:
         # the reason. Rebuilt by apply_config when a reload changes the tier.
         self.dashboard: Dashboard | None = registry.build_dashboard(self.license.tier)
 
-    def admit(self, conn: HTTPConnection, surface: str) -> Admission:
+    async def admit(self, conn: HTTPConnection, surface: str) -> Admission:
         """The access gate's verdict (it scrubs its own credentials from the
         scope first); without a gate every client is the implicit single
-        local user."""
+        local user. A gate may answer directly or with an awaitable."""
         if self.access_gate is None:
             return Admission()
-        return self.access_gate.admit(conn, surface)
+        verdict = self.access_gate.admit(conn, surface)
+        if inspect.isawaitable(verdict):
+            return await verdict
+        return verdict
 
     def context_for(
         self, adapter: ProviderAdapter | None, method: str, path: str, parsed_body: Any
@@ -423,12 +457,21 @@ class ProxyState:
             for field_name in RESTART_ONLY_KEYS
             if getattr(fresh, field_name) != getattr(self.config, field_name)
         ]
+        # Plugin-owned sections (plugin_api.ConfigSection) are restart-only
+        # too, reported by their own section names.
+        restart_required += sorted(
+            name
+            for name in set(fresh.extensions) | set(self.config.extensions)
+            if fresh.extensions.get(name) != self.config.extensions.get(name)
+        )
         for field_name in restart_required:
             logger.warning(
                 "config reload: [%s] changes require restart; keeping current", field_name
             )
         effective = dataclasses.replace(
-            fresh, **{name: getattr(self.config, name) for name in RESTART_ONLY_KEYS}
+            fresh,
+            extensions=self.config.extensions,
+            **{name: getattr(self.config, name) for name in RESTART_ONLY_KEYS},
         )
 
         # Re-resolve the license BEFORE anything is built or swapped:
@@ -1089,12 +1132,14 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
         return JSONResponse({"error": _dashboard_unavailable(state)}, status_code=404)
     if path in (f"{RESERVED_PREFIX}/sessions", f"{RESERVED_PREFIX}/sessions/prune"):
         return await _handle_sessions(request, state)
-    if path in ACCESS_PATHS:
+    scim = path == SCIM_PREFIX or path.startswith(SCIM_PREFIX + "/")
+    if path in ACCESS_PATHS or path in AUTH_PATHS or scim:
         # Host/Origin checked here too (defense in depth — the gate runs the
-        # full guard chain itself) so a rebinding page learns nothing.
+        # full guard chain itself) so a rebinding page learns nothing. SCIM
+        # clients are identity providers, not browsers: Host only.
         if not _host_allowed(request, state):
             return JSONResponse({"error": "host not allowed"}, status_code=403)
-        if not _origin_allowed(request, state):
+        if not scim and not _origin_allowed(request, state):
             return JSONResponse({"error": "origin not allowed"}, status_code=403)
         if state.access_gate is not None:
             return await state.access_gate.handle(request, state)
@@ -1356,7 +1401,71 @@ CSRF_HEADER = "x-llm-redact-csrf"
 
 
 def _allowed_hostnames(state: ProxyState) -> set[str]:
-    return {"127.0.0.1", "localhost", "::1", state.config.host.lower()}
+    names = {"127.0.0.1", "localhost", "::1", state.config.host.lower()}
+    if state.public_origin is not None:
+        names.add(state.public_origin[1])
+    return names
+
+
+def _parse_public_origin(gate: object) -> tuple[str, str, str] | None:
+    """The gate's ``public_origin()`` as (scheme, lowercase host, origin
+    string), or None. Anything but a plain http(s) origin (no path, query,
+    fragment or credentials) is a startup ConfigError — never a silently
+    wider Host check."""
+    getter = getattr(gate, "public_origin", None)
+    raw = getter() if callable(getter) else None
+    if raw is None:
+        return None
+    parsed = urllib.parse.urlsplit(str(raw))
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ConfigError(
+            "the access gate's public origin must be a plain http(s)://host[:port] URL"
+        )
+    default_port = 443 if parsed.scheme == "https" else 80
+    port = f":{parsed.port}" if parsed.port not in (None, default_port) else ""
+    host = parsed.hostname.lower()
+    display_host = f"[{host}]" if ":" in host else host
+    return parsed.scheme, host, f"{parsed.scheme}://{display_host}{port}"
+
+
+async def _admit_reserved(request: Request, state: ProxyState) -> Response | None:
+    """Dashboard admission for the reserved endpoints (only when the gate
+    opts in with ``guards_dashboard``): every reserved path except the
+    monitoring probes and the gate's own paths (sign-in and SCIM
+    authenticate themselves). None admits; otherwise the refusal —
+    a 303 to the gate's same-proxy sign-in page for a browser GET, else a
+    403. Nothing here is forwarded."""
+    if not state.guards_dashboard:
+        return None
+    path = request.url.path
+    if (
+        path in PROBE_PATHS
+        or path in AUTH_PATHS
+        or path == SCIM_PREFIX
+        or path.startswith(SCIM_PREFIX + "/")
+    ):
+        return None
+    admission = await state.admit(request, "dashboard")
+    if admission.refusal is None:
+        return None
+    redirect = admission.redirect
+    if (
+        request.method == "GET"
+        and redirect is not None
+        and redirect.startswith(RESERVED_PREFIX + "/")
+        and "\\" not in redirect
+        and "//" not in redirect
+    ):
+        return RedirectResponse(redirect, status_code=303)
+    return JSONResponse({"error": admission.refusal}, status_code=403)
 
 
 def _host_allowed(request: Request, state: ProxyState) -> bool:
@@ -1374,6 +1483,8 @@ def _origin_allowed(request: Request, state: ProxyState) -> bool:
     itself serves TLS."""
     origin = request.headers.get("origin")
     if origin is None:
+        return True
+    if state.public_origin is not None and origin.lower() == state.public_origin[2]:
         return True
     parsed = urllib.parse.urlsplit(origin)
     schemes = ("http", "https") if state.config.tls.enabled else ("http",)
@@ -1545,7 +1656,9 @@ async def handle(request: Request) -> Response:
     # Reserved local endpoints are answered here, before any routing or
     # upstream code runs — this early return is the non-forwarding guarantee.
     if path.startswith(RESERVED_PREFIX):
-        response = await _handle_local(request, state)
+        response = await _admit_reserved(request, state)
+        if response is None:
+            response = await _handle_local(request, state)
         # Stamp browser-hardening headers on every reserved reply in one place
         # (setdefault so a handler that set its own header still wins).
         for header, value in _SECURITY_HEADERS.items():
@@ -1555,7 +1668,7 @@ async def handle(request: Request) -> Response:
     # Client admission (llm-redact-pro's access gate): it removes every
     # credential it recognizes from the scope before anything else reads
     # the path or headers. Its refusal, if any, is applied further down.
-    admission = state.admit(request, "http")
+    admission = await state.admit(request, "http")
     path = request.scope["path"]
     if path.startswith(RESERVED_PREFIX):
         # Only reachable through a stripped prefix (/u/<key>/__llm-redact/…):

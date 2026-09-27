@@ -646,7 +646,7 @@ async def ws_handle(websocket: WebSocket) -> None:
     # Client admission (llm-redact-pro's access gate): same rule as HTTP.
     # The gate scrubs its credentials from the scope; its refusal is
     # accept-then-close so the reason reaches the client library.
-    admission = state.admit(websocket, "websocket")
+    admission = await state.admit(websocket, "websocket")
     path = websocket.scope["path"]
     if admission.refusal is not None:
         logger.info("WS %s -> refused by the access gate", path)

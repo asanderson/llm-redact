@@ -220,3 +220,137 @@ def test_mutual_tls_over_a_real_socket(tmp_path: Path) -> None:
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+# --- the ASGI TLS extension (tls_scope.py) -------------------------------------
+
+
+def test_rfc4514_name() -> None:
+    from llm_redact.tls_scope import rfc4514_name
+
+    subject = (
+        (("countryName", "US"),),
+        (("organizationName", "Acme, Inc."),),
+        (("commonName", " ada+lovelace "), ("userId", "7")),
+    )
+    assert rfc4514_name(subject) == r"CN=\ ada\+lovelace\ +UID=7,O=Acme\, Inc.,C=US"
+    assert rfc4514_name(()) is None
+    assert rfc4514_name(((("emailAddress", "a@b.example"),),)) == "emailAddress=a@b.example"
+
+
+def test_tls_extension_skips_plain_connections() -> None:
+    from llm_redact.tls_scope import tls_extension
+
+    class Plain:
+        def get_extra_info(self, name: str) -> None:
+            return None
+
+    assert tls_extension(Plain()) is None  # type: ignore[arg-type]
+
+
+def test_serve_wires_the_extension_for_mutual_tls_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import uvicorn
+
+    from llm_redact.cli import main
+
+    captured: list[dict[str, object]] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.append(kwargs))
+    mutual = tmp_path / "mutual.toml"
+    mutual.write_text('[tls]\ncertfile = "/c.crt"\nkeyfile = "/c.key"\nclient_ca = "/ca.crt"\n')
+    server_only = tmp_path / "server.toml"
+    server_only.write_text('[tls]\ncertfile = "/c.crt"\nkeyfile = "/c.key"\n')
+    main(["serve", "--config", str(mutual)])
+    main(["serve", "--config", str(server_only)])
+    http_cls = captured[0]["http"]
+    assert isinstance(http_cls, type) and http_cls.__name__.startswith("TlsExtension")
+    assert "http" not in captured[1] and "ws" not in captured[1]
+
+
+def _echo_tls_app() -> object:
+    import json
+
+    async def app(scope: dict, receive: object, send: object) -> None:  # type: ignore[type-arg]
+        tls = (scope.get("extensions") or {}).get("tls")
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()  # type: ignore[operator]
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})  # type: ignore[operator]
+                else:
+                    await send({"type": "lifespan.shutdown.complete"})  # type: ignore[operator]
+                    return
+        body = json.dumps(tls).encode()
+        if scope["type"] == "websocket":
+            await receive()  # type: ignore[operator]  # websocket.connect
+            await send({"type": "websocket.accept"})  # type: ignore[operator]
+            await send({"type": "websocket.send", "text": body.decode()})  # type: ignore[operator]
+            await send({"type": "websocket.close", "code": 1000})  # type: ignore[operator]
+            return
+        await send(  # type: ignore[operator]
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})  # type: ignore[operator]
+
+    return app
+
+
+def test_client_certificate_reaches_the_scope_over_a_real_socket(tmp_path: Path) -> None:
+    pytest.importorskip("cryptography")
+    import asyncio
+    import json
+
+    import uvicorn
+
+    from llm_redact.tls_scope import uvicorn_protocol_kwargs
+
+    pki = _make_test_pki(tmp_path)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            _echo_tls_app(),  # type: ignore[arg-type]
+            host="127.0.0.1",
+            port=0,
+            log_level="warning",
+            ssl_certfile=str(pki["server_crt"]),
+            ssl_keyfile=str(pki["server_key"]),
+            ssl_ca_certs=str(pki["ca"]),
+            ssl_cert_reqs=ssl.CERT_REQUIRED,
+            **uvicorn_protocol_kwargs(),  # type: ignore[arg-type]
+        )
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.time() + 15
+        while not server.started:
+            if time.time() > deadline:
+                raise RuntimeError("uvicorn did not start")
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        ctx = ssl.create_default_context(cafile=str(pki["ca"]))
+        ctx.load_cert_chain(str(pki["client_crt"]), str(pki["client_key"]))
+
+        tls = httpx.get(f"https://127.0.0.1:{port}/", verify=ctx, timeout=10.0).json()
+        assert tls["client_cert_name"] == "CN=llm-redact test client"
+        assert tls["client_cert_chain"][0].startswith("-----BEGIN CERTIFICATE-----")
+        assert tls["client_cert_chain"][0] == ssl.DER_cert_to_PEM_cert(
+            ssl.PEM_cert_to_DER_cert(pki["client_crt"].read_text())
+        )
+        assert tls["tls_version"] in (0x0303, 0x0304)
+
+        websockets = pytest.importorskip("websockets")
+
+        async def over_websocket() -> dict:  # type: ignore[type-arg]
+            async with websockets.connect(f"wss://127.0.0.1:{port}/ws", ssl=ctx) as ws:
+                return json.loads(await ws.recv())  # type: ignore[no-any-return]
+
+        ws_tls = asyncio.run(over_websocket())
+        assert ws_tls["client_cert_name"] == "CN=llm-redact test client"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)

@@ -24,7 +24,10 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
     "AccessGate": (
         (),
         {
-            "admit": "(self, conn: 'HTTPConnection', surface: 'str') -> 'Admission'",
+            "admit": (
+                "(self, conn: 'HTTPConnection', surface: 'str')"
+                " -> 'Admission | Awaitable[Admission]'"
+            ),
             "status": "(self) -> 'dict[str, Any]'",
             "handle": "(self, request: 'Request', host: 'DashboardHost') -> 'Response'",
             "close": "(self) -> 'None'",
@@ -35,6 +38,13 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
         {
             "add_arguments": "(self, parser: 'argparse.ArgumentParser') -> 'None'",
             "run": "(self, args: 'argparse.Namespace') -> 'int'",
+        },
+    ),
+    "ConfigSection": (
+        ("name",),
+        {
+            "parse": "(self, raw: 'Any', where: 'str') -> 'Any'",
+            "emit": "(self, value: 'Any') -> 'Mapping[str, Any]'",
         },
     ),
     "Dashboard": (
@@ -127,7 +137,10 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
 
 # Frozen dataclass name -> its generated __init__ signature.
 DATACLASSES: dict[str, str] = {
-    "Admission": "(subject: 'str | None' = None, refusal: 'str | None' = None) -> None",
+    "Admission": (
+        "(subject: 'str | None' = None, refusal: 'str | None' = None,"
+        " redirect: 'str | None' = None) -> None"
+    ),
     "RouteInbound": (
         "(adapter_name: 'str | None', provider_name: 'str', method: 'str', path: 'str',"
         " raw_path: 'str', query: 'str', headers: 'Mapping[str, str]', model: 'str | None')"
@@ -155,6 +168,7 @@ ALL: tuple[str, ...] = (
     "AccessGate",
     "Admission",
     "CliCommand",
+    "ConfigSection",
     "Dashboard",
     "DashboardHost",
     "HopDecision",

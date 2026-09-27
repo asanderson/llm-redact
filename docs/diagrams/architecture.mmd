@@ -18,7 +18,7 @@ flowchart LR
         vault[("Vault — local only<br/>«EMAIL_001» ↔ real value<br/>in-memory or SQLite")]
         subgraph proLocal["Pro"]
             dashboard["browser dashboard<br/>/__llm-redact/ — live status,<br/>recent requests, sessions,<br/>config editor, redaction preview"]
-            gate["access gate<br/>named users · per-user keys ·<br/>seats · llm-redact users"]
+            gate["access gate<br/>named users · per-user keys · seats ·<br/>client certificates · OIDC/SSO ·<br/>access-proxy headers · Basic/LDAP ·<br/>SCIM · llm-redact users/login/connect"]
         end
     end
     provider["LLM provider<br/>Anthropic, OpenAI, Gemini,<br/>Azure, Vertex, Bedrock, Ollama,<br/>Cohere, custom upstreams<br/>(/custom/NAME: vLLM, LM Studio, ...)"]

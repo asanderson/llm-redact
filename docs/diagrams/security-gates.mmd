@@ -7,13 +7,15 @@ flowchart TB
     g1 -- "non-loopback without mTLS:<br/>serve refuses to start" --> r1([no socket at all])
     g1 -- accepted --> route{"reserved path<br/>/__llm-redact/* ?"}
 
-    route -- yes --> g2{"② ops guard chain<br/>GET-only + Host · Origin · CSRF<br/>header · content-type · 1 MiB cap<br/>on the guarded POST exceptions"}
+    route -- yes --> gd{"dashboard admission<br/>(llm-redact-pro gate, opt-in):<br/>signed-in admin? Probes and the<br/>gate's sign-in/SCIM paths exempt"}
+    gd -- "refused" --> rd([403, or a 303 to the<br/>same-proxy sign-in page])
+    gd -- "admitted (or no gate)" --> g2{"② ops guard chain<br/>GET-only + Host · Origin · CSRF<br/>header · content-type · 1 MiB cap<br/>on the guarded POST exceptions"}
     g2 -- any layer fails --> r2([4xx — never forwarded])
     g2 -- ok --> ops(["ops surface: status, metrics, recent,<br/>events, sessions — types and counts only,<br/>never values (+ the Pro browser dashboard:<br/>status view, config editor, preview —<br/>llm-redact-pro, same guard chain)"])
 
     route -- no --> g3{"③ provider routing<br/>adapter match (incl. /custom/NAME)<br/>+ enabled? + detection on?"}
     g3 -- "provider disabled or<br/>unknown custom name" --> r3([proxy-generated 502 —<br/>never falls through to pass-through])
-    g3 -- "provider ok" --> ga{"access (llm-redact-pro gate):<br/>who is this client? The gate removes<br/>its credentials first. Without the package:<br/>implicit local user; x-llm-redact-* headers<br/>dropped, /u/… paths answered locally"}
+    g3 -- "provider ok" --> ga{"access (llm-redact-pro gate):<br/>who is this client? (user key, client<br/>certificate, OIDC token, access-proxy<br/>header, Basic/LDAP) The gate removes<br/>its credentials first. Without the package:<br/>implicit local user; x-llm-redact-* headers<br/>dropped, /u/… paths answered locally"}
     ga -- "refused" --> ra([403 — never forwarded])
     ga -- "unrecognized traffic" --> pass([verbatim pass-through —<br/>never break the tool])
     ga -- matched --> g4{"④ body size<br/>≤ max_body_bytes?"}
@@ -38,7 +40,7 @@ flowchart TB
     classDef gate fill:#ddf4ff,stroke:#0969da,stroke-width:1px;
     classDef okPath fill:#dafbe1,stroke:#1a7f37,stroke-width:1px;
     classDef vaultBox fill:#fff8c5,stroke:#9a6700,stroke-width:1.5px;
-    class r1,r2,r3,ra,r4,r5,r6 refuse;
-    class g1,g2,g3,ga,g4,g5,g6 gate;
+    class r1,rd,r2,r3,ra,r4,r5,r6 refuse;
+    class g1,gd,g2,g3,ga,g4,g5,g6 gate;
     class up,resp,out,ops,pass okPath;
     class vault,sink vaultBox;

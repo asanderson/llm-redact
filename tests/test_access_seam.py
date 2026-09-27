@@ -21,7 +21,7 @@ import llm_redact.registry as registry_mod
 from license_fixtures import resolved
 from llm_redact.cli import build_parser, main
 from llm_redact.completions import all_commands, bash_script, fish_script, zsh_script
-from llm_redact.config import Config, ProviderConfig
+from llm_redact.config import Config, ConfigError, ProviderConfig
 from llm_redact.plugin_api import Admission, DashboardHost
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
@@ -251,3 +251,170 @@ def test_plugin_cli_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all_commands()["serve"] != ShadowCommand.completion
     for script in (bash_script(), zsh_script(), fish_script()):
         assert "widgets" in script
+
+
+# --- async admission, dashboard admission, gate paths, public origin -------------
+
+
+class DashboardGate(FakeGate):
+    """Opts into dashboard admission: admits a dashboard request carrying
+    ``x-test-admin: yes`` and refuses the rest with a sign-in redirect."""
+
+    guards_dashboard = True
+
+    def __init__(self, *, origin: str | None = None, redirect: str | None = None) -> None:
+        super().__init__(strict=False)
+        self.origin = origin
+        self.redirect = redirect or "/__llm-redact/auth/login?next=%2F__llm-redact%2F"
+        self.surfaces: list[str] = []
+
+    def public_origin(self) -> str | None:
+        return self.origin
+
+    async def admit(self, conn: HTTPConnection, surface: str) -> Admission:  # type: ignore[override]
+        self.surfaces.append(surface)
+        if surface == "dashboard":
+            if conn.headers.get("x-test-admin") == "yes":
+                return Admission(subject="root")
+            return Admission(refusal="sign in first", redirect=self.redirect)
+        return super().admit(conn, surface)
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, gate: Any) -> None:
+    reg = Registry()
+    reg.resolve_license = lambda *args, **kwargs: resolved("team")
+    reg.build_access_gate = lambda config, license: gate
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+
+
+async def test_async_admission_is_awaited(monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = DashboardGate()
+    _install(monkeypatch, gate)
+    received: list[httpx.Request] = []
+    response = await _call(_app(received), "POST", "/v1/messages", {"x-test-key": "good"})
+    assert response.status_code == 200
+    assert gate.surfaces == ["http"]
+    rows = (await _call(_app([]), "GET", "/__llm-redact/recent", {"x-test-admin": "yes"})).json()
+    assert rows["entries"] == []
+
+
+async def test_dashboard_admission_is_opt_in(gate: FakeGate) -> None:
+    # FakeGate has no guards_dashboard: reserved endpoints stay as before.
+    response = await _call(_app([]), "GET", "/__llm-redact/status")
+    assert response.status_code == 200
+
+
+async def test_dashboard_admission_refuses_and_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = DashboardGate()
+    _install(monkeypatch, gate)
+    app = _app([])
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        page = await client.get("/__llm-redact/status")
+        assert page.status_code == 303
+        assert page.headers["location"] == gate.redirect
+        assert page.headers["x-frame-options"] == "DENY"  # still core-stamped
+        post = await client.post("/__llm-redact/sessions/prune", json={})
+        assert post.status_code == 403  # a non-GET is never redirected
+        assert post.json() == {"error": "sign in first"}
+        ok = await client.get("/__llm-redact/status", headers={"x-test-admin": "yes"})
+        assert ok.status_code == 200
+        for probe in ("/__llm-redact/healthz", "/__llm-redact/readyz", "/__llm-redact/metrics"):
+            assert (await client.get(probe)).status_code == 200  # never admitted
+    assert "dashboard" in gate.surfaces
+
+
+@pytest.mark.parametrize(
+    "redirect", ["https://evil.example/", "//evil.example/x", "/v1/messages", "/__llm-redact/\\\\x"]
+)
+async def test_only_same_proxy_redirects_are_honored(
+    monkeypatch: pytest.MonkeyPatch, redirect: str
+) -> None:
+    _install(monkeypatch, DashboardGate(redirect=redirect))
+    response = await _call(_app([]), "GET", "/__llm-redact/status")
+    assert response.status_code == 403
+
+
+async def test_gate_paths_skip_dashboard_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = DashboardGate()
+    _install(monkeypatch, gate)
+    app = _app([])
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        for path in (
+            "/__llm-redact/auth/login",
+            "/__llm-redact/auth/callback",
+            "/__llm-redact/auth/logout",
+            "/__llm-redact/scim/v2/Users",
+            "/__llm-redact/scim/v2",
+        ):
+            response = await client.get(path)
+            assert response.json() == {"from": "gate", "csrf_ok": True}, path
+        # SCIM clients are not browsers: a foreign Origin is not refused...
+        scim = await client.get(
+            "/__llm-redact/scim/v2/Users", headers={"origin": "https://idp.example"}
+        )
+        assert scim.status_code == 200
+        # ...but the sign-in endpoints keep the Origin check.
+        login = await client.get("/__llm-redact/auth/login", headers={"origin": "https://x.test"})
+        assert login.status_code == 403
+        # The admin endpoints are behind dashboard admission now.
+        assert (await client.get("/__llm-redact/users")).status_code == 303
+    assert gate.surfaces == ["dashboard"]  # only the /users request was admitted
+    assert gate.handled[:5] == [
+        "/__llm-redact/auth/login",
+        "/__llm-redact/auth/callback",
+        "/__llm-redact/auth/logout",
+        "/__llm-redact/scim/v2/Users",
+        "/__llm-redact/scim/v2",
+    ]
+
+
+async def test_gate_paths_without_a_gate() -> None:
+    app = _app([])
+    for path in ("/__llm-redact/auth/login", "/__llm-redact/scim/v2/Users"):
+        response = await _call(app, "GET", path)
+        assert response.status_code == 404
+        assert "llm-redact-pro" in response.json()["error"]
+
+
+async def test_public_origin_widens_host_and_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, DashboardGate(origin="https://Proxy.Team.Example:443"))
+    app = _app([])
+    transport = httpx.ASGITransport(app=app)
+    admin = {"x-test-admin": "yes"}
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://proxy.team.example"
+    ) as client:
+        assert (await client.get("/__llm-redact/recent", headers=admin)).status_code == 200
+        response = await client.get(
+            "/__llm-redact/users", headers={**admin, "origin": "https://proxy.team.example"}
+        )
+        assert response.json() == {"from": "gate", "csrf_ok": True}
+        foreign = await client.get(
+            "/__llm-redact/users", headers={**admin, "origin": "https://other.example"}
+        )
+        assert foreign.status_code == 403
+
+
+async def test_public_origin_needs_dashboard_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = DashboardGate(origin="https://proxy.team.example")
+    gate.guards_dashboard = False  # type: ignore[misc]
+    _install(monkeypatch, gate)
+    transport = httpx.ASGITransport(app=_app([]))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://proxy.team.example"
+    ) as client:
+        assert (await client.get("/__llm-redact/recent")).status_code == 403  # host check
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["ftp://proxy.example", "https://proxy.example/path", "https://u:p@proxy.example", "https://"],
+)
+def test_malformed_public_origin_fails_closed(monkeypatch: pytest.MonkeyPatch, origin: str) -> None:
+    _install(monkeypatch, DashboardGate(origin=origin))
+    with pytest.raises(ConfigError, match="public origin"):
+        _app([])

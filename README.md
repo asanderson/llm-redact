@@ -376,8 +376,9 @@ essentials:
   `docker kill --signal=HUP llm-redact`. Detection settings and upstream
   URLs apply immediately; vault, audit, host, port, log, TLS, OTel,
   users, and email changes are kept as-is with a "require restart"
-  warning. A broken config file is logged and ignored — the running
-  config stays active.
+  warning, and so are sections a plugin adds (llm-redact-pro's `[auth]`).
+  A broken config file is logged and ignored — the running config stays
+  active.
 - **Agent plugins**: the ops workflows ship as slash commands —
   `/llm-redact:status`, `/llm-redact:recent`, `/llm-redact:doctor`, and
   a guarded `/llm-redact:config-edit` that mirrors the reload flow

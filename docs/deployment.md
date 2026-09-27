@@ -109,7 +109,8 @@ Config changes apply on **SIGHUP** without dropping in-flight requests
 injection, `max_body_bytes`, upstream URLs, and the routing sections
 `[upstreams]`/`[routing]`/`[prices]` (llm-redact-pro) hot-reload; vault, audit,
 host, port, log, TLS, OTel, users, and email changes warn "require restart"
-and keep the old value. A broken config file is logged and ignored — the running config
+and keep the old value; so do sections a plugin adds, such as llm-redact-pro's
+`[auth]`. A broken config file is logged and ignored — the running config
 stays live. There is deliberately no HTTP reload endpoint (it would be a
 CSRF-reachable mutating endpoint on loopback).
 

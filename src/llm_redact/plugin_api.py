@@ -11,7 +11,7 @@ plugin API contract — change it deliberately, never incidentally.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -405,22 +405,48 @@ class Admission:
 
     subject: str | None = None
     refusal: str | None = None
+    # Dashboard surface only: a same-proxy path (it must start with
+    # ``/__llm-redact/``) a refused BROWSER GET is sent to with a 303, e.g.
+    # the gate's sign-in page. Ignored on every other surface and method,
+    # and any other value is ignored (never an open redirect).
+    redirect: str | None = None
 
 
 class AccessGate(Protocol):
     """Client admission (``Registry.build_access_gate``).
 
-    ``admit`` runs before routing on every HTTP request and WebSocket
-    upgrade outside the reserved prefix, and MUST remove every credential
-    it recognizes from the connection's ASGI scope (path, raw path,
-    headers) before returning: whatever it leaves is routed, logged and
-    forwarded. ``status`` is the ``users`` block of ``/status`` (metadata
-    only). ``handle`` answers the core's fixed ``ACCESS_PATHS`` (the admin
-    endpoints) and must never forward anything upstream; the core stamps
-    the security headers on its reply. ``close`` runs at shutdown.
+    ``admit`` runs before routing on every HTTP request (surface ``"http"``)
+    and WebSocket upgrade (``"websocket"``) outside the reserved prefix, and
+    MUST remove every credential it recognizes from the connection's ASGI
+    scope (path, raw path, headers) before returning: whatever it leaves is
+    routed, logged and forwarded. It may return the ``Admission`` directly
+    or an awaitable of one (a method that must reach a directory or an
+    identity provider awaits instead of blocking the event loop).
+
+    ``status`` is the ``users`` block of ``/status`` (metadata only).
+    ``handle`` answers the core's fixed gate paths — ``ACCESS_PATHS`` (the
+    admin endpoints), ``AUTH_PATHS`` (sign-in, callback, sign-out) and
+    everything under ``SCIM_PREFIX`` — and must never forward anything
+    upstream; the core stamps the security headers on its reply. ``close``
+    runs at shutdown.
+
+    Two OPTIONAL members, read with ``getattr`` so a gate written before
+    them keeps working unchanged:
+
+    - ``guards_dashboard: bool`` — when true, the core also calls
+      ``admit(conn, "dashboard")`` for every reserved path except the
+      monitoring probes (healthz, readyz, metrics) and the gate paths
+      themselves, and refuses with a 403 — or, for a browser GET, a 303 to
+      ``Admission.redirect`` — before answering it.
+    - ``public_origin() -> str | None`` — the ``scheme://host[:port]`` the
+      proxy is reached at from other machines (read once at startup). Its
+      host joins the loopback names the reserved endpoints' DNS-rebinding
+      check accepts, and exactly that origin passes the Origin check. Only
+      meaningful together with ``guards_dashboard``: the core ignores it
+      otherwise, so a wider Host is never accepted unauthenticated.
     """
 
-    def admit(self, conn: HTTPConnection, surface: str) -> Admission: ...
+    def admit(self, conn: HTTPConnection, surface: str) -> Admission | Awaitable[Admission]: ...
 
     def status(self) -> dict[str, Any]: ...
 
@@ -451,10 +477,40 @@ class CliCommand(Protocol):
     def run(self, args: argparse.Namespace) -> int: ...
 
 
+# --- config seam ----------------------------------------------------------------
+# A plugin's own top-level config tables: the core parses only the sections it
+# knows and rejects every other key, so a plugin feature's settings (for
+# instance llm-redact-pro's [auth]) are claimed here instead of being shaped
+# in the core. Without the plugin such a section stays an unknown key — a
+# startup ConfigError, never silently ignored.
+
+
+class ConfigSection(Protocol):
+    """One top-level ``[name]`` table owned by a plugin.
+
+    ``parse`` validates the raw TOML table and returns an immutable value
+    that supports ``==`` (a frozen dataclass); it raises
+    ``llm_redact.config.ConfigError`` on a bad value, never echoing a
+    secret. The value is stored at ``Config.extensions[name]`` only when the
+    section is present in the file. ``emit`` turns that value back into a
+    TOML-shaped mapping (scalars, lists, nested tables, lists of tables)
+    for ``config show`` and the config editor's rewrite, so the section
+    round-trips. Plugin sections are restart-only: a reload that changes
+    one keeps the running value and reports ``name`` as restart-required.
+    """
+
+    name: str
+
+    def parse(self, raw: Any, where: str) -> Any: ...
+
+    def emit(self, value: Any) -> Mapping[str, Any]: ...
+
+
 __all__ = [
     "AccessGate",
     "Admission",
     "CliCommand",
+    "ConfigSection",
     "Dashboard",
     "DashboardHost",
     "HopDecision",

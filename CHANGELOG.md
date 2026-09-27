@@ -11,6 +11,31 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- `plugin_api.ConfigSection` and `Registry.config_sections`: a plugin can own a top-level config
+  table, such as llm-redact-pro's `[auth]`. The core parses it into `Config.extensions`, writes it
+  back in `config show` and the config editor, and treats it as restart-only. Without the plugin the
+  section is still an unknown key, and startup fails naming llm-redact-pro.
+- Under mutual TLS, `serve` passes the verified client certificate to the app as the standard ASGI
+  TLS extension (`scope["extensions"]["tls"]`), so an access gate can map certificates to users.
+  Nothing in the core reads it.
+- Optional access-gate members for browser sign-in and remote administration:
+  - `guards_dashboard` makes the core ask the gate to admit every reserved endpoint except the
+    monitoring probes. A refused browser GET is redirected only to a same-proxy
+    `/__llm-redact/…` page (`Admission.redirect`); anything else is a 403.
+  - `public_origin()` lets such a gate name the one `https://host` the proxy is reached at, which
+    the Host and Origin checks then accept.
+- New gate-only paths, answered by llm-redact-pro and a local 404 without it:
+  `/__llm-redact/auth/login|callback|logout` (browser sign-in) and everything under
+  `/__llm-redact/scim/v2/` (SCIM 2.0 provisioning, Host-checked but not Origin-checked).
+
+### Changed
+
+- `AccessGate.admit` may return an awaitable, so a gate can check a credential against a directory
+  or an identity provider without blocking the event loop. Gates that answer directly keep
+  working unchanged.
+
 ## [1.4.0] - 2026-09-26
 
 ### Removed

@@ -132,6 +132,16 @@ because breaking the tool teaches users to bypass the proxy).
   `Referrer-Policy: no-referrer` — so a hostile page cannot frame a
   reserved page, run injected remote code, or leak a Referer. These are
   defense-in-depth on top of the Host/Origin/CSRF gates, not a substitute.
+- With llm-redact-pro's access gate configured for it, the reserved
+  endpoints also pass through the gate's **dashboard admission** before
+  they answer (the core's `_admit_reserved`): the monitoring probes
+  (`/healthz`, `/readyz`, `/metrics`) and the gate's own sign-in and SCIM
+  paths are exempt, a refused browser GET is redirected only to a
+  same-proxy `/__llm-redact/…` path (never an open redirect), and anything
+  else is a 403. Only a gate that guards the dashboard may widen the Host
+  and Origin checks to its one public origin, so a wider Host is never
+  accepted without authentication. SCIM requests skip the Origin check
+  (identity providers are not browsers) but keep the Host check.
 - Status/metrics/audit — and the `/events` live feed, which streams the
   same rows `/recent` serves — expose **types and counts only**: never
   values, never placeholder ids, never allowlist contents (the

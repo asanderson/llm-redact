@@ -10,10 +10,13 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from llm_redact.detection.deny import DenyEntry
 from llm_redact.detection.engine import CustomRule, DetectionConfig, NerConfig
+
+if TYPE_CHECKING:
+    from llm_redact.plugin_api import ConfigSection
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -137,6 +140,32 @@ RDBMS_BACKENDS = ("postgresql", "mysql", "oracle", "dbapi")
 # of truth for apply_config and the editor's read-only set (README.md and
 # docs/deployment.md enumerate it — pinned by test_restart_only_docs.py).
 RESTART_ONLY_KEYS = ("vault", "audit", "host", "port", "log", "tls", "otel", "users", "email")
+
+# Every top-level key the core itself parses. Anything else must be claimed
+# by a registered plugin section (plugin_api.ConfigSection) or it is a
+# ConfigError.
+CORE_SECTION_KEYS = frozenset(
+    {
+        "host",
+        "port",
+        "inject_system_note",
+        "max_body_bytes",
+        "providers",
+        "detection",
+        "vault",
+        "rehydration",
+        "audit",
+        "log",
+        "tls",
+        "otel",
+        "license",
+        "users",
+        "email",
+        "upstreams",
+        "routing",
+        "prices",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -466,6 +495,10 @@ class Config:
     # as before.
     routing: RoutingConfig = field(default_factory=RoutingConfig)
     prices: PricesConfig = field(default_factory=PricesConfig)
+    # Plugin-owned top-level tables (plugin_api.ConfigSection), keyed by
+    # section name and holding the plugin's parsed value; only sections
+    # present in the file appear. Restart-only as a whole.
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 class ConfigError(ValueError):
@@ -1456,30 +1489,17 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     dashboard's /__llm-redact/config editor endpoint both go through here,
     so a value the editor accepts is exactly a value the file would accept.
     """
-    _require_keys(
-        raw,
-        {
-            "host",
-            "port",
-            "inject_system_note",
-            "max_body_bytes",
-            "providers",
-            "detection",
-            "vault",
-            "rehydration",
-            "audit",
-            "log",
-            "tls",
-            "otel",
-            "license",
-            "users",
-            "email",
-            "upstreams",
-            "routing",
-            "prices",
-        },
-        where,
-    )
+    sections = _plugin_sections()
+    unknown = set(raw) - CORE_SECTION_KEYS - set(sections)
+    if unknown:
+        raise ConfigError(
+            f"unknown key(s) {sorted(unknown)} in {where} (a section supplied by"
+            " llm-redact-pro, such as [auth], needs that package installed)"
+        )
+    extensions: dict[str, Any] = {}
+    for name, section in sections.items():
+        if name in raw:
+            extensions[name] = section.parse(raw[name], f"[{name}] in {where}")
     max_body_bytes = int(raw.get("max_body_bytes", DEFAULT_MAX_BODY_BYTES))
     if max_body_bytes <= 0:
         raise ConfigError("max_body_bytes must be a positive integer")
@@ -1867,7 +1887,20 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         email=email_cfg,
         routing=routing,
         prices=prices,
+        extensions=extensions,
     )
+
+
+def _plugin_sections() -> "dict[str, ConfigSection]":
+    """The registered plugin sections by name (a name that collides with a
+    core key is ignored — a plugin can never reshape a core section)."""
+    from .registry import get_registry  # lazy: registry imports this module
+
+    sections: dict[str, ConfigSection] = {}
+    for section in get_registry().config_sections:
+        if section.name not in CORE_SECTION_KEYS and section.name not in sections:
+            sections[section.name] = section
+    return sections
 
 
 def _is_loopback_host(host: str) -> bool:

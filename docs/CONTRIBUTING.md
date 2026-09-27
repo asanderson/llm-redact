@@ -95,11 +95,15 @@ Other conventions worth knowing before writing tests:
 
 The architecture diagrams in the README are Mermaid sources under
 `docs/diagrams/` with their rendered PNGs committed alongside (so the
-README needs no toolchain). If you change a `.mmd`, re-render and commit
-both:
+README needs no toolchain). Diagrams that show a data flow or a message
+exchange also carry a `%% animate` comment, and `scripts/animate_diagrams.py`
+renders an animated SVG (CSS only, so it plays when embedded as an image
+and stays a complete static picture under `prefers-reduced-motion`) plus a
+GIF of it; the docs pages embed the SVG, the README keeps the PNG. If you
+change a `.mmd`, re-render and commit everything:
 
 ```bash
-scripts/render_diagrams.sh   # needs Node; see the header for sandboxed-Chromium setups
+scripts/render_diagrams.sh   # needs Node + uv; see the header for sandboxed-Chromium setups
 ```
 
 The agent-plugin terminal screenshots (`docs/screenshots/plugins/`,

@@ -225,3 +225,6 @@ __marimo__/
 # mutmut (mutation testing): the mutants/ working copy and result cache
 mutants/
 .mutmut-cache
+
+# scripts/animate_diagrams.py scratch (frames), removed after each run
+docs/diagrams/.render-*/

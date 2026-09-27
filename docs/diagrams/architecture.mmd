@@ -7,6 +7,8 @@
 %% Render: scripts/render_diagrams.sh (PNG committed next to this source).
 %% padding: the extra node padding keeps the ① label clear of the plugin box
 %% and the tool box inside "Your machine" under mermaid-cli 11.x.
+%% animate: the request/response flow moves; scripts/animate_diagrams.py renders the
+%% animated SVG + GIF committed next to this source (a '%% animate' marker opts in).
 %%{init: {"flowchart": {"padding": 30}}}%%
 flowchart LR
     subgraph machine["Your machine — the proxy binds 127.0.0.1 by default"]

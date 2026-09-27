@@ -79,7 +79,8 @@ reference and enforcement internals ship with it.
 | [coding-standards.md](coding-standards.md) | The style guide: formatting, typing, the correctness invariants, comment style, and testing style a reviewer holds a change to. |
 | [RELEASING.md](RELEASING.md) | The tag-driven release process: preflight checklist, cutting the tag, what the workflow produces, and one-time setup. |
 
-Diagram sources live in [diagrams/](diagrams/) (rendered PNGs are
-committed; `scripts/render_diagrams.sh` regenerates them) and the
+Diagram sources live in [diagrams/](diagrams/) (rendered PNGs, and for the
+flow and sequence diagrams an animated SVG + GIF, are committed;
+`scripts/render_diagrams.sh` regenerates them) and the
 documentation screenshots in [screenshots/](screenshots/) are captured
 from fixture traffic only, never real sessions.

@@ -2,6 +2,8 @@
 %% (PDP) and what enforces (PEP) at each one. Companion table with code
 %% references: docs/security-dataflows.md.
 %% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+%% animate: the request/response flow moves; scripts/animate_diagrams.py renders the
+%% animated SVG + GIF committed next to this source (a '%% animate' marker opts in).
 flowchart TB
     conn([client connection]) --> g1{"① bind policy<br/>loopback, or full mTLS?"}
     g1 -- "non-loopback without mTLS:<br/>serve refuses to start" --> r1([no socket at all])

@@ -18,7 +18,9 @@ namespaces.
 
 A request round trip, using an email as the private value:
 
-![Sequence diagram of a non-streaming request: detect, issue a vault token, forward placeholders, reverse-lookup on the response](diagrams/sequence-chat.png)
+![Sequence diagram of a non-streaming request: detect, issue a vault token, forward placeholders, reverse-lookup on the response](diagrams/sequence-chat.svg)
+
+*Animated: the messages appear in order. Static [PNG](diagrams/sequence-chat.png) · [GIF](diagrams/sequence-chat.gif) · [Mermaid source](diagrams/sequence-chat.mmd).*
 
 Streaming is the hard case — a placeholder can be split across chunk
 boundaries. The rehydrator holds back only a viable token prefix and flushes
@@ -26,7 +28,9 @@ any leftover before the stream-end event, so streamed output is byte-for-byte
 identical to the non-streaming result (the same machinery serves SSE, NDJSON,
 Bedrock's binary eventstream, and realtime WebSocket deltas):
 
-![Sequence diagram of streaming rehydration reassembling a placeholder split across two SSE deltas](diagrams/sequence-streaming.png)
+![Sequence diagram of streaming rehydration reassembling a placeholder split across two SSE deltas](diagrams/sequence-streaming.svg)
+
+*Animated. Static [PNG](diagrams/sequence-streaming.png) · [GIF](diagrams/sequence-streaming.gif) · [Mermaid source](diagrams/sequence-streaming.mmd).*
 
 Watch the round trip live: `llm-redact status` and the `/recent` feed
 ([dashboard.md](dashboard.md)) show detections and restores, and an
@@ -179,5 +183,5 @@ policy decision point (PDP) and enforcement point (PEP) mapped to code —
 are diagrammed in [security-dataflows.md](security-dataflows.md); what
 the proxy defends against, and deliberately does not, is
 [threat-model.md](threat-model.md). Mermaid sources for all diagrams
-live in [diagrams/](diagrams/); regenerate the PNGs with
-`scripts/render_diagrams.sh`.
+live in [diagrams/](diagrams/); regenerate the PNGs and the animated
+SVG/GIF versions with `scripts/render_diagrams.sh`.

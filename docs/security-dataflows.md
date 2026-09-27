@@ -16,9 +16,9 @@ This page maps the flows; [threat-model.md](threat-model.md) explains why
 the boundaries sit where they do, and [SECURITY.md](SECURITY.md)
 defines what counts as a vulnerability against them.
 
-![Every gate a request passes: bind policy, ops guard chain, provider routing, size cap, detection modes, and the local vault](diagrams/security-gates.png)
+![Every gate a request passes: bind policy, ops guard chain, provider routing, size cap, detection modes, and the local vault](diagrams/security-gates.svg)
 
-*Mermaid source: [diagrams/security-gates.mmd](diagrams/security-gates.mmd).*
+*Animated: the flow along the accepted path moves; refusals are static. Static [PNG](diagrams/security-gates.png) · [GIF](diagrams/security-gates.gif) · Mermaid source: [diagrams/security-gates.mmd](diagrams/security-gates.mmd).*
 
 ## The gates
 

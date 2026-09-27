@@ -10,6 +10,8 @@ Large Language Model (LLM) information redactor that prevents private informatio
 
 ![System data flow: agentic tool (with the llm-redact plugin slash commands inside it), proxy, and local vault on your machine; only placeholder tokens reach the LLM provider. Dashed boxes mark as Pro the browser dashboard on your machine (live status, config editor, redaction preview) and the audit log with its object-store sinks, plus the flows into each](docs/diagrams/architecture.png)
 
+*Animated version: [SVG](docs/diagrams/architecture.svg) · [GIF](docs/diagrams/architecture.gif) — the request and response flow moves.*
+
 Only placeholder tokens cross the trust boundary; the vault mapping never
 leaves your machine. The dashed boxes mark what is **Pro** — supplied by
 the proprietary `llm-redact-pro` package: the browser dashboard at

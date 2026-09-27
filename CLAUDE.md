@@ -56,7 +56,7 @@ uv run llm-redact plugin install|uninstall|status claude|codex|opencode|cursor [
 uv run python scripts/render_plugins.py       # re-render plugins/llm-redact + .claude-plugin/marketplace.json from plugin_assets.py (pinned by test)
 uv run llm-redact completions bash|zsh|fish    # shell completion scripts
 uv run llm-redact fips-check                   # host FIPS posture report
-scripts/render_diagrams.sh                     # re-render docs/diagrams/*.mmd -> committed PNGs (needs node; README embeds the PNGs)
+scripts/render_diagrams.sh                     # re-render docs/diagrams/*.mmd -> committed PNGs + animated SVG/GIF for '%% animate' diagrams (needs node + uv; README embeds the PNGs, docs embed the SVGs)
 uv run python scripts/capture_plugin_screenshots.py       # re-render docs/screenshots/plugins/*.svg terminal shots (fixture traffic only)
 uv run python scripts/history_sweep.py         # audit ALL git history with the production detectors (docs/history-hygiene.md)
 uv run python scripts/fake_upstream.py --port 9999 [--mangle]  # fake provider for manual e2e

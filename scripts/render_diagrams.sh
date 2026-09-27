@@ -1,5 +1,7 @@
 #!/usr/bin/env sh
-# Re-render docs/diagrams/*.mmd to the committed PNGs.
+# Re-render docs/diagrams/*.mmd to the committed PNGs, then the animated
+# SVG + GIF of every diagram that opts in with a "%% animate" comment
+# (scripts/animate_diagrams.py; needs uv, which fetches playwright + pillow).
 #
 # Needs Node (mermaid-cli is fetched via npx) and a Chromium/Chrome for
 # puppeteer. If puppeteer cannot download its own browser (sandboxed CI,
@@ -32,3 +34,10 @@ for src in docs/diagrams/*.mmd; do
         -i "$src" -o "$out" -b white -s 2 --quiet
     echo "rendered $out"
 done
+
+# Animated versions (data flow / message order); the same Chromium serves
+# mermaid-cli and the GIF frame capture. ANIMATE=0 skips them.
+if [ "${ANIMATE:-1}" != "0" ]; then
+    uv run --no-project --with playwright --with pillow \
+        python scripts/animate_diagrams.py --diagrams "${DIAGRAMS:-docs/diagrams}"
+fi

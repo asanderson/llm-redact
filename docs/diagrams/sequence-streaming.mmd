@@ -3,6 +3,8 @@
 %% The same channel machinery serves SSE, NDJSON, Bedrock eventstream
 %% frames, and realtime WebSocket deltas.
 %% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+%% animate: the request/response flow moves; scripts/animate_diagrams.py renders the
+%% animated SVG + GIF committed next to this source (a '%% animate' marker opts in).
 sequenceDiagram
     participant L as Provider (SSE)
     participant P as Proxy — StreamingRehydrator

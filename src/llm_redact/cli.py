@@ -452,6 +452,11 @@ def main(argv: list[str] | None = None) -> None:
             # Access-log lines include the full request line with query
             # strings, which can carry provider API keys (Gemini ?key=).
             access_log=False,
+            # The ASGI client address stays the socket peer: uvicorn would
+            # otherwise rewrite it from X-Forwarded-For (for any peer when
+            # FORWARDED_ALLOW_IPS=*), letting a client claim loopback or a
+            # trusted load balancer's address to an access gate.
+            proxy_headers=False,
             **run_kwargs,  # type: ignore[arg-type]
         )
     elif args.command == "status":

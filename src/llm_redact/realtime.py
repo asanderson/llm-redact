@@ -648,6 +648,14 @@ async def ws_handle(websocket: WebSocket) -> None:
     # accept-then-close so the reason reaches the client library.
     admission = await state.admit(websocket, "websocket")
     path = websocket.scope["path"]
+    from llm_redact.proxy import IDENTITY_PATH_PREFIX
+
+    if path.startswith(IDENTITY_PATH_PREFIX):
+        # An identity prefix still present after admission: its next segment
+        # is a key, so the path is never logged (the HTTP rule), and no
+        # realtime route exists under it anyway.
+        await _reject(websocket, admission.refusal or "no realtime route for this path")
+        return
     if admission.refusal is not None:
         logger.info("WS %s -> refused by the access gate", path)
         await _reject(websocket, admission.refusal)

@@ -13,6 +13,15 @@ and tags `vX.Y.Z`.
 
 ## [1.5.0] - 2026-09-27
 
+### Security
+
+- `serve` now passes `proxy_headers=False` to uvicorn, so the ASGI client address is always the
+  socket peer. uvicorn used to rewrite it from `X-Forwarded-For`, for any peer when
+  `FORWARDED_ALLOW_IPS=*`. A client could then claim loopback or a trusted load balancer's address
+  to an access gate.
+- A WebSocket upgrade under a `/u/<key>/` path that no gate removed is refused without logging
+  its path, the same as HTTP. The access-gate refusal line used to log it, key included.
+
 ### Added
 
 - `plugin_api.ConfigSection` and `Registry.config_sections`: a plugin can own a top-level config

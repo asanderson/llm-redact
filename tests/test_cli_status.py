@@ -200,6 +200,7 @@ def test_serve_port_override_reaches_config(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["port"] == 19999
     assert captured["config"].port == 19999  # /status reads this
     assert captured["access_log"] is False
+    assert captured["proxy_headers"] is False  # the client address is the socket peer
 
 
 def test_routes_and_spend_require_pro(

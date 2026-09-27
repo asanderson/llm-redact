@@ -258,3 +258,37 @@ async def test_access_gate_on_websocket(monkeypatch: pytest.MonkeyPatch) -> None
     assert "x-test-key" not in fake.headers[0]
     assert "x-llm-redact-other" not in fake.headers[0]
     assert rows[0]["method"] == "WS" and rows[0]["user"] == "ada via websocket"
+
+
+@pytest.mark.parametrize("refusal", ["a key is required", None])
+async def test_identity_path_on_websocket_is_refused_and_never_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, refusal: str | None
+) -> None:
+    # A WS upgrade under /u/<key>/ (an SDK deriving its realtime URL from a
+    # /u/<key> base URL) that the gate leaves in place: refused, never
+    # forwarded, and the key never reaches a log line — whether the gate
+    # admitted or refused the connection.
+    import logging
+
+    import llm_redact.registry as registry_mod
+    from license_fixtures import resolved
+    from llm_redact.plugin_api import Admission
+    from llm_redact.registry import Registry
+    from test_access_seam import FakeGate
+
+    class PathKeepingGate(FakeGate):
+        def admit(self, conn: Any, surface: str) -> Admission:
+            return Admission(refusal=refusal)
+
+    reg = Registry()
+    reg.resolve_license = lambda *args, **kwargs: resolved("team")
+    reg.build_access_gate = lambda config, license: PathKeepingGate()
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    caplog.set_level(logging.INFO, logger="llm_redact")
+    async with _relay_setup() as (fake, proxy_host):
+        async with websockets.connect(f"ws://{proxy_host}/u/lrk_SUPERSECRET/v1/realtime") as client:
+            with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
+                await client.recv()
+            assert closed.value.rcvd is not None and closed.value.rcvd.code == 1011
+        assert fake.paths == []
+    assert "SUPERSECRET" not in caplog.text

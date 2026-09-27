@@ -84,6 +84,15 @@ class SessionRouter(Protocol):
 
     ``resolve`` and ``record_response_id`` are only invoked when ``mode`` is not
     ``"static"``, so the Free static router implements them as inert stubs.
+
+    OPTIONAL member, read via ``getattr`` so older routers keep working:
+    ``is_durable(session_id) -> bool`` marks a session the live process must
+    never prune (the TTL loop, ``POST /__llm-redact/sessions/prune``) because
+    provider-side state still points into it — the router's equivalents of
+    the configured static session, which the proxy always keeps. A pruned
+    session is recreated on the next request with fresh placeholder numbers,
+    so a token the provider still holds would then rehydrate to a NEWER
+    value (never-wrong-value). Sessions that are merely idle stay prunable.
     """
 
     mode: str

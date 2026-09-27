@@ -1602,12 +1602,27 @@ async def _handle_sessions(request: Request, state: ProxyState) -> Response:
             status_code=400,
         )
     # The static session is the always-live fallback namespace: never
-    # pruned from the live process (the CLI can, with the proxy stopped).
-    pruned = state.vault_manager.prune_sessions(
-        days, exclude=frozenset({state.config.vault.session})
-    )
+    # pruned from the live process (the CLI can, with the proxy stopped);
+    # the session router may name more such sessions (a per-user copy).
+    pruned = state.vault_manager.prune_sessions(days, exclude=_prune_exclusions(state))
     logger.info("pruned %d idle vault session(s) via /sessions/prune", pruned)
     return JSONResponse({"pruned": pruned})
+
+
+def _prune_exclusions(state: ProxyState) -> frozenset[str]:
+    """The sessions a live prune must keep: the configured static session,
+    plus every current session the router marks durable (its optional
+    ``is_durable``, see plugin_api.SessionRouter) — provider-side state
+    (Responses chains, batches) still points into them, and a recreated
+    session would hand out the same placeholder numbers for new values."""
+    keep = {state.config.vault.session}
+    is_durable = getattr(state.session_router, "is_durable", None)
+    if is_durable is not None:
+        for row in state.vault_manager.sessions_summary():
+            session_id = str(row["session"])
+            if is_durable(session_id):
+                keep.add(session_id)
+    return frozenset(keep)
 
 
 async def _guarded_post_json(
@@ -2660,15 +2675,17 @@ def create_app(
         """Retention: prune whole sessions idle longer than session_ttl_days.
 
         Reuses the live-safe manager prune (whole sessions only, evicts cached
-        views) and never touches the active static session — the same
-        never-wrong-value discipline as the CLI prune. Sleep-first so startup
-        is untouched; failures are logged, never fatal."""
+        views) and never touches the active static session or a session the
+        router marks durable — the same never-wrong-value discipline as the
+        CLI prune. Sleep-first so startup is untouched; failures are logged,
+        never fatal."""
         ttl = state.config.vault.session_ttl_days
-        exclude = frozenset({state.config.vault.session})
         while True:
             await asyncio.sleep(interval)
             try:
-                pruned = state.vault_manager.prune_sessions(ttl, exclude=exclude)
+                # Recomputed per pass: the router's durable sessions (a named
+                # user's namespace) appear as users show up.
+                pruned = state.vault_manager.prune_sessions(ttl, exclude=_prune_exclusions(state))
             except Exception:
                 logger.exception("session-ttl prune failed")
                 continue

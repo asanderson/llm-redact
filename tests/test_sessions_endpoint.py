@@ -170,3 +170,48 @@ async def test_sessions_reject_foreign_host() -> None:
     client = _make_client(base_url="http://evil.example")
     assert (await client.get("/__llm-redact/sessions")).status_code == 403
     assert (await client.post("/__llm-redact/sessions/prune", json={})).status_code == 403
+
+
+class _DurableRouter:
+    """A router (like llm-redact-pro's per-user wrapper) that marks some
+    sessions as holding provider-side state the live process must keep."""
+
+    mode = "static"
+
+    def __init__(self, fallback: str) -> None:
+        self._fallback = fallback
+
+    def resolve(self, adapter_name: str | None, method: str, path: str, body: Any) -> str:
+        return self._fallback
+
+    def record_response_id(self, response_id: str, session_id: str) -> None:
+        return None
+
+    def is_durable(self, session_id: str) -> bool:
+        return session_id.startswith("user:") and session_id.endswith(":" + self._fallback)
+
+
+async def test_prune_keeps_sessions_the_router_marks_durable(tmp_path: Path) -> None:
+    # A router's durable sessions (a named user's copy of the static
+    # session) survive a prune like the static session itself; other idle
+    # sessions still go, and a router without the hook behaves as before.
+    from llm_redact import registry as registry_mod
+
+    db = tmp_path / "vault.db"
+    registry = registry_mod.get_registry()
+    original = registry.build_session_router
+    registry.build_session_router = lambda cfg, **kw: _DurableRouter(cfg.session)
+    try:
+        client = _make_client(VaultConfig(backend="sqlite", path=str(db)))
+    finally:
+        registry.build_session_router = original
+    for session in ("user:7:default", "user:8:default", "user:7:conv-idle", "conv-idle"):
+        _insert_session(db, session, days_old=100)
+    _insert_session(db, "default", days_old=100)
+    token = await _token(client)
+    response = await client.post(
+        "/__llm-redact/sessions/prune", headers={CSRF_HEADER: token}, json={"older_than_days": 30}
+    )
+    assert response.json() == {"pruned": 2}
+    remaining = (await client.get("/__llm-redact/sessions")).json()["sessions"]
+    assert {s["session"] for s in remaining} == {"default", "user:7:default", "user:8:default"}

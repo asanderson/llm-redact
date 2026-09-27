@@ -138,7 +138,9 @@ silently rehydrate the *wrong* secret. Treat it accordingly.
   on any failure. Run it after a restore or before a key rotation.
 - **Bound growth.** `[vault] session_ttl_days = N` prunes whole sessions
   idle longer than N days via a background task (never the active
-  session); `0` (default) disables it. For manual control,
+  session, nor a session the session router marks durable, such as a
+  named user's own copy of it under llm-redact-pro); `0` (default)
+  disables it. For manual control,
   `llm-redact sessions prune --older-than 90d` deletes whole idle sessions
   (partial deletion could reuse a still-referenced number).
   `POST /__llm-redact/sessions/prune` (and the llm-redact-pro dashboard,

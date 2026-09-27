@@ -11,6 +11,15 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- Session routers may mark sessions as durable (`SessionRouter.is_durable(session_id)`, an
+  optional member read via `getattr`). The live prune — the `session_ttl_days` loop and
+  `POST /__llm-redact/sessions/prune` — keeps those sessions like the configured static session,
+  because provider-side state (Responses chains, batches) still points into them and a recreated
+  session would issue the same placeholder numbers for new values. llm-redact-pro uses it for each
+  named user's copy of the static session. Routers without the member are unaffected.
+
 ## [1.5.0] - 2026-09-27
 
 ### Security

@@ -67,3 +67,37 @@ async def test_ttl_loop_absent_when_disabled(
     async with app.router.lifespan_context(app):
         await asyncio.sleep(0.2)
     assert _sessions(db) == {"conv-old", "default"}  # nothing pruned
+
+
+async def test_ttl_loop_keeps_sessions_the_router_marks_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact import registry as registry_mod
+
+    class DurableRouter:
+        mode = "static"
+
+        def resolve(self, adapter_name: str | None, method: str, path: str, body: object) -> str:
+            return "default"
+
+        def record_response_id(self, response_id: str, session_id: str) -> None:
+            return None
+
+        def is_durable(self, session_id: str) -> bool:
+            return session_id.endswith(":default")
+
+    db = tmp_path / "vault.db"
+    _seed_and_age(db, "conv-old", "default")
+    _seed_and_age(db, "user:3:default", "default")
+    monkeypatch.setattr(proxy_mod, "_TTL_PRUNE_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(
+        registry_mod.get_registry(), "build_session_router", lambda cfg, **kw: DurableRouter()
+    )
+    app = create_app(_config(db, ttl=1))
+    async with app.router.lifespan_context(app):
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if "conv-old" not in _sessions(db):
+                break
+        await asyncio.sleep(0.1)  # a further pass must not take the durable session either
+    assert _sessions(db) == {"default", "user:3:default"}

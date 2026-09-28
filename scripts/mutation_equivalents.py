@@ -901,5 +901,9 @@ OSCILLATING_MUTANTS: frozenset[str] = frozenset(
         "llm_redact.placeholders.x_viable_prefix_start__mutmut_10",
         "llm_redact.rehydrate.x_substitute_tokens__mutmut_19",
         "llm_redact.sse.xǁSSEParserǁfeed__mutmut_26",
+        # SQL keyword case changes (equivalent) whose test run tipped over the
+        # per-mutant time limit on a slow runner: survived -> timeout.
+        "llm_redact.vault.xǁSqliteVaultǁplaceholder_for__mutmut_7",
+        "llm_redact.vault.xǁSqliteVaultǁplaceholder_for__mutmut_14",
     }
 )

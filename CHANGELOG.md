@@ -11,6 +11,24 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Security
+
+- Session routers can veto the durable response-session map: `SessionRouter.record_response_id`
+  may return `False` (a refused cross-namespace re-home, or a router that never reads the map), and
+  the proxy then skips its durable write. Previously the proxy mirrored every mapping, so a
+  per-user router that refused to move another user's response id into the reader's namespace was
+  overruled by the durable row on its next lookup. Returning `None` keeps the historical behavior.
+- The in-memory vault manager no longer hands the session router a durable lookup: its "unknown"
+  answer was indistinguishable from "that session was pruned", which orphaned every chained
+  Responses turn under llm-redact-pro 0.11.0 and could reissue a placeholder number for a
+  different value.
+
+### Fixed
+
+- The live prune fails safe on a misbehaving router: an `is_durable` that raises keeps the session
+  (logged by exception type) instead of answering `POST /__llm-redact/sessions/prune` with a 500,
+  and only an explicit `False` releases a session (a `None` from a buggy router used to prune it).
+
 ## [1.6.0] - 2026-09-27
 
 ### Added

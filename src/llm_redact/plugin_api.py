@@ -93,13 +93,21 @@ class SessionRouter(Protocol):
     session is recreated on the next request with fresh placeholder numbers,
     so a token the provider still holds would then rehydrate to a NEWER
     value (never-wrong-value). Sessions that are merely idle stay prunable.
+    Only an explicit ``False`` releases a session: any other answer, and an
+    exception, keeps it, so a misbehaving router can only keep more.
+
+    ``record_response_id`` MAY return ``False`` to veto the proxy's durable
+    mirror of the mapping (the vault manager's response-session map): the
+    router refused it (a response must never move to another namespace) or
+    never reads it. ``None`` or ``True`` keep the proxy's historical
+    behavior of mirroring every recorded mapping.
     """
 
     mode: str
 
     def resolve(self, adapter_name: str | None, method: str, path: str, body: Any) -> str: ...
 
-    def record_response_id(self, response_id: str, session_id: str) -> None: ...
+    def record_response_id(self, response_id: str, session_id: str) -> bool | None: ...
 
 
 # --- upstream routing seam ----------------------------------------------------

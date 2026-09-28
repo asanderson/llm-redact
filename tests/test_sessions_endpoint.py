@@ -215,3 +215,111 @@ async def test_prune_keeps_sessions_the_router_marks_durable(tmp_path: Path) -> 
     assert response.json() == {"pruned": 2}
     remaining = (await client.get("/__llm-redact/sessions")).json()["sessions"]
     assert {s["session"] for s in remaining} == {"default", "user:7:default", "user:8:default"}
+
+
+class _NoHookRouter(_DurableRouter):
+    is_durable = None  # type: ignore[assignment]  # an older router without the member
+
+
+class _RaisingRouter(_DurableRouter):
+    def is_durable(self, session_id: str) -> bool:
+        raise RuntimeError("registry closed")
+
+
+class _SloppyRouter(_DurableRouter):
+    def is_durable(self, session_id: str) -> bool:
+        return None  # type: ignore[return-value]  # a buggy router's "don't know"
+
+
+async def _prune_with(router_cls: type[_DurableRouter], tmp_path: Path) -> set[str]:
+    from llm_redact import registry as registry_mod
+
+    db = tmp_path / "vault.db"
+    registry = registry_mod.get_registry()
+    original = registry.build_session_router
+    registry.build_session_router = lambda cfg, **kw: router_cls(cfg.session)
+    try:
+        client = _make_client(VaultConfig(backend="sqlite", path=str(db)))
+    finally:
+        registry.build_session_router = original
+    for session in ("user:7:default", "conv-idle", "default"):
+        _insert_session(db, session, days_old=100)
+    token = await _token(client)
+    response = await client.post(
+        "/__llm-redact/sessions/prune", headers={CSRF_HEADER: token}, json={"older_than_days": 30}
+    )
+    assert response.status_code == 200
+    return {s["session"] for s in (await client.get("/__llm-redact/sessions")).json()["sessions"]}
+
+
+async def test_prune_without_the_hook_keeps_only_the_static_session(tmp_path: Path) -> None:
+    assert await _prune_with(_NoHookRouter, tmp_path) == {"default"}
+
+
+async def test_prune_keeps_sessions_when_is_durable_fails(tmp_path: Path) -> None:
+    # A raising router is a 200 that keeps everything, never a 500 or a loss.
+    assert await _prune_with(_RaisingRouter, tmp_path) == {"default", "user:7:default", "conv-idle"}
+
+
+async def test_prune_keeps_sessions_on_a_non_bool_answer(tmp_path: Path) -> None:
+    # Only an explicit False releases a session.
+    assert await _prune_with(_SloppyRouter, tmp_path) == {"default", "user:7:default", "conv-idle"}
+
+
+def test_the_router_can_veto_the_durable_response_map(tmp_path: Path) -> None:
+    from llm_redact import registry as registry_mod
+    from llm_redact.config import Config
+    from llm_redact.proxy import create_app
+
+    class Router:
+        mode = "per-conversation"
+
+        def __init__(self, answer: bool | None) -> None:
+            self.answer = answer
+
+        def resolve(self, adapter_name: str | None, method: str, path: str, body: Any) -> str:
+            return "default"
+
+        def record_response_id(self, response_id: str, session_id: str) -> bool | None:
+            return self.answer
+
+    registry = registry_mod.get_registry()
+    original = registry.build_session_router
+    results = {}
+    try:
+        for answer in (False, None, True):
+            registry.build_session_router = lambda cfg, a=answer, **kw: Router(a)
+            db = tmp_path / f"vault-{answer}.db"
+            state = create_app(
+                Config(vault=VaultConfig(backend="sqlite", path=str(db)))
+            ).state.proxy
+            state.record_response_id("resp_1", "conv-a")
+            results[answer] = state.vault_manager.lookup_response_session("resp_1")
+    finally:
+        registry.build_session_router = original
+    assert results == {False: None, None: "conv-a", True: "conv-a"}
+
+
+def test_the_memory_vault_hands_the_router_no_durable_lookup(tmp_path: Path) -> None:
+    # Its lookup always answers "unknown", which a router must never read
+    # as "that session was pruned" (every Responses chain would orphan).
+    from llm_redact import registry as registry_mod
+    from llm_redact.config import Config
+    from llm_redact.proxy import create_app
+
+    seen: dict[str, Any] = {}
+    registry = registry_mod.get_registry()
+    original = registry.build_session_router
+
+    def capture(cfg: Any, **kw: Any) -> _DurableRouter:
+        seen.update(kw)
+        return _DurableRouter(cfg.session)
+
+    registry.build_session_router = capture
+    try:
+        create_app(Config(vault=VaultConfig(backend="memory")))
+        assert seen["durable_lookup"] is None
+        create_app(Config(vault=VaultConfig(backend="sqlite", path=str(tmp_path / "v.db"))))
+        assert seen["durable_lookup"] is not None
+    finally:
+        registry.build_session_router = original

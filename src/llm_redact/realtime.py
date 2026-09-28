@@ -43,6 +43,7 @@ import logging
 import time
 import urllib.parse
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -151,6 +152,11 @@ class WsAdapter:
 # base64 audio under `audio` (never `data`). Everything else follows the
 # HTTP rule: walk every string value so unknown future event shapes stay
 # covered (a missed redaction is a leak; the skip set guards the enums).
+# Like every skip set, it skips SCALARS only (jsonwalk): the GA `audio`
+# session object (its transcription prompt is user text), a `format` or
+# `tool_choice` object, and any user JSON reusing these names are walked;
+# the modalities arrays are skipped at their schema positions
+# (jsonwalk.ENUM_LIST_POSITIONS).
 _REALTIME_STRUCTURAL_KEYS = STRUCTURAL_KEYS | frozenset(
     {
         "audio",
@@ -445,7 +451,9 @@ class AzureRealtimeWs(OpenAIRealtimeWs):
 
 
 # Gemini Live adds mime/voice/config enums; base64 audio rides in `data`
-# (already structural) inside realtimeInput mediaChunks. The proto JSON
+# (already structural) inside realtimeInput mediaChunks. Scalars only, like
+# every skip set: toolResponse.functionResponses[].response is an opaque
+# position walked in full (jsonwalk.OPAQUE_POSITIONS). The proto JSON
 # mapping accepts the original snake_case field names too (Google's own
 # Vertex Live notebook sends `mime_type`, `voice_name`, …), so both
 # spellings are skipped.
@@ -671,14 +679,25 @@ def ws_adapter_for(path: str, adapters: list[WsAdapter]) -> WsAdapter | None:
     return None
 
 
+def _request_path(scope: Mapping[str, Any], path: str) -> str:
+    """The path to forward, as the client sent it (the HTTP rule in
+    proxy._upstream_path): the raw path when it is ASCII, else ``path``."""
+    raw_path = scope.get("raw_path")
+    try:
+        return raw_path.split(b"?", 1)[0].decode("ascii") if raw_path else path
+    except UnicodeDecodeError:
+        return path
+
+
 def _upstream_http_url(base_url: str, path: str, query_string: bytes) -> str:
-    """The connection's upstream URL in its HTTP form (the configured
-    upstream's scheme and host) with the RAW query preserved — it may carry
-    credentials, so it is forwarded exactly and never re-encoded. This is
-    the form an identity authorizer sees (a WebSocket upgrade is an HTTP
-    GET to it)."""
+    """The connection's upstream URL in its HTTP form: the configured
+    upstream's scheme, host AND base path (an API-management base such as
+    ``https://gw.example/my-api`` is a different API from its host root),
+    then ``path``, with the RAW query preserved — it may carry credentials,
+    so it is forwarded exactly and never re-encoded. This is the form an
+    identity authorizer sees (a WebSocket upgrade is an HTTP GET to it)."""
     parsed = urllib.parse.urlsplit(base_url)
-    url = f"{parsed.scheme}://{parsed.netloc}{path}"
+    url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}{path}"
     if query_string:
         url += "?" + query_string.decode("latin-1")
     return url
@@ -693,9 +712,11 @@ def _ws_form(http_url: str) -> str:
 
 # Credential-bearing WebSocket subprotocols. Browsers cannot set upgrade
 # headers, so clients smuggle keys in the offered subprotocol list — OpenAI's
-# SDK offers `openai-insecure-api-key.<key>`. Under the proxy's own identity
-# these are stripped like header/query credentials; every other offer
-# (`realtime`, `openai-beta.realtime-v1`, …) is kept.
+# SDK offers `openai-insecure-api-key.<key>`, other clients a bare marker
+# entry followed by the secret as the NEXT entry (`["bearer", "<jwt>"]`).
+# Under the proxy's own identity only an ALLOWLIST of known non-credential
+# offers is forwarded (identity_subprotocols); these markers additionally
+# drop the entry after them.
 _CREDENTIAL_SUBPROTOCOL_MARKERS = (
     "api-key",
     "api_key",
@@ -711,6 +732,37 @@ _CREDENTIAL_SUBPROTOCOL_MARKERS = (
 def is_credential_subprotocol(value: str) -> bool:
     lowered = value.lower()
     return any(marker in lowered for marker in _CREDENTIAL_SUBPROTOCOL_MARKERS)
+
+
+# The subprotocols a realtime client legitimately offers: OpenAI's SDKs
+# (and Azure's, which reuse them) offer `realtime` plus
+# `openai-beta.realtime-v1`; google-genai's Live clients (Gemini API and
+# Vertex) offer none. Organization/project ids (`openai-organization.*`,
+# `openai-project.*`) select an OpenAI billing scope and mean nothing on the
+# identity providers, so they are not forwarded either.
+_IDENTITY_SUBPROTOCOLS = frozenset({"realtime"})
+_IDENTITY_SUBPROTOCOL_PREFIXES = ("openai-beta.",)
+
+
+def identity_subprotocols(offered: Sequence[str]) -> list[str]:
+    """The offered subprotocols forwarded under the proxy's own identity:
+    allowlisted, known non-credential values only — anything else may be
+    a credential (marker matching can never enumerate every spelling) —
+    and never the entry after a credential marker (its value)."""
+    kept: list[str] = []
+    after_marker = False
+    for value in offered:
+        if after_marker:
+            after_marker = False
+            continue
+        if is_credential_subprotocol(value):
+            # A BARE marker (`bearer`, `authorization`, `openai-insecure-
+            # api-key.`) carries its secret in the next entry.
+            after_marker = value.lower().rstrip(".-_=: ").endswith(_CREDENTIAL_SUBPROTOCOL_MARKERS)
+            continue
+        if value in _IDENTITY_SUBPROTOCOLS or value.startswith(_IDENTITY_SUBPROTOCOL_PREFIXES):
+            kept.append(value)
+    return kept
 
 
 def _filtered_headers(websocket: WebSocket) -> list[tuple[str, str]]:
@@ -748,6 +800,24 @@ async def _reject(websocket: WebSocket, reason: str) -> None:
         await websocket.close(code=1011, reason=_close_reason(reason))
 
 
+def _record_ws_refusal(
+    state: "ProxyState", adapter: WsAdapter, path: str, status: int, started: float
+) -> None:
+    """The recorded row for a connection refused before any upstream
+    contact by a proxy rule (HTTP records its 403/400 the same way)."""
+    state.record_request(
+        session=state.config.vault.session,
+        provider=adapter.provider,
+        method="WS",
+        path=path,
+        status=status,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+
+
 def _record_refused(
     state: "ProxyState",
     ctx: "RequestContext",
@@ -779,6 +849,7 @@ async def _authorize_upgrade(
     adapter: WsAdapter,
     upstream_auth: "UpstreamAuth",
     path: str,
+    upstream_path: str,
     http_url: str,
     headers: list[tuple[str, str]],
     subprotocols: list[str],
@@ -797,15 +868,19 @@ async def _authorize_upgrade(
     reason names the credential SOURCE only; counted as an upstream error
     and recorded, never forwarded). Headers, URLs and subprotocols are
     never logged."""
-    from llm_redact.proxy import _same_upstream, strip_client_credentials
+    from llm_redact.proxy import _same_upstream, strip_client_credentials, upstream_base_path
 
     provider = adapter.provider
     http_url, headers = strip_client_credentials(http_url, headers)
-    subprotocols = [s for s in subprotocols if not is_credential_subprotocol(s)]
-    provider_config = state.config.providers[provider]
-    if not _same_upstream(http_url, provider_config.upstream_base_url):
+    subprotocols = identity_subprotocols(subprotocols)
+    base_url = state.config.providers[provider].upstream_base_url
+    if not _same_upstream(
+        http_url, base_url, exact_path=upstream_base_path(base_url) + upstream_path
+    ):
         # Belt and braces behind origin_form_target and the exact
-        # identity_paths: the proxy's identity goes to the configured host.
+        # identity_paths: the proxy's identity goes to exactly the
+        # configured upstream path it was matched on.
+        _record_ws_refusal(state, adapter, path, 400, started)
         await _reject(websocket, "the request target must be a path")
         return None
     try:
@@ -828,10 +903,14 @@ async def _authorize_upgrade(
 
 async def ws_handle(websocket: WebSocket) -> None:
     state: ProxyState = websocket.app.state.proxy
-    from llm_redact.proxy import origin_form_target
+    from llm_redact.proxy import has_dot_segment, origin_form_target
 
     if not origin_form_target(websocket.scope):
         await _reject(websocket, "the request target must be a path")
+        return
+    if has_dot_segment(websocket.scope):
+        # The HTTP rule: never forwarded, recorded, or logged with its path.
+        await _reject(websocket, "the request path must not contain '.' or '..' segments")
         return
     path = websocket.url.path
 
@@ -889,6 +968,7 @@ async def ws_handle(websocket: WebSocket) -> None:
         # is refused: forwarding the client's credential (or none) would
         # silently break the configured contract.
         logger.info("WS %s -> refused (provider %s uses identity auth)", path, adapter.provider)
+        _record_ws_refusal(state, adapter, path, 403, time.perf_counter())
         await _reject(
             websocket,
             f'[providers.{adapter.provider}] auth = "identity": only the realtime routes'
@@ -928,9 +1008,18 @@ async def ws_handle(websocket: WebSocket) -> None:
     )
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
 
+    upstream_path = _request_path(websocket.scope, path)
     http_url = _upstream_http_url(
-        provider_config.upstream_base_url, path, websocket.scope.get("query_string", b"")
+        provider_config.upstream_base_url, upstream_path, websocket.scope.get("query_string", b"")
     )
+    from llm_redact.proxy import _same_upstream
+
+    if not _same_upstream(http_url, provider_config.upstream_base_url):
+        # The HTTP rule: whatever the path holds, the connection goes to the
+        # configured upstream (host AND base path) or nowhere.
+        _record_ws_refusal(state, adapter, path, 400, started)
+        await _reject(websocket, "the request target must be a path")
+        return
     headers = _filtered_headers(websocket)
     subprotocols = list(websocket.scope.get("subprotocols") or [])
     if upstream_auth is not None:
@@ -940,6 +1029,7 @@ async def ws_handle(websocket: WebSocket) -> None:
             adapter,
             upstream_auth,
             path,
+            upstream_path,
             http_url,
             headers,
             subprotocols,

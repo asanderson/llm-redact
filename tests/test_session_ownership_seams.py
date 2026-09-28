@@ -304,3 +304,161 @@ async def test_a_router_without_the_member_is_never_called(
     app = _files_app(monkeypatch, tmp_path, Older())
     assert (await _post_batch(app)).status_code == 200
     assert app.state.proxy.vault_manager.lookup_response_session("batch_9") is None
+
+
+# --- video jobs and stored chat completions -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "tracked"),
+    [
+        ("/v1/videos", None, True),
+        ("/v1/videos/video_1/remix", None, True),  # a remix creates a NEW video
+        ("/openai/v1/videos", None, True),  # Azure's prefix
+        ("/custom/lm/v1/videos", None, True),  # a custom provider's prefix
+        ("/v1/videos/video_1", None, False),
+        ("/v1/videos/video_1/content", None, False),
+        ("/v1/chat/completions", {"store": True}, True),
+        ("/openai/v1/chat/completions", {"store": True}, True),
+        ("/openai/deployments/gpt/chat/completions", {"store": True}, True),
+        ("/custom/lm/v1/chat/completions", {"store": True}, True),
+        ("/v1/chat/completions", {"store": False}, False),
+        ("/v1/chat/completions", {"store": "true"}, False),  # a real boolean only
+        ("/v1/chat/completions", {}, False),
+        ("/v1/chat/completions", None, False),
+        ("/v1/chat/completions/chatcmpl-1", {"store": True}, False),  # metadata update
+    ],
+)
+def test_openai_tracks_videos_and_stored_completions(path: str, body: Any, tracked: bool) -> None:
+    assert OpenAIAdapter().tracks_object_ids("POST", path, body=body) is tracked
+    assert not OpenAIAdapter().tracks_object_ids("GET", path, body=body)
+
+
+def _openai_app(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    router: OwnershipRouter,
+    respond: Any,
+    provider: str = "openai",
+) -> Any:
+    _registry(monkeypatch, build_session_router=lambda config, **kw: router)
+    config = Config(
+        providers={**Config().providers, provider: ProviderConfig(UPSTREAM)},
+        vault=VaultConfig(backend="sqlite", path=str(tmp_path / "v.db")),
+    )
+    return create_app(config, upstream_transport=httpx.MockTransport(respond))
+
+
+async def _post(app: Any, path: str, body: Any) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        return await client.post(path, json=body)
+
+
+def _chat(store: bool | None) -> dict[str, Any]:
+    body: dict[str, Any] = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
+    if store is not None:
+        body["store"] = store
+    return body
+
+
+@pytest.mark.parametrize(
+    ("provider", "path"),
+    [
+        ("openai", "/v1/chat/completions"),
+        ("azure", "/openai/deployments/gpt/chat/completions"),
+        ("azure", "/openai/v1/chat/completions"),
+    ],
+)
+@pytest.mark.parametrize(("store", "reported"), [(True, True), (False, False), (None, False)])
+async def test_a_stored_chat_completion_is_reported_with_its_creator(
+    provider: str,
+    path: str,
+    store: bool | None,
+    reported: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    router = OwnershipRouter()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "chatcmpl-9", "object": "chat.completion"})
+
+    app = _openai_app(monkeypatch, tmp_path, router, respond, provider)
+    assert (await _post(app, path, _chat(store))).status_code == 200
+    assert router.objects == ([("chatcmpl-9", "user:n1:main")] if reported else [])
+
+
+async def test_a_streamed_stored_chat_completion_is_reported_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    router = OwnershipRouter()
+    chunk = '{"id": "chatcmpl-7", "object": "chat.completion.chunk", "choices": []}'
+    stream = f": keep-alive\n\ndata: {chunk}\n\ndata: {chunk}\n\ndata: [DONE]\n\n"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=stream.encode(), headers={"content-type": "text/event-stream"}
+        )
+
+    app = _openai_app(monkeypatch, tmp_path, router, respond)
+    response = await _post(app, "/v1/chat/completions", {**_chat(True), "stream": True})
+    assert response.status_code == 200 and "chatcmpl-7" in response.text
+    assert router.objects == [("chatcmpl-7", "user:n1:main")]
+    # Unstored, or a failed stream: nothing.
+    router.objects.clear()
+    await _post(app, "/v1/chat/completions", {**_chat(False), "stream": True})
+    assert router.objects == []
+
+
+async def test_a_streamed_error_reports_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    router = OwnershipRouter()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        data = b'data: {"id": "chatcmpl-x"}\n\n'
+        return httpx.Response(500, content=data, headers={"content-type": "text/event-stream"})
+
+    app = _openai_app(monkeypatch, tmp_path, router, respond)
+    await _post(app, "/v1/chat/completions", {**_chat(True), "stream": True})
+    assert router.objects == []
+
+
+@pytest.mark.parametrize(
+    ("provider", "path"),
+    [
+        ("openai", "/v1/videos"),
+        ("openai", "/v1/videos/video_0/remix"),
+        ("azure", "/openai/v1/videos"),
+    ],
+)
+async def test_a_created_video_is_reported_with_its_creator(
+    provider: str, path: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    router = OwnershipRouter()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "video_5", "object": "video", "status": "queued"})
+
+    app = _openai_app(monkeypatch, tmp_path, router, respond, provider)
+    assert (await _post(app, path, {"model": "sora-2", "prompt": "a cat"})).status_code == 200
+    assert router.objects == [("video_5", "user:n1:main")]
+
+
+async def test_a_custom_provider_reports_its_stored_objects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    router = OwnershipRouter()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "chatcmpl-c", "object": "chat.completion"})
+
+    _registry(monkeypatch, build_session_router=lambda config, **kw: router)
+    config = Config(
+        providers={**Config().providers, "custom:lm": ProviderConfig(UPSTREAM)},
+        vault=VaultConfig(backend="sqlite", path=str(tmp_path / "v.db")),
+    )
+    app = create_app(config, upstream_transport=httpx.MockTransport(respond))
+    assert (await _post(app, "/custom/lm/v1/chat/completions", _chat(True))).status_code == 200
+    assert router.objects == [("chatcmpl-c", "user:n1:main")]

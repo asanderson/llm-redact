@@ -43,5 +43,9 @@ def setup_logging(log_format: str) -> None:
     else:
         logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     # httpx logs full request URLs at INFO — query strings can carry
-    # provider API keys (Gemini ?key=), so it stays at WARNING.
+    # provider API keys (Gemini ?key=), so it stays at WARNING. websockets
+    # logs the whole upgrade request at DEBUG (the Authorization header, the
+    # ?key= query) — pinned at WARNING too, so a root DEBUG level set later
+    # can never switch it on.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("websockets").setLevel(logging.WARNING)

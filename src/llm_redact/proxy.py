@@ -54,6 +54,7 @@ from llm_redact.config import (
     _is_loopback_host,
     apply_env_overrides,
     default_config_path,
+    identity_upstream_problem,
     load_config,
     resolve_config_path,
     resolve_credentials,
@@ -69,6 +70,7 @@ from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
 from llm_redact.licensing import ResolvedLicense, resolve_license
 from llm_redact.metrics import Metrics
+from llm_redact.multipart import parse as parse_multipart
 from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
 from llm_redact.placeholders import PLACEHOLDER_RE
@@ -91,10 +93,10 @@ from llm_redact.plugin_api import (
 from llm_redact.providers import ALL_ADAPTERS, ProviderAdapter, RouteKind
 from llm_redact.providers.custom import CUSTOM_ROUTE_PREFIX, build_custom_adapters, custom_prefix
 from llm_redact.realtime import ALL_WS_ADAPTERS, WsAdapter, websockets_available, ws_handle
-from llm_redact.redactor import BlockedRequest, Redactor
+from llm_redact.redactor import BlockedRequest, Redactor, UnredactableRequest
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
-from llm_redact.sse import SSEParser, serialize
+from llm_redact.sse import SSEEvent, SSEParser, serialize
 from llm_redact.vault import Vault, VaultManager
 from llm_redact.vault_crypto import key_source as vault_key_source
 from llm_redact.vault_crypto import require_vault_key_source
@@ -219,6 +221,32 @@ def origin_form_target(scope: Mapping[str, Any]) -> bool:
         return raw_path.startswith(b"/")
     path = scope.get("path")
     return isinstance(path, str) and path.startswith("/")
+
+
+# A `.`/`..` path segment, in any spelling an upstream might resolve:
+# percent-encoded dots (%2E), and backslash separators (%5C, `\`) that
+# some front ends (IIS/APIM-style gateways) treat as `/`.
+_DOT_SEGMENT = re.compile(r"(?:^|/)\.{1,2}(?=/|$)")
+
+
+def _dot_normalized(path: str) -> str:
+    return path.lower().replace("%2e", ".").replace("%5c", "/").replace("\\", "/")
+
+
+def has_dot_segment(scope: Mapping[str, Any]) -> bool:
+    """Whether the request path has a ``.`` or ``..`` segment in its raw
+    or decoded form. Matching runs on the decoded path while the raw path is
+    forwarded after the upstream base, and httpx (like most servers) resolves
+    dot segments: ``/async-invoke/../../any/op`` would match a recognized
+    route here yet be sent — signed, under identity auth — to a different
+    path upstream. No API llm-redact serves uses such a segment."""
+    raw_path = scope.get("raw_path")
+    if isinstance(raw_path, bytes | bytearray):
+        raw = raw_path.split(b"?", 1)[0].decode("latin-1")
+        if _DOT_SEGMENT.search(_dot_normalized(raw)):
+            return True
+    path = scope.get("path")
+    return isinstance(path, str) and _DOT_SEGMENT.search(_dot_normalized(path)) is not None
 
 
 # SCIM 2.0 provisioning (llm-redact-pro): everything under this prefix goes
@@ -513,19 +541,21 @@ class ProxyState:
         method: str,
         path: str,
         headers: "Mapping[str, str] | None" = None,
+        body: Any = None,
     ) -> ProviderAdapter | None:
         """The adapter whose ``tracks_object_ids`` claims this request — the
         routed one, else (pass-through) the addressed provider's — or None,
-        also whenever no router could use the ids (static mode)."""
+        also whenever no router could use the ids (static mode). ``body`` is
+        the parsed request body (a stored chat completion is flagged there)."""
         if self.session_router.mode == "static" or not hasattr(
             self.session_router, "record_object_id"
         ):
             return None
         if adapter is not None:
-            return adapter if adapter.tracks_object_ids(method, path) else None
+            return adapter if adapter.tracks_object_ids(method, path, body=body) else None
         name = self.provider_for(None, path, headers)
         for candidate in self.adapters:
-            if candidate.name == name and candidate.tracks_object_ids(method, path):
+            if candidate.name == name and candidate.tracks_object_ids(method, path, body=body):
                 return candidate
         return None
 
@@ -960,9 +990,16 @@ class ProxyState:
         adapter: ProviderAdapter | None,
         path: str,
         headers: "Mapping[str, str] | None" = None,
+        query: str = "",
     ) -> str:
         if adapter is not None and adapter.name in self.config.providers:
             return adapter.name
+        if path.startswith("/v1/") and _google_authenticated(headers, query):
+            # Gemini's v1 surface (GET /v1/models[/{m}], …) shares OpenAI's
+            # /v1 prefix; a Google API key (x-goog-api-key or ?key=) marks
+            # whose traffic this is — inferring openai here would send the
+            # Google key to api.openai.com.
+            return "gemini"
         if (
             headers is not None
             and "anthropic-version" in headers
@@ -1042,8 +1079,24 @@ class ProxyState:
         adapter: ProviderAdapter | None,
         path: str,
         headers: "Mapping[str, str] | None" = None,
+        query: str = "",
     ) -> str:
-        return self.config.providers[self.provider_for(adapter, path, headers)].upstream_base_url
+        return self.config.providers[
+            self.provider_for(adapter, path, headers, query)
+        ].upstream_base_url
+
+
+def _google_authenticated(headers: "Mapping[str, str] | None", query: str) -> bool:
+    """Whether a request carries a Google API key: the x-goog-api-key
+    header or a ``key``/``$key`` query parameter (no other provider the
+    proxy infers uses either)."""
+    if headers is not None and "x-goog-api-key" in headers:
+        return True
+    return any(
+        urllib.parse.unquote_plus(part.split("=", 1)[0]).lower().lstrip("$") == "key"
+        for part in query.split("&")
+        if part
+    )
 
 
 def _request_headers(request: Request) -> list[tuple[str, str]]:
@@ -1087,6 +1140,15 @@ def _build_upstream_auths(providers: Mapping[str, ProviderConfig]) -> dict[str, 
     built: dict[str, UpstreamAuth] = {}
     try:
         for name, provider in sorted(providers.items()):
+            problem = (
+                identity_upstream_problem(provider.upstream_base_url)
+                if provider.auth != "passthrough"
+                else None
+            )
+            if problem is not None:
+                # Also enforced at parse time; this covers configs built in
+                # code (and anything that bypassed the parser).
+                raise ConfigError(f"[providers.{name}] {problem}")
             auth = registry.build_upstream_auth(name, provider)
             if auth is not None:
                 built[name] = auth
@@ -1139,13 +1201,32 @@ def _close_upstream_auths(auths: Mapping[str, UpstreamAuth]) -> None:
 _CREDENTIAL_HEADERS = frozenset(
     {
         "cookie",
+        "password",
+        "passwd",
         "ocp-apim-subscription-key",
         "x-goog-user-project",
+        "x-goog-quota-user",
         "x-goog-iam-authority-selector",
         "x-goog-iam-authorization-token",
     }
 )
-_CREDENTIAL_QUERY_PARAMS = frozenset({"key", "api-key", "api_key", "access_token"})
+# Query twins, compared case-insensitively with any leading `$` dropped
+# (Google's system parameters accept `$key`, `$userProject`), plus APIM's
+# `subscription-key`, OAuth 1/legacy `oauth_token`, and password params.
+_CREDENTIAL_QUERY_PARAMS = frozenset(
+    {
+        "key",
+        "api-key",
+        "api_key",
+        "access_token",
+        "oauth_token",
+        "userproject",
+        "quotauser",
+        "subscription-key",
+        "password",
+        "passwd",
+    }
+)
 
 
 def _is_credential_header(name: str) -> bool:
@@ -1159,15 +1240,16 @@ def _is_credential_header(name: str) -> bool:
 
 
 def _strip_credential_query(query: str) -> str:
-    """The raw query string minus every credential parameter (``key=``,
-    ``api-key=``, ``access_token=``, presigned-URL ``X-Amz-*``, and any
-    ``*authorization*`` parameter — a WebSocket client that cannot set
+    """The raw query string minus every credential parameter (``key=`` and
+    ``$key=``, ``api-key=``, ``access_token=``, ``userProject=``,
+    ``quotaUser=``, ``subscription-key=``, …, presigned-URL ``X-Amz-*``, and
+    any ``*authorization*`` parameter — a WebSocket client that cannot set
     headers may carry ``Authorization=Bearer …`` in the query, a channel
     openai-node's Azure Realtime client recognizes); the rest is kept
     byte-for-byte in order."""
     kept = []
     for part in query.split("&"):
-        name = urllib.parse.unquote_plus(part.split("=", 1)[0]).lower()
+        name = urllib.parse.unquote_plus(part.split("=", 1)[0]).lower().lstrip("$")
         if name in _CREDENTIAL_QUERY_PARAMS or "authorization" in name or name.startswith("x-amz-"):
             continue
         kept.append(part)
@@ -1216,6 +1298,7 @@ async def _stream_rehydrated(
     *,
     request_meta: RequestMeta,
     route: RouteDelivery | None = None,
+    object_tracker: ProviderAdapter | None = None,
 ) -> AsyncIterator[bytes]:
     method, path, started, detections, warned, audit_token = request_meta
     parser = SSEParser()
@@ -1229,6 +1312,10 @@ async def _stream_rehydrated(
                     if response_id is not None:
                         state.record_response_id(response_id, ctx.session_id)
                         response_id_seen = True
+                if object_tracker is not None and _record_streamed_object_ids(
+                    state, ctx, object_tracker, method, path, event
+                ):
+                    object_tracker = None  # the first event naming it suffices
                 for out in adapter.rehydrate_event(event, pool):
                     if route is not None:
                         out = route.observe_event(out)
@@ -1277,6 +1364,26 @@ async def _stream_rehydrated(
             audit_token=audit_token,
             route=(state.finish_route(route, upstream.status_code) if route is not None else None),
         )
+
+
+def _record_streamed_object_ids(
+    state: ProxyState,
+    ctx: RequestContext,
+    tracker: ProviderAdapter,
+    method: str,
+    path: str,
+    event: SSEEvent,
+) -> bool:
+    """Report the stored-object ids a streamed event names (a stored chat
+    completion's chunks carry its id); True once some were reported."""
+    try:
+        payload = json.loads(event.data)
+    except ValueError:
+        return False  # [DONE], keep-alives, anything not JSON
+    object_ids = tracker.object_ids_from_body(method, path, payload)
+    if object_ids:
+        state.record_object_ids(object_ids, ctx.session_id)
+    return bool(object_ids)
 
 
 async def _stream_rehydrated_eventstream(
@@ -1980,6 +2087,13 @@ async def handle(request: Request) -> Response:
     if not origin_form_target(request.scope):
         # Never routed, forwarded, recorded or logged with its target.
         return JSONResponse({"error": "the request target must be a path"}, status_code=400)
+    if has_dot_segment(request.scope):
+        # Refused before routing, admission or any upstream contact (and,
+        # like the target check above, never recorded or logged: the path
+        # may still hold an identity-prefix key).
+        return JSONResponse(
+            {"error": "the request path must not contain '.' or '..' segments"}, status_code=400
+        )
     path = request.url.path
 
     # Reserved local endpoints are answered here, before any routing or
@@ -2023,7 +2137,7 @@ async def handle(request: Request) -> Response:
     # A disabled provider fails closed before anything is read or forwarded:
     # matched routes AND pass-through traffic inferred to it are answered
     # here (forwarding pass-through would send unredacted bodies to it).
-    provider_name = state.provider_for(adapter, path, request.headers)
+    provider_name = state.provider_for(adapter, path, request.headers, request.url.query)
     provider_conf = state.config.providers.get(provider_name)
     if provider_conf is None:
         # /custom/<name>/ with no [providers.custom.<name>] entry: there is
@@ -2200,6 +2314,24 @@ async def handle(request: Request) -> Response:
             status_code=400,
         )
 
+    def refused_response(message: str, refused_adapter: ProviderAdapter, why: str) -> JSONResponse:
+        # A body the proxy cannot redact (or, under identity auth, cannot
+        # vouch for) fails closed before any upstream contact: 400,
+        # recorded, the message naming the field or format only.
+        logger.info("%s %s -> 400 refused (%s)", request.method, path, why)
+        state.record_request(
+            session=ctx.session_id,
+            provider=refused_adapter.name,
+            method=request.method,
+            path=path,
+            status=400,
+            started=started,
+            streamed=False,
+            detections={},
+            rehydrations={},
+        )
+        return JSONResponse(refused_adapter.error_body(message, status=400), status_code=400)
+
     # Routing (the llm-redact-pro routing layer): the router plans BEFORE
     # redaction because the FIRST upstream's inject_system_note governs the
     # prepared body (decision 4; the redacted body is reused on later hops).
@@ -2263,6 +2395,8 @@ async def handle(request: Request) -> Response:
             )
         except BlockedRequest as exc:
             return blocked_response(exc, adapter)
+        except UnredactableRequest as exc:
+            return refused_response(str(exc), adapter, "undecodable field")
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
@@ -2277,6 +2411,21 @@ async def handle(request: Request) -> Response:
         # adapter declines to rewrite forwards verbatim (the non-JSON-body
         # default that keeps unknown formats working).
         boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
+        if (
+            boundary is not None
+            and upstream_auth is not None
+            and parse_multipart(body_bytes, boundary) is None
+        ):
+            # Outside the codec's canonical grammar the upload would be
+            # forwarded verbatim — never under the proxy's own identity,
+            # which must only ever sign what the proxy could redact.
+            return refused_response(
+                "llm-redact: the multipart body is outside the canonical form llm-redact"
+                " can redact, and this provider is authorized with the proxy's own"
+                " identity; the request was not forwarded",
+                adapter,
+                "non-canonical multipart under identity auth",
+            )
         if boundary is not None:
             try:
                 rewritten = adapter.redact_multipart(
@@ -2314,7 +2463,7 @@ async def handle(request: Request) -> Response:
             new_warned=new_warned,
         )
 
-    upstream_base = state.upstream_for(adapter, path, request.headers)
+    upstream_base = state.upstream_for(adapter, path, request.headers, request.url.query)
     if not upstream_base:
         # Providers without a default upstream (azure) answer 502 until
         # configured — proxy-generated, never forwarded.
@@ -2360,6 +2509,12 @@ async def handle(request: Request) -> Response:
         # authorize the FINAL request — the on-the-wire URL and the bytes
         # below, after redaction and note injection — and send exactly that.
         url, headers = strip_client_credentials(url, headers)
+        if not _same_upstream(
+            url, upstream_base, exact_path=upstream_base_path(upstream_base) + upstream_path
+        ):
+            # The URL the authorizer would sign must address exactly the
+            # path the route was matched on (httpx normalizes before send).
+            return JSONResponse({"error": "the request target must be a path"}, status_code=400)
         try:
             headers = await upstream_auth.authorize(request.method, url, headers, outbound)
         except Exception as exc:
@@ -2433,6 +2588,7 @@ async def handle(request: Request) -> Response:
         new_warned=new_warned,
         audit_token=audit_token,
         route=None,
+        request_body=parsed,
     )
 
 
@@ -2450,19 +2606,35 @@ def _redacted_summary(new_counts: dict[str, int]) -> str:
     )
 
 
-def _same_upstream(url: str, upstream_base: str) -> bool:
-    """Whether ``url`` still addresses the configured upstream (scheme and
-    netloc, userinfo included — a smuggled ``user@`` is a different URL)."""
+def _same_upstream(url: str, upstream_base: str, *, exact_path: str | None = None) -> bool:
+    """Whether ``url`` still addresses the configured upstream: scheme and
+    netloc (userinfo included — a smuggled ``user@`` is a different URL),
+    and a path inside the base URL's path (an API-management or gateway
+    base such as ``https://gw.example/my-api`` must not reach a sibling
+    API). With ``exact_path`` — the base path plus the request's raw path,
+    for requests the proxy authorizes with its own identity — the path
+    httpx will send must be exactly that: nothing normalized away."""
     try:
         built, base = httpx.URL(url), httpx.URL(upstream_base)
     except httpx.InvalidURL:
         return False
-    return (built.scheme, built.userinfo, built.host, built.port) == (
+    if (built.scheme, built.userinfo, built.host, built.port) != (
         base.scheme,
         base.userinfo,
         base.host,
         base.port,
-    )
+    ):
+        return False
+    built_path = built.raw_path.split(b"?", 1)[0]
+    base_path = base.raw_path.split(b"?", 1)[0].rstrip(b"/")
+    if base_path and built_path != base_path and not built_path.startswith(base_path + b"/"):
+        return False
+    return exact_path is None or built_path == exact_path.encode("utf-8")
+
+
+def upstream_base_path(upstream_base: str) -> str:
+    """The configured upstream base URL's path, no trailing slash."""
+    return urllib.parse.urlsplit(upstream_base).path.rstrip("/")
 
 
 def _upstream_path(request: Request, path: str) -> str:
@@ -2654,6 +2826,7 @@ async def _deliver(
     new_warned: dict[str, int],
     audit_token: object | None,
     route: RouteDelivery | None,
+    request_body: Any = None,
 ) -> Response:
     """Hand an upstream response to the client: the streaming branches
     (chosen by the upstream RESPONSE content-type, never the request's
@@ -2671,7 +2844,19 @@ async def _deliver(
     if kind is RouteKind.CHAT and adapter is not None and "text/event-stream" in content_type:
         return StreamingResponse(
             _stream_rehydrated(
-                upstream, adapter, state, ctx, request_meta=request_meta, route=route
+                upstream,
+                adapter,
+                state,
+                ctx,
+                request_meta=request_meta,
+                route=route,
+                object_tracker=(
+                    state.object_tracker(
+                        adapter, request.method, path, request.headers, body=request_body
+                    )
+                    if 200 <= upstream.status_code < 300
+                    else None
+                ),
             ),
             status_code=upstream.status_code,
             headers=headers,
@@ -2781,7 +2966,7 @@ async def _deliver(
             raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     tracker = (
-        state.object_tracker(adapter, request.method, path, request.headers)
+        state.object_tracker(adapter, request.method, path, request.headers, body=request_body)
         if raw and 200 <= upstream.status_code < 300 and "application/json" in content_type
         else None
     )
@@ -3110,6 +3295,7 @@ async def _handle_routed(
         new_warned=new_warned,
         audit_token=audit_token,
         route=route,
+        request_body=outbound_obj,
     )
 
 

@@ -132,7 +132,7 @@ MATRIX: list[tuple[str, str, str]] = [
     ("GET", "/openai/files/{id}/content", CHAT),
     ("GET", "/openai/v1/files/{id}/content", CHAT),
     ("POST", "/openai/batches", CHAT),
-    ("GET", "/openai/batches", CHAT),
+    ("GET", "/openai/batches", REDACT_ONLY),
     ("GET", "/openai/v1/batches/{id}", CHAT),
     ("POST", "/openai/batches/{id}/cancel", CHAT),
     ("GET", "/openai/models", REDACT_ONLY),

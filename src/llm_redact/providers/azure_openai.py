@@ -63,14 +63,21 @@ class AzureOpenAIAdapter(OpenAIAdapter):
     name = "azure"
 
     def matches(self, method: str, path: str) -> RouteKind:
-        # Every classification below mirrors the OpenAI adapter's for the
-        # same endpoint, with ONE deliberate difference: the id/metadata
-        # routes OpenAI leaves as pass-through (file list/metadata/delete,
-        # batches, model listings, conversation delete) are RECOGNIZED here.
-        # A provider authorized with the proxy's own identity forwards only
-        # recognized routes, and Azure is one of the three that can be; on a
-        # body-less request REDACT_ONLY is a no-op, so a key-authorized setup
-        # forwards the same bytes it did before.
+        # The content routes (chat, completions, embeddings, media, Files
+        # upload/download, Conversations) are classified as the OpenAI
+        # adapter classifies them. The rest does NOT mirror OpenAI, which
+        # leaves them as pass-through: file list/metadata/delete, the batch
+        # routes, model/deployment listings and conversation delete are
+        # RECOGNIZED here, because a provider authorized with the proxy's own
+        # identity forwards only recognized routes, and Azure is one of the
+        # three that can be. On a body-less request REDACT_ONLY is a no-op,
+        # so a key-authorized setup forwards the same bytes it did before.
+        # Batch create/cancel and a single batch's GET are CHAT (the batch
+        # object echoes the creator's own `metadata`); the batch COLLECTION
+        # GET is REDACT_ONLY: a list spans batches other users created, and
+        # restoring their placeholders in the READER's vault namespace
+        # (llm-redact-pro named users) could hand one user a value bound in
+        # another's — the list passes through unrestored instead.
         if method == "POST":
             return self._match_post(path)
         if method == "GET":
@@ -99,6 +106,8 @@ class AzureOpenAIAdapter(OpenAIAdapter):
 
     @staticmethod
     def _match_get(path: str) -> RouteKind:
+        if _AZURE_BATCH_COLLECTION.fullmatch(path):
+            return RouteKind.REDACT_ONLY  # the list: never rehydrated
         if (
             _AZURE_FILE_CONTENT.fullmatch(path)
             or _AZURE_BATCHES.fullmatch(path)

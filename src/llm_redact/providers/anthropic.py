@@ -131,7 +131,7 @@ class AnthropicAdapter(ProviderAdapter):
         # both directions — deliberate pass-through, pinned by test.
         return RouteKind.NONE
 
-    def tracks_object_ids(self, method: str, path: str) -> bool:
+    def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
         # A message batch: its later results are read by id.
         return method == "POST" and path.rstrip("/").endswith("/messages/batches")
 

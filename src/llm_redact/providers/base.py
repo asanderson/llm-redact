@@ -252,11 +252,14 @@ class ProviderAdapter(ABC):
         """Response id observed on a stream, if this event carries one."""
         return None
 
-    def tracks_object_ids(self, method: str, path: str) -> bool:
+    def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
         """Whether a 2xx JSON response to this request names objects the
         provider STORES for later reads (an uploaded file, a batch, a stored
         conversation) — only then is the body parsed for
-        ``object_ids_from_body``."""
+        ``object_ids_from_body``. ``body`` is the parsed REQUEST body (None
+        when there is none or it is not JSON), for objects stored only on a
+        request flag (OpenAI chat completions with ``store: true``). A
+        streamed response is read from its first event carrying an id."""
         return False
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:

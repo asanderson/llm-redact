@@ -129,7 +129,7 @@ class GeminiAdapter(ProviderAdapter):
             return RouteKind.REDACT_ONLY
         return RouteKind.CHAT
 
-    def tracks_object_ids(self, method: str, path: str) -> bool:
+    def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
         # A context cache: later generateContent requests name it in
         # `cachedContent`, and the model echoes its (redacted) content.
         return method == "POST" and _GEMINI_CACHED_CREATE.fullmatch(path) is not None

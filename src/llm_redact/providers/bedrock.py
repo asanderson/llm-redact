@@ -10,7 +10,9 @@ Covers the four runtime inference routes:
 and the other bedrock-runtime operations that carry content or that a tool
 polls (verified against the Bedrock API reference, 2026-09):
 
-    POST /model/{modelId}/count-tokens        redact-only (answers a count)
+    POST /model/{modelId}/count-tokens        redact-only (answers a count;
+                                              the base64 invokeModel.body
+                                              is decoded and redacted)
     POST /guardrail/{id}/version/{v}/apply    chat (ApplyGuardrail)
     POST /async-invoke                        redact-only (StartAsyncInvoke)
     GET  /async-invoke[/{invocationArn}]      redact-only (list/get: metadata)
@@ -50,23 +52,32 @@ from llm_redact.providers.anthropic import (
     rehydrate_messages_payload,
 )
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
+from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import RehydratorPool
 from llm_redact.sse import SSEEvent
 
+# A slash-bearing identifier (a percent-encoded ARN, decoded): one or more
+# non-empty segments, none of them `.` or `..` — a dot segment would let the
+# decoded path match here while the upstream resolves it elsewhere (the
+# proxy also refuses such paths outright; this keeps the matcher honest).
+_SEG = r"(?!\.\.?(?:/|$))[^/]+"
+_ID = _SEG + r"(?:/" + _SEG + r")*"
 # Greedy id + $-anchored action: backtracking keeps "/invoke" etc. out of
 # the id unless a later action segment also matches (then the longest id
 # wins, which is what an ARN with encoded slashes needs).
-_ROUTE = re.compile(r"^/model/.+/(?:invoke|invoke-with-response-stream|converse|converse-stream)$")
+_ROUTE = re.compile(
+    r"^/model/" + _ID + r"/(?:invoke|invoke-with-response-stream|converse|converse-stream)$"
+)
 # CountTokens mirrors an invoke/converse body under `input`; the answer is a
 # number, so there is nothing to restore.
-_COUNT_TOKENS = re.compile(r"^/model/.+/count-tokens$")
+_COUNT_TOKENS = re.compile(r"^/model/" + _ID + r"/count-tokens$")
 # ApplyGuardrail: the identifier may be a (percent-encoded) ARN whose decoded
 # form holds a slash, so the id is greedy like the model id above.
-_APPLY_GUARDRAIL = re.compile(r"^/guardrail/.+/version/[^/]+/apply$")
+_APPLY_GUARDRAIL = re.compile(r"^/guardrail/" + _ID + r"/version/" + _SEG + r"/apply$")
 # StartAsyncInvoke (POST, collection), ListAsyncInvokes (GET, collection) and
 # GetAsyncInvoke (GET, the invocation ARN — slash-bearing once decoded).
 _ASYNC_INVOKE = re.compile(r"^/async-invoke$")
-_ASYNC_INVOKE_ITEM = re.compile(r"^/async-invoke/.+$")
+_ASYNC_INVOKE_ITEM = re.compile(r"^/async-invoke/" + _ID + r"$")
 
 # Every :event-type a ConverseStream response is known to carry. The live
 # drift test (tests/test_live.py) asserts observed types ⊆ this set: the
@@ -127,6 +138,19 @@ def _looks_like_converse(body: dict[str, Any]) -> bool:
     return system is None or isinstance(system, list)
 
 
+def _decode_invoke_body(encoded: str) -> Any:
+    """The JSON value inside a CountTokens ``invokeModel.body`` blob, or
+    UnredactableRequest (naming the field only) when it is not base64 of
+    UTF-8 JSON."""
+    try:
+        return json.loads(base64.b64decode(encoded, validate=True).decode("utf-8"))
+    except ValueError as exc:  # binascii.Error and UnicodeDecodeError included
+        raise UnredactableRequest(
+            "llm-redact: input.invokeModel.body is not base64-encoded JSON, so it"
+            " cannot be redacted; the request was not forwarded"
+        ) from exc
+
+
 def _event_headers(event_type: str) -> list[tuple[str, int, object]]:
     return [
         string_header(":message-type", "event"),
@@ -170,6 +194,40 @@ class BedrockAdapter(ProviderAdapter):
         # join; a guardrail body has no system field (and a note would be
         # assessed as submitted content).
         return kind is RouteKind.CHAT and _ROUTE.match(path) is not None
+
+    def prepare_request(
+        self,
+        body: dict[str, Any],
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        mcp_exempt: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
+        invoke = body.get("input")
+        invoke = invoke.get("invokeModel") if isinstance(invoke, dict) else None
+        if not (isinstance(invoke, dict) and isinstance(invoke.get("body"), str)):
+            return super().prepare_request(
+                body, redactor, inject_note=inject_note, mcp_exempt=mcp_exempt
+            )
+        # CountTokens with {"input": {"invokeModel": {"body": b64(native
+        # JSON)}}}: the blob is the model's native PROMPT (text, not media),
+        # so it is decoded and redacted as the invoke body it mirrors; the
+        # rest of the envelope is walked with the blob held out (base64 is
+        # never scanned). Undecodable = unredactable = refused.
+        encoded: str = invoke["body"]
+        inner = _decode_invoke_body(encoded)
+        redacted_inner = super().prepare_request(
+            {"body": inner}, redactor, inject_note=False, mcp_exempt=mcp_exempt
+        )["body"]
+        envelope = {**body, "input": {**body["input"], "invokeModel": {**invoke, "body": ""}}}
+        out = super().prepare_request(
+            envelope, redactor, inject_note=inject_note, mcp_exempt=mcp_exempt
+        )
+        if redacted_inner != inner:
+            raw = json.dumps(redacted_inner, ensure_ascii=False).encode("utf-8")
+            encoded = base64.b64encode(raw).decode("ascii")
+        out["input"]["invokeModel"]["body"] = encoded
+        return out
 
     def error_body(self, message: str, *, status: int = 413) -> dict[str, Any]:
         # Bedrock error bodies carry only a message; the exception type

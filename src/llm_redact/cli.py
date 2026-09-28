@@ -721,9 +721,12 @@ def run_status(args: argparse.Namespace) -> int:
                 print(f"licensed-features package: installed{active}")
             else:
                 print("licensed-features package: not installed (FOSS core is complete)")
+    key_source = payload["vault"].get("key_source")
     print(
         f"session: {payload['session']}  vault: {payload['vault']['backend']}"
-        f" ({payload['vault']['entries']} entries)"
+        f" ({payload['vault']['entries']} entries"
+        + (f", key: {key_source}" if key_source else "")
+        + ")"
     )
     detections = payload["detections_total"] or {}
     rehydrations = payload["rehydrations_total"] or {}

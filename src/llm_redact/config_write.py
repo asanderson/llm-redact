@@ -31,6 +31,7 @@ from llm_redact.config import (
     S3AuditConfig,
     UpstreamConfig,
     UsersConfig,
+    VaultKmsConfig,
 )
 from llm_redact.detection.engine import DetectionConfig
 
@@ -241,6 +242,28 @@ def _emit_prices(lines: list[str], prices: PricesConfig) -> None:
         lines.append(f"cache_write = {price.cache_write}")
 
 
+def _emit_vault_kms(lines: list[str], kms: VaultKmsConfig) -> None:
+    """``[vault.kms]``: only the keys the file set (defaults re-parse to the
+    same value; the hashicorp-only keys are refused for other providers, so
+    they are written only for hashicorp). Nothing here is secret — the
+    wrapped key lives in the env var or file it names."""
+    lines.append("\n[vault.kms]")
+    lines.append(f"provider = {_toml_str(kms.provider)}")
+    lines.append(f"key_id = {_toml_str(kms.key_id)}")
+    for key in ("wrapped_key_env", "wrapped_key_file"):
+        if getattr(kms, key):
+            lines.append(f"{key} = {_toml_str(getattr(kms, key))}")
+    if kms.provider != "hashicorp":
+        return
+    defaults = VaultKmsConfig(provider=kms.provider, key_id=kms.key_id)
+    keys = ["address", "mount", "auth"]
+    if kms.auth == "kubernetes":
+        keys += ["role", "auth_mount", "service_account_token_file"]
+    for key in keys:
+        if getattr(kms, key) != getattr(defaults, key):
+            lines.append(f"{key} = {_toml_str(getattr(kms, key))}")
+
+
 def emit_config_toml(config: Config, *, banner: bool = True) -> str:
     # banner=False for display surfaces (`config show`): the editor banner
     # talks about file-writing and .bak, which is wrong for stdout.
@@ -372,6 +395,8 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
             lines.append(f"module = {_toml_str(rdbms.module)}")
         if rdbms.cloud:
             lines.append(f"cloud = {_toml_str(rdbms.cloud)}")
+    if config.vault.kms is not None:
+        _emit_vault_kms(lines, config.vault.kms)
 
     lines.append("\n[audit]")
     lines.append(f"enabled = {_toml_value(config.audit.enabled)}")

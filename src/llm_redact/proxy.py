@@ -91,6 +91,8 @@ from llm_redact.registry import get_registry, loaded_plugins, pro_package_instal
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEParser, serialize
 from llm_redact.vault import Vault, VaultManager
+from llm_redact.vault_crypto import key_source as vault_key_source
+from llm_redact.vault_crypto import require_vault_key_source
 
 # Local endpoints under this prefix are answered by the proxy itself and are
 # never forwarded upstream (see the first statement of handle()).
@@ -255,6 +257,10 @@ class ProxyState:
         # (llm-redact-pro docs/licensing.md). Wiring only — the license gate above
         # is the sole tier chokepoint.
         registry = get_registry()
+        # [vault.kms] fails closed BEFORE any vault is built: a local key
+        # variable alongside it, or no plugin able to unwrap it (an older
+        # llm-redact-pro would silently build its cipher from the env key).
+        require_vault_key_source(config.vault, registry)
         self.vault_manager: VaultManager = registry.build_vault_manager(config.vault)
         self.vault: Vault = self.vault_manager.get(config.vault.session)
         self.detectors = build_detectors(config.detection)
@@ -1244,6 +1250,9 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
             "backend": config.vault.backend,
             "entries": state.vault_manager.total_entries(),
             "sessions": state.vault_manager.session_count(),
+            # "kms:<provider>" | "local" (env / key command / keychain) |
+            # None (unencrypted). Posture only: never the key or key id.
+            "key_source": vault_key_source(config.vault),
         }
         if config.vault.backend in RDBMS_BACKENDS:
             from llm_redact.vault_rdbms import ENV_REMOTE_PLAINTEXT, managed_dbms_cloud

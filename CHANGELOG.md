@@ -11,6 +11,45 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- Realtime: Azure OpenAI Realtime's GA path (`/openai/v1/realtime?model=…`) and the
+  Vertex AI Live API (`/ws/google.cloud.aiplatform.{v1,v1beta1}.LlmBidiService/BidiGenerateContent`,
+  `[providers.vertex]`) are relayed. With llm-redact-pro, `auth = "identity"` now
+  works on these WebSockets instead of being refused: client credentials in the
+  upgrade headers, the query and subprotocols are stripped, and the upgrade is
+  authorized with the proxy's identity on the exact documented paths only.
+- Cloud-provider route coverage. Identity auth forwards only recognized routes, and
+  unrecognized routes of key-authorized providers used to be forwarded unredacted:
+  - Vertex AI: context caching (`projects/{p}/locations/{l}/cachedContents`; the
+    create is redacted on the static session and its cache name tracked;
+    get/list/patch/delete recognized), `:computeTokens`, `:embedContent`,
+    `:fetchPredictOperation`, publisher-model and Model Registry metadata GETs.
+  - Azure OpenAI: legacy completions, image generation/edit prompts and
+    text-to-speech input, `/openai/v1/files` upload and content download, the v1
+    Conversations store, Responses cancel/delete, batches (user `metadata` redacted
+    and restored in the echo), and file/model/deployment listings.
+  - Bedrock runtime: `count-tokens`, ApplyGuardrail (rewritten outputs restored),
+    StartAsyncInvoke and the async-invoke list/get.
+  - `docs/api-coverage.md` gains Vertex AI, Azure OpenAI, Bedrock and realtime
+    WebSocket tables, pinned in both directions by `tests/test_api_coverage.py`.
+
+### Changed
+
+- Under `auth = "identity"`, any query parameter whose name contains
+  `authorization` is stripped as a client credential (HTTP and WebSocket).
+
+### Fixed
+
+- A failed upstream WebSocket dial is counted in `upstream_errors` and recorded; it
+  used to leave an `[audit] required` START row with no END row.
+- WebSocket close reasons are cut to the protocol's 123-byte limit, so a long refusal
+  reason no longer makes the close fail silently.
+- Azure JSONL file uploads get the per-line system note on chat-shaped lines (parity
+  with OpenAI `/v1/files`); Azure's note is otherwise confined to chat completions.
+- Vertex express-mode metadata GETs (`/v1/publishers/…`) reach the vertex upstream
+  instead of the anthropic default.
+
 ## [1.8.0] - 2026-09-28
 
 The core side of the proxy authenticating as ITSELF to cloud services, plus two

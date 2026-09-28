@@ -92,8 +92,12 @@ def test_azure_files_routes_and_raw_delegation() -> None:
     adapter = AzureOpenAIAdapter()
     assert adapter.matches("POST", "/openai/files") is RouteKind.REDACT_ONLY
     assert adapter.matches("GET", "/openai/files/file_a/content") is RouteKind.CHAT
-    assert adapter.matches("GET", "/openai/files/file_a") is RouteKind.NONE
-    assert adapter.matches("POST", "/openai/batches") is RouteKind.NONE
+    # Recognized since the identity-auth route survey (so auth = "identity"
+    # does not refuse them): file metadata is a body-less REDACT_ONLY no-op,
+    # a batch object echoes user metadata and is restored like CHAT.
+    assert adapter.matches("GET", "/openai/files/file_a") is RouteKind.REDACT_ONLY
+    assert adapter.matches("POST", "/openai/batches") is RouteKind.CHAT
+    assert adapter.matches("PUT", "/openai/files/file_a") is RouteKind.NONE
     vault = InMemoryVault()
     token = vault.placeholder_for("EMAIL", EMAIL)
     line = json.dumps({"response": {"body": {"content": f"echo {token}"}}}).encode()

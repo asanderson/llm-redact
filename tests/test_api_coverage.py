@@ -19,6 +19,7 @@ DOC = Path(__file__).resolve().parent.parent / "docs" / "api-coverage.md"
 
 # (method, path, classification) — classification strings match the doc.
 CHAT, REDACT_ONLY, PASS = "chat", "redact-only", "pass-through"
+_VX = "/v1/projects/{p}/locations/{l}"  # the Vertex project/location prefix
 MATRIX: list[tuple[str, str, str]] = [
     # Anthropic
     ("POST", "/v1/messages", CHAT),
@@ -72,6 +73,84 @@ MATRIX: list[tuple[str, str, str]] = [
     ("DELETE", "/v1/videos/{id}", PASS),
     ("POST", "/v1/fine_tuning/jobs", PASS),
     ("GET", "/v1/fine_tuning/jobs", PASS),
+    # Google Vertex AI
+    *[
+        ("POST", f"{_VX}/publishers/google/models/{{m}}:{verb}", kind)
+        for verb, kind in (
+            ("generateContent", CHAT),
+            ("streamGenerateContent", CHAT),
+            ("countTokens", REDACT_ONLY),
+            ("computeTokens", REDACT_ONLY),
+            ("embedContent", REDACT_ONLY),
+            ("predict", REDACT_ONLY),
+            ("predictLongRunning", REDACT_ONLY),
+            ("fetchPredictOperation", REDACT_ONLY),
+        )
+    ],
+    ("POST", f"{_VX}/endpoints/{{id}}:generateContent", CHAT),
+    ("POST", "/v1/publishers/google/models/{m}:generateContent", CHAT),
+    ("POST", f"{_VX}/publishers/anthropic/models/{{m}}:rawPredict", CHAT),
+    ("POST", f"{_VX}/publishers/anthropic/models/{{m}}:streamRawPredict", CHAT),
+    ("POST", f"{_VX}/publishers/meta/models/{{m}}:rawPredict", PASS),
+    ("POST", f"{_VX}/cachedContents", REDACT_ONLY),
+    ("GET", f"{_VX}/cachedContents", REDACT_ONLY),
+    ("GET", f"{_VX}/cachedContents/{{id}}", REDACT_ONLY),
+    ("PATCH", f"{_VX}/cachedContents/{{id}}", REDACT_ONLY),
+    ("DELETE", f"{_VX}/cachedContents/{{id}}", REDACT_ONLY),
+    ("GET", "/v1beta1/publishers/google/models", REDACT_ONLY),
+    ("GET", "/v1beta1/projects/{p}/locations/{l}/publishers/google/models/{m}", REDACT_ONLY),
+    ("GET", f"{_VX}/models", REDACT_ONLY),
+    ("GET", f"{_VX}/models/{{m}}", REDACT_ONLY),
+    ("POST", f"{_VX}/batchPredictionJobs", PASS),
+    # Azure OpenAI
+    ("POST", "/openai/deployments/{d}/chat/completions", CHAT),
+    ("POST", "/openai/v1/chat/completions", CHAT),
+    ("POST", "/openai/deployments/{d}/completions", CHAT),
+    ("POST", "/openai/v1/completions", CHAT),
+    ("POST", "/openai/deployments/{d}/embeddings", REDACT_ONLY),
+    ("POST", "/openai/v1/embeddings", REDACT_ONLY),
+    ("POST", "/openai/deployments/{d}/images/generations", REDACT_ONLY),
+    ("POST", "/openai/deployments/{d}/images/edits", REDACT_ONLY),
+    ("POST", "/openai/deployments/{d}/audio/speech", REDACT_ONLY),
+    ("POST", "/openai/deployments/{d}/audio/transcriptions", PASS),
+    ("POST", "/openai/responses", CHAT),
+    ("POST", "/openai/v1/responses", CHAT),
+    ("GET", "/openai/responses/{id}", CHAT),
+    ("GET", "/openai/v1/responses/{id}/input_items", CHAT),
+    ("POST", "/openai/v1/responses/{id}/cancel", CHAT),
+    ("DELETE", "/openai/responses/{id}", REDACT_ONLY),
+    ("POST", "/openai/v1/conversations", CHAT),
+    ("POST", "/openai/v1/conversations/{id}/items", CHAT),
+    ("GET", "/openai/v1/conversations/{id}", CHAT),
+    ("GET", "/openai/v1/conversations/{id}/items", CHAT),
+    ("DELETE", "/openai/v1/conversations/{id}", REDACT_ONLY),
+    ("POST", "/openai/files", REDACT_ONLY),
+    ("POST", "/openai/v1/files", REDACT_ONLY),
+    ("GET", "/openai/files", REDACT_ONLY),
+    ("GET", "/openai/files/{id}", REDACT_ONLY),
+    ("DELETE", "/openai/files/{id}", REDACT_ONLY),
+    ("GET", "/openai/files/{id}/content", CHAT),
+    ("GET", "/openai/v1/files/{id}/content", CHAT),
+    ("POST", "/openai/batches", CHAT),
+    ("GET", "/openai/batches", CHAT),
+    ("GET", "/openai/v1/batches/{id}", CHAT),
+    ("POST", "/openai/batches/{id}/cancel", CHAT),
+    ("GET", "/openai/models", REDACT_ONLY),
+    ("GET", "/openai/v1/models", REDACT_ONLY),
+    ("GET", "/openai/v1/models/{id}", REDACT_ONLY),
+    ("GET", "/openai/deployments", REDACT_ONLY),
+    ("GET", "/openai/deployments/{d}", REDACT_ONLY),
+    ("POST", "/openai/v1/fine_tuning/jobs", PASS),
+    # AWS Bedrock (runtime)
+    ("POST", "/model/{m}/invoke", CHAT),
+    ("POST", "/model/{m}/invoke-with-response-stream", CHAT),
+    ("POST", "/model/{m}/converse", CHAT),
+    ("POST", "/model/{m}/converse-stream", CHAT),
+    ("POST", "/model/{m}/count-tokens", REDACT_ONLY),
+    ("POST", "/guardrail/{id}/version/{v}/apply", CHAT),
+    ("POST", "/async-invoke", REDACT_ONLY),
+    ("GET", "/async-invoke", REDACT_ONLY),
+    ("GET", "/async-invoke/{id}", REDACT_ONLY),
 ]
 
 _EXPECTED_KIND = {
@@ -92,7 +171,7 @@ def _route(method: str, path: str) -> RouteKind:
 
 @pytest.mark.parametrize(("method", "path", "classification"), MATRIX)
 def test_route_matches_matrix(method: str, path: str, classification: str) -> None:
-    concrete = path.replace("{id}", "abc_123")
+    concrete = re.sub(r"\{[a-z]+\}", "abc_123", path)
     assert _route(method, concrete) is _EXPECTED_KIND[classification], (
         f"{method} {path} expected {classification}"
     )
@@ -109,7 +188,7 @@ def test_doc_and_matrix_agree() -> None:
     text = DOC.read_text(encoding="utf-8")
     doc_rows: set[tuple[str, str, str]] = set()
     for match in re.finditer(
-        r"^\| `(GET|POST|DELETE) ([^`]+)`[^|]* \| (chat|redact-only|pass-through) \|",
+        r"^\| `(GET|POST|PATCH|DELETE) ([^`]+)`[^|]* \| (chat|redact-only|pass-through) \|",
         text,
         flags=re.M,
     ):
@@ -119,3 +198,41 @@ def test_doc_and_matrix_agree() -> None:
     assert not missing_in_doc, f"rows missing from docs/api-coverage.md: {sorted(missing_in_doc)}"
     stale_in_doc = doc_rows - table_rows - EXTRA_DOC_ROWS
     assert not stale_in_doc, f"doc rows not pinned by this table: {sorted(stale_in_doc)}"
+
+
+# --- WebSocket realtime routes ----------------------------------------------------------
+
+# (path, WS adapter name) — the executable twin of the doc's "WebSocket `…`"
+# rows. `{version}` is probed as v1beta.
+WS_MATRIX: list[tuple[str, str]] = [
+    ("/v1/realtime", "openai-realtime"),
+    ("/openai/realtime", "azure-realtime"),
+    ("/openai/v1/realtime", "azure-realtime"),
+    (
+        "/ws/google.ai.generativelanguage.{version}.GenerativeService.BidiGenerateContent",
+        "gemini-live",
+    ),
+    ("/ws/google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent", "vertex-live"),
+    ("/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent", "vertex-live"),
+]
+
+
+@pytest.mark.parametrize(("path", "adapter_name"), WS_MATRIX)
+def test_ws_route_matches_matrix(path: str, adapter_name: str) -> None:
+    from llm_redact.realtime import ALL_WS_ADAPTERS, ws_adapter_for
+
+    adapter = ws_adapter_for(
+        path.replace("{version}", "v1beta"), [cls() for cls in ALL_WS_ADAPTERS]
+    )
+    assert adapter is not None and adapter.name == adapter_name
+
+
+def test_ws_doc_and_matrix_agree() -> None:
+    """The doc's WebSocket rows == WS_MATRIX, both directions, and every WS
+    adapter has at least one row (a new adapter needs its doc row)."""
+    from llm_redact.realtime import ALL_WS_ADAPTERS
+
+    text = DOC.read_text(encoding="utf-8")
+    doc_paths = set(re.findall(r"^\| WebSocket `([^`]+)` \| websocket \|", text, flags=re.M))
+    assert doc_paths == {path for path, _ in WS_MATRIX}
+    assert {cls.name for cls in ALL_WS_ADAPTERS} == {name for _, name in WS_MATRIX}

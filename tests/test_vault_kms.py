@@ -11,6 +11,7 @@ llm-redact-pro's; here a fake ``resolve_vault_key`` stands in for it.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sqlite3
 import tomllib
@@ -421,7 +422,9 @@ def _write_config(tmp_path: Path, db: Path, kms: dict[str, str] | None = None) -
     lines = ["[vault]", 'backend = "sqlite"', f'path = "{db.as_posix()}"', 'encryption = "fernet"']
     if kms is not None:
         lines.append("[vault.kms]")
-        lines += [f'{k} = "{v}"' for k, v in kms.items()]
+        # json.dumps gives a valid TOML basic string (a Windows path's
+    # backslashes are escaped, not read as TOML escapes).
+    lines += [f"{k} = {json.dumps(v)}" for k, v in kms.items()]
     path = tmp_path / "config.toml"
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -556,7 +559,9 @@ def _doctor(tmp_path: Path, kms: dict[str, str]) -> tuple[int, str]:
     port = probe.getsockname()[1]
     probe.close()
     lines = [f"port = {port}", "[vault]", 'encryption = "fernet"', "[vault.kms]"]
-    lines += [f'{k} = "{v}"' for k, v in kms.items()]
+    # json.dumps gives a valid TOML basic string (a Windows path's
+    # backslashes are escaped, not read as TOML escapes).
+    lines += [f"{k} = {json.dumps(v)}" for k, v in kms.items()]
     cfg = tmp_path / "config.toml"
     cfg.write_text("\n".join(lines) + "\n")
     import contextlib

@@ -744,10 +744,14 @@ class RdbmsStore:
                             " FROM llm_redact_response_sessions"
                             " ORDER BY created_at DESC LIMIT :cap) keepers"
                         )
+                    # Only rows of sessions without mappings (see the
+                    # sqlite store): a live session's chain must resolve.
                     self._execute(
                         conn,
                         "DELETE FROM llm_redact_response_sessions"
-                        f" WHERE response_id NOT IN ({keepers})",
+                        f" WHERE response_id NOT IN ({keepers})"
+                        " AND NOT EXISTS (SELECT 1 FROM llm_redact_mappings m"
+                        " WHERE m.session_id = llm_redact_response_sessions.session_id)",
                         {"cap": _MAX_RESPONSE_ROWS},
                     )
                 conn.commit()

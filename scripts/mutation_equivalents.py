@@ -531,6 +531,21 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_25": (
+        "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
+        "names are case-insensitive, so the statement is byte-for-byte equivalent "
+        "to the engine."
+    ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_27": (
+        "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
+        "names are case-insensitive, so the statement is byte-for-byte equivalent "
+        "to the engine."
+    ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_28": (
+        "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
+        "names are case-insensitive, so the statement is byte-for-byte equivalent "
+        "to the engine."
+    ),
     "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_6": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
         "names are case-insensitive, so the statement is byte-for-byte equivalent "

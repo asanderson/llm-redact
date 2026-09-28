@@ -382,6 +382,34 @@ def test_response_session_map_stays_bounded(
     manager.close()
 
 
+def test_response_cap_never_trims_a_live_sessions_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A router reads a missing row as "that session was pruned" and resumes
+    # the chain in a fresh session, which would reissue «EMAIL_001» for a new
+    # value while the provider's history still means the old one. So the cap
+    # only trims rows of sessions that hold no mappings; a live session's
+    # rows leave with the session (prune).
+    monkeypatch.setattr(vault_mod, "_RESPONSE_PRUNE_EVERY", 4)
+    monkeypatch.setattr(vault_mod, "_MAX_RESPONSE_ROWS", 3)
+    manager = SqliteVaultManager(tmp_path / "m.db")
+    manager.get("live").placeholder_for("EMAIL", "ada@corp.example")
+    manager.record_response_session("resp_live", "live")
+    # The live row is the OLDEST, so the recency cap alone would trim it.
+    manager._conn.execute(
+        "UPDATE response_sessions SET created_at = '2000-01-01T00:00:00Z'"
+        " WHERE response_id = 'resp_live'"
+    )
+    for i in range(11):  # with the live row, the 12th insert runs the trim
+        manager.record_response_session(f"resp_{i:03d}", "empty")
+    assert manager.lookup_response_session("resp_live") == "live"
+    empty_rows = manager._conn.execute(
+        "SELECT COUNT(*) FROM response_sessions WHERE session_id = 'empty'"
+    ).fetchone()[0]
+    assert empty_rows <= 3  # the map stays bounded for sessions without mappings
+    manager.close()
+
+
 # ---------------------------------------------------------------------------
 # vault.py — build wiring
 # ---------------------------------------------------------------------------

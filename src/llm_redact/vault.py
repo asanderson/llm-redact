@@ -156,6 +156,8 @@ CREATE TABLE IF NOT EXISTS response_sessions (
 CREATE TABLE IF NOT EXISTS vault_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
+# The response-id map keeps at most this many rows of sessions that hold no
+# mappings; rows of live sessions are removed with their session (prune).
 _MAX_RESPONSE_ROWS = 10000
 _RESPONSE_PRUNE_EVERY = 256
 
@@ -637,9 +639,17 @@ class SqliteVaultManager:
         self._response_inserts += 1
         if self._response_inserts >= _RESPONSE_PRUNE_EVERY:
             self._response_inserts = 0
+            # Beyond the cap, only rows whose session holds no mappings go
+            # (a pruned session, or one that never redacted anything): a
+            # router reads a missing row as "that session was pruned", and a
+            # chain into a LIVE session resumed in a fresh one would reissue
+            # «EMAIL_001» for a new value while the provider's history still
+            # means the old one. Live sessions' rows leave with the session.
             self._conn.execute(
                 "DELETE FROM response_sessions WHERE response_id NOT IN"
-                " (SELECT response_id FROM response_sessions ORDER BY created_at DESC LIMIT ?)",
+                " (SELECT response_id FROM response_sessions ORDER BY created_at DESC LIMIT ?)"
+                " AND NOT EXISTS"
+                " (SELECT 1 FROM mappings m WHERE m.session_id = response_sessions.session_id)",
                 (_MAX_RESPONSE_ROWS,),
             )
 

@@ -559,6 +559,29 @@ def test_response_cap_prune_runs_and_bounds(
     store.close()
 
 
+def test_response_cap_never_trims_a_live_sessions_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Only rows of sessions without mappings are trimmed (see the sqlite
+    # store): a chain into a live session must keep resolving.
+    config, _ = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    monkeypatch.setattr("llm_redact.vault_rdbms._RESPONSE_PRUNE_EVERY", 1)
+    monkeypatch.setattr("llm_redact.vault_rdbms._MAX_RESPONSE_ROWS", 1)
+    store = RdbmsStore(config, None)
+    manager = RdbmsVaultManager(store)
+    manager.get("live").placeholder_for("EMAIL", "ada@corp.example")
+    # The live row is the OLDEST, so the recency cap alone would trim it.
+    monkeypatch.setattr("llm_redact.vault_rdbms._utcnow_iso", lambda: "2000-01-01T00:00:00Z")
+    manager.record_response_session("resp_live", "live")
+    monkeypatch.setattr("llm_redact.vault_rdbms._utcnow_iso", lambda: "2030-01-01T00:00:00Z")
+    for i in range(3):
+        manager.record_response_session(f"resp_{i}", "empty")
+    assert manager.lookup_response_session("resp_live") == "live"
+    empty = [r for r in ("resp_0", "resp_1", "resp_2") if manager.lookup_response_session(r)]
+    assert len(empty) == 1  # still bounded for sessions without mappings
+    store.close()
+
+
 # --- the off-box rule + managed-DBMS recognition -------------------------------
 
 

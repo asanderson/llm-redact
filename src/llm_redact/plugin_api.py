@@ -450,7 +450,10 @@ class AccessGate(Protocol):
 
     ``status`` is the ``users`` block of ``/status`` (metadata only).
     ``handle`` answers the core's fixed gate paths — ``ACCESS_PATHS`` (the
-    admin endpoints), ``AUTH_PATHS`` (sign-in, callback, sign-out) and
+    admin endpoints), everything under ``AUTH_PREFIX`` (browser sign-in:
+    ``AUTH_PATHS`` login, callback and sign-out, plus any page or JSON
+    endpoint a sign-in method adds below the prefix, all Host- and
+    Origin-checked by the core and never behind dashboard admission) and
     everything under ``SCIM_PREFIX`` — and must never forward anything
     upstream; the core stamps the security headers on its reply. ``close``
     runs at shutdown.

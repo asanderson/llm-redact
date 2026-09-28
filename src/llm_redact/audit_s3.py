@@ -30,6 +30,9 @@ _PRO_HINT = "install the llm-redact-pro package to enable it"
 # Client-side batch encryption ([audit.s3]/[audit.azure] encryption = "fernet").
 AUDIT_ENC_KEY_ENV = "LLM_REDACT_AUDIT_ENC_KEY"
 AZURE_STORAGE_KEY_ENV = "AZURE_STORAGE_KEY"
+# [audit.azure] auth = "sas": the SAS token (a bearer secret appended to the
+# blob URL's query — never logged, never in /status).
+AZURE_STORAGE_SAS_ENV = "AZURE_STORAGE_SAS_TOKEN"
 
 
 def audit_enc_key_from_env() -> bytes | None:
@@ -53,8 +56,28 @@ _CREDENTIAL_ENV: dict[str, tuple[str, str, str | None]] = {
 
 
 def credential_env_names(provider: str) -> tuple[str, str, str | None]:
-    """The (access, secret, session-token) env var names for a provider."""
+    """The (access, secret, session-token) env var names for a provider's
+    static keys (``[audit.s3] auth = "keys"``). ``required_credential_env``
+    is the auth-aware form."""
     return _CREDENTIAL_ENV.get(provider, _CREDENTIAL_ENV["aws"])
+
+
+def required_credential_env(
+    sink: str, provider: str = "aws", auth: str = "keys"
+) -> tuple[str, ...]:
+    """The env vars that must be PRESENT for one sink's auth mode (doctor's
+    presence check — values are never read here).
+
+    Empty for ``auth = "identity"``: those credentials resolve at runtime
+    from the workload's cloud identity (llm-redact-pro), which an offline
+    check cannot verify without network calls.
+    """
+    if auth == "identity":
+        return ()
+    if sink == "azure":
+        return (AZURE_STORAGE_SAS_ENV,) if auth == "sas" else (AZURE_STORAGE_KEY_ENV,)
+    access_env, secret_env, _ = credential_env_names(provider)
+    return access_env, secret_env
 
 
 class S3AuditSink(Protocol):

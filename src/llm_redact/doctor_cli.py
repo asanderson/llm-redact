@@ -661,24 +661,35 @@ def run_config_show(args: argparse.Namespace) -> int:
 
 
 def _check_audit_azure(report: _Report, config: Config) -> None:
-    from llm_redact.audit_s3 import AZURE_STORAGE_KEY_ENV
+    from llm_redact.audit_s3 import required_credential_env
 
     az = config.audit.azure
     if not az.enabled:
         return
-    if not os.environ.get(AZURE_STORAGE_KEY_ENV):
+    host = az.endpoint_url or f"{az.account}.blob.core.windows.net"
+    mode = {"key": "SharedKey", "sas": "SAS-token", "identity": "Entra ID"}.get(az.auth, az.auth)
+    # Presence only — never a byte of the values themselves.
+    missing = [n for n in required_credential_env("azure", auth=az.auth) if not os.environ.get(n)]
+    if missing:
         report.line(
             "FAIL",
             "audit.azure",
-            f"enabled but {AZURE_STORAGE_KEY_ENV} not set — batches will be dropped"
-            " (the account key comes from the environment, never the config file)",
+            f"enabled (auth = {az.auth!r}) but {' and '.join(missing)} not set — batches"
+            " will be dropped (credentials come from the environment, never the config file)",
         )
-    else:
-        host = az.endpoint_url or f"{az.account}.blob.core.windows.net"
+    elif az.auth == "identity":
         report.line(
             "PASS",
             "audit.azure",
-            f"SharedKey sink configured (container {az.container} via {host});"
+            f"{mode} sink configured (container {az.container} via {host}); the token"
+            " resolves at runtime from the workload identity (not checked offline);"
+            " metadata rows leave this machine",
+        )
+    else:
+        report.line(
+            "PASS",
+            "audit.azure",
+            f"{mode} sink configured (container {az.container} via {host});"
             " metadata rows leave this machine",
         )
     _check_audit_encryption(report, "audit.azure", az.encryption)
@@ -711,15 +722,20 @@ def _check_audit_encryption(report: _Report, area: str, encryption: str) -> None
 
 
 def _check_audit_s3(report: _Report, config: Config) -> None:
-    from llm_redact.audit_s3 import credential_env_names
+    from llm_redact.audit_s3 import required_credential_env
 
     s3 = config.audit.s3
     if not s3.enabled:
         return
     # Presence only — never a byte of the values themselves. The credential
-    # env vars vary by provider (GCS uses its own HMAC interop keys).
-    access_env, secret_env, _ = credential_env_names(s3.provider)
-    missing = [name for name in (access_env, secret_env) if not os.environ.get(name)]
+    # env vars vary by provider (GCS uses its own HMAC interop keys) and by
+    # auth mode (identity needs none: it resolves at runtime).
+    required = required_credential_env("s3", s3.provider, s3.auth)
+    missing = [name for name in required if not os.environ.get(name)]
+    target = {
+        "aws": f"s3.{s3.region}.amazonaws.com",
+        "gcs": "storage.googleapis.com",
+    }.get(s3.provider, s3.endpoint_url or "?")
     if missing:
         report.line(
             "FAIL",
@@ -727,11 +743,15 @@ def _check_audit_s3(report: _Report, config: Config) -> None:
             f"enabled but {' and '.join(missing)} not set — batches will be"
             " dropped (credentials come from the environment, never the config file)",
         )
+    elif s3.auth == "identity":
+        report.line(
+            "PASS",
+            "audit.s3",
+            f"{s3.provider} sink configured (bucket {s3.bucket} via {target}) with"
+            " workload identity; credentials resolve at runtime (not checked offline);"
+            " metadata rows leave this machine",
+        )
     else:
-        target = {
-            "aws": f"s3.{s3.region}.amazonaws.com",
-            "gcs": "storage.googleapis.com",
-        }.get(s3.provider, s3.endpoint_url or "?")
         report.line(
             "PASS",
             "audit.s3",

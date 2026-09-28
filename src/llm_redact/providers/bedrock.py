@@ -1,4 +1,4 @@
-"""AWS Bedrock runtime adapter (bearer-token auth; SigV4 is a non-goal).
+"""AWS Bedrock runtime adapter (bearer-token auth or the proxy's identity).
 
 Covers the four runtime inference routes:
 
@@ -6,6 +6,14 @@ Covers the four runtime inference routes:
     POST /model/{modelId}/invoke-with-response-stream
     POST /model/{modelId}/converse
     POST /model/{modelId}/converse-stream
+
+and the other bedrock-runtime operations that carry content or that a tool
+polls (verified against the Bedrock API reference, 2026-09):
+
+    POST /model/{modelId}/count-tokens        redact-only (answers a count)
+    POST /guardrail/{id}/version/{v}/apply    chat (ApplyGuardrail)
+    POST /async-invoke                        redact-only (StartAsyncInvoke)
+    GET  /async-invoke[/{invocationArn}]      redact-only (list/get: metadata)
 
 ``modelId`` may be a percent-encoded ARN whose decoded form contains
 slashes and colons: matching runs on the decoded path with a greedy id
@@ -49,6 +57,16 @@ from llm_redact.sse import SSEEvent
 # the id unless a later action segment also matches (then the longest id
 # wins, which is what an ARN with encoded slashes needs).
 _ROUTE = re.compile(r"^/model/.+/(?:invoke|invoke-with-response-stream|converse|converse-stream)$")
+# CountTokens mirrors an invoke/converse body under `input`; the answer is a
+# number, so there is nothing to restore.
+_COUNT_TOKENS = re.compile(r"^/model/.+/count-tokens$")
+# ApplyGuardrail: the identifier may be a (percent-encoded) ARN whose decoded
+# form holds a slash, so the id is greedy like the model id above.
+_APPLY_GUARDRAIL = re.compile(r"^/guardrail/.+/version/[^/]+/apply$")
+# StartAsyncInvoke (POST, collection), ListAsyncInvokes (GET, collection) and
+# GetAsyncInvoke (GET, the invocation ARN — slash-bearing once decoded).
+_ASYNC_INVOKE = re.compile(r"^/async-invoke$")
+_ASYNC_INVOKE_ITEM = re.compile(r"^/async-invoke/.+$")
 
 # Every :event-type a ConverseStream response is known to carry. The live
 # drift test (tests/test_live.py) asserts observed types ⊆ this set: the
@@ -122,9 +140,36 @@ class BedrockAdapter(ProviderAdapter):
     handles_eventstream = True
 
     def matches(self, method: str, path: str) -> RouteKind:
-        if method == "POST" and _ROUTE.match(path):
+        if method == "GET":
+            # Async-invocation status/listing: metadata only (the output goes
+            # to S3, never through the proxy). Recognized so identity auth
+            # can poll the jobs it started.
+            if _ASYNC_INVOKE.match(path) or _ASYNC_INVOKE_ITEM.match(path):
+                return RouteKind.REDACT_ONLY
+            return RouteKind.NONE
+        if method != "POST":
+            return RouteKind.NONE
+        if _ROUTE.match(path):
             return RouteKind.CHAT
+        if _APPLY_GUARDRAIL.match(path):
+            # CHAT, not REDACT_ONLY: the response's outputs[].text is the
+            # submitted text as the guardrail rewrote it, and its assessments
+            # quote matched substrings — both carry the placeholders sent up.
+            # Restoring hands the client back its OWN text (never anyone
+            # else's), which is what a tool calling ApplyGuardrail expects.
+            return RouteKind.CHAT
+        if _COUNT_TOKENS.match(path) or _ASYNC_INVOKE.match(path):
+            # count-tokens answers a number; StartAsyncInvoke answers an
+            # invocation ARN and writes the model output to S3. Both carry
+            # content outbound and nothing to restore inbound.
+            return RouteKind.REDACT_ONLY
         return RouteKind.NONE
+
+    def wants_system_note(self, kind: RouteKind, path: str) -> bool:
+        # Only the four inference routes carry a model body the note can
+        # join; a guardrail body has no system field (and a note would be
+        # assessed as submitted content).
+        return kind is RouteKind.CHAT and _ROUTE.match(path) is not None
 
     def error_body(self, message: str, *, status: int = 413) -> dict[str, Any]:
         # Bedrock error bodies carry only a message; the exception type

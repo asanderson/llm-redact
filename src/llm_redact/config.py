@@ -7,6 +7,7 @@ import math
 import os
 import re
 import tomllib
+import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -253,10 +254,36 @@ class EmailConfig:
     username: str | None = None
     password_env: str = "LLM_REDACT_SMTP_PASSWORD"
     from_address: str | None = None
+    # implicit_tls: TLS from the first byte (SMTP_SSL, usually port 465)
+    # instead of STARTTLS; the two are mutually exclusive.
+    implicit_tls: bool = False
+    # auth: "password" (SMTP AUTH LOGIN/PLAIN with password_env) or "oauth"
+    # (SASL XOAUTH2 bearer token, llm-redact-pro docs/email-oauth.md; TLS
+    # required). oauth_provider picks the token source: "azure" (Entra ID
+    # workload identity, Microsoft 365), "google" (service account with
+    # domain-wide delegation; oauth_subject = the mailbox, default
+    # username/from_address) or "refresh_token" (a generic RFC 6749
+    # refresh-token grant against oauth_token_url, https only). Secrets are
+    # named by *_env keys and read from the environment, never this file.
+    auth: str = "password"
+    oauth_provider: str | None = None
+    oauth_subject: str | None = None
+    oauth_token_url: str | None = None
+    oauth_client_id: str | None = None
+    oauth_client_secret_env: str | None = None
+    oauth_refresh_token_env: str | None = None
+    oauth_scope: str | None = None
 
     @property
     def configured(self) -> bool:
         return self.smtp_host is not None and self.from_address is not None
+
+    @property
+    def tls(self) -> str:
+        """The transport-security mode: "implicit", "starttls" or "none"."""
+        if self.implicit_tls:
+            return "implicit"
+        return "starttls" if self.starttls else "none"
 
 
 @dataclass(frozen=True)
@@ -1837,22 +1864,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     _require_keys(users_raw, {"path"}, "[users]")
     users_cfg = UsersConfig(path=str(users_raw["path"]) if "path" in users_raw else None)
 
-    email_raw = raw.get("email", {})
-    _require_keys(
-        email_raw,
-        {"smtp_host", "smtp_port", "starttls", "username", "password_env", "from_address"},
-        "[email]",
-    )
-    email_cfg = EmailConfig(
-        smtp_host=str(email_raw["smtp_host"]) if "smtp_host" in email_raw else None,
-        smtp_port=int(email_raw.get("smtp_port", 587)),
-        starttls=_bool_key(email_raw, "starttls", True, "[email]"),
-        username=str(email_raw["username"]) if "username" in email_raw else None,
-        password_env=str(email_raw.get("password_env", "LLM_REDACT_SMTP_PASSWORD")),
-        from_address=str(email_raw["from_address"]) if "from_address" in email_raw else None,
-    )
-    if (email_cfg.smtp_host is None) != (email_cfg.from_address is None):
-        raise ConfigError("[email] smtp_host and from_address must be set together")
+    email_cfg = _parse_email(raw.get("email", {}))
 
     # Routing last: it depends on the resolved providers (legacy
     # auto-registration) and the top-level note switch (per-upstream default),
@@ -1888,6 +1900,140 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         routing=routing,
         prices=prices,
         extensions=extensions,
+    )
+
+
+_EMAIL_AUTH_MODES = ("password", "oauth")
+_EMAIL_OAUTH_PROVIDERS = ("azure", "google", "refresh_token")
+# The generic refresh-token grant's own keys; azure/google resolve their
+# credentials from the workload identity and must not carry them.
+_EMAIL_REFRESH_KEYS = (
+    "oauth_token_url",
+    "oauth_client_id",
+    "oauth_client_secret_env",
+    "oauth_refresh_token_env",
+    "oauth_scope",
+)
+_EMAIL_OAUTH_KEYS = ("oauth_provider", "oauth_subject", *_EMAIL_REFRESH_KEYS)
+
+
+def _email_env_name(section: Mapping[str, Any], key: str) -> str | None:
+    """An env-var NAME key: the secret lives in that variable, never in the
+    file. The value is never echoed — the realistic mistake is pasting the
+    secret itself here."""
+    value = _optional_str(section, key, "[email]")
+    if value is not None and not _ENV_VAR_RE.fullmatch(value):
+        raise ConfigError(
+            f"[email] {key} must name an environment variable matching [A-Z_][A-Z0-9_]*"
+            " (the secret itself never lives in the config file)"
+        )
+    return value
+
+
+def _parse_email(email_raw: dict[str, Any]) -> EmailConfig:
+    _require_keys(
+        email_raw,
+        {
+            "smtp_host",
+            "smtp_port",
+            "starttls",
+            "username",
+            "password_env",
+            "from_address",
+            "implicit_tls",
+            "auth",
+            *_EMAIL_OAUTH_KEYS,
+        },
+        "[email]",
+    )
+    implicit_tls = _bool_key(email_raw, "implicit_tls", False, "[email]")
+    # STARTTLS defaults on, except under implicit TLS where it cannot apply.
+    starttls = _bool_key(email_raw, "starttls", not implicit_tls, "[email]")
+    if implicit_tls and starttls:
+        raise ConfigError(
+            "[email] implicit_tls = true and starttls = true are mutually exclusive"
+            " (implicit TLS is already encrypted; set starttls = false)"
+        )
+    auth = _str_key(email_raw, "auth", "password", "[email]")
+    if auth not in _EMAIL_AUTH_MODES:
+        raise ConfigError(f'[email] auth must be "password" or "oauth", got {auth!r}')
+    email_cfg = EmailConfig(
+        smtp_host=str(email_raw["smtp_host"]) if "smtp_host" in email_raw else None,
+        smtp_port=int(email_raw.get("smtp_port", 587)),
+        starttls=starttls,
+        username=str(email_raw["username"]) if "username" in email_raw else None,
+        password_env=str(email_raw.get("password_env", "LLM_REDACT_SMTP_PASSWORD")),
+        from_address=str(email_raw["from_address"]) if "from_address" in email_raw else None,
+        implicit_tls=implicit_tls,
+        auth=auth,
+        oauth_provider=_optional_str(email_raw, "oauth_provider", "[email]"),
+        oauth_subject=_optional_str(email_raw, "oauth_subject", "[email]"),
+        oauth_token_url=_optional_str(email_raw, "oauth_token_url", "[email]"),
+        oauth_client_id=_optional_str(email_raw, "oauth_client_id", "[email]"),
+        oauth_client_secret_env=_email_env_name(email_raw, "oauth_client_secret_env"),
+        oauth_refresh_token_env=_email_env_name(email_raw, "oauth_refresh_token_env"),
+        oauth_scope=_optional_str(email_raw, "oauth_scope", "[email]"),
+    )
+    if (email_cfg.smtp_host is None) != (email_cfg.from_address is None):
+        raise ConfigError("[email] smtp_host and from_address must be set together")
+    if auth == "oauth":
+        _check_email_oauth(email_cfg, email_raw)
+    else:
+        stray = [key for key in _EMAIL_OAUTH_KEYS if key in email_raw]
+        if stray:
+            raise ConfigError(f'[email] {", ".join(stray)} require auth = "oauth"')
+    return email_cfg
+
+
+def _check_email_oauth(email_cfg: EmailConfig, email_raw: Mapping[str, Any]) -> None:
+    """auth = "oauth" invariants: a configured sender, TLS on the wire (a
+    bearer token is a password-equivalent), a known provider, and exactly
+    the keys that provider reads."""
+    if not email_cfg.configured:
+        raise ConfigError('[email] auth = "oauth" requires smtp_host and from_address')
+    if email_cfg.tls == "none":
+        raise ConfigError(
+            '[email] auth = "oauth" requires TLS: set starttls = true or implicit_tls = true'
+            " (a bearer token is never sent over a cleartext connection)"
+        )
+    provider = email_cfg.oauth_provider
+    if provider not in _EMAIL_OAUTH_PROVIDERS:
+        raise ConfigError(
+            '[email] auth = "oauth" requires oauth_provider = "azure", "google" or'
+            f' "refresh_token" (got {provider!r})'
+        )
+    if email_cfg.oauth_subject is not None and provider != "google":
+        raise ConfigError('[email] oauth_subject applies only to oauth_provider = "google"')
+    if provider != "refresh_token":
+        stray = [key for key in _EMAIL_REFRESH_KEYS if key in email_raw]
+        if stray:
+            raise ConfigError(
+                f'[email] {", ".join(stray)} apply only to oauth_provider = "refresh_token"'
+                f" ({provider} credentials come from the workload identity)"
+            )
+        return
+    for key in ("oauth_token_url", "oauth_client_id", "oauth_refresh_token_env"):
+        if key not in email_raw:
+            raise ConfigError(f'[email] oauth_provider = "refresh_token" requires {key}')
+    if not _is_https_url(email_cfg.oauth_token_url or ""):
+        raise ConfigError(
+            "[email] oauth_token_url must be an https:// URL with a host and no"
+            " userinfo or fragment"
+        )
+
+
+def _is_https_url(url: str) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(url)
+        _ = parts.port  # a malformed port raises
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and bool(parts.hostname)
+        and "@" not in parts.netloc
+        and not parts.fragment
+        and not any(char.isspace() for char in url)
     )
 
 

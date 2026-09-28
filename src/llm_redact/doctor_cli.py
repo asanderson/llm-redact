@@ -15,6 +15,7 @@ import re
 import socket
 import stat
 import sys
+import urllib.parse
 from pathlib import Path
 
 from llm_redact import __version__
@@ -582,6 +583,73 @@ def _check_access(report: _Report, config: Config) -> None:
         report.line(level, "access", message)
 
 
+def _check_email(report: _Report, config: Config) -> None:
+    """[email] delivery posture for llm-redact-pro's invites: the SMTP auth
+    mode, the transport security and whether the env-held secrets are
+    PRESENT (names only, never values; no network — a token is fetched only
+    when an invite is sent). Silent when [email] is not configured."""
+    email = config.email
+    if not email.configured:
+        return
+    tls = {"implicit": "implicit TLS", "starttls": "STARTTLS", "none": "no TLS"}[email.tls]
+    if email.auth == "oauth":
+        _check_email_oauth(report, config, tls)
+        return
+    if email.username is None:
+        report.line("PASS", "email", f"SMTP without authentication ({tls})")
+    elif not os.environ.get(email.password_env):
+        report.line(
+            "WARN",
+            "email",
+            f"username is set but {email.password_env} is not — invites will fail to send"
+            " (the SMTP password comes from the environment, never the config file)",
+        )
+    elif email.tls == "none":
+        report.line(
+            "WARN",
+            "email",
+            "SMTP password auth without TLS — the password crosses the network in cleartext"
+            " (set starttls = true or implicit_tls = true)",
+        )
+    else:
+        report.line("PASS", "email", f"SMTP password auth ({tls}; {email.password_env} set)")
+
+
+def _check_email_oauth(report: _Report, config: Config, tls: str) -> None:
+    email = config.email
+    if email.oauth_provider != "refresh_token":
+        source = {
+            "azure": "Microsoft Entra ID workload credentials",
+            "google": "a Google service account with domain-wide delegation",
+        }[str(email.oauth_provider)]
+        report.line(
+            "PASS",
+            "email",
+            f"SMTP OAuth 2.0 (XOAUTH2, {tls}) with tokens from {source}, fetched at send time",
+        )
+        return
+    missing = [
+        name
+        for name in (email.oauth_refresh_token_env, email.oauth_client_secret_env)
+        if name is not None and not os.environ.get(name)
+    ]
+    if missing:
+        report.line(
+            "WARN",
+            "email",
+            f"SMTP OAuth 2.0 refresh-token grant but {' and '.join(missing)} not set —"
+            " invites will fail to send (secrets come from the environment, never the"
+            " config file)",
+        )
+        return
+    host = urllib.parse.urlsplit(email.oauth_token_url or "").hostname
+    report.line(
+        "PASS",
+        "email",
+        f"SMTP OAuth 2.0 (XOAUTH2, {tls}) via a refresh-token grant at {host}",
+    )
+
+
 def run_doctor(args: argparse.Namespace) -> int:
     report = _Report(json_mode=getattr(args, "json", False))
     config = _check_config(report, args)
@@ -600,6 +668,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_posture(report, config)
     _check_routing(report, config, bool(getattr(args, "offline", False)))
     _check_access(report, config)
+    _check_email(report, config)
     if config.audit.enabled:
         from llm_redact.audit import default_audit_path
 

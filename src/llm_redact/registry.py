@@ -29,6 +29,7 @@ from .free_defaults import build_access_gate as _build_access_gate
 from .free_defaults import build_dashboard as _build_dashboard
 from .free_defaults import build_router as _build_router
 from .free_defaults import build_telemetry as _build_telemetry
+from .free_defaults import build_upstream_auth as _build_upstream_auth
 from .free_defaults import resolve_license as _resolve_license
 from .free_defaults import tool_base_url as _tool_base_url
 from .sessions import build_session_router as _build_session_router
@@ -39,7 +40,7 @@ from .vault import cipher_from_key as _cipher_from_key
 if TYPE_CHECKING:
     from .audit import AuditLog
     from .audit_s3 import AzureAuditSink, S3AuditSink
-    from .config import AuditConfig, Config, OtelConfig, VaultConfig
+    from .config import AuditConfig, Config, OtelConfig, ProviderConfig, VaultConfig
     from .licensing import ResolvedLicense
     from .plugin_api import (
         AccessGate,
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
         Router,
         SessionRouter,
         Telemetry,
+        UpstreamAuth,
         VaultCipher,
     )
     from .vault import VaultManager
@@ -96,6 +98,7 @@ class Registry:
     build_access_gate: Callable[[Config, ResolvedLicense], AccessGate | None]
     build_router: Callable[[Config, str], Router | None]
     build_dashboard: Callable[[str], Dashboard | None]
+    build_upstream_auth: Callable[[str, ProviderConfig], UpstreamAuth | None]
     tool_base_url: Callable[[str], str]
     cli_commands: list[CliCommand]
     config_sections: list[ConfigSection]
@@ -132,6 +135,12 @@ class Registry:
         # answers its paths with a 404 naming the package. Built with the
         # resolved tier, rebuilt when a reload changes it.
         self.build_dashboard = _build_dashboard
+        # [providers.NAME] auth = "identity": the proxy's own cloud identity
+        # authorizes requests to bedrock/vertex/azure (plugin_api.UpstreamAuth).
+        # The Free default returns None for passthrough and fails closed on
+        # identity, naming the package. Built per provider at startup and on
+        # every reload that changes a provider's auth settings.
+        self.build_upstream_auth = _build_upstream_auth
         # `llm-redact run` passes the base URL it exports to wrapped tools
         # through this hook (identity-free in the core).
         self.tool_base_url = _tool_base_url

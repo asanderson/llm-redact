@@ -501,6 +501,46 @@ class SessionStore(Protocol):
     def forget(self, session_ids: Iterable[str]) -> int: ...
 
 
+# --- upstream authorization seam ----------------------------------------------
+# [providers.NAME] auth = "identity": the proxy authorizes requests to a cloud
+# provider with its OWN workload identity (AWS SigV4 for Bedrock, OAuth bearer
+# tokens for Vertex AI and Azure OpenAI). Credential fetching and signing are
+# paid code in llm-redact-pro; the core only strips the client's credential
+# channels, hands the plugin the FINAL outbound request (after redaction and
+# note injection) and sends exactly the headers it returns with exactly the
+# bytes it saw. Client-side SigV4 stays unsupported: a signature the CLIENT
+# computed covers the unredacted body, which the proxy rewrites.
+
+
+class UpstreamAuthError(Exception):
+    """An ``UpstreamAuth`` could not authorize a request (no credential, a
+    token endpoint refused). The message names the credential SOURCE kind
+    only (for instance "AWS credential chain") — never a secret, token,
+    signature or response body — because the core logs it and puts it in
+    the client's provider-shaped 502."""
+
+
+class UpstreamAuth(Protocol):
+    """One provider's upstream authorizer (``Registry.build_upstream_auth``).
+
+    ``authorize`` receives the request exactly as the core will send it —
+    ``url`` in the form httpx puts on the wire (query included), ``headers``
+    with every client credential channel already removed, ``body`` the final
+    bytes — and returns the complete outbound header list (it may add
+    ``host``, date and signature headers, and must not change the body or
+    URL). It raises ``UpstreamAuthError`` when no credential is available;
+    the core then answers a recorded 502 and forwards nothing. It must never
+    block the event loop on network I/O. ``close`` runs when a reload
+    displaces the authorizer or at shutdown.
+    """
+
+    async def authorize(
+        self, method: str, url: str, headers: list[tuple[str, str]], body: bytes
+    ) -> list[tuple[str, str]]: ...
+
+    def close(self) -> None: ...
+
+
 # --- CLI seam -------------------------------------------------------------------
 # Paid command-line subcommands register here instead of living in the core
 # parser: the core adds each registered command's subparser, dispatches to
@@ -574,6 +614,8 @@ __all__ = [
     "SSEEvent",
     "SessionRouter",
     "Telemetry",
+    "UpstreamAuth",
+    "UpstreamAuthError",
     "Vault",
     "VaultCipher",
     "VaultKeyError",

@@ -35,6 +35,28 @@ class ProviderConfig:
     # — values go upstream as-is, like warn mode but provider-wide.
     # Rehydration stays active so placeholders from history still restore.
     detection: bool = True
+    # How the proxy authenticates to this upstream. "passthrough" (the
+    # default) forwards the client's own credential untouched. "identity"
+    # (bedrock, vertex, azure only; implemented in llm-redact-pro) strips
+    # every client credential and authorizes each request with the proxy's
+    # OWN cloud identity AFTER redaction: AWS SigV4 for bedrock, an OAuth
+    # bearer token for vertex/azure. Anyone who can reach the proxy then
+    # spends that identity — pair it with the access gate or a loopback bind.
+    auth: str = "passthrough"
+    # bedrock + auth = "identity" only: the SigV4 signing region when the
+    # upstream host does not name one (a VPC endpoint, a proxy in front).
+    region: str | None = None
+
+
+# Providers whose upstream the proxy can authorize with its own cloud
+# identity ([providers.NAME] auth = "identity"), and how.
+IDENTITY_AUTH_PROVIDERS: dict[str, str] = {
+    "bedrock": "AWS SigV4 (service bedrock)",
+    "vertex": "Google OAuth bearer token (cloud-platform scope)",
+    "azure": "Microsoft Entra ID bearer token (cognitiveservices scope)",
+}
+PROVIDER_AUTH_MODES = ("passthrough", "identity")
+_REGION_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
 
 
 DEFAULT_PROVIDERS: dict[str, ProviderConfig] = {
@@ -572,6 +594,38 @@ def _add_custom_provider(
         enabled=_bool_key(section, "enabled", True, f"[providers.custom.{name}]"),
         detection=_bool_key(section, "detection", True, f"[providers.custom.{name}]"),
     )
+
+
+def _provider_auth(name: str, section: Mapping[str, Any]) -> tuple[str, str | None]:
+    """``auth`` and ``region`` of one built-in ``[providers.NAME]`` table.
+
+    ``identity`` is only meaningful where the proxy knows the cloud's
+    authorization scheme (IDENTITY_AUTH_PROVIDERS); anywhere else it would
+    strip the client's key and send nothing — refused. ``region`` feeds
+    the SigV4 credential scope, so it is bedrock-with-identity only (an
+    inert region elsewhere would read as if it did something).
+    """
+    where = f"[providers.{name}]"
+    auth = _str_key(section, "auth", "passthrough", where)
+    if auth not in PROVIDER_AUTH_MODES:
+        raise ConfigError(f'{where} auth must be "passthrough" or "identity", got {auth!r}')
+    if auth == "identity" and name not in IDENTITY_AUTH_PROVIDERS:
+        raise ConfigError(
+            f'{where} auth = "identity" is supported only for'
+            f" {', '.join(sorted(IDENTITY_AUTH_PROVIDERS))} (the proxy signs or authorizes"
+            " those requests with its own cloud identity)"
+        )
+    if "region" not in section:
+        return auth, None
+    region = _str_key(section, "region", "", where)
+    if name != "bedrock" or auth != "identity":
+        raise ConfigError(
+            f'{where} region is only used with [providers.bedrock] auth = "identity"'
+            " (the SigV4 signing region)"
+        )
+    if not _REGION_RE.fullmatch(region):
+        raise ConfigError(f"{where} region must look like an AWS region (e.g. us-east-1)")
+    return auth, region
 
 
 def default_config_path() -> Path:
@@ -1589,14 +1643,21 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
                 f" own OpenAI-compatible upstream use [providers.custom.{name}]"
                 f" (served under /custom/{name}/)"
             )
-        _require_keys(section, {"upstream_base_url", "enabled", "detection"}, f"[providers.{name}]")
+        _require_keys(
+            section,
+            {"upstream_base_url", "enabled", "detection", "auth", "region"},
+            f"[providers.{name}]",
+        )
         # upstream_base_url may be omitted for an enabled-only edit; the
         # provider then keeps its default upstream.
         url = section.get("upstream_base_url", providers[name].upstream_base_url)
+        auth, region = _provider_auth(name, section)
         providers[name] = ProviderConfig(
             upstream_base_url=str(url).rstrip("/"),
             enabled=_bool_key(section, "enabled", True, f"[providers.{name}]"),
             detection=_bool_key(section, "detection", True, f"[providers.{name}]"),
+            auth=auth,
+            region=region,
         )
 
     detection_raw = raw.get("detection", {})

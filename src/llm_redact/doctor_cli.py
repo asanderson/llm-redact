@@ -543,6 +543,52 @@ def _check_posture(report: _Report, config: Config) -> None:
         report.line("PASS", "posture", "no coverage opt-outs configured (all traffic redacted)")
 
 
+def _access_gate_requires_identity(config: Config) -> bool:
+    """Whether llm-redact-pro's access gate is configured to require a client
+    identity on API requests (``[auth] require`` or brokered mode). Read
+    generically: the ``[auth]`` shape belongs to the package."""
+    auth = config.extensions.get("auth")
+    return bool(getattr(auth, "require", False) or getattr(auth, "broker", False))
+
+
+def _check_upstream_auth(report: _Report, config: Config) -> None:
+    """[providers.NAME] auth = "identity": the proxy's own cloud identity.
+    Build-and-close each authorizer through the registry (construction does
+    no network I/O — credentials are fetched per request, so doctor never
+    contacts a cloud), then WARN when a non-loopback proxy lets any client
+    that reaches it spend that identity without an access gate. Silent when
+    every provider forwards the client's own credential."""
+    from llm_redact.registry import get_registry
+
+    identity = sorted(name for name, p in config.providers.items() if p.auth == "identity")
+    if not identity:
+        return
+    registry = get_registry()
+    for name in identity:
+        try:
+            auth = registry.build_upstream_auth(name, config.providers[name])
+        except ConfigError as problem:
+            report.line("FAIL", "upstream-auth", f"{problem} — serve would refuse this config")
+            continue
+        if auth is not None:
+            auth.close()
+        report.line(
+            "PASS",
+            "upstream-auth",
+            f"[providers.{name}] requests are authorized with the proxy's own cloud identity"
+            " (credentials are resolved per request; not contacted here)",
+        )
+    if config.host in ("127.0.0.1", "localhost", "::1") or _access_gate_requires_identity(config):
+        return
+    report.line(
+        "WARN",
+        "upstream-auth",
+        f"non-loopback bind {config.host} with auth = identity for {', '.join(identity)} and"
+        " no access gate requiring an identity: any client that reaches the proxy spends its"
+        " cloud identity — set [auth] require = true (llm-redact-pro) or bind 127.0.0.1",
+    )
+
+
 def _check_routing(report: _Report, config: Config, offline: bool) -> None:
     """R-31 lives in llm-redact-pro (routing is a pro subsystem); this shell
     reports the config/package posture and hands the checks to the package."""
@@ -666,6 +712,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_vault(report, config)
     _check_extras(report, config)
     _check_posture(report, config)
+    _check_upstream_auth(report, config)
     _check_routing(report, config, bool(getattr(args, "offline", False)))
     _check_access(report, config)
     _check_email(report, config)

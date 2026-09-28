@@ -14,7 +14,7 @@ At a glance:
 | Azure OpenAI | `[providers.azure]` + tool's Azure endpoint | same OpenAI surface incl. Responses/Realtime, files/batches |
 | Google Gemini | `GOOGLE_GEMINI_BASE_URL` | generateContent/stream, countTokens, embeddings, cachedContents, batch, Live WS |
 | Vertex AI | `[providers.vertex]` | Gemini-on-Vertex + Claude-on-Vertex (`rawPredict`/`streamRawPredict`) |
-| AWS Bedrock | `[providers.bedrock]` (bearer keys) | converse(+stream), invoke(+response-stream), binary eventstream |
+| AWS Bedrock | `[providers.bedrock]` (bearer keys, or the proxy's own identity) | converse(+stream), invoke(+response-stream), binary eventstream |
 | Cohere | `[providers.cohere]` | v2 chat (+streaming), embed, rerank, legacy v1 chat/generate |
 | Ollama (native) | `OLLAMA_HOST` | /api/chat, /api/generate (+NDJSON streaming), /api/embed |
 | Any OpenAI-compatible | `[providers.custom.NAME]` → `/custom/NAME/` | full OpenAI surface per named upstream, several side by side |
@@ -50,7 +50,9 @@ actually flowing through the proxy with `/llm-redact:status` and
 Set `[providers.azure] upstream_base_url` to your resource URL and point
 the tool's Azure endpoint at the proxy. The full OpenAI surface is
 covered on Azure paths too — Chat Completions, Responses, embeddings,
-files/batches, and Realtime.
+files/batches, and Realtime. The tool's `api-key` (or Entra ID
+bearer token) is forwarded as is, unless the proxy authorizes with its
+own identity (see [the proxy's own cloud identity](#the-proxys-own-cloud-identity)).
 
 ## Vertex AI (Gemini and Claude models)
 
@@ -62,7 +64,9 @@ models on Vertex** are covered too: their
 `publishers/anthropic/models/{m}:rawPredict` / `:streamRawPredict` paths
 carry Anthropic Messages bodies, so they reuse the Anthropic
 redaction/rehydration and the same `[providers.vertex]` upstream (other
-publishers' `rawPredict` traffic is deliberately left untouched).
+publishers' `rawPredict` traffic is deliberately left untouched). The
+tool's bearer token is forwarded as is, unless the proxy authorizes with
+its own identity (below).
 
 ## AWS Bedrock
 
@@ -72,9 +76,43 @@ Bedrock's bearer-token API keys are supported: set
 runtime routes (`converse`, `converse-stream`, `invoke`,
 `invoke-with-response-stream`) are redacted, including AWS's binary
 eventstream response framing, which the proxy parses and re-frames
-natively. SigV4-signed SDK traffic remains a permanent non-goal — the
-signature covers the payload hash, so no body-rewriting proxy can
-transit it (see [threat-model.md](threat-model.md)).
+natively. A signature the CLIENT computed (SigV4-signed SDK traffic)
+remains a permanent non-goal: it covers the payload hash of the
+unredacted body, so no body-rewriting proxy can transit it (see
+[threat-model.md](threat-model.md)). The proxy can instead sign each
+request itself, after redaction, with a cloud identity it holds (below).
+
+## The proxy's own cloud identity
+
+With the llm-redact-pro package installed, Bedrock, Vertex AI and Azure
+OpenAI can be authorized by the PROXY instead of the tool:
+
+```toml
+[providers.bedrock]
+upstream_base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+auth = "identity"          # default "passthrough": forward the tool's credential
+# region = "us-east-1"     # bedrock only; when the host names no region
+```
+
+With `auth = "identity"` the proxy removes every credential the tool
+sent (`Authorization`, `x-api-key`, `api-key`, `x-goog-api-key`, any
+other `*api-key` or `*authorization*` header, `x-amz-*` signing
+headers, cookies, and `key=` / `api-key=` / `access_token=` / `X-Amz-*`
+query parameters), then authorizes the final, redacted request with its
+own workload identity: AWS SigV4 for Bedrock, a Google OAuth token for
+Vertex AI (Gemini and Claude models alike), a Microsoft Entra ID token
+for Azure OpenAI. If no credential can be obtained, the proxy answers a
+502 and forwards nothing. The setting is valid only for these three
+providers; without llm-redact-pro it is a startup error. Realtime
+WebSocket connections to a provider using it are refused (1011), and
+such a provider is never routed. Credential sources and the IAM
+permissions to grant are in llm-redact-pro's provider-identity guide.
+
+Any client that can reach the proxy can then spend that identity: keep
+the proxy on 127.0.0.1, or require a client identity with
+llm-redact-pro's access gate (`[auth] require = true`). `llm-redact
+doctor` warns about a non-loopback bind without one, and `llm-redact
+status` lists the providers the proxy holds credentials for.
 
 ## Ollama's native API
 

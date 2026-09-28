@@ -687,6 +687,18 @@ async def ws_handle(websocket: WebSocket) -> None:
         logger.info("WS %s -> refused (provider %s disabled)", path, adapter.provider)
         await _reject(websocket, f"provider {adapter.provider} disabled in llm-redact config")
         return
+    if provider_config.auth != "passthrough":
+        # auth = "identity": the proxy authorizes this provider with its own
+        # cloud identity on HTTP, but the realtime relay cannot (a WebSocket
+        # handshake is not signed per request). Forwarding the client's
+        # credential — or none — would silently break the configured
+        # contract, so the connection is refused with the reason.
+        logger.info("WS %s -> refused (provider %s uses identity auth)", path, adapter.provider)
+        await _reject(
+            websocket,
+            f'realtime is not supported with [providers.{adapter.provider}] auth = "identity"',
+        )
+        return
     if not websockets_available():
         await _reject(
             websocket,

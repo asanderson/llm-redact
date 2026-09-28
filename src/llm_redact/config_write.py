@@ -265,6 +265,17 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
             # Omitted when true, like enabled — and loudly annotated: this
             # provider's requests are forwarded WITHOUT redaction.
             lines.append("detection = false # values go to this upstream unredacted")
+        if config.providers[name].auth != "passthrough":
+            # Omitted at the default (the client's own credential is
+            # forwarded); annotated because the proxy then spends its OWN
+            # cloud identity for every client that reaches it.
+            lines.append(
+                f"auth = {_toml_str(config.providers[name].auth)}"
+                " # the proxy authorizes with its own cloud identity"
+            )
+        region = config.providers[name].region
+        if region is not None:
+            lines.append(f"region = {_toml_str(region)}")
 
     detection = config.detection
     lines.append("\n[detection]")

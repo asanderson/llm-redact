@@ -121,6 +121,16 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
             "delivery": "(self) -> 'RouteDelivery'",
         },
     ),
+    "UpstreamAuth": (
+        (),
+        {
+            "authorize": (
+                "(self, method: 'str', url: 'str', headers: 'list[tuple[str, str]]',"
+                " body: 'bytes') -> 'list[tuple[str, str]]'"
+            ),
+            "close": "(self) -> 'None'",
+        },
+    ),
     "Router": (
         (),
         {
@@ -188,6 +198,8 @@ ALL: tuple[str, ...] = (
     "SSEEvent",
     "SessionRouter",
     "Telemetry",
+    "UpstreamAuth",
+    "UpstreamAuthError",
     "Vault",
     "VaultCipher",
     "VaultKeyError",
@@ -236,3 +248,10 @@ def test_all_is_snapshotted_and_resolves() -> None:
 
     assert plugin_api.RouteKind is RouteKind
     assert plugin_api.SSEEvent is SSEEvent
+
+
+def test_upstream_auth_error_is_a_plain_exception() -> None:
+    # The core catches it to answer the credential 502; pro raises it from
+    # UpstreamAuth.authorize with a source-only message.
+    assert issubclass(plugin_api.UpstreamAuthError, Exception)
+    assert not issubclass(plugin_api.UpstreamAuthError, ValueError)  # never a ConfigError

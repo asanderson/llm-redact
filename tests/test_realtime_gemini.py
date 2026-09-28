@@ -183,3 +183,38 @@ async def test_relay_round_trip_gemini_path() -> None:
         assert EMAIL not in upstream_text and upstream_text.startswith("mail «EMAIL_")
     # The raw query (with its key) reached the upstream untouched.
     assert fake.paths == [f"{LIVE_PATH}?key=test-key"]
+
+
+def test_snake_case_messages_skip_enums_and_take_the_note() -> None:
+    # The proto JSON mapping accepts the original field names, and Google's
+    # own Vertex Live notebook sends them: snake_case enums stay structural
+    # and a snake_case system_instruction still receives the note.
+    from llm_redact.providers.base import SYSTEM_NOTE
+
+    adapter, ctx, _pool, _vault = _setup()
+    # A detector that would flag the enum values if they were walked.
+    seen: list[str] = []
+
+    def spy(text: str) -> str:
+        seen.append(text)
+        return str(ctx.redactor.redact_text(text))
+
+    spying = SimpleNamespace(redactor=SimpleNamespace(redact_text=spy))
+    message = {
+        "setup": {
+            "model": "projects/p/locations/l/publishers/google/models/m",
+            "system_instruction": {"parts": [{"text": f"help {EMAIL}"}]},
+            "generation_config": {
+                "response_modalities": ["audio"],
+                "speech_config": {
+                    "voice_config": {"prebuilt_voice_config": {"voice_name": "Kore"}},
+                    "language_code": "en-US",
+                },
+            },
+        },
+        "realtime_input": {"media_chunks": [{"mime_type": "audio/pcm", "data": "AAAA"}]},
+    }
+    out = json.loads(adapter.redact_message(json.dumps(message), spying, inject_note=True))  # type: ignore[arg-type]
+    assert seen == [f"help {EMAIL}"]  # only content was walked
+    parts = out["setup"]["system_instruction"]["parts"]
+    assert EMAIL not in parts[0]["text"] and parts[-1]["text"] == SYSTEM_NOTE

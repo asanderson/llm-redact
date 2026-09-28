@@ -59,12 +59,20 @@ upstream_base_url = "http://127.0.0.1:11434"
 # [providers.vertex]
 # upstream_base_url = "https://us-central1-aiplatform.googleapis.com"
 
-# AWS Bedrock (bearer-token API keys only — SigV4-signed SDK traffic cannot
-# transit a body-rewriting proxy) also embeds the region; /model/... routes
-# (converse, converse-stream, invoke, invoke-with-response-stream) answer
-# 502 until this is set.
+# AWS Bedrock (bearer-token API keys — a SigV4 signature the CLIENT computed
+# cannot transit a body-rewriting proxy) also embeds the region; /model/...
+# routes (converse, converse-stream, invoke, invoke-with-response-stream)
+# answer 502 until this is set.
 # [providers.bedrock]
 # upstream_base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+
+# azure, vertex and bedrock only (llm-redact-pro): auth = "identity" drops
+# the tool's credential and authorizes each redacted request with the
+# PROXY's own cloud identity (SigV4 / Google / Entra ID). Anyone who can
+# reach the proxy then spends that identity — keep it on 127.0.0.1 or
+# require client identities ([auth] require = true).
+# auth = "identity"
+# region = "us-east-1"   # bedrock only, when the host names no region
 
 ## [upstreams.*] / [routing] / [prices]: rule-based upstream routing, fallback
 ## chains and monthly budgets are an llm-redact-pro feature; the core parses

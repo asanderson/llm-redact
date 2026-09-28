@@ -108,6 +108,17 @@ class GeminiAdapter(ProviderAdapter):
             return RouteKind.REDACT_ONLY
         return RouteKind.CHAT
 
+    def tracks_object_ids(self, method: str, path: str) -> bool:
+        # A context cache: later generateContent requests name it in
+        # `cachedContent`, and the model echoes its (redacted) content.
+        return method == "POST" and _GEMINI_CACHED_CREATE.fullmatch(path) is not None
+
+    def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
+        # The create answers with the cache's resource name, "cachedContents/…".
+        if isinstance(body, dict) and isinstance(body.get("name"), str) and body["name"]:
+            return (str(body["name"]),)
+        return ()
+
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         # countTokens bodies carry the same systemInstruction schema as the
         # chat request they mirror, so the note belongs in the count;

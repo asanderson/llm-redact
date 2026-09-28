@@ -23,7 +23,9 @@ from license_fixtures import resolved
 from llm_redact.config import Config, ProviderConfig, VaultConfig
 from llm_redact.plugin_api import Admission, SessionStore
 from llm_redact.providers.anthropic import AnthropicAdapter
+from llm_redact.providers.gemini import GeminiAdapter
 from llm_redact.providers.openai import OpenAIAdapter
+from llm_redact.providers.vertex import VertexAdapter
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
 from llm_redact.vault import InMemoryVaultManager, SqliteVaultManager
@@ -151,6 +153,21 @@ def test_stored_object_ids_are_read_from_the_body() -> None:
     assert anthropic.object_ids_from_body("POST", "/v1/messages/batches", {"id": "msgbatch_1"}) == (
         "msgbatch_1",
     )
+    gemini = GeminiAdapter()
+    assert gemini.tracks_object_ids("POST", "/v1beta/cachedContents")
+    assert gemini.tracks_object_ids("POST", "/v1/cachedContents")
+    assert not gemini.tracks_object_ids("GET", "/v1beta/cachedContents/abc")
+    assert not gemini.tracks_object_ids("POST", "/v1beta/models/m:generateContent")
+    assert not gemini.tracks_object_ids("POST", "/v1beta/models/m:batchGenerateContent")
+    created = {"name": "cachedContents/abc123", "model": "models/gemini-2.5-pro"}
+    assert gemini.object_ids_from_body("POST", "/v1beta/cachedContents", created) == (
+        "cachedContents/abc123",
+    )
+    assert gemini.object_ids_from_body("POST", "/v1beta/cachedContents", {"name": ""}) == ()
+    assert gemini.object_ids_from_body("POST", "/v1beta/cachedContents", ["x"]) == ()
+    # Vertex answers on its own paths, which the Gemini API matcher never claims.
+    vertex_create = "/v1/projects/p/locations/us-central1/cachedContents"
+    assert not VertexAdapter().tracks_object_ids("POST", vertex_create)
 
 
 class OwnershipRouter:
@@ -202,6 +219,30 @@ async def test_created_objects_are_reported_with_their_session(
     assert router.objects == [("batch_9", "user:n1:main")]
     durable = app.state.proxy.vault_manager.lookup_response_session("batch_9")
     assert (durable == "user:n1:main") is mirrored
+
+
+async def test_a_created_gemini_cache_is_reported_with_its_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    router = OwnershipRouter()
+    _registry(monkeypatch, build_session_router=lambda config, **kw: router)
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"name": "cachedContents/c1", "model": "models/g"})
+
+    config = Config(
+        providers={"gemini": ProviderConfig(UPSTREAM)},
+        vault=VaultConfig(backend="sqlite", path=str(tmp_path / "v.db")),
+    )
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        body = {"model": "models/g", "contents": [{"parts": [{"text": "ada@corp.example"}]}]}
+        response = await client.post("/v1beta/cachedContents", json=body)
+    assert response.status_code == 200
+    assert router.objects == [("cachedContents/c1", "user:n1:main")]
+    durable = app.state.proxy.vault_manager.lookup_response_session("cachedContents/c1")
+    assert durable == "user:n1:main"
 
 
 async def test_nothing_is_reported_for_errors_or_static_mode(

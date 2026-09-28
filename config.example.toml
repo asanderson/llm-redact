@@ -150,6 +150,10 @@ encryption = "none"
 # module = "pyodbc"        # backend = "dbapi" only
 # cloud = "aws"            # declared managed-DBMS placement (llm-redact-pro);
 #                          # recognized managed hostnames are also detected
+# auth = "identity"        # postgresql/mysql + cloud: a short-lived token from
+#                          # the proxy's cloud identity at every connect, over
+#                          # TLS, instead of a static password (llm-redact-pro)
+# region = "us-east-1"     # auth = "identity" + cloud = "aws": default = from the RDS host
 
 [rehydration]
 # Restore LLM-mangled placeholders too («email_001», «EMAIL-1», « EMAIL_001 »).

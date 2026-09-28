@@ -11,7 +11,7 @@ plugin API contract — change it deliberately, never incidentally.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -541,6 +541,17 @@ class UpstreamAuth(Protocol):
     def close(self) -> None: ...
 
 
+# --- vault database credential seam ---------------------------------------------
+# ``Registry.build_db_password(vault_config)`` returns one of these (or None
+# for the static password). The RDBMS vault store calls it synchronously at
+# EVERY connect and reconnect, on the thread running the store — cloud
+# database tokens (RDS IAM, Cloud SQL IAM, Entra ID) expire in minutes, so a
+# password captured once would break the first reconnect after expiry. It
+# returns the password; it raises (naming the credential SOURCE, never a
+# secret) when none can be had, which fails the connect closed.
+DbPasswordProvider = Callable[[], str]
+
+
 # --- CLI seam -------------------------------------------------------------------
 # Paid command-line subcommands register here instead of living in the core
 # parser: the core adds each registered command's subparser, dispatches to
@@ -599,6 +610,7 @@ __all__ = [
     "ConfigSection",
     "Dashboard",
     "DashboardHost",
+    "DbPasswordProvider",
     "HopDecision",
     "HopRequest",
     "HopResult",

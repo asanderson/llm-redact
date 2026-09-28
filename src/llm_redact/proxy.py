@@ -1363,6 +1363,9 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
             # Honesty fields: a recognized managed-DBMS host and the
             # remote-plaintext hatch are opt-in postures — never silent.
             vault_block["managed_cloud"] = managed_dbms_cloud(config.vault)
+            # "password" (static) or "identity" (a per-connect token minted
+            # from the proxy's cloud identity) — never the credential itself.
+            vault_block["auth"] = config.vault.rdbms.auth
             vault_block["remote_plaintext"] = (
                 config.vault.encryption != "fernet" and os.environ.get(ENV_REMOTE_PLAINTEXT) == "1"
             )

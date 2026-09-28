@@ -175,6 +175,21 @@ def test_access_gate_default_refuses_when_pro_failed_to_load(
     assert reg.build_access_gate(Config(), keyed_free) is None  # key without pro
 
 
+def test_build_db_password_default_factory() -> None:
+    from llm_redact.config import RdbmsConfig
+
+    reg = Registry()
+    assert reg.build_db_password(VaultConfig()) is None  # the static password
+    identity = VaultConfig(
+        backend="postgresql",
+        rdbms=RdbmsConfig(dsn="postgresql://u@h/d", cloud="aws", auth="identity"),
+    )
+    # Minting a token from the cloud identity is credential fetching — paid,
+    # and never silently replaced by a static password.
+    with pytest.raises(ConfigError, match="llm-redact-pro"):
+        reg.build_db_password(identity)
+
+
 def test_default_tool_base_url_and_cli_commands() -> None:
     reg = Registry()
     assert reg.tool_base_url("http://127.0.0.1:8787") == "http://127.0.0.1:8787"

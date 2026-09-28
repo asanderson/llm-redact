@@ -183,6 +183,7 @@ ALL: tuple[str, ...] = (
     "ConfigSection",
     "Dashboard",
     "DashboardHost",
+    "DbPasswordProvider",
     "HopDecision",
     "HopRequest",
     "HopResult",
@@ -255,3 +256,11 @@ def test_upstream_auth_error_is_a_plain_exception() -> None:
     # UpstreamAuth.authorize with a source-only message.
     assert issubclass(plugin_api.UpstreamAuthError, Exception)
     assert not issubclass(plugin_api.UpstreamAuthError, ValueError)  # never a ConfigError
+
+
+def test_db_password_provider_alias_is_snapshotted() -> None:
+    # The RDBMS vault's per-connect password seam (Registry.build_db_password
+    # returns one): a zero-argument callable returning the password.
+    from collections.abc import Callable
+
+    assert plugin_api.DbPasswordProvider == Callable[[], str]

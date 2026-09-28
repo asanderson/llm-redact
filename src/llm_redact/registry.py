@@ -27,6 +27,7 @@ from .audit import build_audit as _build_audit
 from .audit_s3 import build_audit_sinks as _build_audit_sinks
 from .free_defaults import build_access_gate as _build_access_gate
 from .free_defaults import build_dashboard as _build_dashboard
+from .free_defaults import build_db_password as _build_db_password
 from .free_defaults import build_router as _build_router
 from .free_defaults import build_telemetry as _build_telemetry
 from .free_defaults import build_upstream_auth as _build_upstream_auth
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
         CliCommand,
         ConfigSection,
         Dashboard,
+        DbPasswordProvider,
         Router,
         SessionRouter,
         Telemetry,
@@ -90,6 +92,7 @@ class Registry:
     build_vault_manager: Callable[[VaultConfig], VaultManager]
     build_cipher: Callable[[VaultConfig], VaultCipher | None]
     cipher_from_key: Callable[[bytes], VaultCipher]
+    build_db_password: Callable[[VaultConfig], DbPasswordProvider | None]
     build_session_router: Callable[..., SessionRouter]
     resolve_license: Callable[..., ResolvedLicense]
     build_telemetry: Callable[[OtelConfig], Telemetry | None]
@@ -113,6 +116,11 @@ class Registry:
         # defaults fail closed on an encrypted vault.
         self.build_cipher = _build_cipher
         self.cipher_from_key = _cipher_from_key
+        # The RDBMS vault's per-connect password (plugin_api.DbPasswordProvider):
+        # None keeps the static password_env/DSN password; [vault.rdbms]
+        # auth = "identity" (a token minted from the proxy's cloud identity)
+        # is paid — the Free default fails closed naming llm-redact-pro.
+        self.build_db_password = _build_db_password
         self.build_session_router = _build_session_router
         # License verification (the "what did the vendor sign" enforcement core)
         # is a paid subsystem (R3); the Free default resolves to Free with a

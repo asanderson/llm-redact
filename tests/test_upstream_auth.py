@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import tomllib
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -57,6 +58,8 @@ CLIENT_CREDENTIALS = {
     "x-amz-security-token": "client-session",
     "x-amz-content-sha256": "deadbeef",
     "x-goog-iam-authorization-token": "client-iam",
+    "x-goog-iam-authority-selector": "client-selector",
+    "x-goog-user-project": "someone-elses-billing-project",
     "x-ms-authorization-auxiliary": "Bearer aux",
     "proxy-authorization": "Basic cHJveHk=",
     "ocp-apim-subscription-key": "apim",
@@ -177,6 +180,8 @@ def test_custom_providers_have_no_auth_key() -> None:
         ({"auth": "identity", "region": 3}, "region must be a string"),
         ({"auth": "identity", "region": "US East"}, "region must look like an AWS region"),
         ({"auth": "identity", "region": ""}, "region must look like an AWS region"),
+        # The 32-character cap (a later same-named pattern once shadowed it).
+        ({"auth": "identity", "region": "a" * 40}, "region must look like an AWS region"),
         ({"region": "us-east-1"}, "region is only used with"),
     ],
 )
@@ -256,6 +261,16 @@ def test_strip_client_credentials_url_and_headers() -> None:
     # httpx's on-the-wire form: what authorize() sees is what is sent.
     url, _ = strip_client_credentials(f"{AZURE}/openai/x y?api-version=1&key=k", [])
     assert url == f"{AZURE}/openai/x%20y?api-version=1"
+
+
+def test_an_identity_provider_without_an_authorizer_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A plugin answering None for an identity provider would otherwise let
+    # the client's own credential through in the proxy's place.
+    _install(monkeypatch, lambda name, provider: None)
+    with pytest.raises(ConfigError, match="built no authorizer"):
+        create_app(_config(vertex=_identity(VERTEX)))
 
 
 # --- the request path -----------------------------------------------------------------
@@ -631,3 +646,36 @@ def test_doctor_passes_when_factory_returns_none(monkeypatch: pytest.MonkeyPatch
     _install(monkeypatch, lambda name, provider: None)
     rows = _doctor_rows(_config(azure=_identity(AZURE)))
     assert [row["level"] for row in rows] == ["PASS"]
+
+
+def test_identity_exposure_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.proxy import identity_exposure_warning
+
+    _install(monkeypatch)
+    exposed: ProxyState = create_app(_config(vertex=_identity(VERTEX))).state.proxy
+    message = identity_exposure_warning(exposed, "0.0.0.0")
+    assert message is not None and "vertex" in message and "no access gate" in message
+    assert identity_exposure_warning(exposed, "127.0.0.1") is None
+    plain: ProxyState = create_app(_config()).state.proxy
+    assert identity_exposure_warning(plain, "0.0.0.0") is None
+    exposed.access_gate = object()  # type: ignore[assignment]
+    assert identity_exposure_warning(exposed, "0.0.0.0") is None
+
+
+def test_serve_check_prints_the_exposure_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from llm_redact.cli import main
+
+    _install(monkeypatch)
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[providers.vertex]\nupstream_base_url = "https://us-east5-aiplatform.googleapis.com"\n'
+        'auth = "identity"\n'
+    )
+    monkeypatch.setenv("LLM_REDACT_INSECURE_BIND", "1")
+    monkeypatch.setenv("LLM_REDACT_HOST", "0.0.0.0")
+    with pytest.raises(SystemExit) as exit_info:
+        main(["serve", "--check", "--config", str(config)])
+    assert exit_info.value.code == 0
+    assert "WARN: providers vertex use the proxy's own cloud identity" in capsys.readouterr().err

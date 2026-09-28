@@ -31,6 +31,7 @@ from llm_redact.vault import VaultKeyError, build_vault_manager
 from llm_redact.vault_rdbms import (
     ENV_DSN,
     ENV_REMOTE_PLAINTEXT,
+    ENV_TLS_UNVERIFIED,
     RdbmsStore,
     RdbmsVault,
     RdbmsVaultManager,
@@ -929,6 +930,8 @@ def test_parse_identity_auth_accepts_and_roundtrips() -> None:
             "forbids a password",
         ),
         (_identity_raw("postgresql", _PG_IDENTITY_DSN, region="us east"), "not a region name"),
+        # A trailing newline would slip past a $-anchored .match.
+        (_identity_raw("postgresql", _PG_IDENTITY_DSN, region="eu-west-1\n"), "not a region name"),
         (
             _identity_raw("postgresql", _PG_IDENTITY_DSN, cloud="gcp", region="us-east-1"),
             'region applies only to cloud = "aws"',
@@ -978,6 +981,7 @@ def test_identity_battery_and_fresh_password_per_connect(
 ) -> None:
     _, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
     monkeypatch.delenv("PGSSLMODE", raising=False)
+    monkeypatch.setenv(ENV_TLS_UNVERIFIED, "1")  # the require-mode link under test
     monkeypatch.setenv("LLM_REDACT_VAULT_DB_PASSWORD", "static-must-not-be-used")
     config = _identity_vault("postgresql", _PG_IDENTITY_DSN)
     provider = _CountingPassword()
@@ -1008,6 +1012,7 @@ def test_identity_provider_failure_fails_the_connect_closed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    monkeypatch.setenv(ENV_TLS_UNVERIFIED, "1")
     config = _identity_vault("postgresql", _PG_IDENTITY_DSN)
     tokens = iter(["iam-token-1"])
 
@@ -1030,9 +1035,10 @@ def test_identity_provider_failure_fails_the_connect_closed(
     [
         ("", None, {"sslmode": "require"}),
         ("", "prefer", {"sslmode": "require"}),  # a weak env default is overridden
-        ("", "verify-full", {}),  # an operator's stronger env mode is left alone
-        ("?sslmode=verify-ca", "disable", {}),  # the DSN's own strong mode wins
-        ("?sslmode=REQUIRE", None, {}),
+        ("", "verify-full", {"sslmode": "verify-full"}),  # an operator's stronger env mode
+        ("?sslmode=verify-ca", "disable", {"sslmode": "verify-ca"}),  # the DSN's own wins
+        # Always explicit: a service file's weaker sslmode can never apply.
+        ("?sslmode=REQUIRE", None, {"sslmode": "require"}),
     ],
 )
 def test_identity_postgres_tls(
@@ -1043,6 +1049,7 @@ def test_identity_postgres_tls(
     expected: dict[str, str],
 ) -> None:
     _, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    monkeypatch.setenv(ENV_TLS_UNVERIFIED, "1")
     if pgsslmode is None:
         monkeypatch.delenv("PGSSLMODE", raising=False)
     else:
@@ -1081,6 +1088,7 @@ def test_identity_mysql_tls_and_fresh_password(
     from llm_redact.vault_rdbms import _TlsOnlyClearPassword
 
     _, driver = _fake_backend_config(monkeypatch, tmp_path, "mysql")
+    monkeypatch.setenv(ENV_TLS_UNVERIFIED, "1")  # the unverified-context path under test
     config = _identity_vault("mysql", _MYSQL_IDENTITY_DSN)
     provider = _CountingPassword()
     store = RdbmsStore(config, None, password_provider=provider)
@@ -1143,11 +1151,68 @@ def test_identity_mysql_refuses_pymysql_without_tls_enforcement(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _, driver = _fake_backend_config(monkeypatch, tmp_path, "mysql")
+    monkeypatch.setenv(ENV_TLS_UNVERIFIED, "1")
     monkeypatch.setattr(driver, "VERSION", (1, 1, 2, "final"), raising=False)
     provider = _CountingPassword()
     with pytest.raises(ConfigError, match="PyMySQL >= 1.2"):
         RdbmsStore(_identity_vault("mysql", _MYSQL_IDENTITY_DSN), None, password_provider=provider)
     assert provider.calls == 0 and driver.connect_count == 0  # refused before any token
+
+
+@pytest.mark.parametrize(
+    ("backend", "dsn", "env", "problem"),
+    [
+        ("postgresql", _PG_IDENTITY_DSN, {}, "server certificate must be verified"),
+        ("postgresql", _PG_IDENTITY_DSN + "?sslmode=require", {}, "must be verified"),
+        ("postgresql", _PG_IDENTITY_DSN + "?sslmode=verify-full", {}, None),
+        ("postgresql", _PG_IDENTITY_DSN, {"PGSSLMODE": "verify-ca"}, None),
+        ("postgresql", _PG_IDENTITY_DSN, {ENV_TLS_UNVERIFIED: "1"}, None),
+        ("postgresql", "postgresql://vault@127.0.0.1:5432/v", {}, None),  # loopback
+        ("postgresql", "postgresql://vault@/v?host=/cloudsql/p:r:i", {}, None),  # socket
+        # Parameters that could redirect the token or pull in a service file.
+        ("postgresql", _PG_IDENTITY_DSN + "?sslmode=verify-full&service=x", {}, "service"),
+        ("postgresql", _PG_IDENTITY_DSN + "?sslmode=verify-full&hostaddr=10.0.0.9", {}, "hostaddr"),
+        ("postgresql", _PG_IDENTITY_DSN + "?sslmode=verify-full&host=evil.example", {}, "host"),
+        ("postgresql", _PG_IDENTITY_DSN + "?sslmode=verify-full", {"PGSERVICE": "x"}, "PGSERVICE"),
+        (
+            "postgresql",
+            _PG_IDENTITY_DSN + "?sslmode=verify-full",
+            {"PGHOSTADDR": "1.2.3.4"},
+            "PGHOSTADDR",
+        ),
+        ("mysql", _MYSQL_IDENTITY_DSN, {}, "?ssl_ca=PATH"),
+        ("mysql", _MYSQL_IDENTITY_DSN + "?ssl_ca=/ca.pem", {}, None),
+        ("mysql", _MYSQL_IDENTITY_DSN, {ENV_TLS_UNVERIFIED: "1"}, None),
+    ],
+)
+def test_identity_tls_problem(
+    backend: str, dsn: str, env: dict[str, str], problem: str | None
+) -> None:
+    from llm_redact.vault_rdbms import identity_tls_problem
+
+    found = identity_tls_problem(backend, dsn, env)
+    if problem is None:
+        assert found is None
+    else:
+        assert found is not None and problem in found
+        assert "abc.us-east-1" not in found  # the rule, never the DSN
+
+
+def test_identity_tls_unverified_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.vault_rdbms import identity_tls_unverified
+
+    monkeypatch.delenv("PGSSLMODE", raising=False)
+    monkeypatch.delenv(ENV_DSN, raising=False)
+    unverified = _identity_vault("postgresql", _PG_IDENTITY_DSN)
+    assert not identity_tls_unverified(unverified)  # no hatch: it refuses to start instead
+    monkeypatch.setenv(ENV_TLS_UNVERIFIED, "1")
+    assert identity_tls_unverified(unverified)
+    assert not identity_tls_unverified(
+        _identity_vault("postgresql", _PG_IDENTITY_DSN + "?sslmode=verify-full")
+    )
+    assert not identity_tls_unverified(_identity_vault("postgresql", ""))  # no DSN yet
+    password = VaultConfig(backend="postgresql", rdbms=RdbmsConfig(dsn=_PG_IDENTITY_DSN))
+    assert not identity_tls_unverified(password)
 
 
 def test_tls_only_clear_password_handler() -> None:
@@ -1197,6 +1262,7 @@ def test_identity_without_pro_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_
     import llm_redact.registry as registry_mod
 
     _, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    monkeypatch.setenv(ENV_TLS_UNVERIFIED, "1")
     monkeypatch.setattr(registry_mod, "_registry", registry_mod.Registry())
     with pytest.raises(ConfigError, match="llm-redact-pro"):
         RdbmsStore(_identity_vault("postgresql", _PG_IDENTITY_DSN), None)
@@ -1223,6 +1289,7 @@ def test_registry_provider_used_for_every_connect(
     import llm_redact.registry as registry_mod
 
     _, driver = _fake_backend_config(monkeypatch, tmp_path, "mysql")
+    monkeypatch.setenv(ENV_TLS_UNVERIFIED, "1")
     provider = _CountingPassword()
     seen: list[VaultConfig] = []
     registry = registry_mod.Registry()
@@ -1275,7 +1342,7 @@ def test_validate_connector_identity_builds_no_credential(
     registry = registry_mod.Registry()
     registry.build_db_password = exploding  # type: ignore[assignment]
     monkeypatch.setattr(registry_mod, "_registry", registry)
-    config = _identity_vault("postgresql", _PG_IDENTITY_DSN)
+    config = _identity_vault("postgresql", _PG_IDENTITY_DSN + "?sslmode=verify-full")
     validate_connector(config)
     _, connect = _resolve_connector(config)
     with pytest.raises(ConfigError, match="no password provider"):
@@ -1283,6 +1350,8 @@ def test_validate_connector_identity_builds_no_credential(
     assert driver.connect_count == 0
     with pytest.raises(ConfigError, match="requires TLS"):
         validate_connector(_identity_vault("postgresql", _PG_IDENTITY_DSN + "?sslmode=allow"))
+    with pytest.raises(ConfigError, match="server certificate must be verified"):
+        validate_connector(_identity_vault("postgresql", _PG_IDENTITY_DSN))
 
 
 def _doctor_identity(
@@ -1316,7 +1385,12 @@ def _doctor_identity(
 
 def test_doctor_identity_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _, out = _doctor_identity(tmp_path, monkeypatch, installed=True)
+    # The DSN names no verification: a FAIL naming the rule and the hatch.
+    assert "server certificate must be verified" in out
+    monkeypatch.setenv(ENV_TLS_UNVERIFIED, "1")
+    _, out = _doctor_identity(tmp_path, monkeypatch, installed=True)
     assert "short-lived aws token minted from the proxy's cloud identity" in out
+    assert f"{ENV_TLS_UNVERIFIED}=1: the database token goes over TLS that does not" in out
     code, out = _doctor_identity(tmp_path, monkeypatch, installed=False)
     assert code == 1
     assert 'auth = "identity" requires the llm-redact-pro package' in out

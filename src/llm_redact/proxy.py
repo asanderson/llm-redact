@@ -51,11 +51,13 @@ from llm_redact.config import (
     Config,
     ConfigError,
     ProviderConfig,
+    _is_loopback_host,
     apply_env_overrides,
     default_config_path,
     load_config,
     resolve_config_path,
     resolve_credentials,
+    unsupported_plugin_capabilities,
 )
 from llm_redact.detection.engine import (
     active_rule_names,
@@ -360,6 +362,12 @@ class ProxyState:
         self.guide_html = (
             importlib.resources.files("llm_redact").joinpath("user_guide.html").read_text("utf-8")
         )
+        if loaded_plugins():
+            # Version skew: a plugin predating a configured capability
+            # (sink/email auth modes) must refuse, never silently degrade.
+            unsupported = unsupported_plugin_capabilities(config, registry.config_capabilities)
+            if unsupported is not None:
+                raise ConfigError(unsupported)
         # Audit log + off-machine sinks: registry-built (paid), each fail-closed
         # inside its factory (tamper chain without a key / fernet without a key
         # raise ConfigError there). The flush loops start in the lifespan.
@@ -1082,10 +1090,32 @@ def _build_upstream_auths(providers: Mapping[str, ProviderConfig]) -> dict[str, 
             auth = registry.build_upstream_auth(name, provider)
             if auth is not None:
                 built[name] = auth
+            elif provider.auth != "passthrough":
+                # A plugin that answers None for an identity provider would
+                # otherwise forward the client's own credential in its place.
+                raise ConfigError(
+                    f'[providers.{name}] auth = "{provider.auth}" but the installed'
+                    " llm-redact-pro built no authorizer for it; upgrade llm-redact-pro"
+                )
     except BaseException:
         _close_upstream_auths(built)
         raise
     return built
+
+
+def identity_exposure_warning(state: ProxyState, host: str) -> str | None:
+    """The startup warning for a proxy that lends its own cloud identity to
+    whoever can reach it: identity-authorized providers on a non-loopback
+    bind with no access gate to say who the clients are. (Transport mTLS
+    still admits every certificate its CA signed.) None when not exposed."""
+    if not state.upstream_auth or state.access_gate is not None or _is_loopback_host(host):
+        return None
+    names = ", ".join(sorted(state.upstream_auth))
+    return (
+        f"providers {names} use the proxy's own cloud identity and this proxy binds"
+        f" {host} with no access gate: every client that can connect spends that"
+        " identity; install llm-redact-pro access control or bind 127.0.0.1"
+    )
 
 
 def _close_upstream_auths(auths: Mapping[str, UpstreamAuth]) -> None:
@@ -1103,8 +1133,18 @@ def _close_upstream_auths(auths: Mapping[str, UpstreamAuth]) -> None:
 # At least the access gate's brokered set (authorization, x-api-key,
 # x-goog-api-key, api-key, ?key=), widened to every header naming an API key
 # or an authorization, AWS signing headers, cookies, and an API-management
-# subscription key.
-_CREDENTIAL_HEADERS = frozenset({"cookie", "ocp-apim-subscription-key"})
+# subscription key. Google's quota/billing-project and legacy IAM selector
+# headers go too: under the proxy's identity they would let a client bill
+# (or act in) a project the operator never chose.
+_CREDENTIAL_HEADERS = frozenset(
+    {
+        "cookie",
+        "ocp-apim-subscription-key",
+        "x-goog-user-project",
+        "x-goog-iam-authority-selector",
+        "x-goog-iam-authorization-token",
+    }
+)
 _CREDENTIAL_QUERY_PARAMS = frozenset({"key", "api-key", "api_key", "access_token"})
 
 
@@ -1392,7 +1432,11 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
             "key_source": vault_key_source(config.vault),
         }
         if config.vault.backend in RDBMS_BACKENDS:
-            from llm_redact.vault_rdbms import ENV_REMOTE_PLAINTEXT, managed_dbms_cloud
+            from llm_redact.vault_rdbms import (
+                ENV_REMOTE_PLAINTEXT,
+                identity_tls_unverified,
+                managed_dbms_cloud,
+            )
 
             # Honesty fields: a recognized managed-DBMS host and the
             # remote-plaintext hatch are opt-in postures — never silent.
@@ -1403,6 +1447,8 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
             vault_block["remote_plaintext"] = (
                 config.vault.encryption != "fernet" and os.environ.get(ENV_REMOTE_PLAINTEXT) == "1"
             )
+            # The identity token's TLS link is unverified (the hatch is set).
+            vault_block["tls_unverified"] = identity_tls_unverified(config.vault)
         return JSONResponse(
             {
                 "version": __version__,

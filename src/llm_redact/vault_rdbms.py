@@ -42,7 +42,7 @@ import importlib
 import os
 import re
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -66,6 +66,10 @@ ENV_DSN = "LLM_REDACT_VAULT_DSN"
 # same-host container network the hostname check cannot see). Surfaced in
 # /status and doctor whenever active — an opt-out is never silent.
 ENV_REMOTE_PLAINTEXT = "LLM_REDACT_VAULT_REMOTE_PLAINTEXT"
+# auth = "identity" hatch: accept an UNVERIFIED TLS link to a non-loopback
+# database (the token then reaches whoever answers the handshake). Surfaced
+# in /status (vault.tls_unverified), doctor and `llm-redact status`.
+ENV_TLS_UNVERIFIED = "LLM_REDACT_VAULT_TLS_UNVERIFIED"
 
 _DRIVER_MODULES = {"postgresql": "psycopg", "mysql": "pymysql", "oracle": "oracledb"}
 _EXTRA_HINTS = {
@@ -285,19 +289,95 @@ class _TlsOnlyClearPassword:
         return reply
 
 
-def _pg_tls_kwargs(dsn: str) -> dict[str, Any]:
-    """Connect kwargs making a PostgreSQL identity connection use TLS.
+# libpq connection parameters that could send the identity token somewhere
+# other than the DSN's host, or pull in a service file whose settings (a weak
+# sslmode, another hostaddr, another root certificate) apply unseen.
+_PG_REDIRECTING_PARAMS = ("service", "hostaddr")
+_PG_REDIRECTING_ENV = ("PGSERVICE", "PGSERVICEFILE", "PGHOSTADDR")
+_PG_VERIFYING_SSLMODES = ("verify-ca", "verify-full")
 
-    rdbms_identity_error already refused a weak sslmode in the DSN; when the
-    DSN names none, an operator's strong PGSSLMODE is left alone and anything
-    else (unset, or a weak value) is overridden to require."""
+
+def _pg_sslmode(dsn: str, environ: Mapping[str, str]) -> str:
+    """The sslmode an identity connection runs with: the DSN's, else a
+    strong PGSSLMODE, else require (always passed explicitly, so no
+    service file or environment value can weaken it)."""
     from llm_redact.config import PG_TLS_SSLMODES
 
-    if parse_qs(urlsplit(dsn).query).get("sslmode"):
-        return {}
-    if os.environ.get("PGSSLMODE", "").lower() in PG_TLS_SSLMODES:
-        return {}
-    return {"sslmode": "require"}
+    modes = parse_qs(urlsplit(dsn).query).get("sslmode")
+    if modes:
+        return modes[-1].lower()
+    env_mode = environ.get("PGSSLMODE", "").lower()
+    return env_mode if env_mode in PG_TLS_SSLMODES else "require"
+
+
+def identity_tls_problem(
+    backend: str, dsn: str, environ: Mapping[str, str] = os.environ
+) -> str | None:
+    """Why an ``auth = "identity"`` connection could hand its token to the
+    wrong party, else None.
+
+    RDS IAM, Cloud SQL IAM and Entra make the server ask for the token in
+    the clear INSIDE TLS, so an unverified link gives it to whoever answers
+    the handshake: off loopback the server certificate must be verified
+    (PostgreSQL sslmode verify-ca/verify-full, MySQL ``?ssl_ca=``) unless
+    the operator sets the surfaced hatch. PostgreSQL also refuses the
+    parameters that could redirect the connection behind the DSN's host.
+    Messages name the rule, never the DSN."""
+    parts = urlsplit(dsn)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    if backend == "postgresql":
+        named = [key for key in _PG_REDIRECTING_PARAMS if key in query]
+        hosts = query.get("host", [])
+        if any(not host.startswith("/") for host in hosts):
+            named.append("host")  # a TCP host overriding the DSN's; a socket dir is fine
+        named += [name for name in _PG_REDIRECTING_ENV if environ.get(name)]
+        if named:
+            return (
+                '[vault.rdbms] auth = "identity" refuses ' + ", ".join(named) + ": it could"
+                " send the database token past the DSN's host or weaken its TLS settings"
+            )
+    if environ.get(ENV_TLS_UNVERIFIED) == "1" or _identity_tls_verified(backend, dsn, environ):
+        return None
+    how = (
+        "sslmode=verify-full (verify-ca for Cloud SQL) with sslrootcert=PATH"
+        if backend == "postgresql"
+        else "?ssl_ca=PATH (the server's CA bundle)"
+    )
+    return (
+        '[vault.rdbms] auth = "identity" sends the database token inside TLS, so the'
+        f" server certificate must be verified: add {how} to the DSN, or set"
+        f" {ENV_TLS_UNVERIFIED}=1 to accept an unverified link (surfaced, never silent)"
+    )
+
+
+def _identity_tls_verified(backend: str, dsn: str, environ: Mapping[str, str]) -> bool:
+    """True when the token cannot reach an unverified server: a unix socket
+    or loopback host (it never crosses a network), else a verified TLS
+    server certificate."""
+    from llm_redact.config import _is_loopback_host
+
+    parts = urlsplit(dsn)
+    if parts.hostname is None or _is_loopback_host(parts.hostname):
+        return True
+    if backend == "postgresql":
+        return _pg_sslmode(dsn, environ) in _PG_VERIFYING_SSLMODES
+    return bool(parse_qs(parts.query).get("ssl_ca"))
+
+
+def identity_tls_unverified(config: VaultConfig) -> bool:
+    """True when the unverified-TLS hatch is what lets an identity vault
+    connect (the /status, doctor and `llm-redact status` honesty signal)."""
+    if config.rdbms.auth != "identity" or os.environ.get(ENV_TLS_UNVERIFIED) != "1":
+        return False
+    dsn = _quiet_dsn(config)
+    return dsn is not None and not _identity_tls_verified(config.backend, dsn, os.environ)
+
+
+def _pg_tls_kwargs(dsn: str) -> dict[str, Any]:
+    """Connect kwargs making a PostgreSQL identity connection use TLS: an
+    explicit sslmode (explicit parameters beat a service file and the
+    environment), after identity_tls_problem has refused the rest."""
+    return {"sslmode": _pg_sslmode(dsn, os.environ)}
 
 
 def _mysql_tls_kwargs(module: Any, dsn: str) -> dict[str, Any]:
@@ -378,6 +458,10 @@ def _resolve_connector(
     if identity_error is not None:
         raise ConfigError(identity_error)
     identity = config.rdbms.auth == "identity"
+    if identity and backend in ("postgresql", "mysql"):
+        tls_problem = identity_tls_problem(backend, dsn)
+        if tls_problem is not None:
+            raise ConfigError(tls_problem)
     module_name = config.rdbms.module if backend == "dbapi" else _DRIVER_MODULES[backend]
     try:
         module = importlib.import_module(module_name)

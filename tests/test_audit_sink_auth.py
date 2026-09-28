@@ -74,6 +74,47 @@ def test_identity_refused_where_there_is_no_cloud_identity(provider: str) -> Non
         _s3(provider=provider, bucket="b", endpoint_url="http://h:9000", auth="identity")
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://gw.example/minio",  # sent to /minio/b/k but signed over /b/k
+        "http://user:pw@h:9000",  # userinfo: signed host != sent host
+        "http://h:9000?x=1",
+        "http://h:9000#f",
+        "ftp://h:9000",
+        "http://:9000",
+        "http://h:notaport",
+    ],
+)
+def test_s3_endpoint_url_is_scheme_host_and_port_only(endpoint: str) -> None:
+    with pytest.raises(ConfigError, match=r"\[audit.s3\] endpoint_url"):
+        _s3(provider="minio", bucket="b", endpoint_url=endpoint)
+
+
+def test_s3_endpoint_url_keeps_plain_http_and_a_trailing_slash() -> None:
+    assert _s3(provider="ceph", bucket="b", endpoint_url="http://h:9000/").endpoint_url == (
+        "http://h:9000"
+    )
+
+
+@pytest.mark.parametrize("auth", ["sas", "identity"])
+def test_azure_bearer_modes_need_https_off_loopback(auth: str) -> None:
+    # A SAS or an Entra token is a bearer secret; SharedKey sends a signature.
+    with pytest.raises(ConfigError, match="must be https unless the host is loopback"):
+        _azure(account="a", container="c", auth=auth, endpoint_url="http://blob.example.net")
+    for ok in ("https://blob.example.net", "http://127.0.0.1:10000/devstoreaccount1"):
+        assert _azure(account="a", container="c", auth=auth, endpoint_url=ok).endpoint_url == ok
+    assert _azure(
+        account="a", container="c", auth="key", endpoint_url="http://blob.example.net"
+    ).auth == ("key")
+
+
+def test_azure_endpoint_url_refuses_userinfo_and_query() -> None:
+    for bad in ("https://u@blob.example.net", "https://blob.example.net?sv=1"):
+        with pytest.raises(ConfigError, match=r"\[audit.azure\] endpoint_url"):
+            _azure(account="a", container="c", endpoint_url=bad)
+
+
 def test_unknown_auth_modes_are_config_errors() -> None:
     with pytest.raises(ConfigError, match=r"\[audit.s3\] auth must be 'keys' or 'identity'"):
         _s3(auth="key")  # the Azure spelling is not an S3 mode
@@ -218,3 +259,56 @@ async def test_status_reports_the_configured_auth_modes() -> None:
         status = (await client.get("/__llm-redact/status")).json()
     assert status["audit"]["s3"]["auth"] == "keys"
     assert status["audit"]["azure"]["auth"] == "key"
+
+
+# --- version skew: capabilities the loaded plugin must advertise ----------------
+
+
+def test_plugin_capabilities_required_names_every_non_default_shape() -> None:
+    from llm_redact.config import plugin_capabilities_required
+
+    assert plugin_capabilities_required(Config()) == []
+    config = parse_config(
+        {
+            "audit": {
+                "s3": {"enabled": True, "bucket": "b", "auth": "identity"},
+                "azure": {"enabled": True, "account": "a", "container": "c", "auth": "sas"},
+            },
+            "email": {
+                "smtp_host": "smtp.example",
+                "from_address": "p@example.com",
+                "implicit_tls": True,
+                "smtp_port": 465,
+            },
+        },
+        "<t>",
+    )
+    assert plugin_capabilities_required(config) == [
+        "audit.s3.auth=identity",
+        "audit.azure.auth=sas",
+        "email.implicit_tls",
+    ]
+    # A disabled sink's mode is inert: nothing to refuse.
+    disabled = parse_config({"audit": {"s3": {"bucket": "b", "auth": "identity"}}}, "<t>")
+    assert plugin_capabilities_required(disabled) == []
+
+
+def test_a_plugin_without_the_capability_refuses_to_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import llm_redact.proxy as proxy_mod
+    import llm_redact.registry as registry_mod
+
+    email = {"smtp_host": "smtp.example", "from_address": "p@example.com"}
+    config = parse_config({"email": {**email, "auth": "oauth", "oauth_provider": "azure"}}, "<t>")
+    old = registry_mod.Registry()
+    monkeypatch.setattr(registry_mod, "_registry", old)
+    monkeypatch.setattr(proxy_mod, "loaded_plugins", lambda: ["llm_redact_pro"])
+    with pytest.raises(ConfigError, match=r"does not support email\.auth=oauth"):
+        create_app(config)
+    old.config_capabilities.add("email.auth=oauth")
+    create_app(config)
+    # Without any plugin the core's own fail-closed seams apply instead.
+    monkeypatch.setattr(proxy_mod, "loaded_plugins", lambda: [])
+    old.config_capabilities.clear()
+    create_app(config)

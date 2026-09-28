@@ -8,7 +8,7 @@ import os
 import re
 import tomllib
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -243,7 +243,8 @@ RDBMS_AUTH_MODES = ("password", "identity")
 IDENTITY_AUTH_BACKENDS = ("postgresql", "mysql")
 IDENTITY_AUTH_CLOUDS = ("aws", "gcp", "azure")
 PG_TLS_SSLMODES = ("require", "verify-ca", "verify-full")
-_REGION_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+# A cloud region name as the database token is scoped to it (fullmatch only).
+_RDBMS_REGION_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def rdbms_identity_error(backend: str, rdbms: RdbmsConfig, dsn: str) -> str | None:
@@ -347,6 +348,59 @@ class VaultKmsConfig:
     role: str = ""  # kubernetes auth role (required with auth = "kubernetes")
     auth_mount: str = "kubernetes"  # the kubernetes auth method's mount path
     service_account_token_file: str = DEFAULT_SERVICE_ACCOUNT_TOKEN_FILE
+
+
+def plugin_capabilities_required(config: "Config") -> list[str]:
+    """The config SHAPES only a recent llm-redact-pro implements and that have
+    no factory seam of their own to fail closed in: an older plugin would
+    parse past them and silently fall back to the static credentials. Each
+    name must appear in ``Registry.config_capabilities`` (advertised by the
+    plugin) — checked by ProxyState and doctor when a plugin is loaded."""
+    required: list[str] = []
+    s3, azure, email = config.audit.s3, config.audit.azure, config.email
+    if s3.enabled and s3.auth != S3AuditConfig().auth:
+        required.append(f"audit.s3.auth={s3.auth}")
+    if azure.enabled and azure.auth != AzureAuditConfig().auth:
+        required.append(f"audit.azure.auth={azure.auth}")
+    if email.auth != EmailConfig().auth:
+        required.append(f"email.auth={email.auth}")
+    if email.implicit_tls:
+        required.append("email.implicit_tls")
+    return required
+
+
+def unsupported_plugin_capabilities(config: "Config", advertised: Iterable[str]) -> str | None:
+    """A ConfigError message naming the configured capabilities the loaded
+    plugin does not advertise, else None."""
+    missing = sorted(set(plugin_capabilities_required(config)) - set(advertised))
+    if not missing:
+        return None
+    return (
+        "the installed llm-redact-pro does not support " + ", ".join(missing) + ";"
+        " upgrade llm-redact-pro (an older version would silently use the static"
+        " credentials instead)"
+    )
+
+
+def sink_endpoint_problem(url: str, *, allow_path: bool, require_https: bool) -> str | None:
+    """Why an audit sink ``endpoint_url`` is unusable, else None: an http(s)
+    URL with a host, no userinfo, query or fragment, a path only where the
+    sink signs one, and https (unless the host is loopback) when a bearer
+    secret rides the request."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        _ = parts.port  # a malformed port raises
+    except ValueError:
+        return "must look like https://host:port"
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "must start with http:// or https:// and name a host"
+    if "@" in parts.netloc or parts.query or parts.fragment:
+        return "must not carry userinfo, a query string or a fragment"
+    if not allow_path and parts.path not in ("", "/"):
+        return "must not carry a path (requests are signed over /bucket/key)"
+    if require_https and parts.scheme == "http" and not _is_loopback_host(parts.hostname):
+        return "must be https unless the host is loopback (a bearer credential rides it)"
+    return None
 
 
 def kms_address_problem(address: str) -> str | None:
@@ -988,8 +1042,12 @@ def _parse_audit_s3(s3_raw: object) -> S3AuditConfig:
     if provider in ("minio", "ceph"):
         if enabled and not endpoint_url:
             raise ConfigError(f"[audit.s3] endpoint_url is required for provider {provider!r}")
-        if endpoint_url is not None and not endpoint_url.startswith(("http://", "https://")):
-            raise ConfigError("[audit.s3] endpoint_url must start with http:// or https://")
+        if endpoint_url is not None:
+            # The request is signed over /bucket/key and the endpoint's host:
+            # a path, userinfo or query would be sent but never signed.
+            problem = sink_endpoint_problem(endpoint_url, allow_path=False, require_https=False)
+            if problem is not None:
+                raise ConfigError(f"[audit.s3] endpoint_url {problem}")
     elif endpoint_url is not None:
         raise ConfigError(
             "[audit.s3] endpoint_url applies to minio/ceph only; aws and gcs derive"
@@ -1051,13 +1109,20 @@ def _parse_audit_azure(raw: object) -> AzureAuditConfig:
         raise ConfigError("[audit.azure] flush_seconds must be positive")
     if enabled and (not account or not container):
         raise ConfigError("[audit.azure] account and container are required when enabled")
-    if endpoint_url is not None and not endpoint_url.startswith(("http://", "https://")):
-        raise ConfigError("[audit.azure] endpoint_url must start with http:// or https://")
     azure_auth = str(raw.get("auth", default.auth))
     if azure_auth not in AZURE_AUTH_MODES:
         raise ConfigError(
             f"[audit.azure] auth must be 'key', 'sas' or 'identity', got {azure_auth!r}"
         )
+    if endpoint_url is not None:
+        # Azurite's endpoint carries the account as a path, so a path is
+        # fine. A SAS or an Entra token is a bearer secret (SharedKey sends
+        # only a signature): those never cross the network in the clear.
+        problem = sink_endpoint_problem(
+            endpoint_url, allow_path=True, require_https=azure_auth != "key"
+        )
+        if problem is not None:
+            raise ConfigError(f"[audit.azure] endpoint_url {problem}")
     return AzureAuditConfig(
         enabled=enabled,
         account=account,
@@ -2118,7 +2183,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         raise ConfigError(
             f"[vault.rdbms] auth must be one of {RDBMS_AUTH_MODES}, got {rdbms.auth!r}"
         )
-    if rdbms.region and not _REGION_RE.match(rdbms.region):
+    if rdbms.region and not _RDBMS_REGION_RE.fullmatch(rdbms.region):
         raise ConfigError(f"[vault.rdbms] region {rdbms.region!r} is not a region name")
     if rdbms.region and rdbms.auth != "identity":
         raise ConfigError('[vault.rdbms] region applies only to auth = "identity"')

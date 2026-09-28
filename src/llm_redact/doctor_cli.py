@@ -405,6 +405,15 @@ def _check_vault_identity(report: _Report, config: Config) -> None:
             " to start",
         )
         return
+    from llm_redact.vault_rdbms import ENV_TLS_UNVERIFIED, identity_tls_unverified
+
+    if identity_tls_unverified(config.vault):
+        report.line(
+            "WARN",
+            "vault",
+            f"{ENV_TLS_UNVERIFIED}=1: the database token goes over TLS that does not"
+            " verify the server certificate (whoever answers the handshake gets it)",
+        )
     report.line(
         "PASS",
         "vault",
@@ -547,7 +556,7 @@ def _check_license(report: _Report, config: Config) -> None:
         )
 
 
-def _check_licensed_features(report: _Report) -> None:
+def _check_licensed_features(report: _Report, config: Config) -> None:
     """The honest open-core signal (llm-redact-pro LICENSING.md): is the paid
     ``llm-redact-pro`` package installed? Never a FAIL — the FOSS core is
     fully functional alone, and any pro-only *config* without the package
@@ -556,6 +565,7 @@ def _check_licensed_features(report: _Report) -> None:
     package that is installed yet whose plugin failed to register (paid
     features silently off) is exactly the kind of quiet downgrade this
     project surfaces."""
+    from llm_redact.config import unsupported_plugin_capabilities
     from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 
     if not pro_package_installed():
@@ -566,7 +576,7 @@ def _check_licensed_features(report: _Report) -> None:
             " pro-only config fails closed)",
         )
         return
-    get_registry()  # ensure the entry-point scan ran so loaded_plugins() is authoritative
+    registry = get_registry()  # the entry-point scan runs: loaded_plugins() is authoritative
     plugins = loaded_plugins()
     if plugins:
         report.line(
@@ -574,6 +584,9 @@ def _check_licensed_features(report: _Report) -> None:
             "license",
             f"licensed-features package installed ({', '.join(sorted(plugins))} active)",
         )
+        unsupported = unsupported_plugin_capabilities(config, registry.config_capabilities)
+        if unsupported is not None:
+            report.line("FAIL", "license", f"{unsupported} — the proxy will refuse to start")
     else:
         report.line(
             "WARN",
@@ -800,7 +813,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
     _check_platform(report)
     _check_license(report, config)
-    _check_licensed_features(report)
+    _check_licensed_features(report, config)
     _check_build(report, config)
     _check_tls_and_bind(report, config)
     _check_body_cap(report, config)

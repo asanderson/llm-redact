@@ -17,6 +17,39 @@ only config shapes, generic seams, fail-closed defaults and doctor/status surfac
 A config that asks for one of them without llm-redact-pro is a startup error naming
 the package (`[email]`, which does nothing without the package, stays inert).
 
+### Security
+
+- The proxy refuses a request target that is not a path (`400`), over HTTP and realtime alike,
+  and checks that the URL it builds keeps the configured upstream's scheme, userinfo, host and
+  port. A percent-encoded target such as `%2Fv1%2Fx@host:port/…` used to join onto the base URL
+  as `userinfo@host` and send the request (with its credentials) to another host.
+- A provider authorized with the proxy's own identity (`[providers.NAME] auth = "identity"`)
+  forwards only the API routes llm-redact recognizes. Any other path is a recorded local `403`,
+  so a client can't reach the rest of that cloud API as the proxy's principal, unredacted.
+  Google's `x-goog-user-project` and legacy IAM selector headers are stripped along with the
+  client's credentials.
+- Only paths *below* `/__llm-redact/auth/` go to the access gate; the bare prefix stays behind
+  dashboard admission.
+- `[vault.rdbms] auth = "identity"` requires a verified server certificate off loopback
+  (PostgreSQL `sslmode=verify-ca|verify-full`, MySQL `?ssl_ca=`), because the database asks for
+  the token in the clear inside TLS. `LLM_REDACT_VAULT_TLS_UNVERIFIED=1` accepts an unverified
+  link, surfaced as `vault.tls_unverified` in `/status`, doctor and `llm-redact status`.
+  PostgreSQL identity connections always pass an explicit `sslmode` and refuse `service`,
+  `hostaddr`, a TCP `host=` override, `PGSERVICE`, `PGSERVICEFILE` and `PGHOSTADDR`.
+- `[audit.azure]` with `auth = "sas"` or `"identity"` requires an `https` `endpoint_url` unless the
+  host is loopback (both are bearer secrets). `[audit.s3] endpoint_url` and `[audit.azure]
+  endpoint_url` refuse userinfo, a query or a fragment, and the S3 one refuses a path (requests
+  are signed over `/bucket/key`).
+- Version skew fails closed: when a plugin is loaded, a configured sink auth mode, email OAuth or
+  `implicit_tls` that it does not advertise in `Registry.config_capabilities` stops startup (and
+  is a doctor FAIL), instead of an older llm-redact-pro silently using static credentials.
+- An identity provider for which the plugin builds no authorizer is a startup `ConfigError`,
+  never a pass-through of the client's credential.
+- `serve` (and `serve --check`) warns when identity-authorized providers are served on a
+  non-loopback bind with no access gate.
+- `[providers.bedrock] region` keeps its 32-character cap and `[vault.rdbms] region` is matched in
+  full (a trailing newline used to pass).
+
 ### Added
 
 - **Proxy-held provider credentials:** `[providers.bedrock|vertex|azure] auth =

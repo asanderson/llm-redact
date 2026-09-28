@@ -107,6 +107,7 @@ class Registry:
     tool_base_url: Callable[[str], str]
     cli_commands: list[CliCommand]
     config_sections: list[ConfigSection]
+    config_capabilities: set[str]
 
     def __init__(self) -> None:
         # Assigned as INSTANCE attributes (not class attributes) so a bare
@@ -164,6 +165,12 @@ class Registry:
         # Plugin-owned top-level config tables (parsed, emitted and pinned
         # restart-only by the core; see plugin_api.ConfigSection).
         self.config_sections = []
+        # Config shapes the plugin implements that have no factory seam to
+        # fail closed in (config.plugin_capabilities_required names them,
+        # e.g. "audit.s3.auth=identity"). With a plugin loaded, a configured
+        # capability it does not advertise is a ConfigError — an older
+        # plugin would otherwise ignore it and fall back to static secrets.
+        self.config_capabilities = set()
 
 
 def load_plugins(registry: Registry) -> list[str]:

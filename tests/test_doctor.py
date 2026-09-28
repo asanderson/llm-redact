@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from llm_redact.config import Config
 from llm_redact.doctor_cli import run_doctor
 
 
@@ -218,7 +219,7 @@ def test_licensed_features_line_reports_not_installed() -> None:
     from llm_redact.doctor_cli import _check_licensed_features, _Report
 
     report = _Report(json_mode=True)
-    _check_licensed_features(report)
+    _check_licensed_features(report, Config())
     assert report.failed is False
     assert report.rows == [
         {
@@ -262,13 +263,39 @@ def test_licensed_features_line_reports_installed_and_active(
     from llm_redact.doctor_cli import _check_licensed_features, _Report
 
     monkeypatch.setattr(registry_mod, "pro_package_installed", lambda: True)
-    monkeypatch.setattr(registry_mod, "get_registry", lambda: None)
+    monkeypatch.setattr(registry_mod, "get_registry", registry_mod.Registry)
     monkeypatch.setattr(registry_mod, "loaded_plugins", lambda: ["llm_redact_pro"])
     report = _Report(json_mode=True)
-    _check_licensed_features(report)
+    _check_licensed_features(report, Config())
     assert report.failed is False
     assert report.rows[0]["level"] == "PASS"
     assert "installed (llm_redact_pro active)" in report.rows[0]["message"]
+
+
+def test_licensed_features_fail_on_a_capability_the_plugin_lacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Version skew: an older llm-redact-pro would parse past [audit.s3]
+    # auth = "identity" and silently use static keys — doctor FAILs first.
+    import llm_redact.registry as registry_mod
+    from llm_redact.config import parse_config
+    from llm_redact.doctor_cli import _check_licensed_features, _Report
+
+    config = parse_config(
+        {"audit": {"s3": {"enabled": True, "bucket": "b", "auth": "identity"}}}, "<t>"
+    )
+    old = registry_mod.Registry()
+    monkeypatch.setattr(registry_mod, "pro_package_installed", lambda: True)
+    monkeypatch.setattr(registry_mod, "get_registry", lambda: old)
+    monkeypatch.setattr(registry_mod, "loaded_plugins", lambda: ["llm_redact_pro"])
+    report = _Report(json_mode=True)
+    _check_licensed_features(report, config)
+    assert report.failed is True
+    assert "does not support audit.s3.auth=identity" in report.rows[-1]["message"]
+    old.config_capabilities.add("audit.s3.auth=identity")
+    report = _Report(json_mode=True)
+    _check_licensed_features(report, config)
+    assert report.failed is False
 
 
 def test_licensed_features_line_warns_when_installed_but_not_registered(
@@ -283,7 +310,7 @@ def test_licensed_features_line_warns_when_installed_but_not_registered(
     monkeypatch.setattr(registry_mod, "get_registry", lambda: None)
     monkeypatch.setattr(registry_mod, "loaded_plugins", lambda: [])
     report = _Report(json_mode=True)
-    _check_licensed_features(report)
+    _check_licensed_features(report, Config())
     assert report.failed is False  # WARN, not FAIL
     assert report.rows[0]["level"] == "WARN"
     assert "did not register" in report.rows[0]["message"]

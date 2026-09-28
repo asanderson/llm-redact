@@ -155,6 +155,16 @@ encryption = "none"
 #                          # TLS, instead of a static password (llm-redact-pro)
 # region = "us-east-1"     # auth = "identity" + cloud = "aws": default = from the RDS host
 
+# KMS-wrapped vault key (Pro; llm-redact-pro docs/kms.md): the fernet key is
+# stored wrapped by AWS KMS / Google Cloud KMS / Azure Key Vault / HashiCorp
+# Vault transit and unwrapped at startup with the proxy's own identity. It
+# is then the ONLY key source: LLM_REDACT_VAULT_KEY set alongside it refuses
+# to start. Requires encryption = "fernet". Restart-only.
+# [vault.kms]
+# provider = "aws"   # "aws" | "gcp" | "azure" | "hashicorp"
+# key_id = "arn:aws:kms:eu-west-1:123456789012:key/…"
+# wrapped_key_env = "LLM_REDACT_VAULT_KEY_WRAPPED"   # or wrapped_key_file = "…"
+
 [rehydration]
 # Restore LLM-mangled placeholders too («email_001», «EMAIL-1», « EMAIL_001 »).
 # Every candidate is checked against the vault before restoring; unknown

@@ -22,6 +22,7 @@ from llm_redact import __version__
 from llm_redact.config import (
     Config,
     ConfigError,
+    VaultKmsConfig,
     apply_env_overrides,
     load_config,
     resolve_config_path,
@@ -264,7 +265,9 @@ def _check_vault(report: _Report, config: Config) -> None:
                 'encryption = "fernet" but the crypto extra is not installed;'
                 " install it: pip install 'llm-redact-proxy[crypto]'",
             )
-        if not os.environ.get("LLM_REDACT_VAULT_KEY"):
+        if config.vault.kms is not None:
+            _check_vault_kms(report, config)
+        elif not os.environ.get("LLM_REDACT_VAULT_KEY"):
             report.line(
                 "FAIL",
                 "vault",
@@ -273,6 +276,75 @@ def _check_vault(report: _Report, config: Config) -> None:
             )
         elif importlib.util.find_spec("cryptography") is not None:
             _check_vault_key_matches(report, config)
+
+
+def _check_vault_kms(report: _Report, config: Config) -> None:
+    """[vault.kms] posture — read-only and OFFLINE: doctor never calls the
+    KMS (no unwrap, no credential fetch), so a key that does not match the
+    vault shows up only in `serve --check` / `vault verify`. Checks what
+    serve would refuse on sight: an ambiguous local key, no plugin able to
+    unwrap, a missing wrapped value; for hashicorp, the server address."""
+    from llm_redact.registry import get_registry
+    from llm_redact.vault_crypto import ambiguous_local_key, resolve_vault_key
+
+    kms = config.vault.kms
+    assert kms is not None  # caller gates on it
+    ambiguous = ambiguous_local_key(config.vault)
+    if ambiguous is not None:
+        report.line(
+            "FAIL",
+            "vault",
+            f"[vault.kms] is configured and {ambiguous} is also set — the proxy will refuse"
+            f" to start (unset {ambiguous}: the key comes only from the KMS)",
+        )
+    if get_registry().resolve_vault_key is resolve_vault_key:
+        report.line(
+            "FAIL",
+            "vault",
+            "[vault.kms] needs llm-redact-pro (a version that supports it) to unwrap the"
+            " key — the proxy will refuse to start",
+        )
+    if kms.wrapped_key_env and not os.environ.get(kms.wrapped_key_env, "").strip():
+        report.line(
+            "FAIL", "vault", f"[vault.kms] wrapped_key_env {kms.wrapped_key_env} is not set"
+        )
+    elif kms.wrapped_key_file and not Path(kms.wrapped_key_file).expanduser().is_file():
+        report.line(
+            "FAIL", "vault", f"[vault.kms] wrapped_key_file {kms.wrapped_key_file} does not exist"
+        )
+    if kms.provider == "hashicorp":
+        _check_vault_kms_hashicorp(report, kms)
+    report.line(
+        "PASS",
+        "vault",
+        f"key source kms:{kms.provider} — unwrapped at startup with the proxy's identity"
+        " (not probed: doctor never calls the KMS; `serve --check` does)",
+    )
+
+
+def _check_vault_kms_hashicorp(report: _Report, kms: VaultKmsConfig) -> None:
+    from llm_redact.config import kms_address_problem
+
+    address = kms.address or os.environ.get("VAULT_ADDR", "").strip()
+    if not address:
+        report.line("FAIL", "vault", "[vault.kms] hashicorp: no address and VAULT_ADDR is not set")
+    elif (problem := kms_address_problem(address)) is not None:
+        report.line("FAIL", "vault", f"[vault.kms] hashicorp: the Vault address {problem}")
+    if kms.auth == "token" and not (
+        os.environ.get("VAULT_TOKEN") or os.environ.get("VAULT_TOKEN_FILE")
+    ):
+        report.line(
+            "FAIL",
+            "vault",
+            "[vault.kms] hashicorp auth = token: set VAULT_TOKEN or VAULT_TOKEN_FILE",
+        )
+    elif kms.auth == "kubernetes" and not Path(kms.service_account_token_file).is_file():
+        report.line(
+            "WARN",
+            "vault",
+            f"[vault.kms] hashicorp auth = kubernetes: {kms.service_account_token_file}"
+            " does not exist here (fine if doctor runs outside the pod)",
+        )
 
 
 def _check_vault_rdbms(report: _Report, config: Config) -> None:

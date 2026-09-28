@@ -290,6 +290,172 @@ def rdbms_identity_error(backend: str, rdbms: RdbmsConfig, dsn: str) -> str | No
     return None
 
 
+KMS_PROVIDERS = ("aws", "gcp", "azure", "hashicorp")
+KMS_HASHICORP_AUTH = ("token", "kubernetes")
+DEFAULT_SERVICE_ACCOUNT_TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+# Keys only a HashiCorp Vault transit key uses; any other provider refuses them.
+_KMS_HASHICORP_KEYS = frozenset(
+    {"address", "mount", "auth", "role", "auth_mount", "service_account_token_file"}
+)
+_KMS_KUBERNETES_KEYS = frozenset({"role", "auth_mount", "service_account_token_file"})
+_KMS_KEY_ID_SHAPES = {
+    # A key or alias ARN: the region the request goes to comes from it.
+    "aws": re.compile(r"arn:aws(?:-[a-z]+)*:kms:[a-z0-9-]+:\d{12}:(?:key|alias)/[A-Za-z0-9/_:.-]+"),
+    "gcp": re.compile(r"projects/[^/\s]+/locations/[^/\s]+/keyRings/[^/\s]+/cryptoKeys/[^/\s]+"),
+    "azure": re.compile(
+        r"https://[A-Za-z0-9-]+\.vault\.azure\.net/keys/[A-Za-z0-9-]+(?:/[A-Za-z0-9]+)?",
+        re.IGNORECASE,
+    ),
+    "hashicorp": re.compile(r"[A-Za-z0-9_.-]+"),
+}
+_KMS_KEY_ID_HINTS = {
+    "aws": "a key or alias ARN (arn:aws:kms:<region>:<account>:key/<id> or …:alias/<name>)",
+    "gcp": "projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>",
+    "azure": "a key URL https://<vault>.vault.azure.net/keys/<name>[/<version>]",
+    "hashicorp": "a transit key name (letters, digits, '_', '.', '-')",
+}
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_MOUNT_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
+# The plaintext key sources [vault.kms] replaces (vault_crypto.ENV_KEY /
+# CMD_ENV_KEY, spelled out here: vault_crypto imports the vault module).
+_LOCAL_VAULT_KEY_ENVS = ("LLM_REDACT_VAULT_KEY", "LLM_REDACT_VAULT_KEY_CMD")
+
+
+@dataclass(frozen=True)
+class VaultKmsConfig:
+    """``[vault.kms]``: the fernet vault key is stored WRAPPED by a cloud KMS
+    and unwrapped at startup with the proxy's own identity (llm-redact-pro).
+
+    With this table present the key comes ONLY from the KMS — never from
+    LLM_REDACT_VAULT_KEY, the key command or the keychain. The wrapped value
+    is ciphertext; it still never lives in this file (an env var or a file
+    path names where it is)."""
+
+    provider: str  # one of KMS_PROVIDERS
+    # aws: key/alias ARN; gcp: projects/…/cryptoKeys/…; azure: key URL;
+    # hashicorp: transit key name. Not secret.
+    key_id: str
+    # Exactly one: the env var holding the base64 wrapped key, or a file.
+    wrapped_key_env: str = ""
+    wrapped_key_file: str = ""
+    # --- hashicorp only ---
+    # Vault server; empty = the VAULT_ADDR env var at startup. https unless
+    # the host is loopback (the same rule either way).
+    address: str = ""
+    mount: str = "transit"  # the transit secrets-engine mount path
+    auth: str = "token"  # "token" (VAULT_TOKEN / VAULT_TOKEN_FILE) | "kubernetes"
+    role: str = ""  # kubernetes auth role (required with auth = "kubernetes")
+    auth_mount: str = "kubernetes"  # the kubernetes auth method's mount path
+    service_account_token_file: str = DEFAULT_SERVICE_ACCOUNT_TOKEN_FILE
+
+
+def kms_address_problem(address: str) -> str | None:
+    """Why a HashiCorp Vault address is unusable, else None: an http(s) URL
+    with a host and no query/fragment, https unless the host is loopback (a
+    token and the vault key would otherwise cross the network in the clear).
+    Shared by the parser and llm-redact-pro's runtime VAULT_ADDR check."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(address)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "must look like https://vault.example:8200"
+    if parts.query or parts.fragment:
+        return "must not carry a query string or fragment"
+    if parts.scheme == "http" and not _is_loopback_host(parts.hostname):
+        return "must be https unless the host is loopback"
+    return None
+
+
+def parse_vault_kms(
+    raw: Any, *, where: str = "[vault.kms]", require_wrapped: bool = True
+) -> VaultKmsConfig:
+    """Validate a ``[vault.kms]`` table. ``require_wrapped=False`` is the
+    wrapping CLI's form (it produces the wrapped value, so it names none).
+    Error messages name keys and expected shapes, never a value."""
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"{where} must be a table")
+    _require_keys(
+        dict(raw),
+        {"provider", "key_id", "wrapped_key_env", "wrapped_key_file", *_KMS_HASHICORP_KEYS},
+        where,
+    )
+    for key, value in raw.items():
+        if not isinstance(value, str):
+            raise ConfigError(f"{where} {key} must be a string")
+    provider = raw.get("provider", "")
+    if provider not in KMS_PROVIDERS:
+        raise ConfigError(f"{where} provider must be one of {KMS_PROVIDERS}")
+    key_id = raw.get("key_id", "")
+    if _KMS_KEY_ID_SHAPES[provider].fullmatch(key_id) is None:
+        raise ConfigError(
+            f"{where} key_id for provider {provider!r} must be {_KMS_KEY_ID_HINTS[provider]}"
+        )
+    wrapped_env = raw.get("wrapped_key_env", "")
+    wrapped_file = raw.get("wrapped_key_file", "")
+    if require_wrapped and bool(wrapped_env) == bool(wrapped_file):
+        raise ConfigError(f"{where} needs exactly one of wrapped_key_env or wrapped_key_file")
+    if wrapped_env and _ENV_NAME_RE.fullmatch(wrapped_env) is None:
+        raise ConfigError(f"{where} wrapped_key_env must be an environment variable name")
+    if wrapped_env in _LOCAL_VAULT_KEY_ENVS:
+        raise ConfigError(
+            f"{where} wrapped_key_env must not be {wrapped_env}: that variable is the"
+            " plaintext key source [vault.kms] replaces (use e.g. LLM_REDACT_VAULT_KEY_WRAPPED)"
+        )
+    if provider == "hashicorp":
+        return _parse_kms_hashicorp(raw, where, key_id, wrapped_env, wrapped_file)
+    hashicorp_keys = sorted(_KMS_HASHICORP_KEYS & set(raw))
+    if hashicorp_keys:
+        raise ConfigError(f"{where} {hashicorp_keys} apply only to provider = 'hashicorp'")
+    return VaultKmsConfig(
+        provider=provider,
+        key_id=key_id,
+        wrapped_key_env=wrapped_env,
+        wrapped_key_file=wrapped_file,
+    )
+
+
+def _parse_kms_hashicorp(
+    raw: Mapping[str, Any], where: str, key_id: str, wrapped_env: str, wrapped_file: str
+) -> VaultKmsConfig:
+    defaults = VaultKmsConfig(provider="hashicorp", key_id=key_id)
+    address = str(raw.get("address", "")).rstrip("/")
+    if address:
+        problem = kms_address_problem(address)
+        if problem is not None:
+            raise ConfigError(f"{where} address {problem}")
+    auth = str(raw.get("auth", defaults.auth))
+    if auth not in KMS_HASHICORP_AUTH:
+        raise ConfigError(f"{where} auth must be one of {KMS_HASHICORP_AUTH}")
+    mount = str(raw.get("mount", defaults.mount))
+    auth_mount = str(raw.get("auth_mount", defaults.auth_mount))
+    for key, value in (("mount", mount), ("auth_mount", auth_mount)):
+        if _MOUNT_RE.fullmatch(value) is None:
+            raise ConfigError(f"{where} {key} must be a mount path like 'transit' (no leading '/')")
+    role = str(raw.get("role", ""))
+    token_file = str(raw.get("service_account_token_file", defaults.service_account_token_file))
+    if auth == "kubernetes":
+        if not role:
+            raise ConfigError(f"{where} auth = 'kubernetes' requires role")
+        if not token_file:
+            raise ConfigError(f"{where} service_account_token_file must not be empty")
+    else:
+        kube_only = sorted(_KMS_KUBERNETES_KEYS & set(raw))
+        if kube_only:
+            raise ConfigError(f"{where} {kube_only} apply only to auth = 'kubernetes'")
+    return VaultKmsConfig(
+        provider="hashicorp",
+        key_id=key_id,
+        wrapped_key_env=wrapped_env,
+        wrapped_key_file=wrapped_file,
+        address=address,
+        mount=mount,
+        auth=auth,
+        role=role,
+        auth_mount=auth_mount,
+        service_account_token_file=token_file,
+    )
+
+
 @dataclass(frozen=True)
 class VaultConfig:
     # "memory" is the deliberate default: persisting real secrets to disk
@@ -312,6 +478,9 @@ class VaultConfig:
     session_ttl_days: int = 0
     # Connection settings for the RDBMS_BACKENDS (ignored otherwise).
     rdbms: RdbmsConfig = field(default_factory=RdbmsConfig)
+    # [vault.kms]: the fernet key is KMS-wrapped (llm-redact-pro unwraps it
+    # at startup). None = the local sources (env / key command / keychain).
+    kms: VaultKmsConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -1911,7 +2080,16 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     vault_raw = raw.get("vault", {})
     _require_keys(
         vault_raw,
-        {"backend", "path", "session", "session_mode", "encryption", "session_ttl_days", "rdbms"},
+        {
+            "backend",
+            "path",
+            "session",
+            "session_mode",
+            "encryption",
+            "session_ttl_days",
+            "rdbms",
+            "kms",
+        },
         "[vault]",
     )
     backend = str(vault_raw.get("backend", "memory"))
@@ -1974,6 +2152,13 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     session_ttl_days = int(vault_raw.get("session_ttl_days", 0))
     if session_ttl_days < 0:
         raise ConfigError("[vault] session_ttl_days must be >= 0 (0 disables auto-prune)")
+    kms: VaultKmsConfig | None = None
+    if "kms" in vault_raw:
+        kms = parse_vault_kms(vault_raw["kms"])
+        if encryption != "fernet":
+            raise ConfigError(
+                '[vault.kms] wraps the fernet vault key: it requires [vault] encryption = "fernet"'
+            )
     vault = VaultConfig(
         backend=backend,
         path=str(vault_raw["path"]) if "path" in vault_raw else None,
@@ -1982,6 +2167,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         encryption=encryption,
         session_ttl_days=session_ttl_days,
         rdbms=rdbms,
+        kms=kms,
     )
 
     audit_raw = raw.get("audit", {})

@@ -37,6 +37,7 @@ from .sessions import build_session_router as _build_session_router
 from .vault import build_cipher as _build_cipher
 from .vault import build_vault_manager as _build_vault_manager
 from .vault import cipher_from_key as _cipher_from_key
+from .vault_crypto import resolve_vault_key as _resolve_vault_key
 
 if TYPE_CHECKING:
     from .audit import AuditLog
@@ -93,6 +94,7 @@ class Registry:
     build_cipher: Callable[[VaultConfig], VaultCipher | None]
     cipher_from_key: Callable[[bytes], VaultCipher]
     build_db_password: Callable[[VaultConfig], DbPasswordProvider | None]
+    resolve_vault_key: Callable[[VaultConfig], bytes | None]
     build_session_router: Callable[..., SessionRouter]
     resolve_license: Callable[..., ResolvedLicense]
     build_telemetry: Callable[[OtelConfig], Telemetry | None]
@@ -121,6 +123,11 @@ class Registry:
         # auth = "identity" (a token minted from the proxy's cloud identity)
         # is paid — the Free default fails closed naming llm-redact-pro.
         self.build_db_password = _build_db_password
+        # [vault.kms]: the master key stored wrapped by a cloud KMS. The
+        # plugin unwraps it (returning the 32-byte key; None without
+        # [vault.kms]); the Free default fails closed when it is configured.
+        # vault_crypto.resolve_cipher is the one caller-facing path.
+        self.resolve_vault_key = _resolve_vault_key
         self.build_session_router = _build_session_router
         # License verification (the "what did the vendor sign" enforcement core)
         # is a paid subsystem (R3); the Free default resolves to Free with a

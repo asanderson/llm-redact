@@ -383,24 +383,35 @@ max_rows = 10000
 # Storage through its S3-compatible XML API (storage.googleapis.com) with
 # HMAC interoperability keys. Credential env vars: aws/minio/ceph ->
 # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (+ optional AWS_SESSION_TOKEN);
-# gcs -> GCS_HMAC_ACCESS_ID / GCS_HMAC_SECRET. Azure Blob (SharedKey, not an
-# S3 API) has its own [audit.azure] section below. Upload failures WARN and
-# drop the batch — the proxy never blocks on it.
+# gcs -> GCS_HMAC_ACCESS_ID / GCS_HMAC_SECRET. auth = "identity" (aws/gcs
+# only) uses the workload's cloud identity instead of static keys: aws ->
+# the standard AWS credential chain (IRSA, ECS/EKS Pod Identity, EC2 IMDSv2;
+# needs s3:PutObject on the prefix), gcs -> Application Default Credentials
+# as an OAuth bearer token (GKE Workload Identity, Cloud Run, GCE; needs
+# storage.objects.create). Credential sources: llm-redact-pro
+# docs/cloud-identity.md. Azure Blob (not an S3 API) has its own
+# [audit.azure] section below. Upload failures — including a credential
+# that cannot be obtained — WARN and drop the batch; the proxy never blocks.
 # [audit.s3]
 # enabled = true
 # provider = "aws"                  # "aws" | "minio" | "ceph" | "gcs"
 # bucket = "my-audit-bucket"
 # prefix = "llm-redact/"
 # region = "us-east-1"              # gcs: your bucket's location, e.g. "us"
+# auth = "keys"                     # "keys" (env vars above) | "identity"
 # endpoint_url = "http://127.0.0.1:9000"   # minio/ceph only
 # flush_seconds = 60.0
 # encryption = "fernet"   # each batch uploaded as ONE Fernet token (crypto
 #                         # extra + LLM_REDACT_AUDIT_ENC_KEY, env only);
 #                         # read back with `llm-redact audit decrypt`
 
-# Azure Blob Storage sink (SharedKey auth — not an S3 API, so its own
-# section). Same metadata-only rows; account key from AZURE_STORAGE_KEY
-# (env only, never this file). endpoint_url overrides the default host for
+# Azure Blob Storage sink (not an S3 API, so its own section). Same
+# metadata-only rows. auth = "key" (default): SharedKey with the account key
+# from AZURE_STORAGE_KEY; "sas": a SAS token from AZURE_STORAGE_SAS_TOKEN
+# (needs create/write on the container); "identity": a Microsoft Entra ID
+# token for the workload identity (AKS workload identity, managed identity;
+# needs the "Storage Blob Data Contributor" role). Secrets are env-only,
+# never this file. endpoint_url overrides the default host for
 # Azurite/local testing. Upload failures WARN and drop, like [audit.s3].
 # [audit.azure]
 # enabled = true
@@ -408,6 +419,7 @@ max_rows = 10000
 # container = "audit"
 # prefix = "llm-redact/"
 # endpoint_url = "http://127.0.0.1:10000/myaccount"   # Azurite only
+# auth = "key"            # "key" | "sas" | "identity"
 # flush_seconds = 60.0
 # encryption = "fernet"   # same client-side batch encryption as [audit.s3]
 

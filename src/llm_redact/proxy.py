@@ -1318,6 +1318,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                     "s3": {
                         "enabled": state.audit_s3 is not None,
                         "encryption": config.audit.s3.encryption == "fernet",
+                        "auth": config.audit.s3.auth,
                         "batches_uploaded": (
                             state.audit_s3.batches_uploaded if state.audit_s3 is not None else 0
                         ),
@@ -1328,6 +1329,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                     "azure": {
                         "enabled": state.audit_azure is not None,
                         "encryption": config.audit.azure.encryption == "fernet",
+                        "auth": config.audit.azure.auth,
                         "batches_uploaded": (
                             state.audit_azure.batches_uploaded
                             if state.audit_azure is not None

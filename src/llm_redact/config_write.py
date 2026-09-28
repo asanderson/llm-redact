@@ -398,6 +398,8 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append(f"flush_seconds = {s3.flush_seconds}")
         if s3.encryption != "none":
             lines.append(f"encryption = {_toml_str(s3.encryption)}")
+        if s3.auth != S3AuditConfig().auth:
+            lines.append(f"auth = {_toml_str(s3.auth)}")
 
     if config.audit.azure != AzureAuditConfig():
         az = config.audit.azure
@@ -411,6 +413,8 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append(f"flush_seconds = {az.flush_seconds}")
         if az.encryption != "none":
             lines.append(f"encryption = {_toml_str(az.encryption)}")
+        if az.auth != AzureAuditConfig().auth:
+            lines.append(f"auth = {_toml_str(az.auth)}")
 
     lines.append("\n[log]")
     lines.append(f"format = {_toml_str(config.log.format)}")

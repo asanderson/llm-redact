@@ -76,6 +76,13 @@ class S3AuditConfig:
     # never falls back to plaintext. `llm-redact audit decrypt` reads
     # downloaded objects back.
     encryption: str = "none"
+    # "keys" = the static credential env vars above (the historical form).
+    # "identity" = the workload's cloud identity, resolved at runtime by
+    # llm-redact-pro (aws: the standard AWS chain incl. IRSA/ECS/IMDSv2
+    # temporary credentials, still SigV4; gcs: Application Default
+    # Credentials as an OAuth bearer token on the XML API). minio/ceph have
+    # no cloud identity, so identity is refused there.
+    auth: str = "keys"
 
 
 @dataclass(frozen=True)
@@ -94,6 +101,12 @@ class AzureAuditConfig:
     flush_seconds: float = 60.0
     # Client-side batch encryption — same semantics and key as [audit.s3].
     encryption: str = "none"
+    # "key" = SharedKey with AZURE_STORAGE_KEY (the historical form);
+    # "sas" = a SAS token from AZURE_STORAGE_SAS_TOKEN appended to the blob
+    # URL (no signing); "identity" = a Microsoft Entra ID bearer token for
+    # the workload identity, resolved at runtime by llm-redact-pro. All
+    # secrets are env-only or runtime-resolved, never this file.
+    auth: str = "key"
 
 
 @dataclass(frozen=True)
@@ -610,6 +623,11 @@ def _str_list(
 # which the sink can only WARN-and-drop on).
 _S3_PREFIX_RE = re.compile(r"[A-Za-z0-9._/-]*\Z")
 
+# How each off-machine audit sink authenticates (credentials are env-only or
+# resolved at runtime from the workload identity — never this file).
+S3_AUTH_MODES = ("keys", "identity")
+AZURE_AUTH_MODES = ("key", "sas", "identity")
+
 
 def _parse_audit_s3(s3_raw: object) -> S3AuditConfig:
     if not isinstance(s3_raw, dict):
@@ -625,6 +643,7 @@ def _parse_audit_s3(s3_raw: object) -> S3AuditConfig:
             "endpoint_url",
             "flush_seconds",
             "encryption",
+            "auth",
         },
         "[audit.s3]",
     )
@@ -662,6 +681,14 @@ def _parse_audit_s3(s3_raw: object) -> S3AuditConfig:
             "[audit.s3] endpoint_url applies to minio/ceph only; aws and gcs derive"
             " the host from the bucket"
         )
+    auth = str(s3_raw.get("auth", default.auth))
+    if auth not in S3_AUTH_MODES:
+        raise ConfigError(f"[audit.s3] auth must be 'keys' or 'identity', got {auth!r}")
+    if auth == "identity" and provider not in ("aws", "gcs"):
+        raise ConfigError(
+            f"[audit.s3] auth = 'identity' applies to provider 'aws' or 'gcs' only;"
+            f" {provider!r} has no cloud workload identity (use auth = 'keys')"
+        )
     return S3AuditConfig(
         enabled=enabled,
         provider=provider,
@@ -671,6 +698,7 @@ def _parse_audit_s3(s3_raw: object) -> S3AuditConfig:
         endpoint_url=endpoint_url,
         flush_seconds=flush_seconds,
         encryption=s3_encryption,
+        auth=auth,
     )
 
 
@@ -687,6 +715,7 @@ def _parse_audit_azure(raw: object) -> AzureAuditConfig:
             "endpoint_url",
             "flush_seconds",
             "encryption",
+            "auth",
         },
         "[audit.azure]",
     )
@@ -710,6 +739,11 @@ def _parse_audit_azure(raw: object) -> AzureAuditConfig:
         raise ConfigError("[audit.azure] account and container are required when enabled")
     if endpoint_url is not None and not endpoint_url.startswith(("http://", "https://")):
         raise ConfigError("[audit.azure] endpoint_url must start with http:// or https://")
+    azure_auth = str(raw.get("auth", default.auth))
+    if azure_auth not in AZURE_AUTH_MODES:
+        raise ConfigError(
+            f"[audit.azure] auth must be 'key', 'sas' or 'identity', got {azure_auth!r}"
+        )
     return AzureAuditConfig(
         enabled=enabled,
         account=account,
@@ -718,6 +752,7 @@ def _parse_audit_azure(raw: object) -> AzureAuditConfig:
         endpoint_url=endpoint_url,
         flush_seconds=flush_seconds,
         encryption=azure_encryption,
+        auth=azure_auth,
     )
 
 

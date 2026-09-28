@@ -172,8 +172,9 @@ because breaking the tool teaches users to bypass the proxy).
   Values, headers, and placeholder ids are never attributes.
 - The S3 audit sink (opt-in, `[audit.s3]`) ships the same metadata-only
   rows as NDJSON objects to a bucket you name — the same off-machine
-  trust decision as a remote OTel collector. Credentials come from the
-  standard AWS environment variables only, never the config file; upload
+  trust decision as a remote OTel collector. Credentials come from
+  environment variables or, with `auth = "identity"`, from the
+  workload's cloud identity at runtime — never the config file; upload
   failures warn and drop rather than blocking or crashing the proxy
   (under `[audit] required` the sinks instead spool from the audit DB
   and retry until the upload is confirmed — at-least-once, never drop).

@@ -89,6 +89,27 @@ def _synthetic_chunk(index: int, delta: dict[str, Any]) -> SSEEvent:
     )
 
 
+# Responses naming objects the provider stores for later reads: an uploaded
+# file, a batch (whose output/error files appear on its status), a stored
+# conversation. Matched on the path's tail, so the Azure and custom-provider
+# prefixes need no override.
+_BATCH_OBJECT_RE = re.compile(r"(?:^|/)batches/[^/]+(?:/cancel)?")
+_BATCH_FILE_KEYS = ("output_file_id", "error_file_id")
+
+
+def _string_ids(body: Any, keys: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(body, dict):
+        return ()
+    return tuple(str(body[k]) for k in keys if isinstance(body.get(k), str) and body[k])
+
+
+def _tail_is_create(path: str) -> bool:
+    """POST to the collection itself (``…/files``, ``…/batches``,
+    ``…/conversations``), not to a member or sub-resource."""
+    tail = path.rstrip("/").rsplit("/", 1)[-1]
+    return tail in ("files", "batches", "conversations")
+
+
 class OpenAIAdapter(ProviderAdapter):
     name = "openai"
 
@@ -177,6 +198,18 @@ class OpenAIAdapter(ProviderAdapter):
             # graft one and corrupt the create/remix request.
             return False
         return kind is RouteKind.CHAT or path == "/v1/files"
+
+    def tracks_object_ids(self, method: str, path: str) -> bool:
+        if method == "POST" and _tail_is_create(path):
+            return True
+        return method in ("GET", "POST") and _BATCH_OBJECT_RE.search(path) is not None
+
+    def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
+        if _BATCH_OBJECT_RE.search(path) is not None:
+            return _string_ids(body, _BATCH_FILE_KEYS)
+        if path.rstrip("/").endswith("/batches"):
+            return _string_ids(body, ("id", *_BATCH_FILE_KEYS))
+        return _string_ids(body, ("id",))
 
     def matches_request(
         self, method: str, path: str, headers: "Mapping[str, str] | None" = None

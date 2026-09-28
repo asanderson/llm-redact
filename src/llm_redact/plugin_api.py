@@ -11,7 +11,7 @@ plugin API contract — change it deliberately, never incidentally.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -95,6 +95,14 @@ class SessionRouter(Protocol):
     value (never-wrong-value). Sessions that are merely idle stay prunable.
     Only an explicit ``False`` releases a session: any other answer, and an
     exception, keeps it, so a misbehaving router can only keep more.
+
+    OPTIONAL ``record_object_id(object_id, session_id) -> bool | None``:
+    the proxy reports the ids of objects the provider STORES for later reads
+    (uploaded files, batches, message batches, stored conversations — see
+    ``ProviderAdapter.object_ids_from_body``) with the session that created
+    them, so a router can keep another user's later read of that object out
+    of the creator's namespace. ``False`` vetoes the durable mirror, as for
+    response ids; a router without the member is never called.
 
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the
@@ -447,7 +455,7 @@ class AccessGate(Protocol):
     upstream; the core stamps the security headers on its reply. ``close``
     runs at shutdown.
 
-    Two OPTIONAL members, read with ``getattr`` so a gate written before
+    Three OPTIONAL members, read with ``getattr`` so a gate written before
     them keeps working unchanged:
 
     - ``guards_dashboard: bool`` — when true, the core also calls
@@ -461,6 +469,10 @@ class AccessGate(Protocol):
       check accepts, and exactly that origin passes the Origin check. Only
       meaningful together with ``guards_dashboard``: the core ignores it
       otherwise, so a wider Host is never accepted unauthenticated.
+    - ``bind_sessions(store: SessionStore) -> None`` — called once at
+      startup with the live vault's sessions, so a gate can drop the
+      sessions of a user it deletes (whole sessions, through the running
+      proxy's own vault manager, never a second connection).
     """
 
     def admit(self, conn: HTTPConnection, surface: str) -> Admission | Awaitable[Admission]: ...
@@ -470,6 +482,23 @@ class AccessGate(Protocol):
     async def handle(self, request: Request, host: DashboardHost) -> Response: ...
 
     def close(self) -> None: ...
+
+
+class SessionStore(Protocol):
+    """The live vault's sessions, as handed to ``AccessGate.bind_sessions``.
+
+    ``session_ids`` lists the sessions holding mappings. ``forget`` deletes
+    whole named sessions — their mappings and response-id rows — through
+    the proxy's own vault manager (so cached views are dropped too) and
+    returns how many held mappings; the configured static session is never
+    deleted. Whole sessions only: deleting part of one would let the next
+    allocation reissue a still-referenced placeholder number for a
+    different value.
+    """
+
+    def session_ids(self) -> list[str]: ...
+
+    def forget(self, session_ids: Iterable[str]) -> int: ...
 
 
 # --- CLI seam -------------------------------------------------------------------

@@ -467,6 +467,21 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁforget_sessions__mutmut_13": (
+        "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
+        "names are case-insensitive, so the statement is byte-for-byte equivalent "
+        "to the engine."
+    ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁforget_sessions__mutmut_30": (
+        "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
+        "names are case-insensitive, so the statement is byte-for-byte equivalent "
+        "to the engine."
+    ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁforget_sessions__mutmut_33": (
+        "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
+        "names are case-insensitive, so the statement is byte-for-byte equivalent "
+        "to the engine."
+    ),
     "llm_redact.vault.xǁSqliteVaultManagerǁget__mutmut_17": (
         "popitem(last=False) -> last=None: OrderedDict.popitem truth-tests "
         "`last`, and None is falsy exactly like False — still pops the LRU end."

@@ -24,7 +24,7 @@ import signal
 import time
 import urllib.parse
 from collections import Counter, deque
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from datetime import UTC, date, datetime
@@ -362,6 +362,11 @@ class ProxyState:
         self.public_origin: tuple[str, str, str] | None = (
             _parse_public_origin(self.access_gate) if self.guards_dashboard else None
         )
+        # Optional: the gate may drop a deleted user's sessions through the
+        # live vault manager (plugin_api.SessionStore).
+        bind_sessions = getattr(self.access_gate, "bind_sessions", None)
+        if callable(bind_sessions):
+            bind_sessions(_LiveSessions(self))
         for warning in config.routing.warnings:  # parser-owned (inert upstreams, metered
             logger.warning("routing: %s", warning)  # defaults, dead chains) — always logged
         self.router: Router | None = registry.build_router(config, self.license.tier)
@@ -456,6 +461,42 @@ class ProxyState:
         if self.session_router.record_response_id(response_id, session_id) is False:
             return
         self.vault_manager.record_response_session(response_id, session_id)
+
+    def object_tracker(
+        self,
+        adapter: ProviderAdapter | None,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str] | None" = None,
+    ) -> ProviderAdapter | None:
+        """The adapter whose ``tracks_object_ids`` claims this request — the
+        routed one, else (pass-through) the addressed provider's — or None,
+        also whenever no router could use the ids (static mode)."""
+        if self.session_router.mode == "static" or not hasattr(
+            self.session_router, "record_object_id"
+        ):
+            return None
+        if adapter is not None:
+            return adapter if adapter.tracks_object_ids(method, path) else None
+        name = self.provider_for(None, path, headers)
+        for candidate in self.adapters:
+            if candidate.name == name and candidate.tracks_object_ids(method, path):
+                return candidate
+        return None
+
+    def record_object_ids(self, object_ids: Sequence[str], session_id: str) -> None:
+        """Ids of provider-stored objects (files, batches, conversations)
+        created or first seen in ``session_id`` — reported to a router that
+        tracks ownership (the optional ``record_object_id``), mirrored in
+        the durable map unless the router vetoes it."""
+        if self.session_router.mode == "static":
+            return
+        record = getattr(self.session_router, "record_object_id", None)
+        if record is None:
+            return
+        for object_id in object_ids:
+            if record(object_id, session_id) is not False:
+                self.vault_manager.record_response_session(object_id, session_id)
 
     def reload(self) -> None:
         """Rebuild hot-swappable config on SIGHUP; never crash a running proxy.
@@ -1639,6 +1680,28 @@ async def _handle_sessions(request: Request, state: ProxyState) -> Response:
     return JSONResponse({"pruned": pruned})
 
 
+class _LiveSessions:
+    """``plugin_api.SessionStore`` over the running proxy's vault manager
+    (handed to an access gate's optional ``bind_sessions``)."""
+
+    def __init__(self, state: ProxyState) -> None:
+        self._state = state
+
+    def session_ids(self) -> list[str]:
+        return [str(row["session"]) for row in self._state.vault_manager.sessions_summary()]
+
+    def forget(self, session_ids: Iterable[str]) -> int:
+        state = self._state
+        static = state.config.vault.session
+        doomed = [session_id for session_id in set(session_ids) if session_id != static]
+        if not doomed:
+            return 0
+        forgotten = state.vault_manager.forget_sessions(doomed)
+        state._known_sessions.difference_update(doomed)
+        logger.info("forgot %d vault session(s) on the access gate's request", forgotten)
+        return forgotten
+
+
 def _prune_exclusions(state: ProxyState) -> frozenset[str]:
     """The sessions a live prune must keep: the configured static session,
     plus every current session the router marks durable (its optional
@@ -2389,6 +2452,25 @@ async def _deliver(
             payload = None
         if payload is not None and route.observe_payload(payload, kind):
             raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    tracker = (
+        state.object_tracker(adapter, request.method, path, request.headers)
+        if raw and 200 <= upstream.status_code < 300 and "application/json" in content_type
+        else None
+    )
+    if tracker is not None:
+        # Objects the provider stores for later reads (uploaded files,
+        # batches, stored conversations): their ids go to the session router
+        # with the session that created them. A body no adapter tracks is
+        # never parsed here (pass-through routes carry no adapter, so the
+        # provider's is looked up by name).
+        try:
+            stored = payload if payload is not None else json.loads(raw)
+        except ValueError:
+            stored = None
+        object_ids = tracker.object_ids_from_body(request.method, path, stored)
+        if object_ids:
+            state.record_object_ids(object_ids, ctx.session_id)
 
     # Every request is recorded — pass-through included (provider=None maps
     # to the "passthrough" metrics label); audit rows likewise when enabled.

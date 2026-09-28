@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_redact.vault import open_sqlite_vault
+from llm_redact.vault import SqliteVaultManager, open_sqlite_vault
 
 
 @pytest.fixture
@@ -75,6 +75,25 @@ def test_double_fault_propagates_the_original_error(db_path: Path) -> None:
     with pytest.raises(sqlite3.OperationalError, match="disk is full"):
         vault.placeholder_for("EMAIL", "jane@example.com")
     assert vault.original_for("«EMAIL_001»") is None
+
+
+def test_a_faulted_session_forget_rolls_back_whole(tmp_path: Path) -> None:
+    # A fault mid-forget (disk full on the second DELETE) must leave the
+    # sessions intact — never mappings gone but response rows kept — and the
+    # connection usable: the retry deletes everything.
+    manager = SqliteVaultManager(tmp_path / "m.db")
+    manager.get("a").placeholder_for("EMAIL", "a@example.com")
+    manager.record_response_session("resp_a", "a")
+    real = manager._conn
+    manager._conn = _FlakyConn(real, "DELETE FROM response_sessions")  # type: ignore[assignment]
+    with pytest.raises(sqlite3.OperationalError, match="disk is full"):
+        manager.forget_sessions(["a"])
+    assert [row["session"] for row in manager.sessions_summary()] == ["a"]
+    assert manager.lookup_response_session("resp_a") == "a"
+    assert manager.forget_sessions(["a"]) == 1
+    assert manager.lookup_response_session("resp_a") is None
+    manager._conn = real  # type: ignore[assignment]
+    manager.close()
 
 
 def test_interleaved_multi_view_writes_keep_counter_dense(db_path: Path) -> None:

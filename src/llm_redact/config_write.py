@@ -372,6 +372,10 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
             lines.append(f"module = {_toml_str(rdbms.module)}")
         if rdbms.cloud:
             lines.append(f"cloud = {_toml_str(rdbms.cloud)}")
+        if rdbms.auth != RdbmsConfig().auth:
+            lines.append(f"auth = {_toml_str(rdbms.auth)}")
+        if rdbms.region:
+            lines.append(f"region = {_toml_str(rdbms.region)}")
 
     lines.append("\n[audit]")
     lines.append(f"enabled = {_toml_value(config.audit.enabled)}")

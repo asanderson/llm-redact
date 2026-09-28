@@ -411,6 +411,7 @@ class _FakeDriver:
     """A DB-API 2.0 'module' impersonating a server driver over sqlite3."""
 
     Error = sqlite3.Error
+    VERSION = (1, 2, 3, "final")  # PyMySQL's tuple: TLS-enforcing (identity auth)
     IntegrityError = sqlite3.IntegrityError
     OperationalError = sqlite3.OperationalError
     InterfaceError = sqlite3.InterfaceError
@@ -423,6 +424,7 @@ class _FakeDriver:
         self.paramstyle = paramstyle
         self.transactional_ddl = transactional_ddl  # PostgreSQL-style DDL
         self.connect_count = 0
+        self.connect_args: tuple[Any, ...] = ()
         self.connect_kwargs: dict[str, Any] = {}
         self.dead = False  # next cursor() raises OperationalError once
         self._faults: list[tuple[str, Exception]] = []
@@ -440,6 +442,7 @@ class _FakeDriver:
 
     def connect(self, *args: Any, **kwargs: Any) -> _FakeConnection:
         self.connect_count += 1
+        self.connect_args = args
         self.connect_kwargs = kwargs
         if self.dead:
             self.dead = False  # reconnect succeeds
@@ -847,3 +850,473 @@ def test_battery_real_server(backend: str) -> None:
     config = VaultConfig(backend=backend, rdbms=RdbmsConfig(dsn=dsn))
     _drop_tables(config)
     _battery(lambda: RdbmsStore(config, None))
+
+
+# --- [vault.rdbms] auth = "identity" ----------------------------------------------
+# The password is a short-lived token minted from the proxy's cloud identity
+# (llm-redact-pro supplies the provider through Registry.build_db_password).
+# The core owns the config shape, the per-connect call, and the TLS floor.
+
+
+class _CountingPassword:
+    """A password provider minting a distinct 'token' per call."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> str:
+        self.calls += 1
+        return f"iam-token-{self.calls}"
+
+
+_PG_IDENTITY_DSN = "postgresql://vault@db.abc.us-east-1.rds.amazonaws.com:5432/llmredact"
+_MYSQL_IDENTITY_DSN = "mysql://vault@db.abc.us-east-1.rds.amazonaws.com:3306/llmredact"
+
+
+def _identity_vault(backend: str, dsn: str, **rdbms: Any) -> VaultConfig:
+    fields: dict[str, Any] = {"dsn": dsn, "cloud": "aws", "auth": "identity", **rdbms}
+    return VaultConfig(backend=backend, rdbms=RdbmsConfig(**fields))
+
+
+def _identity_raw(backend: str, dsn: str, **rdbms: Any) -> dict[str, Any]:
+    fields: dict[str, Any] = {"dsn": dsn, "cloud": "aws", "auth": "identity", **rdbms}
+    return {"vault": {"backend": backend, "rdbms": fields}}
+
+
+def test_parse_identity_auth_accepts_and_roundtrips() -> None:
+    import tomllib
+
+    from llm_redact.config import Config
+    from llm_redact.config_write import emit_config_toml
+
+    config = parse_config(
+        _identity_raw("postgresql", _PG_IDENTITY_DSN + "?sslmode=verify-full", region="us-east-1"),
+        "<t>",
+    )
+    assert config.vault.rdbms.auth == "identity"
+    assert config.vault.rdbms.region == "us-east-1"
+    assert parse_config(tomllib.loads(emit_config_toml(config)), "<roundtrip>") == config
+    # The default is omitted from the emitted file (like every [vault.rdbms] key).
+    plain = dataclasses.replace(
+        Config(), vault=VaultConfig(backend="mysql", rdbms=RdbmsConfig(dsn="mysql://u@h/d"))
+    )
+    assert "auth" not in emit_config_toml(plain)
+    assert parse_config(tomllib.loads(emit_config_toml(plain)), "<rt>") == plain
+    for cloud in ("gcp", "azure"):
+        raw = _identity_raw("mysql", "mysql://u@db.example:3306/v", cloud=cloud)
+        assert parse_config(raw, "<t>").vault.rdbms.cloud == cloud
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (_identity_raw("postgresql", _PG_IDENTITY_DSN, auth="iam"), "auth must be one of"),
+        (_identity_raw("postgresql", _PG_IDENTITY_DSN, cloud=""), "requires cloud"),
+        (_identity_raw("oracle", "oracle://u@h:1521/s"), "not 'oracle'"),
+        (_identity_raw("dbapi", "x", module="sqlite3"), "not 'dbapi'"),
+        (
+            _identity_raw(
+                "postgresql", _PG_IDENTITY_DSN, password_env="LLM_REDACT_VAULT_DB_PASSWORD"
+            ),
+            "password_env cannot be combined",
+        ),
+        (
+            _identity_raw("mysql", "mysql://vault:hunter2secret@db.example/v"),
+            "forbids a password",
+        ),
+        (
+            _identity_raw("postgresql", _PG_IDENTITY_DSN + "?password=hunter2secret"),
+            "forbids a password",
+        ),
+        (_identity_raw("postgresql", _PG_IDENTITY_DSN, region="us east"), "not a region name"),
+        (
+            _identity_raw("postgresql", _PG_IDENTITY_DSN, cloud="gcp", region="us-east-1"),
+            'region applies only to cloud = "aws"',
+        ),
+        (
+            {
+                "vault": {
+                    "backend": "postgresql",
+                    "rdbms": {"dsn": "postgresql://u@h/d", "region": "x"},
+                }
+            },
+            'region applies only to auth = "identity"',
+        ),
+        (
+            {"vault": {"backend": "sqlite", "rdbms": {"auth": "identity"}}},
+            "applies only to the RDBMS backends",
+        ),
+    ],
+)
+def test_parse_identity_auth_rejections(raw: dict[str, Any], message: str) -> None:
+    with pytest.raises(ConfigError, match=re.escape(message)) as excinfo:
+        parse_config(raw, "<t>")
+    assert "hunter2secret" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("mode", ["disable", "allow", "prefer", "bogus"])
+def test_parse_identity_postgres_refuses_weak_sslmode(mode: str) -> None:
+    raw = _identity_raw("postgresql", f"{_PG_IDENTITY_DSN}?sslmode={mode}")
+    with pytest.raises(ConfigError, match="requires TLS"):
+        parse_config(raw, "<t>")
+
+
+def test_parse_identity_dataclass_password_env_refused() -> None:
+    # A programmatically built config (the pro editor's candidate) is held to
+    # the same rule through rdbms_identity_error.
+    from llm_redact.config import rdbms_identity_error
+
+    rdbms = RdbmsConfig(dsn=_PG_IDENTITY_DSN, cloud="aws", auth="identity", password_env="X")
+    assert "password_env" in (rdbms_identity_error("postgresql", rdbms, rdbms.dsn) or "")
+    rdbms = RdbmsConfig(dsn="", cloud="gcp", auth="identity", region="us-east-1")
+    assert "region" in (rdbms_identity_error("postgresql", rdbms, "") or "")
+    assert rdbms_identity_error("postgresql", dataclasses.replace(rdbms, region=""), "") is None
+
+
+def test_identity_battery_and_fresh_password_per_connect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    monkeypatch.delenv("PGSSLMODE", raising=False)
+    monkeypatch.setenv("LLM_REDACT_VAULT_DB_PASSWORD", "static-must-not-be-used")
+    config = _identity_vault("postgresql", _PG_IDENTITY_DSN)
+    provider = _CountingPassword()
+    _battery(lambda: RdbmsStore(config, None, password_provider=provider))
+    assert provider.calls == driver.connect_count == 1  # one connect, one token
+
+    store = RdbmsStore(config, None, password_provider=provider)
+    assert provider.calls == 2
+    assert driver.connect_args == (_PG_IDENTITY_DSN,)
+    assert driver.connect_kwargs == {"password": "iam-token-2", "sslmode": "require"}
+    vault = RdbmsVault(store, "s")
+    vault.placeholder_for("EMAIL", "first@corp.example")
+    assert provider.calls == 2  # queries on a live connection mint nothing
+    # The idle-dropped connection's reconnect-retry mints a FRESH token (the
+    # last one may have expired), never replays the one captured at startup.
+    driver.dead = True
+    assert vault.placeholder_for("EMAIL", "second@corp.example") == "«EMAIL_002»"
+    assert provider.calls == 3 and driver.connect_count == 3
+    assert driver.connect_kwargs["password"] == "iam-token-3"
+    driver.dead = True
+    assert vault.original_for("«EMAIL_002»") == "second@corp.example"  # cached: no reconnect
+    assert store.lookup_reverse("s", "«EMAIL_001»") == "first@corp.example"
+    assert provider.calls == 4 and driver.connect_kwargs["password"] == "iam-token-4"
+    store.close()
+
+
+def test_identity_provider_failure_fails_the_connect_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    config = _identity_vault("postgresql", _PG_IDENTITY_DSN)
+    tokens = iter(["iam-token-1"])
+
+    def provider() -> str:
+        try:
+            return next(tokens)
+        except StopIteration:
+            raise RuntimeError("no credential from AWS_WEB_IDENTITY_TOKEN_FILE") from None
+
+    store = RdbmsStore(config, None, password_provider=provider)
+    driver.dead = True
+    with pytest.raises(RuntimeError, match="AWS_WEB_IDENTITY_TOKEN_FILE"):
+        RdbmsVault(store, "s").placeholder_for("EMAIL", "a@corp.example")
+    assert driver.connect_count == 1  # no connect was attempted without a password
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("dsn_suffix", "pgsslmode", "expected"),
+    [
+        ("", None, {"sslmode": "require"}),
+        ("", "prefer", {"sslmode": "require"}),  # a weak env default is overridden
+        ("", "verify-full", {}),  # an operator's stronger env mode is left alone
+        ("?sslmode=verify-ca", "disable", {}),  # the DSN's own strong mode wins
+        ("?sslmode=REQUIRE", None, {}),
+    ],
+)
+def test_identity_postgres_tls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    dsn_suffix: str,
+    pgsslmode: str | None,
+    expected: dict[str, str],
+) -> None:
+    _, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    if pgsslmode is None:
+        monkeypatch.delenv("PGSSLMODE", raising=False)
+    else:
+        monkeypatch.setenv("PGSSLMODE", pgsslmode)
+    config = _identity_vault("postgresql", _PG_IDENTITY_DSN + dsn_suffix)
+    RdbmsStore(config, None, password_provider=lambda: "tok").close()
+    assert driver.connect_kwargs == {"password": "tok", **expected}
+
+
+def test_identity_env_dsn_override_is_checked_and_used(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    config = _identity_vault("postgresql", "")
+    env_dsn = "postgresql://svc@other.abc.eu-west-1.rds.amazonaws.com:5432/v?sslmode=verify-full"
+    monkeypatch.setenv(ENV_DSN, env_dsn)
+    RdbmsStore(config, None, password_provider=lambda: "tok").close()
+    assert driver.connect_args == (env_dsn,)
+    # The env DSN is held to the same rules as the file's, never echoed.
+    for bad in (
+        "postgresql://svc:hunter2secret@other.example:5432/v",
+        "postgresql://svc@other.example:5432/v?sslmode=disable",
+    ):
+        monkeypatch.setenv(ENV_DSN, bad)
+        with pytest.raises(ConfigError) as excinfo:
+            RdbmsStore(config, None, password_provider=lambda: "tok")
+        assert "hunter2secret" not in str(excinfo.value)
+        assert "other.example" not in str(excinfo.value)
+
+
+def test_identity_mysql_tls_and_fresh_password(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ssl
+
+    from llm_redact.vault_rdbms import _TlsOnlyClearPassword
+
+    _, driver = _fake_backend_config(monkeypatch, tmp_path, "mysql")
+    config = _identity_vault("mysql", _MYSQL_IDENTITY_DSN)
+    provider = _CountingPassword()
+    store = RdbmsStore(config, None, password_provider=provider)
+    kwargs = driver.connect_kwargs
+    assert kwargs["password"] == "iam-token-1"
+    assert kwargs["user"] == "vault" and kwargs["charset"] == "utf8mb4"
+    context = kwargs["ssl"]
+    assert isinstance(context, ssl.SSLContext)  # a truthy ssl= : PyMySQL >= 1.2 REQUIRES TLS
+    assert context.verify_mode == ssl.CERT_NONE and not context.check_hostname
+    assert kwargs["auth_plugin_map"] == {"mysql_clear_password": _TlsOnlyClearPassword}
+    driver.dead = True
+    RdbmsVault(store, "s").placeholder_for("EMAIL", "a@corp.example")
+    assert driver.connect_kwargs["password"] == "iam-token-2"
+    store.close()
+
+
+def test_identity_mysql_ssl_ca_verifies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import ssl
+
+    pytest.importorskip("cryptography")
+    ca = _self_signed_pem(tmp_path)
+    _, driver = _fake_backend_config(monkeypatch, tmp_path, "mysql")
+    config = _identity_vault("mysql", f"{_MYSQL_IDENTITY_DSN}?ssl_ca={ca}")
+    RdbmsStore(config, None, password_provider=lambda: "tok").close()
+    context = driver.connect_kwargs["ssl"]
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    missing = _identity_vault("mysql", f"{_MYSQL_IDENTITY_DSN}?ssl_ca={tmp_path / 'absent.pem'}")
+    with pytest.raises(ConfigError, match="ssl_ca file could not be loaded"):
+        RdbmsStore(missing, None, password_provider=lambda: "tok")
+
+
+def _self_signed_pem(tmp_path: Path) -> Path:
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test-ca")])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    path = tmp_path / "ca.pem"
+    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return path
+
+
+def test_identity_mysql_refuses_pymysql_without_tls_enforcement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, driver = _fake_backend_config(monkeypatch, tmp_path, "mysql")
+    monkeypatch.setattr(driver, "VERSION", (1, 1, 2, "final"), raising=False)
+    provider = _CountingPassword()
+    with pytest.raises(ConfigError, match="PyMySQL >= 1.2"):
+        RdbmsStore(_identity_vault("mysql", _MYSQL_IDENTITY_DSN), None, password_provider=provider)
+    assert provider.calls == 0 and driver.connect_count == 0  # refused before any token
+
+
+def test_tls_only_clear_password_handler() -> None:
+    import socket
+    import ssl
+
+    from llm_redact.vault_rdbms import _TlsOnlyClearPassword
+
+    class _Reply:
+        checked = False
+
+        def check_error(self) -> None:
+            self.checked = True
+
+    class _Conn:
+        def __init__(self, sock: object) -> None:
+            self._sock = sock
+            self.password = b"iam-token"
+            self.written: list[bytes] = []
+            self.reply = _Reply()
+
+        def write_packet(self, data: bytes) -> None:
+            self.written.append(data)
+
+        def _read_packet(self) -> _Reply:
+            return self.reply
+
+    plain = _Conn(object())
+    with pytest.raises(RuntimeError, match="without TLS") as excinfo:
+        _TlsOnlyClearPassword(plain).authenticate(object())
+    assert plain.written == [] and "iam-token" not in str(excinfo.value)
+
+    raw = socket.socket()
+    tls_sock = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).wrap_socket(
+        raw, do_handshake_on_connect=False, server_hostname="db.example"
+    )
+    try:
+        conn = _Conn(tls_sock)
+        assert _TlsOnlyClearPassword(conn).authenticate(object()) is conn.reply
+        assert conn.written == [b"iam-token\0"]  # the plugin's wire form
+        assert conn.reply.checked
+    finally:
+        tls_sock.close()
+
+
+def test_identity_without_pro_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import llm_redact.registry as registry_mod
+
+    _, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    monkeypatch.setattr(registry_mod, "_registry", registry_mod.Registry())
+    with pytest.raises(ConfigError, match="llm-redact-pro"):
+        RdbmsStore(_identity_vault("postgresql", _PG_IDENTITY_DSN), None)
+    assert driver.connect_count == 0
+    # The CLI's store and the pro build both go through the same seam.
+    with pytest.raises(ConfigError, match="llm-redact-pro"):
+        build_rdbms_vault_manager(
+            dataclasses.replace(
+                _identity_vault("postgresql", _PG_IDENTITY_DSN), encryption="fernet"
+            ),
+            FakeVaultCipher(),
+        )
+    # A plugin factory that breaks the contract (None for identity) also refuses.
+    broken = registry_mod.Registry()
+    broken.build_db_password = lambda config: None
+    monkeypatch.setattr(registry_mod, "_registry", broken)
+    with pytest.raises(ConfigError, match="fail closed"):
+        RdbmsStore(_identity_vault("postgresql", _PG_IDENTITY_DSN), None)
+
+
+def test_registry_provider_used_for_every_connect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import llm_redact.registry as registry_mod
+
+    _, driver = _fake_backend_config(monkeypatch, tmp_path, "mysql")
+    provider = _CountingPassword()
+    seen: list[VaultConfig] = []
+    registry = registry_mod.Registry()
+
+    def build(config: VaultConfig) -> _CountingPassword:
+        seen.append(config)
+        return provider
+
+    registry.build_db_password = build
+    monkeypatch.setattr(registry_mod, "_registry", registry)
+    config = _identity_vault("mysql", _MYSQL_IDENTITY_DSN)
+    store = RdbmsStore(config, None)
+    assert seen == [config] and provider.calls == 1
+    driver.dead = True
+    store.session_count()
+    assert provider.calls == 2 and driver.connect_kwargs["password"] == "iam-token-2"
+    store.close()
+
+
+def test_password_auth_path_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    monkeypatch.setenv("LLM_REDACT_VAULT_DB_PASSWORD", "static-pw")
+    store = RdbmsStore(config, None)
+    assert driver.connect_kwargs == {"password": "static-pw"}  # no sslmode forced
+    driver.dead = True
+    store.session_count()
+    assert driver.connect_kwargs == {"password": "static-pw"}
+    store.close()
+    monkeypatch.delenv("LLM_REDACT_VAULT_DB_PASSWORD")
+    RdbmsStore(config, None).close()
+    assert driver.connect_kwargs == {}  # no password at all: nothing passed
+
+
+def test_dbapi_refuses_a_password_provider(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="cannot take a per-connect password"):
+        RdbmsStore(_dbapi_config(tmp_path / "v.db"), None, password_provider=lambda: "tok")
+
+
+def test_validate_connector_identity_builds_no_credential(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import llm_redact.registry as registry_mod
+    from llm_redact.vault_rdbms import _resolve_connector, validate_connector
+
+    _, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+
+    def exploding(config: VaultConfig) -> None:
+        raise AssertionError("doctor must not build a credential source")
+
+    registry = registry_mod.Registry()
+    registry.build_db_password = exploding  # type: ignore[assignment]
+    monkeypatch.setattr(registry_mod, "_registry", registry)
+    config = _identity_vault("postgresql", _PG_IDENTITY_DSN)
+    validate_connector(config)
+    _, connect = _resolve_connector(config)
+    with pytest.raises(ConfigError, match="no password provider"):
+        connect()
+    assert driver.connect_count == 0
+    with pytest.raises(ConfigError, match="requires TLS"):
+        validate_connector(_identity_vault("postgresql", _PG_IDENTITY_DSN + "?sslmode=allow"))
+
+
+def _doctor_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: bool
+) -> tuple[int, str]:
+    import argparse
+    import io
+    import socket
+    from contextlib import redirect_stdout
+
+    import llm_redact.registry as registry_mod
+    from llm_redact.doctor_cli import run_doctor
+
+    monkeypatch.setitem(sys.modules, "psycopg", _FakeDriver(tmp_path / "d.db", "pyformat"))
+    monkeypatch.setattr(registry_mod, "pro_package_installed", lambda: installed)
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        f"port = {port}\n"
+        '[vault]\nbackend = "postgresql"\nencryption = "fernet"\n\n'
+        f'[vault.rdbms]\ndsn = "{_PG_IDENTITY_DSN}"\ncloud = "aws"\nauth = "identity"\n'
+    )
+    out = io.StringIO()
+    with redirect_stdout(out):
+        code = run_doctor(argparse.Namespace(config=config_file))
+    return code, out.getvalue()
+
+
+def test_doctor_identity_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, out = _doctor_identity(tmp_path, monkeypatch, installed=True)
+    assert "short-lived aws token minted from the proxy's cloud identity" in out
+    code, out = _doctor_identity(tmp_path, monkeypatch, installed=False)
+    assert code == 1
+    assert 'auth = "identity" requires the llm-redact-pro package' in out

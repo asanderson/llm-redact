@@ -188,6 +188,70 @@ class RdbmsConfig:
     # fernet rule (a non-local DSN must be encrypted) is enforced separately by
     # hostname, independent of this field.
     cloud: str = ""
+    # "password" (default): the static password from `password_env` or the
+    # DSN. "identity": a short-lived token minted from the proxy's cloud
+    # identity (RDS IAM auth, Cloud SQL IAM database auth, Entra ID) at EVERY
+    # connect — llm-redact-pro supplies it through the registry's
+    # build_db_password seam. Requires `cloud`, postgresql/mysql, TLS, and no
+    # static password anywhere (rdbms_identity_error).
+    auth: str = "password"
+    # auth = "identity" with cloud = "aws" only: the region the RDS token is
+    # signed for. Empty = derived from the RDS hostname.
+    region: str = ""
+
+
+# [vault.rdbms] auth = "identity": the backends whose drivers take a token as
+# the password, the clouds that mint one, and the libpq sslmodes that would
+# let the token cross the network unencrypted.
+RDBMS_AUTH_MODES = ("password", "identity")
+IDENTITY_AUTH_BACKENDS = ("postgresql", "mysql")
+IDENTITY_AUTH_CLOUDS = ("aws", "gcp", "azure")
+PG_TLS_SSLMODES = ("require", "verify-ca", "verify-full")
+_REGION_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def rdbms_identity_error(backend: str, rdbms: RdbmsConfig, dsn: str) -> str | None:
+    """Why ``auth = "identity"`` cannot run with this backend and DSN, or None.
+
+    Run at parse time on the file's DSN and again at connect-build time on
+    the effective one (``LLM_REDACT_VAULT_DSN`` wins). Messages name the
+    rule, never the DSN (it may embed credentials).
+    """
+    if rdbms.auth != "identity":
+        return None
+    if backend not in IDENTITY_AUTH_BACKENDS:
+        return (
+            f'[vault.rdbms] auth = "identity" supports backend = "postgresql" or "mysql",'
+            f" not {backend!r}"
+        )
+    if rdbms.cloud not in IDENTITY_AUTH_CLOUDS:
+        return (
+            '[vault.rdbms] auth = "identity" requires cloud = "aws", "gcp" or "azure"'
+            " (the identity that mints the database token)"
+        )
+    if rdbms.password_env != RdbmsConfig().password_env:
+        return '[vault.rdbms] password_env cannot be combined with auth = "identity"'
+    if rdbms.region and rdbms.cloud != "aws":
+        return '[vault.rdbms] region applies only to cloud = "aws"'
+    if not dsn:
+        return None  # the missing-DSN error is raised where the DSN is resolved
+    from urllib.parse import parse_qs, urlsplit
+
+    parts = urlsplit(dsn)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    if parts.password or "password" in query:
+        return (
+            '[vault.rdbms] auth = "identity" forbids a password in the DSN'
+            " (the token minted from the cloud identity is the password)"
+        )
+    if backend == "postgresql":
+        modes = [mode.lower() for mode in query.get("sslmode", [])]
+        if any(mode not in PG_TLS_SSLMODES for mode in modes):
+            return (
+                '[vault.rdbms] auth = "identity" requires TLS: the DSN sslmode must be'
+                f" one of {PG_TLS_SSLMODES} (or absent — the proxy then sets require)"
+            )
+    return None
 
 
 @dataclass(frozen=True)
@@ -1732,17 +1796,39 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     if backend not in known_vault_backends:
         raise ConfigError(f"[vault] backend must be one of {known_vault_backends}, got {backend!r}")
     rdbms_raw = vault_raw.get("rdbms", {})
-    _require_keys(rdbms_raw, {"dsn", "password_env", "module", "cloud"}, "[vault.rdbms]")
+    _require_keys(
+        rdbms_raw,
+        {"dsn", "password_env", "module", "cloud", "auth", "region"},
+        "[vault.rdbms]",
+    )
     rdbms = RdbmsConfig(
         dsn=str(rdbms_raw.get("dsn", "")),
         password_env=str(rdbms_raw.get("password_env", "LLM_REDACT_VAULT_DB_PASSWORD")),
         module=str(rdbms_raw.get("module", "")),
         cloud=str(rdbms_raw.get("cloud", "")),
+        auth=str(rdbms_raw.get("auth", "password")),
+        region=str(rdbms_raw.get("region", "")),
     )
     if rdbms.cloud not in ("", "aws", "azure", "gcp"):
         raise ConfigError(
             f"[vault.rdbms] cloud must be 'aws', 'azure', or 'gcp', got {rdbms.cloud!r}"
         )
+    if rdbms.auth not in RDBMS_AUTH_MODES:
+        raise ConfigError(
+            f"[vault.rdbms] auth must be one of {RDBMS_AUTH_MODES}, got {rdbms.auth!r}"
+        )
+    if rdbms.region and not _REGION_RE.match(rdbms.region):
+        raise ConfigError(f"[vault.rdbms] region {rdbms.region!r} is not a region name")
+    if rdbms.region and rdbms.auth != "identity":
+        raise ConfigError('[vault.rdbms] region applies only to auth = "identity"')
+    if rdbms.auth == "identity" and "password_env" in rdbms_raw:
+        # Explicitly naming the default env var is still a static password.
+        raise ConfigError('[vault.rdbms] password_env cannot be combined with auth = "identity"')
+    identity_error = (
+        rdbms_identity_error(backend, rdbms, rdbms.dsn) if backend in RDBMS_BACKENDS else None
+    )
+    if identity_error is not None:
+        raise ConfigError(identity_error)
     if rdbms != RdbmsConfig() and backend not in RDBMS_BACKENDS:
         raise ConfigError(
             f"[vault.rdbms] applies only to the RDBMS backends {RDBMS_BACKENDS},"

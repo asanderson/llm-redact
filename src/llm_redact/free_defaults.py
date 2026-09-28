@@ -23,8 +23,8 @@ from .config import ConfigError
 from .licensing import ENV_KEY, FREE, ResolvedLicense
 
 if TYPE_CHECKING:
-    from .config import Config, OtelConfig
-    from .plugin_api import AccessGate, Dashboard, Router, Telemetry
+    from .config import Config, OtelConfig, VaultConfig
+    from .plugin_api import AccessGate, Dashboard, DbPasswordProvider, Router, Telemetry
 
 _PRO_HINT = "install the llm-redact-pro package to enable it"
 
@@ -39,6 +39,24 @@ def build_telemetry(config: OtelConfig) -> Telemetry | None:
     if not config.enabled:
         return None
     raise ConfigError(f"[otel] enabled = true requires OpenTelemetry export; {_PRO_HINT}")
+
+
+def build_db_password(config: VaultConfig) -> DbPasswordProvider | None:
+    """None for the static password (``[vault.rdbms] auth = "password"``);
+    identity auth requires the pro package.
+
+    Minting a database token from the proxy's cloud identity (RDS IAM auth,
+    Cloud SQL IAM database auth, Entra ID) is credential fetching, which the
+    core never does. Without llm-redact-pro, ``auth = "identity"`` fails
+    closed here — never a silent fallback to a static password that the
+    config deliberately did not name.
+    """
+    if config.rdbms.auth != "identity":
+        return None
+    raise ConfigError(
+        '[vault.rdbms] auth = "identity" requires cloud-identity database'
+        f" authentication; {_PRO_HINT}"
+    )
 
 
 def build_router(config: Config, tier: str) -> Router | None:

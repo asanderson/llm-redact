@@ -288,6 +288,8 @@ def _check_vault_rdbms(report: _Report, config: Config) -> None:
         report.line("FAIL", "vault", str(problem))
         return
     report.line("PASS", "vault", f"{backend} driver importable, DSN shape valid (not probed)")
+    if config.vault.rdbms.auth == "identity":
+        _check_vault_identity(report, config)
 
     cloud = vault_rdbms.managed_dbms_cloud(config.vault)
     if cloud is not None:
@@ -315,6 +317,28 @@ def _check_vault_rdbms(report: _Report, config: Config) -> None:
                 'backend "dbapi" DSNs are opaque — locality cannot be verified;'
                 ' keep the database local or set [vault] encryption = "fernet"',
             )
+
+
+def _check_vault_identity(report: _Report, config: Config) -> None:
+    """``[vault.rdbms] auth = "identity"``: where the password comes from.
+    No credential source is built and nothing is fetched (no network)."""
+    from llm_redact.registry import pro_package_installed
+
+    if not pro_package_installed():
+        report.line(
+            "FAIL",
+            "vault",
+            'auth = "identity" requires the llm-redact-pro package — the proxy will refuse'
+            " to start",
+        )
+        return
+    report.line(
+        "PASS",
+        "vault",
+        f'auth = "identity": the database password is a short-lived {config.vault.rdbms.cloud}'
+        " token minted from the proxy's cloud identity at every connect, over TLS"
+        " (identity not probed)",
+    )
 
 
 def _check_vault_key_matches(report: _Report, config: Config) -> None:

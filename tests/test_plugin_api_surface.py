@@ -173,6 +173,7 @@ ALL: tuple[str, ...] = (
     "ConfigSection",
     "Dashboard",
     "DashboardHost",
+    "DbPasswordProvider",
     "HopDecision",
     "HopRequest",
     "HopResult",
@@ -236,3 +237,11 @@ def test_all_is_snapshotted_and_resolves() -> None:
 
     assert plugin_api.RouteKind is RouteKind
     assert plugin_api.SSEEvent is SSEEvent
+
+
+def test_db_password_provider_alias_is_snapshotted() -> None:
+    # The RDBMS vault's per-connect password seam (Registry.build_db_password
+    # returns one): a zero-argument callable returning the password.
+    from collections.abc import Callable
+
+    assert plugin_api.DbPasswordProvider == Callable[[], str]

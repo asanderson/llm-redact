@@ -28,6 +28,8 @@ and tags `vX.Y.Z`.
 - The live prune fails safe on a misbehaving router: an `is_durable` that raises keeps the session
   (logged by exception type) instead of answering `POST /__llm-redact/sessions/prune` with a 500,
   and only an explicit `False` releases a session (a `None` from a buggy router used to prune it).
+  The compaction-fork check follows the same contract: a raising `is_durable` no longer fails the
+  request, and only an explicit `False` lets a session count as a fork.
 
 ## [1.6.0] - 2026-09-27
 

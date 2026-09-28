@@ -391,7 +391,14 @@ class ProxyState:
         if not PLACEHOLDER_RE.search(flat_body) or len(vault) > 0:
             return False
         is_durable = getattr(self.session_router, "is_durable", None)
-        return not (is_durable is not None and is_durable(session_id))
+        if is_durable is None:
+            return True
+        try:
+            # The prune's contract: only an explicit False says "not durable";
+            # a failing or sloppy router never fails the request over a metric.
+            return is_durable(session_id) is False
+        except Exception:  # noqa: BLE001
+            return False
 
     def context_for(
         self, adapter: ProviderAdapter | None, method: str, path: str, parsed_body: Any

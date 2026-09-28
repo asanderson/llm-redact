@@ -11,6 +11,8 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-28
+
 ### Security
 
 - Session routers can veto the durable response-session map: `SessionRouter.record_response_id`

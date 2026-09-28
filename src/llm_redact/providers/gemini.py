@@ -77,6 +77,27 @@ KNOWN_PART_KEYS = frozenset(
 
 _ChannelKey = tuple[int, str]
 
+_CACHE_PREFIX = "cachedContents/"
+
+
+def cache_object_ids(body: Any) -> tuple[str, ...]:
+    """The context cache a cache-create response names, as
+    ``cachedContents/<id>``.
+
+    The Gemini API answers with exactly that; Vertex answers with the full
+    resource name (``projects/{p}/locations/{l}/cachedContents/<id>``).
+    Both are reported in the Gemini form, which is how a session router
+    reads the ``cachedContent`` a later generateContent body cites — so one
+    cache has one id whichever form the client uses.
+    """
+    if not isinstance(body, dict):
+        return ()
+    name = body.get("name")
+    if not isinstance(name, str) or not name:
+        return ()
+    at = name.rfind(_CACHE_PREFIX)
+    return (name[at:] if at >= 0 else name,)
+
 
 class GeminiAdapter(ProviderAdapter):
     name = "gemini"
@@ -114,10 +135,7 @@ class GeminiAdapter(ProviderAdapter):
         return method == "POST" and _GEMINI_CACHED_CREATE.fullmatch(path) is not None
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
-        # The create answers with the cache's resource name, "cachedContents/…".
-        if isinstance(body, dict) and isinstance(body.get("name"), str) and body["name"]:
-            return (str(body["name"]),)
-        return ()
+        return cache_object_ids(body)
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         # countTokens bodies carry the same systemInstruction schema as the

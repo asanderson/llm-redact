@@ -165,9 +165,18 @@ def test_stored_object_ids_are_read_from_the_body() -> None:
     )
     assert gemini.object_ids_from_body("POST", "/v1beta/cachedContents", {"name": ""}) == ()
     assert gemini.object_ids_from_body("POST", "/v1beta/cachedContents", ["x"]) == ()
-    # Vertex answers on its own paths, which the Gemini API matcher never claims.
+    # Vertex answers on its own paths, which the Gemini API matcher never
+    # claims; its cache create is tracked too, reported in the Gemini form
+    # (`cachedContents/<id>`) that later generateContent bodies are read in.
     vertex_create = "/v1/projects/p/locations/us-central1/cachedContents"
-    assert not VertexAdapter().tracks_object_ids("POST", vertex_create)
+    assert not gemini.tracks_object_ids("POST", vertex_create)
+    vertex = VertexAdapter()
+    assert vertex.tracks_object_ids("POST", vertex_create)
+    assert not vertex.tracks_object_ids("GET", vertex_create + "/abc")
+    full = {"name": "projects/p/locations/us-central1/cachedContents/abc123"}
+    assert vertex.object_ids_from_body("POST", vertex_create, full) == ("cachedContents/abc123",)
+    assert vertex.object_ids_from_body("POST", vertex_create, {"name": "odd"}) == ("odd",)
+    assert vertex.object_ids_from_body("POST", vertex_create, {}) == ()
 
 
 class OwnershipRouter:
@@ -243,6 +252,36 @@ async def test_a_created_gemini_cache_is_reported_with_its_session(
     assert router.objects == [("cachedContents/c1", "user:n1:main")]
     durable = app.state.proxy.vault_manager.lookup_response_session("cachedContents/c1")
     assert durable == "user:n1:main"
+
+
+async def test_a_created_vertex_cache_is_reported_in_the_gemini_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Vertex names the cache by its full resource name; the router hears the
+    # `cachedContents/<id>` form a later generateContent body cites.
+    router = OwnershipRouter()
+    _registry(monkeypatch, build_session_router=lambda config, **kw: router)
+    seen: list[bytes] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(request.content)
+        name = "projects/p/locations/us-central1/cachedContents/c2"
+        return httpx.Response(200, json={"name": name, "model": "m"})
+
+    config = Config(
+        providers={"vertex": ProviderConfig(UPSTREAM)},
+        vault=VaultConfig(backend="sqlite", path=str(tmp_path / "v.db")),
+    )
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        body = {"model": "m", "contents": [{"parts": [{"text": "ada@corp.example"}]}]}
+        response = await client.post(
+            "/v1/projects/p/locations/us-central1/cachedContents", json=body
+        )
+    assert response.status_code == 200
+    assert b"ada@corp.example" not in seen[0]  # the cached content was redacted
+    assert router.objects == [("cachedContents/c2", "user:n1:main")]
 
 
 async def test_nothing_is_reported_for_errors_or_static_mode(

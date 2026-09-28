@@ -11,10 +11,10 @@ At a glance:
 |---|---|---|
 | Anthropic | `ANTHROPIC_BASE_URL` | Messages (+streaming), count_tokens, Message Batches, beta Files |
 | OpenAI | `OPENAI_BASE_URL` | Chat Completions, Responses, Conversations, legacy completions, embeddings, Files+Batches, Realtime WS |
-| Azure OpenAI | `[providers.azure]` + tool's Azure endpoint | same OpenAI surface incl. Responses/Realtime, files/batches |
+| Azure OpenAI | `[providers.azure]` + tool's Azure endpoint | same OpenAI surface incl. Responses/Conversations/Realtime, legacy completions, image/speech prompts, files/batches, model listings |
 | Google Gemini | `GOOGLE_GEMINI_BASE_URL` | generateContent/stream, countTokens, embeddings, cachedContents, batch, Live WS |
-| Vertex AI | `[providers.vertex]` | Gemini-on-Vertex + Claude-on-Vertex (`rawPredict`/`streamRawPredict`) |
-| AWS Bedrock | `[providers.bedrock]` (bearer keys, or the proxy's own identity) | converse(+stream), invoke(+response-stream), binary eventstream |
+| Vertex AI | `[providers.vertex]` | Gemini-on-Vertex + Claude-on-Vertex (`rawPredict`/`streamRawPredict`), context caching, computeTokens/embedContent, Imagen/Veo, model listings |
+| AWS Bedrock | `[providers.bedrock]` (bearer keys, or the proxy's own identity) | converse(+stream), invoke(+response-stream), binary eventstream, count-tokens, ApplyGuardrail, async invoke |
 | Cohere | `[providers.cohere]` | v2 chat (+streaming), embed, rerank, legacy v1 chat/generate |
 | Ollama (native) | `OLLAMA_HOST` | /api/chat, /api/generate (+NDJSON streaming), /api/embed |
 | Any OpenAI-compatible | `[providers.custom.NAME]` → `/custom/NAME/` | full OpenAI surface per named upstream, several side by side |
@@ -49,8 +49,11 @@ actually flowing through the proxy with `/llm-redact:status` and
 
 Set `[providers.azure] upstream_base_url` to your resource URL and point
 the tool's Azure endpoint at the proxy. The full OpenAI surface is
-covered on Azure paths too — Chat Completions, Responses, embeddings,
-files/batches, and Realtime. The tool's `api-key` (or Entra ID
+covered on Azure paths too (both the `/openai/deployments/{d}/…`
+api-version form and the `/openai/v1/…` API) — Chat Completions, legacy
+completions, Responses, Conversations, embeddings, image-generation/edit
+prompts, text-to-speech input, files/batches, and Realtime; the model,
+deployment and file listings are recognized as well. The tool's `api-key` (or Entra ID
 bearer token) is forwarded as is, unless the proxy authorizes with its
 own identity (see [the proxy's own cloud identity](#the-proxys-own-cloud-identity)).
 
@@ -64,9 +67,13 @@ models on Vertex** are covered too: their
 `publishers/anthropic/models/{m}:rawPredict` / `:streamRawPredict` paths
 carry Anthropic Messages bodies, so they reuse the Anthropic
 redaction/rehydration and the same `[providers.vertex]` upstream (other
-publishers' `rawPredict` traffic is deliberately left untouched). The
-tool's bearer token is forwarded as is, unless the proxy authorizes with
-its own identity (below).
+publishers' `rawPredict` traffic is deliberately left untouched).
+Context caches (`projects/{p}/locations/{l}/cachedContents`: the create is
+redacted, get/list/patch/delete recognized), `:computeTokens`,
+`:embedContent`, Imagen/Veo (`:predict`, `:predictLongRunning`,
+`:fetchPredictOperation`) and the publisher/Model Registry model listings
+are covered too. The tool's bearer token is forwarded as is, unless the
+proxy authorizes with its own identity (below).
 
 ## AWS Bedrock
 
@@ -76,7 +83,11 @@ Bedrock's bearer-token API keys are supported: set
 runtime routes (`converse`, `converse-stream`, `invoke`,
 `invoke-with-response-stream`) are redacted, including AWS's binary
 eventstream response framing, which the proxy parses and re-frames
-natively. A signature the CLIENT computed (SigV4-signed SDK traffic)
+natively. `count-tokens`, ApplyGuardrail (`/guardrail/{id}/version/{v}/apply`
+— content redacted, the guardrail's rewritten output restored) and
+StartAsyncInvoke (`POST /async-invoke`; its output lands in S3 with the
+placeholders in place) are redacted too, and the async-invoke status reads
+are recognized. A signature the CLIENT computed (SigV4-signed SDK traffic)
 remains a permanent non-goal: it covers the payload hash of the
 unredacted body, so no body-rewriting proxy can transit it (see
 [threat-model.md](threat-model.md)). The proxy can instead sign each
@@ -105,7 +116,11 @@ for Azure OpenAI. If no credential can be obtained, the proxy answers a
 502 and forwards nothing. The setting is valid only for these three
 providers; without llm-redact-pro it is a startup error. Realtime
 WebSocket connections to a provider using it are refused (1011), and
-such a provider is never routed. Credential sources and the IAM
+such a provider is never routed. Only the routes llm-redact recognizes
+(the Vertex AI, Azure OpenAI and Bedrock tables in
+[api-coverage.md](api-coverage.md)) are forwarded with that identity; any
+other path to the provider is refused with a recorded 403, never signed.
+Credential sources and the IAM
 permissions to grant are in llm-redact-pro's provider-identity guide.
 
 Any client that can reach the proxy can then spend that identity: keep

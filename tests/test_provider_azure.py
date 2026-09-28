@@ -67,8 +67,11 @@ def test_azure_responses_routing() -> None:
     assert adapter.matches("GET", "/openai/responses/resp_abc") is RouteKind.CHAT
     assert adapter.matches("GET", "/openai/v1/responses/resp_abc") is RouteKind.CHAT
     assert adapter.matches("GET", "/openai/responses/resp_abc/input_items") is RouteKind.CHAT
-    # DELETE and unrelated paths pass through.
-    assert adapter.matches("DELETE", "/openai/responses/resp_abc") is RouteKind.NONE
+    # DELETE is recognized (ids only: a body-less no-op) so identity auth
+    # can delete stored responses; cancel answers the Response object.
+    assert adapter.matches("DELETE", "/openai/responses/resp_abc") is RouteKind.REDACT_ONLY
+    assert adapter.matches("POST", "/openai/v1/responses/resp_abc/cancel") is RouteKind.CHAT
+    assert adapter.matches("PUT", "/openai/responses/resp_abc") is RouteKind.NONE
     assert adapter.matches("POST", "/v1/responses") is RouteKind.NONE  # plain OpenAI Responses
 
 

@@ -11,6 +11,13 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- The Gemini adapter reports a created context cache's name (`cachedContents/…`) through the
+  optional `SessionRouter.record_object_id` seam, as the OpenAI and Anthropic adapters already do
+  for files, batches and conversations. llm-redact-pro uses it to keep a cache with the user who
+  created it. Only reported outside static mode; nothing changes without a router that takes it.
+
 ## [1.7.0] - 2026-09-28
 
 ### Security

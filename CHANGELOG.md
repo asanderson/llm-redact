@@ -11,6 +11,8 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-28
+
 The core side of the proxy authenticating as ITSELF to cloud services, plus two
 sign-in additions. Every credential is fetched by llm-redact-pro; the core carries
 only config shapes, generic seams, fail-closed defaults and doctor/status surfaces.

@@ -18,6 +18,12 @@ and tags `vX.Y.Z`.
   the proxy then skips its durable write. Previously the proxy mirrored every mapping, so a
   per-user router that refused to move another user's response id into the reader's namespace was
   overruled by the durable row on its next lookup. Returning `None` keeps the historical behavior.
+- The response-id map's size cap (10,000 rows) no longer trims rows of sessions that still hold
+  mappings, on sqlite and RDBMS vaults alike. A per-user router reads a missing row as "that
+  session was pruned" and resumes the chain in a fresh session, so busy traffic from other users
+  could make an idle user's next chained turn reissue `«EMAIL_001»` for a new value while the
+  provider's history still meant the old one. Only rows of sessions without mappings (pruned, or
+  never redacting anything) are trimmed now; a live session's rows leave with the session.
 - The in-memory vault manager no longer hands the session router a durable lookup: its "unknown"
   answer was indistinguishable from "that session was pruned", which orphaned every chained
   Responses turn under llm-redact-pro 0.11.0 and could reissue a placeholder number for a

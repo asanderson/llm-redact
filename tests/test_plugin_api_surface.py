@@ -91,7 +91,9 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
                 "(self, adapter_name: 'str | None', method: 'str', path: 'str', body: 'Any')"
                 " -> 'str'"
             ),
-            "record_response_id": "(self, response_id: 'str', session_id: 'str') -> 'None'",
+            "record_response_id": (
+                "(self, response_id: 'str', session_id: 'str') -> 'bool | None'"
+            ),
         },
     ),
     "RouteDelivery": (

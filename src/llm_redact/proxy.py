@@ -281,9 +281,16 @@ class ProxyState:
         self.rehydrator = Rehydrator(
             self.vault, fuzzy=config.rehydration.fuzzy, counts=self.rehydration_counts
         )
+        # A vault manager without a durable response map (the in-memory one)
+        # passes no lookup: a lookup that always answers "unknown" would be
+        # read as "that session was pruned" and orphan every Responses chain.
         self.session_router = registry.build_session_router(
             config.vault,
-            durable_lookup=self.vault_manager.lookup_response_session,
+            durable_lookup=(
+                self.vault_manager.lookup_response_session
+                if getattr(self.vault_manager, "durable_response_map", True)
+                else None
+            ),
         )
         self._static_context = RequestContext(
             config.vault.session, self.vault, self.redactor, self.rehydrator
@@ -384,7 +391,14 @@ class ProxyState:
         if not PLACEHOLDER_RE.search(flat_body) or len(vault) > 0:
             return False
         is_durable = getattr(self.session_router, "is_durable", None)
-        return not (is_durable is not None and is_durable(session_id))
+        if is_durable is None:
+            return True
+        try:
+            # The prune's contract: only an explicit False says "not durable";
+            # a failing or sloppy router never fails the request over a metric.
+            return is_durable(session_id) is False
+        except Exception:  # noqa: BLE001
+            return False
 
     def context_for(
         self, adapter: ProviderAdapter | None, method: str, path: str, parsed_body: Any
@@ -436,7 +450,11 @@ class ProxyState:
     def record_response_id(self, response_id: str, session_id: str) -> None:
         if self.session_router.mode == "static":
             return
-        self.session_router.record_response_id(response_id, session_id)
+        # The router may veto the durable mirror (it refused to move a
+        # response into another namespace, or never reads the map): writing
+        # it anyway would let the durable map re-home the owner's chain.
+        if self.session_router.record_response_id(response_id, session_id) is False:
+            return
         self.vault_manager.record_response_session(response_id, session_id)
 
     def reload(self) -> None:
@@ -1629,11 +1647,22 @@ def _prune_exclusions(state: ProxyState) -> frozenset[str]:
     session would hand out the same placeholder numbers for new values."""
     keep = {state.config.vault.session}
     is_durable = getattr(state.session_router, "is_durable", None)
-    if is_durable is not None:
-        for row in state.vault_manager.sessions_summary():
-            session_id = str(row["session"])
-            if is_durable(session_id):
-                keep.add(session_id)
+    if is_durable is None:
+        return frozenset(keep)
+    for row in state.vault_manager.sessions_summary():
+        session_id = str(row["session"])
+        try:
+            verdict = is_durable(session_id)
+        except Exception as exc:  # noqa: BLE001 — a failing router can only keep more
+            logger.warning(
+                "session router is_durable failed (%s); keeping the session", type(exc).__name__
+            )
+            keep.add(session_id)
+            continue
+        if verdict is not False:
+            # Only an explicit False releases a session; True keeps it, and
+            # so does any other answer (None, a count) from a buggy router.
+            keep.add(session_id)
     return frozenset(keep)
 
 

@@ -85,3 +85,23 @@ def test_router_without_is_durable_still_counts(
     state = _state(monkeypatch, tmp_path / "vault.db", _NoDurableRouter)
     _see(state, "user:3:default", _TOKEN_BODY)
     assert state.compaction_forks == 1
+
+
+class _RaisingRouter(_BodyRouter):
+    def is_durable(self, session_id: str) -> bool:
+        raise RuntimeError("registry closed")
+
+
+class _SloppyRouter(_BodyRouter):
+    def is_durable(self, session_id: str) -> bool:
+        return None  # type: ignore[return-value]  # a buggy router's "don't know"
+
+
+@pytest.mark.parametrize("router", [_RaisingRouter, _SloppyRouter])
+def test_a_misbehaving_is_durable_never_fails_the_request(
+    router: type[_BodyRouter], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The prune's contract: only an explicit False means "not durable".
+    state = _state(monkeypatch, tmp_path / "vault.db", router)
+    _see(state, "conv-new", _TOKEN_BODY)
+    assert state.compaction_forks == 0

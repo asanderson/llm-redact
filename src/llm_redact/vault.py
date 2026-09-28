@@ -501,6 +501,10 @@ class VaultManager(Protocol):
 
 
 class InMemoryVaultManager:
+    # No durable response-session map: the session router's in-memory map
+    # is the only truth (ProxyState then hands the router no durable lookup).
+    durable_response_map = False
+
     def __init__(self, cipher: "VaultCipher | None" = None) -> None:
         self._cipher = cipher
         self._vaults: dict[str, Vault] = {}

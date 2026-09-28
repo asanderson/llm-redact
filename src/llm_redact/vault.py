@@ -4,6 +4,7 @@ import hmac
 import os
 import sqlite3
 from collections import OrderedDict
+from collections.abc import Iterable
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol
@@ -495,6 +496,8 @@ class VaultManager(Protocol):
 
     def prune_sessions(self, days: int, *, exclude: frozenset[str] = ...) -> int: ...
 
+    def forget_sessions(self, session_ids: Iterable[str]) -> int: ...
+
     def record_response_session(self, response_id: str, session_id: str) -> None: ...
 
     def lookup_response_session(self, response_id: str) -> str | None: ...
@@ -539,6 +542,11 @@ class InMemoryVaultManager:
         # Nothing to prune by age: memory sessions have no timestamps and
         # die with the process anyway.
         return 0
+
+    def forget_sessions(self, session_ids: Iterable[str]) -> int:
+        """Drop whole sessions (a purged user's); how many existed."""
+        dropped = [self._vaults.pop(session_id, None) for session_id in set(session_ids)]
+        return sum(vault is not None for vault in dropped)
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
         pass  # the SessionRouter's in-memory map is authoritative here
@@ -630,6 +638,32 @@ class SqliteVaultManager:
         for session_id in doomed:
             self._views.pop(session_id, None)
         return len(doomed)
+
+    def forget_sessions(self, session_ids: Iterable[str]) -> int:
+        """Delete whole named sessions (mappings and response rows) in one
+        transaction and drop their cached views; how many held mappings.
+        Whole sessions only, like prune — never a partial delete."""
+        wanted = sorted(set(session_ids))
+        if not wanted:
+            return 0
+        marks = ",".join("?" * len(wanted))
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            present = self._conn.execute(
+                f"SELECT COUNT(DISTINCT session_id) FROM mappings WHERE session_id IN ({marks})",
+                wanted,
+            ).fetchone()[0]
+            self._conn.execute(f"DELETE FROM mappings WHERE session_id IN ({marks})", wanted)
+            self._conn.execute(
+                f"DELETE FROM response_sessions WHERE session_id IN ({marks})", wanted
+            )
+            self._conn.execute("COMMIT")
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        for session_id in wanted:
+            self._views.pop(session_id, None)
+        return int(present)
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
         self._conn.execute(

@@ -252,6 +252,18 @@ class ProviderAdapter(ABC):
         """Response id observed on a stream, if this event carries one."""
         return None
 
+    def tracks_object_ids(self, method: str, path: str) -> bool:
+        """Whether a 2xx JSON response to this request names objects the
+        provider STORES for later reads (an uploaded file, a batch, a stored
+        conversation) — only then is the body parsed for
+        ``object_ids_from_body``."""
+        return False
+
+    def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
+        """The stored-object ids a tracked response names (the created
+        object's id, plus a batch's output and error file ids)."""
+        return ()
+
     @abstractmethod
     def rehydrate_event(self, event: SSEEvent, pool: RehydratorPool) -> list[SSEEvent]:
         """Rewrite one SSE event; may inject synthetic flush events."""

@@ -29,6 +29,22 @@ and tags `vX.Y.Z`.
   Responses turn under llm-redact-pro 0.11.0 and could reissue a placeholder number for a
   different value.
 
+### Added
+
+- Two optional seams for an access-control plugin, read via `getattr` so older plugins keep
+  working:
+  - `AccessGate.bind_sessions(store)` hands the gate a `plugin_api.SessionStore` over the running
+    proxy's vault (`session_ids()`, `forget(ids)`), so a deleted user's vault sessions can be
+    dropped through the live vault manager (whole sessions only; the configured static session is
+    never forgotten). Every vault manager gains `forget_sessions`.
+  - `SessionRouter.record_object_id(object_id, session_id)` receives the ids of objects a provider
+    stores for later reads — uploaded files, OpenAI batches (and their output/error files), stored
+    conversations, Anthropic message batches — with the session that created them, mirrored in the
+    durable map unless the router returns `False`. Only called outside static mode. Adapters
+    declare what they track via `tracks_object_ids` / `object_ids_from_body`.
+- `llm-redact doctor` shows access-control rows from llm-redact-pro when it is installed (silent
+  otherwise).
+
 ### Fixed
 
 - The live prune fails safe on a misbehaving router: an `is_durable` that raises keeps the session

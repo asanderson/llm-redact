@@ -42,7 +42,7 @@ import importlib
 import os
 import re
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -709,6 +709,39 @@ class RdbmsStore:
         result: list[str] = self._run(op)
         return result
 
+    def forget_sessions(self, session_ids: list[str]) -> int:
+        """Delete whole named sessions and their response rows in one
+        transaction; how many held mappings."""
+
+        def op(conn: Any) -> int:
+            present = 0
+            try:
+                for session_id in session_ids:
+                    row = self._execute(
+                        conn,
+                        "SELECT COUNT(*) FROM llm_redact_mappings WHERE session_id = :s",
+                        {"s": session_id},
+                    ).fetchone()
+                    present += 1 if row is not None and int(row[0]) > 0 else 0
+                    self._execute(
+                        conn,
+                        "DELETE FROM llm_redact_mappings WHERE session_id = :s",
+                        {"s": session_id},
+                    )
+                    self._execute(
+                        conn,
+                        "DELETE FROM llm_redact_response_sessions WHERE session_id = :s",
+                        {"s": session_id},
+                    )
+                conn.commit()
+            except self._module.Error:
+                self._rollback(conn)
+                raise
+            return present
+
+        result: int = self._run(op)
+        return result
+
     def record_response_session(self, response_id: str, session_id: str) -> None:
         self._response_inserts += 1
         cap_now = self._response_inserts >= _RESPONSE_PRUNE_EVERY
@@ -853,6 +886,15 @@ class RdbmsVaultManager:
         for session_id in doomed:
             self._views.pop(session_id, None)
         return len(doomed)
+
+    def forget_sessions(self, session_ids: Iterable[str]) -> int:
+        wanted = sorted(set(session_ids))
+        if not wanted:
+            return 0
+        present = self._store.forget_sessions(wanted)
+        for session_id in wanted:
+            self._views.pop(session_id, None)
+        return present
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
         self._store.record_response_session(response_id, session_id)

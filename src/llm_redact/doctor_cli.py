@@ -570,6 +570,18 @@ def _check_routing(report: _Report, config: Config, offline: bool) -> None:
         report.line(level, "routing", message)
 
 
+def _check_access(report: _Report, config: Config) -> None:
+    """Access control lives in llm-redact-pro; this shell hands the checks to
+    the package (read-only: its registry is never written) and stays silent
+    without it or on a version that has no access checks."""
+    try:
+        from llm_redact_pro.access_doctor import access_checks
+    except ImportError:
+        return
+    for level, message in access_checks(config, environ=os.environ):
+        report.line(level, "access", message)
+
+
 def run_doctor(args: argparse.Namespace) -> int:
     report = _Report(json_mode=getattr(args, "json", False))
     config = _check_config(report, args)
@@ -587,6 +599,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_extras(report, config)
     _check_posture(report, config)
     _check_routing(report, config, bool(getattr(args, "offline", False)))
+    _check_access(report, config)
     if config.audit.enabled:
         from llm_redact.audit import default_audit_path
 

@@ -131,6 +131,15 @@ class AnthropicAdapter(ProviderAdapter):
         # both directions — deliberate pass-through, pinned by test.
         return RouteKind.NONE
 
+    def tracks_object_ids(self, method: str, path: str) -> bool:
+        # A message batch: its later results are read by id.
+        return method == "POST" and path.rstrip("/").endswith("/messages/batches")
+
+    def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
+        if isinstance(body, dict) and isinstance(body.get("id"), str) and body["id"]:
+            return (str(body["id"]),)
+        return ()
+
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         # count_tokens accepts the same `system` field as /v1/messages, and
         # the note is part of what the real request will carry — keep the

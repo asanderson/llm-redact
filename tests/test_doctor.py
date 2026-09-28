@@ -519,3 +519,49 @@ def test_doctor_offline_flag_in_parser() -> None:
     args = build_parser().parse_args(["doctor", "--offline"])
     assert args.offline is True
     assert build_parser().parse_args(["doctor"]).offline is False
+
+
+def test_access_check_is_silent_without_the_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.config import Config
+    from llm_redact.doctor_cli import _check_access, _Report
+
+    monkeypatch.setitem(sys.modules, "llm_redact_pro.access_doctor", None)
+    report = _Report(json_mode=True)
+    _check_access(report, Config())
+    assert report.failed is False
+    assert [row for row in report.rows if row["area"] == "access"] == []
+
+
+@pytest.mark.skipif(
+    __import__("importlib.util").util.find_spec("llm_redact_pro") is not None,
+    reason="the real pro package would shadow the fake module",
+)
+def test_access_check_reports_the_packages_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib.machinery
+    import os
+    import types
+
+    from llm_redact.config import Config
+    from llm_redact.doctor_cli import _check_access, _Report
+
+    seen: dict[str, Any] = {}
+
+    def access_checks(config: Any, *, environ: Any) -> list[tuple[str, str]]:
+        seen.update(config=config, environ=environ)
+        return [("WARN", "no break-glass administrator")]
+
+    package = types.ModuleType("llm_redact_pro")
+    package.__path__ = []
+    package.__spec__ = importlib.machinery.ModuleSpec("llm_redact_pro", None, is_package=True)
+    module = types.ModuleType("llm_redact_pro.access_doctor")
+    module.access_checks = access_checks  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "llm_redact_pro", package)
+    monkeypatch.setitem(sys.modules, "llm_redact_pro.access_doctor", module)
+    config = Config()
+    report = _Report(json_mode=True)
+    _check_access(report, config)
+    assert report.failed is False
+    assert [row for row in report.rows if row["area"] == "access"] == [
+        {"level": "WARN", "area": "access", "message": "no break-glass administrator"}
+    ]
+    assert seen["config"] is config and seen["environ"] is os.environ

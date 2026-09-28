@@ -192,6 +192,16 @@ def _battery(make_store: Any) -> None:
     # sess-a survived intact, and its numbering continues densely.
     survivor = manager.get("sess-a")
     assert survivor.placeholder_for("EMAIL", "dan@corp.example") == "«EMAIL_003»"
+
+    # Whole-session forget (an access gate dropping a deleted user's
+    # sessions): mappings and response rows go, cached views too.
+    manager.get("sess-c").placeholder_for("EMAIL", "eve@corp.example")
+    manager.record_response_session("resp_c", "sess-c")
+    assert manager.forget_sessions(["sess-c", "sess-c", "missing"]) == 1
+    assert manager.lookup_response_session("resp_c") is None
+    assert len(manager.get("sess-c")) == 0
+    assert manager.forget_sessions([]) == 0
+    assert manager.session_count() == 1  # sess-a untouched
     store.close()
 
 

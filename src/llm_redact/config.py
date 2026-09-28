@@ -7,7 +7,8 @@ import math
 import os
 import re
 import tomllib
-from collections.abc import Mapping
+import urllib.parse
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -34,6 +35,28 @@ class ProviderConfig:
     # — values go upstream as-is, like warn mode but provider-wide.
     # Rehydration stays active so placeholders from history still restore.
     detection: bool = True
+    # How the proxy authenticates to this upstream. "passthrough" (the
+    # default) forwards the client's own credential untouched. "identity"
+    # (bedrock, vertex, azure only; implemented in llm-redact-pro) strips
+    # every client credential and authorizes each request with the proxy's
+    # OWN cloud identity AFTER redaction: AWS SigV4 for bedrock, an OAuth
+    # bearer token for vertex/azure. Anyone who can reach the proxy then
+    # spends that identity — pair it with the access gate or a loopback bind.
+    auth: str = "passthrough"
+    # bedrock + auth = "identity" only: the SigV4 signing region when the
+    # upstream host does not name one (a VPC endpoint, a proxy in front).
+    region: str | None = None
+
+
+# Providers whose upstream the proxy can authorize with its own cloud
+# identity ([providers.NAME] auth = "identity"), and how.
+IDENTITY_AUTH_PROVIDERS: dict[str, str] = {
+    "bedrock": "AWS SigV4 (service bedrock)",
+    "vertex": "Google OAuth bearer token (cloud-platform scope)",
+    "azure": "Microsoft Entra ID bearer token (cognitiveservices scope)",
+}
+PROVIDER_AUTH_MODES = ("passthrough", "identity")
+_REGION_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
 
 
 DEFAULT_PROVIDERS: dict[str, ProviderConfig] = {
@@ -76,6 +99,13 @@ class S3AuditConfig:
     # never falls back to plaintext. `llm-redact audit decrypt` reads
     # downloaded objects back.
     encryption: str = "none"
+    # "keys" = the static credential env vars above (the historical form).
+    # "identity" = the workload's cloud identity, resolved at runtime by
+    # llm-redact-pro (aws: the standard AWS chain incl. IRSA/ECS/IMDSv2
+    # temporary credentials, still SigV4; gcs: Application Default
+    # Credentials as an OAuth bearer token on the XML API). minio/ceph have
+    # no cloud identity, so identity is refused there.
+    auth: str = "keys"
 
 
 @dataclass(frozen=True)
@@ -94,6 +124,12 @@ class AzureAuditConfig:
     flush_seconds: float = 60.0
     # Client-side batch encryption — same semantics and key as [audit.s3].
     encryption: str = "none"
+    # "key" = SharedKey with AZURE_STORAGE_KEY (the historical form);
+    # "sas" = a SAS token from AZURE_STORAGE_SAS_TOKEN appended to the blob
+    # URL (no signing); "identity" = a Microsoft Entra ID bearer token for
+    # the workload identity, resolved at runtime by llm-redact-pro. All
+    # secrets are env-only or runtime-resolved, never this file.
+    auth: str = "key"
 
 
 @dataclass(frozen=True)
@@ -188,6 +224,290 @@ class RdbmsConfig:
     # fernet rule (a non-local DSN must be encrypted) is enforced separately by
     # hostname, independent of this field.
     cloud: str = ""
+    # "password" (default): the static password from `password_env` or the
+    # DSN. "identity": a short-lived token minted from the proxy's cloud
+    # identity (RDS IAM auth, Cloud SQL IAM database auth, Entra ID) at EVERY
+    # connect — llm-redact-pro supplies it through the registry's
+    # build_db_password seam. Requires `cloud`, postgresql/mysql, TLS, and no
+    # static password anywhere (rdbms_identity_error).
+    auth: str = "password"
+    # auth = "identity" with cloud = "aws" only: the region the RDS token is
+    # signed for. Empty = derived from the RDS hostname.
+    region: str = ""
+
+
+# [vault.rdbms] auth = "identity": the backends whose drivers take a token as
+# the password, the clouds that mint one, and the libpq sslmodes that would
+# let the token cross the network unencrypted.
+RDBMS_AUTH_MODES = ("password", "identity")
+IDENTITY_AUTH_BACKENDS = ("postgresql", "mysql")
+IDENTITY_AUTH_CLOUDS = ("aws", "gcp", "azure")
+PG_TLS_SSLMODES = ("require", "verify-ca", "verify-full")
+# A cloud region name as the database token is scoped to it (fullmatch only).
+_RDBMS_REGION_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def rdbms_identity_error(backend: str, rdbms: RdbmsConfig, dsn: str) -> str | None:
+    """Why ``auth = "identity"`` cannot run with this backend and DSN, or None.
+
+    Run at parse time on the file's DSN and again at connect-build time on
+    the effective one (``LLM_REDACT_VAULT_DSN`` wins). Messages name the
+    rule, never the DSN (it may embed credentials).
+    """
+    if rdbms.auth != "identity":
+        return None
+    if backend not in IDENTITY_AUTH_BACKENDS:
+        return (
+            f'[vault.rdbms] auth = "identity" supports backend = "postgresql" or "mysql",'
+            f" not {backend!r}"
+        )
+    if rdbms.cloud not in IDENTITY_AUTH_CLOUDS:
+        return (
+            '[vault.rdbms] auth = "identity" requires cloud = "aws", "gcp" or "azure"'
+            " (the identity that mints the database token)"
+        )
+    if rdbms.password_env != RdbmsConfig().password_env:
+        return '[vault.rdbms] password_env cannot be combined with auth = "identity"'
+    if rdbms.region and rdbms.cloud != "aws":
+        return '[vault.rdbms] region applies only to cloud = "aws"'
+    if not dsn:
+        return None  # the missing-DSN error is raised where the DSN is resolved
+    from urllib.parse import parse_qs, urlsplit
+
+    parts = urlsplit(dsn)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    if parts.password or "password" in query:
+        return (
+            '[vault.rdbms] auth = "identity" forbids a password in the DSN'
+            " (the token minted from the cloud identity is the password)"
+        )
+    if backend == "postgresql":
+        modes = [mode.lower() for mode in query.get("sslmode", [])]
+        if any(mode not in PG_TLS_SSLMODES for mode in modes):
+            return (
+                '[vault.rdbms] auth = "identity" requires TLS: the DSN sslmode must be'
+                f" one of {PG_TLS_SSLMODES} (or absent — the proxy then sets require)"
+            )
+    return None
+
+
+KMS_PROVIDERS = ("aws", "gcp", "azure", "hashicorp")
+KMS_HASHICORP_AUTH = ("token", "kubernetes")
+DEFAULT_SERVICE_ACCOUNT_TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+# Keys only a HashiCorp Vault transit key uses; any other provider refuses them.
+_KMS_HASHICORP_KEYS = frozenset(
+    {"address", "mount", "auth", "role", "auth_mount", "service_account_token_file"}
+)
+_KMS_KUBERNETES_KEYS = frozenset({"role", "auth_mount", "service_account_token_file"})
+_KMS_KEY_ID_SHAPES = {
+    # A key or alias ARN: the region the request goes to comes from it.
+    "aws": re.compile(r"arn:aws(?:-[a-z]+)*:kms:[a-z0-9-]+:\d{12}:(?:key|alias)/[A-Za-z0-9/_:.-]+"),
+    "gcp": re.compile(r"projects/[^/\s]+/locations/[^/\s]+/keyRings/[^/\s]+/cryptoKeys/[^/\s]+"),
+    "azure": re.compile(
+        r"https://[A-Za-z0-9-]+\.vault\.azure\.net/keys/[A-Za-z0-9-]+(?:/[A-Za-z0-9]+)?",
+        re.IGNORECASE,
+    ),
+    "hashicorp": re.compile(r"[A-Za-z0-9_.-]+"),
+}
+_KMS_KEY_ID_HINTS = {
+    "aws": "a key or alias ARN (arn:aws:kms:<region>:<account>:key/<id> or …:alias/<name>)",
+    "gcp": "projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>",
+    "azure": "a key URL https://<vault>.vault.azure.net/keys/<name>[/<version>]",
+    "hashicorp": "a transit key name (letters, digits, '_', '.', '-')",
+}
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_MOUNT_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
+# The plaintext key sources [vault.kms] replaces (vault_crypto.ENV_KEY /
+# CMD_ENV_KEY, spelled out here: vault_crypto imports the vault module).
+_LOCAL_VAULT_KEY_ENVS = ("LLM_REDACT_VAULT_KEY", "LLM_REDACT_VAULT_KEY_CMD")
+
+
+@dataclass(frozen=True)
+class VaultKmsConfig:
+    """``[vault.kms]``: the fernet vault key is stored WRAPPED by a cloud KMS
+    and unwrapped at startup with the proxy's own identity (llm-redact-pro).
+
+    With this table present the key comes ONLY from the KMS — never from
+    LLM_REDACT_VAULT_KEY, the key command or the keychain. The wrapped value
+    is ciphertext; it still never lives in this file (an env var or a file
+    path names where it is)."""
+
+    provider: str  # one of KMS_PROVIDERS
+    # aws: key/alias ARN; gcp: projects/…/cryptoKeys/…; azure: key URL;
+    # hashicorp: transit key name. Not secret.
+    key_id: str
+    # Exactly one: the env var holding the base64 wrapped key, or a file.
+    wrapped_key_env: str = ""
+    wrapped_key_file: str = ""
+    # --- hashicorp only ---
+    # Vault server; empty = the VAULT_ADDR env var at startup. https unless
+    # the host is loopback (the same rule either way).
+    address: str = ""
+    mount: str = "transit"  # the transit secrets-engine mount path
+    auth: str = "token"  # "token" (VAULT_TOKEN / VAULT_TOKEN_FILE) | "kubernetes"
+    role: str = ""  # kubernetes auth role (required with auth = "kubernetes")
+    auth_mount: str = "kubernetes"  # the kubernetes auth method's mount path
+    service_account_token_file: str = DEFAULT_SERVICE_ACCOUNT_TOKEN_FILE
+
+
+def plugin_capabilities_required(config: "Config") -> list[str]:
+    """The config SHAPES only a recent llm-redact-pro implements and that have
+    no factory seam of their own to fail closed in: an older plugin would
+    parse past them and silently fall back to the static credentials. Each
+    name must appear in ``Registry.config_capabilities`` (advertised by the
+    plugin) — checked by ProxyState and doctor when a plugin is loaded."""
+    required: list[str] = []
+    s3, azure, email = config.audit.s3, config.audit.azure, config.email
+    if s3.enabled and s3.auth != S3AuditConfig().auth:
+        required.append(f"audit.s3.auth={s3.auth}")
+    if azure.enabled and azure.auth != AzureAuditConfig().auth:
+        required.append(f"audit.azure.auth={azure.auth}")
+    if email.auth != EmailConfig().auth:
+        required.append(f"email.auth={email.auth}")
+    if email.implicit_tls:
+        required.append("email.implicit_tls")
+    return required
+
+
+def unsupported_plugin_capabilities(config: "Config", advertised: Iterable[str]) -> str | None:
+    """A ConfigError message naming the configured capabilities the loaded
+    plugin does not advertise, else None."""
+    missing = sorted(set(plugin_capabilities_required(config)) - set(advertised))
+    if not missing:
+        return None
+    return (
+        "the installed llm-redact-pro does not support " + ", ".join(missing) + ";"
+        " upgrade llm-redact-pro (an older version would silently use the static"
+        " credentials instead)"
+    )
+
+
+def sink_endpoint_problem(url: str, *, allow_path: bool, require_https: bool) -> str | None:
+    """Why an audit sink ``endpoint_url`` is unusable, else None: an http(s)
+    URL with a host, no userinfo, query or fragment, a path only where the
+    sink signs one, and https (unless the host is loopback) when a bearer
+    secret rides the request."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        _ = parts.port  # a malformed port raises
+    except ValueError:
+        return "must look like https://host:port"
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "must start with http:// or https:// and name a host"
+    if "@" in parts.netloc or parts.query or parts.fragment:
+        return "must not carry userinfo, a query string or a fragment"
+    if not allow_path and parts.path not in ("", "/"):
+        return "must not carry a path (requests are signed over /bucket/key)"
+    if require_https and parts.scheme == "http" and not _is_loopback_host(parts.hostname):
+        return "must be https unless the host is loopback (a bearer credential rides it)"
+    return None
+
+
+def kms_address_problem(address: str) -> str | None:
+    """Why a HashiCorp Vault address is unusable, else None: an http(s) URL
+    with a host and no query/fragment, https unless the host is loopback (a
+    token and the vault key would otherwise cross the network in the clear).
+    Shared by the parser and llm-redact-pro's runtime VAULT_ADDR check."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(address)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "must look like https://vault.example:8200"
+    if parts.query or parts.fragment:
+        return "must not carry a query string or fragment"
+    if parts.scheme == "http" and not _is_loopback_host(parts.hostname):
+        return "must be https unless the host is loopback"
+    return None
+
+
+def parse_vault_kms(
+    raw: Any, *, where: str = "[vault.kms]", require_wrapped: bool = True
+) -> VaultKmsConfig:
+    """Validate a ``[vault.kms]`` table. ``require_wrapped=False`` is the
+    wrapping CLI's form (it produces the wrapped value, so it names none).
+    Error messages name keys and expected shapes, never a value."""
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"{where} must be a table")
+    _require_keys(
+        dict(raw),
+        {"provider", "key_id", "wrapped_key_env", "wrapped_key_file", *_KMS_HASHICORP_KEYS},
+        where,
+    )
+    for key, value in raw.items():
+        if not isinstance(value, str):
+            raise ConfigError(f"{where} {key} must be a string")
+    provider = raw.get("provider", "")
+    if provider not in KMS_PROVIDERS:
+        raise ConfigError(f"{where} provider must be one of {KMS_PROVIDERS}")
+    key_id = raw.get("key_id", "")
+    if _KMS_KEY_ID_SHAPES[provider].fullmatch(key_id) is None:
+        raise ConfigError(
+            f"{where} key_id for provider {provider!r} must be {_KMS_KEY_ID_HINTS[provider]}"
+        )
+    wrapped_env = raw.get("wrapped_key_env", "")
+    wrapped_file = raw.get("wrapped_key_file", "")
+    if require_wrapped and bool(wrapped_env) == bool(wrapped_file):
+        raise ConfigError(f"{where} needs exactly one of wrapped_key_env or wrapped_key_file")
+    if wrapped_env and _ENV_NAME_RE.fullmatch(wrapped_env) is None:
+        raise ConfigError(f"{where} wrapped_key_env must be an environment variable name")
+    if wrapped_env in _LOCAL_VAULT_KEY_ENVS:
+        raise ConfigError(
+            f"{where} wrapped_key_env must not be {wrapped_env}: that variable is the"
+            " plaintext key source [vault.kms] replaces (use e.g. LLM_REDACT_VAULT_KEY_WRAPPED)"
+        )
+    if provider == "hashicorp":
+        return _parse_kms_hashicorp(raw, where, key_id, wrapped_env, wrapped_file)
+    hashicorp_keys = sorted(_KMS_HASHICORP_KEYS & set(raw))
+    if hashicorp_keys:
+        raise ConfigError(f"{where} {hashicorp_keys} apply only to provider = 'hashicorp'")
+    return VaultKmsConfig(
+        provider=provider,
+        key_id=key_id,
+        wrapped_key_env=wrapped_env,
+        wrapped_key_file=wrapped_file,
+    )
+
+
+def _parse_kms_hashicorp(
+    raw: Mapping[str, Any], where: str, key_id: str, wrapped_env: str, wrapped_file: str
+) -> VaultKmsConfig:
+    defaults = VaultKmsConfig(provider="hashicorp", key_id=key_id)
+    address = str(raw.get("address", "")).rstrip("/")
+    if address:
+        problem = kms_address_problem(address)
+        if problem is not None:
+            raise ConfigError(f"{where} address {problem}")
+    auth = str(raw.get("auth", defaults.auth))
+    if auth not in KMS_HASHICORP_AUTH:
+        raise ConfigError(f"{where} auth must be one of {KMS_HASHICORP_AUTH}")
+    mount = str(raw.get("mount", defaults.mount))
+    auth_mount = str(raw.get("auth_mount", defaults.auth_mount))
+    for key, value in (("mount", mount), ("auth_mount", auth_mount)):
+        if _MOUNT_RE.fullmatch(value) is None:
+            raise ConfigError(f"{where} {key} must be a mount path like 'transit' (no leading '/')")
+    role = str(raw.get("role", ""))
+    token_file = str(raw.get("service_account_token_file", defaults.service_account_token_file))
+    if auth == "kubernetes":
+        if not role:
+            raise ConfigError(f"{where} auth = 'kubernetes' requires role")
+        if not token_file:
+            raise ConfigError(f"{where} service_account_token_file must not be empty")
+    else:
+        kube_only = sorted(_KMS_KUBERNETES_KEYS & set(raw))
+        if kube_only:
+            raise ConfigError(f"{where} {kube_only} apply only to auth = 'kubernetes'")
+    return VaultKmsConfig(
+        provider="hashicorp",
+        key_id=key_id,
+        wrapped_key_env=wrapped_env,
+        wrapped_key_file=wrapped_file,
+        address=address,
+        mount=mount,
+        auth=auth,
+        role=role,
+        auth_mount=auth_mount,
+        service_account_token_file=token_file,
+    )
 
 
 @dataclass(frozen=True)
@@ -212,6 +532,9 @@ class VaultConfig:
     session_ttl_days: int = 0
     # Connection settings for the RDBMS_BACKENDS (ignored otherwise).
     rdbms: RdbmsConfig = field(default_factory=RdbmsConfig)
+    # [vault.kms]: the fernet key is KMS-wrapped (llm-redact-pro unwraps it
+    # at startup). None = the local sources (env / key command / keychain).
+    kms: VaultKmsConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -253,10 +576,36 @@ class EmailConfig:
     username: str | None = None
     password_env: str = "LLM_REDACT_SMTP_PASSWORD"
     from_address: str | None = None
+    # implicit_tls: TLS from the first byte (SMTP_SSL, usually port 465)
+    # instead of STARTTLS; the two are mutually exclusive.
+    implicit_tls: bool = False
+    # auth: "password" (SMTP AUTH LOGIN/PLAIN with password_env) or "oauth"
+    # (SASL XOAUTH2 bearer token, llm-redact-pro docs/email-oauth.md; TLS
+    # required). oauth_provider picks the token source: "azure" (Entra ID
+    # workload identity, Microsoft 365), "google" (service account with
+    # domain-wide delegation; oauth_subject = the mailbox, default
+    # username/from_address) or "refresh_token" (a generic RFC 6749
+    # refresh-token grant against oauth_token_url, https only). Secrets are
+    # named by *_env keys and read from the environment, never this file.
+    auth: str = "password"
+    oauth_provider: str | None = None
+    oauth_subject: str | None = None
+    oauth_token_url: str | None = None
+    oauth_client_id: str | None = None
+    oauth_client_secret_env: str | None = None
+    oauth_refresh_token_env: str | None = None
+    oauth_scope: str | None = None
 
     @property
     def configured(self) -> bool:
         return self.smtp_host is not None and self.from_address is not None
+
+    @property
+    def tls(self) -> str:
+        """The transport-security mode: "implicit", "starttls" or "none"."""
+        if self.implicit_tls:
+            return "implicit"
+        return "starttls" if self.starttls else "none"
 
 
 @dataclass(frozen=True)
@@ -534,6 +883,38 @@ def _add_custom_provider(
     )
 
 
+def _provider_auth(name: str, section: Mapping[str, Any]) -> tuple[str, str | None]:
+    """``auth`` and ``region`` of one built-in ``[providers.NAME]`` table.
+
+    ``identity`` is only meaningful where the proxy knows the cloud's
+    authorization scheme (IDENTITY_AUTH_PROVIDERS); anywhere else it would
+    strip the client's key and send nothing — refused. ``region`` feeds
+    the SigV4 credential scope, so it is bedrock-with-identity only (an
+    inert region elsewhere would read as if it did something).
+    """
+    where = f"[providers.{name}]"
+    auth = _str_key(section, "auth", "passthrough", where)
+    if auth not in PROVIDER_AUTH_MODES:
+        raise ConfigError(f'{where} auth must be "passthrough" or "identity", got {auth!r}')
+    if auth == "identity" and name not in IDENTITY_AUTH_PROVIDERS:
+        raise ConfigError(
+            f'{where} auth = "identity" is supported only for'
+            f" {', '.join(sorted(IDENTITY_AUTH_PROVIDERS))} (the proxy signs or authorizes"
+            " those requests with its own cloud identity)"
+        )
+    if "region" not in section:
+        return auth, None
+    region = _str_key(section, "region", "", where)
+    if name != "bedrock" or auth != "identity":
+        raise ConfigError(
+            f'{where} region is only used with [providers.bedrock] auth = "identity"'
+            " (the SigV4 signing region)"
+        )
+    if not _REGION_RE.fullmatch(region):
+        raise ConfigError(f"{where} region must look like an AWS region (e.g. us-east-1)")
+    return auth, region
+
+
 def default_config_path() -> Path:
     xdg = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     return Path(xdg) / "llm-redact" / "config.toml"
@@ -610,6 +991,11 @@ def _str_list(
 # which the sink can only WARN-and-drop on).
 _S3_PREFIX_RE = re.compile(r"[A-Za-z0-9._/-]*\Z")
 
+# How each off-machine audit sink authenticates (credentials are env-only or
+# resolved at runtime from the workload identity — never this file).
+S3_AUTH_MODES = ("keys", "identity")
+AZURE_AUTH_MODES = ("key", "sas", "identity")
+
 
 def _parse_audit_s3(s3_raw: object) -> S3AuditConfig:
     if not isinstance(s3_raw, dict):
@@ -625,6 +1011,7 @@ def _parse_audit_s3(s3_raw: object) -> S3AuditConfig:
             "endpoint_url",
             "flush_seconds",
             "encryption",
+            "auth",
         },
         "[audit.s3]",
     )
@@ -655,12 +1042,24 @@ def _parse_audit_s3(s3_raw: object) -> S3AuditConfig:
     if provider in ("minio", "ceph"):
         if enabled and not endpoint_url:
             raise ConfigError(f"[audit.s3] endpoint_url is required for provider {provider!r}")
-        if endpoint_url is not None and not endpoint_url.startswith(("http://", "https://")):
-            raise ConfigError("[audit.s3] endpoint_url must start with http:// or https://")
+        if endpoint_url is not None:
+            # The request is signed over /bucket/key and the endpoint's host:
+            # a path, userinfo or query would be sent but never signed.
+            problem = sink_endpoint_problem(endpoint_url, allow_path=False, require_https=False)
+            if problem is not None:
+                raise ConfigError(f"[audit.s3] endpoint_url {problem}")
     elif endpoint_url is not None:
         raise ConfigError(
             "[audit.s3] endpoint_url applies to minio/ceph only; aws and gcs derive"
             " the host from the bucket"
+        )
+    auth = str(s3_raw.get("auth", default.auth))
+    if auth not in S3_AUTH_MODES:
+        raise ConfigError(f"[audit.s3] auth must be 'keys' or 'identity', got {auth!r}")
+    if auth == "identity" and provider not in ("aws", "gcs"):
+        raise ConfigError(
+            f"[audit.s3] auth = 'identity' applies to provider 'aws' or 'gcs' only;"
+            f" {provider!r} has no cloud workload identity (use auth = 'keys')"
         )
     return S3AuditConfig(
         enabled=enabled,
@@ -671,6 +1070,7 @@ def _parse_audit_s3(s3_raw: object) -> S3AuditConfig:
         endpoint_url=endpoint_url,
         flush_seconds=flush_seconds,
         encryption=s3_encryption,
+        auth=auth,
     )
 
 
@@ -687,6 +1087,7 @@ def _parse_audit_azure(raw: object) -> AzureAuditConfig:
             "endpoint_url",
             "flush_seconds",
             "encryption",
+            "auth",
         },
         "[audit.azure]",
     )
@@ -708,8 +1109,20 @@ def _parse_audit_azure(raw: object) -> AzureAuditConfig:
         raise ConfigError("[audit.azure] flush_seconds must be positive")
     if enabled and (not account or not container):
         raise ConfigError("[audit.azure] account and container are required when enabled")
-    if endpoint_url is not None and not endpoint_url.startswith(("http://", "https://")):
-        raise ConfigError("[audit.azure] endpoint_url must start with http:// or https://")
+    azure_auth = str(raw.get("auth", default.auth))
+    if azure_auth not in AZURE_AUTH_MODES:
+        raise ConfigError(
+            f"[audit.azure] auth must be 'key', 'sas' or 'identity', got {azure_auth!r}"
+        )
+    if endpoint_url is not None:
+        # Azurite's endpoint carries the account as a path, so a path is
+        # fine. A SAS or an Entra token is a bearer secret (SharedKey sends
+        # only a signature): those never cross the network in the clear.
+        problem = sink_endpoint_problem(
+            endpoint_url, allow_path=True, require_https=azure_auth != "key"
+        )
+        if problem is not None:
+            raise ConfigError(f"[audit.azure] endpoint_url {problem}")
     return AzureAuditConfig(
         enabled=enabled,
         account=account,
@@ -718,6 +1131,7 @@ def _parse_audit_azure(raw: object) -> AzureAuditConfig:
         endpoint_url=endpoint_url,
         flush_seconds=flush_seconds,
         encryption=azure_encryption,
+        auth=azure_auth,
     )
 
 
@@ -1527,14 +1941,21 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
                 f" own OpenAI-compatible upstream use [providers.custom.{name}]"
                 f" (served under /custom/{name}/)"
             )
-        _require_keys(section, {"upstream_base_url", "enabled", "detection"}, f"[providers.{name}]")
+        _require_keys(
+            section,
+            {"upstream_base_url", "enabled", "detection", "auth", "region"},
+            f"[providers.{name}]",
+        )
         # upstream_base_url may be omitted for an enabled-only edit; the
         # provider then keeps its default upstream.
         url = section.get("upstream_base_url", providers[name].upstream_base_url)
+        auth, region = _provider_auth(name, section)
         providers[name] = ProviderConfig(
             upstream_base_url=str(url).rstrip("/"),
             enabled=_bool_key(section, "enabled", True, f"[providers.{name}]"),
             detection=_bool_key(section, "detection", True, f"[providers.{name}]"),
+            auth=auth,
+            region=region,
         )
 
     detection_raw = raw.get("detection", {})
@@ -1724,7 +2145,16 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     vault_raw = raw.get("vault", {})
     _require_keys(
         vault_raw,
-        {"backend", "path", "session", "session_mode", "encryption", "session_ttl_days", "rdbms"},
+        {
+            "backend",
+            "path",
+            "session",
+            "session_mode",
+            "encryption",
+            "session_ttl_days",
+            "rdbms",
+            "kms",
+        },
         "[vault]",
     )
     backend = str(vault_raw.get("backend", "memory"))
@@ -1732,17 +2162,39 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     if backend not in known_vault_backends:
         raise ConfigError(f"[vault] backend must be one of {known_vault_backends}, got {backend!r}")
     rdbms_raw = vault_raw.get("rdbms", {})
-    _require_keys(rdbms_raw, {"dsn", "password_env", "module", "cloud"}, "[vault.rdbms]")
+    _require_keys(
+        rdbms_raw,
+        {"dsn", "password_env", "module", "cloud", "auth", "region"},
+        "[vault.rdbms]",
+    )
     rdbms = RdbmsConfig(
         dsn=str(rdbms_raw.get("dsn", "")),
         password_env=str(rdbms_raw.get("password_env", "LLM_REDACT_VAULT_DB_PASSWORD")),
         module=str(rdbms_raw.get("module", "")),
         cloud=str(rdbms_raw.get("cloud", "")),
+        auth=str(rdbms_raw.get("auth", "password")),
+        region=str(rdbms_raw.get("region", "")),
     )
     if rdbms.cloud not in ("", "aws", "azure", "gcp"):
         raise ConfigError(
             f"[vault.rdbms] cloud must be 'aws', 'azure', or 'gcp', got {rdbms.cloud!r}"
         )
+    if rdbms.auth not in RDBMS_AUTH_MODES:
+        raise ConfigError(
+            f"[vault.rdbms] auth must be one of {RDBMS_AUTH_MODES}, got {rdbms.auth!r}"
+        )
+    if rdbms.region and not _RDBMS_REGION_RE.fullmatch(rdbms.region):
+        raise ConfigError(f"[vault.rdbms] region {rdbms.region!r} is not a region name")
+    if rdbms.region and rdbms.auth != "identity":
+        raise ConfigError('[vault.rdbms] region applies only to auth = "identity"')
+    if rdbms.auth == "identity" and "password_env" in rdbms_raw:
+        # Explicitly naming the default env var is still a static password.
+        raise ConfigError('[vault.rdbms] password_env cannot be combined with auth = "identity"')
+    identity_error = (
+        rdbms_identity_error(backend, rdbms, rdbms.dsn) if backend in RDBMS_BACKENDS else None
+    )
+    if identity_error is not None:
+        raise ConfigError(identity_error)
     if rdbms != RdbmsConfig() and backend not in RDBMS_BACKENDS:
         raise ConfigError(
             f"[vault.rdbms] applies only to the RDBMS backends {RDBMS_BACKENDS},"
@@ -1765,6 +2217,13 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     session_ttl_days = int(vault_raw.get("session_ttl_days", 0))
     if session_ttl_days < 0:
         raise ConfigError("[vault] session_ttl_days must be >= 0 (0 disables auto-prune)")
+    kms: VaultKmsConfig | None = None
+    if "kms" in vault_raw:
+        kms = parse_vault_kms(vault_raw["kms"])
+        if encryption != "fernet":
+            raise ConfigError(
+                '[vault.kms] wraps the fernet vault key: it requires [vault] encryption = "fernet"'
+            )
     vault = VaultConfig(
         backend=backend,
         path=str(vault_raw["path"]) if "path" in vault_raw else None,
@@ -1773,6 +2232,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         encryption=encryption,
         session_ttl_days=session_ttl_days,
         rdbms=rdbms,
+        kms=kms,
     )
 
     audit_raw = raw.get("audit", {})
@@ -1837,22 +2297,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     _require_keys(users_raw, {"path"}, "[users]")
     users_cfg = UsersConfig(path=str(users_raw["path"]) if "path" in users_raw else None)
 
-    email_raw = raw.get("email", {})
-    _require_keys(
-        email_raw,
-        {"smtp_host", "smtp_port", "starttls", "username", "password_env", "from_address"},
-        "[email]",
-    )
-    email_cfg = EmailConfig(
-        smtp_host=str(email_raw["smtp_host"]) if "smtp_host" in email_raw else None,
-        smtp_port=int(email_raw.get("smtp_port", 587)),
-        starttls=_bool_key(email_raw, "starttls", True, "[email]"),
-        username=str(email_raw["username"]) if "username" in email_raw else None,
-        password_env=str(email_raw.get("password_env", "LLM_REDACT_SMTP_PASSWORD")),
-        from_address=str(email_raw["from_address"]) if "from_address" in email_raw else None,
-    )
-    if (email_cfg.smtp_host is None) != (email_cfg.from_address is None):
-        raise ConfigError("[email] smtp_host and from_address must be set together")
+    email_cfg = _parse_email(raw.get("email", {}))
 
     # Routing last: it depends on the resolved providers (legacy
     # auto-registration) and the top-level note switch (per-upstream default),
@@ -1888,6 +2333,140 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         routing=routing,
         prices=prices,
         extensions=extensions,
+    )
+
+
+_EMAIL_AUTH_MODES = ("password", "oauth")
+_EMAIL_OAUTH_PROVIDERS = ("azure", "google", "refresh_token")
+# The generic refresh-token grant's own keys; azure/google resolve their
+# credentials from the workload identity and must not carry them.
+_EMAIL_REFRESH_KEYS = (
+    "oauth_token_url",
+    "oauth_client_id",
+    "oauth_client_secret_env",
+    "oauth_refresh_token_env",
+    "oauth_scope",
+)
+_EMAIL_OAUTH_KEYS = ("oauth_provider", "oauth_subject", *_EMAIL_REFRESH_KEYS)
+
+
+def _email_env_name(section: Mapping[str, Any], key: str) -> str | None:
+    """An env-var NAME key: the secret lives in that variable, never in the
+    file. The value is never echoed — the realistic mistake is pasting the
+    secret itself here."""
+    value = _optional_str(section, key, "[email]")
+    if value is not None and not _ENV_VAR_RE.fullmatch(value):
+        raise ConfigError(
+            f"[email] {key} must name an environment variable matching [A-Z_][A-Z0-9_]*"
+            " (the secret itself never lives in the config file)"
+        )
+    return value
+
+
+def _parse_email(email_raw: dict[str, Any]) -> EmailConfig:
+    _require_keys(
+        email_raw,
+        {
+            "smtp_host",
+            "smtp_port",
+            "starttls",
+            "username",
+            "password_env",
+            "from_address",
+            "implicit_tls",
+            "auth",
+            *_EMAIL_OAUTH_KEYS,
+        },
+        "[email]",
+    )
+    implicit_tls = _bool_key(email_raw, "implicit_tls", False, "[email]")
+    # STARTTLS defaults on, except under implicit TLS where it cannot apply.
+    starttls = _bool_key(email_raw, "starttls", not implicit_tls, "[email]")
+    if implicit_tls and starttls:
+        raise ConfigError(
+            "[email] implicit_tls = true and starttls = true are mutually exclusive"
+            " (implicit TLS is already encrypted; set starttls = false)"
+        )
+    auth = _str_key(email_raw, "auth", "password", "[email]")
+    if auth not in _EMAIL_AUTH_MODES:
+        raise ConfigError(f'[email] auth must be "password" or "oauth", got {auth!r}')
+    email_cfg = EmailConfig(
+        smtp_host=str(email_raw["smtp_host"]) if "smtp_host" in email_raw else None,
+        smtp_port=int(email_raw.get("smtp_port", 587)),
+        starttls=starttls,
+        username=str(email_raw["username"]) if "username" in email_raw else None,
+        password_env=str(email_raw.get("password_env", "LLM_REDACT_SMTP_PASSWORD")),
+        from_address=str(email_raw["from_address"]) if "from_address" in email_raw else None,
+        implicit_tls=implicit_tls,
+        auth=auth,
+        oauth_provider=_optional_str(email_raw, "oauth_provider", "[email]"),
+        oauth_subject=_optional_str(email_raw, "oauth_subject", "[email]"),
+        oauth_token_url=_optional_str(email_raw, "oauth_token_url", "[email]"),
+        oauth_client_id=_optional_str(email_raw, "oauth_client_id", "[email]"),
+        oauth_client_secret_env=_email_env_name(email_raw, "oauth_client_secret_env"),
+        oauth_refresh_token_env=_email_env_name(email_raw, "oauth_refresh_token_env"),
+        oauth_scope=_optional_str(email_raw, "oauth_scope", "[email]"),
+    )
+    if (email_cfg.smtp_host is None) != (email_cfg.from_address is None):
+        raise ConfigError("[email] smtp_host and from_address must be set together")
+    if auth == "oauth":
+        _check_email_oauth(email_cfg, email_raw)
+    else:
+        stray = [key for key in _EMAIL_OAUTH_KEYS if key in email_raw]
+        if stray:
+            raise ConfigError(f'[email] {", ".join(stray)} require auth = "oauth"')
+    return email_cfg
+
+
+def _check_email_oauth(email_cfg: EmailConfig, email_raw: Mapping[str, Any]) -> None:
+    """auth = "oauth" invariants: a configured sender, TLS on the wire (a
+    bearer token is a password-equivalent), a known provider, and exactly
+    the keys that provider reads."""
+    if not email_cfg.configured:
+        raise ConfigError('[email] auth = "oauth" requires smtp_host and from_address')
+    if email_cfg.tls == "none":
+        raise ConfigError(
+            '[email] auth = "oauth" requires TLS: set starttls = true or implicit_tls = true'
+            " (a bearer token is never sent over a cleartext connection)"
+        )
+    provider = email_cfg.oauth_provider
+    if provider not in _EMAIL_OAUTH_PROVIDERS:
+        raise ConfigError(
+            '[email] auth = "oauth" requires oauth_provider = "azure", "google" or'
+            f' "refresh_token" (got {provider!r})'
+        )
+    if email_cfg.oauth_subject is not None and provider != "google":
+        raise ConfigError('[email] oauth_subject applies only to oauth_provider = "google"')
+    if provider != "refresh_token":
+        stray = [key for key in _EMAIL_REFRESH_KEYS if key in email_raw]
+        if stray:
+            raise ConfigError(
+                f'[email] {", ".join(stray)} apply only to oauth_provider = "refresh_token"'
+                f" ({provider} credentials come from the workload identity)"
+            )
+        return
+    for key in ("oauth_token_url", "oauth_client_id", "oauth_refresh_token_env"):
+        if key not in email_raw:
+            raise ConfigError(f'[email] oauth_provider = "refresh_token" requires {key}')
+    if not _is_https_url(email_cfg.oauth_token_url or ""):
+        raise ConfigError(
+            "[email] oauth_token_url must be an https:// URL with a host and no"
+            " userinfo or fragment"
+        )
+
+
+def _is_https_url(url: str) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(url)
+        _ = parts.port  # a malformed port raises
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and bool(parts.hostname)
+        and "@" not in parts.netloc
+        and not parts.fragment
+        and not any(char.isspace() for char in url)
     )
 
 

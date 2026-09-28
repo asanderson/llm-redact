@@ -23,8 +23,15 @@ from .config import ConfigError
 from .licensing import ENV_KEY, FREE, ResolvedLicense
 
 if TYPE_CHECKING:
-    from .config import Config, OtelConfig
-    from .plugin_api import AccessGate, Dashboard, Router, Telemetry
+    from .config import Config, OtelConfig, ProviderConfig, VaultConfig
+    from .plugin_api import (
+        AccessGate,
+        Dashboard,
+        DbPasswordProvider,
+        Router,
+        Telemetry,
+        UpstreamAuth,
+    )
 
 _PRO_HINT = "install the llm-redact-pro package to enable it"
 
@@ -39,6 +46,24 @@ def build_telemetry(config: OtelConfig) -> Telemetry | None:
     if not config.enabled:
         return None
     raise ConfigError(f"[otel] enabled = true requires OpenTelemetry export; {_PRO_HINT}")
+
+
+def build_db_password(config: VaultConfig) -> DbPasswordProvider | None:
+    """None for the static password (``[vault.rdbms] auth = "password"``);
+    identity auth requires the pro package.
+
+    Minting a database token from the proxy's cloud identity (RDS IAM auth,
+    Cloud SQL IAM database auth, Entra ID) is credential fetching, which the
+    core never does. Without llm-redact-pro, ``auth = "identity"`` fails
+    closed here — never a silent fallback to a static password that the
+    config deliberately did not name.
+    """
+    if config.rdbms.auth != "identity":
+        return None
+    raise ConfigError(
+        '[vault.rdbms] auth = "identity" requires cloud-identity database'
+        f" authentication; {_PRO_HINT}"
+    )
 
 
 def build_router(config: Config, tier: str) -> Router | None:
@@ -60,6 +85,25 @@ def build_router(config: Config, tier: str) -> Router | None:
     raise ConfigError(
         "[routing] enabled = true requires the llm-redact-pro package (0.3+): rule-based"
         " upstream routing, fallback chains and budgets are pro subsystems;"
+        f" {_PRO_HINT}"
+    )
+
+
+def build_upstream_auth(name: str, provider: ProviderConfig) -> UpstreamAuth | None:
+    """None for ``auth = "passthrough"`` (the client's credential is
+    forwarded, as always); otherwise the pro package is required.
+
+    Authorizing upstream requests with the proxy's own cloud identity (AWS
+    SigV4, Google/Entra ID bearer tokens) is a paid feature implemented in
+    llm-redact-pro. Without it, ``auth = "identity"`` fails closed here —
+    never a silent fall back to forwarding the client's credential, which
+    the operator configured the proxy to replace.
+    """
+    if provider.auth == "passthrough":
+        return None
+    raise ConfigError(
+        f'[providers.{name}] auth = "{provider.auth}" (the proxy\'s own cloud identity)'
+        " requires the llm-redact-pro package with provider identity support;"
         f" {_PRO_HINT}"
     )
 

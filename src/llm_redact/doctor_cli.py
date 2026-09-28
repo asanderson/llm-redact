@@ -15,12 +15,14 @@ import re
 import socket
 import stat
 import sys
+import urllib.parse
 from pathlib import Path
 
 from llm_redact import __version__
 from llm_redact.config import (
     Config,
     ConfigError,
+    VaultKmsConfig,
     apply_env_overrides,
     load_config,
     resolve_config_path,
@@ -263,7 +265,9 @@ def _check_vault(report: _Report, config: Config) -> None:
                 'encryption = "fernet" but the crypto extra is not installed;'
                 " install it: pip install 'llm-redact-proxy[crypto]'",
             )
-        if not os.environ.get("LLM_REDACT_VAULT_KEY"):
+        if config.vault.kms is not None:
+            _check_vault_kms(report, config)
+        elif not os.environ.get("LLM_REDACT_VAULT_KEY"):
             report.line(
                 "FAIL",
                 "vault",
@@ -272,6 +276,75 @@ def _check_vault(report: _Report, config: Config) -> None:
             )
         elif importlib.util.find_spec("cryptography") is not None:
             _check_vault_key_matches(report, config)
+
+
+def _check_vault_kms(report: _Report, config: Config) -> None:
+    """[vault.kms] posture — read-only and OFFLINE: doctor never calls the
+    KMS (no unwrap, no credential fetch), so a key that does not match the
+    vault shows up only in `serve --check` / `vault verify`. Checks what
+    serve would refuse on sight: an ambiguous local key, no plugin able to
+    unwrap, a missing wrapped value; for hashicorp, the server address."""
+    from llm_redact.registry import get_registry
+    from llm_redact.vault_crypto import ambiguous_local_key, resolve_vault_key
+
+    kms = config.vault.kms
+    assert kms is not None  # caller gates on it
+    ambiguous = ambiguous_local_key(config.vault)
+    if ambiguous is not None:
+        report.line(
+            "FAIL",
+            "vault",
+            f"[vault.kms] is configured and {ambiguous} is also set — the proxy will refuse"
+            f" to start (unset {ambiguous}: the key comes only from the KMS)",
+        )
+    if get_registry().resolve_vault_key is resolve_vault_key:
+        report.line(
+            "FAIL",
+            "vault",
+            "[vault.kms] needs llm-redact-pro (a version that supports it) to unwrap the"
+            " key — the proxy will refuse to start",
+        )
+    if kms.wrapped_key_env and not os.environ.get(kms.wrapped_key_env, "").strip():
+        report.line(
+            "FAIL", "vault", f"[vault.kms] wrapped_key_env {kms.wrapped_key_env} is not set"
+        )
+    elif kms.wrapped_key_file and not Path(kms.wrapped_key_file).expanduser().is_file():
+        report.line(
+            "FAIL", "vault", f"[vault.kms] wrapped_key_file {kms.wrapped_key_file} does not exist"
+        )
+    if kms.provider == "hashicorp":
+        _check_vault_kms_hashicorp(report, kms)
+    report.line(
+        "PASS",
+        "vault",
+        f"key source kms:{kms.provider} — unwrapped at startup with the proxy's identity"
+        " (not probed: doctor never calls the KMS; `serve --check` does)",
+    )
+
+
+def _check_vault_kms_hashicorp(report: _Report, kms: VaultKmsConfig) -> None:
+    from llm_redact.config import kms_address_problem
+
+    address = kms.address or os.environ.get("VAULT_ADDR", "").strip()
+    if not address:
+        report.line("FAIL", "vault", "[vault.kms] hashicorp: no address and VAULT_ADDR is not set")
+    elif (problem := kms_address_problem(address)) is not None:
+        report.line("FAIL", "vault", f"[vault.kms] hashicorp: the Vault address {problem}")
+    if kms.auth == "token" and not (
+        os.environ.get("VAULT_TOKEN") or os.environ.get("VAULT_TOKEN_FILE")
+    ):
+        report.line(
+            "FAIL",
+            "vault",
+            "[vault.kms] hashicorp auth = token: set VAULT_TOKEN or VAULT_TOKEN_FILE",
+        )
+    elif kms.auth == "kubernetes" and not Path(kms.service_account_token_file).is_file():
+        report.line(
+            "WARN",
+            "vault",
+            f"[vault.kms] hashicorp auth = kubernetes: {kms.service_account_token_file}"
+            " does not exist here (fine if doctor runs outside the pod)",
+        )
 
 
 def _check_vault_rdbms(report: _Report, config: Config) -> None:
@@ -288,6 +361,8 @@ def _check_vault_rdbms(report: _Report, config: Config) -> None:
         report.line("FAIL", "vault", str(problem))
         return
     report.line("PASS", "vault", f"{backend} driver importable, DSN shape valid (not probed)")
+    if config.vault.rdbms.auth == "identity":
+        _check_vault_identity(report, config)
 
     cloud = vault_rdbms.managed_dbms_cloud(config.vault)
     if cloud is not None:
@@ -315,6 +390,37 @@ def _check_vault_rdbms(report: _Report, config: Config) -> None:
                 'backend "dbapi" DSNs are opaque — locality cannot be verified;'
                 ' keep the database local or set [vault] encryption = "fernet"',
             )
+
+
+def _check_vault_identity(report: _Report, config: Config) -> None:
+    """``[vault.rdbms] auth = "identity"``: where the password comes from.
+    No credential source is built and nothing is fetched (no network)."""
+    from llm_redact.registry import pro_package_installed
+
+    if not pro_package_installed():
+        report.line(
+            "FAIL",
+            "vault",
+            'auth = "identity" requires the llm-redact-pro package — the proxy will refuse'
+            " to start",
+        )
+        return
+    from llm_redact.vault_rdbms import ENV_TLS_UNVERIFIED, identity_tls_unverified
+
+    if identity_tls_unverified(config.vault):
+        report.line(
+            "WARN",
+            "vault",
+            f"{ENV_TLS_UNVERIFIED}=1: the database token goes over TLS that does not"
+            " verify the server certificate (whoever answers the handshake gets it)",
+        )
+    report.line(
+        "PASS",
+        "vault",
+        f'auth = "identity": the database password is a short-lived {config.vault.rdbms.cloud}'
+        " token minted from the proxy's cloud identity at every connect, over TLS"
+        " (identity not probed)",
+    )
 
 
 def _check_vault_key_matches(report: _Report, config: Config) -> None:
@@ -450,7 +556,7 @@ def _check_license(report: _Report, config: Config) -> None:
         )
 
 
-def _check_licensed_features(report: _Report) -> None:
+def _check_licensed_features(report: _Report, config: Config) -> None:
     """The honest open-core signal (llm-redact-pro LICENSING.md): is the paid
     ``llm-redact-pro`` package installed? Never a FAIL — the FOSS core is
     fully functional alone, and any pro-only *config* without the package
@@ -459,6 +565,7 @@ def _check_licensed_features(report: _Report) -> None:
     package that is installed yet whose plugin failed to register (paid
     features silently off) is exactly the kind of quiet downgrade this
     project surfaces."""
+    from llm_redact.config import unsupported_plugin_capabilities
     from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 
     if not pro_package_installed():
@@ -469,7 +576,7 @@ def _check_licensed_features(report: _Report) -> None:
             " pro-only config fails closed)",
         )
         return
-    get_registry()  # ensure the entry-point scan ran so loaded_plugins() is authoritative
+    registry = get_registry()  # the entry-point scan runs: loaded_plugins() is authoritative
     plugins = loaded_plugins()
     if plugins:
         report.line(
@@ -477,6 +584,9 @@ def _check_licensed_features(report: _Report) -> None:
             "license",
             f"licensed-features package installed ({', '.join(sorted(plugins))} active)",
         )
+        unsupported = unsupported_plugin_capabilities(config, registry.config_capabilities)
+        if unsupported is not None:
+            report.line("FAIL", "license", f"{unsupported} — the proxy will refuse to start")
     else:
         report.line(
             "WARN",
@@ -542,6 +652,52 @@ def _check_posture(report: _Report, config: Config) -> None:
         report.line("PASS", "posture", "no coverage opt-outs configured (all traffic redacted)")
 
 
+def _access_gate_requires_identity(config: Config) -> bool:
+    """Whether llm-redact-pro's access gate is configured to require a client
+    identity on API requests (``[auth] require`` or brokered mode). Read
+    generically: the ``[auth]`` shape belongs to the package."""
+    auth = config.extensions.get("auth")
+    return bool(getattr(auth, "require", False) or getattr(auth, "broker", False))
+
+
+def _check_upstream_auth(report: _Report, config: Config) -> None:
+    """[providers.NAME] auth = "identity": the proxy's own cloud identity.
+    Build-and-close each authorizer through the registry (construction does
+    no network I/O — credentials are fetched per request, so doctor never
+    contacts a cloud), then WARN when a non-loopback proxy lets any client
+    that reaches it spend that identity without an access gate. Silent when
+    every provider forwards the client's own credential."""
+    from llm_redact.registry import get_registry
+
+    identity = sorted(name for name, p in config.providers.items() if p.auth == "identity")
+    if not identity:
+        return
+    registry = get_registry()
+    for name in identity:
+        try:
+            auth = registry.build_upstream_auth(name, config.providers[name])
+        except ConfigError as problem:
+            report.line("FAIL", "upstream-auth", f"{problem} — serve would refuse this config")
+            continue
+        if auth is not None:
+            auth.close()
+        report.line(
+            "PASS",
+            "upstream-auth",
+            f"[providers.{name}] requests are authorized with the proxy's own cloud identity"
+            " (credentials are resolved per request; not contacted here)",
+        )
+    if config.host in ("127.0.0.1", "localhost", "::1") or _access_gate_requires_identity(config):
+        return
+    report.line(
+        "WARN",
+        "upstream-auth",
+        f"non-loopback bind {config.host} with auth = identity for {', '.join(identity)} and"
+        " no access gate requiring an identity: any client that reaches the proxy spends its"
+        " cloud identity — set [auth] require = true (llm-redact-pro) or bind 127.0.0.1",
+    )
+
+
 def _check_routing(report: _Report, config: Config, offline: bool) -> None:
     """R-31 lives in llm-redact-pro (routing is a pro subsystem); this shell
     reports the config/package posture and hands the checks to the package."""
@@ -582,6 +738,73 @@ def _check_access(report: _Report, config: Config) -> None:
         report.line(level, "access", message)
 
 
+def _check_email(report: _Report, config: Config) -> None:
+    """[email] delivery posture for llm-redact-pro's invites: the SMTP auth
+    mode, the transport security and whether the env-held secrets are
+    PRESENT (names only, never values; no network — a token is fetched only
+    when an invite is sent). Silent when [email] is not configured."""
+    email = config.email
+    if not email.configured:
+        return
+    tls = {"implicit": "implicit TLS", "starttls": "STARTTLS", "none": "no TLS"}[email.tls]
+    if email.auth == "oauth":
+        _check_email_oauth(report, config, tls)
+        return
+    if email.username is None:
+        report.line("PASS", "email", f"SMTP without authentication ({tls})")
+    elif not os.environ.get(email.password_env):
+        report.line(
+            "WARN",
+            "email",
+            f"username is set but {email.password_env} is not — invites will fail to send"
+            " (the SMTP password comes from the environment, never the config file)",
+        )
+    elif email.tls == "none":
+        report.line(
+            "WARN",
+            "email",
+            "SMTP password auth without TLS — the password crosses the network in cleartext"
+            " (set starttls = true or implicit_tls = true)",
+        )
+    else:
+        report.line("PASS", "email", f"SMTP password auth ({tls}; {email.password_env} set)")
+
+
+def _check_email_oauth(report: _Report, config: Config, tls: str) -> None:
+    email = config.email
+    if email.oauth_provider != "refresh_token":
+        source = {
+            "azure": "Microsoft Entra ID workload credentials",
+            "google": "a Google service account with domain-wide delegation",
+        }[str(email.oauth_provider)]
+        report.line(
+            "PASS",
+            "email",
+            f"SMTP OAuth 2.0 (XOAUTH2, {tls}) with tokens from {source}, fetched at send time",
+        )
+        return
+    missing = [
+        name
+        for name in (email.oauth_refresh_token_env, email.oauth_client_secret_env)
+        if name is not None and not os.environ.get(name)
+    ]
+    if missing:
+        report.line(
+            "WARN",
+            "email",
+            f"SMTP OAuth 2.0 refresh-token grant but {' and '.join(missing)} not set —"
+            " invites will fail to send (secrets come from the environment, never the"
+            " config file)",
+        )
+        return
+    host = urllib.parse.urlsplit(email.oauth_token_url or "").hostname
+    report.line(
+        "PASS",
+        "email",
+        f"SMTP OAuth 2.0 (XOAUTH2, {tls}) via a refresh-token grant at {host}",
+    )
+
+
 def run_doctor(args: argparse.Namespace) -> int:
     report = _Report(json_mode=getattr(args, "json", False))
     config = _check_config(report, args)
@@ -590,7 +813,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
     _check_platform(report)
     _check_license(report, config)
-    _check_licensed_features(report)
+    _check_licensed_features(report, config)
     _check_build(report, config)
     _check_tls_and_bind(report, config)
     _check_body_cap(report, config)
@@ -598,8 +821,10 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_vault(report, config)
     _check_extras(report, config)
     _check_posture(report, config)
+    _check_upstream_auth(report, config)
     _check_routing(report, config, bool(getattr(args, "offline", False)))
     _check_access(report, config)
+    _check_email(report, config)
     if config.audit.enabled:
         from llm_redact.audit import default_audit_path
 
@@ -661,24 +886,35 @@ def run_config_show(args: argparse.Namespace) -> int:
 
 
 def _check_audit_azure(report: _Report, config: Config) -> None:
-    from llm_redact.audit_s3 import AZURE_STORAGE_KEY_ENV
+    from llm_redact.audit_s3 import required_credential_env
 
     az = config.audit.azure
     if not az.enabled:
         return
-    if not os.environ.get(AZURE_STORAGE_KEY_ENV):
+    host = az.endpoint_url or f"{az.account}.blob.core.windows.net"
+    mode = {"key": "SharedKey", "sas": "SAS-token", "identity": "Entra ID"}.get(az.auth, az.auth)
+    # Presence only — never a byte of the values themselves.
+    missing = [n for n in required_credential_env("azure", auth=az.auth) if not os.environ.get(n)]
+    if missing:
         report.line(
             "FAIL",
             "audit.azure",
-            f"enabled but {AZURE_STORAGE_KEY_ENV} not set — batches will be dropped"
-            " (the account key comes from the environment, never the config file)",
+            f"enabled (auth = {az.auth!r}) but {' and '.join(missing)} not set — batches"
+            " will be dropped (credentials come from the environment, never the config file)",
         )
-    else:
-        host = az.endpoint_url or f"{az.account}.blob.core.windows.net"
+    elif az.auth == "identity":
         report.line(
             "PASS",
             "audit.azure",
-            f"SharedKey sink configured (container {az.container} via {host});"
+            f"{mode} sink configured (container {az.container} via {host}); the token"
+            " resolves at runtime from the workload identity (not checked offline);"
+            " metadata rows leave this machine",
+        )
+    else:
+        report.line(
+            "PASS",
+            "audit.azure",
+            f"{mode} sink configured (container {az.container} via {host});"
             " metadata rows leave this machine",
         )
     _check_audit_encryption(report, "audit.azure", az.encryption)
@@ -711,15 +947,20 @@ def _check_audit_encryption(report: _Report, area: str, encryption: str) -> None
 
 
 def _check_audit_s3(report: _Report, config: Config) -> None:
-    from llm_redact.audit_s3 import credential_env_names
+    from llm_redact.audit_s3 import required_credential_env
 
     s3 = config.audit.s3
     if not s3.enabled:
         return
     # Presence only — never a byte of the values themselves. The credential
-    # env vars vary by provider (GCS uses its own HMAC interop keys).
-    access_env, secret_env, _ = credential_env_names(s3.provider)
-    missing = [name for name in (access_env, secret_env) if not os.environ.get(name)]
+    # env vars vary by provider (GCS uses its own HMAC interop keys) and by
+    # auth mode (identity needs none: it resolves at runtime).
+    required = required_credential_env("s3", s3.provider, s3.auth)
+    missing = [name for name in required if not os.environ.get(name)]
+    target = {
+        "aws": f"s3.{s3.region}.amazonaws.com",
+        "gcs": "storage.googleapis.com",
+    }.get(s3.provider, s3.endpoint_url or "?")
     if missing:
         report.line(
             "FAIL",
@@ -727,11 +968,15 @@ def _check_audit_s3(report: _Report, config: Config) -> None:
             f"enabled but {' and '.join(missing)} not set — batches will be"
             " dropped (credentials come from the environment, never the config file)",
         )
+    elif s3.auth == "identity":
+        report.line(
+            "PASS",
+            "audit.s3",
+            f"{s3.provider} sink configured (bucket {s3.bucket} via {target}) with"
+            " workload identity; credentials resolve at runtime (not checked offline);"
+            " metadata rows leave this machine",
+        )
     else:
-        target = {
-            "aws": f"s3.{s3.region}.amazonaws.com",
-            "gcs": "storage.googleapis.com",
-        }.get(s3.provider, s3.endpoint_url or "?")
         report.line(
             "PASS",
             "audit.s3",

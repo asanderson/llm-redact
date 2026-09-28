@@ -27,28 +27,33 @@ from .audit import build_audit as _build_audit
 from .audit_s3 import build_audit_sinks as _build_audit_sinks
 from .free_defaults import build_access_gate as _build_access_gate
 from .free_defaults import build_dashboard as _build_dashboard
+from .free_defaults import build_db_password as _build_db_password
 from .free_defaults import build_router as _build_router
 from .free_defaults import build_telemetry as _build_telemetry
+from .free_defaults import build_upstream_auth as _build_upstream_auth
 from .free_defaults import resolve_license as _resolve_license
 from .free_defaults import tool_base_url as _tool_base_url
 from .sessions import build_session_router as _build_session_router
 from .vault import build_cipher as _build_cipher
 from .vault import build_vault_manager as _build_vault_manager
 from .vault import cipher_from_key as _cipher_from_key
+from .vault_crypto import resolve_vault_key as _resolve_vault_key
 
 if TYPE_CHECKING:
     from .audit import AuditLog
     from .audit_s3 import AzureAuditSink, S3AuditSink
-    from .config import AuditConfig, Config, OtelConfig, VaultConfig
+    from .config import AuditConfig, Config, OtelConfig, ProviderConfig, VaultConfig
     from .licensing import ResolvedLicense
     from .plugin_api import (
         AccessGate,
         CliCommand,
         ConfigSection,
         Dashboard,
+        DbPasswordProvider,
         Router,
         SessionRouter,
         Telemetry,
+        UpstreamAuth,
         VaultCipher,
     )
     from .vault import VaultManager
@@ -88,6 +93,8 @@ class Registry:
     build_vault_manager: Callable[[VaultConfig], VaultManager]
     build_cipher: Callable[[VaultConfig], VaultCipher | None]
     cipher_from_key: Callable[[bytes], VaultCipher]
+    build_db_password: Callable[[VaultConfig], DbPasswordProvider | None]
+    resolve_vault_key: Callable[[VaultConfig], bytes | None]
     build_session_router: Callable[..., SessionRouter]
     resolve_license: Callable[..., ResolvedLicense]
     build_telemetry: Callable[[OtelConfig], Telemetry | None]
@@ -96,9 +103,11 @@ class Registry:
     build_access_gate: Callable[[Config, ResolvedLicense], AccessGate | None]
     build_router: Callable[[Config, str], Router | None]
     build_dashboard: Callable[[str], Dashboard | None]
+    build_upstream_auth: Callable[[str, ProviderConfig], UpstreamAuth | None]
     tool_base_url: Callable[[str], str]
     cli_commands: list[CliCommand]
     config_sections: list[ConfigSection]
+    config_capabilities: set[str]
 
     def __init__(self) -> None:
         # Assigned as INSTANCE attributes (not class attributes) so a bare
@@ -110,6 +119,16 @@ class Registry:
         # defaults fail closed on an encrypted vault.
         self.build_cipher = _build_cipher
         self.cipher_from_key = _cipher_from_key
+        # The RDBMS vault's per-connect password (plugin_api.DbPasswordProvider):
+        # None keeps the static password_env/DSN password; [vault.rdbms]
+        # auth = "identity" (a token minted from the proxy's cloud identity)
+        # is paid — the Free default fails closed naming llm-redact-pro.
+        self.build_db_password = _build_db_password
+        # [vault.kms]: the master key stored wrapped by a cloud KMS. The
+        # plugin unwraps it (returning the 32-byte key; None without
+        # [vault.kms]); the Free default fails closed when it is configured.
+        # vault_crypto.resolve_cipher is the one caller-facing path.
+        self.resolve_vault_key = _resolve_vault_key
         self.build_session_router = _build_session_router
         # License verification (the "what did the vendor sign" enforcement core)
         # is a paid subsystem (R3); the Free default resolves to Free with a
@@ -132,6 +151,12 @@ class Registry:
         # answers its paths with a 404 naming the package. Built with the
         # resolved tier, rebuilt when a reload changes it.
         self.build_dashboard = _build_dashboard
+        # [providers.NAME] auth = "identity": the proxy's own cloud identity
+        # authorizes requests to bedrock/vertex/azure (plugin_api.UpstreamAuth).
+        # The Free default returns None for passthrough and fails closed on
+        # identity, naming the package. Built per provider at startup and on
+        # every reload that changes a provider's auth settings.
+        self.build_upstream_auth = _build_upstream_auth
         # `llm-redact run` passes the base URL it exports to wrapped tools
         # through this hook (identity-free in the core).
         self.tool_base_url = _tool_base_url
@@ -140,6 +165,12 @@ class Registry:
         # Plugin-owned top-level config tables (parsed, emitted and pinned
         # restart-only by the core; see plugin_api.ConfigSection).
         self.config_sections = []
+        # Config shapes the plugin implements that have no factory seam to
+        # fail closed in (config.plugin_capabilities_required names them,
+        # e.g. "audit.s3.auth=identity"). With a plugin loaded, a configured
+        # capability it does not advertise is a ConfigError — an older
+        # plugin would otherwise ignore it and fall back to static secrets.
+        self.config_capabilities = set()
 
 
 def load_plugins(registry: Registry) -> list[str]:

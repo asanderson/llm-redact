@@ -50,11 +50,14 @@ from llm_redact.config import (
     RESTART_ONLY_KEYS,
     Config,
     ConfigError,
+    ProviderConfig,
+    _is_loopback_host,
     apply_env_overrides,
     default_config_path,
     load_config,
     resolve_config_path,
     resolve_credentials,
+    unsupported_plugin_capabilities,
 )
 from llm_redact.detection.engine import (
     active_rule_names,
@@ -82,6 +85,8 @@ from llm_redact.plugin_api import (
     Router,
     RouteRefusal,
     Telemetry,
+    UpstreamAuth,
+    UpstreamAuthError,
 )
 from llm_redact.providers import ALL_ADAPTERS, ProviderAdapter, RouteKind
 from llm_redact.providers.custom import CUSTOM_ROUTE_PREFIX, build_custom_adapters, custom_prefix
@@ -91,6 +96,8 @@ from llm_redact.registry import get_registry, loaded_plugins, pro_package_instal
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEParser, serialize
 from llm_redact.vault import Vault, VaultManager
+from llm_redact.vault_crypto import key_source as vault_key_source
+from llm_redact.vault_crypto import require_vault_key_source
 
 # Local endpoints under this prefix are answered by the proxy itself and are
 # never forwarded upstream (see the first statement of handle()).
@@ -182,14 +189,38 @@ ACCESS_PATHS = frozenset(
     }
 )
 # The gate's browser sign-in endpoints (llm-redact-pro): reachable WITHOUT
-# dashboard admission — they are how a browser obtains it.
+# dashboard admission — they are how a browser obtains it. Everything under
+# AUTH_PREFIX goes to the gate (sign-in methods add their own pages and JSON
+# endpoints there, e.g. passkeys); AUTH_PATHS names the original three.
+AUTH_PREFIX = f"{RESERVED_PREFIX}/auth"
 AUTH_PATHS = frozenset(
     {
-        f"{RESERVED_PREFIX}/auth/login",
-        f"{RESERVED_PREFIX}/auth/callback",
-        f"{RESERVED_PREFIX}/auth/logout",
+        f"{AUTH_PREFIX}/login",
+        f"{AUTH_PREFIX}/callback",
+        f"{AUTH_PREFIX}/logout",
     }
 )
+
+
+def _is_auth_path(path: str) -> bool:
+    """A gate sign-in path: anything BELOW AUTH_PREFIX. The bare prefix is
+    not one — it would skip dashboard admission for a path the gate never
+    claimed (it fell through to the gate's user-admin handler)."""
+    return path.startswith(AUTH_PREFIX + "/")
+
+
+def origin_form_target(scope: Mapping[str, Any]) -> bool:
+    """Whether the request target is origin-form (``/path``). The h11
+    parser accepts other forms — ``%2Fv1…@evil.example/x`` or an absolute
+    URL — and the raw path is forwarded verbatim after the upstream base,
+    so anything else could move the request to a host the client chose."""
+    raw_path = scope.get("raw_path")
+    if isinstance(raw_path, bytes | bytearray):
+        return raw_path.startswith(b"/")
+    path = scope.get("path")
+    return isinstance(path, str) and path.startswith("/")
+
+
 # SCIM 2.0 provisioning (llm-redact-pro): everything under this prefix goes
 # to the gate, which authenticates the identity provider's bearer token
 # itself (no browser: no Origin check, no dashboard admission).
@@ -255,6 +286,10 @@ class ProxyState:
         # (llm-redact-pro docs/licensing.md). Wiring only — the license gate above
         # is the sole tier chokepoint.
         registry = get_registry()
+        # [vault.kms] fails closed BEFORE any vault is built: a local key
+        # variable alongside it, or no plugin able to unwrap it (an older
+        # llm-redact-pro would silently build its cipher from the env key).
+        require_vault_key_source(config.vault, registry)
         self.vault_manager: VaultManager = registry.build_vault_manager(config.vault)
         self.vault: Vault = self.vault_manager.get(config.vault.session)
         self.detectors = build_detectors(config.detection)
@@ -327,6 +362,12 @@ class ProxyState:
         self.guide_html = (
             importlib.resources.files("llm_redact").joinpath("user_guide.html").read_text("utf-8")
         )
+        if loaded_plugins():
+            # Version skew: a plugin predating a configured capability
+            # (sink/email auth modes) must refuse, never silently degrade.
+            unsupported = unsupported_plugin_capabilities(config, registry.config_capabilities)
+            if unsupported is not None:
+                raise ConfigError(unsupported)
         # Audit log + off-machine sinks: registry-built (paid), each fail-closed
         # inside its factory (tamper chain without a key / fernet without a key
         # raise ConfigError there). The flush loops start in the lifespan.
@@ -374,6 +415,10 @@ class ProxyState:
         # or when it declines the tier; the dashboard paths then 404 with
         # the reason. Rebuilt by apply_config when a reload changes the tier.
         self.dashboard: Dashboard | None = registry.build_dashboard(self.license.tier)
+        # [providers.NAME] auth = "identity" (llm-redact-pro): provider name ->
+        # the authorizer that signs its requests with the proxy's own cloud
+        # identity. Empty unless configured; the Free default fails closed.
+        self.upstream_auth: dict[str, UpstreamAuth] = _build_upstream_auths(config.providers)
 
     async def admit(self, conn: HTTPConnection, surface: str) -> Admission:
         """The access gate's verdict (it scrubs its own credentials from the
@@ -580,6 +625,15 @@ class ProxyState:
             # under the old config) would leave a still-configured custom
             # upstream with no adapter, i.e. forwarded unredacted.
             adapters = [cls() for cls in ALL_ADAPTERS] + build_custom_adapters(effective.providers)
+        # Upstream authorizers are hot: rebuilt only when a provider's auth
+        # settings changed (a rebuild drops cached cloud credentials), BEFORE
+        # the router reconfigures itself in place — a refusal here (package
+        # absent, no region) closes what it built and changes nothing. The
+        # displaced ones close at swap time; in-flight requests keep the
+        # authorizer they already hold.
+        upstream_auth = self.upstream_auth
+        if _auth_settings(effective.providers) != _auth_settings(self.config.providers):
+            upstream_auth = _build_upstream_auths(effective.providers)
         # Routing is hot (decision 16 / R-34). The router validates-then-swaps
         # its own state; it raises only ConfigError and changes nothing when
         # it does, so this sits after every other build and before the swap.
@@ -587,16 +641,21 @@ class ProxyState:
         # the tier is checked — like the access gate, a running router is never
         # re-gated); one that turns it OFF drops it (closed at swap time).
         router = self.router
-        if effective.routing.enabled:
-            if router is None:
-                router = get_registry().build_router(effective, license_resolved.tier)
+        try:
+            if effective.routing.enabled:
+                if router is None:
+                    router = get_registry().build_router(effective, license_resolved.tier)
+                else:
+                    router.reconfigure(effective)
             else:
-                router.reconfigure(effective)
-        else:
-            router = None
-        dashboard = self.dashboard
-        if license_resolved.tier != self.license.tier:
-            dashboard = get_registry().build_dashboard(license_resolved.tier)
+                router = None
+            dashboard = self.dashboard
+            if license_resolved.tier != self.license.tier:
+                dashboard = get_registry().build_dashboard(license_resolved.tier)
+        except BaseException:
+            if upstream_auth is not self.upstream_auth:
+                _close_upstream_auths(upstream_auth)
+            raise
         self.config = effective
         self.license = license_resolved
         self.adapters = adapters
@@ -612,6 +671,10 @@ class ProxyState:
             self.router.close()
         self.router = router
         self.dashboard = dashboard
+        if upstream_auth is not self.upstream_auth:
+            displaced = self.upstream_auth
+            self.upstream_auth = upstream_auth
+            _close_upstream_auths(displaced)
         for warning in effective.routing.warnings:
             logger.warning("routing: %s", warning)
         logger.info("config reloaded (%d detection rules)", len(detectors))
@@ -656,6 +719,10 @@ class ProxyState:
             probe = get_registry().build_router(effective, resolved.tier)
             if probe is not None:
                 probe.close()
+        # Upstream authorizers: a build-and-close probe (construction does no
+        # network I/O), so a missing package or an unresolvable region is a
+        # 400 in the editor rather than a failed apply after the write.
+        _close_upstream_auths(_build_upstream_auths(effective.providers))
 
     def preview(self, text: str) -> dict[str, Any]:
         """Run the LIVE detectors/allowlist/modes over ``text`` on a
@@ -1000,6 +1067,121 @@ def _response_headers(upstream: httpx.Response) -> dict[str, str]:
     }
 
 
+def _auth_settings(
+    providers: Mapping[str, ProviderConfig],
+) -> dict[str, tuple[str, str | None, str]]:
+    """What an upstream authorizer is built from, per provider: a reload
+    rebuilds the authorizers only when this changes (a rebuild drops the
+    cached cloud credentials)."""
+    return {
+        name: (provider.auth, provider.region, provider.upstream_base_url)
+        for name, provider in providers.items()
+        if provider.auth != "passthrough"
+    }
+
+
+def _build_upstream_auths(providers: Mapping[str, ProviderConfig]) -> dict[str, UpstreamAuth]:
+    """One registry-built authorizer per provider that wants one. A failure
+    part-way closes what was already built and re-raises (ConfigError)."""
+    registry = get_registry()
+    built: dict[str, UpstreamAuth] = {}
+    try:
+        for name, provider in sorted(providers.items()):
+            auth = registry.build_upstream_auth(name, provider)
+            if auth is not None:
+                built[name] = auth
+            elif provider.auth != "passthrough":
+                # A plugin that answers None for an identity provider would
+                # otherwise forward the client's own credential in its place.
+                raise ConfigError(
+                    f'[providers.{name}] auth = "{provider.auth}" but the installed'
+                    " llm-redact-pro built no authorizer for it; upgrade llm-redact-pro"
+                )
+    except BaseException:
+        _close_upstream_auths(built)
+        raise
+    return built
+
+
+def identity_exposure_warning(state: ProxyState, host: str) -> str | None:
+    """The startup warning for a proxy that lends its own cloud identity to
+    whoever can reach it: identity-authorized providers on a non-loopback
+    bind with no access gate to say who the clients are. (Transport mTLS
+    still admits every certificate its CA signed.) None when not exposed."""
+    if not state.upstream_auth or state.access_gate is not None or _is_loopback_host(host):
+        return None
+    names = ", ".join(sorted(state.upstream_auth))
+    return (
+        f"providers {names} use the proxy's own cloud identity and this proxy binds"
+        f" {host} with no access gate: every client that can connect spends that"
+        " identity; install llm-redact-pro access control or bind 127.0.0.1"
+    )
+
+
+def _close_upstream_auths(auths: Mapping[str, UpstreamAuth]) -> None:
+    for name, auth in auths.items():
+        try:
+            auth.close()
+        except Exception as exc:  # a close fault must not break a reload/shutdown
+            logger.warning("upstream auth for %s failed to close (%s)", name, type(exc).__name__)
+
+
+# Client credential channels removed before the proxy authorizes a request
+# with its own cloud identity: the provider must see only the proxy's
+# credential, and a client's key or signature must never ride along (a
+# client SigV4 signature would also be wrong: it covers the unredacted body).
+# At least the access gate's brokered set (authorization, x-api-key,
+# x-goog-api-key, api-key, ?key=), widened to every header naming an API key
+# or an authorization, AWS signing headers, cookies, and an API-management
+# subscription key. Google's quota/billing-project and legacy IAM selector
+# headers go too: under the proxy's identity they would let a client bill
+# (or act in) a project the operator never chose.
+_CREDENTIAL_HEADERS = frozenset(
+    {
+        "cookie",
+        "ocp-apim-subscription-key",
+        "x-goog-user-project",
+        "x-goog-iam-authority-selector",
+        "x-goog-iam-authorization-token",
+    }
+)
+_CREDENTIAL_QUERY_PARAMS = frozenset({"key", "api-key", "api_key", "access_token"})
+
+
+def _is_credential_header(name: str) -> bool:
+    lowered = name.lower()
+    return (
+        lowered in _CREDENTIAL_HEADERS
+        or "authorization" in lowered
+        or lowered.endswith("api-key")
+        or lowered.startswith("x-amz-")
+    )
+
+
+def _strip_credential_query(query: str) -> str:
+    """The raw query string minus every credential parameter (``key=``,
+    ``api-key=``, ``access_token=``, presigned-URL ``X-Amz-*``); the rest is
+    kept byte-for-byte in order."""
+    kept = []
+    for part in query.split("&"):
+        name = urllib.parse.unquote_plus(part.split("=", 1)[0]).lower()
+        if name in _CREDENTIAL_QUERY_PARAMS or name.startswith("x-amz-"):
+            continue
+        kept.append(part)
+    return "&".join(kept)
+
+
+def strip_client_credentials(
+    url: str, headers: Sequence[tuple[str, str]]
+) -> tuple[str, list[tuple[str, str]]]:
+    """``url`` in its on-the-wire form without credential query parameters,
+    and ``headers`` without any client credential channel."""
+    base, _, query = url.partition("?")
+    stripped = _strip_credential_query(query) if query else ""
+    final = str(httpx.URL(base + ("?" + stripped if stripped else "")))
+    return final, [(name, value) for name, value in headers if not _is_credential_header(name)]
+
+
 class RequestMeta(NamedTuple):
     """Per-request context handle() threads into the streaming finalizers,
     which outlive the HTTP handler and call record_request at stream end."""
@@ -1204,10 +1386,11 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
     if path in (f"{RESERVED_PREFIX}/sessions", f"{RESERVED_PREFIX}/sessions/prune"):
         return await _handle_sessions(request, state)
     scim = path == SCIM_PREFIX or path.startswith(SCIM_PREFIX + "/")
-    if path in ACCESS_PATHS or path in AUTH_PATHS or scim:
+    if path in ACCESS_PATHS or _is_auth_path(path) or scim:
         # Host/Origin checked here too (defense in depth — the gate runs the
         # full guard chain itself) so a rebinding page learns nothing. SCIM
-        # clients are identity providers, not browsers: Host only.
+        # clients are identity providers, not browsers: Host only. The
+        # sign-in paths keep the Origin check for every method, POST included.
         if not _host_allowed(request, state):
             return JSONResponse({"error": "host not allowed"}, status_code=403)
         if not scim and not _origin_allowed(request, state):
@@ -1244,16 +1427,28 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
             "backend": config.vault.backend,
             "entries": state.vault_manager.total_entries(),
             "sessions": state.vault_manager.session_count(),
+            # "kms:<provider>" | "local" (env / key command / keychain) |
+            # None (unencrypted). Posture only: never the key or key id.
+            "key_source": vault_key_source(config.vault),
         }
         if config.vault.backend in RDBMS_BACKENDS:
-            from llm_redact.vault_rdbms import ENV_REMOTE_PLAINTEXT, managed_dbms_cloud
+            from llm_redact.vault_rdbms import (
+                ENV_REMOTE_PLAINTEXT,
+                identity_tls_unverified,
+                managed_dbms_cloud,
+            )
 
             # Honesty fields: a recognized managed-DBMS host and the
             # remote-plaintext hatch are opt-in postures — never silent.
             vault_block["managed_cloud"] = managed_dbms_cloud(config.vault)
+            # "password" (static) or "identity" (a per-connect token minted
+            # from the proxy's cloud identity) — never the credential itself.
+            vault_block["auth"] = config.vault.rdbms.auth
             vault_block["remote_plaintext"] = (
                 config.vault.encryption != "fernet" and os.environ.get(ENV_REMOTE_PLAINTEXT) == "1"
             )
+            # The identity token's TLS link is unverified (the hatch is set).
+            vault_block["tls_unverified"] = identity_tls_unverified(config.vault)
         return JSONResponse(
             {
                 "version": __version__,
@@ -1309,6 +1504,13 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 "providers_detection_off": sorted(
                     name for name, provider in config.providers.items() if not provider.detection
                 ),
+                # How the proxy authenticates to each upstream: "passthrough"
+                # (the client's credential) or "identity" (the proxy's OWN
+                # cloud identity — any client that reaches it spends that).
+                # Modes only; never a credential, region or source detail.
+                "providers_auth": {
+                    name: provider.auth for name, provider in config.providers.items()
+                },
                 "mcp_exempt_servers": len(config.detection.mcp_exempt_servers),
                 "audit": {
                     "enabled": state.audit is not None,
@@ -1318,6 +1520,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                     "s3": {
                         "enabled": state.audit_s3 is not None,
                         "encryption": config.audit.s3.encryption == "fernet",
+                        "auth": config.audit.s3.auth,
                         "batches_uploaded": (
                             state.audit_s3.batches_uploaded if state.audit_s3 is not None else 0
                         ),
@@ -1328,6 +1531,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                     "azure": {
                         "enabled": state.audit_azure is not None,
                         "encryption": config.audit.azure.encryption == "fernet",
+                        "auth": config.audit.azure.auth,
                         "batches_uploaded": (
                             state.audit_azure.batches_uploaded
                             if state.audit_azure is not None
@@ -1519,7 +1723,7 @@ async def _admit_reserved(request: Request, state: ProxyState) -> Response | Non
     path = request.url.path
     if (
         path in PROBE_PATHS
-        or path in AUTH_PATHS
+        or _is_auth_path(path)
         or path == SCIM_PREFIX
         or path.startswith(SCIM_PREFIX + "/")
     ):
@@ -1770,6 +1974,9 @@ async def _read_capped(request: Request, limit: int) -> bytes | None:
 
 async def handle(request: Request) -> Response:
     state: ProxyState = request.app.state.proxy
+    if not origin_form_target(request.scope):
+        # Never routed, forwarded, recorded or logged with its target.
+        return JSONResponse({"error": "the request target must be a path"}, status_code=400)
     path = request.url.path
 
     # Reserved local endpoints are answered here, before any routing or
@@ -1881,6 +2088,30 @@ async def handle(request: Request) -> Response:
         logger.info("%s %s -> 403 refused by the access gate", request.method, path)
         return JSONResponse(error, status_code=403)
 
+    if adapter is None and provider_name in state.upstream_auth:
+        # The proxy lends its own cloud identity only to the API routes it
+        # recognizes (and redacts). Signing pass-through traffic would hand
+        # any client the whole cloud API as the proxy's principal, bodies
+        # unredacted — so an unrecognized path is refused here, never sent.
+        message = (
+            f"llm-redact: {provider_name} is authorized with the proxy's own identity"
+            f' ([providers.{provider_name}] auth = "identity"); only the API routes'
+            " llm-redact recognizes are forwarded"
+        )
+        state.record_request(
+            session=state.config.vault.session,
+            provider=provider_name,
+            method=request.method,
+            path=path,
+            status=403,
+            started=started,
+            streamed=False,
+            detections={},
+            rehydrations={},
+        )
+        logger.info("%s %s -> 403 unrecognized route for identity auth", request.method, path)
+        return JSONResponse({"error": message}, status_code=403)
+
     if state.router is not None:
         answer = state.router.local_answer(request.method, path, request.headers)
         if answer is not None:
@@ -1973,7 +2204,12 @@ async def handle(request: Request) -> Response:
     # router's protocols (plan() returns None) — never constructs a routing
     # object and takes the legacy path below byte-for-byte.
     plan: RoutePlan | None = None
-    if state.router is not None:
+    upstream_auth = state.upstream_auth.get(provider_name)
+    # A provider the proxy authorizes with its own cloud identity is never
+    # routed (the routing protocols are anthropic/openai/gemini/ollama, and
+    # a routed hop carries the router's own credentials): the router is not
+    # even asked, so the request below is always signed by its authorizer.
+    if state.router is not None and upstream_auth is None:
         model = parsed.get("model") if isinstance(parsed, dict) else None
         planned = state.router.plan(
             RouteInbound(
@@ -2111,9 +2347,34 @@ async def handle(request: Request) -> Response:
     url = upstream_base + upstream_path
     if request.url.query:
         url += "?" + request.url.query
+    if not _same_upstream(url, upstream_base):
+        # Belt and braces behind origin_form_target: whatever the path
+        # holds, the request goes to the configured upstream or nowhere.
+        return JSONResponse({"error": "the request target must be a path"}, status_code=400)
+    headers = _request_headers(request)
+    if upstream_auth is not None:
+        # The proxy's own cloud identity: strip every client credential, then
+        # authorize the FINAL request — the on-the-wire URL and the bytes
+        # below, after redaction and note injection — and send exactly that.
+        url, headers = strip_client_credentials(url, headers)
+        try:
+            headers = await upstream_auth.authorize(request.method, url, headers, outbound)
+        except Exception as exc:
+            return _upstream_auth_failure(
+                state,
+                ctx,
+                adapter,
+                exc,
+                provider_name=provider_name,
+                request=request,
+                path=path,
+                started=started,
+                new_counts=new_counts,
+                new_warned=new_warned,
+            )
 
     upstream_request = state.client.build_request(
-        request.method, url, headers=_request_headers(request), content=outbound
+        request.method, url, headers=headers, content=outbound
     )
 
     audit_token, audit_refusal = _begin_audit_guarded(
@@ -2186,6 +2447,21 @@ def _redacted_summary(new_counts: dict[str, int]) -> str:
     )
 
 
+def _same_upstream(url: str, upstream_base: str) -> bool:
+    """Whether ``url`` still addresses the configured upstream (scheme and
+    netloc, userinfo included — a smuggled ``user@`` is a different URL)."""
+    try:
+        built, base = httpx.URL(url), httpx.URL(upstream_base)
+    except httpx.InvalidURL:
+        return False
+    return (built.scheme, built.userinfo, built.host, built.port) == (
+        base.scheme,
+        base.userinfo,
+        base.host,
+        base.port,
+    )
+
+
 def _upstream_path(request: Request, path: str) -> str:
     """The path to forward, exactly as the client sent it: Bedrock model
     ids are often percent-encoded ARNs whose %2F/%3A must reach the
@@ -2252,6 +2528,54 @@ def _begin_audit_guarded(
         )
         return None, JSONResponse(body, status_code=503)
     return token, None
+
+
+def _upstream_auth_failure(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    exc: Exception,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+) -> JSONResponse:
+    """The proxy's cloud identity produced no credential: nothing is
+    forwarded (never the client's credential in its place, never an
+    unauthenticated request). A recorded, provider-shaped 502 — the
+    credential twin of the upstream-fault 502 — counted as an upstream
+    error. It names the credential SOURCE only: an ``UpstreamAuthError``
+    message by contract, any other exception by its TYPE."""
+    source = str(exc) if isinstance(exc, UpstreamAuthError) else type(exc).__name__
+    state.upstream_errors[provider_name] += 1
+    logger.warning(
+        "%s %s -> 502 upstream credentials unavailable for %s (%s)",
+        request.method,
+        path,
+        provider_name,
+        source,
+    )
+    state.record_request(
+        session=ctx.session_id,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=502,
+        started=started,
+        streamed=False,
+        detections=new_counts,
+        rehydrations={},
+        warned=new_warned,
+    )
+    message = (
+        f"llm-redact: the proxy could not obtain its own {provider_name} cloud"
+        f" credentials ({source}); nothing was forwarded"
+    )
+    body = adapter.error_body(message, status=502) if adapter is not None else {"error": message}
+    return JSONResponse(body, status_code=502)
 
 
 def _fault_response(
@@ -2861,6 +3185,7 @@ def create_app(
             state.vault_manager.close()
             if state.router is not None:
                 state.router.close()
+            _close_upstream_auths(state.upstream_auth)
             if state.access_gate is not None:
                 state.access_gate.close()
             if state.audit is not None:

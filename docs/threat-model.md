@@ -172,8 +172,9 @@ because breaking the tool teaches users to bypass the proxy).
   Values, headers, and placeholder ids are never attributes.
 - The S3 audit sink (opt-in, `[audit.s3]`) ships the same metadata-only
   rows as NDJSON objects to a bucket you name — the same off-machine
-  trust decision as a remote OTel collector. Credentials come from the
-  standard AWS environment variables only, never the config file; upload
+  trust decision as a remote OTel collector. Credentials come from
+  environment variables or, with `auth = "identity"`, from the
+  workload's cloud identity at runtime — never the config file; upload
   failures warn and drop rather than blocking or crashing the proxy
   (under `[audit] required` the sinks instead spool from the audit DB
   and retry until the upload is confirmed — at-least-once, never drop).
@@ -242,7 +243,7 @@ row, is [resilience.md](resilience.md).
 | Length/timing side channels | Placeholder lengths differ from originals; smoothing them would break streaming |
 | Base64 media contents | Images can't leak through text regexes; PDF parsing would need heavy deps |
 | Shapes the rules exclude | Bare-digit phones, street addresses, passport/DL numbers: collision-prone with no reliable grammar |
-| SigV4-signed provider traffic (AWS Bedrock via SDK credentials) | Permanent non-goal: the signature covers the payload hash, so a body-rewriting proxy can never transit it without holding the user's AWS credentials and re-signing — which this design will not do. Bearer-token Bedrock (API keys) IS supported: the proxy parses AWS's binary CRC-framed eventstream encoding natively (both CRCs validated per frame; a framing violation degrades to verbatim pass-through, so unrestored placeholders — never corrupted frames — are the worst case), and invoke-route bodies are rewritten only for positively recognized model-native shapes (Claude), with everything else forwarded verbatim |
+| SigV4-signed provider traffic (AWS Bedrock via SDK credentials) | Permanent non-goal: the signature covers the payload hash, so a body-rewriting proxy can never transit a signature the CLIENT computed, and it never holds the user's AWS credentials to re-sign. The proxy MAY sign with its OWN identity (`[providers.bedrock] auth = "identity"`, llm-redact-pro): the client's credentials are stripped and the redacted body is signed by credentials the operator gave the proxy — which any client that reaches the proxy can then spend, so pair it with the access gate or a loopback bind. Bearer-token Bedrock (API keys) IS supported: the proxy parses AWS's binary CRC-framed eventstream encoding natively (both CRCs validated per frame; a framing violation degrades to verbatim pass-through, so unrestored placeholders — never corrupted frames — are the worst case), and invoke-route bodies are rewritten only for positively recognized model-native shapes (Claude), with everything else forwarded verbatim |
 
 ## Residual risks
 

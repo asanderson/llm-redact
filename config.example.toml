@@ -59,12 +59,20 @@ upstream_base_url = "http://127.0.0.1:11434"
 # [providers.vertex]
 # upstream_base_url = "https://us-central1-aiplatform.googleapis.com"
 
-# AWS Bedrock (bearer-token API keys only — SigV4-signed SDK traffic cannot
-# transit a body-rewriting proxy) also embeds the region; /model/... routes
-# (converse, converse-stream, invoke, invoke-with-response-stream) answer
-# 502 until this is set.
+# AWS Bedrock (bearer-token API keys — a SigV4 signature the CLIENT computed
+# cannot transit a body-rewriting proxy) also embeds the region; /model/...
+# routes (converse, converse-stream, invoke, invoke-with-response-stream)
+# answer 502 until this is set.
 # [providers.bedrock]
 # upstream_base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+
+# azure, vertex and bedrock only (llm-redact-pro): auth = "identity" drops
+# the tool's credential and authorizes each redacted request with the
+# PROXY's own cloud identity (SigV4 / Google / Entra ID). Anyone who can
+# reach the proxy then spends that identity — keep it on 127.0.0.1 or
+# require client identities ([auth] require = true).
+# auth = "identity"
+# region = "us-east-1"   # bedrock only, when the host names no region
 
 ## [upstreams.*] / [routing] / [prices]: rule-based upstream routing, fallback
 ## chains and monthly budgets are an llm-redact-pro feature; the core parses
@@ -142,6 +150,20 @@ encryption = "none"
 # module = "pyodbc"        # backend = "dbapi" only
 # cloud = "aws"            # declared managed-DBMS placement (llm-redact-pro);
 #                          # recognized managed hostnames are also detected
+# auth = "identity"        # postgresql/mysql + cloud: a short-lived token from
+#                          # the proxy's cloud identity at every connect, over
+#                          # TLS, instead of a static password (llm-redact-pro)
+# region = "us-east-1"     # auth = "identity" + cloud = "aws": default = from the RDS host
+
+# KMS-wrapped vault key (Pro; llm-redact-pro docs/kms.md): the fernet key is
+# stored wrapped by AWS KMS / Google Cloud KMS / Azure Key Vault / HashiCorp
+# Vault transit and unwrapped at startup with the proxy's own identity. It
+# is then the ONLY key source: LLM_REDACT_VAULT_KEY set alongside it refuses
+# to start. Requires encryption = "fernet". Restart-only.
+# [vault.kms]
+# provider = "aws"   # "aws" | "gcp" | "azure" | "hashicorp"
+# key_id = "arn:aws:kms:eu-west-1:123456789012:key/…"
+# wrapped_key_env = "LLM_REDACT_VAULT_KEY_WRAPPED"   # or wrapped_key_file = "…"
 
 [rehydration]
 # Restore LLM-mangled placeholders too («email_001», «EMAIL-1», « EMAIL_001 »).
@@ -383,24 +405,35 @@ max_rows = 10000
 # Storage through its S3-compatible XML API (storage.googleapis.com) with
 # HMAC interoperability keys. Credential env vars: aws/minio/ceph ->
 # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (+ optional AWS_SESSION_TOKEN);
-# gcs -> GCS_HMAC_ACCESS_ID / GCS_HMAC_SECRET. Azure Blob (SharedKey, not an
-# S3 API) has its own [audit.azure] section below. Upload failures WARN and
-# drop the batch — the proxy never blocks on it.
+# gcs -> GCS_HMAC_ACCESS_ID / GCS_HMAC_SECRET. auth = "identity" (aws/gcs
+# only) uses the workload's cloud identity instead of static keys: aws ->
+# the standard AWS credential chain (IRSA, ECS/EKS Pod Identity, EC2 IMDSv2;
+# needs s3:PutObject on the prefix), gcs -> Application Default Credentials
+# as an OAuth bearer token (GKE Workload Identity, Cloud Run, GCE; needs
+# storage.objects.create). Credential sources: llm-redact-pro
+# docs/cloud-identity.md. Azure Blob (not an S3 API) has its own
+# [audit.azure] section below. Upload failures — including a credential
+# that cannot be obtained — WARN and drop the batch; the proxy never blocks.
 # [audit.s3]
 # enabled = true
 # provider = "aws"                  # "aws" | "minio" | "ceph" | "gcs"
 # bucket = "my-audit-bucket"
 # prefix = "llm-redact/"
 # region = "us-east-1"              # gcs: your bucket's location, e.g. "us"
+# auth = "keys"                     # "keys" (env vars above) | "identity"
 # endpoint_url = "http://127.0.0.1:9000"   # minio/ceph only
 # flush_seconds = 60.0
 # encryption = "fernet"   # each batch uploaded as ONE Fernet token (crypto
 #                         # extra + LLM_REDACT_AUDIT_ENC_KEY, env only);
 #                         # read back with `llm-redact audit decrypt`
 
-# Azure Blob Storage sink (SharedKey auth — not an S3 API, so its own
-# section). Same metadata-only rows; account key from AZURE_STORAGE_KEY
-# (env only, never this file). endpoint_url overrides the default host for
+# Azure Blob Storage sink (not an S3 API, so its own section). Same
+# metadata-only rows. auth = "key" (default): SharedKey with the account key
+# from AZURE_STORAGE_KEY; "sas": a SAS token from AZURE_STORAGE_SAS_TOKEN
+# (needs create/write on the container); "identity": a Microsoft Entra ID
+# token for the workload identity (AKS workload identity, managed identity;
+# needs the "Storage Blob Data Contributor" role). Secrets are env-only,
+# never this file. endpoint_url overrides the default host for
 # Azurite/local testing. Upload failures WARN and drop, like [audit.s3].
 # [audit.azure]
 # enabled = true
@@ -408,6 +441,7 @@ max_rows = 10000
 # container = "audit"
 # prefix = "llm-redact/"
 # endpoint_url = "http://127.0.0.1:10000/myaccount"   # Azurite only
+# auth = "key"            # "key" | "sas" | "identity"
 # flush_seconds = 60.0
 # encryption = "fernet"   # same client-side batch encryption as [audit.s3]
 
@@ -441,6 +475,20 @@ max_rows = 10000
 # username = "llm-redact"
 # password_env = "LLM_REDACT_SMTP_PASSWORD"
 # from_address = "llm-redact@corp.example"
+# implicit_tls = false        # true = TLS from the first byte (port 465); then starttls = false
+#
+# OAuth 2.0 (SASL XOAUTH2) instead of a password, for Microsoft 365 / Exchange
+# Online and Google Workspace (llm-redact-pro docs/email-oauth.md). Requires
+# TLS (starttls or implicit_tls). Secrets come from the env vars named by
+# the *_env keys, never this file.
+# auth = "oauth"                  # default "password"
+# oauth_provider = "azure"        # "azure" | "google" | "refresh_token"
+# oauth_subject = "llm-redact@corp.example"  # google only; default username/from_address
+# oauth_token_url = "https://idp.example/oauth2/token"   # refresh_token only (https)
+# oauth_client_id = "..."                                # refresh_token only
+# oauth_client_secret_env = "LLM_REDACT_SMTP_CLIENT_SECRET"  # optional (public clients)
+# oauth_refresh_token_env = "LLM_REDACT_SMTP_REFRESH_TOKEN"
+# oauth_scope = "..."                                    # optional
 
 # License key (see docs/editions.md). The FOSS core needs NO key — nothing in
 # this repository is gated. A key matters only when the separately-installed

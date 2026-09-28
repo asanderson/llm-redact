@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 _OLDER_THAN_RE = re.compile(r"^(\d+)d$")
 
 if TYPE_CHECKING:
-    from llm_redact.config import Config
+    from llm_redact.config import Config, VaultConfig
     from llm_redact.vault_rdbms import RdbmsStore
 
 
@@ -56,10 +56,10 @@ def _open_rdbms_store(config: "Config") -> "RdbmsStore":
     # local tools are never blocked from your own vault). The cipher comes
     # through the registry so an encrypted vault resolves the paid cipher
     # (llm-redact-pro) and a plaintext one stays dependency-free.
-    from llm_redact.registry import get_registry
+    from llm_redact.vault_crypto import resolve_cipher
     from llm_redact.vault_rdbms import RdbmsStore
 
-    return RdbmsStore(config.vault, get_registry().build_cipher(config.vault))
+    return RdbmsStore(config.vault, resolve_cipher(config.vault))
 
 
 def _resolve_db(args: argparse.Namespace) -> Path:
@@ -91,26 +91,50 @@ def _connect(path: Path, *, readonly: bool) -> sqlite3.Connection:
     return sqlite3.connect(path, isolation_level=None)
 
 
-def _cipher_for(conn: sqlite3.Connection, path: Path) -> "VaultCipher | None":
+def _encrypted_vault_config(args: argparse.Namespace) -> "VaultConfig":
+    """The effective [vault] settings for opening an ENCRYPTED database: the
+    config's key source ([vault.kms] or the local order) with encryption
+    forced on — an explicit --db names the file, the config still names the
+    key. A config that fails to load raises ConfigError (never a guess)."""
+    import dataclasses
+
+    vault = apply_env_overrides(load_config(getattr(args, "config", None))).vault
+    return dataclasses.replace(vault, encryption="fernet")
+
+
+def _key_name(vault: "VaultConfig") -> str:
+    """How mismatch messages name the key source (never the key)."""
+    from llm_redact.vault_crypto import ENV_KEY
+
+    if vault.kms is not None:
+        return f"the KMS-unwrapped vault key ([vault.kms] provider {vault.kms.provider})"
+    return ENV_KEY
+
+
+def _cipher_for(
+    conn: sqlite3.Connection, path: Path, args: argparse.Namespace
+) -> "VaultCipher | None":
     """A verified VaultCipher for a v3 database, None for v2. Fails closed.
 
-    The concrete cipher is the paid subsystem, resolved through the registry;
-    a missing llm-redact-pro surfaces as a VaultKeyError (the caller already
-    prints it and exits) rather than a traceback."""
+    The concrete cipher is the paid subsystem, resolved through the one
+    resolution path (``vault_crypto.resolve_cipher``: [vault.kms] or the
+    local key order); a missing llm-redact-pro or a bad config surfaces as a
+    VaultKeyError (the caller prints it and exits) rather than a traceback."""
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if version < 3:
         return None
-    from llm_redact.config import ConfigError, VaultConfig
-    from llm_redact.registry import get_registry
+    from llm_redact.config import ConfigError
+    from llm_redact.vault_crypto import resolve_cipher
 
     try:
-        cipher = get_registry().build_cipher(VaultConfig(encryption="fernet"))
+        vault = _encrypted_vault_config(args)
+        cipher = resolve_cipher(vault)
     except ConfigError as exc:
         raise VaultKeyError(str(exc)) from exc
     assert cipher is not None  # a fernet config always yields a cipher or raises
     row = conn.execute("SELECT value FROM vault_meta WHERE key = 'key_check'").fetchone()
     if row is not None and str(row[0]) != cipher.key_check():
-        raise VaultKeyError(f"LLM_REDACT_VAULT_KEY does not match the vault at {path}")
+        raise VaultKeyError(f"{_key_name(vault)} does not match the vault at {path}")
     return cipher
 
 
@@ -270,7 +294,7 @@ def run_lookup(args: argparse.Namespace) -> int:
         print(f"no vault database at {exc}")
         return 2
     try:
-        cipher = _cipher_for(conn, path)
+        cipher = _cipher_for(conn, path, args)
     except VaultKeyError as exc:
         print(str(exc))
         conn.close()
@@ -368,7 +392,7 @@ def run_vault_verify(args: argparse.Namespace) -> int:
         print(f"no vault database at {exc}")
         return 2
     try:
-        cipher = _cipher_for(conn, path)
+        cipher = _cipher_for(conn, path, args)
     except VaultKeyError as exc:
         print(str(exc))
         conn.close()
@@ -470,9 +494,9 @@ def run_vault_rotate_key(args: argparse.Namespace) -> int:
             " standing up a fresh schema under the new key and re-pointing the DSN"
         )
         return 2
-    from llm_redact.config import ConfigError, VaultConfig
+    from llm_redact.config import ConfigError
     from llm_redact.registry import get_registry
-    from llm_redact.vault_crypto import ENV_KEY, NEW_ENV_KEY, decode_master_key
+    from llm_redact.vault_crypto import ENV_KEY, NEW_ENV_KEY, decode_master_key, resolve_cipher
 
     registry = get_registry()
 
@@ -498,14 +522,15 @@ def run_vault_rotate_key(args: argparse.Namespace) -> int:
             print("this vault is not encrypted; there is no key to rotate")
             return 2
         try:
-            old_cipher = registry.build_cipher(VaultConfig(encryption="fernet"))
+            vault = _encrypted_vault_config(args)
+            old_cipher = resolve_cipher(vault, registry)
         except (VaultKeyError, ConfigError) as exc:
             print(str(exc))
             return 2
         assert old_cipher is not None  # a fernet config yields a cipher or raises
         row = conn.execute("SELECT value FROM vault_meta WHERE key = 'key_check'").fetchone()
         if row is not None and str(row[0]) != old_cipher.key_check():
-            print(f"the current {ENV_KEY} does not match the vault at {path}")
+            print(f"the current {_key_name(vault)} does not match the vault at {path}")
             return 2
 
         raw_new = os.environ.get(NEW_ENV_KEY, "").strip()
@@ -557,6 +582,13 @@ def run_vault_rotate_key(args: argparse.Namespace) -> int:
         rotated = rotate_vault_key(conn, old_cipher, new_cipher)
     finally:
         conn.close()
+    if vault.kms is not None:
+        print(
+            f"rotated {rotated} mapping(s). Wrap the NEW key with the {vault.kms.provider} KMS"
+            " key (llm-redact-pro: `llm-redact kms-wrap`) and replace the value"
+            " [vault.kms] points at before restarting the proxy."
+        )
+        return 0
     print(
         f"rotated {rotated} mapping(s). Set {ENV_KEY} (or the keychain via "
         "`vault set-key`) to the NEW key before restarting the proxy."

@@ -42,11 +42,11 @@ import importlib
 import os
 import re
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from llm_redact.placeholders import format_placeholder
 from llm_redact.vault import (
@@ -58,7 +58,7 @@ from llm_redact.vault import (
 
 if TYPE_CHECKING:
     from llm_redact.config import VaultConfig
-    from llm_redact.plugin_api import VaultCipher
+    from llm_redact.plugin_api import DbPasswordProvider, VaultCipher
 
 ENV_DSN = "LLM_REDACT_VAULT_DSN"
 # The documented hatch for the off-box rule below: set to 1 to run a
@@ -66,6 +66,10 @@ ENV_DSN = "LLM_REDACT_VAULT_DSN"
 # same-host container network the hostname check cannot see). Surfaced in
 # /status and doctor whenever active — an opt-out is never silent.
 ENV_REMOTE_PLAINTEXT = "LLM_REDACT_VAULT_REMOTE_PLAINTEXT"
+# auth = "identity" hatch: accept an UNVERIFIED TLS link to a non-loopback
+# database (the token then reaches whoever answers the handshake). Surfaced
+# in /status (vault.tls_unverified), doctor and `llm-redact status`.
+ENV_TLS_UNVERIFIED = "LLM_REDACT_VAULT_TLS_UNVERIFIED"
 
 _DRIVER_MODULES = {"postgresql": "psycopg", "mysql": "pymysql", "oracle": "oracledb"}
 _EXTRA_HINTS = {
@@ -251,16 +255,213 @@ def offbox_violation(config: VaultConfig) -> str | None:
     )
 
 
-def _resolve_connector(config: VaultConfig) -> tuple[Any, Callable[[], Any]]:
+# PyMySQL before 1.2 silently continues WITHOUT TLS when the server does not
+# advertise it, even with ssl= set (a stripped capability flag would then
+# carry the cleartext token); 1.2 refuses. auth = "identity" requires it.
+_PYMYSQL_TLS_ENFORCING = (1, 2)
+
+
+class _TlsOnlyClearPassword:
+    """PyMySQL ``auth_plugin_map`` handler for ``mysql_clear_password``.
+
+    RDS IAM, Cloud SQL IAM and Entra ID database users all make the server
+    switch the client to the cleartext plugin, so the token itself crosses
+    the wire. PyMySQL >= 1.2 refuses a non-TLS server before any auth packet
+    when ``ssl`` is set; this handler is the second floor — it sends the
+    password only when the connection's socket really is TLS.
+    """
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def authenticate(self, pkt: Any) -> Any:
+        import ssl
+
+        del pkt  # the switch request carries no data this plugin uses
+        conn = self._conn
+        if not isinstance(getattr(conn, "_sock", None), ssl.SSLSocket):
+            raise RuntimeError(
+                "refusing to send the database token over a MySQL connection without TLS"
+            )
+        conn.write_packet(conn.password + b"\0")
+        reply = conn._read_packet()
+        reply.check_error()
+        return reply
+
+
+# libpq connection parameters that could send the identity token somewhere
+# other than the DSN's host, or pull in a service file whose settings (a weak
+# sslmode, another hostaddr, another root certificate) apply unseen.
+_PG_REDIRECTING_PARAMS = ("service", "hostaddr")
+_PG_REDIRECTING_ENV = ("PGSERVICE", "PGSERVICEFILE", "PGHOSTADDR")
+_PG_VERIFYING_SSLMODES = ("verify-ca", "verify-full")
+
+
+def _pg_sslmode(dsn: str, environ: Mapping[str, str]) -> str:
+    """The sslmode an identity connection runs with: the DSN's, else a
+    strong PGSSLMODE, else require (always passed explicitly, so no
+    service file or environment value can weaken it)."""
+    from llm_redact.config import PG_TLS_SSLMODES
+
+    modes = parse_qs(urlsplit(dsn).query).get("sslmode")
+    if modes:
+        return modes[-1].lower()
+    env_mode = environ.get("PGSSLMODE", "").lower()
+    return env_mode if env_mode in PG_TLS_SSLMODES else "require"
+
+
+def identity_tls_problem(
+    backend: str, dsn: str, environ: Mapping[str, str] = os.environ
+) -> str | None:
+    """Why an ``auth = "identity"`` connection could hand its token to the
+    wrong party, else None.
+
+    RDS IAM, Cloud SQL IAM and Entra make the server ask for the token in
+    the clear INSIDE TLS, so an unverified link gives it to whoever answers
+    the handshake: off loopback the server certificate must be verified
+    (PostgreSQL sslmode verify-ca/verify-full, MySQL ``?ssl_ca=``) unless
+    the operator sets the surfaced hatch. PostgreSQL also refuses the
+    parameters that could redirect the connection behind the DSN's host.
+    Messages name the rule, never the DSN."""
+    parts = urlsplit(dsn)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    if backend == "postgresql":
+        named = [key for key in _PG_REDIRECTING_PARAMS if key in query]
+        hosts = query.get("host", [])
+        if any(not host.startswith("/") for host in hosts):
+            named.append("host")  # a TCP host overriding the DSN's; a socket dir is fine
+        named += [name for name in _PG_REDIRECTING_ENV if environ.get(name)]
+        if named:
+            return (
+                '[vault.rdbms] auth = "identity" refuses ' + ", ".join(named) + ": it could"
+                " send the database token past the DSN's host or weaken its TLS settings"
+            )
+    if environ.get(ENV_TLS_UNVERIFIED) == "1" or _identity_tls_verified(backend, dsn, environ):
+        return None
+    how = (
+        "sslmode=verify-full (verify-ca for Cloud SQL) with sslrootcert=PATH"
+        if backend == "postgresql"
+        else "?ssl_ca=PATH (the server's CA bundle)"
+    )
+    return (
+        '[vault.rdbms] auth = "identity" sends the database token inside TLS, so the'
+        f" server certificate must be verified: add {how} to the DSN, or set"
+        f" {ENV_TLS_UNVERIFIED}=1 to accept an unverified link (surfaced, never silent)"
+    )
+
+
+def _identity_tls_verified(backend: str, dsn: str, environ: Mapping[str, str]) -> bool:
+    """True when the token cannot reach an unverified server: a unix socket
+    or loopback host (it never crosses a network), else a verified TLS
+    server certificate."""
+    from llm_redact.config import _is_loopback_host
+
+    parts = urlsplit(dsn)
+    if parts.hostname is None or _is_loopback_host(parts.hostname):
+        return True
+    if backend == "postgresql":
+        return _pg_sslmode(dsn, environ) in _PG_VERIFYING_SSLMODES
+    return bool(parse_qs(parts.query).get("ssl_ca"))
+
+
+def identity_tls_unverified(config: VaultConfig) -> bool:
+    """True when the unverified-TLS hatch is what lets an identity vault
+    connect (the /status, doctor and `llm-redact status` honesty signal)."""
+    if config.rdbms.auth != "identity" or os.environ.get(ENV_TLS_UNVERIFIED) != "1":
+        return False
+    dsn = _quiet_dsn(config)
+    return dsn is not None and not _identity_tls_verified(config.backend, dsn, os.environ)
+
+
+def _pg_tls_kwargs(dsn: str) -> dict[str, Any]:
+    """Connect kwargs making a PostgreSQL identity connection use TLS: an
+    explicit sslmode (explicit parameters beat a service file and the
+    environment), after identity_tls_problem has refused the rest."""
+    return {"sslmode": _pg_sslmode(dsn, os.environ)}
+
+
+def _mysql_tls_kwargs(module: Any, dsn: str) -> dict[str, Any]:
+    """Connect kwargs making a MySQL identity connection use TLS: an
+    SSLContext (``?ssl_ca=PATH`` in the DSN verifies the server certificate
+    and hostname; without it the link is encrypted but unverified — libpq's
+    sslmode=require) and the TLS-only cleartext-plugin handler."""
+    import ssl
+
+    from llm_redact.config import ConfigError
+
+    version = tuple(getattr(module, "VERSION", ()))[:2]
+    if version < _PYMYSQL_TLS_ENFORCING:
+        raise ConfigError(
+            '[vault.rdbms] auth = "identity" on MySQL needs PyMySQL >= 1.2 (older'
+            " releases fall back to an unencrypted connection when the server offers"
+            " no TLS); upgrade PyMySQL"
+        )
+    cafiles = parse_qs(urlsplit(dsn).query).get("ssl_ca")
+    if cafiles:
+        try:
+            context = ssl.create_default_context(cafile=cafiles[-1])
+        except (OSError, ssl.SSLError) as exc:
+            raise ConfigError(
+                "[vault.rdbms] the DSN's ssl_ca file could not be loaded as a CA bundle"
+            ) from exc
+    else:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return {"ssl": context, "auth_plugin_map": {"mysql_clear_password": _TlsOnlyClearPassword}}
+
+
+def _constant(value: str | None) -> Callable[[], str | None]:
+    """The static password (password_env / DSN), read once at build."""
+    return lambda: value
+
+
+def _identity_unavailable() -> str:
+    from llm_redact.config import ConfigError
+
+    raise ConfigError('[vault.rdbms] auth = "identity" has no password provider')
+
+
+def _registry_password(config: VaultConfig) -> DbPasswordProvider | None:
+    """The registry's per-connect password for this vault (None = static)."""
+    from llm_redact.config import ConfigError
+    from llm_redact.registry import get_registry
+
+    provider = get_registry().build_db_password(config)
+    if provider is None and config.rdbms.auth == "identity":
+        raise ConfigError(
+            '[vault.rdbms] auth = "identity": the installed build_db_password'
+            " returned no password provider (fail closed)"
+        )
+    return provider
+
+
+def _resolve_connector(
+    config: VaultConfig,
+    password_provider: DbPasswordProvider | None = None,
+    *,
+    consult_registry: bool = False,
+) -> tuple[Any, Callable[[], Any]]:
     """(driver module, connect thunk) for the configured backend.
 
-    Errors name the backend, the scheme, or the env var — never the DSN,
-    which may embed credentials.
+    The thunk asks for the password at EVERY call (``password_provider``,
+    else the registry's when ``consult_registry``, else the static
+    password_env/DSN password), so the store's reconnect path gets a fresh
+    short-lived token. Errors name the backend, the scheme, or the env var —
+    never the DSN, which may embed credentials.
     """
-    from llm_redact.config import ConfigError
+    from llm_redact.config import ConfigError, rdbms_identity_error
 
     backend = config.backend
     dsn = resolve_dsn(config)
+    identity_error = rdbms_identity_error(backend, config.rdbms, dsn)
+    if identity_error is not None:
+        raise ConfigError(identity_error)
+    identity = config.rdbms.auth == "identity"
+    if identity and backend in ("postgresql", "mysql"):
+        tls_problem = identity_tls_problem(backend, dsn)
+        if tls_problem is not None:
+            raise ConfigError(tls_problem)
     module_name = config.rdbms.module if backend == "dbapi" else _DRIVER_MODULES[backend]
     try:
         module = importlib.import_module(module_name)
@@ -271,8 +472,15 @@ def _resolve_connector(config: VaultConfig) -> tuple[Any, Callable[[], Any]]:
             f'[vault] backend = "{backend}" requires the {module_name} driver:'
             f" {_EXTRA_HINTS[backend]}"
         ) from exc
+    if password_provider is None and consult_registry:
+        password_provider = _registry_password(config)
 
     if backend == "dbapi":
+        if password_provider is not None:
+            raise ConfigError(
+                '[vault.rdbms] backend = "dbapi" hands its DSN to connect() verbatim'
+                " and cannot take a per-connect password"
+            )
         # Verbatim hand-off: the operator owns the connect-string contract
         # of whatever driver they named (sqlite3 takes a path, pyodbc a
         # connection string, ...).
@@ -285,23 +493,37 @@ def _resolve_connector(config: VaultConfig) -> tuple[Any, Callable[[], Any]]:
             f"[vault.rdbms] dsn scheme {parts.scheme!r} does not match"
             f' backend = "{backend}" (expected {expected}; the DSN itself is never echoed)'
         )
-    password = os.environ.get(config.rdbms.password_env) or parts.password or None
+    password: Callable[[], str | None]
+    if password_provider is not None:
+        password = password_provider
+    elif identity:
+        password = _identity_unavailable  # doctor's validate: never connects
+    else:
+        password = _constant(os.environ.get(config.rdbms.password_env) or parts.password or None)
 
     if backend == "postgresql":
-        kwargs: dict[str, Any] = {"password": password} if password else {}
-        return module, lambda: module.connect(dsn, **kwargs)
+        tls = _pg_tls_kwargs(dsn) if identity else {}
+
+        def connect_postgresql() -> Any:
+            secret = password()
+            kwargs: dict[str, Any] = {**tls, "password": secret} if secret else dict(tls)
+            return module.connect(dsn, **kwargs)
+
+        return module, connect_postgresql
     if backend == "mysql":
         host = parts.hostname or "127.0.0.1"
         port = parts.port or 3306
         user = parts.username or ""
         database = parts.path.lstrip("/")
+        tls = _mysql_tls_kwargs(module, dsn) if identity else {}
         return module, lambda: module.connect(
             host=host,
             port=port,
             user=user,
-            password=password or "",
+            password=password() or "",
             database=database,
             charset="utf8mb4",  # placeholders are non-ASCII; latin1 would mangle them
+            **tls,
         )
     # oracle: thin-mode oracledb, host:port/service form.
     host = parts.hostname or "127.0.0.1"
@@ -312,13 +534,15 @@ def _resolve_connector(config: VaultConfig) -> tuple[Any, Callable[[], Any]]:
     with suppress(AttributeError):
         module.defaults.fetch_lobs = False
     return module, lambda: module.connect(
-        user=user, password=password or "", dsn=f"{host}:{port}/{service}"
+        user=user, password=password() or "", dsn=f"{host}:{port}/{service}"
     )
 
 
 def validate_connector(config: VaultConfig) -> None:
-    """Import the driver and validate the DSN shape WITHOUT connecting —
-    doctor's read-only check. Raises ConfigError exactly like the build."""
+    """Import the driver and validate the DSN shape (and, for identity auth,
+    the TLS and no-static-password rules) WITHOUT connecting or building a
+    credential source — doctor's read-only check. Raises ConfigError exactly
+    like the build."""
     _resolve_connector(config)
 
 
@@ -333,12 +557,22 @@ class RdbmsStore:
     finds the committed row and returns the same token.
     """
 
-    def __init__(self, config: VaultConfig, cipher: VaultCipher | None) -> None:
+    def __init__(
+        self,
+        config: VaultConfig,
+        cipher: VaultCipher | None,
+        *,
+        password_provider: DbPasswordProvider | None = None,
+    ) -> None:
+        """``password_provider`` defaults to the registry's
+        ``build_db_password`` (None there = the static password). It is
+        called at EVERY connect — here and on the reconnect-retry — on the
+        calling thread, exactly like the driver's own connect."""
         from llm_redact.config import ConfigError
 
         self._backend = config.backend
         self._cipher = cipher
-        module, connect = _resolve_connector(config)
+        module, connect = _resolve_connector(config, password_provider, consult_registry=True)
         self._module = module
         self._connect = connect
         self._paramstyle = str(getattr(module, "paramstyle", "qmark"))

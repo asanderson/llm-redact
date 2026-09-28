@@ -366,19 +366,22 @@ def _run_serve_check(args: argparse.Namespace) -> int:
     — the gate to run before a deploy or a `kill -HUP` reload (which
     rejects a bad config with only a log line). Creates the same state
     files serve's own startup would (vault/audit databases)."""
-    from llm_redact.proxy import create_app
+    from llm_redact.proxy import create_app, identity_exposure_warning
     from llm_redact.vault import VaultKeyError
 
     try:
         config = _serve_config(args)
         validate_bind_security(config.host, config.tls, os.environ)
-        create_app(config, config_path=args.config)
+        app = create_app(config, config_path=args.config)
     except (ConfigError, ValueError, VaultKeyError, re.error) as problem:
         # re.error is belt-and-braces: build_detectors/build_allowlist wrap
         # user-pattern compiles into named ValueErrors, but the deploy gate
         # must never print a traceback for a config problem.
         print(f"serve --check: FAIL: {problem}", file=sys.stderr)
         return 1
+    exposure = identity_exposure_warning(app.state.proxy, config.host)
+    if exposure is not None:
+        print(f"serve --check: WARN: {exposure}", file=sys.stderr)
     print("serve --check: OK — config loads, builds, and passes bind policy")
     return 0
 
@@ -393,7 +396,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "serve":
         import uvicorn
 
-        from llm_redact.proxy import create_app
+        from llm_redact.proxy import create_app, identity_exposure_warning
 
         if args.check:
             raise SystemExit(_run_serve_check(args))
@@ -444,8 +447,12 @@ def main(argv: list[str] | None = None) -> None:
             "127.0.0.1" if config.host == "0.0.0.0" else config.host,
             config.port,
         )
+        app = create_app(config, config_path=args.config)
+        exposure = identity_exposure_warning(app.state.proxy, config.host)
+        if exposure is not None:
+            logging.getLogger("llm_redact").warning("%s", exposure)
         uvicorn.run(
-            create_app(config, config_path=args.config),
+            app,
             host=config.host,
             port=config.port,
             log_level="warning",
@@ -721,9 +728,12 @@ def run_status(args: argparse.Namespace) -> int:
                 print(f"licensed-features package: installed{active}")
             else:
                 print("licensed-features package: not installed (FOSS core is complete)")
+    key_source = payload["vault"].get("key_source")
     print(
         f"session: {payload['session']}  vault: {payload['vault']['backend']}"
-        f" ({payload['vault']['entries']} entries)"
+        f" ({payload['vault']['entries']} entries"
+        + (f", key: {key_source}" if key_source else "")
+        + ")"
     )
     detections = payload["detections_total"] or {}
     rehydrations = payload["rehydrations_total"] or {}
@@ -833,6 +843,14 @@ def _print_posture(payload: dict[str, Any]) -> None:
     detection_off = payload.get("providers_detection_off") or []
     if detection_off:
         lines.append(f"detection OFF for: {', '.join(detection_off)} (forwarded unredacted)")
+    identity = sorted(
+        name for name, mode in (payload.get("providers_auth") or {}).items() if mode == "identity"
+    )
+    if identity:
+        lines.append(
+            f"proxy holds cloud credentials for: {', '.join(identity)} (auth = identity —"
+            " every client that reaches the proxy spends that identity)"
+        )
     exempt = payload.get("mcp_exempt_servers") or 0
     if exempt:
         lines.append(f"MCP exempt servers: {exempt} (their blocks forwarded unredacted)")
@@ -851,6 +869,11 @@ def _print_posture(payload: dict[str, Any]) -> None:
         lines.append(
             "vault: PLAINTEXT rows may leave this machine"
             " (LLM_REDACT_VAULT_REMOTE_PLAINTEXT hatch active)"
+        )
+    if vault_block.get("tls_unverified"):
+        lines.append(
+            "vault: the database token goes over UNVERIFIED TLS"
+            " (LLM_REDACT_VAULT_TLS_UNVERIFIED hatch active)"
         )
     disabled = payload.get("providers_disabled") or []
     if disabled:

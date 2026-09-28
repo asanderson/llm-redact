@@ -527,3 +527,94 @@ async def test_b15_block_mode_rejects_media_multipart_before_upstream() -> None:
     assert resp.status_code == 400
     assert "jane.doe@corp.example" not in resp.text  # type only, never the value
     assert reached["upstream"] is False
+
+
+# --- B16: the request target is a path, and the upstream is the configured one
+
+
+async def _raw_asgi(app, raw_path: bytes, path: str) -> tuple[int, bytes]:
+    """Drive the app with a hand-built scope: an HTTP client can't send a
+    non-origin-form target through httpx, but a raw socket client can."""
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": raw_path,
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"127.0.0.1:8787"), (b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8787),
+    }
+    messages = [{"type": "http.request", "body": b"{}", "more_body": False}]
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return status, body
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("raw_path", "path", "expected"),
+    [
+        # userinfo@host smuggled through a percent-encoded target that is not
+        # a path: the decoded path routes, but joined onto the base URL the
+        # raw target would name a different host. handle() refuses it.
+        (b"%2Fv1%2Fprojects%2Fx@evil.example:1/steal", "/v1/projects/x@evil.example:1/steal", 400),
+        # Targets whose decoded path is not a path either never match the
+        # catch-all route: Starlette answers them (404, or a 307 to the
+        # proxy's OWN root) before handle() runs.
+        (b"@evil.example/v1/chat/completions", "@evil.example/v1/chat/completions", None),
+        (b"", "", None),
+    ],
+)
+async def test_b16_non_path_request_target_is_never_forwarded(
+    raw_path: bytes, path: str, expected: int | None
+) -> None:
+    reached: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        reached.append(str(request.url))
+        return httpx.Response(200, json={})
+
+    app = create_app(_base_config(), upstream_transport=httpx.MockTransport(handler))
+    status, body = await _raw_asgi(app, raw_path, path)
+    if expected is not None:
+        assert status == expected
+        assert b"must be a path" in body
+    else:
+        assert status in (307, 404)
+    assert reached == []
+
+
+def test_b16_built_url_must_stay_on_the_configured_upstream() -> None:
+    from llm_redact.proxy import _same_upstream
+
+    assert _same_upstream("http://up/v1/chat/completions?x=1", "http://up")
+    assert _same_upstream("https://h.example:8443/a", "https://h.example:8443/base")
+    assert not _same_upstream("http://up@evil.example/v1", "http://up")
+    assert not _same_upstream("http://up.evil.example/v1", "http://up")
+    assert not _same_upstream("http://up:1/v1", "http://up")
+    assert not _same_upstream("https://up/v1", "http://up")
+    assert not _same_upstream("http://[::1/v1", "http://up")  # unparseable
+
+
+def test_b16_origin_form_target_reads_the_raw_target() -> None:
+    from llm_redact.proxy import origin_form_target
+
+    assert origin_form_target({"raw_path": b"/v1/x", "path": "/v1/x"})
+    assert not origin_form_target({"raw_path": b"%2Fv1", "path": "/v1"})
+    assert origin_form_target({"path": "/v1"})  # servers that omit raw_path
+    assert not origin_form_target({"path": "v1"})
+    assert not origin_form_target({})

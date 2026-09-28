@@ -11,12 +11,101 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+The core side of the proxy authenticating as ITSELF to cloud services, plus two
+sign-in additions. Every credential is fetched by llm-redact-pro; the core carries
+only config shapes, generic seams, fail-closed defaults and doctor/status surfaces.
+A config that asks for one of them without llm-redact-pro is a startup error naming
+the package (`[email]`, which does nothing without the package, stays inert).
+
+### Security
+
+- The proxy refuses a request target that is not a path (`400`), over HTTP and realtime alike,
+  and checks that the URL it builds keeps the configured upstream's scheme, userinfo, host and
+  port. A percent-encoded target such as `%2Fv1%2Fx@host:port/…` used to join onto the base URL
+  as `userinfo@host` and send the request (with its credentials) to another host.
+- A provider authorized with the proxy's own identity (`[providers.NAME] auth = "identity"`)
+  forwards only the API routes llm-redact recognizes. Any other path is a recorded local `403`,
+  so a client can't reach the rest of that cloud API as the proxy's principal, unredacted.
+  Google's `x-goog-user-project` and legacy IAM selector headers are stripped along with the
+  client's credentials.
+- Only paths *below* `/__llm-redact/auth/` go to the access gate; the bare prefix stays behind
+  dashboard admission.
+- `[vault.rdbms] auth = "identity"` requires a verified server certificate off loopback
+  (PostgreSQL `sslmode=verify-ca|verify-full`, MySQL `?ssl_ca=`), because the database asks for
+  the token in the clear inside TLS. `LLM_REDACT_VAULT_TLS_UNVERIFIED=1` accepts an unverified
+  link, surfaced as `vault.tls_unverified` in `/status`, doctor and `llm-redact status`.
+  PostgreSQL identity connections always pass an explicit `sslmode` and refuse `service`,
+  `hostaddr`, a TCP `host=` override, `PGSERVICE`, `PGSERVICEFILE` and `PGHOSTADDR`.
+- `[audit.azure]` with `auth = "sas"` or `"identity"` requires an `https` `endpoint_url` unless the
+  host is loopback (both are bearer secrets). `[audit.s3] endpoint_url` and `[audit.azure]
+  endpoint_url` refuse userinfo, a query or a fragment, and the S3 one refuses a path (requests
+  are signed over `/bucket/key`).
+- Version skew fails closed: when a plugin is loaded, a configured sink auth mode, email OAuth or
+  `implicit_tls` that it does not advertise in `Registry.config_capabilities` stops startup (and
+  is a doctor FAIL), instead of an older llm-redact-pro silently using static credentials.
+- An identity provider for which the plugin builds no authorizer is a startup `ConfigError`,
+  never a pass-through of the client's credential.
+- `serve` (and `serve --check`) warns when identity-authorized providers are served on a
+  non-loopback bind with no access gate.
+- `[providers.bedrock] region` keeps its 32-character cap and `[vault.rdbms] region` is matched in
+  full (a trailing newline used to pass).
+
 ### Added
 
+- **Proxy-held provider credentials:** `[providers.bedrock|vertex|azure] auth =
+  "identity"` (plus a bedrock-only `region`). The proxy authorizes each request with
+  its own cloud identity AFTER redaction: it strips every client credential channel
+  (authorization/api-key headers, `x-amz-*`, cookies, and the `key=`,
+  `access_token=` and `X-Amz-*` query parameters), hands the plugin the final URL and
+  bytes, and sends exactly the bytes it authorized. A credential failure is a
+  recorded, provider-shaped 502. Identity providers are never routed, and Realtime
+  WebSockets to them are refused (1011). New seam: `plugin_api.UpstreamAuth` /
+  `UpstreamAuthError`, `Registry.build_upstream_auth`. `/status providers_auth`, a
+  `status` posture line, and `doctor` rows that WARN on a non-loopback bind without
+  an access gate that requires an identity.
+- **IAM database login:** `[vault.rdbms] auth = "identity"` (plus an aws-only
+  `region`), for PostgreSQL and MySQL. It requires `cloud`, forbids `password_env`
+  and a DSN password, and enforces TLS (PostgreSQL `sslmode` at least `require`,
+  set when absent; MySQL over an SSL context with optional `?ssl_ca=` verification,
+  and the cleartext auth plugin only over TLS). New seam:
+  `Registry.build_db_password` / `plugin_api.DbPasswordProvider`; the RDBMS store
+  asks for the password at every connect and reconnect, because tokens expire.
+  `/status vault.auth`; a doctor row.
+- **KMS-wrapped vault key:** `[vault.kms]` (provider `aws`, `gcp`, `azure` or
+  `hashicorp`, `key_id`, and `wrapped_key_env` or `wrapped_key_file`; HashiCorp also
+  takes `address`, `mount`, `auth`, `role`, `auth_mount` and
+  `service_account_token_file`). It requires `encryption = "fernet"`, and the key
+  then comes ONLY from the KMS: `LLM_REDACT_VAULT_KEY` or `_CMD` set alongside it is a
+  startup error. New seam: `Registry.resolve_vault_key` and
+  `vault_crypto.resolve_cipher`, the one cipher path shared by the proxy and the
+  vault CLI (which now resolves the key from the loaded config, `--config` included).
+  `/status vault.key_source` (`kms:<provider>`, `local` or null); doctor posture rows
+  that never call the KMS.
+- **Audit sink credentials:** `[audit.s3] auth = "keys" | "identity"` and
+  `[audit.azure] auth = "key" | "sas" | "identity"` (identity is refused for
+  MinIO/Ceph). Doctor checks the credentials each mode needs; `/status` reports the
+  mode.
+- **Email OAuth:** `[email] auth = "oauth"` with `oauth_provider = "azure" | "google"
+  | "refresh_token"`, `oauth_subject`, and the refresh-grant keys (`oauth_token_url`,
+  https only; `oauth_client_id`; `oauth_client_secret_env`;
+  `oauth_refresh_token_env`; `oauth_scope`). Secrets are named by environment
+  variable, never stored in the file, and OAuth refuses cleartext at parse time. New
+  `[email] implicit_tls` (SMTPS, port 465). A value-free doctor `email` row.
+- **Sign-in paths:** everything under `/__llm-redact/auth/` is dispatched to the
+  access gate (`AUTH_PREFIX`), not only the fixed login/callback/logout paths, so a
+  sign-in method such as llm-redact-pro's passkeys can serve its own pages and JSON
+  endpoints. Host and Origin checks apply (POST included); these paths never need
+  dashboard admission and are never forwarded.
 - The Gemini adapter reports a created context cache's name (`cachedContents/…`) through the
   optional `SessionRouter.record_object_id` seam, as the OpenAI and Anthropic adapters already do
   for files, batches and conversations. llm-redact-pro uses it to keep a cache with the user who
   created it. Only reported outside static mode; nothing changes without a router that takes it.
+
+### Changed
+
+- The `vault-mysql` extra requires PyMySQL 1.2 or newer. Older releases carry on
+  WITHOUT TLS when the server doesn't offer it, even with `ssl=` set, which IAM
+  database authentication must never allow.
 
 ## [1.7.0] - 2026-09-28
 

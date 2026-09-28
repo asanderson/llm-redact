@@ -42,7 +42,7 @@ crypto = ["cryptography>=42"]
 # imports whatever DB-API 2.0 module you name. Drivers never touch the
 # request path beyond vault point lookups.
 vault-postgres = ["psycopg[binary]>=3.1"]
-vault-mysql = ["PyMySQL>=1.1"]
+vault-mysql = ["PyMySQL>=1.2"]
 vault-oracle = ["oracledb>=2"]
 # Vault key in the OS keychain (llm-redact vault set-key) instead of the
 # LLM_REDACT_VAULT_KEY env var. Resolution: env var, then keyring, then

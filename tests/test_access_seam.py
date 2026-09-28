@@ -380,6 +380,82 @@ async def test_gate_paths_without_a_gate() -> None:
         assert "llm-redact-pro" in response.json()["error"]
 
 
+AUTH_PREFIX_PATHS = (
+    "/__llm-redact/auth/passkey",
+    "/__llm-redact/auth/passkey/options",
+    "/__llm-redact/auth/passkey/enroll/verify",
+)
+
+
+async def test_everything_under_the_auth_prefix_goes_to_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A sign-in method's own pages and JSON endpoints (passkeys) live below
+    # the prefix: dispatched to the gate like the fixed three, never behind
+    # dashboard admission (they are how a browser obtains it).
+    gate = DashboardGate(origin="https://proxy.team.example")
+    _install(monkeypatch, gate)
+    transport = httpx.ASGITransport(app=_app([]))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://proxy.team.example"
+    ) as client:
+        for path in AUTH_PREFIX_PATHS:
+            page = await client.get(path)
+            assert page.json() == {"from": "gate", "csrf_ok": True}, path
+            assert page.headers["content-security-policy"].startswith("default-src 'none'")
+            assert page.headers["x-frame-options"] == "DENY"
+            same = await client.post(
+                path, json={}, headers={"origin": "https://proxy.team.example"}
+            )
+            assert same.json() == {"from": "gate", "csrf_ok": True}, path
+            # POSTs keep the Origin check: a foreign page never reaches the gate.
+            foreign = await client.post(path, json={}, headers={"origin": "https://evil.example"})
+            assert foreign.status_code == 403
+            assert foreign.json() == {"error": "origin not allowed"}
+    assert gate.surfaces == []  # none of them went through dashboard admission
+    assert gate.handled == [p for p in AUTH_PREFIX_PATHS for _ in range(2)]
+
+
+async def test_the_auth_prefix_keeps_the_host_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    gate = DashboardGate()
+    _install(monkeypatch, gate)
+    transport = httpx.ASGITransport(app=_app([]))
+    async with httpx.AsyncClient(transport=transport, base_url="http://rebind.example") as client:
+        response = await client.post("/__llm-redact/auth/passkey/verify", json={})
+    assert response.status_code == 403
+    assert response.json() == {"error": "host not allowed"}
+    assert gate.handled == []
+
+
+async def test_a_look_alike_of_the_auth_prefix_is_not_a_gate_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = DashboardGate()
+    _install(monkeypatch, gate)
+    transport = httpx.ASGITransport(app=_app([]))
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        for path in ("/__llm-redact/authx", "/__llm-redact/auth"):
+            # Behind dashboard admission like every other reserved path —
+            # the bare prefix too: only paths BELOW it are the gate's, so a
+            # bare POST can't reach a gate handler without admission...
+            assert (await client.get(path)).status_code == 303, path
+            assert (await client.post(path, json={})).status_code == 403, path
+            admitted = await client.get(path, headers={"x-test-admin": "yes"})
+            # ...and then an ordinary unknown reserved path, never the gate's.
+            assert admitted.status_code == 404, path
+    assert gate.handled == []
+
+
+async def test_auth_prefix_paths_without_a_gate() -> None:
+    received: list[httpx.Request] = []
+    app = _app(received)
+    for method in ("GET", "POST"):
+        response = await _call(app, method, "/__llm-redact/auth/passkey/options")
+        assert response.status_code == 404
+        assert "llm-redact-pro" in response.json()["error"]
+    assert received == []  # never forwarded
+
+
 async def test_public_origin_widens_host_and_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     _install(monkeypatch, DashboardGate(origin="https://Proxy.Team.Example:443"))
     app = _app([])

@@ -11,7 +11,7 @@ plugin API contract — change it deliberately, never incidentally.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -450,7 +450,10 @@ class AccessGate(Protocol):
 
     ``status`` is the ``users`` block of ``/status`` (metadata only).
     ``handle`` answers the core's fixed gate paths — ``ACCESS_PATHS`` (the
-    admin endpoints), ``AUTH_PATHS`` (sign-in, callback, sign-out) and
+    admin endpoints), everything under ``AUTH_PREFIX`` (browser sign-in:
+    ``AUTH_PATHS`` login, callback and sign-out, plus any page or JSON
+    endpoint a sign-in method adds below the prefix, all Host- and
+    Origin-checked by the core and never behind dashboard admission) and
     everything under ``SCIM_PREFIX`` — and must never forward anything
     upstream; the core stamps the security headers on its reply. ``close``
     runs at shutdown.
@@ -499,6 +502,57 @@ class SessionStore(Protocol):
     def session_ids(self) -> list[str]: ...
 
     def forget(self, session_ids: Iterable[str]) -> int: ...
+
+
+# --- upstream authorization seam ----------------------------------------------
+# [providers.NAME] auth = "identity": the proxy authorizes requests to a cloud
+# provider with its OWN workload identity (AWS SigV4 for Bedrock, OAuth bearer
+# tokens for Vertex AI and Azure OpenAI). Credential fetching and signing are
+# paid code in llm-redact-pro; the core only strips the client's credential
+# channels, hands the plugin the FINAL outbound request (after redaction and
+# note injection) and sends exactly the headers it returns with exactly the
+# bytes it saw. Client-side SigV4 stays unsupported: a signature the CLIENT
+# computed covers the unredacted body, which the proxy rewrites.
+
+
+class UpstreamAuthError(Exception):
+    """An ``UpstreamAuth`` could not authorize a request (no credential, a
+    token endpoint refused). The message names the credential SOURCE kind
+    only (for instance "AWS credential chain") — never a secret, token,
+    signature or response body — because the core logs it and puts it in
+    the client's provider-shaped 502."""
+
+
+class UpstreamAuth(Protocol):
+    """One provider's upstream authorizer (``Registry.build_upstream_auth``).
+
+    ``authorize`` receives the request exactly as the core will send it —
+    ``url`` in the form httpx puts on the wire (query included), ``headers``
+    with every client credential channel already removed, ``body`` the final
+    bytes — and returns the complete outbound header list (it may add
+    ``host``, date and signature headers, and must not change the body or
+    URL). It raises ``UpstreamAuthError`` when no credential is available;
+    the core then answers a recorded 502 and forwards nothing. It must never
+    block the event loop on network I/O. ``close`` runs when a reload
+    displaces the authorizer or at shutdown.
+    """
+
+    async def authorize(
+        self, method: str, url: str, headers: list[tuple[str, str]], body: bytes
+    ) -> list[tuple[str, str]]: ...
+
+    def close(self) -> None: ...
+
+
+# --- vault database credential seam ---------------------------------------------
+# ``Registry.build_db_password(vault_config)`` returns one of these (or None
+# for the static password). The RDBMS vault store calls it synchronously at
+# EVERY connect and reconnect, on the thread running the store — cloud
+# database tokens (RDS IAM, Cloud SQL IAM, Entra ID) expire in minutes, so a
+# password captured once would break the first reconnect after expiry. It
+# returns the password; it raises (naming the credential SOURCE, never a
+# secret) when none can be had, which fails the connect closed.
+DbPasswordProvider = Callable[[], str]
 
 
 # --- CLI seam -------------------------------------------------------------------
@@ -559,6 +613,7 @@ __all__ = [
     "ConfigSection",
     "Dashboard",
     "DashboardHost",
+    "DbPasswordProvider",
     "HopDecision",
     "HopRequest",
     "HopResult",
@@ -574,6 +629,8 @@ __all__ = [
     "SSEEvent",
     "SessionRouter",
     "Telemetry",
+    "UpstreamAuth",
+    "UpstreamAuthError",
     "Vault",
     "VaultCipher",
     "VaultKeyError",

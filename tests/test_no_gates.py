@@ -7,7 +7,7 @@ Both directions are pinned, mirroring the old gate suite's discipline:
   configs the old tier matrix refused on Free (non-loopback serving,
   Kubernetes, the cloud LLM adapters) now start cleanly;
 * a config that requests a subsystem only llm-redact-pro implements
-  (vault encryption, RDBMS vaults, the audit log, OTel, per-conversation
+  (vault encryption, KMS-wrapped vault keys, RDBMS vaults, the audit log, OTel, per-conversation
   sessions, rule-based upstream routing) still fails closed, but from the
   registry/factory seams,
   naming the PACKAGE — package presence (distribution) is the boundary,
@@ -30,6 +30,7 @@ from llm_redact.config import (
     RoutingConfig,
     UpstreamConfig,
     VaultConfig,
+    VaultKmsConfig,
 )
 from llm_redact.proxy import create_app
 
@@ -74,6 +75,22 @@ def test_cloud_llm_adapters_route_keyless(provider: str) -> None:
 def test_vault_encryption_fails_closed_naming_package(tmp_path: Path) -> None:
     vault = VaultConfig(backend="sqlite", path=str(tmp_path / "v.db"), encryption="fernet")
     with pytest.raises(ConfigError, match="llm-redact-pro"):
+        create_app(_with(vault=vault))
+
+
+def test_kms_wrapped_vault_key_fails_closed_naming_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # [vault.kms] names the FEATURE and the package; it never falls back to
+    # a local key source.
+    monkeypatch.delenv("LLM_REDACT_VAULT_KEY", raising=False)
+    vault = VaultConfig(
+        backend="sqlite",
+        path=str(tmp_path / "v.db"),
+        encryption="fernet",
+        kms=VaultKmsConfig(provider="gcp", key_id="k", wrapped_key_env="W"),
+    )
+    with pytest.raises(ConfigError, match=r"\[vault\.kms\].*llm-redact-pro"):
         create_app(_with(vault=vault))
 
 

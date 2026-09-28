@@ -31,6 +31,7 @@ from llm_redact.config import (
     S3AuditConfig,
     UpstreamConfig,
     UsersConfig,
+    VaultKmsConfig,
 )
 from llm_redact.detection.engine import DetectionConfig
 
@@ -241,6 +242,28 @@ def _emit_prices(lines: list[str], prices: PricesConfig) -> None:
         lines.append(f"cache_write = {price.cache_write}")
 
 
+def _emit_vault_kms(lines: list[str], kms: VaultKmsConfig) -> None:
+    """``[vault.kms]``: only the keys the file set (defaults re-parse to the
+    same value; the hashicorp-only keys are refused for other providers, so
+    they are written only for hashicorp). Nothing here is secret — the
+    wrapped key lives in the env var or file it names."""
+    lines.append("\n[vault.kms]")
+    lines.append(f"provider = {_toml_str(kms.provider)}")
+    lines.append(f"key_id = {_toml_str(kms.key_id)}")
+    for key in ("wrapped_key_env", "wrapped_key_file"):
+        if getattr(kms, key):
+            lines.append(f"{key} = {_toml_str(getattr(kms, key))}")
+    if kms.provider != "hashicorp":
+        return
+    defaults = VaultKmsConfig(provider=kms.provider, key_id=kms.key_id)
+    keys = ["address", "mount", "auth"]
+    if kms.auth == "kubernetes":
+        keys += ["role", "auth_mount", "service_account_token_file"]
+    for key in keys:
+        if getattr(kms, key) != getattr(defaults, key):
+            lines.append(f"{key} = {_toml_str(getattr(kms, key))}")
+
+
 def emit_config_toml(config: Config, *, banner: bool = True) -> str:
     # banner=False for display surfaces (`config show`): the editor banner
     # talks about file-writing and .bak, which is wrong for stdout.
@@ -265,6 +288,17 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
             # Omitted when true, like enabled — and loudly annotated: this
             # provider's requests are forwarded WITHOUT redaction.
             lines.append("detection = false # values go to this upstream unredacted")
+        if config.providers[name].auth != "passthrough":
+            # Omitted at the default (the client's own credential is
+            # forwarded); annotated because the proxy then spends its OWN
+            # cloud identity for every client that reaches it.
+            lines.append(
+                f"auth = {_toml_str(config.providers[name].auth)}"
+                " # the proxy authorizes with its own cloud identity"
+            )
+        region = config.providers[name].region
+        if region is not None:
+            lines.append(f"region = {_toml_str(region)}")
 
     detection = config.detection
     lines.append("\n[detection]")
@@ -372,6 +406,12 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
             lines.append(f"module = {_toml_str(rdbms.module)}")
         if rdbms.cloud:
             lines.append(f"cloud = {_toml_str(rdbms.cloud)}")
+        if rdbms.auth != RdbmsConfig().auth:
+            lines.append(f"auth = {_toml_str(rdbms.auth)}")
+        if rdbms.region:
+            lines.append(f"region = {_toml_str(rdbms.region)}")
+    if config.vault.kms is not None:
+        _emit_vault_kms(lines, config.vault.kms)
 
     lines.append("\n[audit]")
     lines.append(f"enabled = {_toml_value(config.audit.enabled)}")
@@ -398,6 +438,8 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append(f"flush_seconds = {s3.flush_seconds}")
         if s3.encryption != "none":
             lines.append(f"encryption = {_toml_str(s3.encryption)}")
+        if s3.auth != S3AuditConfig().auth:
+            lines.append(f"auth = {_toml_str(s3.auth)}")
 
     if config.audit.azure != AzureAuditConfig():
         az = config.audit.azure
@@ -411,6 +453,8 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append(f"flush_seconds = {az.flush_seconds}")
         if az.encryption != "none":
             lines.append(f"encryption = {_toml_str(az.encryption)}")
+        if az.auth != AzureAuditConfig().auth:
+            lines.append(f"auth = {_toml_str(az.auth)}")
 
     lines.append("\n[log]")
     lines.append(f"format = {_toml_str(config.log.format)}")
@@ -451,6 +495,23 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append(f"password_env = {_toml_str(config.email.password_env)}")
         if config.email.from_address is not None:
             lines.append(f"from_address = {_toml_str(config.email.from_address)}")
+        if config.email.implicit_tls:
+            lines.append("implicit_tls = true")
+        if config.email.auth != "password":
+            # OAuth secrets are env-only too: only the variable NAMES appear.
+            lines.append(f"auth = {_toml_str(config.email.auth)}")
+        for key in (
+            "oauth_provider",
+            "oauth_subject",
+            "oauth_token_url",
+            "oauth_client_id",
+            "oauth_client_secret_env",
+            "oauth_refresh_token_env",
+            "oauth_scope",
+        ):
+            value = getattr(config.email, key)
+            if value is not None:
+                lines.append(f"{key} = {_toml_str(value)}")
 
     if config.license.key is not None or config.license.key_file is not None:
         # Only ever the signed public token / a path — never key MATERIAL

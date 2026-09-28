@@ -62,9 +62,12 @@ def test_posture_surfaces_every_runtime_opt_out(capsys: pytest.CaptureFixture[st
             "compaction_forks": 1,
             "audit": {"s3": {"rows_dropped": 5}, "azure": {"rows_dropped": 0}},
             "providers_disabled": ["bedrock"],
+            "vault": {"remote_plaintext": True, "tls_unverified": True},
         }
     )
     out = capsys.readouterr().out
+    assert "PLAINTEXT rows may leave this machine" in out
+    assert "database token goes over UNVERIFIED TLS" in out
     assert "PHONE×3" in out and "FORWARDED" in out
     assert "detection OFF for: gemini" in out
     assert "MCP exempt servers: 2" in out

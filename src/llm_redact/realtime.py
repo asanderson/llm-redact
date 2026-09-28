@@ -641,6 +641,11 @@ async def _reject(websocket: WebSocket, reason: str) -> None:
 
 async def ws_handle(websocket: WebSocket) -> None:
     state: ProxyState = websocket.app.state.proxy
+    from llm_redact.proxy import origin_form_target
+
+    if not origin_form_target(websocket.scope):
+        await _reject(websocket, "the request target must be a path")
+        return
     path = websocket.url.path
 
     if path.startswith("/__llm-redact"):
@@ -686,6 +691,18 @@ async def ws_handle(websocket: WebSocket) -> None:
         # fall through to any forwarding path.
         logger.info("WS %s -> refused (provider %s disabled)", path, adapter.provider)
         await _reject(websocket, f"provider {adapter.provider} disabled in llm-redact config")
+        return
+    if provider_config.auth != "passthrough":
+        # auth = "identity": the proxy authorizes this provider with its own
+        # cloud identity on HTTP, but the realtime relay cannot (a WebSocket
+        # handshake is not signed per request). Forwarding the client's
+        # credential — or none — would silently break the configured
+        # contract, so the connection is refused with the reason.
+        logger.info("WS %s -> refused (provider %s uses identity auth)", path, adapter.provider)
+        await _reject(
+            websocket,
+            f'realtime is not supported with [providers.{adapter.provider}] auth = "identity"',
+        )
         return
     if not websockets_available():
         await _reject(

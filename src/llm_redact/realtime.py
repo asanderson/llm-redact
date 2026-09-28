@@ -641,6 +641,11 @@ async def _reject(websocket: WebSocket, reason: str) -> None:
 
 async def ws_handle(websocket: WebSocket) -> None:
     state: ProxyState = websocket.app.state.proxy
+    from llm_redact.proxy import origin_form_target
+
+    if not origin_form_target(websocket.scope):
+        await _reject(websocket, "the request target must be a path")
+        return
     path = websocket.url.path
 
     if path.startswith("/__llm-redact"):

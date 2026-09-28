@@ -201,8 +201,22 @@ AUTH_PATHS = frozenset(
 
 
 def _is_auth_path(path: str) -> bool:
-    """A gate sign-in path: AUTH_PREFIX itself or anything below it."""
-    return path == AUTH_PREFIX or path.startswith(AUTH_PREFIX + "/")
+    """A gate sign-in path: anything BELOW AUTH_PREFIX. The bare prefix is
+    not one — it would skip dashboard admission for a path the gate never
+    claimed (it fell through to the gate's user-admin handler)."""
+    return path.startswith(AUTH_PREFIX + "/")
+
+
+def origin_form_target(scope: Mapping[str, Any]) -> bool:
+    """Whether the request target is origin-form (``/path``). The h11
+    parser accepts other forms — ``%2Fv1…@evil.example/x`` or an absolute
+    URL — and the raw path is forwarded verbatim after the upstream base,
+    so anything else could move the request to a host the client chose."""
+    raw_path = scope.get("raw_path")
+    if isinstance(raw_path, bytes | bytearray):
+        return raw_path.startswith(b"/")
+    path = scope.get("path")
+    return isinstance(path, str) and path.startswith("/")
 
 
 # SCIM 2.0 provisioning (llm-redact-pro): everything under this prefix goes
@@ -1914,6 +1928,9 @@ async def _read_capped(request: Request, limit: int) -> bytes | None:
 
 async def handle(request: Request) -> Response:
     state: ProxyState = request.app.state.proxy
+    if not origin_form_target(request.scope):
+        # Never routed, forwarded, recorded or logged with its target.
+        return JSONResponse({"error": "the request target must be a path"}, status_code=400)
     path = request.url.path
 
     # Reserved local endpoints are answered here, before any routing or
@@ -2024,6 +2041,30 @@ async def handle(request: Request) -> Response:
         )
         logger.info("%s %s -> 403 refused by the access gate", request.method, path)
         return JSONResponse(error, status_code=403)
+
+    if adapter is None and provider_name in state.upstream_auth:
+        # The proxy lends its own cloud identity only to the API routes it
+        # recognizes (and redacts). Signing pass-through traffic would hand
+        # any client the whole cloud API as the proxy's principal, bodies
+        # unredacted — so an unrecognized path is refused here, never sent.
+        message = (
+            f"llm-redact: {provider_name} is authorized with the proxy's own identity"
+            f' ([providers.{provider_name}] auth = "identity"); only the API routes'
+            " llm-redact recognizes are forwarded"
+        )
+        state.record_request(
+            session=state.config.vault.session,
+            provider=provider_name,
+            method=request.method,
+            path=path,
+            status=403,
+            started=started,
+            streamed=False,
+            detections={},
+            rehydrations={},
+        )
+        logger.info("%s %s -> 403 unrecognized route for identity auth", request.method, path)
+        return JSONResponse({"error": message}, status_code=403)
 
     if state.router is not None:
         answer = state.router.local_answer(request.method, path, request.headers)
@@ -2260,6 +2301,10 @@ async def handle(request: Request) -> Response:
     url = upstream_base + upstream_path
     if request.url.query:
         url += "?" + request.url.query
+    if not _same_upstream(url, upstream_base):
+        # Belt and braces behind origin_form_target: whatever the path
+        # holds, the request goes to the configured upstream or nowhere.
+        return JSONResponse({"error": "the request target must be a path"}, status_code=400)
     headers = _request_headers(request)
     if upstream_auth is not None:
         # The proxy's own cloud identity: strip every client credential, then
@@ -2353,6 +2398,21 @@ def _redacted_summary(new_counts: dict[str, int]) -> str:
         " redacted: " + " ".join(f"{k}×{v}" for k, v in sorted(new_counts.items()))
         if new_counts
         else ""
+    )
+
+
+def _same_upstream(url: str, upstream_base: str) -> bool:
+    """Whether ``url`` still addresses the configured upstream (scheme and
+    netloc, userinfo included — a smuggled ``user@`` is a different URL)."""
+    try:
+        built, base = httpx.URL(url), httpx.URL(upstream_base)
+    except httpx.InvalidURL:
+        return False
+    return (built.scheme, built.userinfo, built.host, built.port) == (
+        base.scheme,
+        base.userinfo,
+        base.host,
+        base.port,
     )
 
 

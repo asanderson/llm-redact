@@ -365,20 +365,24 @@ async def test_streaming_response_path_is_signed_too(monkeypatch: pytest.MonkeyP
     assert built[0].calls[0][1].endswith("?alt=sse")
 
 
-async def test_pass_through_traffic_to_an_identity_provider_is_signed(
+async def test_pass_through_traffic_to_an_identity_provider_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The proxy's identity is lent only to routes it recognizes: an
+    # unrecognized path would otherwise reach the whole cloud API as the
+    # proxy's principal, unredacted.
     _, built = _install(monkeypatch)
     upstream = _Upstream(b"{}")
     app = create_app(
         _config(bedrock=_identity(BEDROCK)), upstream_transport=httpx.MockTransport(upstream)
     )
+    state: ProxyState = app.state.proxy
     async with _client(app) as client:
         response = await client.get("/guardrail/g1/version/1", headers={"x-api-key": "k"})
-    assert response.status_code == 200
-    ((method, _, _, body),) = built[0].calls
-    assert (method, body) == ("GET", b"")
-    assert upstream.requests[0].headers["authorization"] == "Proxy bedrock"
+    assert response.status_code == 403
+    assert 'auth = "identity"' in response.json()["error"]
+    assert built[0].calls == [] and upstream.requests == []
+    assert state.recent[-1]["status"] == 403
 
 
 async def test_passthrough_providers_are_untouched(monkeypatch: pytest.MonkeyPatch) -> None:

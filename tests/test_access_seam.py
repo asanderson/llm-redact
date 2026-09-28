@@ -381,7 +381,6 @@ async def test_gate_paths_without_a_gate() -> None:
 
 
 AUTH_PREFIX_PATHS = (
-    "/__llm-redact/auth",
     "/__llm-redact/auth/passkey",
     "/__llm-redact/auth/passkey/options",
     "/__llm-redact/auth/passkey/enroll/verify",
@@ -435,11 +434,15 @@ async def test_a_look_alike_of_the_auth_prefix_is_not_a_gate_path(
     _install(monkeypatch, gate)
     transport = httpx.ASGITransport(app=_app([]))
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
-        # Behind dashboard admission like every other reserved path...
-        assert (await client.get("/__llm-redact/authx")).status_code == 303
-        admitted = await client.get("/__llm-redact/authx", headers={"x-test-admin": "yes"})
-    # ...and then an ordinary unknown reserved path, never the gate's.
-    assert admitted.status_code == 404
+        for path in ("/__llm-redact/authx", "/__llm-redact/auth"):
+            # Behind dashboard admission like every other reserved path —
+            # the bare prefix too: only paths BELOW it are the gate's, so a
+            # bare POST can't reach a gate handler without admission...
+            assert (await client.get(path)).status_code == 303, path
+            assert (await client.post(path, json={})).status_code == 403, path
+            admitted = await client.get(path, headers={"x-test-admin": "yes"})
+            # ...and then an ordinary unknown reserved path, never the gate's.
+            assert admitted.status_code == 404, path
     assert gate.handled == []
 
 

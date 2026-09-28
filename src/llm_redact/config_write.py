@@ -455,6 +455,23 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append(f"password_env = {_toml_str(config.email.password_env)}")
         if config.email.from_address is not None:
             lines.append(f"from_address = {_toml_str(config.email.from_address)}")
+        if config.email.implicit_tls:
+            lines.append("implicit_tls = true")
+        if config.email.auth != "password":
+            # OAuth secrets are env-only too: only the variable NAMES appear.
+            lines.append(f"auth = {_toml_str(config.email.auth)}")
+        for key in (
+            "oauth_provider",
+            "oauth_subject",
+            "oauth_token_url",
+            "oauth_client_id",
+            "oauth_client_secret_env",
+            "oauth_refresh_token_env",
+            "oauth_scope",
+        ):
+            value = getattr(config.email, key)
+            if value is not None:
+                lines.append(f"{key} = {_toml_str(value)}")
 
     if config.license.key is not None or config.license.key_file is not None:
         # Only ever the signed public token / a path — never key MATERIAL

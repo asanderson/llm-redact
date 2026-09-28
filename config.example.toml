@@ -453,6 +453,20 @@ max_rows = 10000
 # username = "llm-redact"
 # password_env = "LLM_REDACT_SMTP_PASSWORD"
 # from_address = "llm-redact@corp.example"
+# implicit_tls = false        # true = TLS from the first byte (port 465); then starttls = false
+#
+# OAuth 2.0 (SASL XOAUTH2) instead of a password, for Microsoft 365 / Exchange
+# Online and Google Workspace (llm-redact-pro docs/email-oauth.md). Requires
+# TLS (starttls or implicit_tls). Secrets come from the env vars named by
+# the *_env keys, never this file.
+# auth = "oauth"                  # default "password"
+# oauth_provider = "azure"        # "azure" | "google" | "refresh_token"
+# oauth_subject = "llm-redact@corp.example"  # google only; default username/from_address
+# oauth_token_url = "https://idp.example/oauth2/token"   # refresh_token only (https)
+# oauth_client_id = "..."                                # refresh_token only
+# oauth_client_secret_env = "LLM_REDACT_SMTP_CLIENT_SECRET"  # optional (public clients)
+# oauth_refresh_token_env = "LLM_REDACT_SMTP_REFRESH_TOKEN"
+# oauth_scope = "..."                                    # optional
 
 # License key (see docs/editions.md). The FOSS core needs NO key — nothing in
 # this repository is gated. A key matters only when the separately-installed

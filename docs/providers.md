@@ -64,7 +64,9 @@ models on Vertex** are covered too: their
 `publishers/anthropic/models/{m}:rawPredict` / `:streamRawPredict` paths
 carry Anthropic Messages bodies, so they reuse the Anthropic
 redaction/rehydration and the same `[providers.vertex]` upstream (other
-publishers' `rawPredict` traffic is deliberately left untouched). The
+publishers' `rawPredict` traffic is deliberately left untouched), and
+the Vertex AI Live API WebSocket is relayed like Gemini Live
+([realtime](#realtime-websocket-apis)). The
 tool's bearer token is forwarded as is, unless the proxy authorizes with
 its own identity (below).
 
@@ -97,15 +99,22 @@ auth = "identity"          # default "passthrough": forward the tool's credentia
 With `auth = "identity"` the proxy removes every credential the tool
 sent (`Authorization`, `x-api-key`, `api-key`, `x-goog-api-key`, any
 other `*api-key` or `*authorization*` header, `x-amz-*` signing
-headers, cookies, and `key=` / `api-key=` / `access_token=` / `X-Amz-*`
-query parameters), then authorizes the final, redacted request with its
+headers, cookies, `key=` / `api-key=` / `access_token=` /
+`*authorization*` / `X-Amz-*` query parameters, and — on realtime
+WebSocket upgrades — credential-bearing subprotocols such as
+`openai-insecure-api-key.<key>`), then authorizes the final, redacted request with its
 own workload identity: AWS SigV4 for Bedrock, a Google OAuth token for
 Vertex AI (Gemini and Claude models alike), a Microsoft Entra ID token
 for Azure OpenAI. If no credential can be obtained, the proxy answers a
 502 and forwards nothing. The setting is valid only for these three
 providers; without llm-redact-pro it is a startup error. Realtime
-WebSocket connections to a provider using it are refused (1011), and
-such a provider is never routed. Credential sources and the IAM
+WebSocket connections are authorized the same way — Azure OpenAI
+Realtime and the Vertex AI Live API (below): the upgrade request is
+authorized as the HTTP GET it is and the upstream is dialled with
+exactly the proxy's headers. Only those documented realtime paths are
+authorized (any other WebSocket path to such a provider is refused
+1011), a missing credential closes the connection 1011 naming the
+credential source, and such a provider is never routed. Credential sources and the IAM
 permissions to grant are in llm-redact-pro's provider-identity guide.
 
 Any client that can reach the proxy can then spend that identity: keep
@@ -157,7 +166,11 @@ arguments and output are redacted and restored like any other content.
 ## Realtime WebSocket APIs
 
 With `pip install 'llm-redact-proxy[realtime]'`: OpenAI Realtime
-(`/v1/realtime`) and Gemini Live (`BidiGenerateContent`) connections are
+(`/v1/realtime`), Azure OpenAI Realtime (`/openai/realtime` preview and
+`/openai/v1/realtime` GA, to `[providers.azure]`), Gemini Live
+(`BidiGenerateContent`) and the Vertex AI Live API
+(`/ws/google.cloud.aiplatform.{v1,v1beta1}.LlmBidiService/BidiGenerateContent`,
+to `[providers.vertex]`) connections are
 relayed over wss with text events redacted outbound and restored
 inbound — tokens split across streaming frames reassemble exactly, and
 base64 audio passes through untouched (audio is not scanned, the same
@@ -167,6 +180,9 @@ use the static vault session — the per-conversation mode's
 first-message anchor does not exist at connection time. With
 llm-redact-pro's named users, each user's connection uses that user's own
 copy of the static session ([per-user namespaces](how-it-works.md#session-isolation)).
+The Azure and Vertex routes work with the proxy's own cloud identity
+([above](#the-proxys-own-cloud-identity)); the full list of accepted
+WebSocket paths is in [api-coverage.md](api-coverage.md#realtime-websocket-routes).
 
 ## Routing, fallback and budgets (llm-redact-pro)
 

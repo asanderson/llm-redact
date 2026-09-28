@@ -119,3 +119,41 @@ def test_doc_and_matrix_agree() -> None:
     assert not missing_in_doc, f"rows missing from docs/api-coverage.md: {sorted(missing_in_doc)}"
     stale_in_doc = doc_rows - table_rows - EXTRA_DOC_ROWS
     assert not stale_in_doc, f"doc rows not pinned by this table: {sorted(stale_in_doc)}"
+
+
+# --- WebSocket realtime routes ----------------------------------------------------------
+
+# (path, WS adapter name) — the executable twin of the doc's "WebSocket `…`"
+# rows. `{version}` is probed as v1beta.
+WS_MATRIX: list[tuple[str, str]] = [
+    ("/v1/realtime", "openai-realtime"),
+    ("/openai/realtime", "azure-realtime"),
+    ("/openai/v1/realtime", "azure-realtime"),
+    (
+        "/ws/google.ai.generativelanguage.{version}.GenerativeService.BidiGenerateContent",
+        "gemini-live",
+    ),
+    ("/ws/google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent", "vertex-live"),
+    ("/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent", "vertex-live"),
+]
+
+
+@pytest.mark.parametrize(("path", "adapter_name"), WS_MATRIX)
+def test_ws_route_matches_matrix(path: str, adapter_name: str) -> None:
+    from llm_redact.realtime import ALL_WS_ADAPTERS, ws_adapter_for
+
+    adapter = ws_adapter_for(
+        path.replace("{version}", "v1beta"), [cls() for cls in ALL_WS_ADAPTERS]
+    )
+    assert adapter is not None and adapter.name == adapter_name
+
+
+def test_ws_doc_and_matrix_agree() -> None:
+    """The doc's WebSocket rows == WS_MATRIX, both directions, and every WS
+    adapter has at least one row (a new adapter needs its doc row)."""
+    from llm_redact.realtime import ALL_WS_ADAPTERS
+
+    text = DOC.read_text(encoding="utf-8")
+    doc_paths = set(re.findall(r"^\| WebSocket `([^`]+)` \| websocket \|", text, flags=re.M))
+    assert doc_paths == {path for path, _ in WS_MATRIX}
+    assert {cls.name for cls in ALL_WS_ADAPTERS} == {name for _, name in WS_MATRIX}

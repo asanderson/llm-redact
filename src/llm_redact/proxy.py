@@ -1160,12 +1160,15 @@ def _is_credential_header(name: str) -> bool:
 
 def _strip_credential_query(query: str) -> str:
     """The raw query string minus every credential parameter (``key=``,
-    ``api-key=``, ``access_token=``, presigned-URL ``X-Amz-*``); the rest is
-    kept byte-for-byte in order."""
+    ``api-key=``, ``access_token=``, presigned-URL ``X-Amz-*``, and any
+    ``*authorization*`` parameter — a WebSocket client that cannot set
+    headers may carry ``Authorization=Bearer …`` in the query, a channel
+    openai-node's Azure Realtime client recognizes); the rest is kept
+    byte-for-byte in order."""
     kept = []
     for part in query.split("&"):
         name = urllib.parse.unquote_plus(part.split("=", 1)[0]).lower()
-        if name in _CREDENTIAL_QUERY_PARAMS or name.startswith("x-amz-"):
+        if name in _CREDENTIAL_QUERY_PARAMS or "authorization" in name or name.startswith("x-amz-"):
             continue
         kept.append(part)
     return "&".join(kept)

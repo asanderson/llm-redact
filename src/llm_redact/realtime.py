@@ -12,7 +12,12 @@ Design rules, matching the HTTP side:
   byte-identically. Never break the tool.
 - Upgrade headers and query strings (Gemini carries ``?key=``; browser
   OpenAI clients carry the key in a subprotocol) pass through untouched
-  and are NEVER logged. Log lines carry path and counts only.
+  and are NEVER logged. Log lines carry path and counts only. The one
+  exception is a provider authorized with the proxy's OWN cloud identity
+  (``auth = "identity"``: Azure OpenAI Realtime, the Vertex AI Live API):
+  every client credential channel — headers, query, subprotocols — is
+  stripped and the upgrade is authorized by the registered
+  ``UpstreamAuth``, on the exact documented paths only.
 - Without the ``websockets`` package, uvicorn itself refuses upgrades
   before this module runs (its auto WS protocol is None); the handler
   also guards the import so other servers and test transports degrade to
@@ -44,11 +49,13 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from llm_redact.audit import AuditWriteError
 from llm_redact.jsonwalk import STRUCTURAL_KEYS, transform_strings
+from llm_redact.plugin_api import UpstreamAuthError
 from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
 from llm_redact.redactor import BlockedRequest, Redactor
 from llm_redact.rehydrate import RehydratorPool
 
 if TYPE_CHECKING:
+    from llm_redact.plugin_api import UpstreamAuth
     from llm_redact.proxy import ProxyState, RequestContext
 
 logger = logging.getLogger("llm_redact")
@@ -113,9 +120,17 @@ class WsAdapter:
 
     name = "ws"
     provider = ""
+    # The exact paths this adapter lets the proxy authorize with its OWN
+    # cloud identity (``[providers.NAME] auth = "identity"``): only the
+    # documented realtime endpoints, never a subpath or look-alike — the
+    # identity is lent to the routes llm-redact recognizes and redacts.
+    identity_paths: frozenset[str] = frozenset()
 
     def matches(self, path: str) -> bool:
         raise NotImplementedError
+
+    def authorizable(self, path: str) -> bool:
+        return path in self.identity_paths
 
     def redact_message(
         self, data: str | bytes, ctx: "RequestContext", *, inject_note: bool = False
@@ -399,9 +414,17 @@ class OpenAIRealtimeWs(WsAdapter):
         return [data]
 
 
+# Azure OpenAI Realtime: the preview form (``?api-version=…&deployment=…``)
+# and the GA v1 form (``/openai/v1/realtime?model=<deployment>``, no
+# api-version — Microsoft's preview-to-GA migration guide; openai-node's
+# Azure client builds exactly this path).
+_AZURE_REALTIME_PATHS = frozenset({"/openai/realtime", "/openai/v1/realtime"})
+
+
 class AzureRealtimeWs(OpenAIRealtimeWs):
     """Azure OpenAI Realtime — the OpenAI Realtime event vocabulary on Azure's
-    path (``/openai/realtime``, with api-version and deployment in the query).
+    paths: ``/openai/realtime`` (preview; api-version and deployment in the
+    query) and ``/openai/v1/realtime`` (GA; ``model=<deployment>``).
 
     Everything (the outbound walk, inbound channels, *.done flush, note
     injection into session/response instructions) is inherited from
@@ -413,15 +436,31 @@ class AzureRealtimeWs(OpenAIRealtimeWs):
 
     name = "azure-realtime"
     provider = "azure"
+    identity_paths = _AZURE_REALTIME_PATHS
 
     def matches(self, path: str) -> bool:
-        return path == "/openai/realtime" or path.startswith("/openai/realtime/")
+        return path in _AZURE_REALTIME_PATHS or path.startswith(
+            ("/openai/realtime/", "/openai/v1/realtime/")
+        )
 
 
 # Gemini Live adds mime/voice/config enums; base64 audio rides in `data`
-# (already structural) inside realtimeInput mediaChunks.
+# (already structural) inside realtimeInput mediaChunks. The proto JSON
+# mapping accepts the original snake_case field names too (Google's own
+# Vertex Live notebook sends `mime_type`, `voice_name`, …), so both
+# spellings are skipped.
 _GEMINI_LIVE_STRUCTURAL_KEYS = _REALTIME_STRUCTURAL_KEYS | frozenset(
-    {"mimeType", "voiceName", "languageCode", "responseModalities", "handle"}
+    {
+        "mimeType",
+        "mime_type",
+        "voiceName",
+        "voice_name",
+        "languageCode",
+        "language_code",
+        "responseModalities",
+        "response_modalities",
+        "handle",
+    }
 )
 
 # Top-level message keys, for the live drift detector (messages are
@@ -486,7 +525,8 @@ class GeminiLiveWs(WsAdapter):
         setup = payload.get("setup")
         if not isinstance(setup, dict):
             return
-        instruction = setup.get("systemInstruction")
+        # camelCase or the proto's snake_case spelling (both accepted).
+        instruction = setup.get("systemInstruction", setup.get("system_instruction"))
         if not isinstance(instruction, dict) or not isinstance(instruction.get("parts"), list):
             # Absent systemInstruction stays absent: creating one would
             # change model behavior beyond token preservation.
@@ -584,12 +624,43 @@ class GeminiLiveWs(WsAdapter):
         return [data]
 
 
+# Vertex AI Live API: the Gemini Live protocol behind Vertex's regional
+# host, ``wss://{region}-aiplatform.googleapis.com/ws/google.cloud.aiplatform.
+# {v1|v1beta1}.LlmBidiService/BidiGenerateContent`` (Google's Vertex Live
+# notebook uses v1; the google-genai SDK builds the path from its Vertex
+# api_version, v1beta1 by default). Bearer-token auth, so the proxy can
+# authorize it with its own identity.
+_VERTEX_LIVE_PATHS = frozenset(
+    f"/ws/google.cloud.aiplatform.{version}.LlmBidiService/BidiGenerateContent"
+    for version in ("v1", "v1beta1")
+)
+
+
+class VertexLiveWs(GeminiLiveWs):
+    """Gemini Live on Vertex AI (``LlmBidiService``). Message handling —
+    setup/clientContent/realtimeInput/toolResponse outbound, serverContent
+    and toolCall inbound, the turnComplete flush — is inherited from
+    GeminiLiveWs (Vertex speaks the same BidiGenerateContent messages); only
+    the path and the upstream (``[providers.vertex]``) differ. Matcher
+    disjoint from GeminiLiveWs (google.ai.generativelanguage vs
+    google.cloud.aiplatform), proven by test."""
+
+    name = "vertex-live"
+    provider = "vertex"
+    identity_paths = _VERTEX_LIVE_PATHS
+
+    def matches(self, path: str) -> bool:
+        return path in _VERTEX_LIVE_PATHS
+
+
 ALL_WS_ADAPTERS: tuple[type[WsAdapter], ...] = (
     OpenAIRealtimeWs,
-    # Azure Realtime shares the OpenAI vocabulary on /openai/realtime; matcher
-    # disjoint from OpenAIRealtimeWs (/v1/realtime) and Gemini Live.
+    # Azure Realtime shares the OpenAI vocabulary on /openai/realtime and
+    # /openai/v1/realtime; matcher disjoint from OpenAIRealtimeWs
+    # (/v1/realtime) and both Gemini Live adapters.
     AzureRealtimeWs,
     GeminiLiveWs,
+    VertexLiveWs,
 )
 
 
@@ -600,19 +671,46 @@ def ws_adapter_for(path: str, adapters: list[WsAdapter]) -> WsAdapter | None:
     return None
 
 
-def _upstream_ws_url(base_url: str, path: str, query_string: bytes) -> str:
-    """The provider's wss URL for this connection.
-
-    Scheme-swapped from the configured HTTP upstream (https→wss, http→ws
-    for local/test upstreams) with the RAW query preserved — it may carry
-    credentials, so it is forwarded exactly and never re-encoded.
-    """
+def _upstream_http_url(base_url: str, path: str, query_string: bytes) -> str:
+    """The connection's upstream URL in its HTTP form (the configured
+    upstream's scheme and host) with the RAW query preserved — it may carry
+    credentials, so it is forwarded exactly and never re-encoded. This is
+    the form an identity authorizer sees (a WebSocket upgrade is an HTTP
+    GET to it)."""
     parsed = urllib.parse.urlsplit(base_url)
-    scheme = "wss" if parsed.scheme == "https" else "ws"
-    url = f"{scheme}://{parsed.netloc}{path}"
+    url = f"{parsed.scheme}://{parsed.netloc}{path}"
     if query_string:
         url += "?" + query_string.decode("latin-1")
     return url
+
+
+def _ws_form(http_url: str) -> str:
+    """The provider's wss URL for this connection: the HTTP form,
+    scheme-swapped (https→wss, anything else — local/test upstreams — →ws)."""
+    scheme, rest = http_url.split("://", 1)
+    return ("wss" if scheme == "https" else "ws") + "://" + rest
+
+
+# Credential-bearing WebSocket subprotocols. Browsers cannot set upgrade
+# headers, so clients smuggle keys in the offered subprotocol list — OpenAI's
+# SDK offers `openai-insecure-api-key.<key>`. Under the proxy's own identity
+# these are stripped like header/query credentials; every other offer
+# (`realtime`, `openai-beta.realtime-v1`, …) is kept.
+_CREDENTIAL_SUBPROTOCOL_MARKERS = (
+    "api-key",
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "token",
+    "secret",
+    "password",
+)
+
+
+def is_credential_subprotocol(value: str) -> bool:
+    lowered = value.lower()
+    return any(marker in lowered for marker in _CREDENTIAL_SUBPROTOCOL_MARKERS)
 
 
 def _filtered_headers(websocket: WebSocket) -> list[tuple[str, str]]:
@@ -631,12 +729,101 @@ def _sendable_close_code(code: int) -> int:
     return 1000 if code in (1005, 1006) else code
 
 
+# RFC 6455 §5.5: a control frame payload is at most 125 bytes, two of
+# which are the close code.
+_MAX_CLOSE_REASON_BYTES = 123
+
+
+def _close_reason(reason: str) -> str:
+    """``reason`` cut to fit a close frame (UTF-8, never mid-character) — an
+    oversized reason would fail the close and lose the message entirely."""
+    return reason.encode("utf-8")[:_MAX_CLOSE_REASON_BYTES].decode("utf-8", errors="ignore")
+
+
 async def _reject(websocket: WebSocket, reason: str) -> None:
     """Accept-then-close: unlike a handshake 403, the close reason reaches
     the client library where a user can read it."""
     with contextlib.suppress(Exception):
         await websocket.accept()
-        await websocket.close(code=1011, reason=reason)
+        await websocket.close(code=1011, reason=_close_reason(reason))
+
+
+def _record_refused(
+    state: "ProxyState",
+    ctx: "RequestContext",
+    adapter: WsAdapter,
+    path: str,
+    started: float,
+    *,
+    audit_token: object | None = None,
+) -> None:
+    """The recorded 502 for a connection the upstream never got (no
+    credential, or the dial failed): one metadata-only row, like HTTP."""
+    state.record_request(
+        session=ctx.session_id,
+        provider=adapter.provider,
+        method="WS",
+        path=path,
+        status=502,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+        audit_token=audit_token,
+    )
+
+
+async def _authorize_upgrade(
+    state: "ProxyState",
+    websocket: WebSocket,
+    adapter: WsAdapter,
+    upstream_auth: "UpstreamAuth",
+    path: str,
+    http_url: str,
+    headers: list[tuple[str, str]],
+    subprotocols: list[str],
+    ctx: "RequestContext",
+    started: float,
+) -> tuple[str, list[tuple[str, str]], list[str]] | None:
+    """The proxy's own cloud identity on a WebSocket upgrade (the HTTP rule:
+    strip every client credential, authorize the request as it will be
+    sent, send exactly what was authorized).
+
+    Client credentials go from all three channels a WebSocket client can
+    use — headers, the query, and the offered subprotocols — then the
+    authorizer sees the upgrade as the HTTP GET it is (the https form of
+    the upstream URL, an empty body). Returns the URL, headers and
+    subprotocols to dial with, or None after refusing the connection (the
+    reason names the credential SOURCE only; counted as an upstream error
+    and recorded, never forwarded). Headers, URLs and subprotocols are
+    never logged."""
+    from llm_redact.proxy import _same_upstream, strip_client_credentials
+
+    provider = adapter.provider
+    http_url, headers = strip_client_credentials(http_url, headers)
+    subprotocols = [s for s in subprotocols if not is_credential_subprotocol(s)]
+    provider_config = state.config.providers[provider]
+    if not _same_upstream(http_url, provider_config.upstream_base_url):
+        # Belt and braces behind origin_form_target and the exact
+        # identity_paths: the proxy's identity goes to the configured host.
+        await _reject(websocket, "the request target must be a path")
+        return None
+    try:
+        headers = await upstream_auth.authorize("GET", http_url, headers, b"")
+    except Exception as exc:
+        source = str(exc) if isinstance(exc, UpstreamAuthError) else type(exc).__name__
+        state.upstream_errors[provider] += 1
+        logger.warning(
+            "WS %s -> upstream credentials unavailable for %s (%s)", path, provider, source
+        )
+        _record_refused(state, ctx, adapter, path, started)
+        await _reject(
+            websocket,
+            f"the proxy could not obtain its own {provider} cloud credentials ({source});"
+            " nothing was forwarded",
+        )
+        return None
+    return http_url, headers, subprotocols
 
 
 async def ws_handle(websocket: WebSocket) -> None:
@@ -692,16 +879,20 @@ async def ws_handle(websocket: WebSocket) -> None:
         logger.info("WS %s -> refused (provider %s disabled)", path, adapter.provider)
         await _reject(websocket, f"provider {adapter.provider} disabled in llm-redact config")
         return
-    if provider_config.auth != "passthrough":
-        # auth = "identity": the proxy authorizes this provider with its own
-        # cloud identity on HTTP, but the realtime relay cannot (a WebSocket
-        # handshake is not signed per request). Forwarding the client's
-        # credential — or none — would silently break the configured
-        # contract, so the connection is refused with the reason.
+    upstream_auth = state.upstream_auth.get(adapter.provider)
+    if provider_config.auth != "passthrough" and (
+        upstream_auth is None or not adapter.authorizable(path)
+    ):
+        # auth = "identity": the proxy lends its own cloud identity only to
+        # the realtime endpoints it recognizes (exact documented paths).
+        # Anything else — a subpath, or a provider with no authorizer —
+        # is refused: forwarding the client's credential (or none) would
+        # silently break the configured contract.
         logger.info("WS %s -> refused (provider %s uses identity auth)", path, adapter.provider)
         await _reject(
             websocket,
-            f'realtime is not supported with [providers.{adapter.provider}] auth = "identity"',
+            f'[providers.{adapter.provider}] auth = "identity": only the realtime routes'
+            " llm-redact recognizes are authorized",
         )
         return
     if not websockets_available():
@@ -713,11 +904,6 @@ async def ws_handle(websocket: WebSocket) -> None:
         return
 
     import websockets
-
-    url = _upstream_ws_url(
-        provider_config.upstream_base_url, path, websocket.scope.get("query_string", b"")
-    )
-    subprotocols = list(websocket.scope.get("subprotocols") or [])
 
     from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
 
@@ -741,6 +927,29 @@ async def ws_handle(websocket: WebSocket) -> None:
         static_ctx.rehydrator,
     )
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
+
+    http_url = _upstream_http_url(
+        provider_config.upstream_base_url, path, websocket.scope.get("query_string", b"")
+    )
+    headers = _filtered_headers(websocket)
+    subprotocols = list(websocket.scope.get("subprotocols") or [])
+    if upstream_auth is not None:
+        authorized = await _authorize_upgrade(
+            state,
+            websocket,
+            adapter,
+            upstream_auth,
+            path,
+            http_url,
+            headers,
+            subprotocols,
+            ctx,
+            started,
+        )
+        if authorized is None:
+            return
+        http_url, headers, subprotocols = authorized
+    url = _ws_form(http_url)
 
     # [audit] required: same rule as HTTP — no durably committed audit row,
     # no upstream contact. The START row commits before the upstream dial;
@@ -766,14 +975,18 @@ async def ws_handle(websocket: WebSocket) -> None:
     try:
         upstream = await websockets.connect(
             url,
-            additional_headers=_filtered_headers(websocket),
+            additional_headers=headers,
             subprotocols=[websockets.Subprotocol(s) for s in subprotocols] or None,
             max_size=MAX_FRAME_BYTES,
             open_timeout=30,
         )
     except Exception as problem:  # DNS, TLS, refusals, handshake rejections
         # The exception may embed the URL (query auth!) — log the class only.
+        # Counted and recorded like an HTTP upstream fault (the audit START
+        # row, if any, gets its END row here).
         logger.warning("WS %s -> upstream connect failed (%s)", path, type(problem).__name__)
+        state.upstream_errors[adapter.provider] += 1
+        _record_refused(state, ctx, adapter, path, started, audit_token=audit_token)
         await _reject(websocket, "upstream websocket connect failed")
         return
 

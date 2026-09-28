@@ -105,6 +105,29 @@ else takes the OpenAI files handling below.
 | `GET /v1/fine_tuning/jobs` | pass-through | |
 | WebSocket `/v1/realtime` | websocket | beta + GA event vocabularies; MCP tool config preserved, MCP arguments rehydrated |
 
+## Realtime WebSocket routes
+
+Every WebSocket path the realtime relay (`realtime.py`) accepts, pinned
+both directions by `tests/test_api_coverage.py` like the tables above
+(the OpenAI row sits in its table). Any other WebSocket path is refused
+(accept-then-close 1011): unlike HTTP there is no default upstream to pass
+an unknown path through to. The Azure and Vertex routes also work with the
+proxy's own cloud identity (`[providers.azure|vertex] auth = "identity"`,
+llm-redact-pro): only the exact paths below are authorized — a subpath is
+refused — and every client credential channel (upgrade headers, the
+`key=`/`api-key=`/`access_token=`/`Authorization=` query parameters, and
+credential-bearing subprotocols such as `openai-insecure-api-key.<key>`) is
+stripped before the proxy's credential is added. Bedrock has no WebSocket
+API, so no realtime route reaches `[providers.bedrock]`.
+
+| Endpoint | Classification | Notes |
+|---|---|---|
+| WebSocket `/openai/realtime` | websocket | Azure OpenAI Realtime, preview form (`?api-version=…&deployment=…`): the OpenAI Realtime event tables, `[providers.azure]`; identity auth supported |
+| WebSocket `/openai/v1/realtime` | websocket | Azure OpenAI Realtime, GA form (`?model=<deployment>`, no api-version): same handling; identity auth supported |
+| WebSocket `/ws/google.ai.generativelanguage.{version}.GenerativeService.BidiGenerateContent` | websocket | Gemini Live (v1alpha/v1beta), JSON over text or binary frames, `[providers.gemini]` |
+| WebSocket `/ws/google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent` | websocket | Vertex AI Live API: Gemini Live message handling, `[providers.vertex]` (the regional `https://{region}-aiplatform.googleapis.com` host); identity auth supported |
+| WebSocket `/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent` | websocket | Vertex AI Live API, v1beta1 (the google-genai SDK's Vertex default): same handling; identity auth supported |
+
 ## MCP (Model Context Protocol)
 
 MCP itself is a local protocol between the agentic tool and its MCP
@@ -167,9 +190,12 @@ stored-response and input-item GETs) reuses `OpenAIResponsesAdapter`
 wholesale via `AzureResponsesAdapter` — identical event vocabulary, delta
 channels, and note injection; only routing differs (matcher disjoint from
 the Azure chat adapter's, proven by test). **Azure Realtime**
-(`/openai/realtime`) likewise reuses the OpenAI Realtime WS adapter via
-`AzureRealtimeWs`; both route to the customer's `[providers.azure]`
-resource URL. Named custom providers
+(`/openai/realtime` and the GA `/openai/v1/realtime`) likewise reuses the
+OpenAI Realtime WS adapter via `AzureRealtimeWs`; both route to the
+customer's `[providers.azure]` resource URL. The **Vertex AI Live API**
+(`LlmBidiService/BidiGenerateContent`, v1 and v1beta1) reuses the Gemini
+Live adapter via `VertexLiveWs` on `[providers.vertex]` (see the realtime
+table above). Named custom providers
 (`[providers.custom.NAME]`, served under `/custom/NAME/`) expose the
 full OpenAI surface above per upstream. Their inner path is normalized
 before matching (`_canonical`): OpenAI-compatible upstreams serve those

@@ -185,14 +185,24 @@ ACCESS_PATHS = frozenset(
     }
 )
 # The gate's browser sign-in endpoints (llm-redact-pro): reachable WITHOUT
-# dashboard admission — they are how a browser obtains it.
+# dashboard admission — they are how a browser obtains it. Everything under
+# AUTH_PREFIX goes to the gate (sign-in methods add their own pages and JSON
+# endpoints there, e.g. passkeys); AUTH_PATHS names the original three.
+AUTH_PREFIX = f"{RESERVED_PREFIX}/auth"
 AUTH_PATHS = frozenset(
     {
-        f"{RESERVED_PREFIX}/auth/login",
-        f"{RESERVED_PREFIX}/auth/callback",
-        f"{RESERVED_PREFIX}/auth/logout",
+        f"{AUTH_PREFIX}/login",
+        f"{AUTH_PREFIX}/callback",
+        f"{AUTH_PREFIX}/logout",
     }
 )
+
+
+def _is_auth_path(path: str) -> bool:
+    """A gate sign-in path: AUTH_PREFIX itself or anything below it."""
+    return path == AUTH_PREFIX or path.startswith(AUTH_PREFIX + "/")
+
+
 # SCIM 2.0 provisioning (llm-redact-pro): everything under this prefix goes
 # to the gate, which authenticates the identity provider's bearer token
 # itself (no browser: no Origin check, no dashboard admission).
@@ -1316,10 +1326,11 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
     if path in (f"{RESERVED_PREFIX}/sessions", f"{RESERVED_PREFIX}/sessions/prune"):
         return await _handle_sessions(request, state)
     scim = path == SCIM_PREFIX or path.startswith(SCIM_PREFIX + "/")
-    if path in ACCESS_PATHS or path in AUTH_PATHS or scim:
+    if path in ACCESS_PATHS or _is_auth_path(path) or scim:
         # Host/Origin checked here too (defense in depth — the gate runs the
         # full guard chain itself) so a rebinding page learns nothing. SCIM
-        # clients are identity providers, not browsers: Host only.
+        # clients are identity providers, not browsers: Host only. The
+        # sign-in paths keep the Origin check for every method, POST included.
         if not _host_allowed(request, state):
             return JSONResponse({"error": "host not allowed"}, status_code=403)
         if not scim and not _origin_allowed(request, state):
@@ -1643,7 +1654,7 @@ async def _admit_reserved(request: Request, state: ProxyState) -> Response | Non
     path = request.url.path
     if (
         path in PROBE_PATHS
-        or path in AUTH_PATHS
+        or _is_auth_path(path)
         or path == SCIM_PREFIX
         or path.startswith(SCIM_PREFIX + "/")
     ):

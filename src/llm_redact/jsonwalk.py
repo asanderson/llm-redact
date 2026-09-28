@@ -110,15 +110,13 @@ _ENUM_LIST_KEYS = frozenset(key for _, key in ENUM_LIST_POSITIONS)
 
 
 def _is_opaque(parent: str | None, key: str) -> bool:
-    return key in _OPAQUE_KEYS and (
-        key in OPAQUE_ANYWHERE or (parent or "", key) in OPAQUE_POSITIONS
-    )
+    return key in _OPAQUE_KEYS and (key in OPAQUE_ANYWHERE or (parent, key) in OPAQUE_POSITIONS)
 
 
 def _is_enum_list(parent: str | None, key: str, value: Any) -> bool:
     return (
         key in _ENUM_LIST_KEYS
-        and (parent or "", key) in ENUM_LIST_POSITIONS
+        and (parent, key) in ENUM_LIST_POSITIONS
         and isinstance(value, list)
         and not any(isinstance(item, dict | list) for item in value)
     )

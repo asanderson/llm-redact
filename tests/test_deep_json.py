@@ -494,12 +494,25 @@ def test_a_jwt_segment_nested_too_deep_to_parse_is_judged_by_its_opening(depth: 
     from llm_redact.detection.validators import VALIDATORS
 
     deep_object = _b64url(b'{"alg": ' + b"[" * depth + b"]" * depth + b"}")
+    spaced_object = _b64url(b' \n{"alg": ' + b"[" * depth + b"]" * depth + b"}")
     deep_array = _b64url(b" " + b"[" * depth + b"]" * depth)
-    for header, is_jwt in ((deep_object, True), (deep_array, False)):
+    for header, is_jwt in ((deep_object, True), (spaced_object, True), (deep_array, False)):
         match = re.fullmatch(r".+", f"{header}.{PAYLOAD}.signature")
         assert match is not None
         assert _jwt_header_ok(match) is is_jwt
         assert VALIDATORS["jwt"](match) is is_jwt
+
+
+def test_a_jwt_segment_that_is_not_base64_is_no_jwt() -> None:
+    import re
+
+    from llm_redact.detection.validators import VALIDATORS
+
+    # Five characters: one more than a multiple of four, which no base64
+    # encoding ends with.
+    match = re.fullmatch(r".+", f"abcde.{PAYLOAD}.signature")
+    assert match is not None
+    assert VALIDATORS["jwt"](match) is False
 
 
 async def test_a_jwt_whose_header_nests_too_deep_is_redacted_not_a_500() -> None:

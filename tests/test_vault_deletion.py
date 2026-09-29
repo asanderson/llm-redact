@@ -338,6 +338,21 @@ def test_a_redaction_checks_the_session_first(open_instance: Factory) -> None:
     assert again != ada and _number(again) > _number(ada)
 
 
+def test_a_new_view_is_first_checked_an_interval_after_its_load(open_instance: Factory) -> None:
+    # A view's caches are as fresh as its load: the first check falls due a
+    # full interval later, not at the view's first lookup (every new
+    # session's first lookup would read the database again).
+    clock = Clock()
+    a, b = open_instance(), open_instance(clock)
+    ada = a.get("s").placeholder_for("EMAIL", "ada@corp.example")
+    b_view = b.get("s")  # loaded now, ada included
+    assert a.forget_sessions(["s"]) == 1
+    clock.now += CACHE_CHECK_SECONDS / 2  # not due: served from the load
+    assert b_view.original_for(ada) == "ada@corp.example"
+    clock.now += CACHE_CHECK_SECONDS / 2  # due: the delete is noticed
+    assert b_view.original_for(ada) is None
+
+
 # --- the prune's idle check is atomic with its delete -------------------------------
 
 
@@ -777,17 +792,23 @@ def _break_retired_reads(manager: Any, patch: pytest.MonkeyPatch) -> type[Except
     return error
 
 
+@pytest.mark.parametrize("bound", [True, False], ids=["counted", "unbound"])
 def test_a_failed_staleness_check_keeps_serving_the_cache(
-    open_instance: Factory, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    open_instance: Factory,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    bound: bool,
 ) -> None:
     """A cache hit never needs the database: a due check that cannot read the
     retired number keeps the caches (a cached token only ever restores its
-    own value) and is tried again at the next interval — counted per check,
-    logged once per outage by exception TYPE only."""
+    own value) and is tried again at the next interval — counted per check
+    where the manager is bound to a counter (the proxy's), logged once per
+    outage by exception TYPE only."""
     clock = Clock()
     manager = open_instance(clock)
     faults: Counter[str] = Counter()
-    getattr(manager, "bind_fault_counter", lambda counter: None)(faults)
+    if bound:
+        getattr(manager, "bind_fault_counter", lambda counter: None)(faults)
     view = manager.get("s")
     ada = view.placeholder_for("EMAIL", "ada@corp.example")
     loaded = view._reverse
@@ -801,7 +822,7 @@ def test_a_failed_staleness_check_keeps_serving_the_cache(
                 assert view.original_for(ada) == "ada@corp.example"  # not due again yet
                 assert view.placeholder_for("EMAIL", "ada@corp.example") == ada
             assert view._reverse is loaded
-        assert faults == {"vault_check": 3 * outage}
+        assert faults == ({"vault_check": 3 * outage} if bound else {})
         clock.now += CACHE_CHECK_SECONDS  # back up: the check reads again
         assert view.original_for(ada) == "ada@corp.example"
         messages = [(r.levelname, r.getMessage()) for r in caplog.records]

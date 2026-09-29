@@ -8,9 +8,10 @@ included). A tail search that tried every tail of every tail was cubic in
 the number of segments: a 5 KB target blocked the event loop for seconds,
 one at uvicorn's 16 KB head limit for minutes.
 
-Each shape below is the worst case of one step at about 15 KB (what fits
-under the head limit): it must be answered in well under a second, and —
-the deterministic half — the number of adapter matches it costs must not
+Each shape below is the worst case of one step at 16 KiB (uvicorn's h11
+head limit; ASGITransport has none): it must be answered in well under a
+second, and — the deterministic half, which also covers a server without
+that limit (httptools) — the number of adapter matches it costs must not
 grow with the path's length.
 """
 
@@ -39,9 +40,9 @@ OPENAI = {"authorization": "Bearer sk-proj-FAKEFAKE"}
 # A web page's request: refused by the request-origin rule, which must not
 # wait for any routing work beyond what attributes the request.
 EVIL_ORIGIN = {"origin": "https://evil.example"}
-# The whole request head (request line + headers) must fit under uvicorn's
-# 16 KiB h11 limit; the path gets about 15 KB of it.
-TARGET_LENGTH = 15_000
+# uvicorn's h11 head limit (the request line and headers together); the
+# in-process transport takes a path this long on its own.
+TARGET_LENGTH = 16 * 1024
 # Generous: every shape is answered in a few milliseconds; the cubic tail
 # search took 3 s for a 5 KB target and minutes at this length.
 BOUND_SECONDS = 0.5
@@ -126,7 +127,7 @@ async def test_every_path_shape_is_routed_in_bounded_time(
     shape: str, method: str, headers: dict[str, str]
 ) -> None:
     path = _fill(*SHAPES[shape])
-    assert 14_000 < len(path) <= TARGET_LENGTH
+    assert TARGET_LENGTH - 64 < len(path) <= TARGET_LENGTH
     elapsed = await _timed(_app(), method, path, headers)
     assert elapsed < BOUND_SECONDS, f"{shape} {method}: {elapsed:.2f} s"
 
@@ -202,7 +203,7 @@ async def test_routing_work_does_not_grow_with_the_path(
     shape: str, match_counts: Counter[str]
 ) -> None:
     """Deterministic: the matches a path costs are the same at 4 KB and at
-    15 KB — a bounded number of tails is ever tried."""
+    16 KiB — a bounded number of tails is ever tried."""
     app = _app()
     observed = []
     for length in (4_000, TARGET_LENGTH):
@@ -211,4 +212,4 @@ async def test_routing_work_does_not_grow_with_the_path(
             await _timed(app, method, _fill(*SHAPES[shape], length=length), OPENAI)
         observed.append(dict(match_counts))
     short, long = observed
-    assert long == short, f"{shape}: {short} at 4 KB, {long} at 15 KB"
+    assert long == short, f"{shape}: {short} at 4 KB, {long} at 16 KiB"

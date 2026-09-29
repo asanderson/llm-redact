@@ -55,11 +55,12 @@ def _upload_body(*lines: str) -> bytes:
 
 def test_files_routing() -> None:
     adapter = OpenAIAdapter()
-    assert adapter.matches("POST", "/v1/files") is RouteKind.REDACT_ONLY
+    assert adapter.matches("POST", "/v1/files") is RouteKind.CHAT
     assert adapter.matches("GET", "/v1/files/file_abc/content") is RouteKind.CHAT
+    # File objects echo the (redacted) upload filename: restored.
+    assert adapter.matches("GET", "/v1/files") is RouteKind.CHAT
+    assert adapter.matches("GET", "/v1/files/file_abc") is RouteKind.CHAT
     # Metadata surfaces stay pass-through: ids and processing state only.
-    assert adapter.matches("GET", "/v1/files") is RouteKind.NONE
-    assert adapter.matches("GET", "/v1/files/file_abc") is RouteKind.NONE
     assert adapter.matches("DELETE", "/v1/files/file_abc") is RouteKind.NONE
     assert adapter.matches("POST", "/v1/batches") is RouteKind.NONE
     assert adapter.matches("GET", "/v1/batches/batch_1") is RouteKind.NONE

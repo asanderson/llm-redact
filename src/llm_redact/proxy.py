@@ -2566,7 +2566,8 @@ async def handle(request: Request) -> Response:
         # /v1/files) get their JSONL file parts redacted; anything the
         # adapter declines to rewrite forwards verbatim (the non-JSON-body
         # default that keeps unknown formats working) — except under
-        # identity auth, refused above (_identity_body_problem).
+        # identity auth: refused above (_identity_body_problem), and any
+        # part the adapter would forward unscanned refused here.
         boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
         if boundary is not None:
             try:
@@ -2576,11 +2577,21 @@ async def handle(request: Request) -> Response:
                     boundary,
                     ctx.redactor,
                     inject_note=note_wanted and adapter.wants_system_note(kind, path),
+                    # Under the proxy's own identity every part must be
+                    # scanned: an unscanned piece refuses the whole request.
+                    require_scanned=upstream_auth is not None,
                 )
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the
                 # whole request is rejected.
                 return blocked_response(exc, adapter)
+            except UnredactableRequest as exc:
+                return refused_response(
+                    f"llm-redact: {exc}, and this provider is authorized with the proxy's"
+                    " own identity; the request was not forwarded",
+                    adapter,
+                    "unscanned multipart content under identity auth",
+                )
             if rewritten is not None:
                 outbound = rewritten
 

@@ -89,9 +89,9 @@ else takes the OpenAI files handling below.
 | `GET /v1/conversations/{id}/items/{item_id}` | chat | single item restored |
 | `DELETE /v1/conversations/{id}` (and `/items/{item_id}`) | pass-through | ids only |
 | `POST /v1/embeddings` | redact-only | vectors come back verbatim |
-| `POST /v1/files` | redact-only | multipart upload; JSONL file-part lines (batch + fine-tune) redacted, all other bytes preserved |
-| `GET /v1/files` | pass-through | metadata only |
-| `GET /v1/files/{id}` | pass-through | metadata only |
+| `POST /v1/files` | chat | multipart upload; JSONL file-part lines (batch + fine-tune) and every part's `filename` / `filename*` redacted, all other bytes preserved; the file object answering it echoes the filename, restored |
+| `GET /v1/files` | chat | the file list: each echoed filename restored in the request's own session |
+| `GET /v1/files/{id}` | chat | the file object: its echoed filename restored |
 | `GET /v1/files/{id}/content` | chat | batch output JSONL restored line by line |
 | `DELETE /v1/files/{id}` | pass-through | |
 | `POST /v1/batches` | pass-through | file ids + metadata only |
@@ -158,11 +158,13 @@ Both path families: the api-version form (`/openai/deployments/{d}/…`,
 `/openai/files`, `?api-version=` in the query) and the v1 API
 (`/openai/v1/…`, the model in the body). Classifications mirror the OpenAI
 table above, with one deliberate difference: the id/metadata routes OpenAI
-leaves as pass-through (file list/metadata/delete, batches, model and
-deployment listings, response/conversation delete) are RECOGNIZED on Azure,
-so `[providers.azure] auth = "identity"` does not refuse them. On a
-body-less request redact-only is a no-op; batch objects are **chat**
-because they echo the user `metadata` a batch create carries.
+leaves as pass-through (file delete, batches, model and deployment
+listings, response/conversation delete) are RECOGNIZED on Azure, so
+`[providers.azure] auth = "identity"` does not refuse them. On a body-less
+request redact-only is a no-op; batch objects are **chat** because they
+echo the user `metadata` a batch create carries, and file objects (the
+list and one file, as on OpenAI) because they echo the upload's
+redacted filename.
 
 | Endpoint | Classification | Notes |
 |---|---|---|
@@ -173,7 +175,7 @@ because they echo the user `metadata` a batch create carries.
 | `POST /openai/deployments/{d}/embeddings` | redact-only | |
 | `POST /openai/v1/embeddings` | redact-only | |
 | `POST /openai/deployments/{d}/images/generations` | redact-only | the prompt is redacted; image output verbatim |
-| `POST /openai/deployments/{d}/images/edits` | redact-only | multipart: the `prompt` form field is redacted, image parts byte-identical |
+| `POST /openai/deployments/{d}/images/edits` | redact-only | multipart: the `prompt` form field is redacted, image parts byte-identical; under identity auth every other form field is scanned as text too |
 | `POST /openai/deployments/{d}/audio/speech` | redact-only | text-to-speech `input` redacted; audio bytes verbatim |
 | `POST /openai/deployments/{d}/audio/transcriptions` | pass-through | audio media non-goal (identity auth refuses it) |
 | `POST /openai/responses` | chat | Responses on Azure, inherited from the OpenAI Responses adapter |
@@ -187,10 +189,12 @@ because they echo the user `metadata` a batch create carries.
 | `GET /openai/v1/conversations/{id}` | chat | |
 | `GET /openai/v1/conversations/{id}/items` | chat | list-envelope walk |
 | `DELETE /openai/v1/conversations/{id}` | redact-only | ids only |
-| `POST /openai/files` | redact-only | multipart JSONL upload, lines redacted (+ note on chat-shaped lines) |
-| `POST /openai/v1/files` | redact-only | |
-| `GET /openai/files` | redact-only | metadata only |
-| `GET /openai/files/{id}` | redact-only | metadata only |
+| `POST /openai/files` | chat | multipart JSONL upload, lines and filenames redacted (+ note on chat-shaped lines), the echoed filename restored; under identity auth a non-JSON-object line, a non-JSONL file, a non-UTF-8 form field, a part header without one reading (a `filename*` outside UTF-8 included), a Content-Transfer-Encoding, or a declared charset other than UTF-8/US-ASCII refuses the upload (400), and form fields are scanned as text |
+| `POST /openai/v1/files` | chat | |
+| `GET /openai/files` | chat | the file list: echoed filenames restored |
+| `GET /openai/files/{id}` | chat | the file object: echoed filename restored |
+| `GET /openai/v1/files` | chat | |
+| `GET /openai/v1/files/{id}` | chat | |
 | `DELETE /openai/files/{id}` | redact-only | |
 | `GET /openai/files/{id}/content` | chat | batch output JSONL restored line by line |
 | `GET /openai/v1/files/{id}/content` | chat | |
@@ -316,8 +320,8 @@ upstream; its matcher is proven disjoint from the Gemini Vertex adapter's
 (`rawPredict` vs `generateContent` verbs), and other publishers' rawPredict
 traffic (Llama, etc.) is deliberately not matched. Azure files
 uploads (`POST /openai/files`, `/openai/v1/files`) and content downloads
-reuse the OpenAI multipart/JSONL handling on Azure's path shapes; batches
-and file metadata are recognized (see the Azure table). **Azure OpenAI Responses**
+reuse the OpenAI multipart/JSONL/filename handling on Azure's path shapes;
+batches are recognized and file objects restored (see the Azure table). **Azure OpenAI Responses**
 (`POST /openai/responses` and the `/openai/v1/responses` preview, plus the
 stored-response and input-item GETs) reuses `OpenAIResponsesAdapter`
 wholesale via `AzureResponsesAdapter` — identical event vocabulary, delta

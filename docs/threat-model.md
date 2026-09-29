@@ -94,8 +94,9 @@ because breaking the tool teaches users to bypass the proxy).
 - Per-rule `block` mode rejects requests before any upstream contact.
 - Auth headers pass through untouched and are never logged.
 - Batch transports are covered like chat: JSONL lines in batch creation
-  and file uploads are redacted per line, results/output downloads are
-  restored per line, and an upload too large to buffer is rejected 413.
+  and file uploads are redacted per line (and every upload's filename,
+  restored on the file objects that echo it), results/output downloads
+  are restored per line, and an upload too large to buffer is rejected 413.
 - MCP connector configuration (`mcp_servers`, `tools type=mcp`) is
   deliberately NOT redacted: it is addressed to the provider, which must
   hold the real credential to call the MCP server on the model's behalf.
@@ -253,6 +254,8 @@ row, is [resilience.md](resilience.md).
 | Provider-side inference | The provider can guess redacted content from context; only omission fixes that |
 | Length/timing side channels | Placeholder lengths differ from originals; smoothing them would break streaming |
 | Base64 media contents | Images can't leak through text regexes; PDF parsing would need heavy deps |
+| Values a client deliberately encodes | base64 inside a JSON string, a quoted-printable or foreign-charset multipart part: the proxy scans the bytes it receives. Under identity auth a declared multipart Content-Transfer-Encoding or charset is refused (400) instead of signed |
+| Structural names | JSON object keys, header names and a multipart part's `name` are protocol, not content; values are scanned — string values, and an upload's `filename` / `filename*` |
 | Shapes the rules exclude | Bare-digit phones, street addresses, passport/DL numbers: collision-prone with no reliable grammar |
 | SigV4-signed provider traffic (AWS Bedrock via SDK credentials) | Permanent non-goal: the signature covers the payload hash, so a body-rewriting proxy can never transit a signature the CLIENT computed, and it never holds the user's AWS credentials to re-sign. The proxy MAY sign with its OWN identity (`[providers.bedrock] auth = "identity"`, llm-redact-pro): the client's credentials are stripped and the redacted body is signed by credentials the operator gave the proxy (a body the proxy could not redact — non-JSON, a top-level array or scalar, content-encoded, or multipart on a route it does not scan — is refused 400, never signed verbatim) — which any client that reaches the proxy can then spend, so pair it with the access gate or a loopback bind. Bearer-token Bedrock (API keys) IS supported: the proxy parses AWS's binary CRC-framed eventstream encoding natively (both CRCs validated per frame; a framing violation degrades to verbatim pass-through, so unrestored placeholders — never corrupted frames — are the worst case), and invoke-route bodies are rewritten only for positively recognized model-native shapes (Claude), with everything else forwarded verbatim |
 

@@ -21,7 +21,11 @@ Classifications:
   provider configured `auth = "identity"` (Bedrock, Vertex AI, Azure — the
   proxy signs with its OWN cloud identity) a pass-through route is instead
   REFUSED with a recorded local 403: the proxy lends its identity only to
-  the routes it recognizes
+  the routes it recognizes. On such a provider a chat or redact-only route
+  likewise signs only a body the proxy redacted: a non-empty body that is
+  not a JSON object (or canonical multipart on a route whose multipart
+  form is scanned), or that carries a `Content-Encoding`, is refused with
+  a recorded 400 instead of being forwarded verbatim
 - **websocket** — relayed by `realtime.py` (see the realtime sections of
   the README and threat model)
 

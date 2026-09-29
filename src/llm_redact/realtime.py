@@ -52,7 +52,7 @@ from llm_redact.audit import AuditWriteError
 from llm_redact.jsonwalk import STRUCTURAL_KEYS, transform_strings
 from llm_redact.plugin_api import UpstreamAuthError
 from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
-from llm_redact.redactor import BlockedRequest, Redactor
+from llm_redact.redactor import BlockedRequest, Redactor, UnredactableRequest
 from llm_redact.rehydrate import RehydratorPool
 
 if TYPE_CHECKING:
@@ -134,9 +134,18 @@ class WsAdapter:
         return path in self.identity_paths
 
     def redact_message(
-        self, data: str | bytes, ctx: "RequestContext", *, inject_note: bool = False
+        self,
+        data: str | bytes,
+        ctx: "RequestContext",
+        *,
+        inject_note: bool = False,
+        require_json: bool = False,
     ) -> str | bytes:
-        return data
+        """Rewrite one client frame. ``require_json`` (identity auth) turns
+        the verbatim forward of a frame the adapter cannot walk into
+        ``UnredactableRequest``: the proxy's own identity never carries an
+        unscanned frame."""
+        return _unparsed_frame(data, require_json)
 
     def rehydrate_message(self, data: str | bytes, pool: RehydratorPool) -> list[str | bytes]:
         return [data]
@@ -284,11 +293,16 @@ class OpenAIRealtimeWs(WsAdapter):
         return path == "/v1/realtime" or path.startswith("/v1/realtime/")
 
     def redact_message(
-        self, data: str | bytes, ctx: "RequestContext", *, inject_note: bool = False
+        self,
+        data: str | bytes,
+        ctx: "RequestContext",
+        *,
+        inject_note: bool = False,
+        require_json: bool = False,
     ) -> str | bytes:
         parsed = parse_json_text(data)
         if parsed is None:
-            return data
+            return _unparsed_frame(data, require_json)
         payload, was_binary = parsed
         # MCP connector tool entries (session/response tools with
         # type == "mcp") are provider-directed config whose credentials
@@ -514,11 +528,16 @@ class GeminiLiveWs(WsAdapter):
         )
 
     def redact_message(
-        self, data: str | bytes, ctx: "RequestContext", *, inject_note: bool = False
+        self,
+        data: str | bytes,
+        ctx: "RequestContext",
+        *,
+        inject_note: bool = False,
+        require_json: bool = False,
     ) -> str | bytes:
         parsed = parse_json_text(data)
         if parsed is None:
-            return data
+            return _unparsed_frame(data, require_json)
         payload, was_binary = parsed
         redacted = transform_strings(
             payload, ctx.redactor.redact_text, skip_keys=_GEMINI_LIVE_STRUCTURAL_KEYS
@@ -1089,8 +1108,20 @@ async def ws_handle(websocket: WebSocket) -> None:
             adapter.provider,
         )
     status: int | None = 101
+    # Under the proxy's own identity a frame the adapter cannot walk is
+    # refused, never relayed verbatim (the HTTP body rule; detection = false
+    # stays the explicit unredacted opt-out).
+    require_json = upstream_auth is not None
+
+    async def close_on_policy(reason: str) -> None:
+        # The client FIRST: closing the upstream first lets upstream_to_client
+        # mirror the upstream's 1000 to the client ahead of the 1008.
+        with contextlib.suppress(RuntimeError):
+            await websocket.close(code=1008, reason=_close_reason(reason))
+        await upstream.close(code=1000)
 
     async def client_to_upstream() -> None:
+        nonlocal status
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
@@ -1110,21 +1141,28 @@ async def ws_handle(websocket: WebSocket) -> None:
                     data
                     if not provider_config.detection
                     else adapter.redact_message(
-                        data, ctx, inject_note=state.config.inject_system_note
+                        data,
+                        ctx,
+                        inject_note=state.config.inject_system_note,
+                        require_json=require_json,
                     )
                 )
                 await upstream.send(outbound)
+            except UnredactableRequest as refused:
+                # Closed like a block: the frame never reaches the upstream
+                # and the session cannot continue without it. The row
+                # records 400 (the HTTP refusal status).
+                logger.info("WS %s -> refused (%s)", path, refused)
+                status = 400
+                await close_on_policy(f"refused by llm-redact ({refused})")
+                return
             except BlockedRequest as blocked:
                 # Block mode on a realtime stream: the event must never
                 # reach the upstream, and the connection cannot continue
                 # coherently without it — close both sides (1008 = policy
                 # violation; detector type only, never the value).
                 logger.info("WS %s -> blocked (%s)", path, blocked)
-                await upstream.close(code=1000)
-                with contextlib.suppress(RuntimeError):
-                    await websocket.close(
-                        code=1008, reason=f"blocked by llm-redact policy ({blocked})"
-                    )
+                await close_on_policy(f"blocked by llm-redact policy ({blocked})")
                 return
 
     async def upstream_to_client() -> None:
@@ -1181,6 +1219,14 @@ async def ws_handle(websocket: WebSocket) -> None:
             rehydrations=dict(pool.counts),
             audit_token=audit_token,
         )
+
+
+def _unparsed_frame(data: str | bytes, require_json: bool) -> str | bytes:
+    """A frame that is not JSON: forwarded byte-identically, or — under the
+    proxy's own identity — refused (the frame KIND only, never its bytes)."""
+    if require_json:
+        raise UnredactableRequest("realtime frame is not JSON llm-redact can redact")
+    return data
 
 
 def parse_json_text(data: str | bytes) -> tuple[Any, bool] | None:

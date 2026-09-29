@@ -273,6 +273,11 @@ class OpenAIAdapter(ProviderAdapter):
             key_overrides={"arguments": rehydrator.rehydrate_json_source_text},
         )
 
+    def redacts_multipart(self, path: str) -> bool:
+        # The Files upload (JSONL file parts) and the prompt-field media
+        # routes; suffix match so Azure's /openai/... shapes reuse it.
+        return path.endswith(("/files", *_PROMPT_FIELD_PATH_SUFFIXES))
+
     def redact_multipart(
         self, path: str, body: bytes, boundary: bytes, redactor: Redactor, *, inject_note: bool
     ) -> bytes | None:

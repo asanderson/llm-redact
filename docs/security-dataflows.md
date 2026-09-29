@@ -43,6 +43,12 @@ deliberate scope decisions rather than gaps:
 
 - **Unrecognized traffic passes through verbatim** (gate ③). Breaking the
   tool teaches users to remove the proxy, which protects nothing. The
+  exception is a provider authorized with the proxy's OWN identity
+  (`auth = "identity"`): there an unrecognized path is a recorded 403, and
+  on a recognized route a non-empty body the proxy did not redact (not a
+  JSON object or scanned canonical multipart, or content-encoded) is a
+  recorded **400 before any credential fetch or upstream contact** — a
+  non-JSON realtime frame closes the connection 1008 unsent. The
   same principle degrades a corrupt Bedrock eventstream frame to verbatim
   pass-through: unrestored placeholders are safe; guessing at corrupt
   frames is not.

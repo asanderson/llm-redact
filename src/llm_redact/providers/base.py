@@ -312,15 +312,16 @@ class ProviderAdapter(ABC):
     ) -> bytes | None:
         """Rewrite a multipart/form-data request body for ``path``.
 
-        None means "leave it alone" — the proxy forwards the original
-        bytes verbatim (matching the non-JSON-body default). Raising
-        BlockedRequest rejects the whole request: one leaking line in an
-        uploaded file is a leak. ``require_scanned`` (identity auth) makes
-        every piece the adapter would forward unscanned an
-        ``UnredactableRequest`` naming its kind: the proxy's own identity
-        signs only what the proxy scanned. This base scans nothing. (What
-        an upload cites for the stored-object check is read separately,
-        before redaction: ``upload_view.read_upload``.)
+        None means "nothing changed" — the proxy forwards the original
+        bytes. Raising BlockedRequest rejects the whole request: one
+        leaking line in an uploaded file is a leak. ``require_scanned``
+        makes every piece the adapter would forward unscanned an
+        ``UnredactableRequest`` naming its kind; the proxy always passes it
+        (the scanned-body rule: a recognized route forwards only what the
+        proxy read — under its own identity, and under the client's own key
+        wherever redaction applies). This base scans nothing. (What an
+        upload cites for the stored-object check is read separately, before
+        redaction: ``upload_view.read_upload``.)
 
         The proxy cannot see inside the parts, so an adapter that redacts
         them first raises ``redactor``'s token floors (``with_floors``) to
@@ -333,8 +334,8 @@ class ProviderAdapter(ABC):
 
     def redacts_multipart(self, path: str) -> bool:
         """Whether ``path`` is a multipart route whose body ``redact_multipart``
-        scans. Consulted only under identity auth, where a multipart body on
-        any other route is refused rather than signed unscanned."""
+        scans. Consulted by the scanned-body rule: a multipart body on any
+        other route is refused rather than forwarded unscanned."""
         return False
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:

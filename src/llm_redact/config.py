@@ -963,7 +963,8 @@ def identity_upstream_problem(url: str) -> str | None:
 
 
 def default_config_path() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    # An empty XDG_CONFIG_HOME is unset (the XDG spec), never the current dir.
+    xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(xdg) / "llm-redact" / "config.toml"
 
 

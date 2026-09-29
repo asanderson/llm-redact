@@ -25,7 +25,7 @@ import json
 from collections.abc import Hashable
 from typing import Any
 
-from llm_redact.jsonwalk import transform_strings
+from llm_redact.jsonwalk import json_text, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
@@ -139,7 +139,7 @@ class CohereAdapter(ProviderAdapter):
             payload = {"type": "tool-plan-delta", "delta": {"message": {"tool_plan": leftover}}}
         else:  # v1 text-generation
             payload = {"event_type": "text-generation", "text": leftover}
-        return SSEEvent(data=json.dumps(payload, ensure_ascii=False))
+        return SSEEvent(data=json_text(payload))
 
     def _flush(self, leftovers: dict[Hashable, str]) -> list[SSEEvent]:
         return [
@@ -175,7 +175,7 @@ class CohereAdapter(ProviderAdapter):
             if isinstance(node, dict) and isinstance(node.get(field), str):
                 key = ("tool_plan",) if kind == "tool_plan" else (kind, self._index(payload))
                 node[field] = pool.get(key, json_source=json_source).feed(node[field])
-                event.data = json.dumps(payload, ensure_ascii=False)
+                event.data = json_text(payload)
             return [event]
 
         # v2 *-end: flush that index's channel first (leftover → synthetic
@@ -195,7 +195,7 @@ class CohereAdapter(ProviderAdapter):
         v1_type = payload.get("event_type")
         if v1_type == "text-generation" and isinstance(payload.get("text"), str):
             payload["text"] = pool.get(("v1text",)).feed(payload["text"])
-            event.data = json.dumps(payload, ensure_ascii=False)
+            event.data = json_text(payload)
             return [event]
         if v1_type == "stream-end":
             return [*self._flush(pool.flush_all()), event]

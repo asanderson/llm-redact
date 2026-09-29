@@ -21,7 +21,9 @@ is subordinate to that goal. The proxy fails *closed* wherever the goal is
 at stake (oversized bodies are rejected rather than forwarded unredacted;
 a wrong vault key aborts startup rather than serving garbage) and fails
 *open* only where it is not (unrecognized traffic passes through verbatim,
-because breaking the tool teaches users to bypass the proxy).
+because breaking the tool teaches users to bypass the proxy; a recognized
+route forwards only a request body the proxy read — one it cannot read is
+refused, not forwarded unscanned).
 
 ## Assets
 
@@ -288,7 +290,12 @@ conscious decision the operator makes, and each is surfaced rather than
 silent:
 
 - `[providers.NAME] detection = false` forwards that provider's requests
-  unredacted (rehydration stays active). Logged per request, listed in
+  unredacted (rehydration stays active) — with the client's own key, a
+  body llm-redact cannot read included (a gzip or non-JSON body, a PDF
+  upload), which a redacting route refuses 400/415 instead (the
+  scanned-body rule: a recognized route never forwards a body the proxy
+  did not read; under a credential the proxy holds it holds whatever
+  `detection` says). Logged per request, listed in
   `/status` `providers_detection_off` and the `status`/`doctor` posture
   output. Meant
   for upstreams you own end to end (a local Ollama).
@@ -343,10 +350,10 @@ row, is [resilience.md](resilience.md).
 | Provider-side inference | The provider can guess redacted content from context; only omission fixes that |
 | Length/timing side channels | Placeholder lengths differ from originals; smoothing them would break streaming |
 | Base64 media contents | Images can't leak through text regexes; PDF parsing would need heavy deps. Media blobs at their known positions (base64 `data`, Bedrock `source.bytes`) are not even scanned — scanning base64 finds nothing real, costs event-loop CPU, and could rewrite a token-shaped run inside an image |
-| Values a client deliberately encodes | base64 inside a JSON string, a quoted-printable or foreign-charset multipart part: the proxy scans the bytes it receives. Under identity auth a declared multipart Content-Transfer-Encoding or charset is refused (400) instead of signed |
+| Values a client deliberately encodes | base64 inside a JSON string: the proxy scans the bytes it receives. What the proxy could not read as its plain bytes is refused instead of forwarded wherever redaction applies (and under any credential the proxy holds): a `Content-Encoding` other than identity (415), a declared multipart Content-Transfer-Encoding or charset (400) |
 | Structural names | JSON object keys, header names and a multipart part's `name` are protocol, not content; values are scanned — string values, and an upload's `filename` / `filename*` |
 | Shapes the rules exclude | Bare-digit phones, street addresses, passport/DL numbers: collision-prone with no reliable grammar |
-| SigV4-signed provider traffic (AWS Bedrock via SDK credentials) | Permanent non-goal: the signature covers the payload hash, so a body-rewriting proxy can never transit a signature the CLIENT computed, and it never holds the user's AWS credentials to re-sign. The proxy MAY sign with its OWN identity (`[providers.bedrock] auth = "identity"`, llm-redact-pro): the client's credentials are stripped and the redacted body is signed by credentials the operator gave the proxy (a body the proxy could not redact — non-JSON, a top-level array or scalar, content-encoded (in any Content-Encoding header), sent with a repeated Content-Type, or multipart on a route it does not scan — is refused 400, never signed verbatim) — which any client that reaches the proxy can then spend, so pair it with the access gate or a loopback bind. Bearer-token Bedrock (API keys) IS supported: the proxy parses AWS's binary CRC-framed eventstream encoding natively (both CRCs validated per frame; a framing violation degrades to verbatim pass-through, so unrestored placeholders — never corrupted frames — are the worst case), and invoke-route bodies are rewritten only for positively recognized model-native shapes (Claude), with everything else forwarded verbatim |
+| SigV4-signed provider traffic (AWS Bedrock via SDK credentials) | Permanent non-goal: the signature covers the payload hash, so a body-rewriting proxy can never transit a signature the CLIENT computed, and it never holds the user's AWS credentials to re-sign. The proxy MAY sign with its OWN identity (`[providers.bedrock] auth = "identity"`, llm-redact-pro): the client's credentials are stripped and the redacted body is signed by credentials the operator gave the proxy (a body the proxy could not redact — non-JSON, a top-level array or scalar, content-encoded in any Content-Encoding header (415), sent with a repeated Content-Type, or multipart on a route it does not scan — is refused 400, never signed verbatim; the same scanned-body rule holds for key-authorized routes wherever redaction applies) — which any client that reaches the proxy can then spend, so pair it with the access gate or a loopback bind. Bearer-token Bedrock (API keys) IS supported: the proxy parses AWS's binary CRC-framed eventstream encoding natively (both CRCs validated per frame; a framing violation degrades to verbatim pass-through, so unrestored placeholders — never corrupted frames — are the worst case), and invoke-route bodies are rewritten only for positively recognized model-native shapes (Claude), with everything else forwarded verbatim |
 
 ## Residual risks
 

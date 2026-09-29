@@ -216,7 +216,8 @@ LOOKUP_CHUNK = 500
 
 
 def default_vault_path() -> Path:
-    xdg = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+    # An empty XDG_DATA_HOME is unset (the XDG spec), never the current dir.
+    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
     return Path(xdg) / "llm-redact" / "vault.db"
 
 

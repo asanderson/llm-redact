@@ -6,11 +6,12 @@ auth modes, the rest of the header block byte-identical. The provider echoes
 the name in the file object (the upload response, the list, one file), all
 CHAT, so the tool sees its original name again (static session).
 
-A filename without a single reading is refused under identity auth and left
-verbatim under key auth (both pinned). Under identity only, a part the proxy
+A filename without a single reading is refused, and so is a part the proxy
 could not read as plain bytes — a Content-Transfer-Encoding, a declared
-charset other than UTF-8/US-ASCII — is refused; key auth keeps forwarding
-it (the documented encoding non-goal, pinned).
+charset other than UTF-8/US-ASCII: under identity auth and, since the
+scanned-body rule, under the client's own key wherever redaction applies
+(both pinned). ``detection = false`` with the client's own key forwards
+such an upload as sent (pinned).
 """
 
 from __future__ import annotations
@@ -370,31 +371,45 @@ async def test_identity_refuses_what_it_cannot_read(
 
 
 @pytest.mark.parametrize("case", sorted(REFUSED))
-async def test_key_auth_forwards_the_same_uploads(case: str) -> None:
+async def test_key_auth_refuses_the_same_uploads(case: str) -> None:
     upstream = FilesUpstream()
-    body, _ = REFUSED[case]
+    body, kind = REFUSED[case]
     async with _client(_app(Config(), upstream)) as client:
         response = await client.post(
             _route(case, False), content=body, headers={**_headers(), **AUTH}
         )
+    assert response.status_code == 400 and upstream.requests == []
+    assert response.json()["error"]["message"] == (
+        f"llm-redact: {kind}, and on this route llm-redact forwards only bodies it has"
+        " redacted; the request was not forwarded"
+    )
+
+
+@pytest.mark.parametrize("case", sorted(REFUSED))
+async def test_detection_off_forwards_the_same_uploads_as_sent(case: str) -> None:
+    upstream = FilesUpstream()
+    body, _ = REFUSED[case]
+    off = ProviderConfig("https://api.openai.com", detection=False)
+    config = Config(providers={**Config().providers, "openai": off})
+    async with _client(_app(config, upstream)) as client:
+        response = await client.post(
+            _route(case, False), content=body, headers={**_headers(), **AUTH}
+        )
     assert response.status_code == 200
-    # Byte-identical: a filename without a single reading (or in a foreign
-    # charset) is left verbatim, and declared encodings are the documented
-    # key-auth non-goal (the base64-in-JSON class). The JSONL content is
-    # still routed and scanned (it is clean here; see the next test).
     assert upstream.requests[0].content == body
 
 
-async def test_ambiguous_filename_still_routes_the_content_under_key_auth() -> None:
+async def test_an_ambiguous_filename_refuses_the_whole_upload_under_key_auth() -> None:
+    # The lines would be scanned, but the part header has no single
+    # reading: the upstream could file the content under another name.
     upstream = FilesUpstream()
     line = b'{"custom_id": "a", "body": {"q": "' + EMAIL.encode() + b'"}}'
     tail = b'filename="C:\\data\\' + EMAIL.encode() + b'.jsonl"'
     body = _form(PURPOSE, _jsonl_part(tail, content=line))
     async with _client(_app(Config(), upstream)) as client:
-        await client.post("/v1/files", content=body, headers={**_headers(), **AUTH})
-    sent = upstream.requests[0].content
-    assert tail in sent  # the header block: verbatim (pinned)
-    assert line not in sent and b'"q": "' + TOKEN.encode() + b'"' in sent  # the lines: redacted
+        response = await client.post("/v1/files", content=body, headers={**_headers(), **AUTH})
+    assert response.status_code == 400 and upstream.requests == []
+    assert EMAIL not in response.text
 
 
 @pytest.mark.parametrize(

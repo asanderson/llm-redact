@@ -17,6 +17,7 @@ import stat
 import sys
 import urllib.parse
 from pathlib import Path
+from typing import Any
 
 from llm_redact import __version__
 from llm_redact.config import (
@@ -66,16 +67,10 @@ class _Report:
 
     def finish(self) -> None:
         if self.json_mode:
-            import json
-
             from llm_redact import __version__ as version
+            from llm_redact.jsonwalk import json_text
 
-            print(
-                json.dumps(
-                    {"version": version, "failed": self.failed, "checks": self.rows},
-                    ensure_ascii=False,
-                )
-            )
+            print(json_text({"version": version, "failed": self.failed, "checks": self.rows}))
 
 
 def _check_platform(report: _Report) -> None:
@@ -218,7 +213,8 @@ def _check_proxy(report: _Report, config: Config) -> None:
             report.line("WARN", "proxy", f"not running at {where} ({problem})")
         _check_port_free(report, config)
         return
-    running = str(response.json().get("version", "?"))
+    status = response.json()
+    running = str(status.get("version", "?"))
     if running != __version__:
         report.line(
             "WARN",
@@ -227,6 +223,25 @@ def _check_proxy(report: _Report, config: Config) -> None:
         )
     else:
         report.line("PASS", "proxy", f"running {running} at {where}")
+    _check_live_vault(report, status)
+
+
+def _check_live_vault(report: _Report, status: Any) -> None:
+    """What only the running proxy knows about its vault (doctor never
+    connects to a vault database): an RDBMS response map its database user
+    could not ALTER to add the kind column, so stored objects' owner
+    records share the Responses rows' bound — heavy Responses traffic can
+    then push them out."""
+    vault = status.get("vault") if isinstance(status, dict) else None
+    if isinstance(vault, dict) and vault.get("owner_bound_shared") is True:
+        report.line(
+            "WARN",
+            "vault",
+            "the running proxy's database user could not add the kind column to"
+            " llm_redact_response_sessions: stored objects' owner records share the"
+            " Responses bound (ALTER TABLE llm_redact_response_sessions ADD kind VARCHAR(8)"
+            " DEFAULT 'response' NOT NULL, then restart)",
+        )
 
 
 def _check_port_free(report: _Report, config: Config) -> None:

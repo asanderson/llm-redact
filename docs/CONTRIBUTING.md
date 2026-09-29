@@ -73,6 +73,21 @@ Other conventions worth knowing before writing tests:
   default and double-gated on env vars + API keys.
 - NER and OTel tests inject fake models/exporters so the suite runs
   without any extra installed.
+- The session never touches your machine (`tests/isolation.py`, applied
+  by `conftest.py` before collection): `HOME` and the XDG
+  config/data/state dirs point into one throwaway directory — whatever
+  your environment set, subprocesses included — and a deployment's
+  `LLM_REDACT_*` variables (config file, vault DSN/key/key command,
+  proxy URL, bind) are dropped; the test-control ones
+  (`LLM_REDACT_TEST_*`, `LLM_REDACT_LIVE*`, the live model picks,
+  `LLM_REDACT_PRO_*`, `LLM_REDACT_LICENSE_*`) are kept. The run FAILS
+  when anything under the real llm-redact config/data dirs, the agent
+  plugins' command dirs or the user service unit was created, changed or
+  removed while it ran; a real proxy (or another checkout's test run) on
+  the same machine writes there too, so
+  `LLM_REDACT_TEST_ALLOW_REAL_DIR_CHANGES=1` skips that check. A test
+  that needs a real-looking home builds one under `tmp_path`
+  (`isolation_root` is the session's).
 
 ## Adding a detection rule
 

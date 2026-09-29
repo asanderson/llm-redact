@@ -9,12 +9,14 @@ redacted (and chat-shaped ones get the system note). Every part's
 ``filename`` is redacted too, and the file object the provider echoes (the
 upload response, the file list, one file's metadata) is restored. Plain
 form fields are scanned as UTF-8 text like the JSON strings they mirror (a
-``user`` field as a chat body's ``user``), except the structural ones —
-enums, sizes, counts, the model — which key auth forwards as sent. Under
-key auth anything the proxy cannot read in the upload — binary documents,
-unparseable lines, a field that is not UTF-8 — is preserved
-byte-identically; under the proxy's own identity every piece must be
-scanned or the upload is refused.
+``user`` field as a chat body's ``user``). The proxy requires every piece
+of an upload scanned (``require_scanned``, the scanned-body rule: under the
+proxy's own identity, and under the client's own key wherever redaction
+applies): anything it cannot read — a binary or text document, an
+unparseable line, a field that is not UTF-8 — refuses the upload. A caller
+that does not require it (``require_scanned=False``) gets the lenient
+reading: the structural fields — enums, sizes, counts, the model — as
+sent, and what cannot be read preserved byte-identically.
 ``GET /v1/files/{id}/content`` rehydrates batch OUTPUT files the same way,
 line by line. ``/v1/batches`` carries file ids,
 processing state and the caller's own ``metadata`` (free-form strings the
@@ -34,13 +36,13 @@ from collections.abc import Hashable, Mapping
 from typing import Any
 
 from llm_redact import multipart
-from llm_redact.jsonwalk import loads_request, transform_strings
+from llm_redact.jsonwalk import json_bytes, json_text, loads_request, transform_strings
 from llm_redact.placeholders import json_floors, may_carry_tokens, merge_floors, token_floors
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
-from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS, json_line
+from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS
 
 _FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
 # The file list and one file's object: both echo each upload's filename.
@@ -57,7 +59,8 @@ _PROMPT_FIELDS = frozenset({"prompt"})
 # twin of jsonwalk.STRUCTURAL_KEYS: enums, sizes, counts and the model name
 # of the multipart routes redact_multipart handles (verified against the
 # OpenAI/Azure Files upload, Images edit and Videos create schemas), plus
-# RFC 7578's ``_charset_`` declaration. Key auth forwards them as sent;
+# RFC 7578's ``_charset_`` declaration. The lenient reading
+# (``require_scanned=False``) forwards them as sent;
 # every other plain field (``user``, ``prompt``, anything unknown) is user
 # content and is redacted as text, as its JSON twin is. The proxy's own
 # identity scans them all (it signs only what it read).
@@ -124,8 +127,8 @@ def _redact_text_part(
     part: multipart.MultipartPart, redactor: Redactor, *, require_scanned: bool
 ) -> bool:
     """Redact a form part's content as UTF-8 text, in place; True when it
-    changed. Content that is not UTF-8 is left alone — or, under identity
-    auth (``require_scanned``), refused as unscannable."""
+    changed. Content that is not UTF-8 is left alone — or, when every piece
+    must be scanned (``require_scanned``), refused as unscannable."""
     try:
         text = part.content.decode("utf-8")
     except UnicodeDecodeError:
@@ -241,12 +244,11 @@ def _leftover_to_delta(key: Hashable, text: str) -> tuple[int, dict[str, Any]] |
 
 def _synthetic_chunk(index: int, delta: dict[str, Any]) -> SSEEvent:
     return SSEEvent(
-        data=json.dumps(
+        data=json_text(
             {
                 "object": "chat.completion.chunk",
                 "choices": [{"index": index, "delta": delta, "finish_reason": None}],
-            },
-            ensure_ascii=False,
+            }
         )
     )
 
@@ -549,7 +551,7 @@ class OpenAIAdapter(ProviderAdapter):
                     require_scanned=require_scanned,
                 )
         except multipart.AmbiguousHeaders as exc:
-            # Only reachable under identity auth (require_scanned): a part
+            # Only reachable with require_scanned (strict header reads): a part
             # header without a single reading is never signed.
             raise UnredactableRequest(str(exc)) from None
         return parsed.serialize() if changed else None
@@ -564,7 +566,7 @@ class OpenAIAdapter(ProviderAdapter):
         require_scanned: bool,
     ) -> bool:
         # The upload's file name is user content on every route (the part
-        # name is structural, like a JSON key). Strict under identity auth,
+        # name is structural, like a JSON key). Strict with require_scanned,
         # so the routing reads below always see the one reading.
         changed = part.redact_filenames(redactor.redact_text, strict=require_scanned)
         kind = _part_kind(part, media=media, require_scanned=require_scanned)
@@ -617,7 +619,7 @@ class OpenAIAdapter(ProviderAdapter):
                 elif isinstance(redacted.get("messages"), list):
                     # Fine-tuning line: a bare chat example.
                     redacted = self.inject_system_note(redacted)
-            out.append(json_line(redacted))
+            out.append(json_bytes(redacted))
         return b"\n".join(out)
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
@@ -634,7 +636,7 @@ class OpenAIAdapter(ProviderAdapter):
             if hydrated == obj:
                 out.append(line)
             else:
-                out.append(json.dumps(hydrated, ensure_ascii=False).encode("utf-8"))
+                out.append(json_bytes(hydrated))
                 changed = True
         return b"\n".join(out) if changed else None
 
@@ -690,7 +692,7 @@ class OpenAIAdapter(ProviderAdapter):
             synthetic.extend(self._flush_to_events(pool.flush_matching(_for_choice)))
 
         if changed:
-            event.data = json.dumps(payload, ensure_ascii=False)
+            event.data = json_text(payload)
         return [*synthetic, event]
 
     @staticmethod
@@ -701,12 +703,11 @@ class OpenAIAdapter(ProviderAdapter):
                 # Legacy completions leftover: a text_completion-shaped chunk.
                 events.append(
                     SSEEvent(
-                        data=json.dumps(
+                        data=json_text(
                             {
                                 "object": "text_completion",
                                 "choices": [{"index": key[0], "text": text, "finish_reason": None}],
-                            },
-                            ensure_ascii=False,
+                            }
                         )
                     )
                 )

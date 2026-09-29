@@ -248,7 +248,9 @@ while the vault row is the secret store and is never exported.
   past its newest 10,000 records, only one whose creating session holds
   no mappings can be dropped, and Responses traffic never pushes one out
   (an RDBMS user that may not `ALTER` the table keeps the old shared
-  bound, with a warning). A session router may then
+  bound, with a warning — surfaced value-free as `/status`
+  `vault.owner_bound_shared`, in `llm-redact status` posture and as a
+  `doctor` WARN read from the running proxy). A session router may then
   refuse a request that reaches another namespace's object
   (`object_access_refusal`): the core answers a recorded, provider-shaped
   **403** before the audit START row, redaction, any upstream credential

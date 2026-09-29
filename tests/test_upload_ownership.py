@@ -133,14 +133,15 @@ def test_a_line_repeating_a_key_is_read_as_the_provider_reads_it() -> None:
 
 
 def test_a_rewritten_line_keeps_a_lone_surrogate_as_the_same_json_value() -> None:
-    # Only a \ud800-style escape can carry a lone surrogate, which has no
-    # UTF-8 form: the rewritten line escapes it again (every non-ASCII
-    # character escaped, the same JSON value) instead of failing the upload.
+    # A \ud800-style escape can carry a lone surrogate, which has no UTF-8
+    # form: the rewritten line escapes it again (jsonwalk.json_bytes — only
+    # the surrogate, every other character as the upload had it; the same
+    # JSON value) instead of failing the upload.
     repeated = b'{"body": {"file_id": "file-a"}, "body": {"input": "\\ud800 \xc2\xab"}}\n'
     body = _form(_file(repeated))
     view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
-    assert view.cited == [{"body": {"input": "\ud800 \u00ab"}}]
-    assert view.normalized == body.replace(repeated, b'{"body": {"input": "\\ud800 \\u00ab"}}\n')
+    assert view.cited == [{"body": {"input": "\ud800 «"}}]
+    assert view.normalized == body.replace(repeated, b'{"body": {"input": "\\ud800 \xc2\xab"}}\n')
 
 
 @pytest.mark.parametrize(
@@ -437,11 +438,12 @@ async def test_with_the_clients_own_credential_a_pass_through_upload_is_not_read
 
 
 @pytest.mark.parametrize(
-    ("headers", "why"),
+    ("headers", "why", "status"),
     [
         pytest.param(
             [("content-type", "application/json"), ("content-encoding", "gzip")],
             "content-encoded",
+            415,
             id="content-encoded",
         ),
         pytest.param(
@@ -450,12 +452,13 @@ async def test_with_the_clients_own_credential_a_pass_through_upload_is_not_read
                 ("content-type", "multipart/form-data; boundary=b"),
             ],
             "more than one Content-Type",
+            400,
             id="two-content-types",
         ),
     ],
 )
 async def test_a_matched_body_the_check_cannot_read_is_never_sent_with_the_proxys_credential(
-    headers: list[tuple[str, str]], why: str, monkeypatch: pytest.MonkeyPatch
+    headers: list[tuple[str, str]], why: str, status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     router = LineRouter()
     app, fake, upstream = _routed(
@@ -471,16 +474,17 @@ async def test_a_matched_body_the_check_cannot_read_is_never_sent_with_the_proxy
             content=body,
             headers=httpx.Headers([*headers, (ROUTE_HEADER, "r")]),
         )
-    assert response.status_code == 400
+    assert response.status_code == status
     assert why in response.json()["error"]["message"]  # provider-shaped: a matched route
     assert router.checks == [] and fake.plans[0].begun == [] and upstream.requests == []
-    # With the client's own credential the same body is not refused here.
+    # With the client's own credential and detection = false (the explicit
+    # opt-out) the same body is not refused: nothing reads it at all.
     app, fake, _ = _routed(
         monkeypatch,
         LineRouter(),
         "/v1/chat/completions",
         proxy_credential=False,
-        providers={**Config().providers, "openai": ProviderConfig(UPSTREAM)},
+        providers={**Config().providers, "openai": ProviderConfig(UPSTREAM, detection=False)},
     )
     async with _client(app) as client:
         response = await client.post(

@@ -1,15 +1,17 @@
-"""Identity auth signs a multipart upload only when every piece was scanned.
+"""A multipart upload is forwarded only when every piece was scanned.
 
 On the multipart routes llm-redact redacts (Files uploads, image edits),
-a key-authorized upload forwards whatever the adapter does not rewrite
-byte-identically: non-JSON JSONL lines, text or binary files, structural
-form fields (``purpose``, ``model``, ``size`` …), a form field that is not
-UTF-8, and the bytes outside every part (every other plain form field is
-scanned as text, like its JSON twin). Under ``auth = "identity"`` each of
-those is either scanned (every plain form field, as UTF-8 text) or the
-WHOLE request is refused with a recorded 400 naming its kind — never signed
-unscanned. Image/video parts on the media routes stay the documented media
-non-goal (like base64 media in a JSON body).
+every piece of an upload is scanned — non-JSON JSONL lines, text or binary
+files, a form field that is not UTF-8 and the bytes outside every part
+would otherwise go out unscanned — or the WHOLE request is refused with a
+recorded 400 naming its kind: under ``auth = "identity"`` (never signed
+unscanned) and, since the scanned-body rule (tests/test_scanned_body.py),
+under the client's own key wherever redaction applies too. Every plain
+form field is scanned as UTF-8 text, structural ones (``purpose``,
+``model``, ``size`` …) included. ``detection = false`` with the client's
+own key stays the explicit opt-out: the upload is forwarded as sent.
+Image/video parts on the media routes stay the documented media non-goal
+(like base64 media in a JSON body).
 """
 
 from __future__ import annotations
@@ -140,9 +142,25 @@ async def test_unscanned_multipart_piece_refused_under_identity(
 
 
 @pytest.mark.parametrize("case", sorted(REFUSED))
-async def test_passthrough_still_forwards_the_same_upload_verbatim(case: str) -> None:
+async def test_key_auth_refuses_the_same_upload(case: str) -> None:
     upstream = _Upstream(b"{}")
     app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    path, body = REFUSED[case]
+    openai_path = "/v1/images/edits" if "edits" in path else "/v1/files"
+    async with _client(app) as client:
+        response = await client.post(
+            openai_path, content=body, headers={**_headers(), "authorization": "Bearer sk-t"}
+        )
+    assert response.status_code == 400 and upstream.requests == []
+    message = response.json()["error"]["message"]
+    assert KINDS[case] in message and "forwards only bodies it has redacted" in message
+
+
+@pytest.mark.parametrize("case", sorted(REFUSED))
+async def test_detection_off_still_forwards_the_same_upload_verbatim(case: str) -> None:
+    upstream = _Upstream(b"{}")
+    off = ProviderConfig("https://api.openai.com", detection=False)
+    app = create_app(_config(openai=off), upstream_transport=httpx.MockTransport(upstream))
     path, body = REFUSED[case]
     openai_path = "/v1/images/edits" if "edits" in path else "/v1/files"
     async with _client(app) as client:
@@ -205,12 +223,12 @@ async def test_plain_form_fields_scanned_on_passthrough_structural_ones_as_sent(
     assert PNG in sent  # the image itself: media, byte-identical
 
 
-async def test_structural_form_field_forwarded_as_sent_under_key_auth_only(
+async def test_a_structural_form_field_is_scanned_under_every_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A structural field's value is protocol (the `model` a JSON walk skips
-    # too): key auth sends it as is — the proxy's own identity signs even
-    # it only once scanned.
+    # too), yet it is scanned before it leaves: the scanned-body rule holds
+    # under the client's own key as under the proxy's own identity.
     body = _form(_field("purpose", EMAIL.encode()), _jsonl(CLEAN_LINE))
     upstream = _Upstream(b"{}")
     app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
@@ -218,7 +236,7 @@ async def test_structural_form_field_forwarded_as_sent_under_key_auth_only(
         await client.post(
             "/v1/files", content=body, headers={**_headers(), "authorization": "Bearer t"}
         )
-    assert upstream.requests[0].content == body
+    assert EMAIL.encode() not in upstream.requests[0].content
     _install(monkeypatch)
     upstream = _Upstream(b"{}")
     app = create_app(

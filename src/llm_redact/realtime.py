@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from llm_redact.audit import AuditWriteError
-from llm_redact.jsonwalk import STRUCTURAL_KEYS, transform_strings
+from llm_redact.jsonwalk import STRUCTURAL_KEYS, json_bytes, json_text, transform_strings
 from llm_redact.placeholders import json_floors, may_carry_tokens, token_floors
 from llm_redact.plugin_api import UpstreamAuthError
 from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
@@ -1381,5 +1381,4 @@ def frame_floors(data: str | bytes) -> dict[str, int]:
 def _dump_frame(payload: Any, was_binary: bool) -> str | bytes:
     """Re-serialize a rewritten event in the SAME frame type it arrived in
     (Gemini Live sends JSON in binary frames; OpenAI uses text)."""
-    text = json.dumps(payload, ensure_ascii=False)
-    return text.encode("utf-8") if was_binary else text
+    return json_bytes(payload) if was_binary else json_text(payload)

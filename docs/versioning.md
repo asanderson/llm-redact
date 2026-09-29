@@ -24,10 +24,12 @@ only change in a MAJOR release, with a documented migration.
   (the documented exception: the llm-redact-pro config-editor GET, a
   `lookup`-equivalent, returns allowlist and deny values).
 - **Proxying behavior contracts**: unrecognized traffic forwards
-  verbatim; oversized redactable bodies fail closed (413); block mode
-  answers 400 before upstream contact; streaming output equals
-  whole-text output; a framing violation degrades to verbatim
-  pass-through, never corruption.
+  verbatim, only to the provider it is positively attributed to (an
+  unattributable request is a local 404); a recognized route forwards only
+  a body it scanned (400/415 otherwise); oversized redactable bodies fail
+  closed (413); block mode answers 400 before upstream contact; streaming
+  output equals whole-text output; a framing violation degrades to
+  verbatim pass-through, never corruption.
 - **Runtime dependencies**: exactly three (httpx, starlette, uvicorn).
   Growing that set in a MINOR release would change the audit surface
   users signed up for — it is treated as a breaking change. Optional

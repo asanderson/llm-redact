@@ -34,7 +34,9 @@ boundary is *tested* — the attacker-scenario → coverage map — is in
 
 **In scope**: secret values leaking into logs, the audit DB, metrics, or
 error responses; redaction bypasses on covered body shapes; cross-session
-placeholder restoration; vault files created with permissive modes;
+placeholder restoration; a request, or its credential, forwarded to a
+provider other than the one the client addressed; vault files created with
+permissive modes;
 `/__llm-redact/*` endpoints reachable cross-origin or forwarded upstream;
 a web page able to drive an API route or a realtime connection through the
 proxy (CSRF, DNS rebinding, cross-site WebSocket) — spending a credential

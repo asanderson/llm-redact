@@ -229,8 +229,8 @@ states ITS truth rather than a generic reassurance:
 | Tool | Routing check | How protection actually starts |
 |---|---|---|
 | Claude Code | `ANTHROPIC_BASE_URL` points at the proxy | Relaunch via `llm-redact run -- claude` (the base URL is read once at launch — `/reload-plugins` reloads the plugin, not the routing) |
-| Codex | `OPENAI_BASE_URL` points at the proxy | Launch via `llm-redact run -- codex` |
-| OpenCode | `OPENAI_BASE_URL` points at the proxy | Launch via `llm-redact run -- opencode` |
+| Codex | `OPENAI_BASE_URL` points at the proxy's `/v1` | Launch via `llm-redact run -- codex` |
+| OpenCode | `OPENAI_BASE_URL` points at the proxy's `/v1` | Launch via `llm-redact run -- opencode` |
 | Cursor | Custom-API-key mode with the base-URL override in Cursor's settings | Cursor routes AI traffic through its own backend by default — unless you confirm the custom-API-key setup, the guard says plainly that Cursor's conversation traffic is NOT protected |
 
 On the CLI side, `llm-redact plugin install` ends with the same posture

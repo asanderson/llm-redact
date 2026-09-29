@@ -2,10 +2,12 @@
 
 On the multipart routes llm-redact redacts (Files uploads, image edits),
 a key-authorized upload forwards whatever the adapter does not rewrite
-byte-identically: non-JSON JSONL lines, text or binary files, plain form
-fields, and the bytes outside every part. Under ``auth = "identity"`` each of
-those is either scanned (plain form fields, as UTF-8 text) or the WHOLE
-request is refused with a recorded 400 naming its kind — never signed
+byte-identically: non-JSON JSONL lines, text or binary files, structural
+form fields (``purpose``, ``model``, ``size`` …), a form field that is not
+UTF-8, and the bytes outside every part (every other plain form field is
+scanned as text, like its JSON twin). Under ``auth = "identity"`` each of
+those is either scanned (every plain form field, as UTF-8 text) or the
+WHOLE request is refused with a recorded 400 naming its kind — never signed
 unscanned. Image/video parts on the media routes stay the documented media
 non-goal (like base64 media in a JSON body).
 """
@@ -17,7 +19,7 @@ import logging
 import httpx
 import pytest
 
-from llm_redact.config import Config
+from llm_redact.config import Config, ProviderConfig
 from llm_redact.providers.base import ProviderAdapter
 from llm_redact.providers.bedrock import BedrockAdapter
 from llm_redact.proxy import create_app
@@ -172,15 +174,100 @@ async def test_form_fields_scanned_as_text_under_identity(monkeypatch: pytest.Mo
     assert built[0].calls[0][3] == sent
 
 
-async def test_plain_form_fields_stay_unscanned_on_passthrough() -> None:
+async def test_plain_form_fields_scanned_on_passthrough_structural_ones_as_sent() -> None:
+    # Key auth scans plain form fields like the JSON strings they mirror (a
+    # chat body's `user` is redacted by the walk; so is the form's), and
+    # forwards the structural ones — enums, sizes, the model — as sent.
     upstream = _Upstream(b"{}")
     app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
-    body = _form(_field("prompt", b"brighter"), _field("user", EMAIL.encode()))
+    structural = [
+        _field("model", b"gpt-image-1"),
+        _field("size", b"1024x1024"),
+        _field("n", b"1"),
+        _field("response_format", b"b64_json"),
+        _field("quality", b"high"),
+    ]
+    body = _form(
+        _field("prompt", b"brighter"),
+        _field("user", EMAIL.encode()),
+        *structural,
+        _file("image", "in.png", PNG, "image/png"),
+    )
     async with _client(app) as client:
-        await client.post(
+        response = await client.post(
             "/v1/images/edits", content=body, headers={**_headers(), "authorization": "Bearer t"}
         )
-    assert upstream.requests[0].content == body  # today's behavior, pinned
+    assert response.status_code == 200
+    sent = upstream.requests[0].content
+    assert EMAIL.encode() not in sent and "«EMAIL_001»".encode() in sent
+    for headers, value in structural:
+        assert headers + b"\r\n\r\n" + value + b"\r\n" in sent
+    assert PNG in sent  # the image itself: media, byte-identical
+
+
+async def test_structural_form_field_forwarded_as_sent_under_key_auth_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A structural field's value is protocol (the `model` a JSON walk skips
+    # too): key auth sends it as is — the proxy's own identity signs even
+    # it only once scanned.
+    body = _form(_field("purpose", EMAIL.encode()), _jsonl(CLEAN_LINE))
+    upstream = _Upstream(b"{}")
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    async with _client(app) as client:
+        await client.post(
+            "/v1/files", content=body, headers={**_headers(), "authorization": "Bearer t"}
+        )
+    assert upstream.requests[0].content == body
+    _install(monkeypatch)
+    upstream = _Upstream(b"{}")
+    app = create_app(
+        _config(azure=_identity(AZURE)), upstream_transport=httpx.MockTransport(upstream)
+    )
+    async with _client(app) as client:
+        await client.post(AZURE_FILES, content=body, headers=_headers())
+    assert EMAIL.encode() not in upstream.requests[0].content
+
+
+async def test_unknown_and_nameless_form_fields_are_scanned_on_passthrough() -> None:
+    upstream = _Upstream(b"{}")
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    nameless = (b"Content-Type: text/plain", b"reach " + EMAIL.encode())
+    body = _form(
+        _field("purpose", b"batch"),
+        _field("note", b"from " + EMAIL.encode()),
+        nameless,
+        _jsonl(CLEAN_LINE),
+    )
+    async with _client(app) as client:
+        await client.post(
+            "/v1/files", content=body, headers={**_headers(), "authorization": "Bearer t"}
+        )
+    sent = upstream.requests[0].content
+    assert EMAIL.encode() not in sent and sent.count("«EMAIL_001»".encode()) == 2
+    assert b'name="purpose"\r\n\r\nbatch\r\n' in sent
+
+
+async def test_form_user_and_json_user_share_one_placeholder() -> None:
+    # The multipart field and its JSON twin now redact alike, into the same
+    # vault identity.
+    upstream = _Upstream(b"{}")
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    auth = {"authorization": "Bearer t"}
+    async with _client(app) as client:
+        await client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "user": EMAIL, "messages": [{"role": "user", "content": "hi"}]},
+            headers=auth,
+        )
+        await client.post(
+            "/v1/images/edits",
+            content=_form(_field("prompt", b"x"), _field("user", EMAIL.encode())),
+            headers={**_headers(), **auth},
+        )
+    assert "«EMAIL_001»".encode() in upstream.requests[0].content
+    assert "«EMAIL_001»".encode() in upstream.requests[1].content
+    assert all(EMAIL.encode() not in request.content for request in upstream.requests)
 
 
 async def test_scanned_jsonl_with_blank_and_crlf_lines_still_signed(
@@ -214,3 +301,23 @@ def test_base_multipart_hook_scans_nothing() -> None:
             inject_note=False,
             require_scanned=True,
         )
+
+
+async def test_azure_key_auth_scans_the_user_field_too() -> None:
+    upstream = _Upstream(b"{}")
+    app = create_app(
+        _config(azure=ProviderConfig(AZURE)), upstream_transport=httpx.MockTransport(upstream)
+    )
+    body = _form(
+        _field("prompt", b"brighter"),
+        _field("user", EMAIL.encode()),
+        _field("size", b"1024x1024"),
+        _file("image", "in.png", PNG, "image/png"),
+    )
+    async with _client(app) as client:
+        response = await client.post(
+            AZURE_EDITS, content=body, headers={**_headers(), "api-key": "azure-key"}
+        )
+    assert response.status_code == 200
+    sent = upstream.requests[0].content
+    assert EMAIL.encode() not in sent and b"1024x1024" in sent and PNG in sent

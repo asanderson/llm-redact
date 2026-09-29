@@ -91,7 +91,7 @@ else takes the OpenAI files handling below.
 | `GET /v1/conversations/{id}/items/{item_id}` | chat | single item restored |
 | `DELETE /v1/conversations/{id}` (and `/items/{item_id}`) | pass-through | ids only |
 | `POST /v1/embeddings` | redact-only | vectors come back verbatim |
-| `POST /v1/files` | chat | multipart upload; JSONL file-part lines (batch + fine-tune) and every part's `filename` / `filename*` redacted, all other bytes preserved; the file object answering it echoes the filename, restored |
+| `POST /v1/files` | chat | multipart upload; JSONL file-part lines (batch + fine-tune), every part's `filename` / `filename*` and every non-structural plain form field redacted (structural fields — `purpose`, `expires_after[…]` — as sent), all other bytes preserved; the file object answering it echoes the filename, restored |
 | `GET /v1/files` | chat | the file list: each echoed filename restored in the request's own session |
 | `GET /v1/files/{id}` | chat | the file object: its echoed filename restored |
 | `GET /v1/files/{id}/content` | chat | batch output JSONL restored line by line |
@@ -107,7 +107,7 @@ else takes the OpenAI files handling below.
 | `POST /v1/audio/translations` | pass-through | audio media non-goal |
 | `POST /v1/audio/speech` | redact-only | the text-to-speech `input` is user text and is redacted; the audio response is bytes forwarded verbatim |
 | `POST /v1/images/generations` | redact-only | the OUTPUT is media, but the `prompt` is plain text and is redacted; the response (`b64_json`/`url`) comes back verbatim — a dall-e-3 `revised_prompt` echo may carry placeholder tokens (fail-safe: the value it hides was never exposed) |
-| `POST /v1/images/edits` | redact-only | multipart: the `prompt` form FIELD is redacted; image/mask file parts are media and stay byte-identical |
+| `POST /v1/images/edits` | redact-only | multipart: the `prompt` form FIELD is redacted, and so is every other non-structural plain field (`user`, like its JSON twin); structural fields (`model`, `size`, `n`, `quality`, `response_format`, …) are forwarded as sent; image/mask file parts are media and stay byte-identical |
 | `POST /v1/images/variations` | pass-through | image in, images out — no text anywhere in the request |
 | `POST /v1/videos` | chat | Sora job create: the `prompt` (JSON or multipart form field) is redacted, and the returned job object's prompt ECHO is restored; multipart `input_reference` media stays byte-identical |
 | `GET /v1/videos` | chat | job list: echoed prompts restored via the list-envelope walk |
@@ -177,7 +177,7 @@ file) because they echo the upload's redacted filename.
 | `POST /openai/deployments/{d}/embeddings` | redact-only | |
 | `POST /openai/v1/embeddings` | redact-only | |
 | `POST /openai/deployments/{d}/images/generations` | redact-only | the prompt is redacted; image output verbatim |
-| `POST /openai/deployments/{d}/images/edits` | redact-only | multipart: the `prompt` form field is redacted, image parts byte-identical; under identity auth every other form field is scanned as text too |
+| `POST /openai/deployments/{d}/images/edits` | redact-only | multipart: the `prompt` and every other non-structural form field (`user`) redacted, structural fields as sent, image parts byte-identical; under identity auth the structural fields are scanned as text too |
 | `POST /openai/deployments/{d}/audio/speech` | redact-only | text-to-speech `input` redacted; audio bytes verbatim |
 | `POST /openai/deployments/{d}/audio/transcriptions` | pass-through | audio media non-goal (identity auth refuses it) |
 | `POST /openai/responses` | chat | Responses on Azure, inherited from the OpenAI Responses adapter |
@@ -191,7 +191,7 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/conversations/{id}` | chat | |
 | `GET /openai/v1/conversations/{id}/items` | chat | list-envelope walk |
 | `DELETE /openai/v1/conversations/{id}` | redact-only | ids only |
-| `POST /openai/files` | chat | multipart JSONL upload, lines and filenames redacted (+ note on chat-shaped lines), the echoed filename restored; under identity auth a non-JSON-object line, a non-JSONL file, a non-UTF-8 form field, a part header without one reading (a `filename*` outside UTF-8 included), a Content-Transfer-Encoding, or a declared charset other than UTF-8/US-ASCII refuses the upload (400), and form fields are scanned as text |
+| `POST /openai/files` | chat | multipart JSONL upload, lines and filenames redacted (+ note on chat-shaped lines), the echoed filename restored; under identity auth a non-JSON-object line, a non-JSONL file, a non-UTF-8 form field, a part header without one reading (a `filename*` outside UTF-8 included), a Content-Transfer-Encoding, or a declared charset other than UTF-8/US-ASCII refuses the upload (400), and every form field is scanned as text (under key auth all but the structural ones) |
 | `POST /openai/v1/files` | chat | |
 | `GET /openai/files` | chat | the file list: echoed filenames restored |
 | `GET /openai/files/{id}` | chat | the file object: echoed filename restored |

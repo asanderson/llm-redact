@@ -2912,13 +2912,13 @@ async def handle(request: Request) -> Response:
         and parsed is None
         and body_bytes
         and (upstream_auth is not None or not detection_off)
-        and adapter.redacts_multipart(path)
         and _multipart_parts_over(request.headers, body_bytes, max_body_strings)
     ):
-        # A multipart body this request would parse (to redact it, or to
-        # vouch for it under identity auth) with more parts than
-        # max_body_strings allows: refused before any parse — a body of
-        # many empty parts costs the event loop per part, not per byte.
+        # A multipart body on a matched route (redacted there, or vouched
+        # for under identity auth) with more parts than max_body_strings
+        # allows: refused before any parse — a body of many empty parts
+        # costs the event loop per part, not per byte. Like max_body_bytes,
+        # the cap holds on every matched route.
         return too_many_strings(adapter)
     if upstream_auth is not None and adapter is not None and body_bytes:
         # The proxy's own identity signs only a body the proxy could read:

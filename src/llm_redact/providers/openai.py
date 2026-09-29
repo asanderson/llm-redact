@@ -7,10 +7,14 @@ multipart/form-data whose file part is JSONL — batch input lines
 both carry user content, so every line that parses as a JSON object is
 redacted (and chat-shaped ones get the system note). Every part's
 ``filename`` is redacted too, and the file object the provider echoes (the
-upload response, the file list, one file's metadata) is restored. Under
-key auth anything else in the upload — form fields, binary documents,
-unparseable lines — is preserved byte-identically; under the proxy's own
-identity every piece must be scanned or the upload is refused.
+upload response, the file list, one file's metadata) is restored. Plain
+form fields are scanned as UTF-8 text like the JSON strings they mirror (a
+``user`` field as a chat body's ``user``), except the structural ones —
+enums, sizes, counts, the model — which key auth forwards as sent. Under
+key auth anything the proxy cannot read in the upload — binary documents,
+unparseable lines, a field that is not UTF-8 — is preserved
+byte-identically; under the proxy's own identity every piece must be
+scanned or the upload is refused.
 ``GET /v1/files/{id}/content`` rehydrates batch OUTPUT files the same way,
 line by line. ``/v1/batches`` carries file ids,
 processing state and the caller's own ``metadata`` (free-form strings the
@@ -47,6 +51,36 @@ _STORED_COMPLETION_RE = re.compile(r"/v1/chat/completions/[^/]+")
 # JSONL-file-part handling.
 _PROMPT_FIELD_PATH_SUFFIXES = ("/images/edits", "/videos")
 _PROMPT_FIELDS = frozenset({"prompt"})
+
+# Plain form fields whose values are protocol, not content — the multipart
+# twin of jsonwalk.STRUCTURAL_KEYS: enums, sizes, counts and the model name
+# of the multipart routes redact_multipart handles (verified against the
+# OpenAI/Azure Files upload, Images edit and Videos create schemas), plus
+# RFC 7578's ``_charset_`` declaration. Key auth forwards them as sent;
+# every other plain field (``user``, ``prompt``, anything unknown) is user
+# content and is redacted as text, as its JSON twin is. The proxy's own
+# identity scans them all (it signs only what it read).
+_STRUCTURAL_FORM_FIELDS = frozenset(
+    {
+        "_charset_",
+        "background",
+        "expires_after[anchor]",
+        "expires_after[seconds]",
+        "input_fidelity",
+        "model",
+        "moderation",
+        "n",
+        "output_compression",
+        "output_format",
+        "partial_images",
+        "purpose",
+        "quality",
+        "response_format",
+        "seconds",
+        "size",
+        "stream",
+    }
+)
 
 # Sora video jobs: list/create, item retrieve/delete, and remix. The
 # binary /content download deliberately does NOT match (media
@@ -109,7 +143,8 @@ def _redact_text_part(
 def _part_kind(part: multipart.MultipartPart, *, media: bool, require_scanned: bool) -> str:
     """How the upload's part loop reads a part: "jsonl" (a file part of a
     JSONL upload, line by line), "text" (UTF-8 text), "media" (a media file
-    part, never read) or "field" (a plain form field, forwarded as-is)."""
+    part, never read) or "field" (a structural form field, forwarded
+    as-is)."""
     if media and part.name in _PROMPT_FIELDS:
         # Matched by NAME regardless of a filename attribute: a prompt
         # part dressed up as a file upload must not slip past the scan
@@ -118,10 +153,12 @@ def _part_kind(part: multipart.MultipartPart, *, media: bool, require_scanned: b
         return "text"
     if part.filename is not None:
         return "media" if media else "jsonl"  # media: never scanned
-    # Plain form fields (purpose, model, size, user, ...) are forwarded
-    # as-is by default; the proxy's own identity signs them only once
-    # scanned as text.
-    return "text" if require_scanned else "field"
+    # A plain form field is user content (`user`, anything unknown — a part
+    # with no name included) unless structural (`purpose`, `model`, `size`
+    # ...); the proxy's own identity signs even those only once scanned.
+    if require_scanned or part.name not in _STRUCTURAL_FORM_FIELDS:
+        return "text"
+    return "field"
 
 
 def _multipart_floors(parsed: multipart.Multipart, *, media: bool) -> dict[str, int]:

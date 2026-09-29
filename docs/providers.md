@@ -174,10 +174,13 @@ declared charset other than UTF-8/US-ASCII (its Content-Type `charset`,
 or the RFC 7578 `_charset_` field). The image and mask parts of an
 image edit are media — the documented non-goal, as base64 media in a
 JSON body — and are signed as sent (their filenames redacted).
-Key-authorized uploads are unchanged: unscanned pieces forward verbatim,
-plain form fields are not scanned, a filename without a single reading
-is left as sent, and declared encodings are the encoding non-goal (the
-proxy scans the bytes it receives). Realtime
+Key-authorized uploads scan what they can read and forward the rest
+verbatim: plain form fields are scanned as UTF-8 text like their JSON
+twins (a form's `user` as a chat body's `user`) except the structural
+ones (`purpose`, `model`, `size`, `n`, `quality`, `response_format`, …),
+which are forwarded as sent, as is a field that is not UTF-8; a filename
+without a single reading is left as sent, and declared encodings are the
+encoding non-goal (the proxy scans the bytes it receives). Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with

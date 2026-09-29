@@ -347,6 +347,17 @@ async def test_multipart_parts_over_the_cap_refused_before_any_parse(
     assert app.state.proxy.recent[-1]["status"] == 413
 
 
+async def test_parts_are_counted_on_every_matched_route() -> None:
+    # Like max_body_bytes: a JSON route sent a multipart body is capped too
+    # (the OpenAI-family hook scans multipart on any matched route).
+    upstream = _Upstream()
+    app = _app(upstream, max_body_strings=3)
+    body = _form(*[_field("x", b"")] * 4)
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", content=body, headers=_MP)
+    assert response.status_code == 413 and upstream.requests == []
+
+
 async def test_multipart_parts_at_the_cap_are_parsed_and_forwarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

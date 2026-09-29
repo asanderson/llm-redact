@@ -43,11 +43,11 @@ class SealingRouter:
     def record_response_id(self, response_id: str, session_id: str) -> None:
         return None
 
-    def sealed(self, session_id: str) -> bool:
+    def sealed(self, session_id: str) -> Any:
         self.asked.append(session_id)
         if isinstance(self.seal, Exception):
             raise self.seal
-        return bool(self.seal)
+        return self.seal
 
 
 class Upstream:
@@ -142,7 +142,7 @@ async def test_a_multipart_upload_into_a_sealed_session_is_refused(
     assert response.status_code == 403 and upstream.requests == []
 
 
-@pytest.mark.parametrize("seal", [False, 0, None])
+@pytest.mark.parametrize("seal", [False, 0, None, ""])
 async def test_an_unsealed_session_redacts_as_usual(
     seal: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -153,6 +153,20 @@ async def test_an_unsealed_session_redacts_as_usual(
     assert response.status_code == 200
     assert EMAIL.encode() not in upstream.requests[0].content
     assert response.json()["choices"][0]["message"]["content"] == f"you said {EMAIL}"
+
+
+async def test_the_routers_own_reason_is_the_refusal_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    reason = "llm-redact: this conversation's earlier turns are no longer known"
+    upstream = Upstream()
+    app = _app(monkeypatch, tmp_path, SealingRouter(seal=reason), upstream)
+    async with _client(app) as client:
+        refused = await client.post("/v1/chat/completions", json=_chat(f"mail {EMAIL}"))
+        served = await client.post("/v1/chat/completions", json=_chat("go on"))
+    assert refused.status_code == 403
+    assert refused.json() == OpenAIAdapter().error_body(reason, status=403)
+    assert served.status_code == 200 and len(upstream.requests) == 1
 
 
 async def test_a_failing_router_seals(

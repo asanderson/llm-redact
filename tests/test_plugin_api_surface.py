@@ -276,7 +276,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``is_durable(session_id) -> bool``",
         "``record_object_id(object_id, session_id) -> bool | None``",
         "``object_access_refusal(adapter_name, method, path, body, *, identity) -> str | None``",
-        "``sealed(session_id) -> bool``",
+        "``sealed(session_id) -> bool | str``",
         "``listing_item_session(object_id) -> str | None``",
     ),
 }

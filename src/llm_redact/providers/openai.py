@@ -5,11 +5,20 @@ platform.openai.com docs, 2026-07): ``POST /v1/files`` is
 multipart/form-data whose file part is JSONL — batch input lines
 ({custom_id, method, url, body}) and fine-tuning lines ({messages: [...]})
 both carry user content, so every line that parses as a JSON object is
-redacted (and chat-shaped ones get the system note); anything else in the
-upload — form fields, binary documents, unparseable lines — is preserved
-byte-identically. ``GET /v1/files/{id}/content`` rehydrates batch OUTPUT
-files the same way, line by line. ``/v1/batches`` itself carries only file
-ids and processing metadata: deliberate pass-through, pinned by test.
+redacted (and chat-shaped ones get the system note). Every part's
+``filename`` is redacted too, and the file object the provider echoes (the
+upload response, the file list, one file's metadata) is restored. Under
+key auth anything else in the upload — form fields, binary documents,
+unparseable lines — is preserved byte-identically; under the proxy's own
+identity every piece must be scanned or the upload is refused.
+``GET /v1/files/{id}/content`` rehydrates batch OUTPUT files the same way,
+line by line. ``/v1/batches`` carries file ids,
+processing state and the caller's own ``metadata`` (free-form strings the
+batch object echoes on every read): create is redacted and every echo —
+a batch's GET, its cancel, and the LIST — restored in the request's own
+session (Azure's handling). With llm-redact-pro's named users a listing
+resolves to an empty session and the session router attributes each
+listed batch to the session that created it (``listing_item_session``).
 Batch flows use the static vault session (an async fetch has no
 conversation anchor — the realtime WS stance); a user-scoping session
 router (llm-redact-pro's named users) makes that the user's own copy.
@@ -42,6 +51,12 @@ _PROMPT_FIELDS = frozenset({"prompt"})
 # binary /content download deliberately does NOT match (media
 # pass-through) — only single-segment ids and the /remix action do.
 _VIDEO_ROUTE_RE = re.compile(r"/v1/videos(?:/[^/]+(?:/remix)?)?")
+
+# Batches whose request or response carries the caller's `metadata`:
+# create (POST /v1/batches) and cancel, a batch's GET and the list (every
+# answer is a batch object, or a list of them, echoing that metadata).
+_BATCH_POST_RE = re.compile(r"/v1/batches|/v1/batches/[^/]+/cancel")
+_BATCH_GET_RE = re.compile(r"/v1/batches(?:/[^/]+)?")
 
 
 def _parse_object_line(line: bytes) -> dict[str, Any] | None:
@@ -274,8 +289,20 @@ class OpenAIAdapter(ProviderAdapter):
             if method in ("POST", "GET"):
                 return RouteKind.CHAT
             return RouteKind.NONE
-        # /v1/batches and file list/metadata/delete carry ids and
-        # processing metadata only: deliberate pass-through, pinned by test.
+        if (method == "POST" and _BATCH_POST_RE.fullmatch(path)) or (
+            method == "GET" and _BATCH_GET_RE.fullmatch(path)
+        ):
+            # Batches: create carries the caller's free-form `metadata`
+            # (redacted out), and create/retrieve/cancel/list all answer
+            # with batch objects echoing it (restored back, in the request's
+            # own session — llm-redact-pro reads a named user's listing in
+            # an empty session and restores only that user's own items).
+            # Structural fields — input_file_id, endpoint,
+            # completion_window, ids, status, counts — carry nothing a
+            # detector matches (pinned by test).
+            return RouteKind.CHAT
+        # File delete carries ids only: deliberate pass-through, pinned by
+        # test.
         return RouteKind.NONE
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
@@ -289,9 +316,9 @@ class OpenAIAdapter(ProviderAdapter):
             # Item bodies carry `items`, not `messages`; injecting the note
             # would graft a spurious `messages` field and corrupt the request.
             return False
-        if path.startswith("/v1/videos"):
-            # Video job bodies have no messages field either — a note would
-            # graft one and corrupt the create/remix request.
+        if path.startswith(("/v1/videos", "/v1/batches")):
+            # Video job and batch bodies have no messages field either — a
+            # note would graft one and corrupt the request.
             return False
         return kind is RouteKind.CHAT or path == "/v1/files"
 

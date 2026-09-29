@@ -361,10 +361,14 @@ async def test_identity_subprotocol_allowlist(offered: list[str], kept: list[str
     assert identity_subprotocols(offered) == expected
 
 
-# --- Azure batch list is never rehydrated ------------------------------------------
+# --- Azure batch list is restored in the request's own session ---------------------
 
 
-async def test_azure_batch_list_passes_through_but_a_batch_is_restored() -> None:
+async def test_azure_batch_list_and_a_batch_are_restored_in_the_requests_session() -> None:
+    # One shared namespace holds every batch's tokens, so the list is
+    # restored like a single batch; llm-redact-pro reads a named user's
+    # listing in an EMPTY session instead and restores only that user's
+    # own items (tests/test_object_access_seams.py, pro's e2e).
     upstream = _Upstream()
     app = create_app(
         _config(azure=ProviderConfig(AZURE)), upstream_transport=httpx.MockTransport(upstream)
@@ -382,8 +386,8 @@ async def test_azure_batch_list_passes_through_but_a_batch_is_restored() -> None
         listing = await client.get("/openai/batches?api-version=2024-10-21")
         upstream.content = batch
         single = await client.get("/openai/batches/b1?api-version=2024-10-21")
-    assert listing.json()["data"][0]["metadata"]["owner"] == token  # not restored
-    assert single.json()["metadata"]["owner"] == EMAIL  # the batch's own read: restored
+    assert listing.json()["data"][0]["metadata"]["owner"] == EMAIL
+    assert single.json()["metadata"]["owner"] == EMAIL
 
 
 # --- Bedrock CountTokens: the base64 invoke body is redacted -----------------------

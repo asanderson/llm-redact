@@ -73,14 +73,13 @@ class AzureOpenAIAdapter(OpenAIAdapter):
         # identity forwards only recognized routes, and Azure is one of the
         # three that can be. On a body-less request REDACT_ONLY is a no-op,
         # so a key-authorized setup forwards the same bytes it did before.
-        # Batch create/cancel and a single batch's GET are CHAT (the batch
-        # object echoes the creator's own `metadata`); the batch COLLECTION
-        # GET is REDACT_ONLY: a list spans batches other users created, and
-        # restoring their placeholders in the READER's vault namespace
-        # (llm-redact-pro named users) could hand one user a value bound in
-        # another's — the list passes through unrestored instead, except for
-        # items a session router attributes (`listing_item_session`), each
-        # restored in the session that created it.
+        # Batch create/cancel, a single batch's GET and the batch list are
+        # CHAT (batch objects echo the creator's own `metadata`). The list
+        # is restored in the request's own session: one shared namespace
+        # holds every batch's tokens, and llm-redact-pro resolves a named
+        # user's listing to an EMPTY session, then restores only the items
+        # that user created (`listing_item_session`) — never another
+        # user's placeholder in the reader's namespace.
         if method == "POST":
             return self._match_post(path)
         if method == "GET":
@@ -111,8 +110,6 @@ class AzureOpenAIAdapter(OpenAIAdapter):
 
     @staticmethod
     def _match_get(path: str) -> RouteKind:
-        if _AZURE_BATCH_COLLECTION.fullmatch(path):
-            return RouteKind.REDACT_ONLY  # the list: only attributed items restored
         if (
             _AZURE_FILE_CONTENT.fullmatch(path)
             or _AZURE_BATCHES.fullmatch(path)

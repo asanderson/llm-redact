@@ -163,17 +163,62 @@ logger = logging.getLogger("llm_redact")
 
 
 class RequestContext:
-    """The session-scoped objects one request redacts and rehydrates with."""
+    """The session-scoped objects one request redacts and rehydrates with.
 
-    __slots__ = ("session_id", "vault", "redactor", "rehydrator")
+    ``sealed``: the session router resolved this request to a session that
+    must stay EMPTY (``SessionRouter.sealed``) — its redactor refuses to
+    write (``SealedSessionError``), so a request with anything to redact is
+    refused and the session is never populated."""
+
+    __slots__ = ("session_id", "vault", "redactor", "rehydrator", "sealed")
 
     def __init__(
-        self, session_id: str, vault: Vault, redactor: Redactor, rehydrator: Rehydrator
+        self,
+        session_id: str,
+        vault: Vault,
+        redactor: Redactor,
+        rehydrator: Rehydrator,
+        sealed: bool = False,
     ) -> None:
         self.session_id = session_id
         self.vault = vault
         self.redactor = redactor
         self.rehydrator = rehydrator
+        self.sealed = sealed
+
+
+class SealedSessionError(Exception):
+    """A request resolved to a sealed session had something to redact:
+    writing it would populate a session that must stay empty."""
+
+
+class _SealedVault:
+    """A read-through view of a sealed session: lookups pass through, and
+    any new placeholder raises ``SealedSessionError`` instead of writing."""
+
+    def __init__(self, vault: Vault) -> None:
+        self._vault = vault
+
+    def placeholder_for(self, detector_type: str, original: str) -> str:
+        raise SealedSessionError(detector_type)
+
+    def original_for(self, placeholder: str) -> str | None:
+        return self._vault.original_for(placeholder)
+
+    def close(self) -> None:
+        pass
+
+    def __len__(self) -> int:
+        return len(self._vault)
+
+
+# The 403 text when a request resolved to a sealed session would redact a
+# value (never the value, never an id).
+_SEALED_REFUSAL = (
+    "llm-redact: this request is served in a vault session that must stay empty (it"
+    " reaches content llm-redact cannot attribute to you), and it carries values that"
+    " would need redacting there; it was not forwarded"
+)
 
 
 # Hop-by-hop / recomputed headers dropped when forwarding either direction.
@@ -366,6 +411,8 @@ class ProxyState:
         # hot path one `is None` test each.
         self._object_access_refusal = getattr(self.session_router, "object_access_refusal", None)
         self._listing_item_session = getattr(self.session_router, "listing_item_session", None)
+        self._record_object_id = getattr(self.session_router, "record_object_id", None)
+        self._sealed = getattr(self.session_router, "sealed", None)
         self._static_context = RequestContext(
             config.vault.session, self.vault, self.redactor, self.rehydrator
         )
@@ -497,7 +544,8 @@ class ProxyState:
         session_id = self.session_router.resolve(
             adapter.name if adapter is not None else None, method, path, parsed_body
         )
-        if session_id == self._static_context.session_id:
+        sealed = self._session_sealed(session_id)
+        if session_id == self._static_context.session_id and not sealed:
             return self._static_context
         vault = self.vault_manager.get(session_id)
         if session_id not in self._known_sessions:
@@ -525,7 +573,7 @@ class ProxyState:
         # counters: object construction only — no regex compilation, no DB open.
         redactor = Redactor(
             self.detectors,
-            vault,
+            _SealedVault(vault) if sealed else vault,
             self.allowlist,
             counts=self.detection_counts,
             modes=self.modes,
@@ -534,7 +582,20 @@ class ProxyState:
         rehydrator = Rehydrator(
             vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
         )
-        return RequestContext(session_id, vault, redactor, rehydrator)
+        return RequestContext(session_id, vault, redactor, rehydrator, sealed=sealed)
+
+    def _session_sealed(self, session_id: str) -> bool:
+        """The optional ``SessionRouter.sealed`` for the session this
+        request was just resolved to. A router that raises seals it: the
+        cost of being wrong is a refusal, never a populated session."""
+        check = self._sealed
+        if check is None:
+            return False
+        try:
+            return bool(check(session_id))
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            logger.warning("session router sealed failed (%s); sealing", type(exc).__name__)
+            return True
 
     def record_response_id(self, response_id: str, session_id: str) -> None:
         if self.session_router.mode == "static":
@@ -556,11 +617,13 @@ class ProxyState:
     ) -> ProviderAdapter | None:
         """The adapter whose ``tracks_object_ids`` claims this request — the
         routed one, else (pass-through) the addressed provider's — or None,
-        also whenever no router could use the ids (static mode). ``body`` is
-        the parsed request body (a stored chat completion is flagged there)."""
-        if self.session_router.mode == "static" or not hasattr(
-            self.session_router, "record_object_id"
-        ):
+        also whenever the router tracks no ownership (no optional
+        ``record_object_id``). Asked in EVERY mode: a router in static mode
+        may still separate namespaces (llm-redact-pro serves unattributed
+        traffic on the static path next to named users, and must know which
+        objects that shared session created). ``body`` is the parsed request
+        body (a stored chat completion is flagged there)."""
+        if self._record_object_id is None:
             return None
         if adapter is not None:
             return adapter if adapter.tracks_object_ids(method, path, body=body) else None
@@ -573,11 +636,9 @@ class ProxyState:
     def record_object_ids(self, object_ids: Sequence[str], session_id: str) -> None:
         """Ids of provider-stored objects (files, batches, conversations)
         created or first seen in ``session_id`` — reported to a router that
-        tracks ownership (the optional ``record_object_id``), mirrored in
-        the durable map unless the router vetoes it."""
-        if self.session_router.mode == "static":
-            return
-        record = getattr(self.session_router, "record_object_id", None)
+        tracks ownership (the optional ``record_object_id``, in any mode),
+        mirrored in the durable map unless the router vetoes it."""
+        record = self._record_object_id
         if record is None:
             return
         for object_id in object_ids:
@@ -628,14 +689,17 @@ class ProxyState:
                 return candidate
         return None
 
-    def listing_rehydrator(self, object_id: str) -> Rehydrator | None:
-        """A rehydrator over the EXISTING session the router names for one
-        listed object (``listing_item_session``), or None: no session named,
-        the router failed (the item keeps its placeholders), or the session
-        holds no mappings — it is never created here."""
+    def listing_restorer(self, object_id: str) -> tuple[bool, Rehydrator | None]:
+        """How one listed object is delivered (``listing_item_session``):
+        ``(False, None)`` — no session named (or the router failed): the item
+        stays as this request's own session delivers it; ``(True, None)`` —
+        the named session does not exist or holds nothing (it is never
+        created here), so restoring in it restores nothing: the item is
+        delivered as the provider sent it; ``(True, rehydrator)`` — restored
+        in that session."""
         name_session = self._listing_item_session
         if name_session is None:
-            return None
+            return False, None
         try:
             session_id = name_session(object_id)
         except Exception as exc:  # noqa: BLE001 — unsure means placeholders
@@ -643,16 +707,16 @@ class ProxyState:
                 "session router listing_item_session failed (%s); item left as is",
                 type(exc).__name__,
             )
-            return None
+            return False, None
         if not isinstance(session_id, str):
-            return None
+            return False, None
         has_session = getattr(self.vault_manager, "has_session", None)
         if has_session is not None and not has_session(session_id):
-            return None
+            return True, None
         vault = self.vault_manager.get(session_id)
         if len(vault) == 0:
-            return None
-        return Rehydrator(
+            return True, None
+        return True, Rehydrator(
             vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
         )
 
@@ -2471,6 +2535,24 @@ async def handle(request: Request) -> Response:
         )
         return JSONResponse(refused_adapter.error_body(message, status=400), status_code=400)
 
+    def sealed_response(sealed_adapter: ProviderAdapter) -> JSONResponse:
+        # The session router sealed this request's session (it must stay
+        # empty) and redaction would have written to it: refused before
+        # any upstream contact, the session untouched.
+        logger.info("%s %s -> 403 refused (sealed session)", request.method, path)
+        state.record_request(
+            session=ctx.session_id,
+            provider=sealed_adapter.name,
+            method=request.method,
+            path=path,
+            status=403,
+            started=started,
+            streamed=False,
+            detections={},
+            rehydrations={},
+        )
+        return JSONResponse(sealed_adapter.error_body(_SEALED_REFUSAL, status=403), status_code=403)
+
     # Routing (the llm-redact-pro routing layer): the router plans BEFORE
     # redaction because the FIRST upstream's inject_system_note governs the
     # prepared body (decision 4; the redacted body is reused on later hops).
@@ -2549,6 +2631,8 @@ async def handle(request: Request) -> Response:
             return blocked_response(exc, adapter)
         except UnredactableRequest as exc:
             return refused_response(str(exc), adapter, "undecodable field")
+        except SealedSessionError:
+            return sealed_response(adapter)
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
@@ -2592,6 +2676,8 @@ async def handle(request: Request) -> Response:
                     adapter,
                     "unscanned multipart content under identity auth",
                 )
+            except SealedSessionError:
+                return sealed_response(adapter)
             if rewritten is not None:
                 outbound = rewritten
 
@@ -3207,11 +3293,13 @@ def _restore_listing(
     """Restore each listed stored object in the session the router names
     for it (``listing_item_session``); every other item, and everything
     outside the item array, stays exactly as ``raw`` (the bytes about to be
-    delivered) has it. A named item is rehydrated as a whole object from
-    the provider's own bytes (``upstream_raw``) with the adapter's
-    non-streaming transform — never a second pass over an already-restored
-    item. None when nothing was restored (the bytes are then forwarded
-    untouched)."""
+    delivered) has it. A named item is rebuilt from the provider's own
+    bytes (``upstream_raw``) — rehydrated as a whole object with the
+    adapter's non-streaming transform, never a second pass over an
+    already-restored item; a named session that does not exist (or holds
+    nothing) restores nothing, so that item is delivered exactly as the
+    provider sent it. None when nothing changed (the bytes are then
+    forwarded untouched)."""
     try:
         original = json.loads(upstream_raw)
     except ValueError:
@@ -3219,11 +3307,11 @@ def _restore_listing(
     items = lister.listing_items(original)
     if not items:
         return None
-    restorers: dict[int, Rehydrator] = {}
+    restorers: dict[int, Rehydrator | None] = {}
     for index, item in enumerate(items):
         if isinstance(item, dict) and isinstance(item.get("id"), str):
-            rehydrator = state.listing_rehydrator(item["id"])
-            if rehydrator is not None:
+            named, rehydrator = state.listing_restorer(item["id"])
+            if named:
                 restorers[index] = rehydrator
     if not restorers:
         return None
@@ -3233,7 +3321,11 @@ def _restore_listing(
         return None  # a routed rewrite changed the shape: leave it alone
     changed = False
     for index, rehydrator in restorers.items():
-        restored = lister.rehydrate_body(items[index], rehydrator)
+        restored = (
+            lister.rehydrate_body(items[index], rehydrator)
+            if rehydrator is not None
+            else items[index]
+        )
         if restored != delivered_items[index]:
             delivered_items[index] = restored
             changed = True

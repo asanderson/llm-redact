@@ -184,7 +184,8 @@ def _client(app: Any) -> httpx.AsyncClient:
     [
         ("DELETE", "/v1/files/file-1", None, None),  # pass-through: no adapter, no body
         ("GET", "/v1/files/file-1/content", "openai", None),
-        ("POST", "/v1/batches/batch_1/cancel", None, None),
+        ("POST", "/v1/batches/batch_1/cancel", "openai", None),
+        ("DELETE", "/v1/videos/video_1", None, None),
         ("POST", "/v1/videos/video_1/remix", "openai", {"prompt": "a dog"}),
     ],
 )
@@ -421,12 +422,18 @@ async def test_a_named_item_is_restored_from_the_provider_bytes_not_twice(
     # GET /v1/videos is a CHAT route: the request's own session restores the
     # whole listing first; a named item is then restored from the PROVIDER's
     # bytes in its owner's session — never from the already-restored text.
-    router = ScriptedRouter(session="shared", owners={"video_a": "user:n1:main"})
+    # An item named to an EMPTY session (another namespace's, in a listing
+    # read in a populated session) keeps the provider's placeholder instead
+    # of the request session's value.
+    router = ScriptedRouter(
+        session="shared", owners={"video_a": "user:n1:main", "video_c": "never-written"}
+    )
     listing = {
         "object": "list",
         "data": [
             {"id": "video_a", "object": "video", "prompt": f"film {TOKEN}"},
             {"id": "video_b", "object": "video", "prompt": f"film {TOKEN}"},
+            {"id": "video_c", "object": "video", "prompt": f"film {TOKEN}"},
         ],
     }
     app = _app(monkeypatch, router, Upstream(listing))
@@ -438,6 +445,8 @@ async def test_a_named_item_is_restored_from_the_provider_bytes_not_twice(
     data = response.json()["data"]
     assert data[0]["prompt"] == f"film {ADA}"  # the owner's value
     assert data[1]["prompt"] == f"film {BOB}"  # the request's session, as today
+    assert data[2]["prompt"] == f"film {TOKEN}"  # an empty session restores nothing
+    assert manager.has_session("never-written") is False  # and was never created
 
 
 @pytest.mark.parametrize(

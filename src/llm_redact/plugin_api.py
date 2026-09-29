@@ -101,8 +101,11 @@ class SessionRouter(Protocol):
     (uploaded files, batches, message batches, stored conversations — see
     ``ProviderAdapter.object_ids_from_body``) with the session that created
     them, so a router can keep another user's later read of that object out
-    of the creator's namespace. ``False`` vetoes the durable mirror, as for
-    response ids; a router without the member is never called.
+    of the creator's namespace. Reported in EVERY ``mode`` (static
+    included: a router may serve unattributed traffic on the static path
+    and still need to know what that shared session created). ``False``
+    vetoes the durable mirror, as for response ids; a router without the
+    member is never called.
 
     OPTIONAL ``object_access_refusal(adapter_name, method, path, body, *,
     identity) -> str | None``: asked once for EVERY forwarded HTTP request
@@ -119,17 +122,31 @@ class SessionRouter(Protocol):
     logged by exception type only). A router without the member is never
     asked, and one that keeps no ownership should return None at once.
 
+    OPTIONAL ``sealed(session_id) -> bool``: asked right after ``resolve``
+    (so never in static mode, where nothing is resolved) with the session
+    the request was resolved to. True means that session must stay EMPTY:
+    the proxy reads it for rehydration, but redacting anything into it is
+    refused — an HTTP request with a value to redact gets a recorded,
+    provider-shaped 403 before any upstream contact (nothing is written),
+    a realtime connection is refused outright. A router uses it where it
+    resolves a request to an empty session because what the request reads
+    has another (or no confirmed) owner: whatever the request itself sent
+    would otherwise share placeholder names with what it reads. An
+    exception seals; a router without the member never seals.
+
     OPTIONAL ``listing_item_session(object_id) -> str | None``: for a 2xx
     listing of stored objects (``ProviderAdapter.lists_objects`` /
     ``listing_items`` — OpenAI-shaped ``{"object": "list", "data": [...]}``
     collections of files, batches, video jobs and stored chat completions),
     the vault session each listed item's placeholders should be restored
-    in. The proxy rehydrates that item — as a whole object, from the bytes
-    the provider sent — in the named session only when the session already
-    exists in the vault (it never creates one) and leaves every other item
-    as the request's own session delivers it. None (or an exception) leaves
-    the item alone. A listing never records ownership: nothing here reaches
-    ``record_object_id``.
+    in. The proxy rebuilds that item from the bytes the provider sent and
+    rehydrates it, as a whole object, in the named session; a session that
+    does not exist or holds nothing restores nothing (the proxy never
+    creates one), so the item then keeps the provider's placeholders —
+    name an empty session to keep an item OUT of the request's own
+    session. None (or an exception) leaves the item as the request's own
+    session delivers it. A listing never records ownership: nothing here
+    reaches ``record_object_id``.
 
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the

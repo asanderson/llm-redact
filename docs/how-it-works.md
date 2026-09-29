@@ -197,20 +197,38 @@ while the vault row is the secret store and is never exported.
   objects the provider stores for later reads — uploaded files, batches,
   message batches, stored conversations, Gemini context caches, video
   jobs and stored chat completions — with the session that created them
-  (`SessionRouter.record_object_id`). A session router may then refuse a
-  request that reaches another namespace's object
+  (`SessionRouter.record_object_id`, in every vault mode: a router may
+  serve unattributed traffic on the static path next to named users, and
+  that shared session's objects are no user's). A session router may then
+  refuse a request that reaches another namespace's object
   (`object_access_refusal`): the core answers a recorded, provider-shaped
   **403** before the audit START row, redaction, any upstream credential
   and any upstream contact, and is told whether the provider is
   authorized with the proxy's own cloud identity. llm-redact-pro refuses
-  every such reference under identity auth and every write (delete,
-  cancel, update) under passthrough keys. On an OpenAI-shaped listing
+  every such reference under identity auth, and in every mode anything
+  but a pure read (a body-less `GET`/`HEAD`): writes, and requests that
+  carry content of their own while citing the object (a chat's file
+  part, a `previous_response_id` continuation, a remix) — their own new
+  values would share placeholder names with the object's in the one
+  session the answer is restored from. A router may also mark the session
+  it resolved a request to as **sealed** (`SessionRouter.sealed`): the
+  core then reads it for rehydration but never writes to it — a request
+  that would redact a value there gets a recorded 403 before any upstream
+  contact (a realtime connection is refused), so an empty session a
+  router hands out for an object of unconfirmed ownership stays empty.
+  On an OpenAI-shaped listing
   (`GET` files, batches, video jobs, stored chat completions — OpenAI,
   Azure and `/custom/<name>/` alike) the router may name the session
   each listed object was created in (`listing_item_session`): the core
-  restores that item there — from the provider's own bytes, only when the
-  session exists — and leaves every other item's placeholders in place,
-  so each user sees their own items restored and nobody else's.
+  rebuilds that item from the provider's own bytes and restores it there
+  (a session that does not exist, or holds nothing, restores nothing —
+  the item keeps the provider's placeholders; the core never creates
+  one). Items the router names nothing for stay as the listing's own
+  session delivers them. llm-redact-pro reads a named user's listing in
+  an empty session and names each item's creator session or an empty
+  one, so each user sees their own items restored and nobody else's. The
+  batch list itself is a **chat** route: with one shared namespace it is
+  restored like a single batch.
 - `compaction_forks` counts only a session first seen by this process
   whose history carries placeholders it cannot own: a persisted session
   resumed after a restart (its vault already holds the tokens) and a

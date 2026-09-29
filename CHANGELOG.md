@@ -70,6 +70,12 @@ providers refuse to start.
   (or none): vector stores, fine-tuning, moderations, assistants/threads, uploads,
   Anthropic and Gemini Files, stored-completion list/update/delete and Ollama model
   management need the client's own key.
+- With llm-redact-pro's per-conversation sessions or named users, a Responses
+  compaction (`POST /v1/responses/compact`) or input-token count
+  (`/v1/responses/input_tokens`) that carries a value to redact is refused `403`
+  until llm-redact-pro resolves the two routes: it reads `compact` and
+  `input_tokens` as the id of a Response it has no record of. Both used to be
+  forwarded unredacted; the default static session is unaffected.
 - A config reload that changes an open realtime connection's provider settings,
   its authorizer or `[detection]` closes it with `1012` (reconnect).
 - The `realtime` extra requires websockets 15.0 or newer.

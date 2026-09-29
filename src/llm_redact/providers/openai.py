@@ -103,6 +103,24 @@ def _string_ids(body: Any, keys: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(str(body[k]) for k in keys if isinstance(body.get(k), str) and body[k])
 
 
+# Sora video jobs: create (POST …/videos) and remix (POST …/videos/{id}/remix,
+# which creates a NEW video) answer with the stored video object — later
+# read by id (GET …/videos/{id}). Tail-anchored like the batch pattern.
+_VIDEO_CREATE_RE = re.compile(r"(?:^|/)videos(?:/[^/]+/remix)?$")
+
+
+def _stored_completion_create(path: str, body: Any) -> bool:
+    """A chat completion created with ``store: true``: OpenAI keeps it for
+    later reads (GET …/chat/completions/{id}); without the flag nothing is
+    stored and nothing is reported (one durable row per chat request would
+    grow the map without bound)."""
+    return (
+        path.rstrip("/").endswith("/chat/completions")
+        and isinstance(body, dict)
+        and body.get("store") is True
+    )
+
+
 def _tail_is_create(path: str) -> bool:
     """POST to the collection itself (``…/files``, ``…/batches``,
     ``…/conversations``), not to a member or sub-resource."""
@@ -199,8 +217,12 @@ class OpenAIAdapter(ProviderAdapter):
             return False
         return kind is RouteKind.CHAT or path == "/v1/files"
 
-    def tracks_object_ids(self, method: str, path: str) -> bool:
-        if method == "POST" and _tail_is_create(path):
+    def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
+        if method == "POST" and (
+            _tail_is_create(path)
+            or _VIDEO_CREATE_RE.search(path.rstrip("/")) is not None
+            or _stored_completion_create(path, body)
+        ):
             return True
         return method in ("GET", "POST") and _BATCH_OBJECT_RE.search(path) is not None
 

@@ -102,7 +102,7 @@ class VertexAdapter(GeminiAdapter):
             return RouteKind.REDACT_ONLY
         return RouteKind.CHAT
 
-    def tracks_object_ids(self, method: str, path: str) -> bool:
+    def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
         # A Vertex context cache, cited later as `cachedContent` by
         # generateContent bodies — the Gemini API stance on Vertex paths.
         return method == "POST" and _CACHED_COLLECTION.fullmatch(path) is not None

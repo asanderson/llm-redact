@@ -43,7 +43,13 @@ from llm_redact.eventstream import (
     EventStreamParser,
     serialize,
 )
-from llm_redact.jsonwalk import STRUCTURAL_KEYS, transform_strings
+from llm_redact.jsonwalk import (
+    ENUM_LIST_POSITIONS,
+    OPAQUE_ANYWHERE,
+    OPAQUE_POSITIONS,
+    STRUCTURAL_KEYS,
+    transform_strings,
+)
 from llm_redact.placeholders import PLACEHOLDER_RE, canonicalize, format_placeholder
 from llm_redact.providers.base import _EXEMPT_STASH_SENTINEL, stash_exempt_mcp_blocks
 from llm_redact.redactor import Redactor, _resolve_overlaps, _sweep
@@ -392,7 +398,25 @@ _body_strings = st.one_of(
     st.text(alphabet=st.characters(exclude_characters="«»"), max_size=20), _body_secrets
 )
 _body_keys = st.sampled_from(
-    ["content", "text", "q", "input", "model", "role", "type", "name", "data", "object"]
+    [
+        "content",
+        "text",
+        "q",
+        "input",
+        "model",
+        "role",
+        "type",
+        "name",
+        "data",
+        "object",
+        # Opaque-position keys (tool calls/results, documents).
+        "functionCall",
+        "args",
+        "json",
+        "documents",
+        "session",
+        "modalities",
+    ]
 )
 _bodies = st.recursive(
     _body_strings | st.integers() | st.booleans() | st.none(),
@@ -418,25 +442,83 @@ def test_body_redact_then_rehydrate_is_identity(body: object) -> None:
     assert Rehydrator(vault).rehydrate_json(redacted) == body
 
 
-def _reference_walk(obj: object, fn: "Callable[[str], str]") -> object:
-    """Independent re-derivation of jsonwalk's documented skip semantics —
-    a differential oracle, deliberately NOT sharing code with jsonwalk."""
+# The opaque positions transcribed INDEPENDENTLY of jsonwalk (checked
+# equal below, so a silent edit to either side fails loudly).
+_REF_OPAQUE = {
+    ("functionCall", "args"),
+    ("function_call", "args"),
+    ("functionResponse", "response"),
+    ("function_response", "response"),
+    ("functionResponses", "response"),
+    ("function_responses", "response"),
+    ("functionCalls", "args"),
+    ("function_calls", "args"),
+    ("content", "input"),
+    ("toolUse", "input"),
+    ("content", "json"),
+    ("document", "data"),
+    ("tool_results", "outputs"),
+    ("call", "parameters"),
+    ("tool_calls", "parameters"),
+    ("function", "arguments"),
+}
+
+
+_REF_ENUM_LISTS = {
+    (parent, key)
+    for parent, key in (
+        ("session", "modalities"),
+        ("response", "modalities"),
+        ("session", "output_modalities"),
+        ("response", "output_modalities"),
+    )
+} | {
+    (parent, key)
+    for parent in ("generationConfig", "generation_config")
+    for key in ("responseModalities", "response_modalities")
+}
+
+
+def test_reference_opaque_positions_match_jsonwalk() -> None:
+    assert frozenset(_REF_OPAQUE) == OPAQUE_POSITIONS
+    assert frozenset({"documents"}) == OPAQUE_ANYWHERE
+    assert frozenset(_REF_ENUM_LISTS) == ENUM_LIST_POSITIONS
+
+
+def _reference_all(obj: object, fn: "Callable[[str], str]") -> object:
     if isinstance(obj, str):
         return fn(obj)
     if isinstance(obj, list):
-        return [_reference_walk(item, fn) for item in obj]
+        return [_reference_all(item, fn) for item in obj]
+    if isinstance(obj, dict):
+        return {key: _reference_all(value, fn) for key, value in obj.items()}
+    return obj
+
+
+def _reference_walk(obj: object, fn: "Callable[[str], str]", parent: str | None = None) -> object:
+    """Independent re-derivation of jsonwalk's documented skip semantics —
+    a differential oracle, deliberately NOT sharing code with jsonwalk:
+    structural keys skip SCALARS only; opaque positions walk everything."""
+    if isinstance(obj, str):
+        return fn(obj)
+    if isinstance(obj, list):
+        return [_reference_walk(item, fn, parent) for item in obj]
     if isinstance(obj, dict):
         out: dict[object, object] = {}
         for key, value in obj.items():
-            walk_data = (obj.get("type") == "text" and isinstance(value, str)) or obj.get(
-                "object"
-            ) == "list"
-            if key == "data" and walk_data:
-                out[key] = _reference_walk(value, fn)
-            elif key in STRUCTURAL_KEYS:
+            scalar = not isinstance(value, dict | list)
+            if key == "documents" or (parent or "", key) in _REF_OPAQUE:
+                out[key] = _reference_all(value, fn)
+            elif key == "data" and obj.get("type") == "text" and isinstance(value, str):
+                out[key] = fn(value)
+            elif (key in STRUCTURAL_KEYS and scalar) or (
+                (parent or "", key) in _REF_ENUM_LISTS
+                and isinstance(value, list)
+                and all(not isinstance(item, dict | list) for item in value)
+            ):
                 out[key] = value
             else:
-                out[key] = _reference_walk(value, fn)
+                out[key] = _reference_walk(value, fn, key)
         return out
     return obj
 

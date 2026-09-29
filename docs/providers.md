@@ -85,8 +85,11 @@ Bedrock's bearer-token API keys are supported: set
 runtime routes (`converse`, `converse-stream`, `invoke`,
 `invoke-with-response-stream`) are redacted, including AWS's binary
 eventstream response framing, which the proxy parses and re-frames
-natively. `count-tokens`, ApplyGuardrail (`/guardrail/{id}/version/{v}/apply`
-— content redacted, the guardrail's rewritten output restored) and
+natively. `count-tokens` (including the base64 `input.invokeModel.body`
+form, decoded and redacted like an invoke body), ApplyGuardrail
+(`/guardrail/{id}/version/{v}/apply` — content redacted, the guardrail's
+rewritten output restored; note the guardrail itself therefore judges the
+redacted text, placeholders and all) and
 StartAsyncInvoke (`POST /async-invoke`; its output lands in S3 with the
 placeholders in place) are redacted too, and the async-invoke status reads
 are recognized. A signature the CLIENT computed (SigV4-signed SDK traffic)
@@ -110,21 +113,36 @@ auth = "identity"          # default "passthrough": forward the tool's credentia
 With `auth = "identity"` the proxy removes every credential the tool
 sent (`Authorization`, `x-api-key`, `api-key`, `x-goog-api-key`, any
 other `*api-key` or `*authorization*` header, `x-amz-*` signing
-headers, cookies, `key=` / `api-key=` / `access_token=` /
-`*authorization*` / `X-Amz-*` query parameters, and — on realtime
-WebSocket upgrades — credential-bearing subprotocols such as
-`openai-insecure-api-key.<key>`), then authorizes the final, redacted request with its
+headers, cookies, `password`/`passwd`, Google's `x-goog-user-project`,
+`x-goog-quota-user` and IAM selector headers; the `key=` / `$key=` /
+`api-key=` / `access_token=` / `oauth_token=` / `userProject=` /
+`quotaUser=` / `subscription-key=` / `password=` / `passwd=` /
+`*authorization*` / `X-Amz-*` query parameters, compared
+case-insensitively with a leading `$` ignored; and — on realtime
+WebSocket upgrades — every subprotocol except the known non-credential
+`realtime` and `openai-beta.*` offers, so `openai-insecure-api-key.<key>`
+and a secret offered as the entry after a bare `bearer` marker never
+reach the provider), then authorizes the final, redacted request with its
 own workload identity: AWS SigV4 for Bedrock, a Google OAuth token for
 Vertex AI (Gemini and Claude models alike), a Microsoft Entra ID token
 for Azure OpenAI. If no credential can be obtained, the proxy answers a
 502 and forwards nothing. The setting is valid only for these three
-providers; without llm-redact-pro it is a startup error. Realtime
+providers; without llm-redact-pro it is a startup error, and so is an
+`http://` `upstream_base_url` on a non-loopback host (every request
+carries the proxy's credential, so the upstream must be https — realtime
+dials the wss twin). The signed URL must be exactly the configured
+upstream — scheme, host, port, and the `upstream_base_url` PATH (an
+API-management base such as `https://gw.example/my-api` is honored on
+HTTP and realtime alike) followed by the request's own path — or the
+request is refused before signing. A multipart upload the proxy cannot
+parse (outside the canonical form it redacts) is refused with a 400
+instead of being forwarded verbatim under the proxy's identity. Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with
 exactly the proxy's headers. Only those documented realtime paths are
 authorized (any other WebSocket path to such a provider is refused
-1011), a missing credential closes the connection 1011 naming the
+1011 and recorded as a 403), a missing credential closes the connection 1011 naming the
 credential source, and such a provider is never routed. Only the HTTP
 routes llm-redact recognizes (the Vertex AI, Azure OpenAI and Bedrock
 tables in [api-coverage.md](api-coverage.md)) are forwarded with that

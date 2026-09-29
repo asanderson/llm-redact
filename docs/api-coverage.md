@@ -191,7 +191,7 @@ because they echo the user `metadata` a batch create carries.
 | `GET /openai/files/{id}/content` | chat | batch output JSONL restored line by line |
 | `GET /openai/v1/files/{id}/content` | chat | |
 | `POST /openai/batches` | chat | file ids + user `metadata` (redacted out, restored in the echo) |
-| `GET /openai/batches` | chat | |
+| `GET /openai/batches` | redact-only | the batch LIST is never restored: it spans batches other users created, so restoring in the reader's vault namespace could hand one user another's value (pro named users); placeholders in listed `metadata` stay as placeholders |
 | `GET /openai/v1/batches/{id}` | chat | |
 | `POST /openai/batches/{id}/cancel` | chat | |
 | `GET /openai/models` | redact-only | model listing |
@@ -204,7 +204,10 @@ because they echo the user `metadata` a batch create carries.
 ## AWS Bedrock (runtime)
 
 `{m}` may be a percent-encoded ARN (matching runs on the decoded path; the
-raw path is forwarded).
+raw path is forwarded). A path with a `.` or `..` segment — in any
+spelling, `%2E` included — is refused with a 400 before any upstream
+contact, on every provider: matching and forwarding must address the
+same resource, and servers resolve dot segments.
 
 | Endpoint | Classification | Notes |
 |---|---|---|
@@ -212,8 +215,8 @@ raw path is forwarded).
 | `POST /model/{m}/invoke-with-response-stream` | chat | binary event stream; Claude `chunk` payloads rehydrated |
 | `POST /model/{m}/converse` | chat | |
 | `POST /model/{m}/converse-stream` | chat | binary event stream, per-block channels |
-| `POST /model/{m}/count-tokens` | redact-only | `input.converse` content redacted; answers a count. The `input.invokeModel.body` form is a base64 blob — not decoded (the media stance) |
-| `POST /guardrail/{id}/version/{v}/apply` | chat | ApplyGuardrail: `content[]` redacted; `outputs[].text` (the submitted text as the guardrail rewrote it) and the assessments' quoted `match` values carry the placeholders sent up, so they are restored — the client gets back its OWN text |
+| `POST /model/{m}/count-tokens` | redact-only | `input.converse` content redacted; answers a count. The `input.invokeModel.body` form is base64 of the model's native JSON prompt — text, not media — so it is decoded, redacted exactly like an `/invoke` body, and re-encoded; a blob that is not base64 of UTF-8 JSON is refused with a 400 (never forwarded unredacted) |
+| `POST /guardrail/{id}/version/{v}/apply` | chat | ApplyGuardrail: `content[]` redacted; `outputs[].text` (the submitted text as the guardrail rewrote it) and the assessments' quoted `match` values carry the placeholders sent up, so they are restored — the client gets back its OWN text. The guardrail therefore evaluates the REDACTED text: its verdict is on placeholders, so a guardrail policy keyed on the values llm-redact redacts (a sensitive-information filter matching emails, say) never sees them |
 | `POST /async-invoke` | redact-only | StartAsyncInvoke: `modelInput` redacted; the output is written to S3 and never passes through the proxy, so it keeps its placeholders (the batch stance) |
 | `GET /async-invoke` | redact-only | ListAsyncInvokes: metadata |
 | `GET /async-invoke/{id}` | redact-only | GetAsyncInvoke: metadata |
@@ -227,10 +230,14 @@ both directions by `tests/test_api_coverage.py` like the tables above
 an unknown path through to. The Azure and Vertex routes also work with the
 proxy's own cloud identity (`[providers.azure|vertex] auth = "identity"`,
 llm-redact-pro): only the exact paths below are authorized — a subpath is
-refused — and every client credential channel (upgrade headers, the
-`key=`/`api-key=`/`access_token=`/`Authorization=` query parameters, and
-credential-bearing subprotocols such as `openai-insecure-api-key.<key>`) is
-stripped before the proxy's credential is added. Bedrock has no WebSocket
+refused (and recorded as a 403) — and every client credential channel
+(upgrade headers, the same query parameters as HTTP — `key=`/`$key=`,
+`api-key=`, `access_token=`, `userProject=`, `quotaUser=`,
+`subscription-key=`, `Authorization=`, … — and every subprotocol except
+the known non-credential `realtime` / `openai-beta.*` offers) is stripped
+before the proxy's credential is added. The relay dials the configured
+`upstream_base_url` INCLUDING its path (an API-management base such as
+`https://gw.example/my-api` is honored), exactly like HTTP. Bedrock has no WebSocket
 API, so no realtime route reaches `[providers.bedrock]`.
 
 | Endpoint | Classification | Notes |
@@ -266,6 +273,12 @@ first-message anchor — so they use the STATIC vault session (the batch
 stance; with llm-redact-pro's named users, the user's own copy of it),
 keeping redact/rehydrate always in agreement. The per-cache
 GET/PATCH/DELETE and list return metadata only and pass through.
+
+A pass-through request under `/v1/` that carries a **Google API key**
+(`x-goog-api-key`, or a `key=`/`$key=` query parameter) is forwarded to
+the Gemini upstream, not inferred as OpenAI: Gemini's v1 surface
+(`GET /v1/models[/{m}]`, …) shares OpenAI's prefix, and the Google key must
+never be sent to api.openai.com.
 
 Gemini **Imagen** (`models/{m}:predict`) and **Veo**
 (`models/{m}:predictLongRunning`) are redact-only: `instances[].prompt`

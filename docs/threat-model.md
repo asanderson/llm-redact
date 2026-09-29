@@ -78,7 +78,18 @@ because breaking the tool teaches users to bypass the proxy).
 
 - Detection runs over **every string value** in the JSON body via a
   generic walk — system prompts, nested content blocks, tool results —
-  not a hardcoded schema. Unknown fields forward verbatim by design.
+  not a hardcoded schema. Unknown fields forward verbatim by design. The
+  walk skips only SCALAR values of structural keys (`model`, `role`,
+  `type`, `id`, base64 `data`, …); an object or array under such a name
+  is walked, and caller-supplied JSON at known tool-call / tool-result /
+  document positions (Gemini `functionCall.args` and
+  `functionResponse.response`, Bedrock `toolUse.input` and
+  `toolResult.content[].json`, Anthropic `tool_use.input`, Cohere
+  `documents`, …) is walked with no skips at all, so a tool result that
+  names its own keys `id` or `data` is still redacted.
+- A request path with a `.`/`..` segment (any spelling) is refused 400
+  before any upstream contact: matching and forwarding must address the
+  same resource.
 - Bodies too large to buffer and redact are rejected **413 fail-closed**.
 - Per-rule `block` mode rejects requests before any upstream contact.
 - Auth headers pass through untouched and are never logged.

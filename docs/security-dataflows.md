@@ -71,6 +71,7 @@ server cannot accept upgrades at all, so realtime traffic can never
 silently bypass redaction); a block-mode match closes **1008** carrying
 the detector type only; headers, `?key=` queries, and subprotocols pass
 through unlogged; and gate ⑤ walks **every** client event, skipping only
-structural keys and base64 audio — voice audio is never decoded or
-scanned, so speech reaches the provider unredacted (see the threat
+the scalar values of structural keys (enums, ids) and base64 audio —
+objects under those names, and tool responses in full, are walked.
+Voice audio is never decoded or scanned, so speech reaches the provider unredacted (see the threat
 model's media non-goal).

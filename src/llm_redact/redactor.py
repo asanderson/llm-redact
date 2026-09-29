@@ -22,6 +22,12 @@ class BlockedRequest(Exception):
         self.detector_type = detector_type
 
 
+class UnredactableRequest(Exception):
+    """A request field that must be redacted could not be decoded, so it
+    cannot be redacted: the whole request is rejected (400), never forwarded
+    unredacted. The message names the FIELD only — never its content."""
+
+
 def _sweep(detections: Sequence[Detection]) -> list[Detection]:
     """Greedy non-overlapping sweep over (start, -length, priority)-sorted input.
 

@@ -11,6 +11,27 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Security
+
+- Tool results and documents nested under keys named like protocol fields (`data`,
+  `name`, `id`, `status`, …) are now redacted; their whole subtree used to be
+  skipped. Only scalar values of structural keys are skipped now, and tool-call
+  arguments, tool results and documents are walked with no skips at all. This
+  affected Gemini/Vertex `functionResponse`, Vertex Live `toolResponse`, Bedrock
+  Converse `toolResult`, Cohere `documents` and realtime events.
+- Request paths with `.`/`..` segments (including `%2E` and backslash forms) are
+  refused with 400 (WebSocket: 1011) before any upstream contact.
+- Under `auth = "identity"`:
+  - more credential query and header variants are stripped (`$key`, `userProject`,
+    `quotaUser`, `subscription-key`, `password`, `passwd`, `oauth_token`, and the
+    matching headers);
+  - only the `realtime` and `openai-beta.*` WebSocket subprotocols are forwarded;
+  - the signed URL must be exactly the base URL plus the request path;
+  - an `http://` upstream on a non-loopback host is a ConfigError;
+  - a multipart body the proxy cannot parse is refused with 400 instead of being
+    forwarded;
+  - WebSocket refusals are recorded like HTTP ones.
+
 ### Added
 
 - Realtime: Azure OpenAI Realtime's GA path (`/openai/v1/realtime?model=…`) and the
@@ -33,6 +54,9 @@ and tags `vX.Y.Z`.
     StartAsyncInvoke and the async-invoke list/get.
   - `docs/api-coverage.md` gains Vertex AI, Azure OpenAI, Bedrock and realtime
     WebSocket tables, pinned in both directions by `tests/test_api_coverage.py`.
+- Object tracking (the session-ownership seam used by llm-redact-pro) also reports
+  stored chat completions (`store: true`, including streamed ones) and video
+  create/remix jobs; `tracks_object_ids` takes the parsed request body.
 
 ### Changed
 
@@ -49,6 +73,13 @@ and tags `vX.Y.Z`.
   with OpenAI `/v1/files`); Azure's note is otherwise confined to chat completions.
 - Vertex express-mode metadata GETs (`/v1/publishers/…`) reach the vertex upstream
   instead of the anthropic default.
+- The realtime relay keeps the `upstream_base_url` path (APIM and gateway bases).
+- The Azure batch list is no longer rehydrated (redact-only, like OpenAI's).
+- Bedrock `count-tokens` decodes, redacts and re-encodes `input.invokeModel.body`;
+  a body that cannot be decoded is refused with 400.
+- A `/v1/…` request authenticated with a Google API key (`x-goog-api-key`, `?key=`)
+  goes to Gemini instead of OpenAI.
+- The `websockets` logger is pinned at WARNING, so it cannot log upgrade URLs.
 
 ## [1.8.0] - 2026-09-28
 

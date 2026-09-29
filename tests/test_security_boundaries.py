@@ -602,7 +602,11 @@ def test_b16_built_url_must_stay_on_the_configured_upstream() -> None:
     from llm_redact.proxy import _same_upstream
 
     assert _same_upstream("http://up/v1/chat/completions?x=1", "http://up")
-    assert _same_upstream("https://h.example:8443/a", "https://h.example:8443/base")
+    assert _same_upstream("https://h.example:8443/base/a", "https://h.example:8443/base")
+    # The base URL's path is part of the upstream: a sibling path on the same
+    # host (another API behind one gateway) is a different upstream.
+    assert not _same_upstream("https://h.example:8443/a", "https://h.example:8443/base")
+    assert not _same_upstream("https://h.example:8443/basement", "https://h.example:8443/base")
     assert not _same_upstream("http://up@evil.example/v1", "http://up")
     assert not _same_upstream("http://up.evil.example/v1", "http://up")
     assert not _same_upstream("http://up:1/v1", "http://up")

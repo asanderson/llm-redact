@@ -915,6 +915,28 @@ def _provider_auth(name: str, section: Mapping[str, Any]) -> tuple[str, str | No
     return auth, region
 
 
+def identity_upstream_problem(url: str) -> str | None:
+    """Why ``url`` cannot carry the proxy's own cloud credential, or None.
+
+    Under ``auth = "identity"`` every forwarded request carries the proxy's
+    SigV4 signature or OAuth bearer token, so the upstream must be https
+    (wss for realtime, derived by scheme swap) unless it is loopback — a
+    cleartext hop would hand the credential to the network. An unset URL
+    (the provider answers 502 until configured) is not a problem here.
+    """
+    if not url:
+        return None
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme == "https" or (
+        parts.scheme == "http" and _is_loopback_host(parts.hostname or "")
+    ):
+        return None
+    return (
+        'upstream_base_url must be https with auth = "identity" unless the host is loopback'
+        " (every request carries the proxy's own cloud credential)"
+    )
+
+
 def default_config_path() -> Path:
     xdg = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     return Path(xdg) / "llm-redact" / "config.toml"
@@ -1950,6 +1972,10 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         # provider then keeps its default upstream.
         url = section.get("upstream_base_url", providers[name].upstream_base_url)
         auth, region = _provider_auth(name, section)
+        if auth == "identity":
+            problem = identity_upstream_problem(str(url))
+            if problem is not None:
+                raise ConfigError(f"[providers.{name}] {problem}")
         providers[name] = ProviderConfig(
             upstream_base_url=str(url).rstrip("/"),
             enabled=_bool_key(section, "enabled", True, f"[providers.{name}]"),

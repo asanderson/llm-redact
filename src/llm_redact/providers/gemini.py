@@ -15,8 +15,12 @@ Responses adapter's KNOWN_EVENT_TYPES):
   part (creating ``content.parts`` if the finish chunk carried none) because
   ``_stream_rehydrated`` discards anything still held at stream end.
 - ``functionCall.args`` is a parsed JSON *object* (not JSON source like the
-  OpenAI ``arguments`` string) and arrives complete in one event: a plain
-  jsonwalk with whole-string restoration is correct there.
+  OpenAI ``arguments`` string) and arrives complete in one event: whole-string
+  restoration is correct there. Every chunk is walked from its ROOT — like the
+  buffered response — so args keep their opaque position (a tool parameter
+  named ``id`` or ``data`` is restored) and code, grounding and citation
+  metadata are restored too; only the text parts are held out of that walk
+  and fed to their channels instead (streaming == buffered).
 - ``:streamGenerateContent`` WITHOUT ``alt=sse`` returns one JSON *array* of
   those same chunks; its elements split tokens exactly like the SSE form, so
   rehydrate_body runs per-candidate streaming channels across elements.
@@ -181,15 +185,14 @@ class GeminiAdapter(ProviderAdapter):
             payload = json.loads(event.data)
         except ValueError:
             return [event]
-        if not isinstance(payload, dict) or not isinstance(payload.get("candidates"), list):
-            return [event]  # usageMetadata / promptFeedback-only chunks
-        _process_candidates(
-            payload["candidates"],
+        rehydrated = _rehydrate_chunk(
+            payload,
             feed=lambda key, text: pool.get(key).feed(text),
             flush=lambda key: pool.flush(key),
             whole=pool.rehydrate_whole,
         )
-        event.data = json.dumps(payload, ensure_ascii=False)
+        if rehydrated != payload:  # else the provider's own bytes go out
+            event.data = json.dumps(rehydrated, ensure_ascii=False)
         return [event]
 
     def rehydrate_body(self, body: Any, rehydrator: Rehydrator) -> Any:
@@ -198,38 +201,68 @@ class GeminiAdapter(ProviderAdapter):
         return rehydrator.rehydrate_json(body)
 
 
-def _process_candidates(
-    candidates: list[Any],
+class StreamedText:
+    """A text value held out of a whole-value walk (jsonwalk returns a
+    non-JSON object untouched): it streams through its channel instead.
+    Shared with the Gemini Live adapter (realtime.py)."""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def _hold_text_parts(chunk: dict[str, Any]) -> dict[str, Any]:
+    """``chunk`` with every candidate text part's text held as ``StreamedText``,
+    copied along that path only — the caller's tree is never modified."""
+    candidates = []
+    for candidate in chunk["candidates"]:
+        content = candidate.get("content") if isinstance(candidate, dict) else None
+        if isinstance(content, dict) and isinstance(content.get("parts"), list):
+            held = [
+                {**part, "text": StreamedText(part["text"])}
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+                else part
+                for part in content["parts"]
+            ]
+            candidate = {**candidate, "content": {**content, "parts": held}}
+        candidates.append(candidate)
+    return {**chunk, "candidates": candidates}
+
+
+def _rehydrate_chunk(
+    chunk: Any,
     *,
     feed: Callable[[_ChannelKey, str], str],
     flush: Callable[[_ChannelKey], str],
     whole: Callable[[str], str],
-) -> None:
-    """Rewrite one chunk's candidates in place; flush on finishReason."""
-    for candidate in candidates:
+) -> Any:
+    """One stream chunk, restored exactly as the buffered response walk
+    restores it — function-call args at their opaque position (a tool's own
+    parameter named ``id`` or ``data``), generated code, grounding and
+    citation metadata, usage-only chunks — except the candidates' text
+    parts, which stream through per-(candidate, text|thought) channels (a
+    «TOKEN» can straddle chunks) and flush on finishReason. Returns a new
+    tree; ``chunk`` is not modified."""
+    if not isinstance(chunk, dict) or not isinstance(chunk.get("candidates"), list):
+        return transform_strings(chunk, whole)
+    walked = transform_strings(_hold_text_parts(chunk), whole)
+    for candidate in walked["candidates"]:
         if not isinstance(candidate, dict):
             continue
         index = candidate.get("index", 0)
         content = candidate.get("content")
         parts = content.get("parts") if isinstance(content, dict) else None
-        if isinstance(parts, list):
-            for part in parts:
-                if not isinstance(part, dict):
-                    continue
-                if isinstance(part.get("text"), str):
-                    kind = "thought" if part.get("thought") else "text"
-                    part["text"] = feed((index, kind), part["text"])
-                elif isinstance(part.get("functionCall"), dict):
-                    # args is a parsed object arriving complete: walk its
-                    # string values (skip_keys protects "name").
-                    call = part["functionCall"]
-                    if isinstance(call.get("args"), dict):
-                        call["args"] = transform_strings(call["args"], whole)
+        for part in parts if isinstance(parts, list) else ():
+            if isinstance(part, dict) and isinstance(part.get("text"), StreamedText):
+                kind = "thought" if part.get("thought") else "text"
+                part["text"] = feed((index, kind), part["text"].text)
         if candidate.get("finishReason"):
             for kind in ("text", "thought"):
                 leftover = flush((index, kind))
                 if leftover:
                     _append_text(candidate, kind, leftover)
+    return walked
 
 
 def _append_text(candidate: dict[str, Any], kind: str, leftover: str) -> None:
@@ -259,7 +292,8 @@ def _append_text(candidate: dict[str, Any], kind: str, leftover: str) -> None:
 
 def _rehydrate_chunk_list(chunks: list[Any], rehydrator: Rehydrator) -> list[Any]:
     """The non-SSE streamGenerateContent array: same split-token hazard as
-    the SSE stream, handled with per-candidate streaming channels."""
+    the SSE stream, handled with per-candidate streaming channels, and every
+    element restored like the SSE chunk it would have been."""
     channels: dict[_ChannelKey, StreamingRehydrator] = {}
 
     def feed(key: _ChannelKey, text: str) -> str:
@@ -273,24 +307,19 @@ def _rehydrate_chunk_list(chunks: list[Any], rehydrator: Rehydrator) -> list[Any
         channel = channels.pop(key, None)
         return channel.flush() if channel is not None else ""
 
+    out: list[Any] = []
     last_candidate: dict[int, dict[str, Any]] = {}
     for chunk in chunks:
-        if isinstance(chunk, dict) and isinstance(chunk.get("candidates"), list):
-            _process_candidates(
-                chunk["candidates"],
-                feed=feed,
-                flush=flush,
-                whole=rehydrator.rehydrate_text,
-            )
-            for candidate in chunk["candidates"]:
-                if isinstance(candidate, dict):
-                    last_candidate[candidate.get("index", 0)] = candidate
-        else:
-            rehydrator.rehydrate_json(chunk)
+        walked = _rehydrate_chunk(chunk, feed=feed, flush=flush, whole=rehydrator.rehydrate_text)
+        out.append(walked)
+        candidates = walked.get("candidates") if isinstance(walked, dict) else None
+        for candidate in candidates if isinstance(candidates, list) else ():
+            if isinstance(candidate, dict):
+                last_candidate[candidate.get("index", 0)] = candidate
     # A stream that never carried finishReason still must not drop text.
     for (index, kind), channel in list(channels.items()):
         leftover = channel.flush()
         if leftover and index in last_candidate:
             _append_text(last_candidate[index], kind, leftover)
     channels.clear()
-    return chunks
+    return out

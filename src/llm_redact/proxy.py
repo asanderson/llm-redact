@@ -24,7 +24,7 @@ import signal
 import time
 import urllib.parse
 from collections import Counter, deque
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from datetime import UTC, date, datetime
@@ -392,6 +392,12 @@ class ProxyState:
         # provider — a resilience health signal, metadata only. The proxy
         # fails these closed with a 502; this counts how often.
         self.upstream_errors: Counter[str] = Counter()
+        # Faults in what runs AFTER the provider answered, by stage:
+        # "response_id" / "object_ids" / "listing" are session bookkeeping
+        # (contained — the answer is still delivered, never a wrong value);
+        # "delivery" is restoring the answer itself (a buffered one fails
+        # closed with a recorded 502; a stream is cut).
+        self.bookkeeping_errors: Counter[str] = Counter()
         self.redactor = Redactor(
             self.detectors,
             self.vault,
@@ -1229,6 +1235,16 @@ class ProxyState:
     ) -> str:
         if adapter is not None and adapter.name in self.config.providers:
             return adapter.name
+        # Pass-through traffic: infer the provider from well-known paths;
+        # Anthropic is the default because that is the primary target tool.
+        # An explicit path family wins over every header or key heuristic.
+        if path.startswith("/v1beta/"):
+            return "gemini"
+        if path.startswith(("/v1/projects/", "/v1/publishers/", "/v1beta1/")):
+            # Vertex AI (express mode and service-account API keys send a
+            # Google API key too — still Vertex's traffic, never the
+            # Gemini API's host).
+            return "vertex"
         if path.startswith("/v1/") and _google_authenticated(headers, query):
             # Gemini's v1 surface (GET /v1/models[/{m}], …) shares OpenAI's
             # /v1 prefix; a Google API key (x-goog-api-key or ?key=) marks
@@ -1251,12 +1267,6 @@ class ProxyState:
             # which handle() answers 502 (never forwarded by guesswork).
             name = path[len(CUSTOM_ROUTE_PREFIX) :].split("/", 1)[0]
             return f"custom:{name}"
-        # Pass-through traffic: infer the provider from well-known paths;
-        # Anthropic is the default because that is the primary target tool.
-        if path.startswith("/v1beta/"):
-            return "gemini"
-        if path.startswith(("/v1/projects/", "/v1beta1/")):
-            return "vertex"
         if path.startswith("/openai/"):
             return "azure"
         if path.startswith(("/model/", "/guardrail/", "/async-invoke")):
@@ -1308,17 +1318,6 @@ class ProxyState:
         ):
             return "openai"
         return "anthropic"
-
-    def upstream_for(
-        self,
-        adapter: ProviderAdapter | None,
-        path: str,
-        headers: "Mapping[str, str] | None" = None,
-        query: str = "",
-    ) -> str:
-        return self.config.providers[
-            self.provider_for(adapter, path, headers, query)
-        ].upstream_base_url
 
 
 def _google_authenticated(headers: "Mapping[str, str] | None", query: str) -> bool:
@@ -1539,13 +1538,24 @@ async def _stream_rehydrated(
     parser = SSEParser()
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
     response_id_seen = False
+    status = upstream.status_code  # 502 when the proxy itself cut the stream
     try:
         async for chunk in upstream.aiter_bytes():
             for event in parser.feed(chunk):
                 if not response_id_seen:
                     response_id = adapter.response_id_from_event(event)
                     if response_id is not None:
-                        state.record_response_id(response_id, ctx.session_id)
+                        # Session bookkeeping never cuts the stream (contained,
+                        # counted); the first id suffices either way.
+                        _contained(
+                            state,
+                            "response_id",
+                            method,
+                            path,
+                            state.record_response_id,
+                            response_id,
+                            ctx.session_id,
+                        )
                         response_id_seen = True
                 if object_tracker is not None and _record_streamed_object_ids(
                     state, ctx, object_tracker, method, path, event
@@ -1577,6 +1587,11 @@ async def _stream_rehydrated(
                 _route_log_suffix(route.row()),
             )
         raise
+    except Exception as exc:
+        status = _stream_delivery_fault(state, method, path, exc)
+        if route is not None:
+            route.mark_failed("stream_error")
+        raise
     finally:
         with suppress(Exception):
             # A stream that errored mid-body can make aclose() itself raise;
@@ -1590,14 +1605,14 @@ async def _stream_rehydrated(
             provider=adapter.name,
             method=method,
             path=path,
-            status=upstream.status_code,
+            status=status,
             started=started,
             streamed=True,
             detections=detections,
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
-            route=(state.finish_route(route, upstream.status_code) if route is not None else None),
+            route=(state.finish_route(route, status) if route is not None else None),
         )
 
 
@@ -1617,8 +1632,28 @@ def _record_streamed_object_ids(
         return False  # [DONE], keep-alives, anything not JSON
     object_ids = tracker.object_ids_from_body(method, path, payload)
     if object_ids:
-        state.record_object_ids(object_ids, ctx.session_id)
+        # Contained like the buffered report: the stream goes on either way.
+        _contained(
+            state, "object_ids", method, path, state.record_object_ids, object_ids, ctx.session_id
+        )
     return bool(object_ids)
+
+
+def _stream_delivery_fault(state: ProxyState, method: str, path: str, exc: Exception) -> int:
+    """A fault restoring a stream after its status went out (a vault read, a
+    router hook): the stream is cut — the honest signal, as for an upstream
+    drop — and the fault counted and logged by exception TYPE. Returns the
+    status the finally block records (and the audit END carries): 502, the
+    proxy's failure — a stream the proxy itself cut is never booked as the
+    upstream's success."""
+    state.bookkeeping_errors["delivery"] += 1
+    logger.warning(
+        "%s %s stream cut: restoring the upstream answer failed (%s)",
+        method,
+        path,
+        type(exc).__name__,
+    )
+    return 502
 
 
 async def _stream_rehydrated_eventstream(
@@ -1640,6 +1675,7 @@ async def _stream_rehydrated_eventstream(
     parser = EventStreamParser(max_frame_bytes=state.config.max_body_bytes)
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
     degraded = False
+    status = upstream.status_code  # 502 when the proxy itself cut the stream
     try:
         async for chunk in upstream.aiter_bytes():
             if degraded:
@@ -1665,6 +1701,11 @@ async def _stream_rehydrated_eventstream(
                 yield parser.residual
             for _key, text in pool.flush_all().items():
                 logger.warning("unflushed stream leftover discarded (%d chars)", len(text))
+    except httpx.TransportError:
+        raise
+    except Exception as exc:
+        status = _stream_delivery_fault(state, method, path, exc)
+        raise
     finally:
         with suppress(Exception):
             # A stream that errored mid-body can make aclose() itself raise;
@@ -1678,7 +1719,7 @@ async def _stream_rehydrated_eventstream(
             provider=adapter.name,
             method=method,
             path=path,
-            status=upstream.status_code,
+            status=status,
             started=started,
             streamed=True,
             detections=detections,
@@ -1810,6 +1851,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 "warnings_total": dict(state.warn_counts),
                 "blocked_total": dict(state.blocked_counts),
                 "upstream_errors_total": dict(state.upstream_errors),
+                "bookkeeping_errors_total": dict(state.bookkeeping_errors),
                 "detection": {
                     "enabled_rules": list(config.detection.enabled),
                     # None = all languages; otherwise the active scope and
@@ -1945,6 +1987,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 vault_sessions=state.vault_manager.session_count(),
                 compaction_forks=state.compaction_forks,
                 upstream_errors=state.upstream_errors,
+                bookkeeping_errors=state.bookkeeping_errors,
             ),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
@@ -2129,6 +2172,7 @@ async def _stream_rehydrated_ndjson(
     method, path, started, detections, warned, audit_token = request_meta
     parser = NDJSONParser()
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
+    status = upstream.status_code  # 502 when the proxy itself cut the stream
     try:
         async for chunk in upstream.aiter_bytes():
             for line in parser.feed(chunk):
@@ -2159,6 +2203,11 @@ async def _stream_rehydrated_ndjson(
                 _route_log_suffix(route.row()),
             )
         raise
+    except Exception as exc:
+        status = _stream_delivery_fault(state, method, path, exc)
+        if route is not None:
+            route.mark_failed("stream_error")
+        raise
     finally:
         with suppress(Exception):
             # A stream that errored mid-body can make aclose() itself raise;
@@ -2172,14 +2221,14 @@ async def _stream_rehydrated_ndjson(
             provider=adapter.name,
             method=method,
             path=path,
-            status=upstream.status_code,
+            status=status,
             started=started,
             streamed=True,
             detections=detections,
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
-            route=(state.finish_route(route, upstream.status_code) if route is not None else None),
+            route=(state.finish_route(route, status) if route is not None else None),
         )
 
 
@@ -2318,7 +2367,7 @@ async def _read_capped(request: Request, limit: int) -> bytes | None:
 
 
 def _identity_body_problem(
-    adapter: ProviderAdapter, path: str, headers: Mapping[str, str], body: bytes, parsed: Any
+    adapter: ProviderAdapter, path: str, headers: Headers, body: bytes, parsed: Any
 ) -> str | None:
     """Why a non-empty request body on a matched route must NOT be signed
     with the proxy's own identity, or None when the proxy redacts it.
@@ -2330,20 +2379,34 @@ def _identity_body_problem(
     verbatim: non-JSON bytes, invalid UTF-8, a top-level array or scalar
     (``null`` included — never walked), whitespace only, multipart on any
     other route, and any content-encoded body (the proxy never decodes
-    one, so it cannot see what the upstream would). The result names the
-    body's KIND only — never its content."""
-    encoding = headers.get("content-encoding", "").strip().lower()
-    if encoding not in ("", "identity"):
+    one, so it cannot see what the upstream would) — every coding of every
+    Content-Encoding header counts, as the upstream reads them all. A
+    repeated Content-Type is refused too: it is a singleton field, and a
+    second one could name a multipart boundary the proxy never parsed
+    with. The route is checked before the multipart parse, so a body
+    refused on its route is never parsed. The result names the body's
+    KIND only — never its content."""
+    codings = (
+        coding.strip().lower()
+        for value in headers.getlist("content-encoding")
+        for coding in value.split(",")
+    )
+    if any(coding not in ("", "identity") for coding in codings):
         return "the request body is content-encoded (llm-redact does not decode request bodies)"
+    content_types = headers.getlist("content-type")
+    if len(content_types) > 1:
+        return "the request carries more than one Content-Type header"
     if isinstance(parsed, dict):
         return None
-    boundary = parse_multipart_boundary(headers.get("content-type", "")) if parsed is None else None
+    boundary = (
+        parse_multipart_boundary(content_types[0]) if parsed is None and content_types else None
+    )
     if boundary is None:
         return "the request body is not a JSON object llm-redact can redact"
-    if parse_multipart(body, boundary) is None:
-        return "the multipart body is outside the canonical form llm-redact can redact"
     if not adapter.redacts_multipart(path):
         return "the multipart body is on a route llm-redact does not redact multipart for"
+    if parse_multipart(body, boundary) is None:
+        return "the multipart body is outside the canonical form llm-redact can redact"
     return None
 
 
@@ -2460,6 +2523,14 @@ async def handle(request: Request) -> Response:
     # here (forwarding pass-through would send unredacted bodies to it).
     provider_name = state.provider_for(adapter, path, request.headers, request.url.query)
     provider_conf = state.config.providers.get(provider_name)
+    # Read ONCE, with the provider's config and before the first await (the
+    # body read): a reload applied while the body is still arriving must not
+    # change what this request was admitted as. Every identity decision
+    # below — the unrecognized-route 403, the ownership check, the body
+    # rule, stripping and signing — and the upstream it goes to use these
+    # two snapshots; the reload's displaced authorizer stays with the
+    # requests that already hold it.
+    upstream_auth = state.upstream_auth.get(provider_name)
     if provider_conf is None:
         # /custom/<name>/ with no [providers.custom.<name>] entry: there is
         # nowhere sane to forward, and guessing would leak.
@@ -2526,7 +2597,7 @@ async def handle(request: Request) -> Response:
         logger.info("%s %s -> 403 refused by the access gate", request.method, path)
         return JSONResponse(error, status_code=403)
 
-    if adapter is None and provider_name in state.upstream_auth:
+    if adapter is None and upstream_auth is not None:
         # The proxy lends its own cloud identity only to the API routes it
         # recognizes (and redacts). Signing pass-through traffic would hand
         # any client the whole cloud API as the proxy's principal, bodies
@@ -2615,7 +2686,6 @@ async def handle(request: Request) -> Response:
     # protocols (plan() returns None) — never constructs a routing object and
     # takes the legacy path below byte-for-byte.
     plan: RoutePlan | None = None
-    upstream_auth = state.upstream_auth.get(provider_name)
     # A provider the proxy authorizes with its own cloud identity is never
     # routed (the routing protocols are anthropic/openai/gemini/ollama, and
     # a routed hop carries the router's own credentials): the router is not
@@ -2775,11 +2845,14 @@ async def handle(request: Request) -> Response:
     # bodies): the routed path applies per-hop body rewrites to it.
     outbound_obj: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
     detection_off = provider_conf is not None and not provider_conf.detection
-    if upstream_auth is not None and adapter is not None and body_bytes and not detection_off:
-        # The proxy's own identity signs only what the proxy could redact:
-        # a body it cannot walk would otherwise be forwarded verbatim —
+    if upstream_auth is not None and adapter is not None and body_bytes:
+        # The proxy's own identity signs only a body the proxy could read:
+        # one it cannot walk would otherwise be forwarded verbatim —
         # refused here, before redaction, any credential fetch or upstream
-        # contact. (detection = false is the explicit unredacted opt-out.)
+        # contact. detection = false turns REDACTION off, not this rule:
+        # the ownership check (object_access_refusal, above) and object
+        # tracking read the parsed body too, and a body they could not
+        # read (gzip, non-JSON bytes) must not carry the proxy's identity.
         problem = _identity_body_problem(adapter, path, request.headers, body_bytes, parsed)
         if problem is not None:
             return refused_response(
@@ -2800,6 +2873,12 @@ async def handle(request: Request) -> Response:
             path,
             provider_name,
         )
+        if duplicate_keys:
+            # Except a repeated JSON key: the ownership check and object
+            # tracking read its LAST occurrence, so exactly that is sent — a
+            # first-wins upstream would otherwise act on a value nobody
+            # checked (another user's previous_response_id, a `store`).
+            outbound = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
     elif adapter is not None and isinstance(parsed, dict):
         # Token floors: a new value is never numbered onto a token this body
         # already carries (one its session never issued — a compacted
@@ -2939,7 +3018,7 @@ async def handle(request: Request) -> Response:
             new_warned=new_warned,
         )
 
-    upstream_base = state.upstream_for(adapter, path, request.headers, request.url.query)
+    upstream_base = provider_conf.upstream_base_url  # the admitted config's, not a reload's
     if not upstream_base:
         # Providers without a default upstream (azure) answer 502 until
         # configured — proxy-generated, never forwarded.
@@ -3391,6 +3470,76 @@ async def _deliver(
         )
     await upstream.aclose()
 
+    rehydration_counts_before = dict(state.rehydration_counts)
+    try:
+        raw = _restore_buffered(
+            request,
+            state,
+            ctx,
+            adapter,
+            kind,
+            route,
+            raw,
+            path=path,
+            content_type=content_type,
+            status=upstream.status_code,
+            request_body=request_body,
+        )
+    except Exception as exc:  # noqa: BLE001 — never a bare 500 once the provider answered
+        return _delivery_fault_response(
+            state,
+            ctx,
+            adapter,
+            exc,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+            audit_token=audit_token,
+            route=route,
+        )
+
+    # Every request is recorded — pass-through included (provider=None maps
+    # to the "passthrough" metrics label); audit rows likewise when enabled.
+    state.record_request(
+        session=ctx.session_id,
+        provider=adapter.name if adapter is not None else None,
+        method=request.method,
+        path=path,
+        status=upstream.status_code,
+        started=started,
+        streamed=False,
+        detections=new_counts,
+        rehydrations=_count_delta(state.rehydration_counts, rehydration_counts_before),
+        warned=new_warned,
+        audit_token=audit_token,
+        route=(state.finish_route(route, upstream.status_code) if route is not None else None),
+    )
+
+    return Response(content=raw, status_code=upstream.status_code, headers=headers)
+
+
+def _restore_buffered(
+    request: Request,
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    kind: RouteKind,
+    route: RouteDelivery | None,
+    raw: bytes,
+    *,
+    path: str,
+    content_type: str,
+    status: int,
+    request_body: Any,
+) -> bytes:
+    """A buffered upstream answer as the client receives it: rehydrated in
+    the request's session (CHAT), observed by the router, listed objects
+    restored in their owners' sessions, stored objects and response ids
+    reported. The session bookkeeping is contained (``_contained``: the
+    answer is still delivered); a fault restoring the answer itself raises
+    to ``_deliver``'s backstop."""
     received = raw  # the provider's own bytes (a listing restores items from these)
     rehydration_counts_before = dict(state.rehydration_counts)
     payload: Any = None
@@ -3402,7 +3551,15 @@ async def _deliver(
         if payload is not None:
             response_id = adapter.response_id_from_body(payload)
             if response_id is not None:
-                state.record_response_id(response_id, ctx.session_id)
+                _contained(
+                    state,
+                    "response_id",
+                    request.method,
+                    path,
+                    state.record_response_id,
+                    response_id,
+                    ctx.session_id,
+                )
             rehydrated = adapter.rehydrate_body(payload, ctx.rehydrator)
             # No-op short-circuit: every restore increments rehydration_counts
             # (a miss passes through verbatim), so an unchanged count means the
@@ -3444,7 +3601,7 @@ async def _deliver(
 
     lister = (
         state.object_lister(adapter, request.method, path, request.headers)
-        if raw and 200 <= upstream.status_code < 300 and "application/json" in content_type
+        if raw and 200 <= status < 300 and "application/json" in content_type
         else None
     )
     if lister is not None:
@@ -3458,7 +3615,7 @@ async def _deliver(
 
     tracker = (
         state.object_tracker(adapter, request.method, path, request.headers, body=request_body)
-        if raw and 200 <= upstream.status_code < 300 and "application/json" in content_type
+        if raw and 200 <= status < 300 and "application/json" in content_type
         else None
     )
     if tracker is not None:
@@ -3473,26 +3630,97 @@ async def _deliver(
             stored = None
         object_ids = tracker.object_ids_from_body(request.method, path, stored)
         if object_ids:
-            state.record_object_ids(object_ids, ctx.session_id)
+            _contained(
+                state,
+                "object_ids",
+                request.method,
+                path,
+                state.record_object_ids,
+                object_ids,
+                ctx.session_id,
+            )
+    return raw
 
-    # Every request is recorded — pass-through included (provider=None maps
-    # to the "passthrough" metrics label); audit rows likewise when enabled.
+
+def _contained(
+    state: ProxyState,
+    stage: str,
+    method: str,
+    path: str,
+    bookkeeping: Callable[..., object],
+    *args: Any,
+) -> bool:
+    """Run session bookkeeping that follows the provider's answer (a router
+    call, a durable-map write): a fault is counted and logged by stage and
+    exception TYPE (a message can carry an id or a DSN) and never reaches
+    the response — the answer the provider already produced (and billed) is
+    delivered. Losing a record is fail-safe by construction: an unrecorded
+    response id or stored object is the router's unknown-object case (an
+    empty session: placeholders pass through), never a wrong value. False
+    when it failed."""
+    try:
+        bookkeeping(*args)
+    except Exception as exc:  # noqa: BLE001 — contained by design, see above
+        state.bookkeeping_errors[stage] += 1
+        logger.warning(
+            "%s %s -> %s bookkeeping failed (%s); the answer is delivered",
+            method,
+            path,
+            stage,
+            type(exc).__name__,
+        )
+        return False
+    return True
+
+
+def _delivery_fault_response(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    exc: Exception,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+    audit_token: object | None,
+    route: RouteDelivery | None,
+) -> JSONResponse:
+    """The provider answered, but restoring that answer failed (a vault read
+    that cannot complete, a router hook): fail closed with a provider-shaped
+    502 — never a bare 500, never a partial or unrestored body — recorded
+    (the ``[audit] required`` END row included) and counted. The upstream
+    itself did not fail: not an upstream error, and the route is closed as
+    a 502 without a fault class. By exception TYPE only."""
+    state.bookkeeping_errors["delivery"] += 1
+    row = state.finish_route(route, 502) if route is not None else None
+    logger.warning(
+        "%s %s -> 502 restoring the upstream answer failed (%s)%s",
+        request.method,
+        path,
+        type(exc).__name__,
+        _route_log_suffix(row) if row is not None else "",
+    )
     state.record_request(
         session=ctx.session_id,
         provider=adapter.name if adapter is not None else None,
         method=request.method,
         path=path,
-        status=upstream.status_code,
+        status=502,
         started=started,
         streamed=False,
         detections=new_counts,
-        rehydrations=_count_delta(state.rehydration_counts, rehydration_counts_before),
+        rehydrations={},
         warned=new_warned,
         audit_token=audit_token,
-        route=(state.finish_route(route, upstream.status_code) if route is not None else None),
+        route=row,
     )
-
-    return Response(content=raw, status_code=upstream.status_code, headers=headers)
+    message = "llm-redact: the upstream answer could not be restored; nothing was delivered"
+    body = adapter.error_body(message, status=502) if adapter is not None else {"error": message}
+    return JSONResponse(
+        body, status_code=502, headers=dict(route.headers) if route is not None else None
+    )
 
 
 def _object_access_refused(
@@ -3587,7 +3815,14 @@ def _restore_listing(
         for index, item in enumerate(items)
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
-    by_id = state.listing_restorers(list(dict.fromkeys(listed.values())))
+    try:
+        by_id = state.listing_restorers(list(dict.fromkeys(listed.values())))
+    except Exception as exc:  # noqa: BLE001 — a vault read that failed
+        # The owners' sessions cannot be read: restore nothing — every listed
+        # item goes out as the provider sent it, never what this request's
+        # session made of it (another value).
+        _listing_fault(state, exc)
+        by_id = dict.fromkeys(listed.values())
     restorers = {
         index: by_id[object_id] for index, object_id in listed.items() if object_id in by_id
     }
@@ -3599,15 +3834,26 @@ def _restore_listing(
         return None  # a routed rewrite changed the shape: leave it alone
     changed = False
     for index, rehydrator in restorers.items():
-        restored = (
-            lister.rehydrate_body(items[index], rehydrator)
-            if rehydrator is not None
-            else items[index]
-        )
+        restored = items[index]
+        if rehydrator is not None:
+            try:
+                restored = lister.rehydrate_body(items[index], rehydrator)
+            except Exception as exc:  # noqa: BLE001 — as above: the provider's item
+                _listing_fault(state, exc)
         if restored != delivered_items[index]:
             delivered_items[index] = restored
             changed = True
     return json.dumps(delivered, ensure_ascii=False).encode("utf-8") if changed else None
+
+
+def _listing_fault(state: ProxyState, exc: Exception) -> None:
+    """A listed item whose owner's session could not be read: counted and
+    logged by exception TYPE; the item goes out as the provider sent it."""
+    state.bookkeeping_errors["listing"] += 1
+    logger.warning(
+        "listing restore failed for an item (%s); delivered as the provider sent it",
+        type(exc).__name__,
+    )
 
 
 # ---------------------------------------------------------------------------

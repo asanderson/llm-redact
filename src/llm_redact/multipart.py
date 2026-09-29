@@ -225,29 +225,34 @@ def parse_boundary(content_type: str) -> bytes | None:
 
 
 def parse(body: bytes, boundary: bytes) -> Multipart | None:
-    """Parse the canonical delimiter grammar; None on anything else."""
-    delim = b"--" + boundary
-    if body.startswith(delim):
+    """Parse the canonical delimiter grammar; None on anything else.
+
+    Linear in the body: each part is located by offset into ``body`` and
+    only its own bytes are copied — re-slicing the remainder per part cost
+    parts × size, and a body of many empty parts froze the event loop."""
+    separator = b"\r\n--" + boundary
+    if body.startswith(separator[2:]):
         preamble = b""
-        rest = body[len(delim) :]
+        pos = len(separator) - 2
     else:
-        idx = body.find(b"\r\n" + delim)
+        idx = body.find(separator)
         if idx < 0:
             return None
         preamble = body[: idx + 2]
-        rest = body[idx + 2 + len(delim) :]
+        pos = idx + len(separator)
 
     parts: list[MultipartPart] = []
     while True:
-        if rest.startswith(b"--"):
-            return Multipart(boundary, preamble, parts, rest[2:])
-        if not rest.startswith(b"\r\n"):
+        if body.startswith(b"--", pos):
+            return Multipart(boundary, preamble, parts, body[pos + 2 :])
+        if not body.startswith(b"\r\n", pos):
             return None  # transport padding and LF-only bodies: verbatim
-        end = rest.find(b"\r\n" + delim, 2)
-        if end < 0:
+        try:
+            end = body.index(separator, pos + 2)
+        except ValueError:
             return None  # no closing delimiter
-        raw = rest[2:end]
-        rest = rest[end + 2 + len(delim) :]
+        raw = body[pos + 2 : end]
+        pos = end + len(separator)
         head, sep, content = raw.partition(b"\r\n\r\n")
         if sep:
             parts.append(MultipartPart(headers=head, content=content))

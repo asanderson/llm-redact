@@ -80,6 +80,51 @@ def test_multipart_parse_never_crashes_and_round_trips(data: bytes, boundary: by
         assert result.serialize() == data  # byte-faithful
 
 
+def _reference_parse(body: bytes, boundary: bytes) -> Multipart | None:
+    """The canonical delimiter grammar, transcribed from the original
+    re-slicing parser (quadratic, but obviously faithful): the differential
+    oracle for the offset-based one."""
+    delim = b"--" + boundary
+    if body.startswith(delim):
+        preamble, rest = b"", body[len(delim) :]
+    else:
+        idx = body.find(b"\r\n" + delim)
+        if idx < 0:
+            return None
+        preamble, rest = body[: idx + 2], body[idx + 2 + len(delim) :]
+    parts: list[MultipartPart] = []
+    while True:
+        if rest.startswith(b"--"):
+            return Multipart(boundary, preamble, parts, rest[2:])
+        if not rest.startswith(b"\r\n"):
+            return None
+        end = rest.find(b"\r\n" + delim, 2)
+        if end < 0:
+            return None
+        raw, rest = rest[2:end], rest[end + 2 + len(delim) :]
+        head, sep, content = raw.partition(b"\r\n\r\n")
+        parts.append(
+            MultipartPart(headers=head, content=content)
+            if sep
+            else MultipartPart(headers=None, content=raw)
+        )
+
+
+# Bodies built from the grammar's own pieces, so delimiters, near-miss
+# delimiters, blank lines and closes land everywhere.
+_PIECES = st.sampled_from(
+    [b"--b", b"--bb", b"--", b"\r\n", b"\r\n\r\n", b"\n", b"b", b"x", b"h: v", b"\r"]
+)
+
+
+@given(pieces=st.lists(_PIECES, max_size=40), boundary=st.sampled_from([b"b", b"bb", b"x"]))
+def test_multipart_parse_matches_the_reference_grammar(
+    pieces: list[bytes], boundary: bytes
+) -> None:
+    body = b"".join(pieces)
+    assert multipart.parse(body, boundary) == _reference_parse(body, boundary)
+
+
 _HEADER = st.sampled_from(
     [
         None,

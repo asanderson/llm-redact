@@ -109,3 +109,43 @@ def test_serialize_is_inverse_on_constructed_value() -> None:
         epilogue=b"\r\n",
     )
     assert parse(document.serialize(), BOUNDARY) == document
+
+
+class _CountingBytes(bytes):
+    """Bytes whose slices stay counted: every byte a slice copies (of this
+    body, or of a slice of it) is added to ``copied``."""
+
+    copied = 0
+
+    def __getitem__(self, key):  # type: ignore[no-untyped-def,override]
+        out = bytes.__getitem__(self, key)
+        if isinstance(key, slice):
+            _CountingBytes.copied += len(out)
+            return _CountingBytes(out)
+        return out
+
+
+def test_parse_copies_each_byte_a_bounded_number_of_times() -> None:
+    # Many tiny parts: re-slicing the remainder per part copied parts x size
+    # (minutes of a frozen event loop at max_body_bytes); locating parts by
+    # offset copies each byte of the body about once.
+    parts = 3000
+    body = _CountingBytes(b"--b" + b"\r\nx: y\r\n\r\nv\r\n--b" * parts + b"--\r\nend")
+    _CountingBytes.copied = 0
+    parsed = parse(body, b"b")
+    assert parsed is not None and len(parsed.parts) == parts
+    assert parsed.epilogue == b"\r\nend"
+    assert _CountingBytes.copied <= 2 * len(body)
+    assert parsed.serialize() == bytes(body)
+
+
+def test_preamble_and_empty_parts_located_by_offset() -> None:
+    body = b"pre\r\n--b\r\n\r\n\r\n--b\r\nh: 1\r\n\r\n\r\n--b--"
+    parsed = parse(body, b"b")
+    assert parsed is not None
+    assert parsed.preamble == b"pre\r\n" and parsed.epilogue == b""
+    # A part with no blank line is carried opaquely; one with it splits.
+    assert [(p.headers, p.content) for p in parsed.parts] == [(None, b"\r\n"), (b"h: 1", b"")]
+    assert parsed.serialize() == body
+    # A delimiter that is only a prefix of a longer boundary is not one.
+    assert parse(b"--bb\r\n\r\n\r\n--b--", b"b") is None

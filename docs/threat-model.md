@@ -86,7 +86,14 @@ because breaking the tool teaches users to bypass the proxy).
   `functionResponse.response`, Bedrock `toolUse.input` and
   `toolResult.content[].json`, Anthropic `tool_use.input`, Cohere
   `documents`, …) is walked with no skips at all, so a tool result that
-  names its own keys `id` or `data` is still redacted.
+  names its own keys `id` or `data` is still redacted. The same holds for
+  maps whose keys the caller chooses: `metadata` wherever it appears
+  (OpenAI/Azure chat, Responses, batches, conversations, Realtime;
+  Anthropic), Bedrock Converse `requestMetadata`, prompt-template
+  `prompt.variables` (Responses, Realtime), and a `:predict` body's
+  top-level `instances`/`parameters` (arbitrary custom-model input) — a
+  metadata label or a feature column named `id`, `name` or `type` is the
+  caller's data, not protocol.
 - A request path with a `.`/`..` segment (any spelling) is refused 400
   before any upstream contact: matching and forwarding must address the
   same resource.
@@ -262,11 +269,11 @@ row, is [resilience.md](resilience.md).
 | Multi-user machines | Vault modes help, but the design assumes one user |
 | Provider-side inference | The provider can guess redacted content from context; only omission fixes that |
 | Length/timing side channels | Placeholder lengths differ from originals; smoothing them would break streaming |
-| Base64 media contents | Images can't leak through text regexes; PDF parsing would need heavy deps |
+| Base64 media contents | Images can't leak through text regexes; PDF parsing would need heavy deps. Media blobs at their known positions (base64 `data`, Bedrock `source.bytes`) are not even scanned — scanning base64 finds nothing real, costs event-loop CPU, and could rewrite a token-shaped run inside an image |
 | Values a client deliberately encodes | base64 inside a JSON string, a quoted-printable or foreign-charset multipart part: the proxy scans the bytes it receives. Under identity auth a declared multipart Content-Transfer-Encoding or charset is refused (400) instead of signed |
 | Structural names | JSON object keys, header names and a multipart part's `name` are protocol, not content; values are scanned — string values, and an upload's `filename` / `filename*` |
 | Shapes the rules exclude | Bare-digit phones, street addresses, passport/DL numbers: collision-prone with no reliable grammar |
-| SigV4-signed provider traffic (AWS Bedrock via SDK credentials) | Permanent non-goal: the signature covers the payload hash, so a body-rewriting proxy can never transit a signature the CLIENT computed, and it never holds the user's AWS credentials to re-sign. The proxy MAY sign with its OWN identity (`[providers.bedrock] auth = "identity"`, llm-redact-pro): the client's credentials are stripped and the redacted body is signed by credentials the operator gave the proxy (a body the proxy could not redact — non-JSON, a top-level array or scalar, content-encoded, or multipart on a route it does not scan — is refused 400, never signed verbatim) — which any client that reaches the proxy can then spend, so pair it with the access gate or a loopback bind. Bearer-token Bedrock (API keys) IS supported: the proxy parses AWS's binary CRC-framed eventstream encoding natively (both CRCs validated per frame; a framing violation degrades to verbatim pass-through, so unrestored placeholders — never corrupted frames — are the worst case), and invoke-route bodies are rewritten only for positively recognized model-native shapes (Claude), with everything else forwarded verbatim |
+| SigV4-signed provider traffic (AWS Bedrock via SDK credentials) | Permanent non-goal: the signature covers the payload hash, so a body-rewriting proxy can never transit a signature the CLIENT computed, and it never holds the user's AWS credentials to re-sign. The proxy MAY sign with its OWN identity (`[providers.bedrock] auth = "identity"`, llm-redact-pro): the client's credentials are stripped and the redacted body is signed by credentials the operator gave the proxy (a body the proxy could not redact — non-JSON, a top-level array or scalar, content-encoded (in any Content-Encoding header), sent with a repeated Content-Type, or multipart on a route it does not scan — is refused 400, never signed verbatim) — which any client that reaches the proxy can then spend, so pair it with the access gate or a loopback bind. Bearer-token Bedrock (API keys) IS supported: the proxy parses AWS's binary CRC-framed eventstream encoding natively (both CRCs validated per frame; a framing violation degrades to verbatim pass-through, so unrestored placeholders — never corrupted frames — are the worst case), and invoke-route bodies are rewritten only for positively recognized model-native shapes (Claude), with everything else forwarded verbatim |
 
 ## Residual risks
 

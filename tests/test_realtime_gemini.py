@@ -145,12 +145,46 @@ def test_thought_and_text_parts_use_separate_channels() -> None:
     assert text == EMAIL
 
 
-def test_tool_call_args_rehydrated_whole() -> None:
+@pytest.mark.parametrize("snake", [False, True])
+def test_tool_call_args_rehydrated_whole(snake: bool) -> None:
     adapter, _ctx, pool, vault = _setup()
     token = vault.placeholder_for("EMAIL", EMAIL)
-    frame = {"toolCall": {"functionCalls": [{"id": "f1", "name": "send", "args": {"to": token}}]}}
+    # A tool's own parameters named like protocol fields are its data (the
+    # opaque functionCalls[].args position), restored like any other.
+    args = {"to": token, "id": token, "name": token, "data": token, "type": token}
+    calls = "function_calls" if snake else "functionCalls"
+    frame = {"toolCall": {calls: [{"id": "f1", "name": "send", "args": args}]}}
     (out,) = adapter.rehydrate_message(json.dumps(frame), pool)
-    assert json.loads(out)["toolCall"]["functionCalls"][0]["args"]["to"] == EMAIL
+    (call,) = json.loads(out)["toolCall"][calls]
+    assert call == {"id": "f1", "name": "send", "args": dict.fromkeys(args, EMAIL)}
+
+
+def test_model_turn_parts_beyond_text_restored_like_the_http_adapter() -> None:
+    adapter, _ctx, pool, vault = _setup()
+    token = vault.placeholder_for("EMAIL", EMAIL)
+    frame = {
+        "serverContent": {
+            "modelTurn": {
+                "parts": [
+                    {"text": f"mail {token[:5]}"},
+                    {"executableCode": {"language": "PYTHON", "code": f"send({token!r})"}},
+                    {"inlineData": {"mimeType": "audio/pcm", "data": "QUJD"}},
+                ]
+            },
+            "groundingMetadata": {"webSearchQueries": [f"who is {token}"]},
+        }
+    }
+    (out,) = adapter.rehydrate_message(json.dumps(frame), pool)
+    content = json.loads(out)["serverContent"]
+    parts = content["modelTurn"]["parts"]
+    assert parts[0] == {"text": "mail "}  # the partial token is held for the next frame
+    assert parts[1]["executableCode"]["code"] == f"send({EMAIL!r})"
+    assert parts[2] == {"inlineData": {"mimeType": "audio/pcm", "data": "QUJD"}}
+    assert content["groundingMetadata"] == {"webSearchQueries": [f"who is {EMAIL}"]}
+    frames = adapter.rehydrate_message(
+        json.dumps(_server_content(token[5:], turnComplete=True)), pool
+    )
+    assert json.loads(frames[-1])["serverContent"]["modelTurn"]["parts"][0]["text"] == EMAIL
 
 
 def test_bookkeeping_and_unparseable_pass_verbatim() -> None:

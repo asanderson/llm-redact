@@ -74,7 +74,7 @@ from llm_redact.metrics import Metrics
 from llm_redact.multipart import parse as parse_multipart
 from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
-from llm_redact.placeholders import PLACEHOLDER_RE
+from llm_redact.placeholders import PLACEHOLDER_RE, json_floors, may_carry_tokens
 from llm_redact.plugin_api import (
     AccessGate,
     Admission,
@@ -94,7 +94,12 @@ from llm_redact.plugin_api import (
 from llm_redact.providers import ALL_ADAPTERS, ProviderAdapter, RouteKind
 from llm_redact.providers.custom import CUSTOM_ROUTE_PREFIX, build_custom_adapters, custom_prefix
 from llm_redact.realtime import ALL_WS_ADAPTERS, WsAdapter, websockets_available, ws_handle
-from llm_redact.redactor import BlockedRequest, Redactor, UnredactableRequest
+from llm_redact.redactor import (
+    BlockedRequest,
+    PlaceholderLimitReached,
+    Redactor,
+    UnredactableRequest,
+)
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent, SSEParser, serialize
@@ -200,7 +205,8 @@ class _SealedVault:
     def __init__(self, vault: Vault) -> None:
         self._vault = vault
 
-    def placeholder_for(self, detector_type: str, original: str) -> str:
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
+        # Whatever the request's token floor: nothing is ever written here.
         raise SealedSessionError(detector_type)
 
     def original_for(self, placeholder: str) -> str | None:
@@ -2628,15 +2634,27 @@ async def handle(request: Request) -> Response:
             provider_name,
         )
     elif adapter is not None and isinstance(parsed, dict):
+        # Token floors: a new value is never numbered onto a token this body
+        # already carries (one its session never issued — a compacted
+        # history, a pasted answer — would otherwise gain a second meaning).
+        # The whole decoded body counts, fields the walk skips included; a
+        # body with no guillemet in any encoding pays only the byte gate.
+        redactor = (
+            ctx.redactor.with_floors(json_floors(parsed))
+            if may_carry_tokens(body_bytes)
+            else ctx.redactor
+        )
         try:
             prepared = adapter.prepare_request(
                 parsed,
-                ctx.redactor,
+                redactor,
                 inject_note=note_wanted and adapter.wants_system_note(kind, path),
                 mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
             )
         except BlockedRequest as exc:
             return blocked_response(exc, adapter)
+        except PlaceholderLimitReached as exc:
+            return refused_response(str(exc), adapter, "no placeholder number left")
         except UnredactableRequest as exc:
             return refused_response(str(exc), adapter, "undecodable field")
         except SealedSessionError:
@@ -2677,6 +2695,8 @@ async def handle(request: Request) -> Response:
                 # One leaking line in an uploaded file is a leak: the
                 # whole request is rejected.
                 return blocked_response(exc, adapter)
+            except PlaceholderLimitReached as exc:
+                return refused_response(str(exc), adapter, "no placeholder number left")
             except UnredactableRequest as exc:
                 return refused_response(
                     f"llm-redact: {exc}, and this provider is authorized with the proxy's"

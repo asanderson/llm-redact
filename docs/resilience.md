@@ -50,7 +50,8 @@ with `synchronous=FULL` and WAL so a committed mapping survives a crash.
 
 | Fault | Behavior | Pinned by |
 | --- | --- | --- |
-| Write fault mid-insert (disk full, I/O error) | The open transaction is rolled back so the connection is not wedged for the next request, and the write fails closed. Caches are written only after `COMMIT` (nothing poisoned), and the counter is `MAX(n)+1` read fresh each call, so a retry reissues the **same dense number** — never a gap, never a reused token. | `test_vault_faults.py` |
+| Write fault mid-insert (disk full, I/O error, a cipher fault) | The open transaction is rolled back so the connection is not wedged for the next request, and the write fails closed. Caches are written only after `COMMIT` (nothing poisoned), and the number is `max(MAX(n), floor)+1` with `MAX(n)` read fresh each call, so a retry of the same request reissues the **same number** — never a skipped number, never a reused token. | `test_vault_faults.py`, `test_vault_floors.py` |
+| A request carries tokens its session never issued (a compacted history, a pasted answer) | New values are numbered above every token the request carries (the token floor), so none of those names gains a second meaning; the skipped numbers are the only gaps the vault ever leaves. A request needing a number past 999999999 is refused 400 with nothing written. | `test_vault_floors.py`, `test_token_floors_e2e.py` |
 | Concurrent writers (two proxies, one DB) | `PRAGMA busy_timeout` waits on a briefly-held WAL write lock; the unique-constraint loser re-selects the winner's placeholder. | `test_vault_faults.py`, `test_vault_sqlite.py` |
 | Crash between issue and use | The committed mapping is durable (WAL + `synchronous=FULL`); on reopen the counter continues from `MAX(n)` — issued tokens keep rehydrating, new values never reuse a number. | `test_vault_sqlite.py` |
 | Wrong / missing encryption key | Fails closed **at open** — never silently issues fresh tokens against an unreadable store. | `test_vault_sqlite.py` |
@@ -79,7 +80,7 @@ lookup across sessions.
 | Property | Behavior | Pinned by |
 | --- | --- | --- |
 | Many concurrent distinct sessions | Each request restores only its own session's values; no bleed through the shared token name. | `test_soak_concurrency.py` |
-| Concurrent writes in one session | Distinct secrets get distinct dense tokens; no counter collision. | `test_soak_concurrency.py` |
+| Concurrent writes in one session | Distinct secrets get distinct dense tokens (no token floor involved); no counter collision. | `test_soak_concurrency.py` |
 | More sessions than the view cache holds | The per-session view cache stays bounded (LRU); eviction drops only caches, never a mapping — every evicted session still rehydrates its own value. | `test_soak_concurrency.py` |
 
 Run the concurrency/soak suite explicitly: `uv run pytest -m soak` (it is

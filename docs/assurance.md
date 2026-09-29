@@ -169,11 +169,20 @@ interleaving of `(session, type, value)` writes over multiple sessions
 `«EMAIL_001»`), any mix of own/foreign/unknown/mangled tokens in a text,
 any chunking of the stream, and any truncation point — a placeholder
 restores to exactly the value its own session stored, or passes through
-verbatim. Writes are deterministic and collision-free against a shadow
-model, per-`(session, type)` counters are exactly `1..n` after every step,
-streaming equals whole-text, and a truncated stream equals the whole-text
+verbatim. Writes — plain ones and ones under a request's token floor —
+are deterministic and collision-free against a shadow model, and
+per-`(session, type)` numbers never repeat: each is exactly
+`max(previous, floor) + 1`, so without floors the counters are `1..n` after
+every step and the only gaps are the ones a floor asked for. Streaming
+equals whole-text, and a truncated stream equals the whole-text
 rehydration of the prefix. Write-path faults remain the sqlite battery's
-job (`test_vault_faults.py`).
+job (`test_vault_faults.py`; floored retries in `test_vault_floors.py`).
+A companion property (`test_no_new_value_takes_a_token_the_request_carries`)
+states the floor's purpose directly: for random token histories —
+canonical, mangled or JSON-escaped, sent in either JSON encoding through
+the proxy's byte gate — and random new values, over the memory, encrypted
+and sqlite vaults, no newly issued token equals one the request carries,
+and each carried token the session did not own stays unissued.
 
 ## Differential fuzzing, bottom to top
 

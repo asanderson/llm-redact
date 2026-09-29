@@ -256,6 +256,9 @@ use the static vault session — the per-conversation mode's
 first-message anchor does not exist at connection time. With
 llm-redact-pro's named users, each user's connection uses that user's own
 copy of the static session ([per-user namespaces](how-it-works.md#session-isolation)).
+A connection keeps a running token floor: a token any of its client
+frames carried (a restored conversation, a pasted answer) is never issued
+to a new value later on that connection ([the vault records](how-it-works.md#the-vault-records)).
 The Azure and Vertex routes work with the proxy's own cloud identity
 ([above](#the-proxys-own-cloud-identity)); the full list of accepted
 WebSocket paths is in [api-coverage.md](api-coverage.md#realtime-websocket-routes).

@@ -34,6 +34,12 @@ session comes from ``state.context_for`` like HTTP, so a session router
 that scopes by user (llm-redact-pro's named users) hands each user's
 connection that user's own copy of the static session. docs/providers.md
 documents this.
+
+Token floors: the provider holds a realtime conversation, so a token any
+earlier client frame carried is still in it. A connection keeps a RUNNING
+floor (``frame_floors`` of every client frame, raised before the frame is
+redacted): a new value is never numbered onto a token the conversation
+already holds — the per-request floor of the HTTP path, per connection.
 """
 
 import asyncio
@@ -50,6 +56,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from llm_redact.audit import AuditWriteError
 from llm_redact.jsonwalk import STRUCTURAL_KEYS, transform_strings
+from llm_redact.placeholders import json_floors, may_carry_tokens, token_floors
 from llm_redact.plugin_api import UpstreamAuthError
 from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
 from llm_redact.redactor import BlockedRequest, Redactor, UnredactableRequest
@@ -1017,7 +1024,8 @@ async def ws_handle(websocket: WebSocket) -> None:
         return
     # Thin per-connection wrapper (the context_for pattern: object
     # construction only): a tee counter gives exact per-connection
-    # detection counts that still land in the process totals.
+    # detection counts that still land in the process totals. Its redactor
+    # is rebound as the connection's token floor rises (frame_floors).
     connection_counts = _TeeCounter(state.detection_counts)
     ctx = RequestContext(
         static_ctx.session_id,
@@ -1140,6 +1148,14 @@ async def ws_handle(websocket: WebSocket) -> None:
                 data = message["text"]
             else:
                 data = message.get("bytes") or b""
+            # The connection's running token floor, raised BEFORE this
+            # frame's values are numbered: the provider holds the whole
+            # conversation, so a token any earlier client frame carried is
+            # still in it (the client never resends history, as on HTTP).
+            # Upstream frames are not read: model output is provider-side
+            # history, as on HTTP (and a session echo carries the proxy's
+            # own note, whose example token must not raise the floor).
+            ctx.redactor = ctx.redactor.with_floors(frame_floors(data))
             try:
                 # [providers.NAME] detection = false applies to realtime
                 # frames too: forwarded untouched (rehydration inbound
@@ -1248,6 +1264,19 @@ def parse_json_text(data: str | bytes) -> tuple[Any, bool] | None:
         return json.loads(data), False
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+def frame_floors(data: str | bytes) -> dict[str, int]:
+    """The token floors of one client frame: its JSON decoded when it
+    parses, else its text. A connection accumulates them (its running
+    floor): a realtime conversation lives on the provider, so a token any
+    earlier frame carried is still in it."""
+    if not may_carry_tokens(data):
+        return {}
+    parsed = parse_json_text(data)
+    if parsed is not None:
+        return json_floors(parsed[0])
+    return token_floors(data if isinstance(data, str) else data.decode("utf-8", "replace"))
 
 
 def _dump_frame(payload: Any, was_binary: bool) -> str | bytes:

@@ -9,7 +9,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol
 
-from llm_redact.placeholders import format_placeholder
+from llm_redact.placeholders import MAX_TOKEN_NUMBER, format_placeholder
 
 if TYPE_CHECKING:
     from llm_redact.config import VaultConfig
@@ -23,9 +23,45 @@ class VaultKeyError(RuntimeError):
     ``crypto`` extra installed."""
 
 
+class PlaceholderSpaceExhausted(RuntimeError):
+    """A new placeholder would need a number above MAX_TOKEN_NUMBER: the
+    request carries a token numbered at the limit (or, in theory, the
+    session issued that many). Refused, never wrapped around or reused —
+    the redactor turns it into a refused request. The message names the
+    detector type only, never a value."""
+
+    def __init__(self, detector_type: str) -> None:
+        super().__init__(
+            f"no {detector_type} placeholder number above the ones this request carries"
+            f" is left to issue (the limit is {MAX_TOKEN_NUMBER})"
+        )
+        self.detector_type = detector_type
+
+
+def next_number(issued: int, floor: int, detector_type: str) -> int:
+    """The number a NEW placeholder takes: above every number the session
+    has issued (``issued`` is their maximum, 0 when none) AND above
+    ``floor``, the highest same-type number the request being redacted
+    already carries. Without a floor that is the dense MAX(n)+1; with one,
+    the numbers in between are skipped — a gap, never a reuse."""
+    n = max(issued, floor) + 1
+    if n > MAX_TOKEN_NUMBER:
+        raise PlaceholderSpaceExhausted(detector_type)
+    return n
+
+
 class Vault(Protocol):
-    def placeholder_for(self, detector_type: str, original: str) -> str:
-        """Get or create the placeholder for an original value."""
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
+        """Get or create the placeholder for an original value.
+
+        A value the session already mapped keeps its token whatever the
+        floor. A NEW value is numbered ``next_number``: above the session's
+        own numbers and above ``floor`` — the highest same-type token number
+        the request carries (placeholders.token_floors), so a token the
+        session never issued (a compacted history, a pasted answer) never
+        gets a second meaning. Callers pass ``floor`` only when it is
+        non-zero, so a vault predating the keyword still serves every
+        request that carries no tokens."""
         ...
 
     def original_for(self, placeholder: str) -> str | None:
@@ -51,12 +87,12 @@ class InMemoryVault:
         self._reverse: dict[str, str] = {}
         self._counters: dict[str, int] = {}
 
-    def placeholder_for(self, detector_type: str, original: str) -> str:
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
         key = f"{detector_type}::{original}"
         existing = self._forward.get(key)
         if existing is not None:
             return existing
-        n = self._counters.get(detector_type, 0) + 1
+        n = next_number(self._counters.get(detector_type, 0), floor, detector_type)
         self._counters[detector_type] = n
         placeholder = format_placeholder(detector_type, n)
         self._forward[key] = placeholder
@@ -91,16 +127,19 @@ class EncryptedInMemoryVault:
         self._reverse: dict[str, bytes] = {}  # placeholder -> Fernet token
         self._counters: dict[str, int] = {}
 
-    def placeholder_for(self, detector_type: str, original: str) -> str:
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
         mac = self._cipher.mac(self._session_id, detector_type, original)
         existing = self._forward.get(mac)
         if existing is not None:
             return existing
-        n = self._counters.get(detector_type, 0) + 1
+        n = next_number(self._counters.get(detector_type, 0), floor, detector_type)
+        # Encrypt BEFORE any state changes: a failing cipher must leave no
+        # forward entry whose token could never be restored.
+        ciphertext = self._cipher.encrypt(original)
         self._counters[detector_type] = n
         placeholder = format_placeholder(detector_type, n)
         self._forward[mac] = placeholder
-        self._reverse[placeholder] = self._cipher.encrypt(original)
+        self._reverse[placeholder] = ciphertext
         return placeholder
 
     def original_for(self, placeholder: str) -> str | None:
@@ -376,19 +415,21 @@ class SqliteVault:
                 self._forward[f"{detector_type}::{original}"] = placeholder
                 self._reverse[placeholder] = original
 
-    def placeholder_for(self, detector_type: str, original: str) -> str:
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
         key = f"{detector_type}::{original}"
         existing = self._forward.get(key)
         if existing is not None:
             return existing
         try:
             self._conn.execute("BEGIN IMMEDIATE")
+            # MAX(n) read fresh inside the write lock: a retry after a
+            # rolled-back write computes the same max(MAX(n), floor) + 1.
             row = self._conn.execute(
-                "SELECT COALESCE(MAX(n), 0) + 1 FROM mappings"
+                "SELECT COALESCE(MAX(n), 0) FROM mappings"
                 " WHERE session_id = ? AND detector_type = ?",
                 (self._session, detector_type),
             ).fetchone()
-            n = int(row[0])
+            n = next_number(int(row[0]), floor, detector_type)
             placeholder = format_placeholder(detector_type, n)
             if self._cipher is None:
                 self._conn.execute(
@@ -433,13 +474,14 @@ class SqliteVault:
             if row is None:  # pragma: no cover - constraint failed another way
                 raise
             placeholder = str(row[0])
-        except sqlite3.Error:
-            # Any other write failure (disk full, I/O error, lock timeout):
-            # roll back so the open BEGIN IMMEDIATE can't wedge the connection
-            # for the next request, and fail closed. Nothing was cached (the
-            # caches are written only after a successful commit below), and n
-            # is MAX(n)+1 read fresh on every call, so the next attempt
-            # reissues the same number — never a gap, never a reused token.
+        except BaseException:
+            # Any other failure (disk full, I/O error, lock timeout, a cipher
+            # fault, an exhausted number space): roll back so the open BEGIN
+            # IMMEDIATE can't wedge the connection for the next request, and
+            # fail closed. Nothing was cached (the caches are written only
+            # after a successful commit below), and n is computed from MAX(n)
+            # read fresh on every call, so the next attempt reissues the same
+            # number — never a skipped number, never a reused token.
             with suppress(sqlite3.Error):
                 self._conn.execute("ROLLBACK")
             raise

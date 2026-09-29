@@ -9,11 +9,12 @@ bounded retry, which is the SqliteVault recipe generalized to any engine.
 
 Semantics mirror SqliteVault and are pinned by the same invariant battery
 (tests/test_vault_rdbms.py): deterministic (session, type, value) → token,
-dense per-(session, type) counters (n is MAX(n)+1 read fresh inside the
-transaction, so a rolled-back allocation reissues the SAME number — reuse
-is the danger, gaps would come from counters tables, which is why there is
-none), caches written only after COMMIT, any write fault rolls back and
-fails closed, whole-session prune only.
+per-(session, type) counters that never reuse a number (n is
+max(MAX(n), floor)+1 with MAX(n) read fresh inside the transaction, so a
+rolled-back allocation reissues the SAME number — reuse is the danger; the
+only gaps are the ones a request's token floor asks for, and there is no
+counters table to lose one), caches written only after COMMIT, any write
+fault rolls back and fails closed, whole-session prune only.
 
 Two deliberate deltas from the sqlite schema:
 
@@ -52,8 +53,10 @@ from llm_redact.placeholders import format_placeholder
 from llm_redact.vault import (
     _MAX_RESPONSE_ROWS,
     _RESPONSE_PRUNE_EVERY,
+    PlaceholderSpaceExhausted,
     Vault,
     VaultKeyError,
+    next_number,
 )
 
 if TYPE_CHECKING:
@@ -715,7 +718,11 @@ class RdbmsStore:
         result: list[tuple[str, str, str]] = self._run(op)
         return result
 
-    def get_or_create(self, session: str, detector_type: str, original: str) -> str:
+    def get_or_create(
+        self, session: str, detector_type: str, original: str, *, floor: int = 0
+    ) -> str:
+        """The value's token in ``session``; a NEW value is numbered above
+        the session's numbers and above ``floor`` (vault.next_number)."""
         original_key = self._original_key(session, detector_type, original)
 
         def op(conn: Any) -> str:
@@ -731,11 +738,15 @@ class RdbmsStore:
                     return str(row[0])
                 nrow = self._execute(
                     conn,
-                    "SELECT COALESCE(MAX(n), 0) + 1 FROM llm_redact_mappings"
+                    "SELECT COALESCE(MAX(n), 0) FROM llm_redact_mappings"
                     " WHERE session_id = :s AND detector_type = :t",
                     {"s": session, "t": detector_type},
                 ).fetchone()
-                n = int(nrow[0])
+                try:
+                    n = next_number(int(nrow[0]), floor, detector_type)
+                except PlaceholderSpaceExhausted:
+                    self._rollback(conn)  # close the read transaction; nothing written
+                    raise
                 placeholder = format_placeholder(detector_type, n)
                 params: dict[str, Any] = {
                     "s": session,
@@ -769,8 +780,8 @@ class RdbmsStore:
                     continue
                 except self._module.Error:
                     # Any other write failure: roll back and fail closed.
-                    # Nothing was cached, and n is MAX(n)+1 read fresh, so
-                    # the next attempt reissues the same number.
+                    # Nothing was cached, and n comes from MAX(n) read fresh,
+                    # so the next attempt reissues the same number.
                     self._rollback(conn)
                     raise
             raise RuntimeError(
@@ -1060,12 +1071,12 @@ class RdbmsVault:
             self._forward[f"{detector_type}::{original}"] = placeholder
             self._reverse[placeholder] = original
 
-    def placeholder_for(self, detector_type: str, original: str) -> str:
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
         key = f"{detector_type}::{original}"
         existing = self._forward.get(key)
         if existing is not None:
             return existing
-        placeholder = self._store.get_or_create(self._session, detector_type, original)
+        placeholder = self._store.get_or_create(self._session, detector_type, original, floor=floor)
         self._forward[key] = placeholder
         self._reverse[placeholder] = original
         return placeholder

@@ -107,6 +107,22 @@ still `«EMAIL_001»` ten turns later:
 With `[vault] encryption = "fernet"` the `original` column holds an
 HMAC index and ciphertext instead of plaintext.
 
+`n` counts per `(session, type)`, so every session has its own
+`«EMAIL_001»`. A request can therefore carry tokens its session never
+issued — a compacted history quoting the conversation's earlier session,
+an answer pasted from another conversation. A new value is never numbered
+onto one of those: before redacting, the proxy reads the highest
+placeholder number per type the request already carries (canonical,
+fuzzy-mangled and JSON-escaped forms alike — the **token floor**) and
+numbers each new value `max(MAX(n), floor) + 1`. The request's foreign
+tokens stay unissued in this session, so their echoes pass through
+verbatim instead of restoring the new value; skipped numbers are a gap,
+never a reuse. Values already mapped keep their tokens. Multipart uploads
+are read part by part for the floor, the Bedrock CountTokens blob is
+decoded for it, and a realtime connection keeps a running floor over
+everything its client has sent. The record of what a per-request floor
+cannot see is in [compaction-relink.md](compaction-relink.md).
+
 ### The audit record
 
 `audit.db`, an opt-in Pro feature: one metadata-only row per request
@@ -232,7 +248,11 @@ while the vault row is the secret store and is never exported.
 - `compaction_forks` counts only a session first seen by this process
   whose history carries placeholders it cannot own: a persisted session
   resumed after a restart (its vault already holds the tokens) and a
-  per-user copy of the static session are not forks.
+  per-user copy of the static session are not forks. A fork never issues
+  one of those placeholders to a new value: the compacted summary is the
+  fork's first message, so every request of it carries the summary's
+  tokens and the token floor (see "The vault records") numbers new values
+  past them.
 - The engineering record for why compaction-fork relinking was rejected
   (it cannot meet the never-restore-a-wrong-value bar) stays public in
   [compaction-relink.md](compaction-relink.md).

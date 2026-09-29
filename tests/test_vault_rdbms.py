@@ -194,6 +194,15 @@ def _battery(make_store: Any) -> None:
     survivor = manager.get("sess-a")
     assert survivor.placeholder_for("EMAIL", "dan@corp.example") == "«EMAIL_003»"
 
+    # Token floors: a new value is numbered above the request's floor (the
+    # highest same-type token it carries), a mapped value keeps its token
+    # whatever the floor, and later values continue above the gap — also
+    # from a cold view, which reads MAX(n) fresh.
+    assert survivor.placeholder_for("EMAIL", "fay@corp.example", floor=9) == "«EMAIL_010»"
+    assert survivor.placeholder_for("EMAIL", "dan@corp.example", floor=50) == "«EMAIL_003»"
+    assert RdbmsVault(store, "sess-a").placeholder_for("EMAIL", "gus@corp.example") == "«EMAIL_011»"
+    assert survivor.placeholder_for("PHONE", "+1 555 0101", floor=0) == "«PHONE_002»"
+
     # Whole-session forget (an access gate dropping a deleted user's
     # sessions): mappings and response rows go, cached views too.
     manager.get("sess-c").placeholder_for("EMAIL", "eve@corp.example")

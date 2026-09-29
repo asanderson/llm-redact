@@ -7,7 +7,7 @@ from typing import Any
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.engine import Allowlist, detect_all
 from llm_redact.jsonwalk import transform_strings
-from llm_redact.vault import Vault
+from llm_redact.vault import PlaceholderSpaceExhausted, Vault
 
 
 class BlockedRequest(Exception):
@@ -26,6 +26,13 @@ class UnredactableRequest(Exception):
     """A request field that must be redacted could not be decoded, so it
     cannot be redacted: the whole request is rejected (400), never forwarded
     unredacted. The message names the FIELD only — never its content."""
+
+
+class PlaceholderLimitReached(UnredactableRequest):
+    """A new value would need a placeholder number past MAX_TOKEN_NUMBER
+    (only a request carrying a token numbered at the limit gets here): the
+    whole request is refused, never numbered past the limit or onto a token
+    the request already carries. The message names the detector type only."""
 
 
 def _sweep(detections: Sequence[Detection]) -> list[Detection]:
@@ -84,6 +91,7 @@ class Redactor:
         counts: "Counter[str] | None" = None,
         modes: Mapping[str, str] | None = None,
         warn_counts: "Counter[str] | None" = None,
+        floors: Mapping[str, int] | None = None,
     ) -> None:
         self._detectors = detectors
         self._vault = vault
@@ -97,6 +105,44 @@ class Redactor:
         # the same longest-wins rule that governs substitution.
         self._modes = modes if modes is not None else {}
         self.warn_counts: Counter[str] = warn_counts if warn_counts is not None else Counter()
+        # The request's token floors (placeholders.token_floors): per type,
+        # the highest placeholder number the request being redacted already
+        # carries. Every NEW placeholder is numbered above it. Never mutated:
+        # a shared redactor (static mode) stays floor-free and each request
+        # carrying tokens gets its own thin copy (with_floors).
+        self._floors: Mapping[str, int] = floors if floors is not None else {}
+
+    def with_floors(self, floors: Mapping[str, int]) -> "Redactor":
+        """This redactor numbering new placeholders above ``floors`` as well
+        (per type, the higher of both): itself when nothing rises, else a
+        thin copy sharing the detectors, vault and counters — so a floor
+        never leaks into another request through a shared redactor."""
+        raised = {t: n for t, n in floors.items() if n > self._floors.get(t, 0)}
+        if not raised:
+            return self
+        return Redactor(
+            self._detectors,
+            self._vault,
+            self._allowlist,
+            counts=self.counts,
+            modes=self._modes,
+            warn_counts=self.warn_counts,
+            floors={**self._floors, **raised},
+        )
+
+    def _placeholder(self, detector_type: str, value: str) -> str:
+        floor = self._floors.get(detector_type)
+        try:
+            if floor is None:
+                # No token of this type in the request: the keyword is left
+                # out, so a vault predating it keeps serving every request
+                # that carries no tokens.
+                return self._vault.placeholder_for(detector_type, value)
+            return self._vault.placeholder_for(detector_type, value, floor=floor)
+        except PlaceholderSpaceExhausted as exc:
+            raise PlaceholderLimitReached(
+                f"llm-redact: {exc}; the request was not forwarded"
+            ) from None
 
     def redact_text(self, text: str) -> str:
         detections = _resolve_overlaps(detect_all(self._detectors, text, self._allowlist))
@@ -120,7 +166,7 @@ class Redactor:
                 self.warn_counts[d.detector_type] += 1
                 continue
             parts.append(text[cursor : d.start])
-            parts.append(self._vault.placeholder_for(d.detector_type, d.value))
+            parts.append(self._placeholder(d.detector_type, d.value))
             self.counts[d.detector_type] += 1
             cursor = d.end
         parts.append(text[cursor:])

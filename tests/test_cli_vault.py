@@ -126,21 +126,68 @@ def test_vault_verify_plaintext_ok(tmp_path: Path, capsys: pytest.CaptureFixture
     assert _run(["vault", "verify", "--db", str(db)]) == 0
     out = capsys.readouterr().out
     assert "verify OK" in out
-    assert "PASS counter density" in out
+    assert "PASS counter integrity" in out
+    assert "note:" not in out  # dense numbering: nothing skipped
 
 
-def test_vault_verify_detects_counter_gap(
+def test_vault_verify_reports_a_floor_gap_without_failing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # A request carrying «EMAIL_004» (a compacted history, a pasted answer)
+    # had its new value numbered past it: the skipped numbers are a gap by
+    # design — never a reuse — so verify notes it and still passes.
     db = tmp_path / "vault.db"
     _seed_plain(db)  # conv-aaaa has EMAIL n=1 and n=2
+    vault = open_sqlite_vault(db, "conv-aaaa")
+    assert vault.placeholder_for("EMAIL", "carol@corp.example", floor=4) == "«EMAIL_005»"
+    vault.close()
+    assert _run(["vault", "verify", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "PASS counter integrity" in out and "verify OK" in out
+    assert "note: 1 (session,type) group(s) skip numbers" in out
+    assert "carol" not in out
+
+
+def test_vault_verify_notes_a_deleted_row_as_a_gap(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A hand-deleted row leaves its token unrestorable (it passes through
+    # verbatim) but below MAX(n): nothing is ever reissued, so it is noted.
+    db = tmp_path / "vault.db"
+    _seed_plain(db)
     conn = sqlite3.connect(db)
     conn.execute("DELETE FROM mappings WHERE session_id = 'conv-aaaa' AND n = 1")
     conn.commit()
     conn.close()
+    assert _run(["vault", "verify", "--db", str(db)]) == 0
+    assert "note: 1 (session,type) group(s) skip numbers" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "UPDATE mappings SET placeholder = '«EMAIL_009»' WHERE session_id = 'conv-aaaa' AND n = 2",
+        "UPDATE mappings SET n = 7 WHERE session_id = 'conv-aaaa' AND n = 2",
+        "UPDATE mappings SET n = 0, placeholder = '«EMAIL_000»'"
+        " WHERE session_id = 'conv-aaaa' AND n = 1",
+        "UPDATE mappings SET n = 1000000000, placeholder = '«EMAIL_1000000000»'"
+        " WHERE session_id = 'conv-aaaa' AND n = 2",
+    ],
+)
+def test_vault_verify_fails_a_number_its_token_disagrees_with(
+    tamper: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = tmp_path / "vault.db"
+    _seed_plain(db)
+    conn = sqlite3.connect(db)
+    conn.execute(tamper)
+    conn.commit()
+    conn.close()
     assert _run(["vault", "verify", "--db", str(db)]) == 1
     out = capsys.readouterr().out
-    assert "FAIL counter density" in out and "verify FAILED" in out
+    assert "FAIL counter integrity: 1 row(s)" in out and "verify FAILED" in out
+    assert "conv-aaaa / EMAIL" in out
+    assert "jane" not in out and "bob" not in out
 
 
 def test_vault_verify_missing_db(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

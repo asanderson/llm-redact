@@ -118,6 +118,15 @@ because breaking the tool teaches users to bypass the proxy).
   across sessions deliberately, so there is no fallback lookup — a
   cross-session hit would silently restore someone else's secret.
   Pruning deletes whole sessions only.
+- Because names collide across sessions, a request can carry tokens its
+  own session never issued (a compacted history, a pasted answer). A new
+  value is numbered above every such token the request carries — the
+  per-type **token floor**, read from the decoded request (canonical,
+  fuzzy and JSON-escaped forms; multipart parts; the Bedrock CountTokens
+  blob; a realtime connection's every client frame) — so the upstream
+  never reads one token name with two meanings and a foreign token's echo
+  passes through verbatim. Numbers stop at 999999999: a request needing
+  one past it is refused, never wrapped.
 
 ### Local ops surface (`/__llm-redact/*`)
 
@@ -265,7 +274,8 @@ row, is [resilience.md](resilience.md).
 |---|---|
 | Novel secret formats the rules miss | User-extensible custom rules; NER extras; fp/recall gates keep the shipped set honest |
 | LLM mangles a placeholder beyond fuzzy repair | Pass-through verbatim (never a wrong value); bracket swaps deliberately unrestored |
-| History compaction rewrites the session anchor | Fails safe: fresh session, no cross-session restore — verified by the dogfood compaction probe |
+| History compaction rewrites the session anchor | Fails safe: fresh session, no cross-session restore — verified by the dogfood compaction probe. The fork never issues a token its summary carries: the summary is the fork's anchor, so every request of it carries the summary's tokens and the token floor numbers new values past them |
+| A request carries tokens its session did not issue (a pasted answer, a foreign proxy's token) | The token floor keeps the request (and a realtime connection) that carries them from issuing those names. Residual, documented in [compaction-relink.md](compaction-relink.md): a number the session had already issued before the foreign token arrived, another request sharing the session that does not carry the token, and provider-side history (a `previous_response_id` chain, a realtime model's own output) no request of the session carries — the last is what llm-redact-pro's sealed sessions cover |
 | Values pre-escaped inside JSON-source strings | Captured in escaped form; documented limitation |
 | A drifted provider event shape bypasses a rehydration channel | Drift detectors in live tests; unknown shapes pass through rather than corrupt |
 | License enforcement circumvented by patching the source | Accepted: signed keys prevent forgery and the single chokepoint makes tampering auditable, but source-available checks are deterrence, not DRM — the license is a legal instrument, never a security boundary (the `llm-redact-pro` repo's `docs/licensing.md`) |

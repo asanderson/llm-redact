@@ -77,7 +77,9 @@ class AzureOpenAIAdapter(OpenAIAdapter):
         # GET is REDACT_ONLY: a list spans batches other users created, and
         # restoring their placeholders in the READER's vault namespace
         # (llm-redact-pro named users) could hand one user a value bound in
-        # another's — the list passes through unrestored instead.
+        # another's — the list passes through unrestored instead, except for
+        # items a session router attributes (`listing_item_session`), each
+        # restored in the session that created it.
         if method == "POST":
             return self._match_post(path)
         if method == "GET":
@@ -107,7 +109,7 @@ class AzureOpenAIAdapter(OpenAIAdapter):
     @staticmethod
     def _match_get(path: str) -> RouteKind:
         if _AZURE_BATCH_COLLECTION.fullmatch(path):
-            return RouteKind.REDACT_ONLY  # the list: never rehydrated
+            return RouteKind.REDACT_ONLY  # the list: only attributed items restored
         if (
             _AZURE_FILE_CONTENT.fullmatch(path)
             or _AZURE_BATCHES.fullmatch(path)

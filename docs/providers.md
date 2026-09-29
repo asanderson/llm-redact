@@ -134,16 +134,31 @@ dials the wss twin). The signed URL must be exactly the configured
 upstream — scheme, host, port, and the `upstream_base_url` PATH (an
 API-management base such as `https://gw.example/my-api` is honored on
 HTTP and realtime alike) followed by the request's own path — or the
-request is refused before signing. A multipart upload the proxy cannot
-parse (outside the canonical form it redacts) is refused with a 400
-instead of being forwarded verbatim under the proxy's identity. Realtime
+request is refused before signing. The identity signs only a body the
+proxy actually redacted: a non-empty request body on a recognized route
+must be a JSON object (read from the bytes whatever the content-type; a
+UTF-8 BOM or UTF-16/32 encoding is fine) or canonical multipart on a
+route whose multipart form llm-redact scans (Azure Files uploads and
+image edits). Anything else — non-JSON bytes, invalid UTF-8, a top-level
+JSON array or scalar (`null` included), a whitespace-only body,
+multipart on any other route or outside the canonical form, and any
+`Content-Encoding` other than `identity` (the proxy never decompresses
+a request, so it cannot see what the upstream would) — is refused with a
+recorded, provider-shaped 400 naming the body's kind, before any
+credential is fetched or the upstream contacted. An empty body (a GET,
+DELETE or body-less POST) is forwarded as before; `detection = false`
+stays the explicit unredacted opt-out, and key-authorized providers keep
+forwarding such bodies verbatim. Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with
 exactly the proxy's headers. Only those documented realtime paths are
 authorized (any other WebSocket path to such a provider is refused
 1011 and recorded as a 403), a missing credential closes the connection 1011 naming the
-credential source, and such a provider is never routed. Only the HTTP
+credential source, a client frame that is not JSON (text or binary —
+Gemini Live's JSON-in-binary frames stay allowed) closes it 1008 unsent
+and records the connection as a 400, and such a provider is never
+routed. Only the HTTP
 routes llm-redact recognizes (the Vertex AI, Azure OpenAI and Bedrock
 tables in [api-coverage.md](api-coverage.md)) are forwarded with that
 identity; any other path to the provider is refused with a recorded 403,

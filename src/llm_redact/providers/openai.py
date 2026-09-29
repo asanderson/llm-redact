@@ -21,7 +21,7 @@ from collections.abc import Hashable, Mapping
 from typing import Any
 
 from llm_redact import multipart
-from llm_redact.jsonwalk import transform_strings
+from llm_redact.jsonwalk import loads_request, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
@@ -52,6 +52,19 @@ def _parse_object_line(line: bytes) -> dict[str, Any] | None:
     except ValueError:
         return None
     return obj if isinstance(obj, dict) else None
+
+
+def _parse_request_line(line: bytes) -> tuple[dict[str, Any] | None, bool]:
+    """``_parse_object_line`` for an uploaded REQUEST line, plus whether an
+    object in it repeats a key (then the line must be re-serialized)."""
+    stripped = line.strip()
+    if not stripped:
+        return None, False
+    try:
+        obj, duplicate_keys = loads_request(stripped)
+    except ValueError:
+        return None, False
+    return (obj, duplicate_keys) if isinstance(obj, dict) else (None, False)
 
 
 # Delta fields that carry reasoning-model chain-of-thought as a string,
@@ -119,6 +132,13 @@ def _stored_completion_create(path: str, body: Any) -> bool:
         and isinstance(body, dict)
         and body.get("store") is True
     )
+
+
+# Collection reads whose `{"object": "list", "data": [...]}` answer lists
+# stored objects by id: files, batches, video jobs and stored chat
+# completions. Tail-anchored, so the Azure and custom-provider prefixes
+# need no override.
+_LISTING_RE = re.compile(r"(?:^|/)(?:files|batches|videos|chat/completions)$")
 
 
 def _tail_is_create(path: str) -> bool:
@@ -233,6 +253,15 @@ class OpenAIAdapter(ProviderAdapter):
             return _string_ids(body, ("id", *_BATCH_FILE_KEYS))
         return _string_ids(body, ("id",))
 
+    def lists_objects(self, method: str, path: str) -> bool:
+        return method == "GET" and _LISTING_RE.search(path.rstrip("/")) is not None
+
+    def listing_items(self, body: Any) -> list[Any] | None:
+        if not isinstance(body, dict) or body.get("object") != "list":
+            return None
+        data = body.get("data")
+        return data if isinstance(data, list) else None
+
     def matches_request(
         self, method: str, path: str, headers: "Mapping[str, str] | None" = None
     ) -> RouteKind:
@@ -273,6 +302,11 @@ class OpenAIAdapter(ProviderAdapter):
             key_overrides={"arguments": rehydrator.rehydrate_json_source_text},
         )
 
+    def redacts_multipart(self, path: str) -> bool:
+        # The Files upload (JSONL file parts) and the prompt-field media
+        # routes; suffix match so Azure's /openai/... shapes reuse it.
+        return path.endswith(("/files", *_PROMPT_FIELD_PATH_SUFFIXES))
+
     def redact_multipart(
         self, path: str, body: bytes, boundary: bytes, redactor: Redactor, *, inject_note: bool
     ) -> bytes | None:
@@ -311,15 +345,18 @@ class OpenAIAdapter(ProviderAdapter):
     def _redact_jsonl(self, data: bytes, redactor: Redactor, *, inject_note: bool) -> bytes:
         out: list[bytes] = []
         for line in data.split(b"\n"):
-            obj = _parse_object_line(line)
+            obj, duplicate_keys = _parse_request_line(line)
             if obj is None:
                 out.append(line)  # blank/binary/unparseable: byte-identical
                 continue
             redacted = redactor.redact_json(obj)
-            if redacted == obj:
+            changed = redacted != obj
+            if not changed and not duplicate_keys:
+                # Unchanged — and no repeated key whose earlier occurrence
+                # the walk never saw — so the original line is safe.
                 out.append(line)
                 continue
-            if inject_note:
+            if inject_note and changed:
                 body_obj = redacted.get("body")
                 if isinstance(body_obj, dict) and isinstance(body_obj.get("messages"), list):
                     # Batch input line: {custom_id, method, url, body}.

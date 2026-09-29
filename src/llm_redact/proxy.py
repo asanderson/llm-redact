@@ -68,6 +68,7 @@ from llm_redact.detection.engine import (
 )
 from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
+from llm_redact.jsonwalk import loads_request
 from llm_redact.licensing import ResolvedLicense, resolve_license
 from llm_redact.metrics import Metrics
 from llm_redact.multipart import parse as parse_multipart
@@ -131,6 +132,11 @@ _INBOUND_TRACEPARENT: ContextVar[str | None] = ContextVar("llm_redact_traceparen
 # by record_request — the same task-context trick as the traceparent, so the
 # streaming finalizers attribute without threading a parameter through.
 _REQUEST_USER: ContextVar[str | None] = ContextVar("llm_redact_user", default=None)
+# The 403 text when the session router's ownership check fails or answers
+# something other than a reason (never an id or a user name).
+_OBJECT_ACCESS_FAULT = (
+    "llm-redact: the stored-object ownership check failed; the request was not forwarded"
+)
 
 # Response headers stamped on every reserved-endpoint reply (dashboard, status,
 # metrics, config editor, everything under RESERVED_PREFIX). The dashboard is
@@ -355,6 +361,11 @@ class ProxyState:
                 else None
             ),
         )
+        # Optional ownership members (plugin_api.SessionRouter), read ONCE:
+        # the router is restart-only, and a router without them costs the
+        # hot path one `is None` test each.
+        self._object_access_refusal = getattr(self.session_router, "object_access_refusal", None)
+        self._listing_item_session = getattr(self.session_router, "listing_item_session", None)
         self._static_context = RequestContext(
             config.vault.session, self.vault, self.redactor, self.rehydrator
         )
@@ -572,6 +583,78 @@ class ProxyState:
         for object_id in object_ids:
             if record(object_id, session_id) is not False:
                 self.vault_manager.record_response_session(object_id, session_id)
+
+    def object_access_refusal(
+        self, adapter_name: str | None, method: str, path: str, body: Any, *, identity: bool
+    ) -> str | None:
+        """The session router's refusal of a request that reaches another
+        namespace's stored object (optional ``object_access_refusal``), or
+        None. A router that raises refuses: an ownership check that cannot
+        answer must not wave the request through to the upstream."""
+        check = self._object_access_refusal
+        if check is None:
+            return None
+        try:
+            verdict = check(adapter_name, method, path, body, identity=identity)
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            logger.warning(
+                "session router object_access_refusal failed (%s); refusing",
+                type(exc).__name__,
+            )
+            return _OBJECT_ACCESS_FAULT
+        if verdict is None:
+            return None
+        # Any other non-None answer refuses; only a non-empty string is
+        # the router's own (fixed) reason.
+        return verdict if isinstance(verdict, str) and verdict else _OBJECT_ACCESS_FAULT
+
+    def object_lister(
+        self,
+        adapter: ProviderAdapter | None,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str] | None" = None,
+    ) -> ProviderAdapter | None:
+        """The adapter whose ``lists_objects`` claims this request (the
+        routed one, else the addressed provider's), or None — always None
+        when the session router attributes no listed items."""
+        if self._listing_item_session is None:
+            return None
+        if adapter is not None:
+            return adapter if adapter.lists_objects(method, path) else None
+        name = self.provider_for(None, path, headers)
+        for candidate in self.adapters:
+            if candidate.name == name and candidate.lists_objects(method, path):
+                return candidate
+        return None
+
+    def listing_rehydrator(self, object_id: str) -> Rehydrator | None:
+        """A rehydrator over the EXISTING session the router names for one
+        listed object (``listing_item_session``), or None: no session named,
+        the router failed (the item keeps its placeholders), or the session
+        holds no mappings — it is never created here."""
+        name_session = self._listing_item_session
+        if name_session is None:
+            return None
+        try:
+            session_id = name_session(object_id)
+        except Exception as exc:  # noqa: BLE001 — unsure means placeholders
+            logger.warning(
+                "session router listing_item_session failed (%s); item left as is",
+                type(exc).__name__,
+            )
+            return None
+        if not isinstance(session_id, str):
+            return None
+        has_session = getattr(self.vault_manager, "has_session", None)
+        if has_session is not None and not has_session(session_id):
+            return None
+        vault = self.vault_manager.get(session_id)
+        if len(vault) == 0:
+            return None
+        return Rehydrator(
+            vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
+        )
 
     def reload(self) -> None:
         """Rebuild hot-swappable config on SIGHUP; never crash a running proxy.
@@ -2082,6 +2165,36 @@ async def _read_capped(request: Request, limit: int) -> bytes | None:
     return b"".join(chunks)
 
 
+def _identity_body_problem(
+    adapter: ProviderAdapter, path: str, headers: Mapping[str, str], body: bytes, parsed: Any
+) -> str | None:
+    """Why a non-empty request body on a matched route must NOT be signed
+    with the proxy's own identity, or None when the proxy redacts it.
+
+    Signable: a JSON object (what ``prepare_request`` walks; JSON is read
+    from the bytes whatever the content-type, a UTF-8 BOM or UTF-16/32
+    encoding included), or canonical multipart on a route whose
+    ``redact_multipart`` scans it. Everything else would be forwarded
+    verbatim: non-JSON bytes, invalid UTF-8, a top-level array or scalar
+    (``null`` included — never walked), whitespace only, multipart on any
+    other route, and any content-encoded body (the proxy never decodes
+    one, so it cannot see what the upstream would). The result names the
+    body's KIND only — never its content."""
+    encoding = headers.get("content-encoding", "").strip().lower()
+    if encoding not in ("", "identity"):
+        return "the request body is content-encoded (llm-redact does not decode request bodies)"
+    if isinstance(parsed, dict):
+        return None
+    boundary = parse_multipart_boundary(headers.get("content-type", "")) if parsed is None else None
+    if boundary is None:
+        return "the request body is not a JSON object llm-redact can redact"
+    if parse_multipart(body, boundary) is None:
+        return "the multipart body is outside the canonical form llm-redact can redact"
+    if not adapter.redacts_multipart(path):
+        return "the multipart body is on a route llm-redact does not redact multipart for"
+    return None
+
+
 async def handle(request: Request) -> Response:
     state: ProxyState = request.app.state.proxy
     if not origin_form_target(request.scope):
@@ -2274,11 +2387,37 @@ async def handle(request: Request) -> Response:
         body_bytes = await request.body()
 
     parsed: Any = None
+    # A repeated JSON key: the parse keeps the last occurrence, so the walk
+    # never sees the earlier ones — such a body is always re-serialized.
+    duplicate_keys = False
     if adapter is not None and body_bytes:
         try:
-            parsed = json.loads(body_bytes)
+            parsed, duplicate_keys = loads_request(body_bytes)
         except ValueError:
             parsed = None
+
+    refusal = state.object_access_refusal(
+        adapter.name if adapter is not None else None,
+        request.method,
+        path,
+        parsed,
+        identity=provider_name in state.upstream_auth,
+    )
+    if refusal is not None:
+        # The session router (llm-redact-pro named users) refused a request
+        # that reaches another namespace's stored object: answered here,
+        # before the audit START row, redaction, any upstream credential
+        # and any upstream contact — routed or not. The reason is the
+        # router's fixed text, never an id.
+        return _object_access_refused(
+            state,
+            adapter,
+            refusal,
+            provider_name=provider_name,
+            request=request,
+            path=path,
+            started=started,
+        )
 
     # Session resolution hashes the raw (pre-redaction) conversation anchor,
     # so it must happen before prepare_request.
@@ -2373,6 +2512,19 @@ async def handle(request: Request) -> Response:
     # bodies): the routed path applies per-hop body rewrites to it.
     outbound_obj: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
     detection_off = provider_conf is not None and not provider_conf.detection
+    if upstream_auth is not None and adapter is not None and body_bytes and not detection_off:
+        # The proxy's own identity signs only what the proxy could redact:
+        # a body it cannot walk would otherwise be forwarded verbatim —
+        # refused here, before redaction, any credential fetch or upstream
+        # contact. (detection = false is the explicit unredacted opt-out.)
+        problem = _identity_body_problem(adapter, path, request.headers, body_bytes, parsed)
+        if problem is not None:
+            return refused_response(
+                f"llm-redact: {problem}, and this provider is authorized with the proxy's"
+                " own identity; the request was not forwarded",
+                adapter,
+                f"{problem} under identity auth",
+            )
     if adapter is not None and detection_off:
         # [providers.NAME] detection = false: the deliberate off-switch.
         # The request is forwarded byte-identical — no detection, no deny
@@ -2403,29 +2555,19 @@ async def handle(request: Request) -> Response:
         # prepare_request), so an unchanged count means the prepared body is
         # byte-for-byte the original. Forward the raw bytes and skip the
         # parse→dump round-trip — the common nothing-to-redact large-body case.
-        if sum(state.detection_counts.values()) != sum(detection_counts_before.values()):
+        # Never with a repeated key: the raw bytes still hold the earlier
+        # occurrences the walk never saw (an upstream may keep the first).
+        if duplicate_keys or sum(state.detection_counts.values()) != sum(
+            detection_counts_before.values()
+        ):
             outbound = json.dumps(prepared, ensure_ascii=False).encode("utf-8")
     elif adapter is not None and parsed is None and body_bytes:
         # Matched routes with non-JSON bodies: multipart uploads (OpenAI
         # /v1/files) get their JSONL file parts redacted; anything the
         # adapter declines to rewrite forwards verbatim (the non-JSON-body
-        # default that keeps unknown formats working).
+        # default that keeps unknown formats working) — except under
+        # identity auth, refused above (_identity_body_problem).
         boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
-        if (
-            boundary is not None
-            and upstream_auth is not None
-            and parse_multipart(body_bytes, boundary) is None
-        ):
-            # Outside the codec's canonical grammar the upload would be
-            # forwarded verbatim — never under the proxy's own identity,
-            # which must only ever sign what the proxy could redact.
-            return refused_response(
-                "llm-redact: the multipart body is outside the canonical form llm-redact"
-                " can redact, and this provider is authorized with the proxy's own"
-                " identity; the request was not forwarded",
-                adapter,
-                "non-canonical multipart under identity auth",
-            )
         if boundary is not None:
             try:
                 rewritten = adapter.redact_multipart(
@@ -2915,6 +3057,7 @@ async def _deliver(
         )
     await upstream.aclose()
 
+    received = raw  # the provider's own bytes (a listing restores items from these)
     rehydration_counts_before = dict(state.rehydration_counts)
     payload: Any = None
     if kind is RouteKind.CHAT and adapter is not None and "application/json" in content_type:
@@ -2965,6 +3108,20 @@ async def _deliver(
         if payload is not None and route.observe_payload(payload, kind):
             raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
+    lister = (
+        state.object_lister(adapter, request.method, path, request.headers)
+        if raw and 200 <= upstream.status_code < 300 and "application/json" in content_type
+        else None
+    )
+    if lister is not None:
+        # A listing of stored objects: the session router may name the
+        # session each listed object was created in (its owner's own
+        # listing), so those items are restored there; the rest keep what
+        # this request's session made of them. Never recorded as ownership.
+        restored = _restore_listing(state, lister, received, raw)
+        if restored is not None:
+            raw = restored
+
     tracker = (
         state.object_tracker(adapter, request.method, path, request.headers, body=request_body)
         if raw and 200 <= upstream.status_code < 300 and "application/json" in content_type
@@ -3002,6 +3159,74 @@ async def _deliver(
     )
 
     return Response(content=raw, status_code=upstream.status_code, headers=headers)
+
+
+def _object_access_refused(
+    state: ProxyState,
+    adapter: ProviderAdapter | None,
+    message: str,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """The session router's stored-object refusal: a recorded,
+    provider-shaped 403 (the access gate's conventions), sent before any
+    upstream contact."""
+    error = adapter.error_body(message, status=403) if adapter is not None else {"error": message}
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=403,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info("%s %s -> 403 refused by the session router (stored object)", request.method, path)
+    return JSONResponse(error, status_code=403)
+
+
+def _restore_listing(
+    state: ProxyState, lister: ProviderAdapter, upstream_raw: bytes, raw: bytes
+) -> bytes | None:
+    """Restore each listed stored object in the session the router names
+    for it (``listing_item_session``); every other item, and everything
+    outside the item array, stays exactly as ``raw`` (the bytes about to be
+    delivered) has it. A named item is rehydrated as a whole object from
+    the provider's own bytes (``upstream_raw``) with the adapter's
+    non-streaming transform — never a second pass over an already-restored
+    item. None when nothing was restored (the bytes are then forwarded
+    untouched)."""
+    try:
+        original = json.loads(upstream_raw)
+    except ValueError:
+        return None
+    items = lister.listing_items(original)
+    if not items:
+        return None
+    restorers: dict[int, Rehydrator] = {}
+    for index, item in enumerate(items):
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            rehydrator = state.listing_rehydrator(item["id"])
+            if rehydrator is not None:
+                restorers[index] = rehydrator
+    if not restorers:
+        return None
+    delivered = json.loads(raw)  # a fresh tree to edit (raw is JSON: upstream_raw or a dump)
+    delivered_items = lister.listing_items(delivered)
+    if delivered_items is None or len(delivered_items) != len(items):
+        return None  # a routed rewrite changed the shape: leave it alone
+    changed = False
+    for index, rehydrator in restorers.items():
+        restored = lister.rehydrate_body(items[index], rehydrator)
+        if restored != delivered_items[index]:
+            delivered_items[index] = restored
+            changed = True
+    return json.dumps(delivered, ensure_ascii=False).encode("utf-8") if changed else None
 
 
 # ---------------------------------------------------------------------------

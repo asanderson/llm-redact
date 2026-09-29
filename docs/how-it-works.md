@@ -32,6 +32,16 @@ Bedrock's binary eventstream, and realtime WebSocket deltas):
 
 *Animated. Static [PNG](diagrams/sequence-streaming.png) · [GIF](diagrams/sequence-streaming.gif) · [Mermaid source](diagrams/sequence-streaming.mmd).*
 
+A request body with nothing to redact is forwarded as its original bytes
+(no parse-and-reserialize round trip). The one exception is a JSON object
+that repeats a key, at any depth: the parser keeps the last occurrence,
+so the redactor never sees the earlier ones — while the provider's parser
+might keep the first. Such a body (and such an uploaded JSONL line) is
+always re-serialized from the walked object, so the earlier occurrences
+never leave the machine; realtime frames are always re-serialized anyway,
+and a Bedrock `count-tokens` base64 body that repeats a key is refused
+with a 400.
+
 Watch the round trip live: `llm-redact status` and the `/recent` feed
 ([dashboard.md](dashboard.md)) show detections and restores, and an
 agent with the slash-command plugins installed can do the same in-tool with
@@ -183,6 +193,24 @@ while the vault row is the secret store and is never exported.
   behavior. The live prune (`session_ttl_days`, `POST
   /__llm-redact/sessions/prune`) keeps each user's copy like the static
   session itself.
+- **Stored objects** (named users, **Pro**): the core reports the ids of
+  objects the provider stores for later reads — uploaded files, batches,
+  message batches, stored conversations, Gemini context caches, video
+  jobs and stored chat completions — with the session that created them
+  (`SessionRouter.record_object_id`). A session router may then refuse a
+  request that reaches another namespace's object
+  (`object_access_refusal`): the core answers a recorded, provider-shaped
+  **403** before the audit START row, redaction, any upstream credential
+  and any upstream contact, and is told whether the provider is
+  authorized with the proxy's own cloud identity. llm-redact-pro refuses
+  every such reference under identity auth and every write (delete,
+  cancel, update) under passthrough keys. On an OpenAI-shaped listing
+  (`GET` files, batches, video jobs, stored chat completions — OpenAI,
+  Azure and `/custom/<name>/` alike) the router may name the session
+  each listed object was created in (`listing_item_session`): the core
+  restores that item there — from the provider's own bytes, only when the
+  session exists — and leaves every other item's placeholders in place,
+  so each user sees their own items restored and nobody else's.
 - `compaction_forks` counts only a session first seen by this process
   whose history carries placeholders it cannot own: a persisted session
   resumed after a restart (its vault already holds the tokens) and a

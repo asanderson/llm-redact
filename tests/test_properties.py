@@ -7,6 +7,7 @@ covers. deadline=None throughout: CI machines are slow and none of these
 properties is about speed.
 """
 
+import json
 import uuid as uuid_module
 from collections.abc import Callable
 
@@ -48,10 +49,12 @@ from llm_redact.jsonwalk import (
     OPAQUE_ANYWHERE,
     OPAQUE_POSITIONS,
     STRUCTURAL_KEYS,
+    loads_request,
     transform_strings,
 )
 from llm_redact.placeholders import PLACEHOLDER_RE, canonicalize, format_placeholder
 from llm_redact.providers.base import _EXEMPT_STASH_SENTINEL, stash_exempt_mcp_blocks
+from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.redactor import Redactor, _resolve_overlaps, _sweep
 from llm_redact.rehydrate import (
     Rehydrator,
@@ -675,3 +678,31 @@ def test_mcp_tool_result_exempt_only_when_correlated(
     is_stashed = result_block == _EXEMPT_STASH_SENTINEL
     correlated = use_server == "exempt" and result_id == use_id
     assert is_stashed == correlated
+
+
+_DUP_SECRET = "dup.secret@corp.example"
+
+
+@settings(deadline=None)
+@given(body=_bodies, key=_body_keys, depth=st.integers(min_value=0, max_value=3))
+def test_a_repeated_key_is_always_flagged_and_never_leaks_from_a_jsonl_line(
+    body: object, key: str, depth: int
+) -> None:
+    # Without repeats the parse is json.loads and the flag stays down.
+    plain = json.dumps(body)
+    assert loads_request(plain) == (json.loads(plain), False)
+    # An EARLIER occurrence of `key` carrying a secret, prepended to an
+    # object that ends with `key` (at any nesting depth): always flagged,
+    # the parse keeps the later value, and the uploaded-JSONL path never
+    # forwards the secret whatever the rest of the body holds.
+    obj = {**(body if isinstance(body, dict) else {}), key: body}
+    text = json.dumps(obj)
+    injected = "{" + json.dumps(key) + ": " + json.dumps(_DUP_SECRET) + ", " + text[1:]
+    for _ in range(depth):
+        injected = '{"wrap": [' + injected + "]}"
+        obj = {"wrap": [obj]}
+    assert loads_request(injected) == (obj, True)
+    config = DetectionConfig()
+    redactor = Redactor(build_detectors(config), InMemoryVault(), build_allowlist(config))
+    out = OpenAIAdapter()._redact_jsonl(injected.encode(), redactor, inject_note=False)
+    assert _DUP_SECRET.encode() not in out

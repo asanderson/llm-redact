@@ -21,7 +21,11 @@ Classifications:
   provider configured `auth = "identity"` (Bedrock, Vertex AI, Azure — the
   proxy signs with its OWN cloud identity) a pass-through route is instead
   REFUSED with a recorded local 403: the proxy lends its identity only to
-  the routes it recognizes
+  the routes it recognizes. On such a provider a chat or redact-only route
+  likewise signs only a body the proxy redacted: a non-empty body that is
+  not a JSON object (or canonical multipart on a route whose multipart
+  form is scanned), or that carries a `Content-Encoding`, is refused with
+  a recorded 400 instead of being forwarded verbatim
 - **websocket** — relayed by `realtime.py` (see the realtime sections of
   the README and threat model)
 
@@ -191,7 +195,7 @@ because they echo the user `metadata` a batch create carries.
 | `GET /openai/files/{id}/content` | chat | batch output JSONL restored line by line |
 | `GET /openai/v1/files/{id}/content` | chat | |
 | `POST /openai/batches` | chat | file ids + user `metadata` (redacted out, restored in the echo) |
-| `GET /openai/batches` | redact-only | the batch LIST is never restored: it spans batches other users created, so restoring in the reader's vault namespace could hand one user another's value (pro named users); placeholders in listed `metadata` stay as placeholders |
+| `GET /openai/batches` | redact-only | the batch LIST is never restored in the reader's vault namespace: it spans batches other users created, so that could hand one user another's value (pro named users). A session router that attributes listed items (`listing_item_session`, llm-redact-pro named users) restores each batch the READER created in the session it was created in; every other item's `metadata` keeps its placeholders |
 | `GET /openai/v1/batches/{id}` | chat | |
 | `POST /openai/batches/{id}/cancel` | chat | |
 | `GET /openai/models` | redact-only | model listing |
@@ -215,7 +219,7 @@ same resource, and servers resolve dot segments.
 | `POST /model/{m}/invoke-with-response-stream` | chat | binary event stream; Claude `chunk` payloads rehydrated |
 | `POST /model/{m}/converse` | chat | |
 | `POST /model/{m}/converse-stream` | chat | binary event stream, per-block channels |
-| `POST /model/{m}/count-tokens` | redact-only | `input.converse` content redacted; answers a count. The `input.invokeModel.body` form is base64 of the model's native JSON prompt — text, not media — so it is decoded, redacted exactly like an `/invoke` body, and re-encoded; a blob that is not base64 of UTF-8 JSON is refused with a 400 (never forwarded unredacted) |
+| `POST /model/{m}/count-tokens` | redact-only | `input.converse` content redacted; answers a count. The `input.invokeModel.body` form is base64 of the model's native JSON prompt — text, not media — so it is decoded, redacted exactly like an `/invoke` body, and re-encoded; a blob that is not base64 of UTF-8 JSON, or whose JSON repeats a key, is refused with a 400 (never forwarded unredacted) |
 | `POST /guardrail/{id}/version/{v}/apply` | chat | ApplyGuardrail: `content[]` redacted; `outputs[].text` (the submitted text as the guardrail rewrote it) and the assessments' quoted `match` values carry the placeholders sent up, so they are restored — the client gets back its OWN text. The guardrail therefore evaluates the REDACTED text: its verdict is on placeholders, so a guardrail policy keyed on the values llm-redact redacts (a sensitive-information filter matching emails, say) never sees them |
 | `POST /async-invoke` | redact-only | StartAsyncInvoke: `modelInput` redacted; the output is written to S3 and never passes through the proxy, so it keeps its placeholders (the batch stance) |
 | `GET /async-invoke` | redact-only | ListAsyncInvokes: metadata |

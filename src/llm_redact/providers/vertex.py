@@ -104,8 +104,15 @@ class VertexAdapter(GeminiAdapter):
 
     def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
         # A Vertex context cache, cited later as `cachedContent` by
-        # generateContent bodies — the Gemini API stance on Vertex paths.
-        return method == "POST" and _CACHED_COLLECTION.fullmatch(path) is not None
+        # generateContent bodies — the Gemini API stance on Vertex paths —
+        # and a Veo job (`:predictLongRunning`), whose operation name a later
+        # `:fetchPredictOperation` body cites to read the video back.
+        if method != "POST":
+            return False
+        if _CACHED_COLLECTION.fullmatch(path) is not None:
+            return True
+        match = _VERTEX_PATH.fullmatch(path)
+        return match is not None and match.group(1) == "predictLongRunning"
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
         return cache_object_ids(body)

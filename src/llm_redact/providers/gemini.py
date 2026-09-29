@@ -37,6 +37,9 @@ _GEMINI_PATH = re.compile(
     r"(generateContent|streamGenerateContent|countTokens|embedContent"
     r"|batchEmbedContents|batchGenerateContent|predict|predictLongRunning)"
 )
+# Verbs that answer with a long-running operation whose results are read
+# back by its name later (the Gemini API's batch mode and Veo).
+_OPERATION_VERBS = frozenset({"batchGenerateContent", "predictLongRunning"})
 # Context caching: only the create (POST /…/cachedContents) carries content to
 # redact. The per-cache GET/PATCH/DELETE and list return metadata (name, model,
 # token counts, expiry) — never the cached content — so they pass through.
@@ -82,7 +85,8 @@ _CACHE_PREFIX = "cachedContents/"
 
 def cache_object_ids(body: Any) -> tuple[str, ...]:
     """The context cache a cache-create response names, as
-    ``cachedContents/<id>``.
+    ``cachedContents/<id>``; any other ``name`` (a long-running operation's)
+    as it is.
 
     The Gemini API answers with exactly that; Vertex answers with the full
     resource name (``projects/{p}/locations/{l}/cachedContents/<id>``).
@@ -131,8 +135,16 @@ class GeminiAdapter(ProviderAdapter):
 
     def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
         # A context cache: later generateContent requests name it in
-        # `cachedContent`, and the model echoes its (redacted) content.
-        return method == "POST" and _GEMINI_CACHED_CREATE.fullmatch(path) is not None
+        # `cachedContent`, and the model echoes its (redacted) content. And
+        # the long-running jobs whose results are read back by their
+        # operation NAME: a batch (`batches/<id>`, results inlined) and a
+        # Veo video (`models/<m>/operations/<id>`).
+        if method != "POST":
+            return False
+        if _GEMINI_CACHED_CREATE.fullmatch(path) is not None:
+            return True
+        match = _GEMINI_PATH.fullmatch(path)
+        return match is not None and match.group(1) in _OPERATION_VERBS
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
         return cache_object_ids(body)

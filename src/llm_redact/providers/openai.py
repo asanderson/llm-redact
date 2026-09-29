@@ -258,6 +258,11 @@ def _stored_completion_create(path: str, body: Any) -> bool:
 _LISTING_RE = re.compile(r"(?:^|/)(?:files|batches|videos|chat/completions)$")
 
 
+# The Uploads API (large files in parts): completing an upload creates the
+# stored FILE, named in the answer's nested `file` object.
+_UPLOAD_COMPLETE_RE = re.compile(r"(?:^|/)uploads/[^/]+/complete$")
+
+
 def _tail_is_create(path: str) -> bool:
     """POST to the collection itself (``…/files``, ``…/batches``,
     ``…/conversations``), not to a member or sub-resource."""
@@ -377,6 +382,7 @@ class OpenAIAdapter(ProviderAdapter):
         if method == "POST" and (
             _tail_is_create(path)
             or _VIDEO_CREATE_RE.search(path.rstrip("/")) is not None
+            or _UPLOAD_COMPLETE_RE.search(path.rstrip("/")) is not None
             or _stored_completion_create(path, body)
         ):
             return True
@@ -385,6 +391,8 @@ class OpenAIAdapter(ProviderAdapter):
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
         if _BATCH_OBJECT_RE.search(path) is not None:
             return _string_ids(body, _BATCH_FILE_KEYS)
+        if _UPLOAD_COMPLETE_RE.search(path.rstrip("/")) is not None:
+            return _string_ids(body.get("file") if isinstance(body, dict) else None, ("id",))
         if path.rstrip("/").endswith("/batches"):
             return _string_ids(body, ("id", *_BATCH_FILE_KEYS))
         return _string_ids(body, ("id",))
@@ -452,6 +460,7 @@ class OpenAIAdapter(ProviderAdapter):
         *,
         inject_note: bool,
         require_scanned: bool = False,
+        cited: list[Any] | None = None,
     ) -> bytes | None:
         parsed = multipart.parse(body, boundary)
         if parsed is None:
@@ -480,6 +489,7 @@ class OpenAIAdapter(ProviderAdapter):
                     media=media,
                     inject_note=inject_note,
                     require_scanned=require_scanned,
+                    cited=cited,
                 )
         except multipart.AmbiguousHeaders as exc:
             # Only reachable under identity auth (require_scanned): a part
@@ -495,6 +505,7 @@ class OpenAIAdapter(ProviderAdapter):
         media: bool,
         inject_note: bool,
         require_scanned: bool,
+        cited: list[Any] | None = None,
     ) -> bool:
         # The upload's file name is user content on every route (the part
         # name is structural, like a JSON key). Strict under identity auth,
@@ -505,7 +516,11 @@ class OpenAIAdapter(ProviderAdapter):
             _require_plain_encoding(part, scanned=kind != "media")
         if kind == "jsonl":
             new_content = self._redact_jsonl(
-                part.content, redactor, inject_note=inject_note, require_scanned=require_scanned
+                part.content,
+                redactor,
+                inject_note=inject_note,
+                require_scanned=require_scanned,
+                cited=cited,
             )
             if new_content != part.content:
                 part.content = new_content
@@ -515,7 +530,13 @@ class OpenAIAdapter(ProviderAdapter):
         return changed
 
     def _redact_jsonl(
-        self, data: bytes, redactor: Redactor, *, inject_note: bool, require_scanned: bool = False
+        self,
+        data: bytes,
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        require_scanned: bool = False,
+        cited: list[Any] | None = None,
     ) -> bytes:
         out: list[bytes] = []
         for line in data.split(b"\n"):
@@ -527,6 +548,10 @@ class OpenAIAdapter(ProviderAdapter):
                     )
                 out.append(line)  # blank/binary/unparseable: byte-identical
                 continue
+            if cited is not None:
+                # As the provider will read it: a repeated key's line is
+                # re-serialized below, so the last occurrence is what it sees.
+                cited.append(obj)
             redacted = redactor.redact_json(obj)
             changed = redacted != obj
             if not changed and not duplicate_keys:

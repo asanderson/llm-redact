@@ -158,7 +158,8 @@ def test_stored_object_ids_are_read_from_the_body() -> None:
     assert gemini.tracks_object_ids("POST", "/v1/cachedContents")
     assert not gemini.tracks_object_ids("GET", "/v1beta/cachedContents/abc")
     assert not gemini.tracks_object_ids("POST", "/v1beta/models/m:generateContent")
-    assert not gemini.tracks_object_ids("POST", "/v1beta/models/m:batchGenerateContent")
+    # A batch job is read back by its operation name (batches/<id>).
+    assert gemini.tracks_object_ids("POST", "/v1beta/models/m:batchGenerateContent")
     created = {"name": "cachedContents/abc123", "model": "models/gemini-2.5-pro"}
     assert gemini.object_ids_from_body("POST", "/v1beta/cachedContents", created) == (
         "cachedContents/abc123",
@@ -473,3 +474,99 @@ async def test_a_custom_provider_reports_its_stored_objects(
     app = create_app(config, upstream_transport=httpx.MockTransport(respond))
     assert (await _post(app, "/custom/lm/v1/chat/completions", _chat(True))).status_code == 200
     assert router.objects == [("chatcmpl-c", "user:n1:main")]
+
+
+# --- more stored objects: Anthropic files, OpenAI uploads, long-running jobs -----------
+
+
+def test_every_provider_reports_the_jobs_and_files_read_back_by_id() -> None:
+    from llm_redact.providers.bedrock import BedrockAdapter
+
+    anthropic = AnthropicAdapter()
+    assert anthropic.tracks_object_ids("POST", "/v1/files")
+    assert not anthropic.tracks_object_ids("GET", "/v1/files/file_1")
+    assert not anthropic.tracks_object_ids("POST", "/v1/files/file_1")
+    assert anthropic.object_ids_from_body("POST", "/v1/files", {"id": "file_011"}) == ("file_011",)
+    assert anthropic.object_ids_from_body("POST", "/v1/files", {"id": ""}) == ()
+    openai = OpenAIAdapter()
+    complete = "/v1/uploads/upload_1/complete"
+    assert openai.tracks_object_ids("POST", complete)
+    assert openai.tracks_object_ids("POST", "/openai/v1/uploads/upload_1/complete/")
+    assert not openai.tracks_object_ids("POST", "/v1/uploads/upload_1/parts")
+    assert not openai.tracks_object_ids("POST", "/v1/uploads")
+    done = {"id": "upload_1", "object": "upload", "file": {"id": "file-big", "object": "file"}}
+    assert openai.object_ids_from_body("POST", complete, done) == ("file-big",)
+    assert openai.object_ids_from_body("POST", complete, {"id": "upload_1", "file": None}) == ()
+    assert openai.object_ids_from_body("POST", complete, ["x"]) == ()
+    gemini = GeminiAdapter()
+    for verb in ("batchGenerateContent", "predictLongRunning"):
+        assert gemini.tracks_object_ids("POST", f"/v1beta/models/m:{verb}")
+    assert not gemini.tracks_object_ids("POST", "/v1beta/models/m:predict")
+    assert not gemini.tracks_object_ids("GET", "/v1beta/models/m:predictLongRunning")
+    operation = {"name": "models/veo-3.0-generate-001/operations/op1"}
+    assert gemini.object_ids_from_body(
+        "POST", "/v1beta/models/m:predictLongRunning", operation
+    ) == ("models/veo-3.0-generate-001/operations/op1",)
+    vertex = VertexAdapter()
+    veo = "/v1/projects/p/locations/l/publishers/google/models/veo-3.0-generate-001"
+    assert vertex.tracks_object_ids("POST", veo + ":predictLongRunning")
+    assert not vertex.tracks_object_ids("POST", veo + ":fetchPredictOperation")
+    assert not vertex.tracks_object_ids("POST", veo + ":generateContent")
+    assert not vertex.tracks_object_ids("POST", "/v1/projects/p/locations/l/unknown")
+    full = {"name": veo[4:] + "/operations/op2"}
+    assert vertex.object_ids_from_body("POST", veo + ":predictLongRunning", full) == (full["name"],)
+    bedrock = BedrockAdapter()
+    arn = "arn:aws:bedrock:us-east-1:123456789012:async-invoke/abc123"
+    assert bedrock.tracks_object_ids("POST", "/async-invoke")
+    assert not bedrock.tracks_object_ids("GET", "/async-invoke")
+    assert not bedrock.tracks_object_ids("GET", f"/async-invoke/{arn}")
+    assert bedrock.object_ids_from_body("POST", "/async-invoke", {"invocationArn": arn}) == (arn,)
+    assert bedrock.object_ids_from_body("POST", "/async-invoke", {"invocationArn": 7}) == ()
+    assert bedrock.object_ids_from_body("POST", "/async-invoke", None) == ()
+
+
+async def test_an_anthropic_files_upload_is_reported_with_its_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Anthropic's Files API is pass-through (the document is media); the
+    # anthropic-version header names the provider whose adapter tracks it.
+    router = OwnershipRouter()
+    _registry(monkeypatch, build_session_router=lambda config, **kw: router)
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "file_011", "type": "file"})
+
+    config = Config(
+        providers={**Config().providers, "anthropic": ProviderConfig(UPSTREAM)},
+        vault=VaultConfig(backend="sqlite", path=str(tmp_path / "v.db")),
+    )
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        response = await client.post(
+            "/v1/files",
+            files={"file": ("doc.pdf", b"%PDF-1.7", "application/pdf")},
+            headers={"anthropic-version": "2023-06-01"},
+        )
+    assert response.status_code == 200
+    assert router.objects == [("file_011", "user:n1:main")]
+
+
+async def test_a_bedrock_async_invocation_is_reported_with_its_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    arn = "arn:aws:bedrock:us-east-1:123456789012:async-invoke/abc123"
+    router = OwnershipRouter()
+    _registry(monkeypatch, build_session_router=lambda config, **kw: router)
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"invocationArn": arn})
+
+    config = Config(
+        providers={**Config().providers, "bedrock": ProviderConfig(UPSTREAM)},
+        vault=VaultConfig(backend="sqlite", path=str(tmp_path / "v.db")),
+    )
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    body = {"modelId": "amazon.nova-reel-v1:0", "modelInput": {"text": "a dog"}}
+    assert (await _post(app, "/async-invoke", body)).status_code == 200
+    assert router.objects == [(arn, "user:n1:main")]

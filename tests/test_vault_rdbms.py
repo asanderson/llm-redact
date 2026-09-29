@@ -182,6 +182,14 @@ def _battery(make_store: Any) -> None:
     manager.record_response_session("resp_1", "sess-b")  # idempotent re-record
     assert manager.lookup_response_session("resp_1") == "sess-b"
     assert manager.lookup_response_session("resp_unknown") is None
+    # Batched: every recorded id with its session, unknown ids absent, a
+    # repeat asked once, nothing asked for nothing.
+    manager.record_response_session("resp_2", "sess-a")
+    assert manager.lookup_response_sessions(["resp_1", "resp_2", "resp_unknown", "resp_1"]) == {
+        "resp_1": "sess-b",
+        "resp_2": "sess-a",
+    }
+    assert manager.lookup_response_sessions([]) == {}
 
     # Whole-session prune only. days=-1 puts the cutoff in the future so
     # rows created this second count as idle — deterministic at the
@@ -1403,3 +1411,26 @@ def test_doctor_identity_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     code, out = _doctor_identity(tmp_path, monkeypatch, installed=False)
     assert code == 1
     assert 'auth = "identity" requires the llm-redact-pro package' in out
+
+
+def test_batched_response_lookups_bind_one_chunk_per_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact.vault import LOOKUP_CHUNK
+
+    store = RdbmsStore(_dbapi_config(tmp_path / "vault.db"), None)
+    manager = RdbmsVaultManager(store)
+    ids = [f"obj-{n}" for n in range(LOOKUP_CHUNK + 1)]
+    for object_id in ids[::2]:
+        manager.record_response_session(object_id, "s")
+    statements: list[str] = []
+    execute = store._execute
+
+    def spy(conn: Any, sql: str, params: dict[str, Any] | None = None) -> Any:
+        statements.append(sql)
+        return execute(conn, sql, params)
+
+    monkeypatch.setattr(store, "_execute", spy)
+    assert manager.lookup_response_sessions(ids) == dict.fromkeys(ids[::2], "s")
+    assert len(statements) == 2  # LOOKUP_CHUNK ids, then the one left over
+    store.close()

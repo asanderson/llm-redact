@@ -125,8 +125,8 @@ class Redactor:
         budget: StringBudget | None = None,
     ) -> None:
         # The detector list compiled for string-at-a-time detection (same
-        # output, gated per string), taken as it is now: plan_for caches one
-        # plan per list, and the thin copies below hand theirs straight on.
+        # output, gated per string), taken as it is now: plan_for shares the
+        # live plan of a list, and the thin copies below hand theirs on.
         self._plan = detectors if isinstance(detectors, DetectorPlan) else plan_for(detectors)
         # The strings one request body may still have redacted (with_budget);
         # None for a shared redactor, which counts nothing.

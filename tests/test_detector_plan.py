@@ -20,8 +20,6 @@ from llm_redact.bench.corpus import VALUE_GENERATORS, generate
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyEntry
 from llm_redact.detection.engine import (
-    _PLANS,
-    _PLANS_MAX,
     GATED_MAX_CHARS,
     Allowlist,
     CustomRule,
@@ -337,12 +335,26 @@ def test_plan_for_caches_per_list_and_notices_a_change() -> None:
     assert [d.detector_type for d in detect_all(detectors, "Jane Doe", NO_ALLOW)] == ["PERSON"]
 
 
-def test_plan_cache_is_bounded() -> None:
-    lists = [build_detectors(DetectionConfig(enabled=("email",))) for _ in range(_PLANS_MAX + 3)]
-    plans = [plan_for(detectors) for detectors in lists]
-    assert len(_PLANS) == _PLANS_MAX
-    assert plan_for(lists[-1]) is plans[-1]  # the newest stay cached
-    assert plan_for(lists[0]) is not plans[0]  # the oldest were evicted
+def test_plan_cache_holds_no_detector_list_alive() -> None:
+    # A reload's old detector list (an NER model can be hundreds of MB) must
+    # go once nothing uses it: the cache holds plans weakly.
+    import gc
+    import weakref
+
+    detectors = build_detectors(DetectionConfig(enabled=("email",)))
+    plan = plan_for(detectors)
+    assert plan_for(detectors) is plan  # live: reused
+    first = weakref.ref(detectors[0])
+    del plan, detectors
+    gc.collect()
+    assert first() is None
+
+
+def test_a_live_redactor_keeps_its_plan_cached() -> None:
+    detectors = build_detectors(DetectionConfig())
+    redactor = Redactor(detectors, InMemoryVault(), NO_ALLOW)
+    assert plan_for(detectors) is redactor._plan
+    assert Redactor(detectors, InMemoryVault(), NO_ALLOW)._plan is redactor._plan
 
 
 def test_redactor_copies_share_the_compiled_plan() -> None:
@@ -351,3 +363,22 @@ def test_redactor_copies_share_the_compiled_plan() -> None:
     assert raised._plan is redactor._plan
     assert raised.redact_text("mail a@b.example") == "mail «EMAIL_006»"
     assert redactor.redact_text("mail c@d.example") == "mail «EMAIL_007»"
+
+
+def test_a_reload_frees_the_old_detector_list() -> None:
+    # The proxy's shared redactor holds the live plan; replacing it on a
+    # reload that changed [detection] must free the old detectors.
+    import dataclasses
+    import gc
+    import weakref
+
+    from llm_redact.config import Config
+    from llm_redact.proxy import ProxyState
+
+    state = ProxyState(Config(), None)
+    old = weakref.ref(state.detectors[0])
+    fresh = dataclasses.replace(state.config, detection=DetectionConfig(enabled=("email",)))
+    assert state.apply_config(fresh) == []
+    gc.collect()
+    assert old() is None
+    assert [det.name for det in state.redactor._plan.detectors] == ["email"]

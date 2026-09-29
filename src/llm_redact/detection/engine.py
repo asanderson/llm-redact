@@ -1,6 +1,7 @@
 """Assemble the detector list from configuration."""
 
 import re
+import weakref
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 
@@ -476,23 +477,23 @@ class DetectorPlan:
         return detections
 
 
-# Plans by detector-list identity. An entry holds its list, so the id cannot
-# be reused while it is cached, and the contents are compared on every
-# lookup, so a list changed in place gets a fresh plan. Bounded: a reload
-# builds a new list only when [detection] changed.
-_PLANS: dict[int, DetectorPlan] = {}
-_PLANS_MAX = 32
+# Plans by detector-list identity, held WEAKLY: a plan lives exactly as long
+# as a Redactor (or a caller) holds it — the proxy's shared redactor keeps
+# the live list's plan, and a reload's old one is freed with its detectors
+# (an NER model can be hundreds of MB) once the last in-flight request that
+# uses it ends. A live plan holds its list, so the id cannot be reused while
+# the entry exists; the contents are compared on every lookup, so a list
+# changed in place gets a fresh plan.
+_PLANS: "weakref.WeakValueDictionary[int, DetectorPlan]" = weakref.WeakValueDictionary()
 
 
 def plan_for(detectors: Sequence[Detector]) -> DetectorPlan:
-    """The (cached) DetectorPlan for ``detectors``."""
+    """The DetectorPlan for ``detectors``: the live one if a caller holds it,
+    else a new one. A loop calling detect_all should hold the plan itself."""
     key = id(detectors)
     plan = _PLANS.get(key)
     if plan is not None and plan.source is detectors and plan.detectors == tuple(detectors):
         return plan
     plan = DetectorPlan(detectors)
-    _PLANS.pop(key, None)
-    if len(_PLANS) >= _PLANS_MAX:
-        del _PLANS[next(iter(_PLANS))]  # the oldest entry
     _PLANS[key] = plan
     return plan

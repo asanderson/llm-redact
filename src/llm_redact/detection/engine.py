@@ -1,7 +1,7 @@
 """Assemble the detector list from configuration."""
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 
 from llm_redact.detection.base import Detection, Detector
@@ -326,20 +326,173 @@ def build_modes(config: DetectionConfig) -> dict[str, str]:
 
 
 def detect_all(detectors: Sequence[Detector], text: str, allowlist: Allowlist) -> list[Detection]:
-    # One PreparedText per body: regex detectors share it so their
-    # required-literal prefilters (and the lowered haystack behind the
-    # case-insensitive ones) are computed once, not per rule.
-    prepared = PreparedText(text)
-    detections: list[Detection] = []
-    for det in detectors:
-        found = (
-            det.detect_prepared(prepared) if isinstance(det, RegexDetector) else det.detect(text)
-        )
-        # Tier-0 (deny) detections bypass the allowlist — global AND
-        # per-type: deny is the user's explicit strongest signal, so a
-        # deny/allowlist contradiction resolves in favor of redaction.
-        detections.extend(
-            d for d in found if d.tier == 0 or not allowlist.allows_for(d.detector_type, d.value)
-        )
-    detections.sort(key=lambda d: (d.start, -(d.end - d.start), d.priority))
-    return detections
+    return plan_for(detectors).detect(text, allowlist)
+
+
+# Texts up to this many characters take the gated path of DetectorPlan.detect;
+# longer ones run every detector. Per-rule interpreter overhead (~1 us a
+# rule) is what the gate saves: measured, the gate wins 9x on a 10-character
+# string and breaks even around 1-2 KB, where the scans themselves dominate
+# and the combined pattern search starts to cost a second scan of any text
+# in which something matches.
+GATED_MAX_CHARS = 1024
+
+
+def _runner(det: Detector) -> Callable[[PreparedText], Iterable[Detection]]:
+    """How the plan runs ``det`` on a prepared text: regex rules share the
+    PreparedText (their prefilters read its cached haystacks)."""
+    if isinstance(det, RegexDetector):
+        return det.detect_prepared
+    return lambda prepared: det.detect(prepared.text)
+
+
+def _gate_group(required: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
+    """The CNF group a rule is gated on: any one group is a necessary
+    condition; the one whose shortest literal is longest skips most."""
+    return max(required, key=lambda group: min(len(lit) for lit in group))
+
+
+def _combinable(pattern: "re.Pattern[str]") -> str | None:
+    """``pattern``'s source as an alternation member, or None when it cannot
+    be one: capturing groups (a backreference would be renumbered, a group
+    name could repeat) or any flag beyond the str default (a global inline
+    flag must lead the whole expression)."""
+    if pattern.groups or pattern.flags & ~re.UNICODE:
+        return None
+    member = f"(?:{pattern.pattern})"
+    try:
+        compiled = re.compile(member)
+    except re.error:
+        return None  # e.g. a leading "(?u)": legal alone, not inside a group
+    return member if compiled.flags == pattern.flags else None
+
+
+class DetectorPlan:
+    """A detector list compiled for detection on one string at a time.
+
+    A request body is walked string by string, and on a short string every
+    rule costs about a microsecond of interpreter overhead even when none
+    can match — a body of 300,000 tiny strings once kept the event loop
+    busy for over half a minute. On a short text the plan first decides
+    which detectors could fire at all, then runs only those, in list order,
+    through the unchanged per-detector code. The output is identical by
+    construction:
+
+    * a regex rule with a ``required`` CNF is skipped only when no literal
+      of one of its groups occurs in that rule's own haystack — exactly the
+      texts its prefilter returns nothing for (a literal occurs only where
+      its first character does, so indexing literals by first character
+      and looking up the text's characters finds every one);
+    * the regex rules without literals whose patterns can be alternation
+      members share one combined search: an alternation matches nowhere in
+      a text exactly when none of its members does, and a rule whose
+      pattern matches nowhere detects nothing;
+    * every other detector — deny strings, NER backends, plugin detectors,
+      rules whose patterns cannot be combined — always runs.
+
+    The differential tests run the gated path against every detector's full
+    scan, and against a plan whose gate lies, to prove they would notice.
+    """
+
+    def __init__(
+        self, detectors: Sequence[Detector], *, gated_max_chars: int = GATED_MAX_CHARS
+    ) -> None:
+        self.source = detectors
+        self.detectors = tuple(detectors)
+        self.gated_max_chars = gated_max_chars
+        self._runners = tuple(_runner(det) for det in self.detectors)
+        # first character -> literal -> indices of the rules it gates, for
+        # case-sensitive literals (digit-folded haystack) and case-
+        # insensitive ones (lowered haystack).
+        self._cs: dict[str, dict[str, list[int]]] = {}
+        self._ci: dict[str, dict[str, list[int]]] = {}
+        always: list[int] = []
+        members: list[str] = []
+        member_indices: list[int] = []
+        for index, det in enumerate(self.detectors):
+            if isinstance(det, RegexDetector) and det.required:
+                gate = _gate_group(det.required)
+                if "" in gate:
+                    always.append(index)  # an empty literal is always present
+                    continue
+                table = self._ci if det.rule.required_ci else self._cs
+                for lit in gate:
+                    table.setdefault(lit[0], {}).setdefault(lit, []).append(index)
+                continue
+            member = _combinable(det.rule.pattern) if isinstance(det, RegexDetector) else None
+            if member is None:
+                always.append(index)
+            else:
+                members.append(member)
+                member_indices.append(index)
+        self._always = frozenset(always)
+        self._members = tuple(member_indices)
+        self._combined = re.compile("|".join(members)) if members else None
+        self._every = tuple(range(len(self.detectors)))
+
+    def candidates(self, prepared: PreparedText) -> tuple[int, ...]:
+        """Indices, in list order, of the detectors that could fire on the
+        text; the others provably detect nothing in it."""
+        chosen = set(self._always)
+        for table, haystack in (
+            (self._cs, prepared.folded if self._cs else ""),
+            (self._ci, prepared.lower if self._ci else ""),
+        ):
+            for first in table.keys() & set(haystack):
+                for lit, indices in table[first].items():
+                    if lit in haystack:
+                        chosen.update(indices)
+        if self._combined is not None and self._combined.search(prepared.text) is not None:
+            chosen.update(self._members)
+        return tuple(sorted(chosen))
+
+    def detect(self, text: str, allowlist: Allowlist) -> list[Detection]:
+        # One PreparedText per string: regex detectors share it so their
+        # required-literal prefilters (and the derived haystacks behind
+        # them) are computed once, not per rule.
+        prepared = PreparedText(text)
+        order = self._every if len(text) > self.gated_max_chars else self.candidates(prepared)
+        return self._run(order, prepared, allowlist)
+
+    def detect_each(self, text: str, allowlist: Allowlist) -> list[Detection]:
+        """Every detector, ungated: the reference the gated path equals."""
+        return self._run(self._every, PreparedText(text), allowlist)
+
+    def _run(
+        self, order: Iterable[int], prepared: PreparedText, allowlist: Allowlist
+    ) -> list[Detection]:
+        detections: list[Detection] = []
+        runners = self._runners
+        allows = allowlist.allows_for
+        for index in order:
+            found = runners[index](prepared)
+            # Tier-0 (deny) detections bypass the allowlist — global AND
+            # per-type: deny is the user's explicit strongest signal, so a
+            # deny/allowlist contradiction resolves in favor of redaction.
+            detections.extend(
+                d for d in found if d.tier == 0 or not allows(d.detector_type, d.value)
+            )
+        detections.sort(key=lambda d: (d.start, -(d.end - d.start), d.priority))
+        return detections
+
+
+# Plans by detector-list identity. An entry holds its list, so the id cannot
+# be reused while it is cached, and the contents are compared on every
+# lookup, so a list changed in place gets a fresh plan. Bounded: a reload
+# builds a new list only when [detection] changed.
+_PLANS: dict[int, DetectorPlan] = {}
+_PLANS_MAX = 32
+
+
+def plan_for(detectors: Sequence[Detector]) -> DetectorPlan:
+    """The (cached) DetectorPlan for ``detectors``."""
+    key = id(detectors)
+    plan = _PLANS.get(key)
+    if plan is not None and plan.source is detectors and plan.detectors == tuple(detectors):
+        return plan
+    plan = DetectorPlan(detectors)
+    _PLANS.pop(key, None)
+    if len(_PLANS) >= _PLANS_MAX:
+        del _PLANS[next(iter(_PLANS))]  # the oldest entry
+    _PLANS[key] = plan
+    return plan

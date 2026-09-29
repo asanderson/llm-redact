@@ -15,6 +15,7 @@ EXPECTED_NAMES = {
     "redact_json_small",
     "redact_json_large",
     "redact_json_prose_large",
+    "redact_json_many_small",
     "rehydrate_json_small",
     "rehydrate_json_large",
     "streaming_rehydrate",

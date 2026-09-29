@@ -433,7 +433,9 @@ the package (see [docs/editions.md](docs/editions.md)).
   a dev container (the prefiltered single-pass-per-anchor scan): ~1 ms
   added per small (2 KB) request end to end, ~14 ms on a secret-dense
   100 KB body, ~5-11 ms on 100 KB of ordinary prose, ~18 MB/s streaming
-  rehydration.
+  rehydration, and ~100 ms for a body of 20,000 short strings (short
+  strings are gated per string: only the rules that could match one run
+  on it — the same body cost ~2 s when every rule ran on every string).
 - `uv run python scripts/live_smoke.py` runs opt-in smoke tests against the
   real provider APIs (needs API keys, spends credits, never runs in default
   test or CI runs) — including an event-shape drift detector for the

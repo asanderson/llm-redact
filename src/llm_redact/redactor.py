@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from llm_redact.detection.base import Detection, Detector
-from llm_redact.detection.engine import Allowlist, detect_all
+from llm_redact.detection.engine import Allowlist, DetectorPlan, plan_for
 from llm_redact.jsonwalk import transform_strings
 from llm_redact.vault import PlaceholderSpaceExhausted, Vault
 
@@ -85,7 +85,7 @@ def _resolve_overlaps(detections: Sequence[Detection]) -> list[Detection]:
 class Redactor:
     def __init__(
         self,
-        detectors: Sequence[Detector],
+        detectors: "Sequence[Detector] | DetectorPlan",
         vault: Vault,
         allowlist: Allowlist,
         counts: "Counter[str] | None" = None,
@@ -93,7 +93,10 @@ class Redactor:
         warn_counts: "Counter[str] | None" = None,
         floors: Mapping[str, int] | None = None,
     ) -> None:
-        self._detectors = detectors
+        # The detector list compiled for string-at-a-time detection (same
+        # output, gated per string), taken as it is now: plan_for caches one
+        # plan per list, and the thin copies below hand theirs straight on.
+        self._plan = detectors if isinstance(detectors, DetectorPlan) else plan_for(detectors)
         self._vault = vault
         self._allowlist = allowlist
         # Detection counts by type; a shared Counter may be passed in so
@@ -121,7 +124,7 @@ class Redactor:
         if not raised:
             return self
         return Redactor(
-            self._detectors,
+            self._plan,
             self._vault,
             self._allowlist,
             counts=self.counts,
@@ -145,7 +148,7 @@ class Redactor:
             ) from None
 
     def redact_text(self, text: str) -> str:
-        detections = _resolve_overlaps(detect_all(self._detectors, text, self._allowlist))
+        detections = _resolve_overlaps(self._plan.detect(text, self._allowlist))
         if not detections:
             return text
         parts: list[str] = []

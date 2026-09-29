@@ -42,9 +42,11 @@ you may skip.
 - **No pydantic, no FastAPI.** The proxy forwards unknown JSON fields
   verbatim; it must never validate or reshape a body it doesn't need to
   touch.
-- **Never break the tool.** Unrecognized traffic passes through verbatim.
+- **Never break the tool.** Unrecognized traffic passes through verbatim, to
+  the provider it is positively attributed to (never a guessed one).
   Fail closed only where the security goal is at stake (oversized bodies,
-  block mode, disabled providers, bind policy, vault keys).
+  block mode, disabled providers, bind policy, vault keys, a body a
+  recognized route cannot scan, a request from a web page).
 - **Never log values.** Log lines carry paths, statuses, and detection
   counts — never header values, body content, query strings, or the
   matched secrets themselves. Error messages name positions or types,

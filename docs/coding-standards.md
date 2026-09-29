@@ -48,9 +48,11 @@ These four (`ruff check`, `ruff format --check`, `pytest`, `mypy`) plus
 These are not style preferences — they are the product's contract, and a change
 that weakens one will be rejected regardless of how clean it looks.
 
-- **Never break the tool.** Unrecognized traffic passes through **verbatim**.
-  The proxy operates on the raw byte stream; never assume typed objects — that
-  is the failure mode that broke other proxies.
+- **Never break the tool.** Unrecognized traffic passes through **verbatim** —
+  to the provider it is positively attributed to, never a guessed one (an
+  unattributable request is answered locally), and never with a credential
+  the proxy holds. The proxy operates on the raw byte stream; never assume
+  typed objects — that is the failure mode that broke other proxies.
 - **Fail closed only where the security goal is at stake** — oversized bodies
   (413), block mode (400), disabled providers (502), bind policy, vault-key
   resolution, license gating. Everywhere else, degrade to pass-through rather

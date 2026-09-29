@@ -33,6 +33,13 @@ Fix: unmapped chains/GETs now route to a **unique, empty** session derived from
 the response id (`orphan_session_id`, domain-separated from conversation
 anchors). Nothing else ever writes to it, so an echoed stale token *misses* and
 passes through verbatim — the same safe degradation as the compaction fork.
+That holds for a body-less read; a continuation that carries content of its
+own would redact new values into the orphan session. The per-conversation
+router therefore seals it (`SessionRouter.sealed`): a placeholder-only turn
+is served, a turn that would redact a value is refused with a 403 ("this
+conversation's earlier turns are no longer known to this proxy … start a new
+conversation"), and the served turn's Response is not recorded, so the chain
+stays sealed.
 Tests: `test_orphan_session_is_unique_empty_and_never_the_static_fallback`,
 `test_orphan_session_disjoint_from_conversation_anchor_derivation`, and the
 updated chain/GET resolution tests in `tests/pro/test_sessions_pro.py`.

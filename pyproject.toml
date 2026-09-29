@@ -55,7 +55,12 @@ perf = ["uvloop>=0.19"]
 # Realtime WebSocket APIs (OpenAI Realtime, Gemini Live). One package
 # serves both sides: uvicorn's WS protocol lights up automatically when
 # it is importable, and the relay uses its client for the upstream leg.
-realtime = ["websockets>=13"]
+# 15.0 is the floor the relay needs: its asyncio client (13.0), whose
+# process_redirect hook the relay overrides to refuse redirects (13.1),
+# and a client that keeps a forwarded User-Agent instead of adding a
+# second one (15.0 — before it the upstream got two, which a websockets
+# server rejects; the realtime suite fails 12 of 92 on 14.2).
+realtime = ["websockets>=15.0"]
 # OpenTelemetry export ([otel] enabled = true): metadata-only traces and
 # counters over OTLP/HTTP. Extras never touch the request path.
 otel = [
@@ -84,8 +89,10 @@ dev = [
     "cryptography>=42",
     # The realtime extra, same treatment: the relay suite runs real
     # sockets everywhere; the no-extra refusal is pinned via a
-    # monkeypatched import guard instead of a separate CI variant.
-    "websockets>=13",
+    # monkeypatched import guard instead of a separate CI variant. Same
+    # floor as the extra (the suite also uses 14.0's new-API top-level
+    # connect/serve).
+    "websockets>=15.0",
     "hypothesis>=6.100",
     # Mutation testing (assurance): dev-only, never touches the request path.
     "mutmut>=3.6",

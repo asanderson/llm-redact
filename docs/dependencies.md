@@ -35,7 +35,7 @@ checked by the weekly gating pip-audit job.
 | `vault-oracle` | `oracledb` | Oracle's own thin-mode driver: pure Python, no Instant Client required. Covers the connect-to-existing-corporate-Oracle case. The generic `backend = "dbapi"` needs no extra — it imports whatever DB-API 2.0 module the operator names. |
 | `keyring` | `keyring` | OS-keychain storage for the vault key, so the key need not live in an env var. |
 | `perf` | `uvloop` | Drop-in event-loop speedup; uvicorn's `loop="auto"` picks it up with zero configuration. |
-| `realtime` | `websockets` | One package serves BOTH sides of the realtime relay: uvicorn's server-side WebSocket protocol (auto-enabled when importable) and the upstream wss client. |
+| `realtime` | `websockets` | One package serves BOTH sides of the realtime relay: uvicorn's server-side WebSocket protocol (auto-enabled when importable) and the upstream wss client. Floor 15.0: the relay overrides the asyncio client's redirect hook (added in 13.1) and forwards the client's `User-Agent`, which clients before 15.0 send a second time. |
 | `otel` | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | Metadata-only telemetry export over OTLP/HTTP, the vendor-neutral standard; scoped SDK providers, never process globals. |
 
 ## Development group

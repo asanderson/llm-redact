@@ -121,6 +121,13 @@ def _stored_completion_create(path: str, body: Any) -> bool:
     )
 
 
+# Collection reads whose `{"object": "list", "data": [...]}` answer lists
+# stored objects by id: files, batches, video jobs and stored chat
+# completions. Tail-anchored, so the Azure and custom-provider prefixes
+# need no override.
+_LISTING_RE = re.compile(r"(?:^|/)(?:files|batches|videos|chat/completions)$")
+
+
 def _tail_is_create(path: str) -> bool:
     """POST to the collection itself (``…/files``, ``…/batches``,
     ``…/conversations``), not to a member or sub-resource."""
@@ -232,6 +239,15 @@ class OpenAIAdapter(ProviderAdapter):
         if path.rstrip("/").endswith("/batches"):
             return _string_ids(body, ("id", *_BATCH_FILE_KEYS))
         return _string_ids(body, ("id",))
+
+    def lists_objects(self, method: str, path: str) -> bool:
+        return method == "GET" and _LISTING_RE.search(path.rstrip("/")) is not None
+
+    def listing_items(self, body: Any) -> list[Any] | None:
+        if not isinstance(body, dict) or body.get("object") != "list":
+            return None
+        data = body.get("data")
+        return data if isinstance(data, list) else None
 
     def matches_request(
         self, method: str, path: str, headers: "Mapping[str, str] | None" = None

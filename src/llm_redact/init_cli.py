@@ -30,6 +30,20 @@ TOOL_EXPORTS: dict[str, tuple[str, str]] = {
     "ollama": ("OLLAMA_HOST", "the ollama CLI and other native-API clients"),
 }
 
+# The API path a base-URL variable carries after the proxy's address. The
+# OpenAI SDKs — and Codex and OpenCode, which read OPENAI_BASE_URL — join
+# endpoint paths such as /responses onto a base that already INCLUDES /v1
+# (their default is https://api.openai.com/v1); the Anthropic, Gemini and
+# Ollama clients add their own version segment. Without it the proxy
+# receives /responses: no provider's path (refused with a 404 naming the
+# fix — it once went to the anthropic upstream with the OpenAI key).
+ENV_BASE_PATHS: dict[str, str] = {"OPENAI_BASE_URL": "/v1"}
+
+
+def export_value(env: str, base_url: str) -> str:
+    """The value to export in ``env`` for a proxy at ``base_url``."""
+    return base_url + ENV_BASE_PATHS.get(env, "")
+
 
 def _ask(prompt: str, default: str) -> str:
     reply = input(f"{prompt} [{default}]: ").strip()
@@ -134,7 +148,7 @@ def run_init(args: argparse.Namespace) -> int:
     print("\nPoint your tools at the proxy:\n")
     for tool in tools:
         env, description = TOOL_EXPORTS[tool]
-        print(f"  export {env}={base_url}    # {description}")
+        print(f"  export {env}={export_value(env, base_url)}    # {description}")
     print("\nNext steps:")
     first_tool = tools[0]
     print(f"  llm-redact run -- {first_tool}            # one-liner: proxy + tool together")

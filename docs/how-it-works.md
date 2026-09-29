@@ -129,6 +129,32 @@ decoded for it, and a realtime connection keeps a running floor over
 everything its client has sent. The record of what a per-request floor
 cannot see is in [compaction-relink.md](compaction-relink.md).
 
+Deleting a session (the `session_ttl_days` prune, `POST
+/__llm-redact/sessions/prune`, `llm-redact sessions prune`, an access
+gate's purge) deletes its rows but **retires its numbers**: one row per
+deleted session records the highest number it held, and a new value in
+that session is numbered above it, forever. So no `(session, type, n)`
+ever carries two values — a provider history, another proxy instance's
+cached copy of the session, or a live realtime connection still holding a
+deleted token can only restore it to its own value, or pass it through,
+never to a value issued after the delete:
+
+```json
+{"session_id": "conv-4f1c…", "n": 7}
+```
+
+Every view of a session re-reads that number at most once a second and
+drops the deleted values from memory when it moved; the instance that
+deleted the session drops them at once.
+
+A request's new values are written in **one transaction**, committed once
+before anything is forwarded (the sqlite vault runs `synchronous=FULL`, so
+each commit is an fsync — once per request, not once per value). A refused
+request (a block-mode value, `max_body_strings`) and a failed commit roll
+the whole transaction back: nothing it issued is kept, cached or sent. A
+vault fault answers the request with a recorded 503 (a realtime frame: the
+connection closes 1011), never a bare 500.
+
 ### The audit record
 
 `audit.db`, an opt-in Pro feature: one metadata-only row per request
@@ -259,7 +285,9 @@ while the vault row is the secret store and is never exported.
   past its newest 10,000 records, only one whose creating session holds
   no mappings can be dropped, and Responses traffic never pushes one out
   (an RDBMS user that may not `ALTER` the table keeps the old shared
-  bound, with a warning). A session router may then
+  bound, with a warning — surfaced value-free as `/status`
+  `vault.owner_bound_shared`, in `llm-redact status` posture and as a
+  `doctor` WARN read from the running proxy). A session router may then
   refuse a request that reaches another namespace's object
   (`object_access_refusal`): the core answers a recorded, provider-shaped
   **403** before the audit START row, redaction, any upstream credential
@@ -268,24 +296,26 @@ while the vault row is the secret store and is never exported.
   own cloud identity, or — the routing layer plans before this check — a
   routed upstream that sends an operator key or no key at all
   (`RoutePlan.proxy_credential`; a plan that does not say counts as the
-  proxy's). Under such a credential a routed pass-through request's JSON
-  body is parsed for the check alone (still forwarded byte-for-byte), and
-  one the check cannot read — content-encoded, with more than one
-  Content-Type, repeating a key, JSON over `max_body_bytes` — is refused
-  (a matched route's content-encoded or doubly-typed body too). An upload
-  (multipart/form-data) is read for the check alone (`upload_view`),
-  whether or not its route redacts (`detection = false` included) and, on
-  a pass-through route, under a proxy-held credential: the router is
-  asked with the list of what it cites — the JSON lines of its file parts
-  (a batch input file's requests, run later with the upload's credential)
-  and its form fields, nested along their names (`file_ids[]` →
-  `{"file_ids": [...]}`) — before redaction and any upstream contact. An
-  upload the check cannot read (outside the canonical grammar, a part
-  header without one reading, a transfer encoding, a form field that is
-  not UTF-8 text, more JSON than `max_body_bytes`, and on a pass-through
-  route a line repeating a key) is refused under a proxy-held credential;
-  with `detection = false` a line repeating a key is sent re-serialized,
-  exactly as checked.
+  proxy's). Under such a credential a request no adapter recognizes
+  (pass-through) never reaches the check: it is refused with a recorded
+  403 before its body is read — the proxy lends a credential it holds
+  only to the routes it recognizes. A matched route's parsed JSON body is
+  what the check reads, and a body the proxy cannot read — content-encoded
+  (415), with more than one Content-Type, not a JSON object — is refused
+  before the check by the scanned-body rule wherever it holds (redaction
+  applies, or a proxy-held credential is spent). An upload
+  (multipart/form-data) on a matched route is read for the check alone
+  (`upload_view`), whether or not its route redacts (`detection = false`
+  included): the router is asked with the list of what it cites — the
+  JSON lines of its file parts (a batch input file's requests, run later
+  with the upload's credential) and its form fields, nested along their
+  names (`file_ids[]` → `{"file_ids": [...]}`) — before redaction and any
+  upstream contact. An upload the check cannot read (outside the
+  canonical grammar, a part header without one reading, a transfer
+  encoding, a form field that is not UTF-8 text, more JSON than
+  `max_body_bytes`, more parts than `max_body_strings`) is refused under
+  a proxy-held credential; with `detection = false` a line repeating a
+  key is sent re-serialized, exactly as checked.
   llm-redact-pro refuses every such reference under a proxy-held
   credential (and, for a named user, a reference to an object no user is
   recorded creating), and in every mode anything but a pure read (a

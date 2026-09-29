@@ -2,61 +2,73 @@
 
 The table below is the executable twin of docs/api-coverage.md. Every row
 asserts what ProxyState-style first-match routing yields for that method
-and path, and the doc-sync test requires the markdown table and this table
-to list exactly the same endpoints with the same classification — so a
-route drifting to pass-through (or a doc row going stale) fails here.
+and path — sent with the headers its provider's SDKs send — and which
+PROVIDER the request is sent to (a pass-through row included: the upstream
+it reaches, end to end). The doc-sync test requires the markdown table and
+this table to list exactly the same endpoints with the same classification
+— so a route drifting to pass-through, a pass-through drifting to another
+provider's upstream, or a doc row going stale fails here.
 """
 
 import re
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 
+from llm_redact.config import Config, ProviderConfig
 from llm_redact.providers import ALL_ADAPTERS
 from llm_redact.providers.base import RouteKind
+from llm_redact.proxy import create_app
 
 DOC = Path(__file__).resolve().parent.parent / "docs" / "api-coverage.md"
 
 # (method, path, classification) — classification strings match the doc.
 CHAT, REDACT_ONLY, PASS = "chat", "redact-only", "pass-through"
 _VX = "/v1/projects/{p}/locations/{l}"  # the Vertex project/location prefix
-MATRIX: list[tuple[str, str, str]] = [
-    # Anthropic
+ANTHROPIC_ROWS: list[tuple[str, str, str]] = [
     ("POST", "/v1/messages", CHAT),
     ("POST", "/v1/messages/count_tokens", REDACT_ONLY),
     ("POST", "/v1/messages/batches", REDACT_ONLY),
-    ("GET", "/v1/messages/batches", PASS),
-    ("GET", "/v1/messages/batches/{id}", PASS),
+    ("GET", "/v1/messages/batches", REDACT_ONLY),
+    ("GET", "/v1/messages/batches/{id}", REDACT_ONLY),
     ("GET", "/v1/messages/batches/{id}/results", CHAT),
-    ("POST", "/v1/messages/batches/{id}/cancel", PASS),
-    ("DELETE", "/v1/messages/batches/{id}", PASS),
-    ("GET", "/v1/models", PASS),
-    ("GET", "/v1/models/{id}", PASS),
+    ("POST", "/v1/messages/batches/{id}/cancel", REDACT_ONLY),
+    ("DELETE", "/v1/messages/batches/{id}", REDACT_ONLY),
+    ("GET", "/v1/models", REDACT_ONLY),
+    ("GET", "/v1/models/{id}", REDACT_ONLY),
     ("POST", "/v1/complete", CHAT),
+    ("POST", "/v1/files", PASS),
+    ("GET", "/v1/files/{id}/content", PASS),
     ("POST", "/v1/organizations/probe", PASS),
-    # OpenAI
+]
+OPENAI_ROWS: list[tuple[str, str, str]] = [
     ("POST", "/v1/chat/completions", CHAT),
     ("GET", "/v1/chat/completions/{id}", CHAT),
     ("POST", "/v1/responses", CHAT),
     ("GET", "/v1/responses/{id}", CHAT),
     ("GET", "/v1/responses/{id}/input_items", CHAT),
-    ("DELETE", "/v1/responses/{id}", PASS),
+    ("DELETE", "/v1/responses/{id}", REDACT_ONLY),
     ("POST", "/v1/conversations", CHAT),
     ("POST", "/v1/conversations/{id}/items", CHAT),
     ("GET", "/v1/conversations/{id}", CHAT),
     ("GET", "/v1/conversations/{id}/items", CHAT),
     ("GET", "/v1/conversations/{id}/items/{item_id}", CHAT),
-    ("DELETE", "/v1/conversations/{id}", PASS),
+    ("DELETE", "/v1/conversations/{id}", REDACT_ONLY),
+    ("DELETE", "/v1/conversations/{id}/items/{item_id}", REDACT_ONLY),
     ("POST", "/v1/embeddings", REDACT_ONLY),
     ("POST", "/v1/files", CHAT),
     ("GET", "/v1/files", CHAT),
     ("GET", "/v1/files/{id}", CHAT),
     ("GET", "/v1/files/{id}/content", CHAT),
-    ("DELETE", "/v1/files/{id}", PASS),
+    ("DELETE", "/v1/files/{id}", REDACT_ONLY),
     ("POST", "/v1/batches", CHAT),
     ("GET", "/v1/batches", CHAT),
     ("GET", "/v1/batches/{id}", CHAT),
     ("POST", "/v1/batches/{id}/cancel", CHAT),
+    ("GET", "/v1/models", REDACT_ONLY),
+    ("GET", "/v1/models/{id}", REDACT_ONLY),
     ("POST", "/v1/completions", CHAT),
     ("POST", "/v1/moderations", PASS),
     ("POST", "/v1/audio/transcriptions", PASS),
@@ -69,12 +81,22 @@ MATRIX: list[tuple[str, str, str]] = [
     ("GET", "/v1/videos", CHAT),
     ("GET", "/v1/videos/{id}", CHAT),
     ("POST", "/v1/videos/{id}/remix", CHAT),
-    ("GET", "/v1/videos/{id}/content", PASS),
-    ("DELETE", "/v1/videos/{id}", PASS),
+    ("GET", "/v1/videos/{id}/content", REDACT_ONLY),
+    ("DELETE", "/v1/videos/{id}", REDACT_ONLY),
     ("POST", "/v1/fine_tuning/jobs", PASS),
     ("GET", "/v1/fine_tuning/jobs", PASS),
     ("GET", "/v1/fine_tuning/jobs/{id}", PASS),
-    # Google Vertex AI
+    ("POST", "/v1/uploads", PASS),
+    ("POST", "/v1/uploads/{id}/parts", PASS),
+    ("POST", "/v1/vector_stores", PASS),
+    ("POST", "/v1/assistants", PASS),
+    ("POST", "/v1/threads/{id}/messages", PASS),
+    ("GET", "/v1/containers/{id}/files/{file_id}/content", PASS),
+    ("GET", "/v1/evals", PASS),
+    ("POST", "/v1/realtime/client_secrets", PASS),
+    ("GET", "/v1/organization/probe", PASS),
+]
+VERTEX_ROWS: list[tuple[str, str, str]] = [
     *[
         ("POST", f"{_VX}/publishers/google/models/{{m}}:{verb}", kind)
         for verb, kind in (
@@ -103,7 +125,8 @@ MATRIX: list[tuple[str, str, str]] = [
     ("GET", f"{_VX}/models", REDACT_ONLY),
     ("GET", f"{_VX}/models/{{m}}", REDACT_ONLY),
     ("POST", f"{_VX}/batchPredictionJobs", PASS),
-    # Azure OpenAI
+]
+AZURE_ROWS: list[tuple[str, str, str]] = [
     ("POST", "/openai/deployments/{d}/chat/completions", CHAT),
     ("POST", "/openai/v1/chat/completions", CHAT),
     ("POST", "/openai/deployments/{d}/completions", CHAT),
@@ -144,7 +167,8 @@ MATRIX: list[tuple[str, str, str]] = [
     ("GET", "/openai/deployments", REDACT_ONLY),
     ("GET", "/openai/deployments/{d}", REDACT_ONLY),
     ("POST", "/openai/v1/fine_tuning/jobs", PASS),
-    # AWS Bedrock (runtime)
+]
+BEDROCK_ROWS: list[tuple[str, str, str]] = [
     ("POST", "/model/{m}/invoke", CHAT),
     ("POST", "/model/{m}/invoke-with-response-stream", CHAT),
     ("POST", "/model/{m}/converse", CHAT),
@@ -156,6 +180,39 @@ MATRIX: list[tuple[str, str, str]] = [
     ("GET", "/async-invoke/{id}", REDACT_ONLY),
 ]
 
+# Each doc section's provider, the upstream it is configured with here, and
+# the headers its SDKs send (an Anthropic SDK request always carries
+# anthropic-version — the marker the shared /v1/files and /v1/models paths
+# are told apart by).
+SECTIONS: list[tuple[str, str, dict[str, str], list[tuple[str, str, str]]]] = [
+    (
+        "anthropic",
+        "https://api.anthropic.com",
+        {"x-api-key": "sk-ant-api03-test", "anthropic-version": "2023-06-01"},
+        ANTHROPIC_ROWS,
+    ),
+    ("openai", "https://api.openai.com", {"authorization": "Bearer sk-proj-test"}, OPENAI_ROWS),
+    (
+        "vertex",
+        "https://us-central1-aiplatform.googleapis.com",
+        {"authorization": "Bearer ya29.test"},
+        VERTEX_ROWS,
+    ),
+    ("azure", "https://res.openai.azure.com", {"api-key": "azure-test"}, AZURE_ROWS),
+    (
+        "bedrock",
+        "https://bedrock-runtime.us-east-1.amazonaws.com",
+        {"authorization": "Bearer ABSK-test"},
+        BEDROCK_ROWS,
+    ),
+]
+MATRIX: list[tuple[str, str, str]] = [row for *_, rows in SECTIONS for row in rows]
+ROUTED: list[tuple[str, dict[str, str], str, str, str]] = [
+    (provider, headers, method, path, classification)
+    for provider, _, headers, rows in SECTIONS
+    for method, path, classification in rows
+]
+
 _EXPECTED_KIND = {
     CHAT: RouteKind.CHAT,
     REDACT_ONLY: RouteKind.REDACT_ONLY,
@@ -163,27 +220,67 @@ _EXPECTED_KIND = {
 }
 
 
-def _route(method: str, path: str) -> RouteKind:
+def _concrete(path: str) -> str:
+    return re.sub(r"\{[a-z_]+\}", "abc_123", path)
+
+
+def _route(method: str, path: str, headers: dict[str, str]) -> tuple[str | None, RouteKind]:
     # First-match semantics, identical to ProxyState.route.
     for adapter in (cls() for cls in ALL_ADAPTERS):
-        kind = adapter.matches(method, path)
+        kind = adapter.matches_request(method, path, headers)
         if kind is not RouteKind.NONE:
-            return kind
-    return RouteKind.NONE
+            return adapter.name, kind
+    return None, RouteKind.NONE
 
 
-@pytest.mark.parametrize(("method", "path", "classification"), MATRIX)
-def test_route_matches_matrix(method: str, path: str, classification: str) -> None:
-    concrete = re.sub(r"\{[a-z]+\}", "abc_123", path)
-    assert _route(method, concrete) is _EXPECTED_KIND[classification], (
-        f"{method} {path} expected {classification}"
-    )
+@pytest.mark.parametrize(("provider", "headers", "method", "path", "classification"), ROUTED)
+def test_route_matches_matrix(
+    provider: str, headers: dict[str, str], method: str, path: str, classification: str
+) -> None:
+    name, kind = _route(method, _concrete(path), headers)
+    assert kind is _EXPECTED_KIND[classification], f"{method} {path} expected {classification}"
+    assert name in (None, provider), f"{method} {path} matched {name}'s adapter"
+
+
+def _config() -> Config:
+    providers = dict(Config().providers)
+    for provider, base, _, _ in SECTIONS:
+        providers[provider] = ProviderConfig(base)
+    return Config(providers=providers)
+
+
+@pytest.mark.parametrize(("provider", "headers", "method", "path", "classification"), ROUTED)
+async def test_every_row_reaches_its_own_providers_upstream(
+    provider: str, headers: dict[str, str], method: str, path: str, classification: str
+) -> None:
+    """End to end: each row — pass-through included — is forwarded to its
+    section's upstream with the client's own credential, and to no other
+    (an unrecognized route once went to the anthropic default)."""
+    sent: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={})
+
+    app = create_app(_config(), upstream_transport=httpx.MockTransport(upstream))
+    body: dict[str, Any] | None = {} if method in ("POST", "PATCH") else None
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.request(method, _concrete(path), headers=headers, json=body)
+    assert response.status_code == 200, response.text
+    (request,) = sent
+    expected_host = httpx.URL(dict((p, b) for p, b, _, _ in SECTIONS)[provider]).host
+    assert request.url.host == expected_host, f"{method} {path} reached {request.url.host}"
 
 
 # Doc rows deliberately not route-pinned (prose paths, no concrete route).
-EXTRA_DOC_ROWS = {("GET", "/v1/organizations/...", PASS)}
+EXTRA_DOC_ROWS = {("GET", "/v1/organizations/...", PASS), ("GET", "/v1/organization/...", PASS)}
 # Table rows probed for routing but expressed as prose in the doc.
-TABLE_ONLY_ROWS = {("POST", "/v1/organizations/probe", PASS)}
+TABLE_ONLY_ROWS = {
+    ("POST", "/v1/organizations/probe", PASS),
+    ("GET", "/v1/organization/probe", PASS),
+}
 
 
 def test_doc_and_matrix_agree() -> None:

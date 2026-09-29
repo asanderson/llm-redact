@@ -150,9 +150,12 @@ class Metrics:
             )
 
         lines.append(
-            "# HELP llm_redact_bookkeeping_errors_total Faults after the upstream answered, by"
-            " stage: session bookkeeping (response_id, object_ids, listing — contained, the"
-            " answer still delivered) and delivery (restoring the answer — a recorded 502)."
+            "# HELP llm_redact_bookkeeping_errors_total Faults in the proxy's own bookkeeping,"
+            " by stage: after the upstream answered, session bookkeeping (response_id,"
+            " object_ids, listing — contained, the answer still delivered) and delivery"
+            " (restoring the answer — a recorded 502); before any upstream contact, vault"
+            " (issuing a request's placeholders failed — a recorded 503, a realtime frame"
+            " closes 1011)."
         )
         lines.append("# TYPE llm_redact_bookkeeping_errors_total counter")
         for stage, count in sorted((bookkeeping_errors or Counter()).items()):

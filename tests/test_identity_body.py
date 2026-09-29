@@ -4,13 +4,14 @@ Under ``[providers.NAME] auth = "identity"`` a non-empty request body on a
 matched route is forwarded only when llm-redact actually walked it: a JSON
 object, or canonical multipart on a route whose ``redact_multipart`` scans
 it. Anything else (non-JSON bytes, invalid UTF-8, a top-level array or
-scalar, whitespace, a content-encoded body, multipart elsewhere) is a
-recorded, provider-shaped 400 before the authorizer or the upstream is
-touched. An empty body still forwards, ``detection = false`` stays the
+scalar, whitespace, multipart elsewhere) is a recorded, provider-shaped 400
+— a content-encoded body a 415 — before the authorizer or the upstream is
+touched. An empty body still forwards, and ``detection = false`` stays the
 explicit unredacted opt-out for a body the proxy can read (redaction off,
-never the body rule: the ownership check reads the parsed body too), and
-passthrough-auth providers keep forwarding non-JSON verbatim (never break
-the tool). The realtime relay applies the
+never the body rule: the ownership check reads the parsed body too). The
+same scanned-body rule now holds for key-authorized providers wherever
+redaction applies (tests/test_scanned_body.py); with ``detection = false``
+they keep forwarding such bodies verbatim. The realtime relay applies the
 same rule per frame: a non-JSON frame on an identity connection closes it
 1008, never relayed.
 """
@@ -80,10 +81,10 @@ REFUSED: dict[str, tuple[bytes, dict[str, str]]] = {
     "number": (b"4111111111111111", {}),
     "null": (b"null", {}),
     "whitespace": (b" \r\n\t", {}),
-    "gzip": (gzip.compress(_OBJECT), {"content-encoding": "gzip"}),
+    "gzip": (gzip.compress(_OBJECT), {"content-encoding": "gzip"}),  # 415
     # Plain JSON claiming an encoding: the upstream would decode what the
     # proxy never saw.
-    "encoded-claim": (_OBJECT, {"content-encoding": "deflate"}),
+    "encoded-claim": (_OBJECT, {"content-encoding": "deflate"}),  # 415
     "non-canonical-multipart": (
         b'--b\nContent-Disposition: form-data; name="prompt"\n\n' + EMAIL.encode() + b"\n--b--\n",
         {"content-type": "multipart/form-data; boundary=b"},
@@ -96,6 +97,10 @@ REFUSED: dict[str, tuple[bytes, dict[str, str]]] = {
         {"content-type": "multipart/form-data; boundary=b"},
     ),
 }
+
+
+# A content coding is refused 415 (with Accept-Encoding: identity), the rest 400.
+_CODED = frozenset({"gzip", "encoded-claim"})
 
 
 def _error_message(provider: str, payload: dict[str, Any]) -> str:
@@ -120,10 +125,11 @@ async def test_unwalkable_body_refused_before_auth_and_upstream(
         _config(**{provider: _identity(base)}), upstream_transport=httpx.MockTransport(upstream)
     )
     body, headers = REFUSED[kind]
+    status = 415 if kind in _CODED else 400
     caplog.set_level(logging.INFO, logger="llm_redact")
     async with _client(app) as client:
         response = await client.post(path, content=body, headers=headers)
-    assert response.status_code == 400
+    assert response.status_code == status
     # Never sent, never signed: no credential fetch for a refused body.
     assert upstream.requests == [] and built[0].calls == []
     # Provider-shaped, naming the body's kind only.
@@ -131,7 +137,7 @@ async def test_unwalkable_body_refused_before_auth_and_upstream(
     assert "proxy's own identity" in message
     assert EMAIL not in response.text and EMAIL not in caplog.text
     state = app.state.proxy
-    assert state.recent[-1]["status"] == 400
+    assert state.recent[-1]["status"] == status
     assert state.recent[-1]["provider"] == provider
 
 
@@ -243,9 +249,12 @@ async def test_detection_off_stays_the_unredacted_opt_out(
 
 @pytest.mark.parametrize(("provider", "base", "path"), FAMILIES)
 @pytest.mark.parametrize("kind", ["text", "array", "gzip", "multipart-off-route"])
-async def test_passthrough_auth_still_forwards_verbatim(
+async def test_key_auth_refuses_the_same_bodies(
     monkeypatch: pytest.MonkeyPatch, provider: str, base: str, path: str, kind: str
 ) -> None:
+    # The scanned-body rule holds under the client's own key wherever
+    # redaction applies: a lenient upstream would decode what the proxy
+    # never read. Only the clause naming WHY differs.
     _install(monkeypatch)
     upstream = _Upstream(b"{}")
     app = create_app(
@@ -255,15 +264,29 @@ async def test_passthrough_auth_still_forwards_verbatim(
     body, headers = REFUSED[kind]
     async with _client(app) as client:
         response = await client.post(path, content=body, headers=headers)
+    assert response.status_code == (415 if kind in _CODED else 400)
+    assert upstream.requests == []
+    message = _error_message(provider, response.json())
+    assert "forwards only bodies it has redacted" in message
+    assert "identity" not in message
+
+
+@pytest.mark.parametrize(("provider", "base", "path"), FAMILIES)
+@pytest.mark.parametrize("kind", ["text", "array", "gzip", "multipart-off-route"])
+async def test_key_auth_with_detection_off_still_forwards_verbatim(
+    monkeypatch: pytest.MonkeyPatch, provider: str, base: str, path: str, kind: str
+) -> None:
+    _install(monkeypatch)
+    upstream = _Upstream(b"{}")
+    app = create_app(
+        _config(**{provider: ProviderConfig(base, detection=False)}),
+        upstream_transport=httpx.MockTransport(upstream),
+    )
+    body, headers = REFUSED[kind]
+    async with _client(app) as client:
+        response = await client.post(path, content=body, headers=headers)
     assert response.status_code == 200
-    if provider == "azure" and kind == "multipart-off-route":
-        # Key auth scans what it can read: the OpenAI-family multipart hook
-        # redacts a plain form field on any matched route (a filename or an
-        # uploaded JSONL line there too), like its JSON twin.
-        sent = upstream.requests[0].content
-        assert EMAIL.encode() not in sent and "«EMAIL_001»".encode() in sent
-    else:
-        assert upstream.requests[0].content == body
+    assert upstream.requests[0].content == body
 
 
 # Every Content-Encoding value counts, not just the first header's: the
@@ -301,10 +324,11 @@ async def test_every_header_value_counts_under_identity(
     )
     async with _client(app) as client:
         response = await client.post(path, content=_OBJECT, headers=DUPLICATE_HEADERS[case])
-    assert response.status_code == 400
+    status = 415 if case.startswith("encoding-") else 400
+    assert response.status_code == status
     assert upstream.requests == [] and built[0].calls == []
     assert "proxy's own identity" in _error_message(provider, response.json())
-    assert app.state.proxy.recent[-1]["status"] == 400
+    assert app.state.proxy.recent[-1]["status"] == status
 
 
 async def test_identity_encodings_in_every_header_still_signed(

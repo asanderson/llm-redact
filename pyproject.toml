@@ -192,6 +192,9 @@ only_mutate = [
     "src/llm_redact/placeholders.py",
     "src/llm_redact/multipart.py",
     "src/llm_redact/eventstream.py",
+    # The stored-object ownership check's reading of multipart uploads: a
+    # security-relevant parser beside multipart.py.
+    "src/llm_redact/upload_view.py",
 ]
 # mutmut runs pytest from a mutants/ copy; the suite reads repo data by path
 # (docs/api-coverage.md, deploy/*, bench/fp_corpus/*, the checked-in agent

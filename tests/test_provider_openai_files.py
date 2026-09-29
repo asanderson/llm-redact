@@ -62,8 +62,11 @@ def test_files_routing() -> None:
     # File objects echo the (redacted) upload filename: restored.
     assert adapter.matches("GET", "/v1/files") is RouteKind.CHAT
     assert adapter.matches("GET", "/v1/files/file_abc") is RouteKind.CHAT
-    # Metadata surfaces stay pass-through: ids and processing state only.
-    assert adapter.matches("DELETE", "/v1/files/file_abc") is RouteKind.NONE
+    # A file's delete carries its id only: recognized, redact-only (a
+    # body-less no-op), so a proxy-held credential may reach it.
+    assert adapter.matches("DELETE", "/v1/files/file_abc") is RouteKind.REDACT_ONLY
+    assert adapter.matches("DELETE", "/v1/files") is RouteKind.NONE
+    assert not adapter.wants_system_note(RouteKind.REDACT_ONLY, "/v1/files/file_abc")
     # Batches: create, retrieve, cancel and the list carry (or echo) the
     # caller's `metadata`; unknown batch sub-routes stay pass-through.
     assert adapter.matches("POST", "/v1/batches") is RouteKind.CHAT

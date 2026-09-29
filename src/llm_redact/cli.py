@@ -885,6 +885,11 @@ def _print_posture(payload: dict[str, Any]) -> None:
             "vault: the database token goes over UNVERIFIED TLS"
             " (LLM_REDACT_VAULT_TLS_UNVERIFIED hatch active)"
         )
+    if vault_block.get("owner_bound_shared"):
+        lines.append(
+            "vault: stored objects' owner records share the Responses bound (the database"
+            " user could not add the kind column to llm_redact_response_sessions)"
+        )
     disabled = payload.get("providers_disabled") or []
     if disabled:
         # Fail-closed, so protection is intact — noted for completeness.

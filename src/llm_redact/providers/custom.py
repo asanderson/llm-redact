@@ -1,24 +1,63 @@
-"""Named custom OpenAI-compatible upstreams ([providers.custom.NAME]).
+"""OpenAI-compatible surfaces served under a path prefix.
 
-Each custom provider serves the FULL OpenAI adapter surface (chat,
-embeddings, files/batches hooks, /v1/responses) under the /custom/NAME/
-prefix; the proxy strips the prefix before forwarding, so tools simply
-point OPENAI_BASE_URL at http://127.0.0.1:8787/custom/NAME. Several can
-run side by side (vLLM + LM Studio + OpenRouter), each independently
-disable-able (fail-closed 502 like every provider). Unmatched subpaths
-under a configured prefix still pass through to THAT upstream — the
-client addressed it explicitly. Realtime WS custom upstreams are out of
-scope (documented).
+Named custom upstreams ([providers.custom.NAME]) serve the FULL OpenAI
+adapter surface (chat, embeddings, files/batches hooks, /v1/responses)
+under the /custom/NAME/ prefix; the proxy strips the prefix before
+forwarding, so tools simply point OPENAI_BASE_URL at
+http://127.0.0.1:8787/custom/NAME. Several can run side by side (vLLM + LM
+Studio + OpenRouter), each independently disable-able (fail-closed 502 like
+every provider). Unmatched subpaths under a configured prefix still pass
+through to THAT upstream — the client addressed it explicitly. Realtime WS
+custom upstreams are out of scope (documented).
+
+The Gemini API's own OpenAI-compatible surface (``/v1beta/openai/…`` on
+generativelanguage.googleapis.com) is the same shape under a fixed prefix,
+served by the ``gemini`` provider: its chat, embeddings, files and batches
+are redacted and restored like OpenAI's (the raw path is forwarded).
 """
 
 from collections.abc import Iterable
 
+from llm_redact.providers.attribution import CUSTOM_ROUTE_PREFIX
 from llm_redact.providers.base import ProviderAdapter, RouteKind
 from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.providers.openai_responses import OpenAIResponsesAdapter
 from llm_redact.rehydrate import Rehydrator
 
-CUSTOM_ROUTE_PREFIX = "/custom/"
+# The methods an OpenAI endpoint tail is recognized under (matching the
+# request itself stays method-exact: see _PrefixedOpenAIMixin.matches).
+_ENDPOINT_METHODS = ("POST", "GET", "DELETE")
+# OpenAI API resource names. A tail below one of them is a sub-resource of
+# it (a container's or vector store's files, a thread's messages), never
+# an endpoint under a base path: /containers/c/files/f/content is not the
+# Files API's download, and restoring it as one would read a code
+# interpreter's output in the wrong session. Base paths never hold one
+# (``models`` is left out: Azure AI's base path is /models).
+_OPENAI_RESOURCES = frozenset(
+    {
+        "assistants",
+        "audio",
+        "batches",
+        "chat",
+        "chatkit",
+        "completions",
+        "containers",
+        "conversations",
+        "embeddings",
+        "evals",
+        "files",
+        "fine_tuning",
+        "images",
+        "moderations",
+        "organization",
+        "realtime",
+        "responses",
+        "threads",
+        "uploads",
+        "vector_stores",
+        "videos",
+    }
+)
 
 
 def custom_prefix(provider_key: str) -> str:
@@ -26,55 +65,90 @@ def custom_prefix(provider_key: str) -> str:
     return CUSTOM_ROUTE_PREFIX + provider_key.removeprefix("custom:")
 
 
-class _CustomPrefixMixin:
-    """Strips the /custom/NAME prefix around an OpenAI-family adapter.
+class _PrefixedOpenAIMixin:
+    """An OpenAI-family adapter whose paths sit under ``prefix``.
 
-    Every path-sensitive hook delegates with the stripped path so the
+    Every path-sensitive hook delegates with the canonical path so the
     wrapped adapter keeps reasoning in its native /v1/... namespace.
     """
 
-    def __init__(self, custom_name: str) -> None:
-        self.name = f"custom:{custom_name}"
-        self.prefix = CUSTOM_ROUTE_PREFIX + custom_name
+    prefix: str
 
     def _strip(self, path: str) -> str | None:
         if path.startswith(self.prefix + "/"):
             return path[len(self.prefix) :]
         return None
 
-    def _canonical(self, path: str) -> str:
-        """Normalize a custom-provider inner path to the OpenAI-family
-        namespace the wrapped adapter matches on (exact /v1/...).
+    def _recognized(self, candidate: str, method: str | None, kind: RouteKind | None) -> bool:
+        """Whether ``candidate`` is an endpoint of the wrapped adapter: for
+        ``method`` when given (the request's own), else for any method whose
+        route is of ``kind`` (a hook that knows the matched kind, not the
+        method, lands on the tail the match did)."""
+        wrapped = super().matches  # type: ignore[misc]
+        for candidate_method in (method,) if method is not None else _ENDPOINT_METHODS:
+            found = wrapped(candidate_method, candidate)
+            if found is not RouteKind.NONE and (kind is None or found is kind):
+                return True
+        return False
 
-        OpenAI-compatible upstreams serve the SAME endpoints under varied base
-        paths — Groq /openai/v1, OpenRouter /api/v1, Fireworks /inference/v1 —
-        and some tool configs put /v1 in upstream_base_url so the inner path
-        omits it entirely. Without this, a misplaced base path matched NOTHING
-        and the request was silently forwarded UNREDACTED. Re-anchor at the
-        last /v1/ if present; otherwise assume the tail is already the endpoint
-        and prepend /v1. Custom providers are opted-in OpenAI-compatible, so a
-        path ending in a known endpoint is genuinely ours; unknown tails still
-        fall through to NONE (pass-through) via the wrapped exact matcher."""
+    def _canonical(
+        self, path: str, *, method: str | None = None, kind: RouteKind | None = None
+    ) -> str:
+        """The inner path in the OpenAI namespace the wrapped adapter
+        matches on (exact /v1/...).
+
+        OpenAI-compatible upstreams serve the SAME endpoints under varied
+        base paths — Groq /openai/v1, OpenRouter /api/v1, Fireworks
+        /inference/v1, but also Gemini /v1beta/openai, GitHub Models
+        /inference, Azure AI /models, Zhipu /api/paas/v4, a Cloudflare AI
+        Gateway /v1/{account}/{gateway}/openai — and some tool configs put
+        /v1 in upstream_base_url so the inner path omits it entirely. The
+        endpoint is the path's TAIL: the longest tail, at a segment
+        boundary, that is a known OpenAI endpoint (taken as is when it
+        already starts /v1/, else under /v1) for the request's method — or,
+        from a hook that knows only the matched ``kind``, of that kind — and
+        is not nested under an OpenAI resource (``_OPENAI_RESOURCES``), so a
+        known endpoint routes under any base path (Azure AI's POST
+        /models/embeddings is the embeddings endpoint, not a GET of a model
+        named "embeddings"). Without a match the old rule (re-anchor at the
+        last /v1/, else prepend /v1) applies, and an unknown tail still falls
+        through to NONE (pass-through) via the wrapped exact matcher."""
         inner = self._strip(path)
         if inner is None:
             return path
-        marker = "/v1/"
-        index = inner.rfind(marker)
-        if index != -1:
-            return inner[index:]
-        return "/v1" + inner if inner.startswith("/") else "/v1/" + inner
+        segments = inner.split("/")
+        for index in range(1, len(segments)):
+            if index > 1 and segments[index - 1] in _OPENAI_RESOURCES:
+                break  # every later tail is a sub-resource of that resource
+            tail = "/" + "/".join(segments[index:])
+            candidate = tail if tail.startswith("/v1/") else "/v1" + tail
+            if self._recognized(candidate, method, kind):
+                return candidate
+        marker = inner.rfind("/v1/")
+        return inner[marker:] if marker != -1 else "/v1" + inner
 
     def matches(self, method: str, path: str) -> RouteKind:
         if self._strip(path) is None:
             return RouteKind.NONE
-        return super().matches(method, self._canonical(path))  # type: ignore[misc,no-any-return]
+        canonical = self._canonical(path, method=method)
+        return super().matches(method, canonical)  # type: ignore[misc,no-any-return]
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
-        return super().wants_system_note(kind, self._canonical(path))  # type: ignore[misc,no-any-return]
+        canonical = self._canonical(path, kind=kind)
+        return super().wants_system_note(kind, canonical)  # type: ignore[misc,no-any-return]
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
-        canonical = self._canonical(path)
+        # Consulted on CHAT routes only.
+        canonical = self._canonical(path, kind=RouteKind.CHAT)
         return super().rehydrate_raw_body(canonical, raw, rehydrator)  # type: ignore[misc,no-any-return]
+
+
+class _CustomPrefixMixin(_PrefixedOpenAIMixin):
+    """A named custom upstream: /custom/NAME/..."""
+
+    def __init__(self, custom_name: str) -> None:
+        self.name = f"custom:{custom_name}"
+        self.prefix = CUSTOM_ROUTE_PREFIX + custom_name
 
 
 class CustomOpenAIAdapter(_CustomPrefixMixin, OpenAIAdapter):
@@ -83,6 +157,30 @@ class CustomOpenAIAdapter(_CustomPrefixMixin, OpenAIAdapter):
 
 class CustomResponsesAdapter(_CustomPrefixMixin, OpenAIResponsesAdapter):
     pass
+
+
+# The Gemini API's OpenAI-compatible base (generativelanguage.googleapis.com
+# /v1beta/openai/): the OpenAI SDK appends chat/completions, embeddings, …
+GEMINI_OPENAI_PREFIX = "/v1beta/openai"
+
+
+class GeminiOpenAIAdapter(_PrefixedOpenAIMixin, OpenAIAdapter):
+    name = "gemini"
+    prefix = GEMINI_OPENAI_PREFIX
+
+
+class GeminiOpenAIResponsesAdapter(_PrefixedOpenAIMixin, OpenAIResponsesAdapter):
+    """Only the create: its answer is restored in the request's own session.
+    A stored response read back by id is left alone (pass-through) — the
+    session that created it is not one a later read on this prefix is
+    resolved to, and a placeholder left in place is safe where a restore in
+    another session is not."""
+
+    name = "gemini"
+    prefix = GEMINI_OPENAI_PREFIX
+
+    def matches(self, method: str, path: str) -> RouteKind:
+        return super().matches(method, path) if method == "POST" else RouteKind.NONE
 
 
 def build_custom_adapters(provider_keys: "Iterable[str]") -> list[ProviderAdapter]:
@@ -98,8 +196,11 @@ def build_custom_adapters(provider_keys: "Iterable[str]") -> list[ProviderAdapte
 
 __all__ = [
     "CUSTOM_ROUTE_PREFIX",
+    "GEMINI_OPENAI_PREFIX",
     "CustomOpenAIAdapter",
     "CustomResponsesAdapter",
+    "GeminiOpenAIAdapter",
+    "GeminiOpenAIResponsesAdapter",
     "build_custom_adapters",
     "custom_prefix",
 ]

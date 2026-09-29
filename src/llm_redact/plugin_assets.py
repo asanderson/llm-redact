@@ -383,27 +383,29 @@ before the next launch). Never imply protection before that.
     "codex": """\
 Routing honesty: even when the proxy is running, check
 `OPENAI_BASE_URL` in this shell. If it is unset or does not point at
-the proxy, tell the user plainly that this Codex session's traffic is
-NOT protected yet — launching via `llm-redact run -- codex` injects the
-variable (and starts an ephemeral proxy if none is running). Never
-imply protection before that.
+the proxy's `/v1` (default http://127.0.0.1:8787/v1), tell the user
+plainly that this Codex session's traffic is NOT protected yet —
+launching via `llm-redact run -- codex` injects the variable (and
+starts an ephemeral proxy if none is running). Never imply protection
+before that.
 """,
     "opencode": """\
 Routing honesty: even when the proxy is running, check
 `OPENAI_BASE_URL` in this shell. If it is unset or does not point at
-the proxy, tell the user plainly that this OpenCode session's traffic
-is NOT protected yet — launching via `llm-redact run -- opencode`
-injects the variable (and starts an ephemeral proxy if none is
-running). Never imply protection before that.
+the proxy's `/v1` (default http://127.0.0.1:8787/v1), tell the user
+plainly that this OpenCode session's traffic is NOT protected yet —
+launching via `llm-redact run -- opencode` injects the variable (and
+starts an ephemeral proxy if none is running). Never imply protection
+before that.
 """,
     "cursor": """\
 Routing honesty: Cursor routes its AI traffic through Cursor's own
 backend by default — a local proxy only sees it in custom-API-key mode
-with the base URL override in Cursor's settings pointed at the proxy
-(default http://127.0.0.1:8787). Unless the user confirms that setup,
-say plainly that Cursor's conversation traffic is NOT protected; these
-commands still operate the proxy for the other tools that route
-through it.
+with the OpenAI base URL override in Cursor's settings pointed at the
+proxy's `/v1` (default http://127.0.0.1:8787/v1). Unless the user
+confirms that setup, say plainly that Cursor's conversation traffic is
+NOT protected; these commands still operate the proxy for the other
+tools that route through it.
 """,
 }
 

@@ -21,6 +21,7 @@ from that adapter's (rawPredict vs generateContent verbs).
 """
 
 import re
+from collections.abc import Mapping
 
 from llm_redact.providers.anthropic import AnthropicAdapter
 from llm_redact.providers.base import RouteKind
@@ -44,6 +45,17 @@ class ClaudeVertexAdapter(AnthropicAdapter):
         if method != "POST":
             return RouteKind.NONE
         return RouteKind.CHAT if _CLAUDE_VERTEX_PATH.fullmatch(path) else RouteKind.NONE
+
+    def matches_request(
+        self,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str] | None" = None,
+        query: str = "",
+    ) -> RouteKind:
+        # Only the Vertex paths above: never the Anthropic API's own shared
+        # routes (its marker-claimed /v1/models) under the vertex name.
+        return self.matches(method, path)
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         # The rawPredict body is a Messages body with a `system` field, so

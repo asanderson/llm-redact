@@ -10,9 +10,9 @@ At a glance:
 | Provider | Point at the proxy | Covered surface |
 |---|---|---|
 | Anthropic | `ANTHROPIC_BASE_URL` | Messages (+streaming), count_tokens, Message Batches, beta Files |
-| OpenAI | `OPENAI_BASE_URL` | Chat Completions, Responses, Conversations, legacy completions, embeddings, Files+Batches, Realtime WS |
+| OpenAI | `OPENAI_BASE_URL` (ending in `/v1`) | Chat Completions, Responses, Conversations, legacy completions, embeddings, Files+Batches, Realtime WS |
 | Azure OpenAI | `[providers.azure]` + tool's Azure endpoint | same OpenAI surface incl. Responses/Conversations/Realtime, legacy completions, image/speech prompts, files/batches, model listings |
-| Google Gemini | `GOOGLE_GEMINI_BASE_URL` | generateContent/stream, countTokens, embeddings, cachedContents, batch, Live WS |
+| Google Gemini | `GOOGLE_GEMINI_BASE_URL` | generateContent/stream, countTokens, embeddings, cachedContents, batch, Live WS, the OpenAI-compatible `/v1beta/openai/` surface |
 | Vertex AI | `[providers.vertex]` | Gemini-on-Vertex + Claude-on-Vertex (`rawPredict`/`streamRawPredict`), context caching, computeTokens/embedContent, Imagen/Veo, model listings |
 | AWS Bedrock | `[providers.bedrock]` (bearer keys, or the proxy's own identity) | converse(+stream), invoke(+response-stream), binary eventstream, count-tokens, ApplyGuardrail, async invoke |
 | Cohere | `[providers.cohere]` | v2 chat (+streaming), embed, rerank, legacy v1 chat/generate |
@@ -32,8 +32,9 @@ proxy and the default upstreams apply:
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude -p "hello"
-# OpenAI-compatible tools (chat completions and /v1/responses, e.g. Codex CLI):
-OPENAI_BASE_URL=http://127.0.0.1:8787 <your-tool>
+# OpenAI-compatible tools (chat completions and /v1/responses, e.g. Codex CLI,
+# OpenCode, the OpenAI SDKs) — the /v1 is part of the base URL:
+OPENAI_BASE_URL=http://127.0.0.1:8787/v1 <your-tool>
 # Gemini (generateContent / streamGenerateContent / countTokens):
 GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787 <your-tool>
 # Ollama's native API (/api/chat, /api/generate, /api/embed):
@@ -44,6 +45,28 @@ OLLAMA_HOST=http://127.0.0.1:8787 <your-tool>
 agent with the llm-redact plugin installed can confirm its traffic is
 actually flowing through the proxy with `/llm-redact:status` and
 `/llm-redact:recent` ([plugins.md](plugins.md)).
+
+The OpenAI SDKs (and Codex and OpenCode) append endpoint paths such as
+`/responses` to a base URL that already includes `/v1` — their default is
+`https://api.openai.com/v1`. With the old `OPENAI_BASE_URL=http://127.0.0.1:8787`
+the proxy receives `/responses`, which is no provider's path: it answers a
+404 naming the fix and forwards nothing. (Releases up to 1.8.0 sent such a
+request to the anthropic upstream with the OpenAI key and the prompt,
+unredacted.)
+
+The proxy forwards a request no route matches only to a provider it can
+positively attribute it to — a path family, or a header only that
+provider's clients send (`anthropic-version`, a Google API key, …) —
+never to a guessed one; anything else is a recorded local 404. A path
+spelled differently from the API's own route (an empty `//` segment, a
+trailing `/`, another case) is refused 400, a recognized route under an
+extra prefix (`/v1/v1/messages`: a base URL repeating the version) is a
+404, and `GET`/`HEAD /` is answered locally. See
+[api-coverage.md](api-coverage.md#requests-no-route-matches). Point each
+`upstream_base_url` at the API's final `https` URL: the proxy never relays
+an upstream redirect that a following client would answer by re-sending
+a redacted request's unredacted original to the `Location` — it answers
+502.
 
 ## Azure OpenAI
 
@@ -101,6 +124,61 @@ unredacted body, so no body-rewriting proxy can transit it (see
 [threat-model.md](threat-model.md)). The proxy can instead sign each
 request itself, after redaction, with a cloud identity it holds (below).
 
+## Request bodies llm-redact cannot read
+
+A recognized route (the chat and redact-only rows of
+[api-coverage.md](api-coverage.md)) forwards only a request body the
+proxy scanned — wherever redaction applies (`detection` on, which is the
+default, with the tool's own key) and wherever the request is sent with a
+credential the PROXY holds (its own cloud identity, below, or an operator
+key a routing rule spends), whatever `detection` says. A non-empty body
+must be a JSON object (read from the bytes whatever the content-type; a
+UTF-8 BOM or UTF-16/32 encoding is fine) or canonical multipart on a
+route whose multipart form llm-redact scans (Files uploads, image edits,
+video jobs). Anything else would be forwarded verbatim, unread — and
+common upstreams decode it anyway: Go's JSON decoder behind Ollama and
+Jackson take the first JSON value and ignore what follows, Express's
+body-parser substitutes invalid bytes and inflates gzip. So non-JSON
+bytes, invalid UTF-8 (Windows PowerShell 5.1 sends a string `-Body`
+without a charset as ISO-8859-1), bytes after the JSON value (a trailing
+NUL, a second value), a top-level JSON array or scalar (`null` included),
+a whitespace-only body, multipart on any other route or outside the
+canonical form, and a repeated `Content-Type` header (a singleton field;
+a second one could name a multipart boundary the proxy never parsed with)
+are refused with a recorded, provider-shaped **400** naming the body's
+kind, before any upstream contact. A `Content-Encoding` coding other than
+`identity`, in any of the request's Content-Encoding headers, is refused
+**415** with `Accept-Encoding: identity`: llm-redact does not decode
+request bodies — send it uncompressed. An empty body (a GET, DELETE or
+body-less POST) is forwarded as before, and every SDK sends UTF-8 JSON
+objects, so only clients that were already sending malformed bodies see
+the refusal instead of a silent leak.
+
+Inside an accepted multipart upload every piece must be scanned too, or
+the whole request is refused the same way: each non-blank line of an
+uploaded file must be a JSON object (a batch input or fine-tuning file),
+so a text, PDF, image or other non-JSONL file is refused — llm-redact
+cannot scan it; plain form fields (`purpose`, `user`, `size`, …) are
+scanned as UTF-8 text (a field that is not UTF-8 is refused), and bytes
+outside every part (a multipart preamble or epilogue) are refused. So is
+a part header without a single reading — a folded or repeated header
+line, a filename holding a backslash that is not a `\"` or `\\` escape, a
+malformed `filename*` or one in a charset other than UTF-8 — and a part
+the proxy could not read as its plain bytes: a Content-Transfer-Encoding
+other than `7bit`/`8bit`/`binary` on any part (RFC 7578 deprecates them),
+or, on a part whose content is scanned, a declared charset other than
+UTF-8/US-ASCII (its Content-Type `charset`, or the RFC 7578 `_charset_`
+field). The image and mask parts of an image edit (and a video job's
+reference image) are media — the documented non-goal, as base64 media in
+a JSON body — and are sent as they came (their filenames redacted).
+
+`[providers.NAME] detection = false` with the tool's own key is the
+explicit opt-out: nothing is scanned and such bodies — a PDF upload
+included — are forwarded verbatim, surfaced like every other opt-out
+(`/status` `providers_detection_off`, `llm-redact status`, `doctor`).
+Traffic on a route llm-redact does not recognize is forwarded verbatim
+as before (pass-through).
+
 ## The proxy's own cloud identity
 
 With the llm-redact-pro package installed, Bedrock, Vertex AI and Azure
@@ -138,49 +216,14 @@ upstream — scheme, host, port, and the `upstream_base_url` PATH (an
 API-management base such as `https://gw.example/my-api` is honored on
 HTTP and realtime alike) followed by the request's own path — or the
 request is refused before signing. The identity signs only a body the
-proxy actually redacted: a non-empty request body on a recognized route
-must be a JSON object (read from the bytes whatever the content-type; a
-UTF-8 BOM or UTF-16/32 encoding is fine) or canonical multipart on a
-route whose multipart form llm-redact scans (Azure Files uploads and
-image edits). Anything else — non-JSON bytes, invalid UTF-8, a top-level
-JSON array or scalar (`null` included), a whitespace-only body,
-multipart on any other route or outside the canonical form, any
-`Content-Encoding` coding other than `identity` in any of the request's
-Content-Encoding headers (the proxy never decompresses a request, so it
-cannot see what the upstream would), and a repeated `Content-Type`
-header (a singleton field; a second one could name a multipart boundary
-the proxy never parsed with) — is refused with a
-recorded, provider-shaped 400 naming the body's kind, before any
-credential is fetched or the upstream contacted. An empty body (a GET,
-DELETE or body-less POST) is forwarded as before; `detection = false`
-stays the explicit unredacted opt-out for a body the proxy can read (it
-turns redaction off, not this rule: the ownership check of
+proxy actually redacted — the scanned-body rule every recognized route
+follows (above, "Request bodies llm-redact cannot read"), which under the
+proxy's own identity holds whatever `detection` says: `detection = false`
+turns redaction off, not this rule (the ownership check of
 llm-redact-pro's named users reads the parsed body too, so a gzip or
-non-JSON body it could not read is refused either way), and
-key-authorized providers keep forwarding such bodies verbatim. Inside an accepted multipart upload every
-piece must be scanned too, or the whole request is refused the same way:
-each non-blank line of an uploaded file must be a JSON object (so a text,
-PDF or other non-JSONL file cannot be uploaded with the proxy's identity —
-use key auth for those), plain form fields (`purpose`, `user`, `size`, …)
-are scanned as UTF-8 text (a field that is not UTF-8 is refused), and
-bytes outside every part (a multipart preamble or epilogue) are refused.
-So is a part header without a single reading — a folded or repeated
-header line, a filename holding a backslash that is not a `\"` or `\\`
-escape, a malformed `filename*` or one in a charset other than UTF-8 —
-and a part the proxy could not read as its plain bytes: a
-Content-Transfer-Encoding other than `7bit`/`8bit`/`binary` on any part
-(RFC 7578 deprecates them), or, on a part whose content is scanned, a
-declared charset other than UTF-8/US-ASCII (its Content-Type `charset`,
-or the RFC 7578 `_charset_` field). The image and mask parts of an
-image edit are media — the documented non-goal, as base64 media in a
-JSON body — and are signed as sent (their filenames redacted).
-Key-authorized uploads scan what they can read and forward the rest
-verbatim: plain form fields are scanned as UTF-8 text like their JSON
-twins (a form's `user` as a chat body's `user`) except the structural
-ones (`purpose`, `model`, `size`, `n`, `quality`, `response_format`, …),
-which are forwarded as sent, as is a field that is not UTF-8; a filename
-without a single reading is left as sent, and declared encodings are the
-encoding non-goal (the proxy scans the bytes it receives). Realtime
+non-JSON body it could not read is refused either way). With `detection`
+on, an upload whose files are not JSONL (a text file, a PDF) cannot be
+sent with the proxy's identity. Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with
@@ -227,8 +270,10 @@ every other route too — see the threat model's "Requests from web pages".
 Supported out of the box (`OLLAMA_HOST=http://127.0.0.1:8787`, or point
 the tool at the proxy): `/api/chat` and `/api/generate` are redacted and
 rehydrated including their newline-delimited-JSON streaming, and
-`/api/embed`/`/api/embeddings` inputs are scrubbed. The default
-upstream is the local daemon at `http://127.0.0.1:11434`.
+`/api/embed`/`/api/embeddings` inputs are scrubbed. The model inventory
+(`/api/tags`, `/api/ps`, `/api/show`) and `/api/version` are recognized,
+and the ollama CLI's `HEAD /` heartbeat is answered by the proxy itself.
+The default upstream is the local daemon at `http://127.0.0.1:11434`.
 
 Ollama (like a local vLLM or LM Studio server) needs no key, so the proxy
 lends whoever reaches it access to the model — and it rewrites `Host` when
@@ -247,7 +292,15 @@ own `/v1` endpoints) are covered by pointing
 `[providers.openai] upstream_base_url` at them, so even self-hosted
 model traffic can be redacted — or run **several side by side** as
 named custom upstreams (`[providers.custom.NAME]`, served under
-`/custom/NAME/` with the full OpenAI surface, including Responses).
+`/custom/NAME/` with the full OpenAI surface, including Responses). A
+custom upstream's endpoints are recognized under whatever base path it
+serves them — `/v1`, `/openai/v1`, `/api/v1`, `/inference`, `/models`,
+`/api/paas/v4`, a Cloudflare AI Gateway's `/v1/{account}/{gateway}/openai`
+— and the path after `/custom/NAME` is forwarded byte-for-byte: point the
+tool at `http://127.0.0.1:8787/custom/NAME` plus the base path the
+upstream's own docs give. Gemini's OpenAI-compatible surface needs no
+custom provider: `http://127.0.0.1:8787/v1beta/openai/` reaches
+`[providers.gemini]`, redacted like OpenAI's.
 
 ## Embeddings
 
@@ -301,6 +354,12 @@ copy of the static session ([per-user namespaces](how-it-works.md#session-isolat
 A connection keeps a running token floor: a token any of its client
 frames carried (a restored conversation, a pasted answer) is never issued
 to a new value later on that connection ([the vault records](how-it-works.md#the-vault-records)).
+A config reload (SIGHUP, the config editor) reaches open connections too.
+A connection whose provider settings, upstream authorizer or `[detection]`
+policy the reload changed is closed on both sides with code 1012
+(reconnect), and no frame it reads after the reload is forwarded under the
+old configuration. A client that reconnects gets the new configuration and
+the same vault session ([details](deployment.md#reloads-and-open-realtime-connections)).
 The Azure and Vertex routes work with the proxy's own cloud identity
 ([above](#the-proxys-own-cloud-identity)); the full list of accepted
 WebSocket paths is in [api-coverage.md](api-coverage.md#realtime-websocket-routes).

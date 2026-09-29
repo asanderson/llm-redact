@@ -10,11 +10,20 @@ bounded retry, which is the SqliteVault recipe generalized to any engine.
 Semantics mirror SqliteVault and are pinned by the same invariant battery
 (tests/test_vault_rdbms.py): deterministic (session, type, value) → token,
 per-(session, type) counters that never reuse a number (n is
-max(MAX(n), floor)+1 with MAX(n) read fresh inside the transaction, so a
-rolled-back allocation reissues the SAME number — reuse is the danger; the
-only gaps are the ones a request's token floor asks for, and there is no
-counters table to lose one), caches written only after COMMIT, any write
-fault rolls back and fails closed, whole-session prune only.
+max(MAX(n), retired, floor)+1 with MAX(n) and the session's retired number
+read in one statement inside the transaction, so a rolled-back allocation
+reissues the SAME number — reuse is the danger; the only gaps are the ones
+a request's token floor asks for, and there is no counters table to lose
+one), caches written only after COMMIT, any write fault rolls back and fails
+closed, whole-session prune only — and a deleted session's numbers retired
+(``llm_redact_retired``), never issued again, so a replica still caching
+them restores the right value or none.
+
+Allocation stays one self-contained transaction per value (no per-request
+batch as on sqlite): the reconnect-retry replays ONE self-contained op, and
+the UNIQUE-retry rolls back ONE allocation — inside a shared transaction a
+dropped connection or a rollback would take the request's earlier
+allocations with it, after their tokens were already substituted.
 
 Two deliberate deltas from the sqlite schema:
 
@@ -43,6 +52,8 @@ import importlib
 import logging
 import os
 import re
+import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
@@ -57,6 +68,7 @@ from llm_redact.vault import (
     _OBJECT_KIND,
     _RESPONSE_KIND,
     _RESPONSE_PRUNE_EVERY,
+    CACHE_CHECK_SECONDS,
     LOOKUP_CHUNK,
     PlaceholderSpaceExhausted,
     Vault,
@@ -98,6 +110,13 @@ _SCHEMES = {
 _LONG_TEXT = {"postgresql": "TEXT", "mysql": "LONGTEXT", "oracle": "CLOB", "dbapi": "TEXT"}
 
 _ALLOCATION_ATTEMPTS = 3
+
+
+class RdbmsAllocationError(RuntimeError):
+    """A new placeholder's allocation kept colliding with concurrent writers
+    past ``_ALLOCATION_ATTEMPTS``: refused, never guessed (one of the store's
+    ``fault_types``)."""
+
 
 # The response map's row kind (a Responses chain's row, or a stored object's
 # owner record): each kind is bounded apart (see llm_redact.vault). One
@@ -167,6 +186,13 @@ def _ddl(backend: str) -> dict[str, str]:
   meta_key VARCHAR(32) NOT NULL,
   meta_value VARCHAR(128) NOT NULL,
   PRIMARY KEY (meta_key)
+)""",
+        # A whole-session delete retires every number the session held (see
+        # RdbmsStore._retire): one row per session ever deleted, no values.
+        "llm_redact_retired": """CREATE TABLE llm_redact_retired (
+  session_id VARCHAR(128) NOT NULL,
+  n INTEGER NOT NULL,
+  PRIMARY KEY (session_id)
 )""",
     }
 
@@ -658,7 +684,7 @@ class RdbmsStore:
                 # Probe-then-create instead of IF NOT EXISTS: Oracle only
                 # grew the clause in 23ai, and the probe is portable.
                 if self._table_missing(conn, table):
-                    conn.cursor().execute(ddl)
+                    self._create(conn, table, ddl)
                     # Commit EACH create: PostgreSQL DDL is transactional,
                     # and the NEXT missing-table probe's rollback would
                     # otherwise undo this CREATE (MySQL/Oracle/sqlite
@@ -669,6 +695,39 @@ class RdbmsStore:
             self._ensure_kind_column(conn)
 
         self._run(op)
+
+    @property
+    def owner_bound_shared(self) -> bool:
+        """Whether the response map could not gain its ``kind`` column (the
+        database user may not ALTER it, see ``_ensure_kind_column``): stored
+        objects' owner records then share the Responses rows' bound. Read at
+        startup only — adding the column takes a restart."""
+        return not self._row_kinds
+
+    @property
+    def fault_types(self) -> tuple[type[BaseException], ...]:
+        """What a failed allocation raises: the driver's DB-API ``Error``
+        (after the rollback and the one reconnect-retry) and an allocation
+        that kept colliding — the proxy refuses such a request 503."""
+        driver_error = getattr(self._module, "Error", None)
+        driver = (driver_error,) if isinstance(driver_error, type) else ()
+        return (*driver, RdbmsAllocationError)
+
+    def _create(self, conn: Any, table: str, ddl: str) -> None:
+        """Create a missing table — or refuse to start, naming it and the
+        statement a DBA must run, when this database user may not (a table
+        added by an upgrade, under a schema created by someone else). Never
+        the DSN."""
+        from llm_redact.config import ConfigError
+
+        try:
+            conn.cursor().execute(ddl)
+        except self._module.Error as exc:
+            self._rollback(conn)
+            raise ConfigError(
+                f"the RDBMS vault could not create its table {table}"
+                f" ({type(exc).__name__}); create it, then start again: {ddl}"
+            ) from exc
 
     def _kind_missing(self, conn: Any) -> bool:
         """Whether the response map lacks the ``kind`` column (the portable
@@ -702,7 +761,8 @@ class RdbmsStore:
                 logger.warning(
                     "vault: could not add the kind column to llm_redact_response_sessions"
                     " (%s); stored objects' owner records share the Responses bound until"
-                    " it is added (ALTER TABLE llm_redact_response_sessions ADD %s)",
+                    " it is added (ALTER TABLE llm_redact_response_sessions ADD %s) and the"
+                    " proxy restarted",
                     type(exc).__name__,
                     _KIND_COLUMN,
                 )
@@ -752,10 +812,18 @@ class RdbmsStore:
             return self._cipher.mac(session, detector_type, original)
         return hashlib.sha256(original.encode("utf-8")).hexdigest()
 
-    def preload(self, session: str) -> list[tuple[str, str, str]]:
-        """(detector_type, original, placeholder) rows for one session."""
+    def _retired_of(self, conn: Any, session: str) -> int:
+        row = self._execute(
+            conn, "SELECT n FROM llm_redact_retired WHERE session_id = :s", {"s": session}
+        ).fetchone()
+        return 0 if row is None else int(row[0])
 
-        def op(conn: Any) -> list[tuple[str, str, str]]:
+    def load(self, session: str) -> tuple[int, list[tuple[str, str, str]]]:
+        """The session's retired number, then its (detector_type, original,
+        placeholder) rows — in that order (see SqliteVault._load)."""
+
+        def op(conn: Any) -> tuple[int, list[tuple[str, str, str]]]:
+            retired = self._retired_of(conn, session)
             rows = self._execute(
                 conn,
                 "SELECT detector_type, original, original_ct, placeholder"
@@ -768,10 +836,61 @@ class RdbmsStore:
                 if self._cipher is not None:
                     original = self._cipher.decrypt(str(original_ct).encode("ascii"))
                 out.append((str(detector_type), str(original), str(placeholder)))
-            return out
+            return retired, out
 
-        result: list[tuple[str, str, str]] = self._run(op)
+        result: tuple[int, list[tuple[str, str, str]]] = self._run(op)
         return result
+
+    def retired(self, session: str) -> int:
+        """The highest number ``session`` held in rows since deleted (0:
+        none) — a view's staleness check."""
+
+        def op(conn: Any) -> int:
+            value = self._retired_of(conn, session)
+            conn.commit()
+            return value
+
+        result: int = self._run(op)
+        return result
+
+    def _retire(self, conn: Any, session: str, highest: int) -> None:
+        """Raise ``session``'s retired number to ``highest`` — never lower
+        it (a replica retiring it concurrently may have gone higher). No
+        upsert: a concurrent first INSERT surfaces as IntegrityError, and
+        the caller's op starts over."""
+        existing = self._execute(
+            conn, "SELECT n FROM llm_redact_retired WHERE session_id = :s", {"s": session}
+        ).fetchone()
+        if existing is None:
+            self._execute(
+                conn,
+                "INSERT INTO llm_redact_retired (session_id, n) VALUES (:s, :n)",
+                {"s": session, "n": highest},
+            )
+            return
+        self._execute(
+            conn,
+            "UPDATE llm_redact_retired SET n = :n WHERE session_id = :s AND n < :n",
+            {"s": session, "n": highest},
+        )
+
+    def _delete_session(self, conn: Any, session: str, highest: int) -> None:
+        """Delete one session's rows numbered up to ``highest`` (its MAX(n),
+        read by the caller) and its response rows, retiring the numbers
+        first. A row another replica allocated meanwhile is numbered above
+        ``highest`` (its allocation read MAX(n) or the retired number) and
+        survives: every number deleted is retired, none ever reissued."""
+        self._retire(conn, session, highest)
+        self._execute(
+            conn,
+            "DELETE FROM llm_redact_mappings WHERE session_id = :s AND n <= :n",
+            {"s": session, "n": highest},
+        )
+        self._execute(
+            conn,
+            "DELETE FROM llm_redact_response_sessions WHERE session_id = :s",
+            {"s": session},
+        )
 
     def get_or_create(
         self, session: str, detector_type: str, original: str, *, floor: int = 0
@@ -791,14 +910,19 @@ class RdbmsStore:
                 if row is not None:
                     conn.commit()
                     return str(row[0])
+                # The live numbers and the retired number in ONE statement
+                # (one snapshot): a concurrent whole-session delete is seen
+                # either before (its rows) or after (its retired number) —
+                # never neither.
                 nrow = self._execute(
                     conn,
-                    "SELECT COALESCE(MAX(n), 0) FROM llm_redact_mappings"
-                    " WHERE session_id = :s AND detector_type = :t",
+                    "SELECT COALESCE(MAX(n), 0), (SELECT COALESCE(MAX(n), 0)"
+                    " FROM llm_redact_retired WHERE session_id = :s)"
+                    " FROM llm_redact_mappings WHERE session_id = :s AND detector_type = :t",
                     {"s": session, "t": detector_type},
                 ).fetchone()
                 try:
-                    n = next_number(int(nrow[0]), floor, detector_type)
+                    n = next_number(max(int(nrow[0]), int(nrow[1])), floor, detector_type)
                 except PlaceholderSpaceExhausted:
                     self._rollback(conn)  # close the read transaction; nothing written
                     raise
@@ -839,7 +963,7 @@ class RdbmsStore:
                     # so the next attempt reissues the same number.
                     self._rollback(conn)
                     raise
-            raise RuntimeError(
+            raise RdbmsAllocationError(
                 "RDBMS vault allocation kept colliding after"
                 f" {_ALLOCATION_ATTEMPTS} attempts; refusing to guess"
             )
@@ -975,72 +1099,84 @@ class RdbmsStore:
         return result
 
     def prune_sessions(self, days: int, *, exclude: frozenset[str] = frozenset()) -> list[str]:
+        """Delete (``_delete_session``) the sessions that issued no new value
+        in the last ``days`` days, but those in ``exclude``; their ids.
+
+        Each candidate's idle check is re-read in the statement that sizes
+        its delete (MAX(created_at) and MAX(n) in one snapshot): the delete
+        removes exactly the rows seen idle, and a value another replica
+        issued since keeps its row (numbered above them)."""
         cutoff = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        def op(conn: Any) -> list[str]:
-            rows = self._execute(
+        def attempt(conn: Any) -> list[str]:
+            candidates = self._execute(
                 conn,
                 "SELECT session_id FROM llm_redact_mappings GROUP BY session_id"
                 " HAVING MAX(created_at) < :cutoff",
                 {"cutoff": cutoff},
             ).fetchall()
-            doomed = [str(row[0]) for row in rows if str(row[0]) not in exclude]
-            if not doomed:
-                conn.commit()
-                return []
-            try:
-                for session_id in doomed:
-                    self._execute(
-                        conn,
-                        "DELETE FROM llm_redact_mappings WHERE session_id = :s",
-                        {"s": session_id},
-                    )
-                    self._execute(
-                        conn,
-                        "DELETE FROM llm_redact_response_sessions WHERE session_id = :s",
-                        {"s": session_id},
-                    )
-                conn.commit()
-            except self._module.Error:
-                self._rollback(conn)
-                raise
+            doomed = []
+            for (session_id,) in candidates:
+                if str(session_id) in exclude:
+                    continue
+                highest, last = self._execute(
+                    conn,
+                    "SELECT MAX(n), MAX(created_at) FROM llm_redact_mappings WHERE session_id = :s",
+                    {"s": str(session_id)},
+                ).fetchone()
+                if highest is None or str(last) >= cutoff:
+                    continue  # emptied, or used, since the candidate query
+                self._delete_session(conn, str(session_id), int(highest))
+                doomed.append(str(session_id))
             return doomed
 
-        result: list[str] = self._run(op)
+        result: list[str] = self._run(lambda conn: self._deleting(conn, attempt))
         return result
 
     def forget_sessions(self, session_ids: list[str]) -> int:
         """Delete whole named sessions and their response rows in one
-        transaction; how many held mappings."""
+        transaction, retiring their numbers; how many held mappings."""
 
-        def op(conn: Any) -> int:
+        def attempt(conn: Any) -> int:
             present = 0
-            try:
-                for session_id in session_ids:
-                    row = self._execute(
-                        conn,
-                        "SELECT COUNT(*) FROM llm_redact_mappings WHERE session_id = :s",
-                        {"s": session_id},
-                    ).fetchone()
-                    present += 1 if row is not None and int(row[0]) > 0 else 0
-                    self._execute(
-                        conn,
-                        "DELETE FROM llm_redact_mappings WHERE session_id = :s",
-                        {"s": session_id},
-                    )
+            for session_id in session_ids:
+                (highest,) = self._execute(
+                    conn,
+                    "SELECT MAX(n) FROM llm_redact_mappings WHERE session_id = :s",
+                    {"s": session_id},
+                ).fetchone()
+                if highest is not None:
+                    present += 1
+                    self._delete_session(conn, session_id, int(highest))
+                else:
                     self._execute(
                         conn,
                         "DELETE FROM llm_redact_response_sessions WHERE session_id = :s",
                         {"s": session_id},
                     )
+            return present
+
+        result: int = self._run(lambda conn: self._deleting(conn, attempt))
+        return result
+
+    def _deleting(self, conn: Any, attempt: Callable[[Any], Any]) -> Any:
+        """Run a delete ``attempt`` as one transaction: committed, or rolled
+        back whole. A replica retiring the same session first (the retired
+        row's INSERT collides) starts it over — bounded, like allocation."""
+        for _ in range(_ALLOCATION_ATTEMPTS):
+            try:
+                result = attempt(conn)
                 conn.commit()
+                return result
+            except self._module.IntegrityError:
+                self._rollback(conn)
+                continue
             except self._module.Error:
                 self._rollback(conn)
                 raise
-            return present
-
-        result: int = self._run(op)
-        return result
+        raise RuntimeError(
+            f"RDBMS vault session delete kept colliding after {_ALLOCATION_ATTEMPTS} attempts"
+        )
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
         """Map a Responses chain's response id to its session."""
@@ -1156,19 +1292,50 @@ class RdbmsStore:
 
 class RdbmsVault:
     """Per-session view over a shared RdbmsStore — SqliteVault's caching
-    contract: preload at creation, write-through only after COMMIT."""
+    contract: loaded at creation, write-through only after COMMIT, rebuilt
+    when the session's retired number moved (another replica deleted the
+    session; checked at most every CACHE_CHECK_SECONDS)."""
 
-    def __init__(self, store: RdbmsStore, session: str, *, owns_store: bool = False) -> None:
+    # Set by _load (SqliteVault's fields).
+    _forward: dict[str, str]
+    _reverse: dict[str, str]
+    _retired: int
+    _next_check: float
+
+    def __init__(
+        self,
+        store: RdbmsStore,
+        session: str,
+        *,
+        owns_store: bool = False,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._store = store
         self._session = session
         self._owns_store = owns_store
-        self._forward: dict[str, str] = {}
-        self._reverse: dict[str, str] = {}
-        for detector_type, original, placeholder in store.preload(session):
-            self._forward[f"{detector_type}::{original}"] = placeholder
-            self._reverse[placeholder] = original
+        self._clock = clock
+        self._load()
+
+    def _load(self) -> None:
+        retired, rows = self._store.load(self._session)
+        self._forward = {
+            f"{detector_type}::{original}": placeholder
+            for detector_type, original, placeholder in rows
+        }
+        self._reverse = {placeholder: original for _, original, placeholder in rows}
+        self._retired = retired
+        self._next_check = self._clock() + CACHE_CHECK_SECONDS
+
+    def _revalidate(self) -> None:
+        """SqliteVault._revalidate: one indexed read once the check is due."""
+        if self._store.retired(self._session) != self._retired:
+            self._load()
+            return
+        self._next_check = self._clock() + CACHE_CHECK_SECONDS
 
     def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
+        if self._clock() >= self._next_check:
+            self._revalidate()
         key = f"{detector_type}::{original}"
         existing = self._forward.get(key)
         if existing is not None:
@@ -1179,6 +1346,8 @@ class RdbmsVault:
         return placeholder
 
     def original_for(self, placeholder: str) -> str | None:
+        if self._clock() >= self._next_check:
+            self._revalidate()
         cached = self._reverse.get(placeholder)
         if cached is not None:
             return cached
@@ -1197,18 +1366,30 @@ class RdbmsVault:
 
 class RdbmsVaultManager:
     """One shared store; per-session views cached in a small LRU (the
-    SqliteVaultManager shape — eviction drops only a view's cache)."""
+    SqliteVaultManager shape — eviction drops only a view's cache, a view
+    still held elsewhere is handed out again, and a delete rebuilds every
+    live view of the session)."""
 
-    def __init__(self, store: RdbmsStore, *, view_cache_size: int = 64) -> None:
+    def __init__(
+        self,
+        store: RdbmsStore,
+        *,
+        view_cache_size: int = 64,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._store = store
+        self._clock = clock
         self._views: OrderedDict[str, RdbmsVault] = OrderedDict()
         self._view_cache_size = view_cache_size
+        self._live: weakref.WeakValueDictionary[str, RdbmsVault] = weakref.WeakValueDictionary()
 
     def get(self, session_id: str) -> Vault:
-        view = self._views.get(session_id)
+        # Every view the LRU holds is live, so the registry answers for both.
+        view = self._live.get(session_id)
         if view is None:
-            view = RdbmsVault(self._store, session_id)
-            self._views[session_id] = view
+            view = RdbmsVault(self._store, session_id, clock=self._clock)
+            self._live[session_id] = view
+        self._views[session_id] = view
         self._views.move_to_end(session_id)
         while len(self._views) > self._view_cache_size:
             self._views.popitem(last=False)
@@ -1223,10 +1404,19 @@ class RdbmsVaultManager:
     def sessions_summary(self) -> list[dict[str, object]]:
         return self._store.sessions_summary()
 
+    @property
+    def owner_bound_shared(self) -> bool:
+        """``RdbmsStore.owner_bound_shared`` (surfaced in /status and doctor)."""
+        return self._store.owner_bound_shared
+
+    @property
+    def fault_types(self) -> tuple[type[BaseException], ...]:
+        """``RdbmsStore.fault_types`` (the proxy's vault-fault refusal)."""
+        return self._store.fault_types
+
     def prune_sessions(self, days: int, *, exclude: frozenset[str] = frozenset()) -> int:
         doomed = self._store.prune_sessions(days, exclude=exclude)
-        for session_id in doomed:
-            self._views.pop(session_id, None)
+        self._drop_views(doomed)
         return len(doomed)
 
     def forget_sessions(self, session_ids: Iterable[str]) -> int:
@@ -1234,9 +1424,16 @@ class RdbmsVaultManager:
         if not wanted:
             return 0
         present = self._store.forget_sessions(wanted)
-        for session_id in wanted:
-            self._views.pop(session_id, None)
+        self._drop_views(wanted)
         return present
+
+    def _drop_views(self, session_ids: Iterable[str]) -> None:
+        """SqliteVaultManager._drop_views: evicted, and rebuilt where held."""
+        for session_id in session_ids:
+            self._views.pop(session_id, None)
+            view = self._live.get(session_id)
+            if view is not None:
+                view._load()
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
         self._store.record_response_session(response_id, session_id)

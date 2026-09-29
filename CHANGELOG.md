@@ -124,6 +124,17 @@ providers refuse to start.
   tails of at most eight segments after `/v1` (every OpenAI endpoint has four or
   fewer) and the one at the first OpenAI resource name, and an extra prefix is
   looked for up to eight segments deep.
+- **Responses compaction and input-token counts were forwarded unredacted.**
+  `POST /v1/responses/compact` and `POST /v1/responses/input_tokens` take a
+  responses.create body, and neither was matched: the whole `input` went out in
+  clear text — for a compaction (Codex CLI compacts long sessions) the entire
+  conversation, restored values included. A compaction is now a chat route: its
+  window is redacted, the system note joins its `instructions` (the compacted state
+  must carry every token exactly), and the compacted window it answers is restored
+  (the encrypted compaction item goes back as sent). The count is redact-only,
+  redacted with the note like the request it counts. Both are matched on OpenAI,
+  Azure (`/openai/v1/…` and `/openai/…`), custom providers and the Gemini API's
+  OpenAI surface; neither creates a stored object.
 - **Recognized routes forward only a body the proxy read.** Wherever redaction
   applies, and whatever `detection` says when a request spends a credential the
   proxy holds, the bodies listed under Upgrading are refused before the

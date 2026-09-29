@@ -118,6 +118,8 @@ matches](#requests-no-route-matches).
 | `GET /v1/responses/{id}` | chat | stored responses rehydrated |
 | `GET /v1/responses/{id}/input_items` | chat | input-item echoes restored |
 | `DELETE /v1/responses/{id}` | redact-only | id only (a body-less no-op: recognized) |
+| `POST /v1/responses/compact` | chat | compaction (Codex CLI compacts long sessions: the whole conversation): the window redacted, the note joins its `instructions` (the compacted state must carry every token exactly); the compacted window (`response.compaction`: retained messages and tool calls, then one opaque, encrypted compaction item) restored — the compaction item goes back as sent. Never streams; stateless, so nothing is reported as a stored object |
+| `POST /v1/responses/input_tokens` | redact-only | a create body, redacted with the note like the request it counts (Anthropic `count_tokens`' stance); the count forwarded as sent |
 | `POST /v1/conversations` | chat | create: item content redacted, echoed response restored |
 | `POST /v1/conversations/{id}/items` | chat | add items: content redacted + echo restored |
 | `GET /v1/conversations/{id}` | chat | retrieve conversation, restored |
@@ -232,6 +234,9 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/responses/{id}/input_items` | chat | input-item echoes restored |
 | `POST /openai/v1/responses/{id}/cancel` | chat | answers the Response object, restored |
 | `DELETE /openai/responses/{id}` | redact-only | ids only |
+| `POST /openai/v1/responses/compact` | chat | compaction, as on OpenAI |
+| `POST /openai/responses/compact` | chat | the api-version form (Azure documents `/openai/v1`) |
+| `POST /openai/v1/responses/input_tokens` | redact-only | not documented by Azure: a client that sends it gets the body redacted all the same |
 | `POST /openai/v1/conversations` | chat | item content redacted, echo restored; STATIC vault session |
 | `POST /openai/v1/conversations/{id}/items` | chat | |
 | `GET /openai/v1/conversations/{id}` | chat | |
@@ -398,7 +403,8 @@ uploads (`POST /openai/files`, `/openai/v1/files`) and content downloads
 reuse the OpenAI multipart/JSONL/filename handling on Azure's path shapes;
 batches are recognized and file objects restored (see the Azure table). **Azure OpenAI Responses**
 (`POST /openai/responses` and the `/openai/v1/responses` preview, plus the
-stored-response and input-item GETs) reuses `OpenAIResponsesAdapter`
+stored-response and input-item GETs, compaction and the input-token count)
+reuses `OpenAIResponsesAdapter`
 wholesale via `AzureResponsesAdapter` — identical event vocabulary, delta
 channels, and note injection; only routing differs (matcher disjoint from
 the Azure chat adapter's, proven by test). **Azure Realtime**

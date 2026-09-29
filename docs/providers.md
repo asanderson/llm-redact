@@ -32,8 +32,9 @@ proxy and the default upstreams apply:
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude -p "hello"
-# OpenAI-compatible tools (chat completions and /v1/responses, e.g. Codex CLI,
-# OpenCode, the OpenAI SDKs) — the /v1 is part of the base URL:
+# OpenAI-compatible tools (chat completions and /v1/responses — its compaction
+# and input-token count too — e.g. Codex CLI, OpenCode, the OpenAI SDKs); the
+# /v1 is part of the base URL:
 OPENAI_BASE_URL=http://127.0.0.1:8787/v1 <your-tool>
 # Gemini (generateContent / streamGenerateContent / countTokens):
 GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787 <your-tool>

@@ -193,11 +193,12 @@ class GeminiOpenAIAdapter(_PrefixedOpenAIMixin, OpenAIAdapter):
 
 
 class GeminiOpenAIResponsesAdapter(_PrefixedOpenAIMixin, OpenAIResponsesAdapter):
-    """Only the create: its answer is restored in the request's own session.
-    A stored response read back by id is left alone (pass-through) — the
-    session that created it is not one a later read on this prefix is
-    resolved to, and a placeholder left in place is safe where a restore in
-    another session is not."""
+    """Only the POSTs — the create, a compaction and the input-token count:
+    an answer is restored in the request's own session. A stored response
+    read back by id is left alone (pass-through) — the session that created
+    it is not one a later read on this prefix is resolved to, and a
+    placeholder left in place is safe where a restore in another session
+    is not."""
 
     name = "gemini"
     prefix = GEMINI_OPENAI_PREFIX

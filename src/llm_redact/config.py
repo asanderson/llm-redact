@@ -198,6 +198,7 @@ CORE_SECTION_KEYS = frozenset(
         "allowed_hosts",
         "inject_system_note",
         "max_body_bytes",
+        "max_body_strings",
         "providers",
         "detection",
         "vault",
@@ -650,6 +651,11 @@ class TlsConfig:
 
 DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MiB: covers 200k-token bodies
 # plus image blocks while bounding the memory the proxy buffers per request.
+# Redaction costs per STRING as well as per byte, and runs on the event loop:
+# the strings (JSON string values, form fields, file names, uploaded JSONL
+# lines) and multipart parts one redactable body may carry. A 1M-token Claude
+# Code history is ~12k strings; 10 MiB of tiny strings would be ~300k-2M.
+DEFAULT_MAX_BODY_STRINGS = 100_000
 
 
 # --- [upstreams] / [routing] / [prices] shapes -------------------------------
@@ -845,6 +851,7 @@ class Config:
     allowed_hosts: tuple[str, ...] = ()
     inject_system_note: bool = True
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
+    max_body_strings: int = DEFAULT_MAX_BODY_STRINGS
     providers: dict[str, ProviderConfig] = field(default_factory=lambda: dict(DEFAULT_PROVIDERS))
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     vault: VaultConfig = field(default_factory=VaultConfig)
@@ -1993,6 +2000,9 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     max_body_bytes = int(raw.get("max_body_bytes", DEFAULT_MAX_BODY_BYTES))
     if max_body_bytes <= 0:
         raise ConfigError("max_body_bytes must be a positive integer")
+    max_body_strings = int(raw.get("max_body_strings", DEFAULT_MAX_BODY_STRINGS))
+    if max_body_strings <= 0:
+        raise ConfigError("max_body_strings must be a positive integer")
 
     providers = dict(DEFAULT_PROVIDERS)
     for name, section in raw.get("providers", {}).items():
@@ -2400,6 +2410,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         allowed_hosts=_parse_allowed_hosts(raw),
         inject_system_note=inject_system_note,
         max_body_bytes=max_body_bytes,
+        max_body_strings=max_body_strings,
         providers=providers,
         detection=detection,
         vault=vault,

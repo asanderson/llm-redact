@@ -17,7 +17,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from llm_redact.detection.engine import Allowlist, DetectionConfig, build_detectors, detect_all
+from llm_redact.detection.engine import Allowlist, DetectionConfig, build_detectors, plan_for
 from llm_redact.redactor import _resolve_overlaps
 
 MANIFEST_NAME = "MANIFEST.toml"
@@ -55,7 +55,9 @@ def scan_fp_corpus(root: Path, config: DetectionConfig | None = None) -> list[Fp
     as results (and become failures in fp_failures).
     """
     manifest = load_manifest(root)
-    detectors = build_detectors(config or DetectionConfig())
+    # One plan for the whole run: the production path (DetectorPlan), held
+    # here so every sample reuses it.
+    plan = plan_for(build_detectors(config or DetectionConfig()))
 
     on_disk = sorted(p.name for p in root.iterdir() if p.is_file() and p.name != MANIFEST_NAME)
     results: list[FpFileResult] = []
@@ -66,7 +68,7 @@ def scan_fp_corpus(root: Path, config: DetectionConfig | None = None) -> list[Fp
             results.append(FpFileResult(name=name, expected=expected, missing_file=True))
             continue
         text = path.read_text(encoding="utf-8")
-        detections = _resolve_overlaps(detect_all(detectors, text, _NO_ALLOW))
+        detections = _resolve_overlaps(plan.detect(text, _NO_ALLOW))
         found: Counter[str] = Counter(d.detector_type for d in detections)
         lines: dict[str, list[int]] = {}
         for d in detections:

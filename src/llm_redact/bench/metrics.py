@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from llm_redact.bench.corpus import Sample
-from llm_redact.detection.engine import Allowlist, DetectionConfig, build_detectors, detect_all
+from llm_redact.detection.engine import Allowlist, DetectionConfig, build_detectors, plan_for
 from llm_redact.redactor import _resolve_overlaps
 
 _NO_ALLOW = Allowlist(exact=frozenset(), patterns=())
@@ -43,7 +43,9 @@ class BenchResult:
 def evaluate(corpus: list[Sample], config: DetectionConfig | None = None) -> BenchResult:
     """Score the full pipeline (detect → overlap resolution) with exact
     span+type matching."""
-    detectors = build_detectors(config or DetectionConfig())
+    # One plan for the whole run: the production path (DetectorPlan), held
+    # here so every sample reuses it.
+    plan = plan_for(build_detectors(config or DetectionConfig()))
     per_type: dict[str, TypeScore] = defaultdict(TypeScore)
     overall = TypeScore()
 
@@ -51,7 +53,7 @@ def evaluate(corpus: list[Sample], config: DetectionConfig | None = None) -> Ben
     started = time.perf_counter()
     for sample in corpus:
         total_bytes += len(sample.text.encode())
-        detections = _resolve_overlaps(detect_all(detectors, sample.text, _NO_ALLOW))
+        detections = _resolve_overlaps(plan.detect(sample.text, _NO_ALLOW))
         found = {(d.start, d.end, d.detector_type) for d in detections}
         expected = {(s.start, s.end, s.detector_type) for s in sample.spans}
         for span in found & expected:

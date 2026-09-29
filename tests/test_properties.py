@@ -13,6 +13,7 @@ import uuid as uuid_module
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
+from typing import Any
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -732,6 +733,58 @@ def test_deny_tier0_wins_every_overlap(detections: list[Detection]) -> None:
     # No surviving tier-1 span overlaps any surviving deny span.
     for other in (d for d in resolved if d.tier != 0):
         assert all(other.end <= d.start or d.end <= other.start for d in deny_out)
+
+
+# --- DetectorPlan: the gated path equals every detector ----------------------
+#
+# The per-string gate (engine.DetectorPlan) is a quick-reject: skipping a
+# detector that would have fired is a silent recall bug. Texts are glued
+# from what the gate reads — every declared literal (case-insensitive ones
+# in any case), recall-corpus values whole and truncated, digits in other
+# scripts, the IGNORECASE letters İ/ı/ſ, separators — plus arbitrary text.
+
+
+@cache
+def _plan_under_test() -> tuple[Any, Any]:
+    from llm_redact.detection.engine import DetectorPlan
+
+    detectors = build_detectors(DetectionConfig())
+    return detectors, DetectorPlan(detectors, gated_max_chars=10**9)
+
+
+def _plan_fragments() -> list[str]:
+    import random
+
+    from llm_redact.bench.corpus import VALUE_GENERATORS
+
+    literals = {lit for rule in BUILTIN_RULES for group in rule.required for lit in group}
+    literals |= {lit.upper() for lit in literals} | {lit.title() for lit in literals}
+    rng = random.Random(1)
+    values = [gen(rng) for _type, gen in VALUE_GENERATORS.values() for _ in range(2)]
+    pieces = [value[: rng.randrange(1, len(value) + 1)] for value in values]
+    digits = [chr(zero + d) for zero in (0x30, 0xFF10, 0x0660, 0x0966) for d in range(10)]
+    return sorted(literals) + values + pieces + digits + list(" -.:=_@/+()\n\u0130\u0131\u017fxZ")
+
+
+_plan_texts = st.lists(
+    st.one_of(st.sampled_from(_plan_fragments()), st.text(max_size=4)), max_size=10
+).map("".join)
+
+
+@settings(deadline=None, max_examples=300)
+@given(text=_plan_texts)
+def test_gated_detection_equals_every_detector_for_any_text(text: str) -> None:
+    from llm_redact.detection.engine import Allowlist
+
+    detectors, plan = _plan_under_test()
+    no_allow = Allowlist(exact=frozenset(), patterns=())
+    gated = plan.detect(text, no_allow)
+    assert gated == plan.detect_each(text, no_allow)
+    naive = sorted(
+        (d for det in detectors for d in det.detect(text)),
+        key=lambda d: (d.start, -(d.end - d.start), d.priority),
+    )
+    assert gated == naive
 
 
 # --- language scope: only out-of-scope national-id rules drop ---------------

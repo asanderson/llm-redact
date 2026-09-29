@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from llm_redact.detection.base import Detection, Detector
-from llm_redact.detection.engine import Allowlist, detect_all
+from llm_redact.detection.engine import Allowlist, DetectorPlan, plan_for
 from llm_redact.jsonwalk import transform_strings
 from llm_redact.vault import PlaceholderSpaceExhausted, Vault
 
@@ -33,6 +33,36 @@ class PlaceholderLimitReached(UnredactableRequest):
     (only a request carrying a token numbered at the limit gets here): the
     whole request is refused, never numbered past the limit or onto a token
     the request already carries. The message names the detector type only."""
+
+
+class TooManyStrings(UnredactableRequest):
+    """The body carries more strings for redaction than ``max_body_strings``
+    allows: refused before any upstream contact (413 over HTTP), never
+    forwarded partly redacted. A subclass of UnredactableRequest, so a path
+    that does not tell it apart still refuses the request."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"request body exceeds llm-redact max_body_strings ({limit})")
+        self.limit = limit
+
+
+class StringBudget:
+    """How many strings one request body may have redacted: its JSON string
+    values, form fields, file names and uploaded JSONL lines. Redaction costs
+    per string, so the count bounds the event-loop time one body can take —
+    max_body_bytes alone let 10 MiB of tiny strings stall the loop for
+    seconds."""
+
+    __slots__ = ("limit", "used")
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.used = 0
+
+    def charge(self, count: int) -> None:
+        self.used += count
+        if self.used > self.limit:
+            raise TooManyStrings(self.limit)
 
 
 def _sweep(detections: Sequence[Detection]) -> list[Detection]:
@@ -85,15 +115,22 @@ def _resolve_overlaps(detections: Sequence[Detection]) -> list[Detection]:
 class Redactor:
     def __init__(
         self,
-        detectors: Sequence[Detector],
+        detectors: "Sequence[Detector] | DetectorPlan",
         vault: Vault,
         allowlist: Allowlist,
         counts: "Counter[str] | None" = None,
         modes: Mapping[str, str] | None = None,
         warn_counts: "Counter[str] | None" = None,
         floors: Mapping[str, int] | None = None,
+        budget: StringBudget | None = None,
     ) -> None:
-        self._detectors = detectors
+        # The detector list compiled for string-at-a-time detection (same
+        # output, gated per string), taken as it is now: plan_for shares the
+        # live plan of a list, and the thin copies below hand theirs on.
+        self._plan = detectors if isinstance(detectors, DetectorPlan) else plan_for(detectors)
+        # The strings one request body may still have redacted (with_budget);
+        # None for a shared redactor, which counts nothing.
+        self._budget = budget
         self._vault = vault
         self._allowlist = allowlist
         # Detection counts by type; a shared Counter may be passed in so
@@ -120,15 +157,32 @@ class Redactor:
         raised = {t: n for t, n in floors.items() if n > self._floors.get(t, 0)}
         if not raised:
             return self
+        return self._copy({**self._floors, **raised}, self._budget)
+
+    def with_budget(self, limit: int) -> "Redactor":
+        """A thin copy for ONE request body that refuses it (TooManyStrings)
+        once it has been asked to redact more than ``limit`` strings. Its
+        floor copies (with_floors) share the same count."""
+        return self._copy(self._floors, StringBudget(limit))
+
+    def _copy(self, floors: Mapping[str, int], budget: StringBudget | None) -> "Redactor":
         return Redactor(
-            self._detectors,
+            self._plan,
             self._vault,
             self._allowlist,
             counts=self.counts,
             modes=self._modes,
             warn_counts=self.warn_counts,
-            floors={**self._floors, **raised},
+            floors=floors,
+            budget=budget,
         )
+
+    def charge(self, count: int) -> None:
+        """Count ``count`` more pieces of the body (an uploaded file's JSONL
+        lines, before they are split) against its string budget: nothing
+        for a redactor without one."""
+        if self._budget is not None:
+            self._budget.charge(count)
 
     def _placeholder(self, detector_type: str, value: str) -> str:
         floor = self._floors.get(detector_type)
@@ -145,7 +199,10 @@ class Redactor:
             ) from None
 
     def redact_text(self, text: str) -> str:
-        detections = _resolve_overlaps(detect_all(self._detectors, text, self._allowlist))
+        # Counted before any work on it: the string over the budget is
+        # never scanned.
+        self.charge(1)
+        detections = _resolve_overlaps(self._plan.detect(text, self._allowlist))
         if not detections:
             return text
         parts: list[str] = []

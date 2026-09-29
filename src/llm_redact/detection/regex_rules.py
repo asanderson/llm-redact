@@ -12,6 +12,7 @@ import datetime
 import ipaddress
 import math
 import re
+import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -59,21 +60,69 @@ class RegexRule:
     languages: tuple[str, ...] | None = None
 
 
+# `\d` in a str pattern is any Unicode decimal digit (category Nd), not just
+# 0-9: full-width "１２３-４５-６７８９" matches us_ssn's \d{3}-\d{2}-\d{4}, and
+# the validators read it (int() accepts every Nd digit). Prefilter literals
+# spell digits in ASCII, so they are tested against a haystack whose decimal
+# digits are folded to ASCII — or such a match would be silently skipped.
+_NON_ASCII_DIGIT = re.compile(r"[^\D0-9]")
+
+
+def _ascii_digit(match: re.Match[str]) -> str:
+    return str(unicodedata.decimal(match.group(0)))
+
+
+def fold_digits(text: str) -> str:
+    """``text`` with every non-ASCII decimal digit (what ``\\d`` matches
+    beyond 0-9) replaced by its ASCII digit: same length, same offsets.
+
+    A substring of ``text`` stays a substring of the result (folded the
+    same way), so a literal test against the folded form can only find
+    more, never less."""
+    if text.isascii():
+        return text
+    return _NON_ASCII_DIGIT.sub(_ascii_digit, text)
+
+
+def lower_for_ci(text: str) -> str:
+    """The case-insensitive prefilter haystack (and literal) form of ``text``.
+
+    Under re.IGNORECASE an ASCII letter also matches three characters whose
+    str.lower() is not that letter: 'İ' (which lowers to "i" plus a
+    combining dot — two characters), 'ı' and 'ſ'. Mapping them first makes
+    the haystack hold a lowercase ASCII literal exactly where the
+    case-insensitive pattern can match it, at the same offsets (the
+    exhaustive code-point check is in tests/test_prefilter.py). Three
+    replace() scans: a translate() table costs ten times as much."""
+    if text.isascii():
+        return text.lower()
+    return text.replace("İ", "i").replace("ı", "i").replace("ſ", "s").lower()
+
+
 class PreparedText:
     """A haystack shared across all rules of one detect_all call, with the
-    lowercase form computed at most once (for case-insensitive prefilters)."""
+    derived forms computed at most once: ``lower`` for case-insensitive
+    prefilters, ``folded`` (decimal digits in ASCII) for case-sensitive
+    ones."""
 
-    __slots__ = ("text", "_lower")
+    __slots__ = ("text", "_lower", "_folded")
 
     def __init__(self, text: str) -> None:
         self.text = text
         self._lower: str | None = None
+        self._folded: str | None = None
 
     @property
     def lower(self) -> str:
         if self._lower is None:
-            self._lower = self.text.lower()
+            self._lower = lower_for_ci(self.text)
         return self._lower
+
+    @property
+    def folded(self) -> str:
+        if self._folded is None:
+            self._folded = fold_digits(self.text)
+        return self._folded
 
 
 def _luhn_checksum(digits: list[int]) -> int:
@@ -226,8 +275,11 @@ def _codice_fiscale_ok(match: re.Match[str]) -> bool:
     """Italian codice fiscale: day-of-birth range (women add 40) plus the
     mod-26 check letter over odd/even position tables. The omocodia
     letter-substitution variants are deliberately out of scope — their
-    grammar collides with random uppercase identifiers."""
-    value = match.group(0)
+    grammar collides with random uppercase identifiers. The grammar's \\d
+    admits any Unicode decimal digit; the tables are keyed by ASCII, so the
+    digits are folded first (a full-width digit once raised KeyError here,
+    failing the whole request with a bare 500)."""
+    value = fold_digits(match.group(0))
     day = int(value[9:11])
     if not (1 <= day <= 31 or 41 <= day <= 71):
         return False
@@ -487,8 +539,10 @@ _CURP_STATES = frozenset(
 def _curp_ok(match: re.Match[str]) -> bool:
     """Mexican CURP: state-code gate, a REAL calendar date (the century
     comes from the homoclave — digit means 1900s, letter means 2000s, per
-    RENAPO), and the mod-10 check digit over the Ñ-bearing charset."""
-    value = match.group(0)
+    RENAPO), and the mod-10 check digit over the Ñ-bearing charset. Digits
+    are folded to ASCII first: the grammar's \\d admits any Unicode decimal
+    digit, which the charset lookup cannot index."""
+    value = fold_digits(match.group(0))
     if value[11:13] not in _CURP_STATES:
         return False
     century = 1900 if value[16].isdigit() else 2000
@@ -1574,15 +1628,30 @@ class RegexDetector:
         self.name = rule.name
         self._rule = rule
         self._validator = rule.validator or _GENERIC_VALIDATORS.get(rule.name)
+        # The required literals in the form of the haystack they are tested
+        # against. Case-sensitive literals meet the digit-folded text, so
+        # they are digit-folded too (a per-character map: a literal the text
+        # holds, the folded text holds folded) — only a user literal with a
+        # non-ASCII digit changes. Case-insensitive literals are declared in
+        # lowercase ASCII (built-in rules only), which is already their form.
+        self.required: tuple[tuple[str, ...], ...] = (
+            rule.required
+            if rule.required_ci
+            else tuple(tuple(fold_digits(lit) for lit in group) for group in rule.required)
+        )
+
+    @property
+    def rule(self) -> RegexRule:
+        return self._rule
 
     def detect_prepared(self, prepared: PreparedText) -> Iterable[Detection]:
         """detect(), skipped or narrowed via the rule's declared literals —
         identical output by construction (required literals are necessary
         conditions; anchors are guaranteed match prefixes)."""
         rule = self._rule
-        if rule.required:
-            haystack = prepared.lower if rule.required_ci else prepared.text
-            if not all(any(lit in haystack for lit in group) for group in rule.required):
+        if self.required:
+            haystack = prepared.lower if rule.required_ci else prepared.folded
+            if not all(any(lit in haystack for lit in group) for group in self.required):
                 return ()
         if rule.anchors:
             return self._detections_from(self._anchored_matches(prepared))
@@ -1602,9 +1671,11 @@ class RegexDetector:
         if rule.anchors_ci:
             haystack = prepared.lower
             if len(haystack) != len(text):
-                # str.lower changed the string's length ('İ' → 2 chars), so
-                # lowered offsets no longer map 1:1; fall back to the full
-                # scan rather than guess.
+                # Lowering changed the string's length, so lowered offsets no
+                # longer map 1:1: fall back to the full scan rather than
+                # guess. lower_for_ci maps 'İ' (the one code point str.lower
+                # turns into two) itself; this guards a future Unicode
+                # database adding another.
                 yield from rule.pattern.finditer(text)
                 return
         else:

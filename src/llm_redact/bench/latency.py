@@ -39,6 +39,10 @@ SMALL_BYTES = 2_000
 LARGE_BYTES = 100_000
 STREAM_BYTES = 1_000_000
 CHUNK_CHARS = 40
+# The event-loop-stall shape: per-STRING cost, not per byte. A body of many
+# short messages once cost ~100 us a string (every rule's interpreter
+# overhead), so 300k of them held the loop for half a minute.
+MANY_SMALL_STRINGS = 20_000
 
 
 @dataclass
@@ -117,6 +121,19 @@ def _anthropic_body(text: str) -> dict[str, object]:
     }
 
 
+def _many_small_body(rng: random.Random, strings: int) -> dict[str, object]:
+    """A body of ``strings`` short chat messages (secret-free, like most)."""
+    replies = ["ok", "thanks", "run the tests", "done", "next step", "y", "looks good", "retry"]
+    return {
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 100,
+        "messages": [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": rng.choice(replies)}
+            for i in range(strings)
+        ],
+    }
+
+
 def _micro_stats(rng: random.Random, *, quick: bool) -> list[LatencyStat]:
     config = DetectionConfig()
     detectors = build_detectors(config)
@@ -149,6 +166,14 @@ def _micro_stats(rng: random.Random, *, quick: bool) -> list[LatencyStat]:
     seconds = _time(functools.partial(redactor.redact_json, prose_body), iterations)
     p50, p95 = _quantiles(seconds)
     stats.append(LatencyStat("redact_json_prose_large", p50, p95, iterations, prose_payload))
+
+    # Many tiny strings: what one request's string COUNT costs the event loop.
+    many_body = _many_small_body(rng, 500 if quick else MANY_SMALL_STRINGS)
+    many_payload = len(json.dumps(many_body).encode())
+    iterations = 3 if quick else 10
+    seconds = _time(functools.partial(redactor.redact_json, many_body), iterations)
+    p50, p95 = _quantiles(seconds)
+    stats.append(LatencyStat("redact_json_many_small", p50, p95, iterations, many_payload))
 
     # Streaming throughput: a token-dense stream fed in tiny chunks, the
     # worst case for the partial-placeholder holdback logic.
@@ -346,9 +371,13 @@ def to_json_list(stats: list[LatencyStat]) -> list[dict[str, object]]:
 # redact_json_prose_large (dense prose, 100 KB) bumped 60 -> 100 for the same
 # reason: a loaded runner lands at ~62 ms on a hot path unchanged since it was
 # set (a quadratic blowup would be seconds), so 60 was too tight to be jitter-proof.
+# redact_json_many_small (20,000 short strings) is healthy at ~100 ms; before
+# the per-string detector gate (engine.DetectorPlan) it took ~2.2 s — every
+# rule's interpreter overhead paid per string.
 CHECK_CEILINGS_MS = {
     "redact_json_large": 150.0,
     "redact_json_prose_large": 100.0,
+    "redact_json_many_small": 800.0,
     "proxy_overhead_delta_json_large": 150.0,
 }
 

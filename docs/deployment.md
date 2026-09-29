@@ -159,7 +159,7 @@ its provider's upstream and authorization mode (`auth`, the authorizer
 it holds) are read once, before its body, so a reload that lands while a
 body is still arriving never signs a pass-through request with the
 proxy's identity. Detection rules, allowlists, NER, fuzzy rehydration, note
-injection, `max_body_bytes`, upstream URLs, and the routing sections
+injection, `max_body_bytes`, `max_body_strings`, upstream URLs, and the routing sections
 `[upstreams]`/`[routing]`/`[prices]` (llm-redact-pro) hot-reload; vault, audit,
 host, port, allowed_hosts, log, TLS, OTel, users, and email changes warn "require restart"
 and keep the old value; so do sections a plugin adds, such as llm-redact-pro's

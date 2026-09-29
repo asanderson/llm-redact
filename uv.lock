@@ -1170,7 +1170,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'hf'", specifier = ">=4.40" },
     { name = "uvicorn", specifier = ">=0.50" },
     { name = "uvloop", marker = "extra == 'perf'", specifier = ">=0.19" },
-    { name = "websockets", marker = "extra == 'realtime'", specifier = ">=13" },
+    { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0" },
 ]
 provides-extras = ["crypto", "gliner", "hf", "keyring", "ner", "otel", "perf", "presidio", "realtime", "stanza", "vault-mysql", "vault-oracle", "vault-postgres"]
 
@@ -1184,7 +1184,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.6" },
-    { name = "websockets", specifier = ">=13" },
+    { name = "websockets", specifier = ">=15.0" },
 ]
 
 [[package]]

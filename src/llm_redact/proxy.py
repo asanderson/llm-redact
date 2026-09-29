@@ -99,6 +99,7 @@ from llm_redact.redactor import (
     BlockedRequest,
     PlaceholderLimitReached,
     Redactor,
+    TooManyStrings,
     UnredactableRequest,
 )
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
@@ -1895,6 +1896,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 },
                 "rehydration": {"fuzzy": config.rehydration.fuzzy},
                 "max_body_bytes": config.max_body_bytes,
+                "max_body_strings": config.max_body_strings,
                 "inject_system_note": config.inject_system_note,
                 "providers": {
                     name: provider.upstream_base_url for name, provider in config.providers.items()
@@ -2510,6 +2512,53 @@ async def _guarded_post_json(
         return None, JSONResponse({"error": f"invalid JSON: {exc}"}, status_code=400)
 
 
+def _body_too_large(
+    state: "ProxyState",
+    request: Request,
+    adapter: ProviderAdapter,
+    *,
+    session: str,
+    path: str,
+    started: float,
+    cap: str,
+    limit: int,
+) -> Response:
+    """The recorded, provider-shaped 413 for a redactable body over one of
+    its caps — ``max_body_bytes`` (too big to buffer) or ``max_body_strings``
+    (too many strings or multipart parts to redact on the event loop) —
+    answered before any upstream contact: forwarding it unredacted is never
+    an option. The message names the cap, never the content."""
+    logger.info("%s %s -> 413 body over %s (%d)", request.method, path, cap, limit)
+    state.record_request(
+        session=session,
+        provider=adapter.name,
+        method=request.method,
+        path=path,
+        status=413,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    return Response(
+        content=json.dumps(
+            adapter.error_body(f"request body exceeds llm-redact {cap} ({limit})")
+        ).encode("utf-8"),
+        status_code=413,
+        media_type="application/json",
+    )
+
+
+def _multipart_parts_over(headers: Headers, body: bytes, limit: int) -> bool:
+    """Whether a multipart body may hold more than ``limit`` parts, decided
+    without parsing it: every part multipart.parse finds ends at a
+    ``CRLF--boundary`` delimiter of its own, so their count bounds the
+    parts (bytes.count: no allocation per part). A body that is not
+    multipart/form-data has no parts."""
+    boundary = parse_multipart_boundary(headers.get("content-type", ""))
+    return boundary is not None and body.count(b"\r\n--" + boundary) > limit
+
+
 async def _read_capped(request: Request, limit: int) -> bytes | None:
     """Read the body, aborting as soon as it exceeds ``limit`` bytes.
 
@@ -2808,35 +2857,25 @@ async def handle(request: Request) -> Response:
             # gates would refuse. It needs nothing from the body.
             return _answer_locally(state, request, answer, path=path, started=started)
 
+    # The body caps this request is held to, read once like its provider
+    # config: a reload while the body arrives changes neither.
+    max_body_bytes = state.config.max_body_bytes
+    max_body_strings = state.config.max_body_strings
     if adapter is not None:
         # Redactable routes fail closed on oversized bodies: the proxy must
         # buffer the whole body to redact it, and forwarding unredacted is
         # never acceptable. Pass-through routes below are unaffected.
-        capped = await _read_capped(request, state.config.max_body_bytes)
+        capped = await _read_capped(request, max_body_bytes)
         if capped is None:
-            logger.info(
-                "%s %s -> 413 body over %d bytes", request.method, path, state.config.max_body_bytes
-            )
-            state.record_request(
+            return _body_too_large(
+                state,
+                request,
+                adapter,
                 session=state.config.vault.session,
-                provider=adapter.name,
-                method=request.method,
                 path=path,
-                status=413,
                 started=started,
-                streamed=False,
-                detections={},
-                rehydrations={},
-            )
-            return Response(
-                content=json.dumps(
-                    adapter.error_body(
-                        f"request body exceeds llm-redact max_body_bytes"
-                        f" ({state.config.max_body_bytes})"
-                    )
-                ).encode("utf-8"),
-                status_code=413,
-                media_type="application/json",
+                cap="max_body_bytes",
+                limit=max_body_bytes,
             )
         body_bytes = capped
     else:
@@ -2925,7 +2964,7 @@ async def handle(request: Request) -> Response:
         # alone — the bytes are still forwarded verbatim. A body the check
         # cannot read is never sent with the proxy's credential.
         check_body, unreadable = _pass_through_check_body(
-            request.headers, body_bytes, state.config.max_body_bytes
+            request.headers, body_bytes, max_body_bytes
         )
         if unreadable is not None:
             return _unchecked_body_refused(
@@ -3030,6 +3069,22 @@ async def handle(request: Request) -> Response:
         reason = ctx.sealed or _SEALED_REFUSAL
         return JSONResponse(sealed_adapter.error_body(reason, status=403), status_code=403)
 
+    def too_many_strings(capped_adapter: ProviderAdapter) -> Response:
+        # More strings than max_body_strings: counted during redaction, so
+        # refused before any upstream contact (placeholders issued for the
+        # strings before the limit are harmless — the vault is
+        # deterministic and nothing is forwarded).
+        return _body_too_large(
+            state,
+            request,
+            capped_adapter,
+            session=ctx.session_id,
+            path=path,
+            started=started,
+            cap="max_body_strings",
+            limit=max_body_strings,
+        )
+
     note_wanted = plan.inject_system_note if plan is not None else state.config.inject_system_note
 
     outbound = body_bytes
@@ -3037,6 +3092,19 @@ async def handle(request: Request) -> Response:
     # bodies): the routed path applies per-hop body rewrites to it.
     outbound_obj: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
     detection_off = provider_conf is not None and not provider_conf.detection
+    if (
+        adapter is not None
+        and parsed is None
+        and body_bytes
+        and (upstream_auth is not None or not detection_off)
+        and _multipart_parts_over(request.headers, body_bytes, max_body_strings)
+    ):
+        # A multipart body on a matched route (redacted there, or vouched
+        # for under identity auth) with more parts than max_body_strings
+        # allows: refused before any parse — a body of many empty parts
+        # costs the event loop per part, not per byte. Like max_body_bytes,
+        # the cap holds on every matched route.
+        return too_many_strings(adapter)
     if upstream_auth is not None and adapter is not None and body_bytes:
         # The proxy's own identity signs only a body the proxy could read:
         # one it cannot walk would otherwise be forwarded verbatim —
@@ -3077,10 +3145,11 @@ async def handle(request: Request) -> Response:
         # history, a pasted answer — would otherwise gain a second meaning).
         # The whole decoded body counts, fields the walk skips included; a
         # body with no guillemet in any encoding pays only the byte gate.
+        # The copy is this body's own: it counts the strings it redacts
+        # against max_body_strings.
+        budgeted = ctx.redactor.with_budget(max_body_strings)
         redactor = (
-            ctx.redactor.with_floors(json_floors(parsed))
-            if may_carry_tokens(body_bytes)
-            else ctx.redactor
+            budgeted.with_floors(json_floors(parsed)) if may_carry_tokens(body_bytes) else budgeted
         )
         try:
             prepared = adapter.prepare_request(
@@ -3091,6 +3160,8 @@ async def handle(request: Request) -> Response:
             )
         except BlockedRequest as exc:
             return blocked_response(exc, adapter)
+        except TooManyStrings:
+            return too_many_strings(adapter)
         except PlaceholderLimitReached as exc:
             return refused_response(str(exc), adapter, "no placeholder number left")
         except UnredactableRequest as exc:
@@ -3143,7 +3214,10 @@ async def handle(request: Request) -> Response:
                     path,
                     body_bytes,
                     boundary,
-                    ctx.redactor,
+                    # This body's own copy, counting its strings (form
+                    # fields, file names, JSONL lines) against
+                    # max_body_strings.
+                    ctx.redactor.with_budget(max_body_strings),
                     inject_note=note_wanted and adapter.wants_system_note(kind, path),
                     # Under the proxy's own identity every part must be
                     # scanned: an unscanned piece refuses the whole request.
@@ -3154,6 +3228,8 @@ async def handle(request: Request) -> Response:
                 # One leaking line in an uploaded file is a leak: the
                 # whole request is rejected.
                 return blocked_response(exc, adapter)
+            except TooManyStrings:
+                return too_many_strings(adapter)
             except PlaceholderLimitReached as exc:
                 return refused_response(str(exc), adapter, "no placeholder number left")
             except UnredactableRequest as exc:

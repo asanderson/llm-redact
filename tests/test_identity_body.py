@@ -256,7 +256,14 @@ async def test_passthrough_auth_still_forwards_verbatim(
     async with _client(app) as client:
         response = await client.post(path, content=body, headers=headers)
     assert response.status_code == 200
-    assert upstream.requests[0].content == body
+    if provider == "azure" and kind == "multipart-off-route":
+        # Key auth scans what it can read: the OpenAI-family multipart hook
+        # redacts a plain form field on any matched route (a filename or an
+        # uploaded JSONL line there too), like its JSON twin.
+        sent = upstream.requests[0].content
+        assert EMAIL.encode() not in sent and "«EMAIL_001»".encode() in sent
+    else:
+        assert upstream.requests[0].content == body
 
 
 # Every Content-Encoding value counts, not just the first header's: the

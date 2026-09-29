@@ -50,7 +50,9 @@ value, substitute bad bytes). A `Content-Encoding` other than `identity`,
 in any of the request's Content-Encoding headers, is refused **415** with
 `Accept-Encoding: identity`: llm-redact does not decode request bodies —
 send it uncompressed. Inside an accepted upload every piece must be
-scanned too (the `/v1/files` rows below). `[providers.NAME] detection =
+scanned too wherever redaction applies (the `/v1/files` rows below; with
+`detection = false` an upload's file parts go out as sent, a proxy-held
+credential included, once the stored-object check has read the upload). `[providers.NAME] detection =
 false` with the client's own key forwards such a body as sent, and so does
 every pass-through route (a route this table does not claim) — reached
 only with the client's own credential, since a credential the proxy holds
@@ -504,12 +506,13 @@ that is not there:
   large-file sibling of `/v1/files`. Each part is an opaque byte range and a
   secret can straddle a part boundary, so per-line scanning cannot be applied
   safely; real coverage would need stateful cross-part buffering. Pass-through,
-  routed to the OpenAI upstream (pinned by test — it previously
-  fell through to the anthropic default). For the same reason the File a
-  completed Upload creates is reported to a session router as its creator's
-  only when its `purpose` is stated and is not `batch`: a batch input file's
-  requests would be run with the upload's credential, and the stored objects
-  they cite were never checked.
+  routed to the OpenAI upstream with the client's own credential (pinned by
+  test — it previously fell through to the anthropic default; a credential
+  the proxy holds is never lent to it: a recorded 403). For the same reason
+  the File a completed Upload creates is reported to a session router as its
+  creator's only when its `purpose` is stated and is not `batch`: a batch
+  input file's requests would be run with the upload's credential, and the
+  stored objects they cite were never checked.
 - **OpenAI Assistants / Threads / vector-store search** — on OpenAI's
   announced deprecation path (Responses/Conversations is the successor), so
   not built. The same holds for their Azure v1 twins (`/openai/v1/threads`,

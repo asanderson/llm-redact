@@ -26,9 +26,12 @@ providers refuse to start.
   get a `404` that names the fix. `llm-redact run`, `init` and the deploy manifests
   now export it with `/v1`.
 - A path with an empty segment (`//`, often a base URL ending in `/`) is refused
-  `400`. Another spelling of a recognized route (a trailing `/`, other case) is a
-  recorded `400`; a recognized route without its `/v1`, or under an extra prefix
-  such as `/v1/v1/…`, is a recorded `404`.
+  `400`. Another spelling of a recognized route (a trailing `/`, other case, or what
+  a front end that normalizes paths reads as the route: `\` or `%5C` for `/`, a
+  segment's `;params`, trailing spaces, tabs or dots, `%uXXXX` escapes or a second
+  percent-encoding, Unicode compatibility forms) is a recorded `400`; a recognized
+  route without its `/v1`, or under an extra prefix such as `/v1/v1/…`, is a
+  recorded `404`.
 - Requests from web pages are refused. A browser request (one carrying `Origin` or
   a `Sec-Fetch-*` header) from another origin or site, or addressed to a host name
   the proxy does not answer to, gets a recorded `403` (WebSocket: close `1008`).
@@ -40,10 +43,11 @@ providers refuse to start.
 - Where redaction applies (`detection` on, the default; the client's own key
   included), a recognized route refuses a body it cannot read with a recorded `400`
   instead of forwarding it unredacted: non-JSON bytes, invalid UTF-8, bytes after
-  the JSON value, a top-level JSON array or scalar, whitespace only, multipart on a
-  route that does not redact multipart or outside the canonical form, and a
-  repeated `Content-Type`. A `Content-Encoding` other than `identity` gets `415`
-  with `Accept-Encoding: identity`: send request bodies uncompressed.
+  the JSON value, a top-level JSON array or scalar, JSON nesting deeper than 128
+  levels of objects and arrays (an uploaded JSONL line's too), whitespace only,
+  multipart on a route that does not redact multipart or outside the canonical form,
+  and a repeated `Content-Type`. A `Content-Encoding` other than `identity` gets
+  `415` with `Accept-Encoding: identity`: send request bodies uncompressed.
 - Uploads must be readable in full: a `/v1/files` upload (OpenAI, Azure, custom
   providers) of a file that is not JSONL, such as a PDF, text, CSV or image file,
   is refused `400`, and so is a form field that is not UTF-8, a multipart preamble
@@ -66,6 +70,12 @@ providers refuse to start.
   (or none): vector stores, fine-tuning, moderations, assistants/threads, uploads,
   Anthropic and Gemini Files, stored-completion list/update/delete and Ollama model
   management need the client's own key.
+- With llm-redact-pro's per-conversation sessions or named users, a Responses
+  compaction (`POST /v1/responses/compact`) or input-token count
+  (`/v1/responses/input_tokens`) that carries a value to redact is refused `403`
+  until llm-redact-pro resolves the two routes: it reads `compact` and
+  `input_tokens` as the id of a Response it has no record of. Both used to be
+  forwarded unredacted; the default static session is unaffected.
 - A config reload that changes an open realtime connection's provider settings,
   its authorizer or `[detection]` closes it with `1012` (reconnect).
 - The `realtime` extra requires websockets 15.0 or newer.
@@ -106,12 +116,31 @@ providers refuse to start.
   `/v1/organization` added). Anything else, or markers of two providers, is a
   recorded `404`.
 - **Misaddressed routes were forwarded unredacted.** Trailing-slash, doubled-slash
-  and case spellings of recognized routes, a recognized route missing `/v1` or
-  under an extra prefix, and OpenAI-compatible endpoints under a base path without
-  `/v1` (custom upstreams such as `/custom/NAME/inference/…` or `…/api/paas/v4/…`,
-  and the Gemini API's `/v1beta/openai/` surface) all reached their upstream
-  unredacted. They are now refused as above, or matched on the endpoint's tail and
-  redacted.
+  and case spellings of recognized routes, the spellings front ends normalize to
+  them (`/v1/chat%5Ccompletions` reached api.openai.com unredacted, and so did
+  `…/chat/completions;x` and `…/chat/completions%20`: IIS and API Management read
+  `\` as `/`, Tomcat and Jetty drop `;params`, IIS trims trailing spaces and dots),
+  a recognized route missing `/v1` or under an extra prefix, and OpenAI-compatible
+  endpoints under a base path without `/v1` (custom upstreams such as
+  `/custom/NAME/inference/…` or `…/api/paas/v4/…`, and the Gemini API's
+  `/v1beta/openai/` surface) all reached their upstream unredacted. They are now
+  refused as above, or matched on the endpoint's tail and redacted. Routing a path
+  costs time linear in its length, and the misaddressing check runs only for a
+  request the request-origin rule and the access gate admit: the tail search tries
+  tails of at most eight segments after `/v1` (every OpenAI endpoint has four or
+  fewer) and the one at the first OpenAI resource name, and an extra prefix is
+  looked for up to eight segments deep.
+- **Responses compaction and input-token counts were forwarded unredacted.**
+  `POST /v1/responses/compact` and `POST /v1/responses/input_tokens` take a
+  responses.create body, and neither was matched: the whole `input` went out in
+  clear text — for a compaction (Codex CLI compacts long sessions) the entire
+  conversation, restored values included. A compaction is now a chat route: its
+  window is redacted, the system note joins its `instructions` (the compacted state
+  must carry every token exactly), and the compacted window it answers is restored
+  (the encrypted compaction item goes back as sent). The count is redact-only,
+  redacted with the note like the request it counts. Both are matched on OpenAI,
+  Azure (`/openai/v1/…` and `/openai/…`), custom providers and the Gemini API's
+  OpenAI surface; neither creates a stored object.
 - **Recognized routes forward only a body the proxy read.** Wherever redaction
   applies, and whatever `detection` says when a request spends a credential the
   proxy holds, the bodies listed under Upgrading are refused before the
@@ -165,10 +194,13 @@ providers refuse to start.
   prune`, an access gate's purge), a re-created session could issue a deleted
   value's number again for a new value, and another instance's cache or an open
   realtime connection then restored one value where the other was meant. Every
-  delete now retires the session's highest number
-  (`retired_numbers`, RDBMS `llm_redact_retired`), new values are numbered above it,
-  and views re-check at most once a second. The prune's idle check and its delete
-  are one transaction.
+  delete now retires the session's highest number (`retired_numbers`, RDBMS
+  `llm_redact_retired`), new values are numbered above it, and views re-check at
+  most once a second. The prune's idle check and its delete are one transaction. A
+  re-check that cannot read the database keeps the view's cache (a cached token only
+  ever restores its own value) and runs again a second later, counted as
+  `bookkeeping_errors{stage="vault_check"}` and logged once per outage by exception
+  type: restoring a cached token never needs the database.
 - **A config reload did not reach open realtime connections.** A reload that
   withdrew the proxy's identity (`auth` back to `passthrough`, the provider
   disabled, its upstream moved) kept spending it on the live upstream session, and
@@ -259,8 +291,9 @@ providers refuse to start.
   non-default `[users]` refuses to start).
 - `llm_redact_bookkeeping_errors_total{stage}` and `/status`
   `bookkeeping_errors_total`: faults in the proxy's own bookkeeping after the
-  upstream answered (`response_id`, `object_ids`, `listing`, `delivery`) and vault
-  write faults before it (`vault`).
+  upstream answered (`response_id`, `object_ids`, `listing`, `delivery`), vault
+  write faults before it (`vault`), and vault staleness checks that could not read
+  the database (`vault_check`, contained).
 - Realtime: Azure OpenAI Realtime's GA path (`/openai/v1/realtime?model=…`) and the
   Vertex AI Live API (`/ws/google.cloud.aiplatform.{v1,v1beta1}.LlmBidiService/BidiGenerateContent`,
   `[providers.vertex]`) are relayed. With llm-redact-pro, `auth = "identity"` now
@@ -319,16 +352,26 @@ providers refuse to start.
 
 - A vault that cannot record a request's placeholders (a failed sqlite write or
   COMMIT, an RDBMS driver error, an RDBMS allocation that kept colliding, now
-  `RdbmsAllocationError`) refuses the request with a recorded, provider-shaped `503`
-  before any upstream contact, counted as `bookkeeping_errors{stage="vault"}` and
-  logged by exception type only; a realtime frame closes the connection `1011`. It
-  was an unrecorded bare `500`.
+  `RdbmsAllocationError`), or cannot open the session a request resolves to (a new
+  session's view reads its rows), refuses the request with a recorded,
+  provider-shaped `503` before any upstream contact, counted as
+  `bookkeeping_errors{stage="vault"}` and logged by exception type only; a realtime
+  frame, or a connection whose session cannot be opened, closes `1011`. It was an
+  unrecorded bare `500`.
 - A lone UTF-16 surrogate escape in a body, an answer or a stream no longer causes a
   bare `500`, a `502` or a cut stream: every re-serialization goes through one
   serializer that re-escapes it. Unchanged bodies are still forwarded
   byte-identical.
 - A codice fiscale or CURP containing a non-ASCII digit crashed the request with an
   unrecorded `500`; it is now detected and redacted.
+- A JSON document nested deeper than the proxy can walk no longer causes a bare,
+  unrecorded `500` (`'{"messages":' + '[' * 200000`), a `502` or a cut stream.
+  Every document the proxy reads may nest at most 128 levels of objects and arrays:
+  a deeper request body, uploaded JSONL line or form field, or Bedrock
+  `count-tokens` blob is a recorded `400` (a realtime client frame closes `1008`),
+  and a deeper answer, SSE event, NDJSON or JSONL line, event-stream payload or
+  realtime frame is forwarded exactly as it came, its placeholders left in place. A
+  JWT whose header is too deep to parse is redacted (it was a `500`).
 - Faults in post-response bookkeeping (response ids, stored objects, the listing
   restore) are contained and counted, and the answer is delivered; a fault restoring
   a buffered answer is a recorded `502`, and a stream the proxy cuts is recorded as

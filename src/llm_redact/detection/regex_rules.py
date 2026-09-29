@@ -673,18 +673,13 @@ def _base64_gate(match: re.Match[str]) -> bool:
 
 
 def _jwt_header_ok(match: re.Match[str]) -> bool:
-    """The first segment of a real JWT base64url-decodes to a JSON object."""
-    import base64
-    import binascii
-    import json as _json
+    """The first segment of a real JWT base64url-decodes to a JSON object
+    (``validators._b64url_json_object``, which judges one nesting too deep
+    to parse by its opening)."""
+    # Imported here: validators imports this module.
+    from llm_redact.detection.validators import _b64url_json_object
 
-    header = match.group(0).split(".", 1)[0]
-    padded = header + "=" * (-len(header) % 4)
-    try:
-        decoded = base64.urlsafe_b64decode(padded)
-        return isinstance(_json.loads(decoded), dict)
-    except (binascii.Error, ValueError, UnicodeDecodeError):
-        return False
+    return _b64url_json_object(match.group(0).split(".", 1)[0])
 
 
 # Prefilter literal groups shared by the digit-punctuation rules: any ipv4

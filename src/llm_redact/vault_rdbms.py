@@ -54,7 +54,7 @@ import os
 import re
 import time
 import weakref
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -70,6 +70,7 @@ from llm_redact.vault import (
     _RESPONSE_PRUNE_EVERY,
     CACHE_CHECK_SECONDS,
     LOOKUP_CHUNK,
+    CheckFaults,
     PlaceholderSpaceExhausted,
     Vault,
     VaultKeyError,
@@ -630,6 +631,8 @@ class RdbmsStore:
             if isinstance(exc_type, type) and issubclass(exc_type, BaseException):
                 retryable.append(exc_type)
         self._retryable: tuple[type[BaseException], ...] = tuple(retryable)
+        # Every view's failed staleness checks (see RdbmsVault._revalidate).
+        self.check_faults = CheckFaults()
         self._conn = connect()
         self._inserts = {_RESPONSE_KIND: 0, _OBJECT_KIND: 0}
         # False only when a schema from before the row kind could not gain
@@ -1327,10 +1330,20 @@ class RdbmsVault:
         self._next_check = self._clock() + CACHE_CHECK_SECONDS
 
     def _revalidate(self) -> None:
-        """SqliteVault._revalidate: one indexed read once the check is due."""
-        if self._store.retired(self._session) != self._retired:
-            self._load()
-            return
+        """SqliteVault._revalidate: one indexed read once the check is due.
+        A check that cannot read the database — a driver error, a failed
+        reconnect or credential fetch — keeps the caches as they are (a
+        cached token only ever restores its own value) and runs again at the
+        next interval: restoring a cached token never needs the database
+        (``CheckFaults``, shared by the store's views)."""
+        faults = self._store.check_faults
+        try:
+            if self._store.retired(self._session) != self._retired:
+                self._load()
+        except Exception as exc:  # noqa: BLE001 — a cached token restores only its own value
+            faults.failed(exc)
+        else:
+            faults.succeeded()
         self._next_check = self._clock() + CACHE_CHECK_SECONDS
 
     def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
@@ -1382,6 +1395,11 @@ class RdbmsVaultManager:
         self._views: OrderedDict[str, RdbmsVault] = OrderedDict()
         self._view_cache_size = view_cache_size
         self._live: weakref.WeakValueDictionary[str, RdbmsVault] = weakref.WeakValueDictionary()
+
+    def bind_fault_counter(self, counter: Counter[str]) -> None:
+        """Count this manager's failed staleness checks in ``counter`` (the
+        proxy's ``bookkeeping_errors``; optional, read via getattr)."""
+        self._store.check_faults.counter = counter
 
     def get(self, session_id: str) -> Vault:
         # Every view the LRU holds is live, so the registry answers for both.

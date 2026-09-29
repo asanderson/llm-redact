@@ -23,10 +23,9 @@ the model's Modelfile SYSTEM template and change behavior; a missing
 note only weakens token preservation.
 """
 
-import json
 from typing import Any
 
-from llm_redact.jsonwalk import json_bytes, transform_strings
+from llm_redact.jsonwalk import json_bytes, loads_bounded, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.rehydrate import RehydratorPool
 from llm_redact.sse import SSEEvent
@@ -94,7 +93,7 @@ class OllamaAdapter(ProviderAdapter):
 
     def rehydrate_ndjson_line(self, line: bytes, pool: RehydratorPool) -> bytes:
         try:
-            payload = json.loads(line)
+            payload = loads_bounded(line)
         except ValueError:
             return line  # non-JSON lines (or blanks) pass through verbatim
         if not isinstance(payload, dict):

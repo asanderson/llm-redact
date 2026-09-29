@@ -58,6 +58,11 @@ _AZURE_RESPONSES = re.compile(r"/openai/(?:v1/)?responses")
 _AZURE_RESPONSE_ID = re.compile(r"/openai/(?:v1/)?responses/[^/]+")
 _AZURE_RESPONSE_INPUT_ITEMS = re.compile(r"/openai/(?:v1/)?responses/[^/]+/input_items")
 _AZURE_RESPONSE_CANCEL = re.compile(r"/openai/(?:v1/)?responses/[^/]+/cancel")
+# Compaction (documented on /openai/v1; the api-version form read the same)
+# and the input-token count, which Azure does not document: a client that
+# sends one gets its body redacted all the same.
+_AZURE_RESPONSE_COMPACT = re.compile(r"/openai/(?:v1/)?responses/compact")
+_AZURE_RESPONSE_INPUT_TOKENS = re.compile(r"/openai/(?:v1/)?responses/input_tokens")
 
 
 class AzureOpenAIAdapter(OpenAIAdapter):
@@ -161,11 +166,16 @@ class AzureResponsesAdapter(OpenAIResponsesAdapter):
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "POST" and (
-            _AZURE_RESPONSES.fullmatch(path) or _AZURE_RESPONSE_CANCEL.fullmatch(path)
+            _AZURE_RESPONSES.fullmatch(path)
+            or _AZURE_RESPONSE_CANCEL.fullmatch(path)
+            or _AZURE_RESPONSE_COMPACT.fullmatch(path)
         ):
             # Cancel answers with the Response object (partial output
-            # included), so it is restored like a stored-response GET.
+            # included), so it is restored like a stored-response GET; a
+            # compaction answers with the compacted window (restored).
             return RouteKind.CHAT
+        if method == "POST" and _AZURE_RESPONSE_INPUT_TOKENS.fullmatch(path):
+            return RouteKind.REDACT_ONLY
         if method == "GET" and (
             _AZURE_RESPONSE_ID.fullmatch(path) or _AZURE_RESPONSE_INPUT_ITEMS.fullmatch(path)
         ):

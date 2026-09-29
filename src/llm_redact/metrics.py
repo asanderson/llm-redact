@@ -155,7 +155,8 @@ class Metrics:
             " object_ids, listing — contained, the answer still delivered) and delivery"
             " (restoring the answer — a recorded 502); before any upstream contact, vault"
             " (issuing a request's placeholders failed — a recorded 503, a realtime frame"
-            " closes 1011)."
+            " closes 1011); vault_check (a vault view's staleness check could not read its"
+            " database — contained, the cache kept)."
         )
         lines.append("# TYPE llm_redact_bookkeeping_errors_total counter")
         for stage, count in sorted((bookkeeping_errors or Counter()).items()):

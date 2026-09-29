@@ -42,7 +42,8 @@ holds (`auth = "identity"`, or a routed plan's operator key), whatever
 read from the bytes whatever the content-type; a UTF-8 BOM or UTF-16/32
 is fine) or canonical multipart on a route whose multipart form is
 scanned — bytes after the JSON value, invalid UTF-8 (a Latin-1 body), a
-top-level array or scalar, whitespace only, multipart anywhere else — or
+top-level array or scalar, JSON nesting deeper than 128 levels, whitespace
+only, multipart anywhere else — or
 that is sent with a repeated `Content-Type`, is refused with a recorded,
 provider-shaped 400 instead of being forwarded verbatim (a lenient
 upstream would decode what the proxy never read: take the first JSON
@@ -117,6 +118,8 @@ matches](#requests-no-route-matches).
 | `GET /v1/responses/{id}` | chat | stored responses rehydrated |
 | `GET /v1/responses/{id}/input_items` | chat | input-item echoes restored |
 | `DELETE /v1/responses/{id}` | redact-only | id only (a body-less no-op: recognized) |
+| `POST /v1/responses/compact` | chat | compaction (Codex CLI compacts long sessions: the whole conversation): the window redacted, the note joins its `instructions` (the compacted state must carry every token exactly); the compacted window (`response.compaction`: retained messages and tool calls, then one opaque, encrypted compaction item) restored — the compaction item goes back as sent. Never streams; stateless, so nothing is reported as a stored object |
+| `POST /v1/responses/input_tokens` | redact-only | a create body, redacted with the note like the request it counts (Anthropic `count_tokens`' stance); the count forwarded as sent |
 | `POST /v1/conversations` | chat | create: item content redacted, echoed response restored |
 | `POST /v1/conversations/{id}/items` | chat | add items: content redacted + echo restored |
 | `GET /v1/conversations/{id}` | chat | retrieve conversation, restored |
@@ -231,6 +234,9 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/responses/{id}/input_items` | chat | input-item echoes restored |
 | `POST /openai/v1/responses/{id}/cancel` | chat | answers the Response object, restored |
 | `DELETE /openai/responses/{id}` | redact-only | ids only |
+| `POST /openai/v1/responses/compact` | chat | compaction, as on OpenAI |
+| `POST /openai/responses/compact` | chat | the api-version form (Azure documents `/openai/v1`) |
+| `POST /openai/v1/responses/input_tokens` | redact-only | not documented by Azure: a client that sends it gets the body redacted all the same |
 | `POST /openai/v1/conversations` | chat | item content redacted, echo restored; STATIC vault session |
 | `POST /openai/v1/conversations/{id}/items` | chat | |
 | `GET /openai/v1/conversations/{id}` | chat | |
@@ -397,7 +403,8 @@ uploads (`POST /openai/files`, `/openai/v1/files`) and content downloads
 reuse the OpenAI multipart/JSONL/filename handling on Azure's path shapes;
 batches are recognized and file objects restored (see the Azure table). **Azure OpenAI Responses**
 (`POST /openai/responses` and the `/openai/v1/responses` preview, plus the
-stored-response and input-item GETs) reuses `OpenAIResponsesAdapter`
+stored-response and input-item GETs, compaction and the input-token count)
+reuses `OpenAIResponsesAdapter`
 wholesale via `AzureResponsesAdapter` — identical event vocabulary, delta
 channels, and note injection; only routing differs (matcher disjoint from
 the Azure chat adapter's, proven by test). **Azure Realtime**
@@ -452,24 +459,43 @@ Anything else is answered locally with a **recorded 404** that names the
 path (never the query) and why, and nothing is forwarded. So are paths
 that only look unrecognized — each would otherwise carry its body
 unredacted to an upstream that may serve it as the recognized route
-(routers that ignore a trailing `/` or case):
+(routers that ignore a trailing `/` or case, front ends that normalize
+paths):
 
 - an **empty path segment** (`//`, in the raw or decoded path, `\`
   counted as `/`) is refused with a 400 before admission, like a `.`/`..`
   segment — never recorded or logged with its path (it may still hold an
   identity-prefix key). A base URL ending in `/` joined onto an endpoint
   path is the usual cause;
-- **another spelling** of a recognized route — a trailing `/`, another
-  case — is refused with a recorded, provider-shaped 400: the path that
-  was matched must be the path that is forwarded, byte for byte;
+- **another spelling** of a recognized route is refused with a recorded,
+  provider-shaped 400: the path that was matched must be the path that is
+  forwarded, byte for byte. A spelling is the path as a router or a
+  normalizing front end reads it: without a trailing `/`; in another case
+  (lower case, and .NET's case-insensitive comparison, where a dotless `ı`
+  is `I`); with `\` (or `%5C`) as `/` (IIS, Azure API Management, Envoy);
+  with each segment's `;params` dropped (Tomcat, Jetty, Spring) and its
+  trailing spaces, tabs and dots trimmed (IIS); in Unicode compatibility
+  form (a full-width `ｃ` is `c`); and percent-decoded a second time, IIS's
+  `%uXXXX` escapes included (a gateway that decodes before the app server
+  does). Only a path one of whose spellings matches a route is refused: a
+  Gemini `:method` or a Bedrock ARN (`%3A`, `%2F`) is matched as sent, and
+  a spelling of a pass-through route stays pass-through;
 - a recognized route **without its `/v1`** (`/chat/completions`,
   `/responses`, `/models`, … — an OpenAI-compatible base URL that lacks
   `/v1`) is a recorded 404 whose message gives the fix
   (`OPENAI_BASE_URL=http://127.0.0.1:8787/v1`);
-- a recognized route **under an extra prefix** (`/v1/v1/messages` — a
-  base URL that repeats the API version) is a recorded 404. Azure's
-  `/openai/…` and custom `/custom/NAME/…` paths embed OpenAI routes by
-  design and are exempt.
+- a recognized route **under an extra prefix** of up to eight segments
+  (`/v1/v1/messages` — a base URL that repeats the API version) is a
+  recorded 404. Azure's `/openai/…` and custom `/custom/NAME/…` paths
+  embed OpenAI routes by design and are exempt.
+
+These checks, like every routing step, cost time linear in the path's
+length, and they run only for a request the request-origin rule and the
+access gate admit (a refused request gets its own refusal). An
+OpenAI-compatible prefix (`/custom/NAME/…`, `/v1beta/openai/…`) is matched
+on the endpoint's tail: tails of at most eight segments after `/v1` (every
+OpenAI endpoint has four or fewer), and the one at the first OpenAI
+resource name.
 
 `GET /` and `HEAD /` — the proxy's base URL itself, no provider's API —
 are answered locally with a 200 (a client's liveness probe: the ollama

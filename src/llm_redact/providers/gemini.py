@@ -26,12 +26,11 @@ Responses adapter's KNOWN_EVENT_TYPES):
   rehydrate_body runs per-candidate streaming channels across elements.
 """
 
-import json
 import re
 from collections.abc import Callable
 from typing import Any
 
-from llm_redact.jsonwalk import json_text, transform_strings
+from llm_redact.jsonwalk import json_text, loads_bounded, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.rehydrate import Rehydrator, RehydratorPool, StreamingRehydrator
 from llm_redact.sse import SSEEvent
@@ -242,7 +241,7 @@ class GeminiAdapter(ProviderAdapter):
         if not event.data:
             return [event]
         try:
-            payload = json.loads(event.data)
+            payload = loads_bounded(event.data)
         except ValueError:
             return [event]
         rehydrated = _rehydrate_chunk(

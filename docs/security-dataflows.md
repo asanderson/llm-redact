@@ -93,5 +93,12 @@ through unlogged; and gate ⑤ walks **every** client event, skipping only
 the scalar values of structural keys (enums, ids) and base64 audio —
 objects under those names, and tool responses, `metadata` maps and
 prompt `variables` in full, are walked.
+The gates' inputs are the ones in force. A connection is admitted under
+its provider's settings, the authorizer that opened it and the
+`[detection]` policy. A reload that changes any of them revokes the relay
+in the same synchronous step as the swap: it closes **1012** (reconnect)
+and never forwards a client frame it reads after the reload. So `/status`
+never reports a policy that an open connection is not following
+([deployment.md](deployment.md#reloads-and-open-realtime-connections)).
 Voice audio is never decoded or scanned, so speech reaches the provider unredacted (see the threat
 model's media non-goal).

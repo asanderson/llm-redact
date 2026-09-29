@@ -173,6 +173,50 @@ edits the file, gates on `serve --check`, reloads via SIGHUP, and reads
 back the coverage posture — and `/llm-redact:doctor` runs the same
 read-only preflight as the CLI ([plugins.md](plugins.md)).
 
+### Reloads and open realtime connections
+
+The in-flight rule above covers one request. An open realtime (WebSocket)
+connection lasts far longer (realtime sessions run for tens of minutes), so
+a reload reaches it: a relay redacts and forwards every client frame under
+the configuration it was admitted with, and a reload that changes that
+configuration closes it. What a connection was admitted with is:
+
+- its provider's `[providers.NAME]` settings (`upstream_base_url`,
+  `enabled`, `detection`, `auth`, `region`);
+- the upstream authorizer that opened it under `auth = "identity"` (a
+  change to any identity provider's `auth`, `region` or upstream rebuilds
+  them all);
+- everything under `[detection]` (rules, deny strings, allowlists, modes,
+  NER, languages).
+
+When a reload (SIGHUP or the config editor) changes any of these, the proxy
+closes the connection on both sides. The client gets WebSocket close code
+**1012** (Service Restart: reconnect), with a reason that names what
+changed and never a value. Reconnecting puts the client under the new
+configuration in the same vault session, so tokens issued before the
+reload still restore.
+
+Reloads run on the proxy's event loop, and the relay checks for a reload
+between reading a client frame and redacting it, so no frame it reads after
+the reload is redacted or forwarded under the old configuration. The one
+exception is a frame the relay had already read and handed to the
+provider's socket when the reload ran. A connection still being authorized
+under the proxy's identity when the reload lands is never dialled: it is
+closed 1012 and recorded as a 503. One whose upstream handshake was already
+under way completes it (the in-flight rule above) and is then closed before
+it relays a frame. Each connection still gets its one `/recent` and audit
+row when it closes.
+
+Two settings are read per frame and apply to open connections at once:
+`inject_system_note` and `max_body_strings`. `rehydration.fuzzy` applies to
+connections opened after the reload. A reload that changes nothing an open
+connection depends on (another provider, the body limits, note injection,
+routing) leaves it open.
+
+A client still writing frames when the proxy closes it may see a connection
+reset instead of the 1012 frame, because the server closes its socket right
+after sending the close frame. Treat either as "reconnect".
+
 ## Vault lifecycle in production
 
 The sqlite vault (`[vault] backend = "sqlite"`) is the one piece of state

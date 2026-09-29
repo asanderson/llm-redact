@@ -94,7 +94,13 @@ from llm_redact.plugin_api import (
 )
 from llm_redact.providers import ALL_ADAPTERS, ProviderAdapter, RouteKind
 from llm_redact.providers.custom import CUSTOM_ROUTE_PREFIX, build_custom_adapters, custom_prefix
-from llm_redact.realtime import ALL_WS_ADAPTERS, WsAdapter, websockets_available, ws_handle
+from llm_redact.realtime import (
+    ALL_WS_ADAPTERS,
+    RealtimeRelay,
+    WsAdapter,
+    websockets_available,
+    ws_handle,
+)
 from llm_redact.redactor import (
     BlockedRequest,
     PlaceholderLimitReached,
@@ -450,6 +456,10 @@ class ProxyState:
             cls() for cls in ALL_ADAPTERS
         ] + build_custom_adapters(config.providers)
         self.ws_adapters: list[WsAdapter] = [cls() for cls in ALL_WS_ADAPTERS]
+        # Every open realtime relay's admission (realtime.RealtimeRelay):
+        # apply_config revokes each one its swap changed, so a relay never
+        # outlives the configuration it was admitted under.
+        self.realtime_relays: set[RealtimeRelay] = set()
         self.client = httpx.AsyncClient(
             transport=upstream_transport, timeout=httpx.Timeout(600.0, connect=10.0)
         )
@@ -855,7 +865,9 @@ class ProxyState:
 
         Hot: detection rules/allowlists/custom rules/NER, rehydration.fuzzy,
         inject_system_note, max_body_bytes, provider upstreams. Requires
-        restart (kept with a warning): vault, audit, host, port.
+        restart (kept with a warning): vault, audit, host, port. An open
+        realtime connection whose provider settings, upstream authorizer or
+        detection policy changed is closed 1012 (reconnect).
         """
         try:
             fresh = apply_env_overrides(load_config(self.config_path))
@@ -974,18 +986,32 @@ class ProxyState:
         self._static_context = RequestContext(
             effective.vault.session, self.vault, redactor, rehydrator
         )
-        if self.router is not None and router is not self.router:
-            self.router.close()
+        displaced_router = self.router if router is not self.router else None
         self.router = router
         self.dashboard = dashboard
-        if upstream_auth is not self.upstream_auth:
-            displaced = self.upstream_auth
-            self.upstream_auth = upstream_auth
-            _close_upstream_auths(displaced)
+        displaced_auths = self.upstream_auth if upstream_auth is not self.upstream_auth else {}
+        self.upstream_auth = upstream_auth
+        # Open realtime relays: revoked in this same synchronous step, before
+        # anything displaced is closed — a relay whose admission the swap
+        # changed forwards no frame it reads from here on, and closes 1012.
+        self._revoke_stale_relays()
+        if displaced_router is not None:
+            displaced_router.close()
+        _close_upstream_auths(displaced_auths)
         for warning in effective.routing.warnings:
             logger.warning("routing: %s", warning)
         logger.info("config reloaded (%d detection rules)", len(detectors))
         return restart_required
+
+    def _revoke_stale_relays(self) -> None:
+        """Revoke every open realtime relay whose admission — its provider's
+        settings, its upstream authorizer, the detection policy — the live
+        configuration no longer grants (``RealtimeRelay.stale``). A relay the
+        reload did not touch keeps running."""
+        for relay in list(self.realtime_relays):
+            changed = relay.stale(self)
+            if changed is not None:
+                relay.revoke(changed)
 
     # --- DashboardHost (plugin_api): what the pro dashboard may use --------
 

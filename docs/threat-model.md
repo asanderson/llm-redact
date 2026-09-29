@@ -142,6 +142,14 @@ indistinguishable from the attacker above.
 - A web page's handshake (browsers send `Origin` on every WebSocket
   upgrade and apply no CORS to it) is refused with close code 1008 before
   anything else — see "Requests from web pages" above.
+- A connection never outlives the configuration it was admitted under.
+  Realtime sessions run for tens of minutes, so a reload that withdraws the
+  proxy's identity or tightens redaction must reach open connections, not
+  only new ones. A reload that changes a connection's provider settings,
+  its upstream authorizer or the `[detection]` policy closes it with code
+  1012 (reconnect). No client frame the relay reads after the reload is
+  forwarded under the old configuration
+  ([deployment.md](deployment.md#reloads-and-open-realtime-connections)).
 - Text modality only. Voice audio is base64 media and is never decoded
   or scanned (the standing media non-goal): what a user SAYS on a
   realtime connection reaches the provider unredacted. The docs say so

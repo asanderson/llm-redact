@@ -298,6 +298,12 @@ copy of the static session ([per-user namespaces](how-it-works.md#session-isolat
 A connection keeps a running token floor: a token any of its client
 frames carried (a restored conversation, a pasted answer) is never issued
 to a new value later on that connection ([the vault records](how-it-works.md#the-vault-records)).
+A config reload (SIGHUP, the config editor) reaches open connections too.
+A connection whose provider settings, upstream authorizer or `[detection]`
+policy the reload changed is closed on both sides with code 1012
+(reconnect), and no frame it reads after the reload is forwarded under the
+old configuration. A client that reconnects gets the new configuration and
+the same vault session ([details](deployment.md#reloads-and-open-realtime-connections)).
 The Azure and Vertex routes work with the proxy's own cloud identity
 ([above](#the-proxys-own-cloud-identity)); the full list of accepted
 WebSocket paths is in [api-coverage.md](api-coverage.md#realtime-websocket-routes).

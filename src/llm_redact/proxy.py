@@ -737,7 +737,14 @@ class ProxyState:
                 restorers[object_id] = None
                 continue
             if session_id not in rehydrators:
-                rehydrators[session_id] = self._existing_session_rehydrator(session_id)
+                try:
+                    rehydrators[session_id] = self._existing_session_rehydrator(session_id)
+                except Exception as exc:  # noqa: BLE001 — a vault read that failed
+                    # The named owner's session cannot be read: its items go
+                    # out as the provider sent them, never what this
+                    # request's session would make of them (another value).
+                    _listing_fault(self, exc)
+                    rehydrators[session_id] = None
             restorers[object_id] = rehydrators[session_id]
         return restorers
 
@@ -3815,14 +3822,7 @@ def _restore_listing(
         for index, item in enumerate(items)
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
-    try:
-        by_id = state.listing_restorers(list(dict.fromkeys(listed.values())))
-    except Exception as exc:  # noqa: BLE001 — a vault read that failed
-        # The owners' sessions cannot be read: restore nothing — every listed
-        # item goes out as the provider sent it, never what this request's
-        # session made of it (another value).
-        _listing_fault(state, exc)
-        by_id = dict.fromkeys(listed.values())
+    by_id = state.listing_restorers(list(dict.fromkeys(listed.values())))
     restorers = {
         index: by_id[object_id] for index, object_id in listed.items() if object_id in by_id
     }

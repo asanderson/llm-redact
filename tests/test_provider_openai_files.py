@@ -1,11 +1,14 @@
 """OpenAI Files + Batches: multipart upload redaction, output rehydration.
 
 The upload's JSONL file part is redacted line by line (batch lines get the
-system note inside body; fine-tune lines directly); everything else in the
-multipart body — form fields, binary parts, unparseable lines — must be
-byte-identical (part filenames excepted: redacted, and restored in the file
-objects the provider echoes); batch create, retrieve, cancel and list redact
-and restore the caller's ``metadata``.
+system note inside body; fine-tune lines directly); part filenames are
+redacted, and restored in the file objects the provider echoes; batch
+create, retrieve, cancel and list redact and restore the caller's
+``metadata``. Through the proxy every piece of an upload must be scanned
+(the scanned-body rule): plain form fields are scanned as text, and a
+binary part or an unparseable line refuses the upload. The lenient reading
+(``require_scanned=False``) keeps the structural form fields, binary parts
+and unparseable lines byte-identical.
 """
 
 import json

@@ -18,11 +18,17 @@ user data slip past it:
   or a map whose keys the caller chooses (``metadata``, prompt-template
   ``variables``, ``:predict`` instances) — is walked with NO skip set at
   all: a user key named ``id`` or ``name`` there is data, not protocol.
+
+Every walk recurses once or twice per level of nesting, so every document
+the proxy reads — a request's or an answer's — is parsed through
+``loads_bounded``/``loads_request``, which refuse one nesting deeper than
+``MAX_JSON_DEPTH``: no walk over a parsed document can exhaust the stack.
 """
 
 import json
 import re
 from collections.abc import Callable
+from itertools import chain
 from typing import Any
 
 # Enum-like or structural fields whose SCALAR values must never be rewritten:
@@ -274,17 +280,77 @@ def json_bytes(value: Any) -> bytes:
         return _SURROGATE.sub(_escape_surrogate, text).encode()
 
 
+# How deeply a document the proxy reads may nest objects and arrays. The
+# parser alone reads thousands of levels (3.12+), while a walk recurses once
+# per level (twice for an array on 3.11) under an interpreter recursion limit
+# of 1000 frames: a deeper body was a bare 500, a deeper answer a 502 or a
+# cut stream. 128 is serde_json's default and past protobuf's 100 (the Gemini
+# and Vertex APIs' own limit); a walk this deep stays hundreds of frames
+# below the limit, even with every call wrapped (mutation testing's
+# trampolines triple the frames a level costs).
+MAX_JSON_DEPTH = 128
+_CONTAINERS = frozenset({dict, list})
+
+
+class JsonTooDeep(ValueError):
+    """A document nests objects and arrays deeper than MAX_JSON_DEPTH (or
+    than the parser itself could read). A ValueError, so every caller that
+    treats an unparseable document as such treats this one the same way: a
+    client's is refused, an upstream's forwarded as it came."""
+
+    def __init__(self) -> None:
+        super().__init__(f"the JSON document nests deeper than {MAX_JSON_DEPTH} levels")
+
+
+def _too_deep(value: Any) -> bool:
+    """Whether a parsed value nests deeper than MAX_JSON_DEPTH: its
+    containers, level by level — never recursively."""
+    level = [value]
+    for _ in range(MAX_JSON_DEPTH):
+        level = [
+            child
+            for child in chain.from_iterable(
+                node.values() if type(node) is dict else node
+                for node in level
+                if type(node) in _CONTAINERS
+            )
+            if type(child) in _CONTAINERS
+        ]
+        if not level:
+            return False
+    return True
+
+
+def loads_bounded(data: bytes | str) -> Any:
+    """``json.loads(data)`` of a document the proxy walks, refused
+    (JsonTooDeep) when it nests deeper than MAX_JSON_DEPTH, however deep
+    the parser could go."""
+    try:
+        value = json.loads(data)
+    except RecursionError:
+        raise JsonTooDeep from None
+    if _too_deep(value):
+        raise JsonTooDeep
+    return value
+
+
 def loads_request(data: bytes | str) -> tuple[Any, bool]:
-    """``json.loads(data)`` plus whether ANY object in it repeats a key.
+    """``loads_bounded(data)`` plus whether ANY object in it repeats a key.
 
     The parsed value keeps the LAST occurrence (Python's rule); an earlier
     one is never walked. A caller that would forward the ORIGINAL bytes
     when the walk changed nothing must re-serialize instead when this is
     True — an upstream parser may keep the first occurrence, which the
-    redactor never saw. Raises ValueError like ``json.loads``. The hook
-    runs per object (exact, nested ones included); the second, plain parse
-    happens only for a duplicate-bearing document."""
+    redactor never saw. Raises ValueError like ``json.loads`` (JsonTooDeep
+    for a document nesting too deep). The hook runs per object (exact,
+    nested ones included); the second, plain parse happens only for a
+    duplicate-bearing document."""
     try:
-        return json.loads(data, object_pairs_hook=_unique_pairs), False
+        value = json.loads(data, object_pairs_hook=_unique_pairs)
     except _DuplicateKey:
-        return json.loads(data), True
+        return loads_bounded(data), True
+    except RecursionError:
+        raise JsonTooDeep from None
+    if _too_deep(value):
+        raise JsonTooDeep
+    return value, False

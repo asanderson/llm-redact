@@ -32,8 +32,9 @@ proxy and the default upstreams apply:
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude -p "hello"
-# OpenAI-compatible tools (chat completions and /v1/responses, e.g. Codex CLI,
-# OpenCode, the OpenAI SDKs) — the /v1 is part of the base URL:
+# OpenAI-compatible tools (chat completions and /v1/responses — its compaction
+# and input-token count too — e.g. Codex CLI, OpenCode, the OpenAI SDKs); the
+# /v1 is part of the base URL:
 OPENAI_BASE_URL=http://127.0.0.1:8787/v1 <your-tool>
 # Gemini (generateContent / streamGenerateContent / countTokens):
 GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787 <your-tool>
@@ -59,9 +60,11 @@ positively attribute it to — a path family, or a header only that
 provider's clients send (`anthropic-version`, a Google API key, …) —
 never to a guessed one; anything else is a recorded local 404. A path
 spelled differently from the API's own route (an empty `//` segment, a
-trailing `/`, another case) is refused 400, a recognized route under an
-extra prefix (`/v1/v1/messages`: a base URL repeating the version) is a
-404, and `GET`/`HEAD /` is answered locally. See
+trailing `/`, another case, or a spelling a normalizing front end reads as
+the route: `\` for `/`, `;params`, trailing spaces or dots, a second
+encoding) is refused 400, a recognized route under an extra prefix
+(`/v1/v1/messages`: a base URL repeating the version) is a 404, and
+`GET`/`HEAD /` is answered locally. See
 [api-coverage.md](api-coverage.md#requests-no-route-matches). Point each
 `upstream_base_url` at the API's final `https` URL: the proxy never relays
 an upstream redirect that a following client would answer by re-sending
@@ -142,7 +145,8 @@ body-parser substitutes invalid bytes and inflates gzip. So non-JSON
 bytes, invalid UTF-8 (Windows PowerShell 5.1 sends a string `-Body`
 without a charset as ISO-8859-1), bytes after the JSON value (a trailing
 NUL, a second value), a top-level JSON array or scalar (`null` included),
-a whitespace-only body, multipart on any other route or outside the
+JSON nesting deeper than 128 levels of objects and arrays (no walk could
+read it), a whitespace-only body, multipart on any other route or outside the
 canonical form, and a repeated `Content-Type` header (a singleton field;
 a second one could name a multipart boundary the proxy never parsed with)
 are refused with a recorded, provider-shaped **400** naming the body's

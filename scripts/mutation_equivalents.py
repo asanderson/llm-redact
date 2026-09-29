@@ -915,6 +915,16 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "batch.begun`, `if batch.begun`), and None is falsy exactly like False - "
         "the batch still begins lazily at its first new value."
     ),
+    "llm_redact.vault.xǁCheckFaultsǁ__init____mutmut_2": (
+        "failing = False -> None: the outage flag is only ever truth-tested (`if "
+        "not self.failing`, `if self.failing`), and None is falsy exactly like "
+        "False - the first failed check still logs the outage."
+    ),
+    "llm_redact.vault.xǁCheckFaultsǁsucceeded__mutmut_1": (
+        "failing = False -> None when the database answers again: the flag is "
+        "only ever truth-tested, and None is falsy exactly like False - the next "
+        "outage's first failed check still logs it."
+    ),
     "llm_redact.vault.xǁSqliteVaultǁoriginal_for__mutmut_13": (
         "SQL case change only: SQLite keywords, identifiers, and function names are "
         "case-insensitive, so the statement is byte-for-byte equivalent to the "

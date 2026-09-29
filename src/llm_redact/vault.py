@@ -1,11 +1,12 @@
 """Placeholder-to-original mapping store. The mapping never leaves the machine."""
 
 import hmac
+import logging
 import os
 import sqlite3
 import time
 import weakref
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
 from pathlib import Path
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+logger = logging.getLogger("llm_redact")
+
 # How long a persistent view (sqlite, RDBMS) serves from its caches before it
 # re-reads its session's retired number: another proxy instance sharing the
 # database may have deleted the session meanwhile. Stale caches can never
@@ -26,6 +29,42 @@ T = TypeVar("T")
 # see ``delete_sessions``); this bounds how long a deleted session's values
 # stay restorable from another instance's memory.
 CACHE_CHECK_SECONDS = 1.0
+# The proxy's bookkeeping stage a failed staleness check is counted under.
+CHECK_FAULT_STAGE = "vault_check"
+
+
+class CheckFaults:
+    """The failed staleness checks of every view over one database (one
+    manager's). A check that cannot read the database keeps the view's
+    caches as they are — a cached token only ever restores its own value —
+    and runs again at the next interval, so a cache hit never needs the
+    database. Each failure is counted in ``counter`` (the proxy's
+    ``bookkeeping_errors``, bound by the manager's ``bind_fault_counter``);
+    an outage is logged when it starts and when the database answers again,
+    by exception TYPE only (a driver's message can name a host, a file or a
+    value)."""
+
+    __slots__ = ("counter", "failing")
+
+    def __init__(self) -> None:
+        self.counter: Counter[str] | None = None
+        self.failing = False
+
+    def failed(self, exc: Exception) -> None:
+        if self.counter is not None:
+            self.counter[CHECK_FAULT_STAGE] += 1
+        if not self.failing:
+            self.failing = True
+            logger.warning(
+                "vault staleness check failed (%s): cached values are served until the"
+                " database answers again",
+                type(exc).__name__,
+            )
+
+    def succeeded(self) -> None:
+        if self.failing:
+            self.failing = False
+            logger.info("vault staleness check: the database answers again")
 
 
 class VaultKeyError(RuntimeError):
@@ -537,11 +576,12 @@ class _Connection:
     and the batch open on it — at most one, since ``batched`` runs its work
     synchronously."""
 
-    __slots__ = ("conn", "batch")
+    __slots__ = ("conn", "batch", "check_faults")
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
         self.batch: _Batch | None = None
+        self.check_faults = CheckFaults()
 
 
 class SqliteVault:
@@ -618,7 +658,7 @@ class SqliteVault:
         a manager keeps one view per session, so no staged row of this
         session can be read here as if committed."""
         conn = self._conn
-        self._retired = _retired_number(conn, self._session)
+        retired = _retired_number(conn, self._session)
         forward: dict[str, str] = {}
         reverse: dict[str, str] = {}
         if self._cipher is None:
@@ -638,6 +678,9 @@ class SqliteVault:
                 original = self._cipher.decrypt(original_ct)
                 forward[f"{detector_type}::{original}"] = placeholder
                 reverse[placeholder] = original
+        # All or nothing: a load that fails part-way changes nothing, so the
+        # next check sees the retired number still moved and loads again.
+        self._retired = retired
         self._forward = forward
         self._reverse = reverse
         self._next_check = self._clock() + CACHE_CHECK_SECONDS
@@ -648,12 +691,18 @@ class SqliteVault:
         site so a cache hit pays a clock read, not a call), never while a
         batch is open. If it moved, the session was deleted (by another
         instance) since the caches were loaded: they are rebuilt, so its
-        values stop being restorable here too."""
-        if self._shared.batch is not None:
+        values stop being restorable here too. A check that cannot read the
+        database keeps the caches as they are (``CheckFaults``)."""
+        shared = self._shared
+        if shared.batch is not None:
             return
-        if _retired_number(self._conn, self._session) != self._retired:
-            self._load()
-            return
+        try:
+            if _retired_number(self._conn, self._session) != self._retired:
+                self._load()
+        except Exception as exc:  # noqa: BLE001 — a cached token restores only its own value
+            shared.check_faults.failed(exc)
+        else:
+            shared.check_faults.succeeded()
         self._next_check = self._clock() + CACHE_CHECK_SECONDS
 
     def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
@@ -999,6 +1048,11 @@ class SqliteVaultManager:
     @_conn.setter
     def _conn(self, conn: sqlite3.Connection) -> None:
         self._shared.conn = conn
+
+    def bind_fault_counter(self, counter: Counter[str]) -> None:
+        """Count this manager's failed staleness checks in ``counter`` (the
+        proxy's ``bookkeeping_errors``; optional, read via getattr)."""
+        self._shared.check_faults.counter = counter
 
     def get(self, session_id: str) -> Vault:
         # Every view the LRU holds is live, so the registry answers for both.

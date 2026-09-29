@@ -46,9 +46,11 @@ against [providers.md](providers.md); `/recent` shows the path.
 
 The base URL is off: it repeats the API version (`/v1/v1/messages` —
 `ANTHROPIC_BASE_URL` takes no `/v1`), ends in `/` and is joined naively
-(`//`), or the tool changed the path's case or added a trailing `/`. A
-spelling the API does not define is never forwarded: an upstream that
-ignores case or a trailing slash would run it unredacted.
+(`//`), or the tool changed the path's case, added a trailing `/`, a `\`,
+a `;param`, trailing spaces or dots, or encoded the path twice. A spelling
+the API does not define is never forwarded: an upstream (or a front end
+before it) that ignores case or a trailing slash, or normalizes such
+spellings, would run it unredacted.
 
 ## "the upstream answered a redirect (NNN), which llm-redact does not relay" (HTTP 502)
 

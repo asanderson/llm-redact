@@ -29,6 +29,7 @@ import secrets
 import signal
 import sqlite3
 import time
+import unicodedata
 import urllib.parse
 from collections import Counter, deque
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -77,7 +78,13 @@ from llm_redact.detection.engine import (
 )
 from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
-from llm_redact.jsonwalk import json_bytes, loads_request
+from llm_redact.jsonwalk import (
+    MAX_JSON_DEPTH,
+    JsonTooDeep,
+    json_bytes,
+    loads_bounded,
+    loads_request,
+)
 from llm_redact.licensing import ResolvedLicense, resolve_license
 from llm_redact.metrics import Metrics
 from llm_redact.multipart import parse as parse_multipart
@@ -447,8 +454,13 @@ class ProxyState:
         # buffered one fails closed with a recorded 502; a stream is cut);
         # before any upstream contact, "vault" is issuing a request's
         # placeholders (a vault write or its COMMIT failed: rolled back, a
-        # recorded 503 — a realtime frame closes 1011).
+        # recorded 503 — a realtime frame closes 1011); "vault_check" is a
+        # vault view's staleness check that could not read its database
+        # (contained: the view keeps serving its cache, never a wrong value).
         self.bookkeeping_errors: Counter[str] = Counter()
+        bind_fault_counter = getattr(self.vault_manager, "bind_fault_counter", None)
+        if callable(bind_fault_counter):
+            bind_fault_counter(self.bookkeeping_errors)
         # Requests refused as a web page's (request_origin_refusal), by kind:
         # "host" (a name the proxy does not answer to — DNS rebinding, or an
         # alias not in allowed_hosts), "origin", "fetch_site". Kinds only.
@@ -2585,8 +2597,8 @@ async def _guarded_post_json(
     if raw_body is None:
         return None, JSONResponse({"error": "request body over 1 MiB"}, status_code=413)
     try:
-        return json.loads(raw_body), None
-    except json.JSONDecodeError as exc:
+        return loads_bounded(raw_body), None
+    except ValueError as exc:  # JSONDecodeError and JsonTooDeep alike
         return None, JSONResponse({"error": f"invalid JSON: {exc}"}, status_code=400)
 
 
@@ -2680,7 +2692,13 @@ _IDENTITY_ONLY = {"accept-encoding": "identity"}
 
 
 def _unscanned_body(
-    adapter: ProviderAdapter, path: str, headers: Headers, body: bytes, parsed: Any
+    adapter: ProviderAdapter,
+    path: str,
+    headers: Headers,
+    body: bytes,
+    parsed: Any,
+    *,
+    too_deep: bool = False,
 ) -> _Unreadable | None:
     """Why a non-empty request body on a matched route must NOT be
     forwarded, or None when the proxy reads — and so redacts — all of it.
@@ -2695,7 +2713,9 @@ def _unscanned_body(
     request refused). Everything else would be forwarded verbatim, and a
     lenient upstream decodes what the proxy never read: non-JSON bytes,
     invalid UTF-8, bytes after the JSON value, a top-level array or scalar
-    (``null`` included — never walked), whitespace only, multipart on any
+    (``null`` included — never walked), JSON nesting deeper than
+    ``MAX_JSON_DEPTH`` (``too_deep``: no walk could read it), whitespace
+    only, multipart on any
     other route, and any content-encoded body (415: the proxy never decodes
     one) — every coding of every Content-Encoding header counts, as the
     upstream reads them all. A repeated Content-Type is refused too: it is a
@@ -2708,6 +2728,8 @@ def _unscanned_body(
     content_types = headers.getlist("content-type")
     if len(content_types) > 1:
         return _Unreadable(400, "the request carries more than one Content-Type header")
+    if too_deep:
+        return _Unreadable(400, f"the request body nests JSON deeper than {MAX_JSON_DEPTH} levels")
     if isinstance(parsed, dict):
         return None
     boundary = (
@@ -2824,8 +2846,9 @@ class _Misaddressed(NamedTuple):
 
 _SPELLING = (
     "llm-redact: the request path must be spelled exactly as the provider's API defines it"
-    " (no trailing '/', its exact case); this spelling of an API route llm-redact redacts"
-    " was not forwarded"
+    " (its exact case; no trailing '/', no '\\', no ';' parameters, no trailing spaces, tabs"
+    " or dots, no double encoding); this spelling of an API route llm-redact redacts was not"
+    " forwarded"
 )
 _MISSING_VERSION = (
     "llm-redact: this path lacks the API's /v1 segment, so it was not forwarded: an"
@@ -2838,6 +2861,51 @@ _EXTRA_PREFIX = (
     " (a base URL that repeats the API version, such as .../v1/v1/...), so it was not"
     " forwarded; check the tool's base URL"
 )
+# The longest extra prefix looked for, in segments. A base URL mistake adds
+# one or two (/v1/v1/…, /api/v1/…); each candidate tail costs a match of up
+# to the whole path, so trying every tail was quadratic in its length.
+_MAX_EXTRA_PREFIX = 8
+# IIS's non-standard %uXXXX escape.
+_PERCENT_U = re.compile(r"%[uU]([0-9A-Fa-f]{4})")
+# What IIS trims from the end of a path segment (Windows file-name rules:
+# spaces and dots), and the other whitespace a decoded %09/%0B/%0C carries.
+_SEGMENT_TRAILER = " \t\r\n\x0b\x0c."
+
+
+def _normalized_path(path: str) -> str:
+    """``path`` (decoded) as a front end that normalizes paths serves it:
+    Unicode compatibility forms folded (NFKC: a full-width letter is its
+    ASCII one), ``\\`` read as ``/`` (IIS, Azure API Management, Envoy's
+    path normalization), and in every segment its ``;params`` dropped
+    (Tomcat, Jetty, Spring) and trailing whitespace and dots trimmed (IIS);
+    the empty segments that leaves (and a trailing ``/``) merged."""
+    text = unicodedata.normalize("NFKC", path).replace("\\", "/")
+    segments = (part.split(";", 1)[0].rstrip(_SEGMENT_TRAILER) for part in text.split("/"))
+    return "/" + "/".join(segment for segment in segments if segment)
+
+
+def _decoded_again(path: str) -> str:
+    """``path`` percent-decoded once more — IIS's ``%uXXXX`` escapes and a
+    ``+`` for a space included — as a gateway that decodes before an app
+    server decodes again would read it."""
+    unescaped = _PERCENT_U.sub(lambda match: chr(int(match.group(1), 16)), path)
+    return urllib.parse.unquote_plus(unescaped)
+
+
+def _spellings(path: str) -> tuple[str, ...]:
+    """The spellings of ``path`` an upstream (or a front end before it) may
+    serve as the same route: without a trailing ``/``; normalized
+    (``_normalized_path``), as sent and decoded once more; each in its own
+    case, lower case and folded the way .NET's OrdinalIgnoreCase compares
+    (upper-cased first: a dotless ``ı`` is ``I``). A bounded few, each
+    linear in the path's length."""
+    stripped = path[:-1] if len(path) > 1 and path.endswith("/") else path
+    forms = (stripped, _normalized_path(path), _normalized_path(_decoded_again(path)))
+    return tuple(
+        dict.fromkeys(
+            spelling for form in forms for spelling in (form, form.lower(), form.upper().lower())
+        )
+    )
 
 
 def _misaddressed(
@@ -2850,19 +2918,28 @@ def _misaddressed(
     """Why an UNRECOGNIZED path must not be forwarded although it names a
     route llm-redact recognizes — or None. Forwarded, each would carry its
     body unredacted to an upstream that may serve it as that very route
-    (routers that ignore a trailing ``/`` or case: Express, fiber, ASP.NET):
+    (routers that ignore a trailing ``/`` or case: Express, fiber, ASP.NET;
+    front ends that normalize paths: IIS, API Management, Tomcat, Envoy):
 
-    - another spelling of the route — a trailing ``/``, another case (400;
-      the matched path must be the forwarded path, as for dot segments);
+    - another spelling of the route (``_spellings``) — a trailing ``/``,
+      another case, ``\\`` for ``/``, ``;params``, trailing whitespace or
+      dots, a second encoding (400; the matched path must be the forwarded
+      path, as for dot segments);
     - the route without its ``/v1`` segment, or an OpenAI resource without
       it (404: an OpenAI-compatible base URL that lacks ``/v1``);
-    - the route under an extra leading prefix (404: a base URL repeating the
-      version). Azure's ``/openai/…`` and custom ``/custom/NAME/…`` paths
-      embed OpenAI routes by design, and their adapters read their own
-      tails; an Azure tail is never taken as a sign of an extra prefix.
+    - the route under an extra leading prefix of up to ``_MAX_EXTRA_PREFIX``
+      segments (404: a base URL repeating the version). Azure's ``/openai/…``
+      and custom ``/custom/NAME/…`` paths embed OpenAI routes by design, and
+      their adapters read their own tails; an Azure tail is never taken as a
+      sign of an extra prefix.
+
+    Only a path one of whose spellings matches a route is refused: a Gemini
+    ``:method`` or a Bedrock ARN is matched as sent, and a spelling of a
+    pass-through route stays pass-through. It costs a bounded number of
+    route matches, each linear in the path's length: it runs before most
+    refusals, for any client.
     """
-    stripped = path[:-1] if len(path) > 1 and path.endswith("/") else path
-    spellings = tuple(dict.fromkeys((stripped, stripped.lower())))
+    spellings = _spellings(path)
     for candidate in spellings:
         if candidate == path:
             continue
@@ -2885,7 +2962,7 @@ def _misaddressed(
         return None
     for candidate in spellings:
         segments = candidate.split("/")
-        for index in range(2, len(segments)):
+        for index in range(2, min(len(segments), _MAX_EXTRA_PREFIX + 2)):
             tail = "/" + "/".join(segments[index:])
             if tail.startswith("/openai/"):
                 # Azure's family name is a segment of other providers'
@@ -3096,15 +3173,6 @@ async def handle(request: Request) -> Response:
     started = time.perf_counter()
     query = request.url.query
     adapter, kind = state.route(request.method, path, request.headers, query)
-    # An unrecognized path that is another spelling of a recognized route,
-    # or that route without its /v1 or under an extra prefix: refused below
-    # (never forwarded unredacted to an upstream that may serve it as that
-    # route).
-    misaddressed = (
-        _misaddressed(state, request.method, path, request.headers, query)
-        if adapter is None
-        else None
-    )
 
     # A disabled provider fails closed before anything is read or forwarded:
     # matched routes AND pass-through traffic attributed to it are answered
@@ -3145,10 +3213,18 @@ async def handle(request: Request) -> Response:
         return Response(
             b"llm-redact is running\n", media_type="text/plain", headers=dict(_SECURITY_HEADERS)
         )
-    if misaddressed is not None:
-        return _misaddressed_refused(
-            state, misaddressed, request=request, path=path, started=started
-        )
+    if adapter is None and admission.refusal is None:
+        # An unrecognized path that is another spelling of a recognized
+        # route, or that route without its /v1 or under an extra prefix:
+        # refused, never forwarded unredacted to an upstream that may serve
+        # it as that route. Looked for only once the request-origin rule and
+        # the access gate admit the request: a refused one (a web page's, an
+        # unknown client's) gets its refusal without this routing work.
+        misaddressed = _misaddressed(state, request.method, path, request.headers, query)
+        if misaddressed is not None:
+            return _misaddressed_refused(
+                state, misaddressed, request=request, path=path, started=started
+            )
     if provider_name is None:
         return _unattributed_refused(state, request, path=path, started=started)
     if provider_conf is None:
@@ -3306,9 +3382,14 @@ async def handle(request: Request) -> Response:
     # A repeated JSON key: the parse keeps the last occurrence, so the walk
     # never sees the earlier ones — such a body is always re-serialized.
     duplicate_keys = False
+    # JSON nesting deeper than any walk may recurse: unreadable, like any
+    # other body the proxy cannot read (the scanned-body rule below).
+    too_deep = False
     if adapter is not None and body_bytes:
         try:
             parsed, duplicate_keys = loads_request(body_bytes)
+        except JsonTooDeep:
+            too_deep = True
         except ValueError:
             parsed = None
 
@@ -3402,7 +3483,9 @@ async def handle(request: Request) -> Response:
                 cap="max_body_strings",
                 limit=max_body_strings,
             )
-        unscanned = _unscanned_body(adapter, path, request.headers, body_bytes, parsed)
+        unscanned = _unscanned_body(
+            adapter, path, request.headers, body_bytes, parsed, too_deep=too_deep
+        )
         if unscanned is not None:
             return _unscanned_body_refused(
                 state,
@@ -3469,8 +3552,25 @@ async def handle(request: Request) -> Response:
         )
 
     # Session resolution hashes the raw (pre-redaction) conversation anchor,
-    # so it must happen before prepare_request.
-    ctx = state.context_for(adapter, request.method, path, parsed)
+    # so it must happen before prepare_request. Opening a session this
+    # process has not seen reads the vault (its view loads the rows; a
+    # router may read the durable response map): a fault there is refused
+    # like every vault fault — the request has no session yet, so the row
+    # carries the configured one.
+    try:
+        ctx = state.context_for(adapter, request.method, path, parsed)
+    except state.vault_faults as exc:
+        return _vault_fault_refused(
+            state,
+            state.config.vault.session,
+            adapter,
+            exc,
+            request=request,
+            path=path,
+            started=started,
+            provider_name=provider_name,
+            opening=True,
+        )
 
     detection_counts_before = dict(state.detection_counts)
     warn_counts_before = dict(state.warn_counts)
@@ -3621,7 +3721,7 @@ async def handle(request: Request) -> Response:
             return sealed_response(adapter)
         except state.vault_faults as exc:
             return _vault_fault_refused(
-                state, ctx, adapter, exc, request=request, path=path, started=started
+                state, ctx.session_id, adapter, exc, request=request, path=path, started=started
             )
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
@@ -3686,7 +3786,13 @@ async def handle(request: Request) -> Response:
                 return sealed_response(adapter)
             except state.vault_faults as exc:
                 return _vault_fault_refused(
-                    state, ctx, adapter, exc, request=request, path=path, started=started
+                    state,
+                    ctx.session_id,
+                    adapter,
+                    exc,
+                    request=request,
+                    path=path,
+                    started=started,
                 )
             if rewritten is not None:
                 outbound = rewritten
@@ -3864,29 +3970,35 @@ def vault_fault_types(manager: object) -> tuple[type[BaseException], ...]:
 
 def _vault_fault_refused(
     state: ProxyState,
-    ctx: RequestContext,
-    adapter: ProviderAdapter,
+    session: str,
+    adapter: ProviderAdapter | None,
     exc: BaseException,
     *,
     request: Request,
     path: str,
     started: float,
+    provider_name: str | None = None,
+    opening: bool = False,
 ) -> JSONResponse:
     """The vault could not issue this request's placeholders — a write or
-    its batch's COMMIT failed, and the batch rolled back whole: a recorded,
-    provider-shaped 503 before any upstream contact (the audit refusal's
-    twin; nothing was forwarded or signed), counted as the "vault"
-    bookkeeping stage and logged by exception TYPE only."""
+    its batch's COMMIT failed, and the batch rolled back whole — or, with
+    ``opening``, could not open the session the request resolved to (a new
+    session's view reads its rows; the session router may read the durable
+    response map): a recorded, provider-shaped 503 before any upstream
+    contact (the audit refusal's twin; nothing was forwarded or signed),
+    counted as the "vault" bookkeeping stage and logged by exception TYPE
+    only. A pass-through request (no adapter) gets the generic shape."""
     state.bookkeeping_errors["vault"] += 1
     logger.error(
-        "%s %s -> 503 vault write failed (%s); nothing forwarded",
+        "%s %s -> 503 %s (%s); nothing forwarded",
         request.method,
         path,
+        "vault read failed opening the session" if opening else "vault write failed",
         type(exc).__name__,
     )
     state.record_request(
-        session=ctx.session_id,
-        provider=adapter.name,
+        session=session,
+        provider=adapter.name if adapter is not None else provider_name,
         method=request.method,
         path=path,
         status=503,
@@ -3896,10 +4008,13 @@ def _vault_fault_refused(
         rehydrations={},
     )
     message = (
-        "llm-redact: the vault could not record this request's placeholders; the request"
+        "llm-redact: the vault could not open this request's session; the request was not forwarded"
+        if opening
+        else "llm-redact: the vault could not record this request's placeholders; the request"
         " was not forwarded"
     )
-    return JSONResponse(adapter.error_body(message, status=503), status_code=503)
+    body = adapter.error_body(message, status=503) if adapter is not None else {"error": message}
+    return JSONResponse(body, status_code=503)
 
 
 def _count_delta(after: Counter[str], before: dict[str, int]) -> dict[str, int]:
@@ -4392,7 +4507,7 @@ def _restore_buffered(
     payload: Any = None
     if kind is RouteKind.CHAT and adapter is not None and "application/json" in content_type:
         try:
-            payload = json.loads(raw)
+            payload = loads_bounded(raw)
         except ValueError:
             payload = None
         if payload is not None:
@@ -4440,7 +4555,7 @@ def _restore_buffered(
         # not want is not parsed at all (a large file listing forwards
         # untouched).
         try:
-            payload = json.loads(raw)
+            payload = loads_bounded(raw)
         except ValueError:
             payload = None
         if payload is not None and route.observe_payload(payload, kind):
@@ -4481,7 +4596,7 @@ def _restore_buffered(
         # provider's is looked up by name). Contained, reading included: a
         # lost record is the router's unknown-object case, never a lost answer.
         try:
-            stored = payload if payload is not None else json.loads(raw)
+            stored = payload if payload is not None else loads_bounded(raw)
         except ValueError:
             stored = None
         _contained(
@@ -4738,7 +4853,7 @@ def _restore_listing(
     it. None when nothing changed (the bytes are then forwarded
     untouched)."""
     try:
-        original = json.loads(upstream_raw)
+        original = loads_bounded(upstream_raw)
     except ValueError:
         return None
     items = lister.listing_items(original)
@@ -4755,7 +4870,8 @@ def _restore_listing(
     }
     if not restorers:
         return None
-    delivered = json.loads(raw)  # a fresh tree to edit (raw is JSON: upstream_raw or a dump)
+    # A fresh tree to edit (raw is JSON: upstream_raw or a dump of it).
+    delivered = loads_bounded(raw)
     delivered_items = lister.listing_items(delivered)
     if delivered_items is None or len(delivered_items) != len(items):
         return None  # a routed rewrite changed the shape: leave it alone

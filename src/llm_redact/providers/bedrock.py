@@ -47,7 +47,7 @@ from collections.abc import Callable
 from typing import Any
 
 from llm_redact.eventstream import EventStreamMessage, string_header
-from llm_redact.jsonwalk import json_bytes, loads_request
+from llm_redact.jsonwalk import json_bytes, loads_bounded, loads_request
 from llm_redact.placeholders import json_floors
 from llm_redact.providers.anthropic import (
     inject_anthropic_system_note,
@@ -280,7 +280,7 @@ class BedrockAdapter(ProviderAdapter):
         if message.message_type != "event":
             return [message]  # exceptions and errors pass through untouched
         try:
-            payload = json.loads(message.payload)
+            payload = loads_bounded(message.payload)
         except ValueError:
             return [message]
         if not isinstance(payload, dict):
@@ -307,7 +307,7 @@ class BedrockAdapter(ProviderAdapter):
         if not isinstance(encoded, str):
             return [message]
         try:
-            inner = json.loads(base64.b64decode(encoded, validate=True))
+            inner = loads_bounded(base64.b64decode(encoded, validate=True))
         except ValueError:  # covers binascii.Error (its subclass) too
             return [message]
         if not isinstance(inner, dict):

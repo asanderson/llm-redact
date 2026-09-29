@@ -8,12 +8,11 @@ Synthetic flush events omit ``sequence_number``: renumbering would require
 rewriting every subsequent event. Documented deviation.
 """
 
-import json
 import re
 from collections.abc import Hashable
 from typing import Any
 
-from llm_redact.jsonwalk import json_text, transform_strings
+from llm_redact.jsonwalk import json_text, loads_bounded, transform_strings
 from llm_redact.providers.base import (
     SYSTEM_NOTE,
     ProviderAdapter,
@@ -27,6 +26,12 @@ from llm_redact.sse import SSEEvent
 
 _RESPONSE_ID_PATH = re.compile(r"/v1/responses/[^/]+")
 _INPUT_ITEMS_PATH = re.compile(r"/v1/responses/[^/]+/input_items")
+# Two POSTs that take a responses.create body and create nothing stored:
+# compaction (Codex CLI compacts long sessions — the whole conversation) and
+# the input-token count. Suffixes, so every prefix that wraps this adapter
+# (Azure's /openai and /openai/v1, custom providers) reads them the same.
+_COMPACT = "/responses/compact"
+_INPUT_TOKENS = "/responses/input_tokens"
 
 # type → (channel kind, delta field, json_source)
 _DELTA_EVENTS = {
@@ -181,6 +186,15 @@ class OpenAIResponsesAdapter(ProviderAdapter):
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "POST" and path == "/v1/responses":
             return RouteKind.CHAT
+        if method == "POST" and path == "/v1" + _COMPACT:
+            # The window to compact goes up redacted; the compacted window
+            # (response.compaction: the retained messages and tool calls,
+            # then one opaque, encrypted compaction item) comes back
+            # restored. It never streams.
+            return RouteKind.CHAT
+        if method == "POST" and path == "/v1" + _INPUT_TOKENS:
+            # A create body in, a number out: nothing to restore.
+            return RouteKind.REDACT_ONLY
         # A stored response fetched later must be rehydrated too, or the
         # client sees the placeholders that were sent upstream.
         if method == "GET" and (
@@ -203,6 +217,14 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 "code": "request_too_large" if status == 413 else None,
             }
         }
+
+    def wants_system_note(self, kind: RouteKind, path: str) -> bool:
+        # A compaction is a chat route: the note joins its instructions, so
+        # the compacted state carries every token forward exactly, as the
+        # requests it condenses did. The input-token count takes the create
+        # body it counts, and that request carries the note: counted too
+        # (Anthropic count_tokens' stance).
+        return kind is RouteKind.CHAT or path.endswith(_INPUT_TOKENS)
 
     def inject_system_note(self, body: dict[str, Any]) -> dict[str, Any]:
         body = dict(body)
@@ -231,7 +253,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         if _FILE_ID_KEY not in event.data:
             return ()
         try:
-            payload = json.loads(event.data)
+            payload = loads_bounded(event.data)
         except ValueError:
             return ()
         return _event_container_files(payload) if isinstance(payload, dict) else ()
@@ -244,7 +266,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         if event.event != "response.created" or not event.data:
             return None
         try:
-            payload = json.loads(event.data)
+            payload = loads_bounded(event.data)
         except ValueError:
             return None
         response = payload.get("response")
@@ -315,7 +337,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 return [*self._flush_to_events(pool.flush_all()), event]
             return [event]
         try:
-            payload = json.loads(event.data)
+            payload = loads_bounded(event.data)
         except ValueError:
             return [event]
         event_type = payload.get("type")

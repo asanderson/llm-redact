@@ -145,7 +145,10 @@ never to a value issued after the delete:
 
 Every view of a session re-reads that number at most once a second and
 drops the deleted values from memory when it moved; the instance that
-deleted the session drops them at once.
+deleted the session drops them at once. A re-read that fails (the database
+is briefly unreachable) keeps what the view holds and tries again a second
+later: a cached token only ever restores its own value, so restoring one
+never waits on the database.
 
 A request's new values are written in **one transaction**, committed once
 before anything is forwarded (the sqlite vault runs `synchronous=FULL`, so

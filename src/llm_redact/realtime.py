@@ -52,7 +52,6 @@ it reads after the swap under the configuration it was opened with.
 import asyncio
 import contextlib
 import functools
-import json
 import logging
 import time
 import urllib.parse
@@ -63,7 +62,15 @@ from typing import TYPE_CHECKING, Any
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from llm_redact.audit import AuditWriteError
-from llm_redact.jsonwalk import STRUCTURAL_KEYS, json_bytes, json_text, transform_strings
+from llm_redact.jsonwalk import (
+    MAX_JSON_DEPTH,
+    STRUCTURAL_KEYS,
+    JsonTooDeep,
+    json_bytes,
+    json_text,
+    loads_bounded,
+    transform_strings,
+)
 from llm_redact.placeholders import json_floors, may_carry_tokens, token_floors
 from llm_redact.plugin_api import UpstreamAuthError
 from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
@@ -338,7 +345,7 @@ class OpenAIRealtimeWs(WsAdapter):
         inject_note: bool = False,
         require_json: bool = False,
     ) -> str | bytes:
-        parsed = parse_json_text(data)
+        parsed = parse_client_frame(data)
         if parsed is None:
             return _unparsed_frame(data, require_json)
         payload, was_binary = parsed
@@ -575,7 +582,7 @@ class GeminiLiveWs(WsAdapter):
         inject_note: bool = False,
         require_json: bool = False,
     ) -> str | bytes:
-        parsed = parse_json_text(data)
+        parsed = parse_client_frame(data)
         if parsed is None:
             return _unparsed_frame(data, require_json)
         payload, was_binary = parsed
@@ -1206,7 +1213,22 @@ async def ws_handle(websocket: WebSocket) -> None:
         )
         return
 
-    static_ctx = state.context_for(None, "GET", path, None)
+    try:
+        static_ctx = state.context_for(None, "GET", path, None)
+    except state.vault_faults as fault:
+        # Opening the connection's session reads the vault (a new session's
+        # view loads its rows): a fault refuses the connection before any
+        # dial, recorded as the HTTP path's 503, counted as the "vault"
+        # bookkeeping stage, logged by exception TYPE only.
+        state.bookkeeping_errors["vault"] += 1
+        logger.error(
+            "WS %s -> closed 1011 (vault read failed opening the session: %s)",
+            path,
+            type(fault).__name__,
+        )
+        _record_ws_refusal(state, adapter, path, 503, started)
+        await _reject(websocket, "llm-redact could not open this connection's vault session")
+        return
     if static_ctx.sealed:
         # A session the router says must stay empty cannot carry a
         # conversation whose every message is redacted into it.
@@ -1556,18 +1578,45 @@ def _unparsed_frame(data: str | bytes, require_json: bool) -> str | bytes:
     return data
 
 
-def parse_json_text(data: str | bytes) -> tuple[Any, bool] | None:
-    """(parsed, was_binary) when ``data`` is a JSON text/binary frame, else
-    None — the caller must then forward the frame byte-identically. A
-    parsed client frame is ALWAYS re-serialized (``_dump_frame``), never
-    forwarded as its original bytes, so a repeated key's earlier
-    occurrence (dropped by the parse, never walked) cannot leave."""
+def _parse_frame(data: str | bytes) -> tuple[Any, bool] | None:
+    """(parsed, was_binary) when ``data`` is a JSON text/binary frame, None
+    when it is not JSON; JsonTooDeep when it nests deeper than
+    MAX_JSON_DEPTH (no walk could read it)."""
     try:
         if isinstance(data, bytes):
-            return json.loads(data.decode("utf-8")), True
-        return json.loads(data), False
+            return loads_bounded(data.decode("utf-8")), True
+        return loads_bounded(data), False
+    except JsonTooDeep:
+        raise
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+def parse_json_text(data: str | bytes) -> tuple[Any, bool] | None:
+    """(parsed, was_binary) when ``data`` is a JSON text/binary frame the
+    proxy reads, else None — the caller must then forward the frame
+    byte-identically: an UPSTREAM frame nesting too deep to walk goes to
+    the client as it came (its placeholders left in place). A client frame
+    goes through ``parse_client_frame``."""
+    try:
+        return _parse_frame(data)
+    except JsonTooDeep:
+        return None
+
+
+def parse_client_frame(data: str | bytes) -> tuple[Any, bool] | None:
+    """``parse_json_text`` for a CLIENT frame: one nesting JSON too deep to
+    walk is refused (UnredactableRequest: closed 1008, recorded 400), never
+    forwarded unredacted as if it were not JSON. A parsed client frame is
+    ALWAYS re-serialized (``_dump_frame``), never forwarded as its original
+    bytes, so a repeated key's earlier occurrence (dropped by the parse,
+    never walked) cannot leave."""
+    try:
+        return _parse_frame(data)
+    except JsonTooDeep:
+        raise UnredactableRequest(
+            f"realtime frame nests JSON deeper than {MAX_JSON_DEPTH} levels"
+        ) from None
 
 
 def frame_floors(data: str | bytes) -> dict[str, int]:

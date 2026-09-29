@@ -1,10 +1,10 @@
-import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
 from llm_redact.eventstream import EventStreamMessage
+from llm_redact.jsonwalk import loads_bounded
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
@@ -288,7 +288,7 @@ class ProviderAdapter(ABC):
         streams name objects on a few events only overrides this with a
         cheap test first: it runs for every event of a tracked stream."""
         try:
-            payload = json.loads(event.data)
+            payload = loads_bounded(event.data)
         except ValueError:
             return ()  # [DONE], keep-alives, anything not JSON
         return self.object_ids_from_body(method, path, payload)

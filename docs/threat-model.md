@@ -195,9 +195,12 @@ own answer decides whether the page may read a response).
 - A request path with a `.`/`..` segment or an empty segment (`//`), in
   any spelling, is refused 400 before admission and any upstream contact,
   and another spelling of a recognized route (a trailing `/`, another
-  case) is a recorded 400: matching and forwarding must address the same
-  resource, and an upstream that ignores case or a trailing slash would
-  otherwise serve the unredacted body as the route itself.
+  case, or what a normalizing front end reads as the route: `\` for `/`,
+  `;params`, trailing whitespace or dots, a second encoding) is a recorded
+  400: matching and forwarding must address the same resource, and an
+  upstream that ignores case or a trailing slash, or a front end that
+  normalizes the path, would otherwise serve the unredacted body as the
+  route itself. Routing a path costs time linear in its length.
 - A request no route matches is forwarded only to a provider it can be
   POSITIVELY attributed to — a path family, or the headers only one
   provider's clients send (`anthropic-version`, a Google key, …) — never

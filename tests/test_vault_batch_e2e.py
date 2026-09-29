@@ -32,6 +32,19 @@ from llm_redact.config import Config, DetectionConfig, ProviderConfig, VaultConf
 from llm_redact.proxy import create_app
 from test_vault_faults import _FlakyConn
 
+
+class _FlakyAnyCase(_FlakyConn):
+    """``_FlakyConn`` matching its SQL in any case, as the engine reads it:
+    a statement spelled in another case is the same statement and fails
+    the same way."""
+
+    def execute(self, sql: str, *args: object) -> object:
+        if self._fail_on.lower() in sql.lower() and self._times > 0:
+            self._times -= 1
+            raise sqlite3.OperationalError("database or disk is full")
+        return self._real.execute(sql, *args)
+
+
 EMAILS = [f"user{i}@corp.example" for i in range(12)]
 
 
@@ -279,6 +292,7 @@ def _relay(
     seen: list[str],
     *,
     fail_on: str | None = None,
+    flaky: type[_FlakyConn] = _FlakyConn,
     apps: list[Any] | None = None,
 ) -> Iterator[str]:
     """The proxy in uvicorn's own thread — built there too (a factory):
@@ -292,7 +306,7 @@ def _relay(
             lambda sql: seen.append(sql) if sql in ("BEGIN IMMEDIATE", "COMMIT") else None
         )
         if fail_on is not None:
-            manager._conn = _FlakyConn(manager._conn, fail_on)
+            manager._conn = flaky(manager._conn, fail_on)
         if apps is not None:
             apps.append(app)
         return app
@@ -386,3 +400,101 @@ async def test_a_failed_commit_closes_the_realtime_connection_1011(tmp_path: Pat
     conn = sqlite3.connect(tmp_path / "vault.db")
     assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone() == (0,)  # rolled back
     conn.close()
+
+
+# --- a vault fault while a request's session is opened ------------------------------
+
+
+class _NewSessionRouter:
+    """A session router (llm-redact-pro's seam) resolving every request to a
+    session this process has not opened yet: its vault view is built — and
+    reads the database — while the request's context is made."""
+
+    mode = "per-conversation"
+
+    def resolve(self, adapter_name: str | None, method: str, path: str, body: Any) -> str:
+        return "conv-new"
+
+    def record_response_id(self, response_id: str, session_id: str) -> None:
+        return None
+
+
+def _new_session_router(monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_session_ownership_seams import _registry
+
+    router = _NewSessionRouter()
+    _registry(monkeypatch, build_session_router=lambda config, **kw: router)
+
+
+@pytest.mark.parametrize(
+    ("path", "provider", "shape"),
+    [("/v1/messages", "anthropic", "error"), ("/v1/moderations", "openai", None)],
+    ids=["matched", "pass-through"],
+)
+async def test_a_vault_fault_opening_the_requests_session_refuses_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+    provider: str,
+    shape: str | None,
+) -> None:
+    """Opening a new session's view reads its rows: a database fault there
+    is a recorded, provider-shaped 503 before any upstream contact (labelled
+    with the configured session: the request has none yet) — never a bare,
+    unrecorded 500."""
+    _new_session_router(monkeypatch)
+    sent: list[dict[str, Any]] = []
+    app, _ = _app(tmp_path, sent)
+    manager = app.state.proxy.vault_manager
+    real = manager._conn
+    manager._conn = _FlakyAnyCase(real, "FROM retired_numbers")
+    headers = {"authorization": "Bearer sk-proj-FAKE"} if provider == "openai" else {}
+    with caplog.at_level("ERROR", logger="llm_redact"):
+        response = await _post(app, path, json=_messages(EMAILS[0]), headers=headers)
+    assert response.status_code == 503, response.text
+    refusal = response.json()
+    assert refusal.get("type") == shape  # the route's adapter shape, else a generic one
+    assert "vault could not" in json.dumps(refusal)
+    assert sent == []
+    state = app.state.proxy
+    assert state.bookkeeping_errors == {"vault": 1}
+    (row,) = state.recent
+    assert row["status"] == 503 and row["provider"] == provider
+    assert row["session"] == state.config.vault.session
+    assert "OperationalError" in caplog.text and "disk is full" not in caplog.text
+    assert EMAILS[0] not in caplog.text
+    # The fault passed: the next request opens the session and is forwarded.
+    manager._conn = real
+    assert (await _post(app, path, json=_messages(EMAILS[0]), headers=headers)).status_code == 200
+    manager.close()
+
+
+@pytest.mark.asyncio
+async def test_a_vault_fault_opening_a_realtime_session_closes_1011(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _new_session_router(monkeypatch)
+    seen: list[str] = []
+    apps: list[Any] = []
+    async with _EchoUpstream() as upstream:
+        config = Config(
+            providers={
+                **Config().providers,
+                "openai": ProviderConfig(f"http://127.0.0.1:{upstream.port}"),
+            },
+            vault=VaultConfig(backend="sqlite", path=str(tmp_path / "vault.db")),
+        )
+        with _relay(
+            config, seen, fail_on="FROM retired_numbers", flaky=_FlakyAnyCase, apps=apps
+        ) as host:
+            async with websockets.connect(f"ws://{host}/v1/realtime") as client:
+                with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
+                    await asyncio.wait_for(client.recv(), 10)
+    assert closed.value.rcvd is not None and closed.value.rcvd.code == 1011
+    assert "vault" in closed.value.rcvd.reason
+    assert upstream.received == []
+    state = apps[0].state.proxy
+    assert state.bookkeeping_errors == {"vault": 1}
+    (row,) = state.recent
+    assert row["method"] == "WS" and row["status"] == 503

@@ -12,12 +12,11 @@ like the model listing — so a routed request spending a key the proxy holds
 may still reach them, while an unrecognized route never can.
 """
 
-import json
 import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from llm_redact.jsonwalk import json_bytes, json_text, transform_strings
+from llm_redact.jsonwalk import json_bytes, json_text, loads_bounded, transform_strings
 from llm_redact.providers.attribution import provider_markers
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor
@@ -237,7 +236,7 @@ class AnthropicAdapter(ProviderAdapter):
         if _FILE_ID_KEY not in event.data:
             return ()
         try:
-            payload = json.loads(event.data)
+            payload = loads_bounded(event.data)
         except ValueError:
             return ()
         if not isinstance(payload, dict):
@@ -322,7 +321,7 @@ class AnthropicAdapter(ProviderAdapter):
         # restoration through the pool (counts flow into audit/status).
         # Anything unparseable is forwarded byte-identically.
         try:
-            payload = json.loads(line)
+            payload = loads_bounded(line)
         except ValueError:
             return line
         if not isinstance(payload, dict):
@@ -336,7 +335,7 @@ class AnthropicAdapter(ProviderAdapter):
         if event.event in _PASSTHROUGH_EVENTS or not event.data:
             return [event]
         try:
-            payload = json.loads(event.data)
+            payload = loads_bounded(event.data)
         except ValueError:
             return [event]
         if not isinstance(payload, dict):

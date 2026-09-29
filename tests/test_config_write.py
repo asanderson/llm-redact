@@ -78,6 +78,7 @@ def test_every_field_nondefault_round_trips() -> None:
         port=1234,
         inject_system_note=False,
         max_body_bytes=99,
+        max_body_strings=77,
         providers={
             "anthropic": ProviderConfig(upstream_base_url="http://a.example"),
             "openai": ProviderConfig(upstream_base_url="http://o.example"),

@@ -179,16 +179,16 @@ def _check_build(report: _Report, config: Config) -> None:
 
 
 def _check_body_cap(report: _Report, config: Config) -> None:
-    # Informational: batch/file uploads bigger than the cap are rejected
+    # Informational: batch/file uploads bigger than the caps are rejected
     # 413 fail-closed (never forwarded unredacted) — batch workflows often
-    # need a bigger cap than chat traffic does.
+    # need bigger caps than chat traffic does.
     mib = config.max_body_bytes / (1024 * 1024)
     report.line(
         "PASS",
         "body cap",
-        f"max_body_bytes {config.max_body_bytes} (~{mib:.0f} MiB); redactable"
-        " requests above this answer 413 — raise it for large batch/file"
-        " uploads",
+        f"max_body_bytes {config.max_body_bytes} (~{mib:.0f} MiB), max_body_strings"
+        f" {config.max_body_strings}; redactable requests above either answer 413"
+        " — raise them for large batch/file uploads",
     )
 
 

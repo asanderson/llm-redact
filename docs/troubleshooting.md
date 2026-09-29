@@ -29,6 +29,17 @@ A 413: the redactable body is bigger than the cap (default ~10 MiB), and
 forwarding it unscanned is never an option. Batch/file uploads legitimately
 exceed chat-sized caps — raise `max_body_bytes` in the config.
 
+## "request body exceeds llm-redact max_body_strings"
+
+A 413 of the same kind: the body carries more strings to redact than the
+cap (default 100,000 — JSON string values, form fields, file names, lines
+of an uploaded JSONL file) or more multipart parts. Redaction costs per
+string on the proxy's event loop, so the cap keeps one request from
+stalling the others. Agent conversations stay far below it; a large batch
+upload of short prompts can exceed it — raise `max_body_strings` (and
+usually `max_body_bytes`) in the config. A realtime connection whose
+client frame exceeds it is closed with code 1009.
+
 ## "config parses but does not BUILD: …"
 
 From `doctor`: the file is valid TOML but the detector build refuses it —

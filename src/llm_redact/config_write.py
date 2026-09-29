@@ -272,6 +272,7 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
     lines.append(f"port = {config.port}")
     lines.append(f"inject_system_note = {_toml_value(config.inject_system_note)}")
     lines.append(f"max_body_bytes = {config.max_body_bytes}")
+    lines.append(f"max_body_strings = {config.max_body_strings}")
 
     for name in sorted(config.providers):
         # Custom upstreams ("custom:vllm") emit the canonical nested form.

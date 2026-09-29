@@ -25,7 +25,7 @@ Boundary map (threat-model.md § / guard):
   B5  Local ops surface / CORS preflight dies (OPTIONS -> 405, no CORS headers)
   B6  Local ops surface / JSON content-type required — 415
   B7  Local ops surface / 1 MiB guarded-POST body cap — 413
-  B8  Outbound requests / max_body_bytes fail-closed — 413, never forwarded
+  B8  Outbound requests / max_body_bytes + max_body_strings fail-closed — 413, never forwarded
   B9  Local ops surface / browser-hardening headers on every reserved reply
   B10 Trust boundaries / fail-closed bind policy (validate_bind_security)
   B11 Logging posture / ?key= query auth never logged (cross-ref canary harness)
@@ -296,6 +296,19 @@ async def test_b8_oversized_redactable_body_413_not_forwarded() -> None:
     resp = await client.post("/v1/chat/completions", json=body)
     assert resp.status_code == 413
     assert "x" * 500 not in resp.text  # never round-tripped through the upstream
+
+
+@pytest.mark.anyio
+async def test_b8_too_many_strings_413_not_forwarded() -> None:
+    """Threat-model § Outbound requests: redaction costs per string on the
+    event loop, so a body of more strings than max_body_strings is refused
+    413 — never forwarded, partly redacted or not."""
+    client = _client(_base_config(max_body_strings=10))
+    messages = [{"role": "user", "content": f"line {i} x@corp.example"} for i in range(11)]
+    resp = await client.post("/v1/chat/completions", json={"model": "gpt-4o", "messages": messages})
+    assert resp.status_code == 413
+    assert "max_body_strings (10)" in resp.text
+    assert "x@corp.example" not in resp.text  # never round-tripped through the upstream
 
 
 @pytest.mark.anyio

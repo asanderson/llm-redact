@@ -475,6 +475,13 @@ class OpenAIAdapter(ProviderAdapter):
         # non-goal); the user text rides named form fields. Suffix match so
         # the Azure subclass's /openai/... path shapes reuse this unchanged.
         media = path.endswith(_PROMPT_FIELD_PATH_SUFFIXES)
+        for part in parsed.parts:
+            if not media and part.filename is not None:
+                # Every line of an uploaded JSONL file is a string to redact:
+                # counted against max_body_strings BEFORE anything splits the
+                # file (the floor scan below does) — millions of empty lines
+                # cost per line, not per byte.
+                redactor.charge(part.content.count(b"\n") + 1)
         if may_carry_tokens(body):
             # Token floors from the WHOLE upload before any part is redacted:
             # a token in a later line bounds the numbers an earlier line's

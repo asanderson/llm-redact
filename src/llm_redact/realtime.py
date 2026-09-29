@@ -61,7 +61,7 @@ from llm_redact.placeholders import json_floors, may_carry_tokens, token_floors
 from llm_redact.plugin_api import UpstreamAuthError
 from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
 from llm_redact.providers.gemini import StreamedText
-from llm_redact.redactor import BlockedRequest, Redactor, UnredactableRequest
+from llm_redact.redactor import BlockedRequest, Redactor, TooManyStrings, UnredactableRequest
 from llm_redact.rehydrate import RehydratorPool
 
 if TYPE_CHECKING:
@@ -1191,11 +1191,11 @@ async def ws_handle(websocket: WebSocket) -> None:
     # a realtime frame, so there is nothing the opt-out could desynchronize.
     require_json = upstream_auth is not None
 
-    async def close_on_policy(reason: str) -> None:
+    async def close_on_policy(reason: str, code: int = 1008) -> None:
         # The client FIRST: closing the upstream first lets upstream_to_client
         # mirror the upstream's 1000 to the client ahead of the 1008.
         with contextlib.suppress(RuntimeError):
-            await websocket.close(code=1008, reason=_close_reason(reason))
+            await websocket.close(code=code, reason=_close_reason(reason))
         await upstream.close(code=1000)
 
     async def client_to_upstream() -> None:
@@ -1219,6 +1219,15 @@ async def ws_handle(websocket: WebSocket) -> None:
             # history, as on HTTP (and a session echo carries the proxy's
             # own note, whose «EMAIL_000» example is never issued anyway).
             ctx.redactor = ctx.redactor.with_floors(frame_floors(data))
+            # Each client frame is a body of its own: redacted through a copy
+            # that counts its strings against max_body_strings (the frame
+            # cap, MAX_FRAME_BYTES, bounds bytes only).
+            frame_ctx = RequestContext(
+                ctx.session_id,
+                ctx.vault,
+                ctx.redactor.with_budget(state.config.max_body_strings),
+                ctx.rehydrator,
+            )
             try:
                 # [providers.NAME] detection = false applies to realtime
                 # frames too: forwarded untouched (rehydration inbound
@@ -1228,12 +1237,19 @@ async def ws_handle(websocket: WebSocket) -> None:
                     if not provider_config.detection
                     else adapter.redact_message(
                         data,
-                        ctx,
+                        frame_ctx,
                         inject_note=state.config.inject_system_note,
                         require_json=require_json,
                     )
                 )
                 await upstream.send(outbound)
+            except TooManyStrings as refused:
+                # Too many strings to redact in one frame: never relayed
+                # (1009, message too big); the row records the HTTP 413.
+                logger.info("WS %s -> refused (%s)", path, refused)
+                status = 413
+                await close_on_policy(f"refused by llm-redact ({refused})", code=1009)
+                return
             except UnredactableRequest as refused:
                 # Closed like a block: the frame never reaches the upstream
                 # and the session cannot continue without it. The row

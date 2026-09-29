@@ -192,6 +192,14 @@ while the vault row is the secret store and is never exported.
 - **Request size limit** (`max_body_bytes`, 10 MiB default): oversized
   redactable requests are rejected with 413 before anything goes upstream —
   the proxy never silently forwards unredacted content.
+- **Request string limit** (`max_body_strings`, 100,000 default): redaction
+  runs string by string on the proxy's event loop, so a body of hundreds of
+  thousands of tiny strings would stall every other request. A redactable
+  request with more strings than this (JSON string values, form fields,
+  file names, uploaded JSONL lines) or more multipart parts is rejected with
+  413 the same way; a realtime client frame over it closes the connection
+  (1009). A long agent conversation carries a few thousand strings; raise
+  it together with `max_body_bytes` for large batch uploads.
 
 ## Session isolation
 

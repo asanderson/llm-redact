@@ -243,7 +243,8 @@ response, `GET /v1/files`, `GET /v1/files/{id}`, and Azure's
 with no single reading (a bare backslash, a folded header) is left as
 sent with key auth and refused with identity auth. Batch flows use the static vault session (with llm-redact-pro's
 named users, the submitting user's own copy of it), and uploads larger
-than `max_body_bytes` are rejected 413 fail-closed — raise the cap for
+than `max_body_bytes` — or carrying more lines, strings or parts than
+`max_body_strings` — are rejected 413 fail-closed: raise the caps for
 large batch files (`llm-redact doctor` reminds you).
 
 MCP connector configuration (Anthropic `mcp_servers`, OpenAI

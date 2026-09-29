@@ -129,6 +129,30 @@ decoded for it, and a realtime connection keeps a running floor over
 everything its client has sent. The record of what a per-request floor
 cannot see is in [compaction-relink.md](compaction-relink.md).
 
+Deleting a session (the `session_ttl_days` prune, `POST
+/__llm-redact/sessions/prune`, `llm-redact sessions prune`, an access
+gate's purge) deletes its rows but **retires its numbers**: one row per
+deleted session records the highest number it held, and a new value in
+that session is numbered above it, forever. So no `(session, type, n)`
+ever carries two values — a provider history, another proxy instance's
+cached copy of the session, or a live realtime connection still holding a
+deleted token can only restore it to its own value, or pass it through,
+never to a value issued after the delete:
+
+```json
+{"session_id": "conv-4f1c…", "n": 7}
+```
+
+Every view of a session re-reads that number at most once a second and
+drops the deleted values from memory when it moved; the instance that
+deleted the session drops them at once.
+
+A request's new values are written in **one transaction**, committed once
+before anything is forwarded (the sqlite vault runs `synchronous=FULL`, so
+each commit is an fsync — once per request, not once per value). A refused
+request (a block-mode value, `max_body_strings`) and a failed commit roll
+the whole transaction back: nothing it issued is kept, cached or sent.
+
 ### The audit record
 
 `audit.db`, an opt-in Pro feature: one metadata-only row per request

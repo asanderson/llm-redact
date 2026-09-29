@@ -309,7 +309,20 @@ silently rehydrate the *wrong* secret. Treat it accordingly.
   `llm-redact sessions prune --older-than 90d` deletes whole idle sessions
   (partial deletion could reuse a still-referenced number).
   `POST /__llm-redact/sessions/prune` (and the llm-redact-pro dashboard,
-  which calls it) does the same, safe against the live process.
+  which calls it) does the same, safe against the live process. Every
+  delete **retires** the session's numbers (a small `retired_numbers` row
+  per deleted session, no values, never removed): a new value in that
+  session is numbered above them, so a token of the deleted session — in
+  a provider's history, in another proxy instance's memory, on a realtime
+  connection still open — is never restored to a different value. Several
+  instances may share one vault file: each drops a session another one
+  deleted from its memory within a second. A session counts as idle when
+  it issued no NEW value for N days, and each instance's prune spares only
+  its own static session (and the router's durable ones) — so on a shared
+  vault one instance can prune another's static session that kept re-using
+  known values. That costs the deleted tokens their restoration (they pass
+  through verbatim), never a wrong value; set `session_ttl_days` above the
+  longest such pause, or leave it `0` on a shared vault.
 
 At-rest **encryption** of the vault (`[vault] encryption = "fernet"`), **key
 rotation** (`vault rotate-key`), and the **server RDBMS** backends are Pro

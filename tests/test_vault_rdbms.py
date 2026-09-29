@@ -198,6 +198,15 @@ def _battery(make_store: Any) -> None:
     assert pruned == 1
     assert manager.session_count() == 1
     assert manager.lookup_response_session("resp_1") is None  # rode along
+    # The pruned session's numbers are retired: re-created, it numbers above
+    # them — carol's «EMAIL_001» never gets a second value.
+    assert store.retired("sess-b") == 1
+    # A view the manager never handed out (another instance's) may still
+    # restore carol for a moment — her token's own value, never another.
+    assert other.original_for("«EMAIL_001»") in (None, "carol@corp.example")
+    assert other.placeholder_for("EMAIL", "zed@corp.example") == "«EMAIL_002»"
+    assert RdbmsVault(store, "sess-b").original_for("«EMAIL_002»") == "zed@corp.example"
+    assert manager.forget_sessions(["sess-b"]) == 1
     # sess-a survived intact, and its numbering continues densely.
     survivor = manager.get("sess-a")
     assert survivor.placeholder_for("EMAIL", "dan@corp.example") == "«EMAIL_003»"
@@ -849,7 +858,12 @@ def _drop_tables(config: VaultConfig) -> None:
 
     module, connect = _resolve_connector(config)
     conn = connect()
-    for table in ("llm_redact_mappings", "llm_redact_response_sessions", "llm_redact_meta"):
+    for table in (
+        "llm_redact_mappings",
+        "llm_redact_response_sessions",
+        "llm_redact_meta",
+        "llm_redact_retired",
+    ):
         with suppress(module.Error):
             conn.cursor().execute(f"DROP TABLE {table}")
             conn.commit()

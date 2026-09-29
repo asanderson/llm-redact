@@ -1,9 +1,10 @@
 """Vault lifecycle commands: sessions list/prune, lookup, gen-key.
 
 These operate directly on the sqlite database. Reads (list, lookup) are safe
-against a running proxy (WAL allows concurrent readers). Prune is not: a
-running proxy's write-through caches still hold pruned mappings, and a
-pruned session's counters restart — stop or restart the proxy afterwards.
+against a running proxy (WAL allows concurrent readers). Prune retires every
+number a deleted session held, so it never reissues one, and a running
+proxy drops the pruned mappings from its caches within a second
+(vault.CACHE_CHECK_SECONDS) — still, prefer to prune with the proxy stopped.
 
 ``lookup`` deliberately prints a secret to the terminal: that is the tool.
 The value is never logged anywhere.
@@ -20,7 +21,7 @@ from typing import TYPE_CHECKING
 
 from llm_redact.config import apply_env_overrides, dial_url, load_config
 from llm_redact.placeholders import MAX_TOKEN_NUMBER, canonicalize
-from llm_redact.vault import VaultKeyError, default_vault_path
+from llm_redact.vault import _RETIRED_TABLE, VaultKeyError, default_vault_path, prune_idle_sessions
 
 if TYPE_CHECKING:
     # Type-only import against the plugin-API Protocol: the concrete cipher is
@@ -204,11 +205,14 @@ def _rdbms_sessions_prune(config: "Config", days: int, *, assume_yes: bool) -> i
     finally:
         store.close()
     print(f"deleted {deleted} session(s)")
-    print(
-        "NOTE: stop or restart a running proxy — its caches still hold the "
-        "pruned mappings, and pruned sessions' counters restart."
-    )
+    print(_PRUNED_NOTE)
     return 0
+
+
+_PRUNED_NOTE = (
+    "NOTE: a pruned session's numbers are retired, never issued again; a running"
+    " proxy drops its pruned mappings from memory within a second."
+)
 
 
 def run_sessions_prune(args: argparse.Namespace) -> int:
@@ -245,18 +249,15 @@ def run_sessions_prune(args: argparse.Namespace) -> int:
             print("aborted")
             conn.close()
             return 1
-    ids = [session_id for session_id, _count in doomed]
-    marks = ",".join("?" * len(ids))
-    conn.execute("BEGIN IMMEDIATE")
-    conn.execute(f"DELETE FROM mappings WHERE session_id IN ({marks})", ids)
-    conn.execute(f"DELETE FROM response_sessions WHERE session_id IN ({marks})", ids)
-    conn.execute("COMMIT")
+    # A database no proxy of this version has opened yet lacks the table
+    # the delete retires the sessions' numbers in.
+    conn.execute(_RETIRED_TABLE)
+    # The idle check is repeated inside the delete's write transaction: a
+    # session used since the listing above is kept.
+    deleted = prune_idle_sessions(conn, days)
     conn.close()
-    print(f"deleted {len(doomed)} session(s)")
-    print(
-        "NOTE: stop or restart a running proxy — its caches still hold the "
-        "pruned mappings, and pruned sessions' counters restart."
-    )
+    print(f"deleted {len(deleted)} session(s)")
+    print(_PRUNED_NOTE)
     return 0
 
 
@@ -438,6 +439,25 @@ def run_vault_verify(args: argparse.Namespace) -> int:
             f"  note: {gapped} (session,type) group(s) skip numbers — token floors (numbers a"
             " request's own tokens held), or a deleted row; never a reuse"
         )
+    # Retired numbers: a whole-session delete retired every number the session
+    # held, and a new value is numbered above them — a live row at or below
+    # its session's retired number would be a deleted token's number reused.
+    has_retired = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'retired_numbers'"
+    ).fetchone()
+    if has_retired is not None:
+        reused = conn.execute(
+            "SELECT COUNT(*) FROM mappings m JOIN retired_numbers r"
+            " ON r.session_id = m.session_id WHERE m.n <= r.n"
+        ).fetchone()[0]
+        if reused:
+            failed = True
+            print(
+                f"  FAIL retired numbers: {reused} row(s) reuse a number their session's"
+                " deleted rows held"
+            )
+        else:
+            print("  PASS retired numbers (no deleted session's number issued again)")
 
     if cipher is not None:
         checked = decrypt_fail = mac_fail = 0

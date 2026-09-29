@@ -17,6 +17,7 @@ Design rules enforced here:
 
 import asyncio
 import dataclasses
+import functools
 import importlib.resources
 import importlib.util
 import inspect
@@ -126,7 +127,7 @@ from llm_redact.registry import get_registry, loaded_plugins, pro_package_instal
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent, SSEParser, serialize
 from llm_redact.upload_view import read_upload
-from llm_redact.vault import Vault, VaultManager
+from llm_redact.vault import Vault, VaultManager, run_batched
 from llm_redact.vault_crypto import key_source as vault_key_source
 from llm_redact.vault_crypto import require_vault_key_source
 
@@ -3588,11 +3589,18 @@ async def handle(request: Request) -> Response:
             budgeted.with_floors(json_floors(parsed)) if may_carry_tokens(body_bytes) else budgeted
         )
         try:
-            prepared = adapter.prepare_request(
-                parsed,
-                redactor,
-                inject_note=note_wanted and adapter.wants_system_note(kind, path),
-                mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
+            # Every new value of the body in ONE vault transaction (one fsync
+            # per request, not per value), committed before anything is
+            # forwarded; any refusal below rolls it back whole.
+            prepared = run_batched(
+                ctx.vault,
+                functools.partial(
+                    adapter.prepare_request,
+                    parsed,
+                    redactor,
+                    inject_note=note_wanted and adapter.wants_system_note(kind, path),
+                    mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
+                ),
             )
         except BlockedRequest as exc:
             return blocked_response(exc, adapter)
@@ -3628,18 +3636,23 @@ async def handle(request: Request) -> Response:
         boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
         if boundary is not None:
             try:
-                rewritten = adapter.redact_multipart(
-                    path,
-                    body_bytes,
-                    boundary,
-                    # This body's own copy, counting its strings (form
-                    # fields, file names, JSONL lines) against
-                    # max_body_strings.
-                    ctx.redactor.with_budget(max_body_strings),
-                    inject_note=note_wanted and adapter.wants_system_note(kind, path),
-                    # The scanned-body rule, part by part: an unscanned
-                    # piece refuses the whole request.
-                    require_scanned=True,
+                # One vault transaction for the whole upload (run_batched).
+                rewritten = run_batched(
+                    ctx.vault,
+                    functools.partial(
+                        adapter.redact_multipart,
+                        path,
+                        body_bytes,
+                        boundary,
+                        # This body's own copy, counting its strings (form
+                        # fields, file names, JSONL lines) against
+                        # max_body_strings.
+                        ctx.redactor.with_budget(max_body_strings),
+                        inject_note=note_wanted and adapter.wants_system_note(kind, path),
+                        # The scanned-body rule, part by part: an unscanned
+                        # piece refuses the whole request.
+                        require_scanned=True,
+                    ),
                 )
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the

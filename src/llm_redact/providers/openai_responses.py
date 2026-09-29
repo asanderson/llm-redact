@@ -48,6 +48,79 @@ _DONE_EVENTS = {
 
 _TERMINAL_EVENTS = frozenset({"response.completed", "response.failed", "response.incomplete"})
 
+# The files the code interpreter WROTE into its container, as an answer
+# names them: an output_text part's ``container_file_citation`` annotation
+# (``file_id`` + ``container_id``), and a code interpreter call's output
+# entries of type ``files`` (``files[].file_id``; the ``results`` form of
+# earlier API versions too). A ``file_citation`` names a file the request's
+# file_search read — the user's own upload, never the provider's creation.
+_CONTAINER_CITATION = "container_file_citation"
+_CODE_INTERPRETER_CALL = "code_interpreter_call"
+_CALL_OUTPUT_KEYS = ("outputs", "results")
+# A key every event naming such a file carries (never inside a JSON string:
+# a quote there is escaped), so an event without it is never parsed.
+_FILE_ID_KEY = '"file_id"'
+
+
+def _dicts(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _annotation_file(annotation: Any, found: list[str]) -> None:
+    if isinstance(annotation, dict) and annotation.get("type") == _CONTAINER_CITATION:
+        file_id = annotation.get("file_id")
+        if isinstance(file_id, str) and file_id:
+            found.append(file_id)
+
+
+def _part_files(part: Any, found: list[str]) -> None:
+    annotations = part.get("annotations") if isinstance(part, dict) else None
+    for annotation in annotations if isinstance(annotations, list) else ():
+        _annotation_file(annotation, found)
+
+
+def _item_files(item: Any, found: list[str]) -> None:
+    if not isinstance(item, dict):
+        return
+    if item.get("type") == _CODE_INTERPRETER_CALL:
+        for key in _CALL_OUTPUT_KEYS:
+            for output in _dicts(item.get(key)):
+                for file in _dicts(output.get("files")):
+                    file_id = file.get("file_id")
+                    if isinstance(file_id, str) and file_id:
+                        found.append(file_id)
+        return
+    content = item.get("content")
+    for part in content if isinstance(content, list) else ():
+        _part_files(part, found)
+
+
+def container_file_ids(response: Any) -> tuple[str, ...]:
+    """The container files a Response's ``output`` names, each once."""
+    found: list[str] = []
+    output = response.get("output") if isinstance(response, dict) else None
+    for item in output if isinstance(output, list) else ():
+        _item_files(item, found)
+    return tuple(dict.fromkeys(found))
+
+
+def _event_container_files(payload: dict[str, Any]) -> tuple[str, ...]:
+    """The container files one stream event names: an added annotation,
+    a finished content part or output item, a terminal event's Response."""
+    found: list[str] = []
+    _annotation_file(payload.get("annotation"), found)
+    _part_files(payload.get("part"), found)
+    _item_files(payload.get("item"), found)
+    found.extend(container_file_ids(payload.get("response")))
+    return tuple(dict.fromkeys(found))
+
+
+def _creates_response(path: str) -> bool:
+    """POST to the Responses collection itself (under any prefix: OpenAI's
+    /v1, Azure's /openai and /openai/v1, a custom provider's)."""
+    return path.rstrip("/").endswith("/responses")
+
+
 # Every event type this adapter knows about — handled or deliberately passed
 # through. The live-API drift detector asserts observed ⊆ KNOWN_EVENT_TYPES,
 # so a new event name introduced by the API fails loudly instead of being
@@ -140,6 +213,28 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         if isinstance(body, dict) and isinstance(body.get("id"), str):
             return str(body["id"])
         return None
+
+    def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
+        # A Response's answer names the files its code interpreter wrote
+        # (container_file_ids), reported as the creator's. A read by id, a
+        # cancel or the input items create nothing and are never tracked.
+        return method == "POST" and _creates_response(path)
+
+    def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
+        return container_file_ids(body)
+
+    def object_ids_from_event(self, method: str, path: str, event: SSEEvent) -> tuple[str, ...]:
+        if _FILE_ID_KEY not in event.data:
+            return ()
+        try:
+            payload = json.loads(event.data)
+        except ValueError:
+            return ()
+        return _event_container_files(payload) if isinstance(payload, dict) else ()
+
+    def reports_object_ids_once(self, method: str, path: str) -> bool:
+        # Files are named as their annotations and items arrive.
+        return False
 
     def response_id_from_event(self, event: SSEEvent) -> str | None:
         if event.event != "response.created" or not event.data:

@@ -35,7 +35,7 @@ Classifications:
 
 | Endpoint | Classification | Notes |
 |---|---|---|
-| `POST /v1/messages` | chat | MCP connector: `mcp_servers[]` blocks pass through unredacted BY DESIGN — the provider must hold the real `authorization_token` to call the MCP server; everything else in the body is redacted |
+| `POST /v1/messages` | chat | MCP connector: `mcp_servers[]` blocks pass through unredacted BY DESIGN — the provider must hold the real `authorization_token` to call the MCP server; everything else in the body is redacted. The files a code execution run WROTE (`code_execution_output` / `bash_code_execution_output` entries of a code execution tool result, streaming included) are reported to a session router as the requester's |
 | `POST /v1/messages/count_tokens` | redact-only | note counted too, keeping counts honest |
 | `POST /v1/messages/batches` | redact-only | each `requests[].params` redacted + noted |
 | `GET /v1/messages/batches` | pass-through | processing metadata only |
@@ -80,7 +80,7 @@ else takes the OpenAI files handling below.
 |---|---|---|
 | `POST /v1/chat/completions` | chat | streaming `delta.content`, tool-call arguments, and reasoning-model chain-of-thought (`delta.reasoning_content` / `delta.reasoning`) are all rehydrated per choice |
 | `GET /v1/chat/completions/{id}` | chat | stored-completion retrieval restored |
-| `POST /v1/responses` | chat | MCP connector: `tools[].type == "mcp"` entries (server_url, headers) pass through unredacted BY DESIGN — the provider needs the real credential; `mcp_call` arguments/output in responses are rehydrated, streaming included |
+| `POST /v1/responses` | chat | MCP connector: `tools[].type == "mcp"` entries (server_url, headers) pass through unredacted BY DESIGN — the provider needs the real credential; `mcp_call` arguments/output in responses are rehydrated, streaming included. The files the code interpreter WROTE into its container (`container_file_citation` annotations, a code interpreter call's output files; streaming included) are reported to a session router as the requester's |
 | `GET /v1/responses/{id}` | chat | stored responses rehydrated |
 | `GET /v1/responses/{id}/input_items` | chat | input-item echoes restored |
 | `DELETE /v1/responses/{id}` | pass-through | |
@@ -115,8 +115,9 @@ else takes the OpenAI files handling below.
 | `POST /v1/videos/{id}/remix` | chat | remix prompt redacted; echo restored |
 | `GET /v1/videos/{id}/content` | pass-through | the rendered video: media bytes verbatim |
 | `DELETE /v1/videos/{id}` | pass-through | id only |
-| `POST /v1/fine_tuning/jobs` | pass-through | file ids only; the training FILE is covered at upload via `/v1/files` |
+| `POST /v1/fine_tuning/jobs` | pass-through | file ids only; the training FILE is covered at upload via `/v1/files`; the created job is reported to a session router as its creator's |
 | `GET /v1/fine_tuning/jobs` | pass-through | |
+| `GET /v1/fine_tuning/jobs/{id}` | pass-through | the job's `result_files` are reported to a session router (like a batch's output files on its status; also on the job's `cancel`, `pause` and `resume`) |
 | WebSocket `/v1/realtime` | websocket | beta + GA event vocabularies; MCP tool config preserved, MCP arguments rehydrated |
 
 ## Google Vertex AI
@@ -209,7 +210,7 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/models/{id}` | redact-only | |
 | `GET /openai/deployments` | redact-only | deployment listing |
 | `GET /openai/deployments/{d}` | redact-only | |
-| `POST /openai/v1/fine_tuning/jobs` | pass-through | file ids only; the training FILE is covered at upload |
+| `POST /openai/v1/fine_tuning/jobs` | pass-through | file ids only; the training FILE is covered at upload; the job, and later its `result_files`, are reported like OpenAI's |
 
 ## AWS Bedrock (runtime)
 
@@ -383,7 +384,10 @@ that is not there:
   not built. The same holds for their Azure v1 twins (`/openai/v1/threads`,
   `/openai/v1/vector_stores/{id}/search`), and Azure's `/openai/v1/evals`
   and `/openai/v1/containers` are not covered either — pass-through, and
-  refused under `auth = "identity"`.
+  refused under `auth = "identity"`. OpenAI's own `/v1/containers` (the
+  code interpreter's containers and their files) passes through to the
+  OpenAI upstream too; the files a Response's code wrote into a container
+  are reported to a session router as that Response's creator's.
 - **OpenAI WebRTC realtime** (`POST /v1/realtime/calls`, SDP offer/answer) —
   after setup, media and the event data channel flow peer-to-peer and never
   transit this HTTP/WS proxy at all: structurally unreachable, not merely

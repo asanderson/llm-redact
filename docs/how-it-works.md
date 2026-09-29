@@ -235,11 +235,22 @@ while the vault row is the secret store and is never exported.
   resumable upload's finalizing chunk when it is sent through the proxy,
   the metadata-only create and `files:register`; and a finished Gemini
   batch's output file, named on the status its creator reads), video jobs
-  (OpenAI/Azure `/videos`), stored chat completions,
+  (OpenAI/Azure `/videos`), stored chat completions, OpenAI fine-tuning
+  jobs (and a job's `result_files`, named when the job is read), the files
+  a provider tool WROTE for a request — an Anthropic code execution run's
+  output files (Files API ids, from a Messages answer, streamed ones read
+  from the `content_block_start` that carries the result) and the files
+  OpenAI's code interpreter wrote into its container
+  (`container_file_citation` annotations and a code interpreter call's
+  output files, streamed ones from whichever event names them first) —
   and the long-running jobs read back by name: Gemini API batches and Veo
   operations, Vertex Veo operations (`:predictLongRunning`, polled through
   `:fetchPredictOperation`) and Bedrock async invocations (`POST
-  /async-invoke`, polled by ARN) — with the session that created them
+  /async-invoke`, polled by ARN) — with the session that created them.
+  Only what the answer to THAT request names is reported, each id once
+  per answer, and never an id the request body itself carries (a file it
+  attached or uploaded into a container, an earlier answer it resends):
+  that is an existing object echoed, not one this request created
   (`SessionRouter.record_object_id`, in every vault mode: a router may
   serve unattributed traffic on the static path next to named users, and
   that shared session's objects are no user's). With a sqlite or RDBMS

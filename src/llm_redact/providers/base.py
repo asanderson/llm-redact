@@ -1,3 +1,4 @@
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from enum import Enum
@@ -262,13 +263,37 @@ class ProviderAdapter(ABC):
         ``object_ids_from_body``. ``body`` is the parsed REQUEST body (None
         when there is none or it is not JSON), for objects stored only on a
         request flag (OpenAI chat completions with ``store: true``). A
-        streamed response is read from its first event carrying an id."""
+        streamed response is read event by event (``object_ids_from_event``,
+        ``reports_object_ids_once``). Only objects the answer to THIS
+        request created are reported: the proxy drops any id the request
+        body itself carries (an existing object the answer echoes)."""
         return False
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
         """The stored-object ids a tracked response names (the created
-        object's id, plus a batch's output and error file ids)."""
+        object's id, plus a batch's output and error file ids, or the files
+        a tool run generated)."""
         return ()
+
+    def object_ids_from_event(self, method: str, path: str, event: SSEEvent) -> tuple[str, ...]:
+        """The stored-object ids one event of a tracked STREAM names: by
+        default its data parsed as the body ``object_ids_from_body`` reads
+        (a stored chat completion's chunks carry its id). An adapter whose
+        streams name objects on a few events only overrides this with a
+        cheap test first: it runs for every event of a tracked stream."""
+        try:
+            payload = json.loads(event.data)
+        except ValueError:
+            return ()  # [DONE], keep-alives, anything not JSON
+        return self.object_ids_from_body(method, path, payload)
+
+    def reports_object_ids_once(self, method: str, path: str) -> bool:
+        """Whether a tracked stream names ALL its stored objects on the
+        first event naming any (a stored chat completion's id rides every
+        chunk): the proxy then stops reading the stream for ids. False — a
+        stream naming generated files on the events that carry them — has
+        every event read, each id reported once."""
+        return True
 
     def lists_objects(self, method: str, path: str) -> bool:
         """Whether this request reads a COLLECTION of provider-stored objects

@@ -294,6 +294,23 @@ _LISTING_RE = re.compile(r"(?:^|/)(?:files|batches|videos|chat/completions)$")
 # stored FILE, named in the answer's nested `file` object.
 _UPLOAD_COMPLETE_RE = re.compile(r"(?:^|/)uploads/[^/]+/complete$")
 
+# Fine-tuning jobs (pass-through routes): the create answers with the job,
+# later read by id; a job read (and its cancel/pause/resume, each answering
+# with the job) names the files the job WROTE once it finished
+# (`result_files`) — reported like a batch's output files on its status, as
+# the reader's; the session router attributes them to the job's recorded
+# creator only. Tail-anchored: the Azure and custom-provider prefixes match.
+_FINE_TUNING_CREATE_RE = re.compile(r"(?:^|/)fine_tuning/jobs$")
+_FINE_TUNING_JOB_RE = re.compile(r"(?:^|/)fine_tuning/jobs/[^/]+(?:/cancel|/pause|/resume)?$")
+
+
+def _result_files(body: Any) -> tuple[str, ...]:
+    """The files a fine-tuning job's ``result_files`` names."""
+    files = body.get("result_files") if isinstance(body, dict) else None
+    if not isinstance(files, list):
+        return ()
+    return tuple(dict.fromkeys(f for f in files if isinstance(f, str) and f))
+
 
 def _completed_upload_file(body: Any) -> tuple[str, ...]:
     """The file a completed Upload created — unless it holds requests the
@@ -431,22 +448,32 @@ class OpenAIAdapter(ProviderAdapter):
         return kind is RouteKind.CHAT or path == "/v1/files"
 
     def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
+        tail = path.rstrip("/")
         if method == "POST" and (
             _tail_is_create(path)
-            or _VIDEO_CREATE_RE.search(path.rstrip("/")) is not None
-            or _UPLOAD_COMPLETE_RE.search(path.rstrip("/")) is not None
+            or _VIDEO_CREATE_RE.search(tail) is not None
+            or _UPLOAD_COMPLETE_RE.search(tail) is not None
+            or _FINE_TUNING_CREATE_RE.search(tail) is not None
             or _stored_completion_create(path, body)
         ):
             return True
-        return method in ("GET", "POST") and _BATCH_OBJECT_RE.search(path) is not None
+        return method in ("GET", "POST") and (
+            _BATCH_OBJECT_RE.search(path) is not None
+            or _FINE_TUNING_JOB_RE.search(tail) is not None
+        )
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
+        tail = path.rstrip("/")
         if _BATCH_OBJECT_RE.search(path) is not None:
             return _string_ids(body, _BATCH_FILE_KEYS)
-        if _UPLOAD_COMPLETE_RE.search(path.rstrip("/")) is not None:
+        if _UPLOAD_COMPLETE_RE.search(tail) is not None:
             return _completed_upload_file(body)
-        if path.rstrip("/").endswith("/batches"):
+        if tail.endswith("/batches"):
             return _string_ids(body, ("id", *_BATCH_FILE_KEYS))
+        if _FINE_TUNING_JOB_RE.search(tail) is not None:
+            return _result_files(body)  # never the job again: a read
+        if _FINE_TUNING_CREATE_RE.search(tail) is not None:
+            return (*_string_ids(body, ("id",)), *_result_files(body))
         return _string_ids(body, ("id",))
 
     def lists_objects(self, method: str, path: str) -> bool:

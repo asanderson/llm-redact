@@ -98,10 +98,16 @@ class SessionRouter(Protocol):
 
     OPTIONAL ``record_object_id(object_id, session_id) -> bool | None``:
     the proxy reports the ids of objects the provider STORES for later reads
-    (uploaded files, batches, message batches, stored conversations — see
-    ``ProviderAdapter.object_ids_from_body``) with the session that created
-    them, so a router can keep another user's later read of that object out
-    of the creator's namespace. Reported in EVERY ``mode`` (static
+    (uploaded files, batches, message batches, stored conversations, the
+    files a provider tool wrote for the request — see
+    ``ProviderAdapter.object_ids_from_body``) with the session of the
+    request whose answer names them (never an id that request's own body
+    carries: an existing object the answer echoes), so a router can keep
+    another user's later read of that object out of the creator's
+    namespace. An answer to a request that READS an existing object (a
+    batch's status, a fine-tuning job) names objects derived from it (the
+    batch's output files, the job's result files): a router attributes
+    those to the read object's creator. Reported in EVERY ``mode`` (static
     included: a router may serve unattributed traffic on the static path
     and still need to know what that shared session created). ``False``
     vetoes the durable mirror, as for response ids; a router without the

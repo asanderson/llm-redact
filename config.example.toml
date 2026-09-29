@@ -476,9 +476,13 @@ max_rows = 10000
 # authentication code): where the users database lives. Default:
 # $XDG_DATA_HOME/llm-redact/users.db. Restart to apply. Without the
 # llm-redact-pro package, setting it refuses startup rather than serving an
-# open proxy.
+# open proxy. unrecorded_objects: under a credential the proxy holds, a
+# named user's reference to a stored object no user is recorded creating is
+# refused ("refuse", the default) or forwarded and read sealed ("allow" —
+# it widens what one user can reach; see llm-redact-pro's docs).
 # [users]
 # path = "/var/lib/llm-redact/users.db"
+# unrecorded_objects = "refuse"
 
 # Verification-email delivery for llm-redact-pro's `llm-redact users invite` — YOUR SMTP
 # server, nothing goes through a vendor service. The SMTP password comes

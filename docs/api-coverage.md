@@ -24,8 +24,10 @@ Classifications:
   the routes it recognizes. On such a provider a chat or redact-only route
   likewise signs only a body the proxy redacted: a non-empty body that is
   not a JSON object (or canonical multipart on a route whose multipart
-  form is scanned), or that carries a `Content-Encoding`, is refused with
-  a recorded 400 instead of being forwarded verbatim
+  form is scanned), or that carries a `Content-Encoding` (any coding but
+  `identity`, in any of its Content-Encoding headers) or a repeated
+  `Content-Type`, is refused with a recorded 400 instead of being
+  forwarded verbatim
 - **websocket** — relayed by `realtime.py` (see the realtime sections of
   the README and threat model)
 
@@ -286,7 +288,10 @@ A pass-through request under `/v1/` that carries a **Google API key**
 (`x-goog-api-key`, or a `key=`/`$key=` query parameter) is forwarded to
 the Gemini upstream, not inferred as OpenAI: Gemini's v1 surface
 (`GET /v1/models[/{m}]`, …) shares OpenAI's prefix, and the Google key must
-never be sent to api.openai.com.
+never be sent to api.openai.com. An explicit Vertex path family
+(`/v1/projects/…`, `/v1/publishers/…`, `/v1beta1/…`) stays Vertex's
+whatever key it carries (express mode and service-account API keys
+authorize Vertex that way) — never sent to the Gemini API's host.
 
 Gemini **Imagen** (`models/{m}:predict`) and **Veo**
 (`models/{m}:predictLongRunning`) are redact-only: `instances[].prompt`

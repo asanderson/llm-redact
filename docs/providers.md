@@ -92,7 +92,10 @@ rewritten output restored; note the guardrail itself therefore judges the
 redacted text, placeholders and all) and
 StartAsyncInvoke (`POST /async-invoke`; its output lands in S3 with the
 placeholders in place) are redacted too, and the async-invoke status reads
-are recognized. A signature the CLIENT computed (SigV4-signed SDK traffic)
+are recognized. Base64 media blocks (`image`/`document`/`video`
+`source.bytes`) are forwarded byte-identical on every route — never
+scanned, like base64 `data` elsewhere (the media non-goal); the text
+beside them is redacted. A signature the CLIENT computed (SigV4-signed SDK traffic)
 remains a permanent non-goal: it covers the payload hash of the
 unredacted body, so no body-rewriting proxy can transit it (see
 [threat-model.md](threat-model.md)). The proxy can instead sign each
@@ -141,14 +144,20 @@ UTF-8 BOM or UTF-16/32 encoding is fine) or canonical multipart on a
 route whose multipart form llm-redact scans (Azure Files uploads and
 image edits). Anything else — non-JSON bytes, invalid UTF-8, a top-level
 JSON array or scalar (`null` included), a whitespace-only body,
-multipart on any other route or outside the canonical form, and any
-`Content-Encoding` other than `identity` (the proxy never decompresses
-a request, so it cannot see what the upstream would) — is refused with a
+multipart on any other route or outside the canonical form, any
+`Content-Encoding` coding other than `identity` in any of the request's
+Content-Encoding headers (the proxy never decompresses a request, so it
+cannot see what the upstream would), and a repeated `Content-Type`
+header (a singleton field; a second one could name a multipart boundary
+the proxy never parsed with) — is refused with a
 recorded, provider-shaped 400 naming the body's kind, before any
 credential is fetched or the upstream contacted. An empty body (a GET,
 DELETE or body-less POST) is forwarded as before; `detection = false`
-stays the explicit unredacted opt-out, and key-authorized providers keep
-forwarding such bodies verbatim. Inside an accepted multipart upload every
+stays the explicit unredacted opt-out for a body the proxy can read (it
+turns redaction off, not this rule: the ownership check of
+llm-redact-pro's named users reads the parsed body too, so a gzip or
+non-JSON body it could not read is refused either way), and
+key-authorized providers keep forwarding such bodies verbatim. Inside an accepted multipart upload every
 piece must be scanned too, or the whole request is refused the same way:
 each non-blank line of an uploaded file must be a JSON object (so a text,
 PDF or other non-JSONL file cannot be uploaded with the proxy's identity —
@@ -172,7 +181,10 @@ proxy scans the bytes it receives). Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with
-exactly the proxy's headers. Only those documented realtime paths are
+exactly the proxy's headers — and never redirected: a 3xx answer to the
+upgrade is a failed dial (1011, counted and recorded), so the proxy's
+credential cannot follow a `Location` to another host or path (nor, on
+key-authorized connections, the client's own key). Only those documented realtime paths are
 authorized (any other WebSocket path to such a provider is refused
 1011 and recorded as a 403), a missing credential closes the connection 1011 naming the
 credential source, a client frame that is not JSON (text or binary —
@@ -289,6 +301,10 @@ unredacted. Each provider also has a deliberate detection off-switch
 (`detection = false`): its requests are forwarded **unredacted** —
 nothing is protected, like warn mode — while rehydration stays active;
 use it only for upstreams you own end to end, such as a local Ollama.
+It turns off redaction only: a body with a repeated JSON key is still
+forwarded as the proxy parsed it (its last occurrence — what the session
+router's ownership check and stored-object tracking read), and an
+identity-authorized provider still refuses a body the proxy cannot read.
 Detection can also be scoped by language
 (`[detection] languages = ["en"]` skips other countries' national-id
 rules; universal rules always run) and per MCP server

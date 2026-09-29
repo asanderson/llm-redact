@@ -40,6 +40,7 @@ faults surface as the transport errors above.
 | Malformed UTF-8 in an SSE line | The line is decoded with `errors="replace"` and forwarded; valid streams stay byte-identical. | `test_codec_fuzz.py` |
 | Corrupt binary eventstream frame (bad CRC / length) | Degrade to **verbatim pass-through** of every unreturned byte and the rest of the stream — an unrestored placeholder is safe; guessing at a corrupt frame is not. | `test_provider_bedrock.py`, `test_eventstream.py` |
 | ndjson line that is not valid JSON | Forwarded byte-identically. | `test_ndjson.py` |
+| Multipart body of very many tiny parts | Parsed in time linear in the body (each part located by offset — re-slicing the remainder per part once froze the event loop for minutes at `max_body_bytes`); under identity auth a route that never scans multipart refuses it without parsing it at all. | `test_multipart.py`, `test_identity_body.py` |
 | Stream **ends mid-token** (upstream closed after a prefix) | The partial placeholder held in the rehydrator buffer is flushed **verbatim** — never guessed into a value, never dropped. For every truncation point, `feed(prefix)+flush()` equals the non-streaming rehydration of exactly what arrived. | `test_stream_truncation.py` |
 
 ## Vault durability
@@ -70,6 +71,23 @@ required = true` inverts that deliberately; its fault behavior:
 | Crash or kill between START and END | The next startup adopts every orphaned START as a synthetic chained `interrupted` row — a served request can lose its details, never its existence. Idempotent. | pro `test_audit_required_pro.py` |
 | Off-machine sink upload fails / credentials or encryption key missing | Batches spool from the audit DB and the per-sink high-water mark does NOT advance — retained and retried (byte-identical), never dropped; `max_rows` pruning never deletes unshipped rows. | pro `test_audit_required_pro.py` |
 
+## Faults after the upstream answered
+
+Once the provider has answered, the proxy still restores the answer and
+does session bookkeeping: it reports the response id and any stored
+objects (an uploaded file, a `store: true` completion) to the session
+router and mirrors them into the vault's durable map, and restores a
+listing's items in their owners' sessions (llm-redact-pro named users).
+A router exception, an RDBMS outage or a locked/failed sqlite write there
+must not undo an answer the provider already produced — and billed.
+
+| Fault | Behavior | Pinned by |
+| --- | --- | --- |
+| Recording a response id or stored object fails (router or durable map) | Contained: the answer is delivered (buffered or streamed — the stream is never cut), the fault logged by stage and exception type and counted (`llm_redact_bookkeeping_errors_total{stage}`, `/status` `bookkeeping_errors_total`). The object stays unattributed — the router's unknown-object case (an empty session: placeholders pass through), never a wrong value. | `test_bookkeeping_faults.py` |
+| A listed item's owner session cannot be read | That item is delivered exactly as the provider sent it (placeholders in place) — never what the request's own session would make of it; counted as `listing`. | `test_bookkeeping_faults.py` |
+| Restoring a **buffered** answer fails (a vault read that cannot complete, a router hook) | A recorded, provider-shaped **502** — never a bare 500, never a partial or unrestored body — its `[audit] required` END row finalized; counted as `delivery`. | `test_bookkeeping_faults.py` |
+| Restoring a **streamed** answer fails | The stream is cut (its status already went out — the honest signal, as for an upstream drop); counted as `delivery`, and the row and audit END are still finalized — booked as the proxy's 502, never the upstream's 200 (a routed stream closes as `stream_error`). | `test_bookkeeping_faults.py` |
+
 ## Concurrency
 
 Distinct conversations share the same token *names* (`«EMAIL_001»` exists in
@@ -92,6 +110,9 @@ deselected from the default run and runs as its own CI step).
   failed closed as 502. The `LlmRedactUpstreamErrors` Prometheus alert
   ([deploy/prometheus-alerts.yml](../deploy/prometheus-alerts.yml)) fires on a
   sustained rate. `/status` exposes the same as `upstream_errors_total`.
+- **`llm_redact_bookkeeping_errors_total{stage}`** counts faults after the
+  upstream answered (see above); `/status` exposes the same as
+  `bookkeeping_errors_total`.
 - Every fault path still emits a `record_request` row, so 502s appear in
   `/__llm-redact/recent`, the metrics `requests_total{status="502"}` series,
   and the audit log — a fault is never invisible.

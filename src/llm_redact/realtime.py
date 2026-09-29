@@ -44,6 +44,7 @@ already holds — the per-request floor of the HTTP path, per connection.
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import time
@@ -59,6 +60,7 @@ from llm_redact.jsonwalk import STRUCTURAL_KEYS, transform_strings
 from llm_redact.placeholders import json_floors, may_carry_tokens, token_floors
 from llm_redact.plugin_api import UpstreamAuthError
 from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
+from llm_redact.providers.gemini import StreamedText
 from llm_redact.redactor import BlockedRequest, Redactor, UnredactableRequest
 from llm_redact.rehydrate import RehydratorPool
 
@@ -104,6 +106,24 @@ _HOP_HEADERS = frozenset(
         "content-length",
     }
 )
+
+
+@functools.cache
+def _connect_without_redirects() -> Any:
+    """``websockets``' asyncio ``connect``, refusing every handshake redirect.
+
+    The stock client follows 3xx upgrade responses (cross-origin included)
+    and resends its headers on each hop — under identity auth the proxy's
+    OWN cloud credential, to a URL nobody authorized. The relay treats a
+    redirect as a failed dial instead (the HTTP side never follows one
+    either): the handshake's InvalidStatus is raised as is."""
+    from websockets.asyncio.client import connect
+
+    class NoRedirectConnect(connect):
+        def process_redirect(self, exc: Exception) -> Exception | str:
+            return exc
+
+    return NoRedirectConnect
 
 
 def websockets_available() -> bool:
@@ -522,8 +542,10 @@ class GeminiLiveWs(WsAdapter):
     turnComplete/generationComplete are the flush points: a leftover
     appends to the message's last matching part when it has a modelTurn,
     else it becomes a synthetic serverContent frame ahead of the flush
-    message. toolCall functionCalls[].args is a parsed object (plain
-    walk). Unparseable frames forward byte-identically.
+    message. Everything else in a model message is restored whole by a
+    walk from the message's root (toolCall functionCalls[].args at its
+    opaque position, code and grounding parts). Bookkeeping, unknown and
+    unparseable frames forward byte-identically.
     """
 
     name = "gemini-live"
@@ -575,14 +597,39 @@ class GeminiLiveWs(WsAdapter):
     def _part_kind(part: dict[str, Any]) -> str:
         return "thought" if part.get("thought") else "text"
 
+    @staticmethod
+    def _hold_streamed(payload: dict[str, Any]) -> dict[str, Any]:
+        """``payload`` with the values that stream through channels — the
+        modelTurn text parts and outputTranscription.text — held as
+        ``StreamedText``, copied along those paths only."""
+        server_content = dict(payload["serverContent"])
+        model_turn = server_content.get("modelTurn")
+        if isinstance(model_turn, dict) and isinstance(model_turn.get("parts"), list):
+            server_content["modelTurn"] = {
+                **model_turn,
+                "parts": [
+                    {**part, "text": StreamedText(part["text"])}
+                    if isinstance(part, dict) and isinstance(part.get("text"), str)
+                    else part
+                    for part in model_turn["parts"]
+                ],
+            }
+        transcription = server_content.get("outputTranscription")
+        if isinstance(transcription, dict) and isinstance(transcription.get("text"), str):
+            server_content["outputTranscription"] = {
+                **transcription,
+                "text": StreamedText(transcription["text"]),
+            }
+        return {**payload, "serverContent": server_content}
+
     def _rehydrate_parts(self, model_turn: dict[str, Any], pool: RehydratorPool) -> None:
         parts = model_turn.get("parts")
         if not isinstance(parts, list):
             return
         for part in parts:
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
+            if isinstance(part, dict) and isinstance(part.get("text"), StreamedText):
                 channel = pool.get(("modelTurn", self._part_kind(part)))
-                part["text"] = channel.feed(part["text"])
+                part["text"] = channel.feed(part["text"].text)
 
     def _flush_into(self, payload: dict[str, Any], pool: RehydratorPool) -> list[dict[str, Any]]:
         """Drain every channel; return extra frames to emit first."""
@@ -627,35 +674,33 @@ class GeminiLiveWs(WsAdapter):
         if not isinstance(payload, dict):
             return [data]
 
-        server_content = payload.get("serverContent")
-        if isinstance(server_content, dict):
-            model_turn = server_content.get("modelTurn")
-            if isinstance(model_turn, dict):
-                self._rehydrate_parts(model_turn, pool)
-            transcription = server_content.get("outputTranscription")
-            if isinstance(transcription, dict) and isinstance(transcription.get("text"), str):
-                channel = pool.get(("outputTranscription",))
-                transcription["text"] = channel.feed(transcription["text"])
-            frames: list[str | bytes] = []
-            if server_content.get("turnComplete") or server_content.get("generationComplete"):
-                frames = [
-                    _dump_frame(extra, was_binary) for extra in self._flush_into(payload, pool)
-                ]
-            frames.append(_dump_frame(payload, was_binary))
-            return frames
+        # A model message is walked from its ROOT, like the HTTP adapter's
+        # chunks, so each value keeps its position's context: a toolCall's
+        # functionCalls[].args is an opaque position (a tool parameter named
+        # `id` or `name` is restored), and code/grounding in serverContent
+        # are restored whole. Only the streamed values are held out of the
+        # walk and fed to their channels.
+        if not isinstance(payload.get("serverContent"), dict):
+            if isinstance(payload.get("toolCall"), dict):
+                return [_dump_frame(transform_strings(payload, pool.rehydrate_whole), was_binary)]
+            # setupComplete / usageMetadata / goAway / sessionResumptionUpdate
+            # and unknown shapes: pass through.
+            return [data]
 
-        tool_call = payload.get("toolCall")
-        if isinstance(tool_call, dict):
-            calls = tool_call.get("functionCalls")
-            if isinstance(calls, list):
-                tool_call["functionCalls"] = [
-                    transform_strings(call, pool.rehydrate_whole) for call in calls
-                ]
-            return [_dump_frame(payload, was_binary)]
-
-        # setupComplete / usageMetadata / goAway / sessionResumptionUpdate /
-        # inputTranscription-only and unknown shapes: pass through.
-        return [data]
+        walked = transform_strings(self._hold_streamed(payload), pool.rehydrate_whole)
+        server_content = walked["serverContent"]
+        model_turn = server_content.get("modelTurn")
+        if isinstance(model_turn, dict):
+            self._rehydrate_parts(model_turn, pool)
+        transcription = server_content.get("outputTranscription")
+        if isinstance(transcription, dict) and isinstance(transcription.get("text"), StreamedText):
+            channel = pool.get(("outputTranscription",))
+            transcription["text"] = channel.feed(transcription["text"].text)
+        frames: list[str | bytes] = []
+        if server_content.get("turnComplete") or server_content.get("generationComplete"):
+            frames = [_dump_frame(extra, was_binary) for extra in self._flush_into(walked, pool)]
+        frames.append(_dump_frame(walked, was_binary))
+        return frames
 
 
 # Vertex AI Live API: the Gemini Live protocol behind Vertex's regional
@@ -827,13 +872,21 @@ async def _reject(websocket: WebSocket, reason: str) -> None:
 
 
 def _record_ws_refusal(
-    state: "ProxyState", adapter: WsAdapter, path: str, status: int, started: float
+    state: "ProxyState",
+    adapter: WsAdapter | None,
+    path: str,
+    status: int,
+    started: float,
+    *,
+    session: str | None = None,
 ) -> None:
     """The recorded row for a connection refused before any upstream
-    contact by a proxy rule (HTTP records its 403/400 the same way)."""
+    contact by a proxy rule — the access gate (403), an unusable provider
+    (502), an audit START that could not commit (503), a sealed session or
+    a malformed target — as HTTP records its refusals."""
     state.record_request(
-        session=state.config.vault.session,
-        provider=adapter.provider,
+        session=session if session is not None else state.config.vault.session,
+        provider=adapter.provider if adapter is not None else None,
         method="WS",
         path=path,
         status=status,
@@ -956,19 +1009,24 @@ async def ws_handle(websocket: WebSocket) -> None:
         # realtime route exists under it anyway.
         await _reject(websocket, admission.refusal or "no realtime route for this path")
         return
-    if admission.refusal is not None:
-        logger.info("WS %s -> refused by the access gate", path)
-        await _reject(websocket, admission.refusal)
-        return
     if path.startswith("/__llm-redact"):
+        # Reached through a stripped prefix: never served here, never
+        # recorded (the HTTP rule — before the gate's refusal is applied).
         await _reject(websocket, "reserved path")
         return
-    # Attribute the connection's single record_request row (at close; same
-    # task, so the proxy's contextvar carries it).
+    # Attribute the connection's record_request row — a refusal's below,
+    # or the connection's at close (same task, so the proxy's contextvar
+    # carries it). From here on every refusal is recorded like HTTP's.
     from llm_redact.proxy import _REQUEST_USER
 
     _REQUEST_USER.set(admission.subject)
+    started = time.perf_counter()
     adapter = ws_adapter_for(path, state.ws_adapters)
+    if admission.refusal is not None:
+        logger.info("WS %s -> refused by the access gate", path)
+        _record_ws_refusal(state, adapter, path, 403, started)
+        await _reject(websocket, admission.refusal)
+        return
     if adapter is None:
         # Unlike unmatched HTTP traffic there is no default upstream to
         # forward an unknown WS path to; refusing is the only safe answer.
@@ -976,12 +1034,14 @@ async def ws_handle(websocket: WebSocket) -> None:
         return
     provider_config = state.config.providers.get(adapter.provider)
     if provider_config is None or not provider_config.upstream_base_url:
+        _record_ws_refusal(state, adapter, path, 502, started)
         await _reject(websocket, f"[providers.{adapter.provider}] upstream not configured")
         return
     if not provider_config.enabled:
         # Same fail-closed stance as HTTP: a disabled provider must never
         # fall through to any forwarding path.
         logger.info("WS %s -> refused (provider %s disabled)", path, adapter.provider)
+        _record_ws_refusal(state, adapter, path, 502, started)
         await _reject(websocket, f"provider {adapter.provider} disabled in llm-redact config")
         return
     upstream_auth = state.upstream_auth.get(adapter.provider)
@@ -994,7 +1054,7 @@ async def ws_handle(websocket: WebSocket) -> None:
         # is refused: forwarding the client's credential (or none) would
         # silently break the configured contract.
         logger.info("WS %s -> refused (provider %s uses identity auth)", path, adapter.provider)
-        _record_ws_refusal(state, adapter, path, 403, time.perf_counter())
+        _record_ws_refusal(state, adapter, path, 403, started)
         await _reject(
             websocket,
             f'[providers.{adapter.provider}] auth = "identity": only the realtime routes'
@@ -1013,7 +1073,6 @@ async def ws_handle(websocket: WebSocket) -> None:
 
     from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
 
-    started = time.perf_counter()
     static_ctx = state.context_for(None, "GET", path, None)
     if static_ctx.sealed:
         # A session the router says must stay empty cannot carry a
@@ -1088,23 +1147,26 @@ async def ws_handle(websocket: WebSocket) -> None:
             detections={},
         )
     except AuditWriteError as problem:
+        # The HTTP 503 twin: no upstream contact, recorded to metrics and
+        # /recent (its own audit write fails too — logged loudly there).
         logger.critical(
             "WS %s -> refused; audit write failed with [audit] required (%s)",
             path,
             type(problem).__name__,
         )
+        _record_ws_refusal(state, adapter, path, 503, started, session=ctx.session_id)
         await _reject(websocket, "audit log unavailable and [audit] required is enabled")
         return
 
     try:
-        upstream = await websockets.connect(
+        upstream = await _connect_without_redirects()(
             url,
             additional_headers=headers,
             subprotocols=[websockets.Subprotocol(s) for s in subprotocols] or None,
             max_size=MAX_FRAME_BYTES,
             open_timeout=30,
         )
-    except Exception as problem:  # DNS, TLS, refusals, handshake rejections
+    except Exception as problem:  # DNS, TLS, refusals, handshake rejections, redirects
         # The exception may embed the URL (query auth!) — log the class only.
         # Counted and recorded like an HTTP upstream fault (the audit START
         # row, if any, gets its END row here).
@@ -1124,8 +1186,9 @@ async def ws_handle(websocket: WebSocket) -> None:
         )
     status: int | None = 101
     # Under the proxy's own identity a frame the adapter cannot walk is
-    # refused, never relayed verbatim (the HTTP body rule; detection = false
-    # stays the explicit unredacted opt-out).
+    # refused, never relayed verbatim (the HTTP body rule). detection = false
+    # relays frames untouched: unlike an HTTP body, no ownership check reads
+    # a realtime frame, so there is nothing the opt-out could desynchronize.
     require_json = upstream_auth is not None
 
     async def close_on_policy(reason: str) -> None:

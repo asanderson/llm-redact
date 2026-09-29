@@ -50,6 +50,7 @@ from llm_redact.eventstream import (
 )
 from llm_redact.jsonwalk import (
     ENUM_LIST_POSITIONS,
+    MEDIA_POSITIONS,
     OPAQUE_ANYWHERE,
     OPAQUE_POSITIONS,
     STRUCTURAL_KEYS,
@@ -504,13 +505,26 @@ _body_keys = st.sampled_from(
         "name",
         "data",
         "object",
-        # Opaque-position keys (tool calls/results, documents).
+        # Opaque-position keys (tool calls/results, documents, and the
+        # caller-keyed maps: metadata, prompt variables, :predict input).
         "functionCall",
         "args",
         "json",
         "documents",
+        "metadata",
+        "requestMetadata",
+        "prompt",
+        "variables",
+        "instances",
+        "parameters",
+        "id",
+        # The empty key: a parent of "" is not the top level (None).
+        "",
         "session",
         "modalities",
+        # Bedrock base64 media: source.bytes.
+        "source",
+        "bytes",
     ]
 )
 _bodies = st.recursive(
@@ -556,7 +570,14 @@ _REF_OPAQUE = {
     ("call", "parameters"),
     ("tool_calls", "parameters"),
     ("function", "arguments"),
+    ("prompt", "variables"),
+    # None: the top level of a body (a :predict request).
+    (None, "instances"),
+    (None, "parameters"),
 }
+_REF_OPAQUE_ANYWHERE = {"documents", "metadata", "requestMetadata"}
+# Base64 media strings, skipped only at this position.
+_REF_MEDIA = {("source", "bytes")}
 
 
 _REF_ENUM_LISTS = {
@@ -576,7 +597,8 @@ _REF_ENUM_LISTS = {
 
 def test_reference_opaque_positions_match_jsonwalk() -> None:
     assert frozenset(_REF_OPAQUE) == OPAQUE_POSITIONS
-    assert frozenset({"documents"}) == OPAQUE_ANYWHERE
+    assert frozenset(_REF_OPAQUE_ANYWHERE) == OPAQUE_ANYWHERE
+    assert frozenset(_REF_MEDIA) == MEDIA_POSITIONS
     assert frozenset(_REF_ENUM_LISTS) == ENUM_LIST_POSITIONS
 
 
@@ -602,14 +624,18 @@ def _reference_walk(obj: object, fn: "Callable[[str], str]", parent: str | None 
         out: dict[object, object] = {}
         for key, value in obj.items():
             scalar = not isinstance(value, dict | list)
-            if key == "documents" or (parent or "", key) in _REF_OPAQUE:
+            if key in _REF_OPAQUE_ANYWHERE or (parent, key) in _REF_OPAQUE:
                 out[key] = _reference_all(value, fn)
             elif key == "data" and obj.get("type") == "text" and isinstance(value, str):
                 out[key] = fn(value)
-            elif (key in STRUCTURAL_KEYS and scalar) or (
-                (parent or "", key) in _REF_ENUM_LISTS
-                and isinstance(value, list)
-                and all(not isinstance(item, dict | list) for item in value)
+            elif (
+                (key in STRUCTURAL_KEYS and scalar)
+                or ((parent, key) in _REF_MEDIA and isinstance(value, str))
+                or (
+                    (parent, key) in _REF_ENUM_LISTS
+                    and isinstance(value, list)
+                    and all(not isinstance(item, dict | list) for item in value)
+                )
             ):
                 out[key] = value
             else:

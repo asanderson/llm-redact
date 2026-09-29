@@ -190,8 +190,9 @@ and each carried token the session did not own stays unissued.
 | --- | --- | --- |
 | Byte codecs (SSE, NDJSON, eventstream, multipart) | Parsers never lose bytes, never raise foreign exceptions, chunking never changes the parse | `test_codec_fuzz.py` |
 | JSON body pipeline | redact → rehydrate is identity over arbitrary JSON bodies (real detectors, seeded with values verified to fire detection) | `test_properties.py` |
-| jsonwalk skip semantics | Structural keys skip SCALARS only (objects/arrays under them walked), opaque tool-call/tool-result/document positions walked with no skips, enum arrays skipped at their schema positions, plaintext-document `data` walked — checked against an independent reference walker (and an independently transcribed position table) sharing no code with jsonwalk | `test_properties.py` |
+| jsonwalk skip semantics | Structural keys skip SCALARS only (objects/arrays under them walked), opaque tool-call/tool-result/document positions and caller-keyed maps walked with no skips, enum arrays skipped at their schema positions, plaintext-document `data` walked — checked against an independent reference walker (and an independently transcribed position table) sharing no code with jsonwalk | `test_properties.py` |
 | Tool results and documents | Any string anywhere inside a tool result / document (Gemini, Vertex Live, Bedrock Converse, Anthropic, Cohere v1/v2, Ollama), under any key including structural names, is redacted — and restored | `test_structural_subtrees.py` |
+| Caller-keyed maps | A value under ANY key — every skip name included — of `metadata` (OpenAI/Azure batches, chat, Responses, Realtime), Bedrock `requestMetadata`, `prompt.variables` and `:predict` `instances`/`parameters` is redacted end to end (signed redacted under identity auth) and restored in the echoes | `test_caller_keyed_maps.py` |
 | Streaming channels | `RehydratorPool` channels stay isolated under interleaving: each channel's streamed output equals the whole-text rehydration of just its fragments | `test_properties.py` |
 
 ## Reproducible builds

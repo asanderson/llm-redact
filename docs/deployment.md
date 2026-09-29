@@ -105,7 +105,11 @@ own restarts and log retention:
 
 Config changes apply on **SIGHUP** without dropping in-flight requests
 (`kill -HUP $(pgrep -f 'llm-redact serve')`, or `docker kill
---signal=HUP`). Detection rules, allowlists, NER, fuzzy rehydration, note
+--signal=HUP`). A request keeps the configuration it was admitted under:
+its provider's upstream and authorization mode (`auth`, the authorizer
+it holds) are read once, before its body, so a reload that lands while a
+body is still arriving never signs a pass-through request with the
+proxy's identity. Detection rules, allowlists, NER, fuzzy rehydration, note
 injection, `max_body_bytes`, upstream URLs, and the routing sections
 `[upstreams]`/`[routing]`/`[prices]` (llm-redact-pro) hot-reload; vault, audit,
 host, port, log, TLS, OTel, users, and email changes warn "require restart"

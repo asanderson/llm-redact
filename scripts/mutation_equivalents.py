@@ -854,13 +854,6 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
     "llm_redact.eventstream.xǁEventStreamParserǁfeed__mutmut_49": (
         "error-msg-text: 'message CRC mismatch' XX-wrapped; match='message CRC' still matches."
     ),
-    "llm_redact.multipart.x_parse__mutmut_47": (
-        "unreachable-off-by-one: end<0 to end<=0; end = rest.find(delim, 2) is -1 or "
-        ">=2, never 0/1, so both predicates select the same set."
-    ),
-    "llm_redact.multipart.x_parse__mutmut_48": (
-        "unreachable-off-by-one: end<0 to end<1; end is never 0, so identical."
-    ),
     "llm_redact.multipart.x_parse_boundary__mutmut_28": (
         "codec-case: encode('ascii') to 'ASCII'; codec name normalized."
     ),

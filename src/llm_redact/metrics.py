@@ -89,6 +89,7 @@ class Metrics:
         vault_sessions: int,
         compaction_forks: int = 0,
         upstream_errors: "Counter[str] | None" = None,
+        bookkeeping_errors: "Counter[str] | None" = None,
     ) -> str:
         lines: list[str] = []
         lines.append("# HELP llm_redact_info Build information.")
@@ -146,6 +147,17 @@ class Metrics:
         for provider, count in sorted((upstream_errors or Counter()).items()):
             lines.append(
                 f'llm_redact_upstream_errors_total{{provider="{_escape_label(provider)}"}} {count}'
+            )
+
+        lines.append(
+            "# HELP llm_redact_bookkeeping_errors_total Faults after the upstream answered, by"
+            " stage: session bookkeeping (response_id, object_ids, listing — contained, the"
+            " answer still delivered) and delivery (restoring the answer — a recorded 502)."
+        )
+        lines.append("# TYPE llm_redact_bookkeeping_errors_total counter")
+        for stage, count in sorted((bookkeeping_errors or Counter()).items()):
+            lines.append(
+                f'llm_redact_bookkeeping_errors_total{{stage="{_escape_label(stage)}"}} {count}'
             )
 
         lines.append(

@@ -26,7 +26,11 @@ Streaming is the hard case — a placeholder can be split across chunk
 boundaries. The rehydrator holds back only a viable token prefix and flushes
 any leftover before the stream-end event, so streamed output is byte-for-byte
 identical to the non-streaming result (the same machinery serves SSE, NDJSON,
-Bedrock's binary eventstream, and realtime WebSocket deltas):
+Bedrock's binary eventstream, and realtime WebSocket deltas). Where a stream
+chunk is a whole JSON object (Gemini/Vertex, Gemini Live), everything but
+its streamed text is restored exactly as the buffered response would be,
+walked from the chunk's root — a tool call's arguments at their opaque
+position included:
 
 ![Sequence diagram of streaming rehydration reassembling a placeholder split across two SSE deltas](diagrams/sequence-streaming.svg)
 
@@ -38,9 +42,11 @@ that repeats a key, at any depth: the parser keeps the last occurrence,
 so the redactor never sees the earlier ones — while the provider's parser
 might keep the first. Such a body (and such an uploaded JSONL line) is
 always re-serialized from the walked object, so the earlier occurrences
-never leave the machine; realtime frames are always re-serialized anyway,
-and a Bedrock `count-tokens` base64 body that repeats a key is refused
-with a 400.
+never leave the machine — on a `detection = false` provider too, where it
+is re-serialized unredacted, so the upstream acts on exactly the value the
+session router's ownership check read; realtime frames are always
+re-serialized anyway, and a Bedrock `count-tokens` base64 body that
+repeats a key is refused with a 400.
 
 Watch the round trip live: `llm-redact status` and the `/recent` feed
 ([dashboard.md](dashboard.md)) show detections and restores, and an

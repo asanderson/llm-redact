@@ -24,6 +24,7 @@ from llm_redact.config import (
     ConfigError,
     VaultKmsConfig,
     apply_env_overrides,
+    dial_url,
     load_config,
     resolve_config_path,
     validate_bind_security,
@@ -198,20 +199,23 @@ def _check_proxy(report: _Report, config: Config) -> None:
     from llm_redact.proxy import RESERVED_PREFIX
 
     scheme = "https" if config.tls.enabled else "http"
-    url = f"{scheme}://{config.host}:{config.port}{RESERVED_PREFIX}/status"
+    # Where the configured bind is reached from this machine: loopback for
+    # a wildcard bind, an IPv6 literal in brackets.
+    base = dial_url(config.host, config.port, scheme=scheme)
+    where = urllib.parse.urlsplit(base).netloc
     try:
-        response = httpx.get(url, timeout=2.0)
+        response = httpx.get(f"{base}{RESERVED_PREFIX}/status", timeout=2.0)
         response.raise_for_status()
-    except httpx.HTTPError as problem:
+    except (httpx.HTTPError, httpx.InvalidURL) as problem:
         if config.tls.mutual:
             report.line(
                 "WARN",
                 "proxy",
-                f"not reachable at {config.host}:{config.port} — mutual TLS is on, so this"
+                f"not reachable at {where} — mutual TLS is on, so this"
                 " may just mean doctor has no client certificate",
             )
         else:
-            report.line("WARN", "proxy", f"not running at {config.host}:{config.port} ({problem})")
+            report.line("WARN", "proxy", f"not running at {where} ({problem})")
         _check_port_free(report, config)
         return
     running = str(response.json().get("version", "?"))
@@ -222,11 +226,24 @@ def _check_proxy(report: _Report, config: Config) -> None:
             f"running version {running} differs from installed {__version__} — restart to update",
         )
     else:
-        report.line("PASS", "proxy", f"running {running} at {config.host}:{config.port}")
+        report.line("PASS", "proxy", f"running {running} at {where}")
 
 
 def _check_port_free(report: _Report, config: Config) -> None:
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # An IPv6 bind needs an IPv6 socket: an IPv4 one fails to bind "::1"
+    # whether or not the port is free.
+    family = socket.AF_INET6 if ":" in config.host else socket.AF_INET
+    try:
+        probe = socket.socket(family, socket.SOCK_STREAM)
+    except OSError as exc:
+        kind = "IPv6" if family == socket.AF_INET6 else "IPv4"
+        report.line(
+            "WARN",
+            "proxy",
+            f"cannot probe port {config.port} on {config.host}: this machine cannot open"
+            f" an {kind} socket ({type(exc).__name__})",
+        )
+        return
     try:
         probe.bind((config.host, config.port))
     except OSError:

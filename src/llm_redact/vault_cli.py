@@ -18,7 +18,7 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from llm_redact.config import apply_env_overrides, load_config
+from llm_redact.config import apply_env_overrides, dial_url, load_config
 from llm_redact.placeholders import MAX_TOKEN_NUMBER, canonicalize
 from llm_redact.vault import VaultKeyError, default_vault_path
 
@@ -486,11 +486,11 @@ def _proxy_reachable(args: argparse.Namespace) -> bool:
     from llm_redact.proxy import RESERVED_PREFIX
 
     scheme = "https" if config.tls.enabled else "http"
-    url = f"{scheme}://{config.host}:{config.port}{RESERVED_PREFIX}/status"
+    url = f"{dial_url(config.host, config.port, scheme=scheme)}{RESERVED_PREFIX}/status"
     try:
         httpx.get(url, timeout=1.0).raise_for_status()
         return True
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return False
 
 

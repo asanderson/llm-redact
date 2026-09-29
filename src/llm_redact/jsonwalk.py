@@ -21,6 +21,7 @@ user data slip past it:
 """
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -229,6 +230,48 @@ def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     if len(obj) != len(pairs):
         raise _DuplicateKey
     return obj
+
+
+# The proxy's one JSON serializer: exactly ``json.dumps(value,
+# ensure_ascii=False)`` (the settings json.dumps builds its encoder from),
+# non-ASCII kept as is.
+_ENCODE = json.JSONEncoder(ensure_ascii=False).encode
+# A lone UTF-16 surrogate has no UTF-8 form, yet JSON can carry one: a
+# ``\ud800``-style escape, or (``json.loads`` of bytes decodes with
+# surrogatepass) surrogate-encoded bytes. Written raw by that serializer,
+# it fails the UTF-8 encode every body, SSE event, NDJSON line and
+# WebSocket frame goes through.
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _escape_surrogate(match: re.Match[str]) -> str:
+    return f"\\u{ord(match.group()):04x}"
+
+
+def json_text(value: Any) -> str:
+    """``value`` re-serialized the proxy's one way, and always
+    UTF-8-encodable: each lone surrogate (only ever inside a string literal,
+    never part of an escape the encoder wrote) is written back as its
+    ``\\udXXX`` escape — the same JSON value. Every other character, and so
+    every value without a lone surrogate, comes out exactly as
+    ``json.dumps(value, ensure_ascii=False)`` has it."""
+    text = _ENCODE(value)
+    if text.isascii():
+        return text
+    try:
+        text.encode()
+    except UnicodeEncodeError:
+        return _SURROGATE.sub(_escape_surrogate, text)
+    return text
+
+
+def json_bytes(value: Any) -> bytes:
+    """``json_text(value)`` as UTF-8, encoded once."""
+    text = _ENCODE(value)
+    try:
+        return text.encode()
+    except UnicodeEncodeError:
+        return _SURROGATE.sub(_escape_surrogate, text).encode()
 
 
 def loads_request(data: bytes | str) -> tuple[Any, bool]:

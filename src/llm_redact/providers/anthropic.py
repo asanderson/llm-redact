@@ -17,7 +17,7 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from llm_redact.jsonwalk import transform_strings
+from llm_redact.jsonwalk import json_bytes, json_text, transform_strings
 from llm_redact.providers.attribution import provider_markers
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor
@@ -330,7 +330,7 @@ class AnthropicAdapter(ProviderAdapter):
         rehydrated = transform_strings(payload, pool.rehydrate_whole)
         if rehydrated == payload:
             return line
-        return json.dumps(rehydrated, ensure_ascii=False).encode("utf-8")
+        return json_bytes(rehydrated)
 
     def rehydrate_event(self, event: SSEEvent, pool: RehydratorPool) -> list[SSEEvent]:
         if event.event in _PASSTHROUGH_EVENTS or not event.data:
@@ -349,7 +349,7 @@ class AnthropicAdapter(ProviderAdapter):
             if payload.get("stop_reason"):
                 new_text += pool.flush(channel)
             if new_text != payload["completion"]:
-                event.data = json.dumps({**payload, "completion": new_text}, ensure_ascii=False)
+                event.data = json_text({**payload, "completion": new_text})
             return [event]
         payloads = rehydrate_messages_payload(payload, pool)
         if payloads is None:
@@ -360,11 +360,9 @@ class AnthropicAdapter(ProviderAdapter):
                 events.append(event)  # unchanged: original bytes and fields
             elif item.get("type") == payload.get("type"):
                 # The rewritten form of this event: keep its envelope.
-                event.data = json.dumps(item, ensure_ascii=False)
+                event.data = json_text(item)
                 events.append(event)
             else:
                 # Synthetic flush delta injected before a stop.
-                events.append(
-                    SSEEvent(event="content_block_delta", data=json.dumps(item, ensure_ascii=False))
-                )
+                events.append(SSEEvent(event="content_block_delta", data=json_text(item)))
         return events

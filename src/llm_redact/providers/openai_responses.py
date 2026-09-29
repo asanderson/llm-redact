@@ -13,7 +13,7 @@ import re
 from collections.abc import Hashable
 from typing import Any
 
-from llm_redact.jsonwalk import transform_strings
+from llm_redact.jsonwalk import json_text, transform_strings
 from llm_redact.providers.base import (
     SYSTEM_NOTE,
     ProviderAdapter,
@@ -298,7 +298,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 "content_index": key[3],
                 "delta": leftover,
             }
-        return SSEEvent(event=payload["type"], data=json.dumps(payload, ensure_ascii=False))
+        return SSEEvent(event=payload["type"], data=json_text(payload))
 
     def _flush_to_events(self, leftovers: dict[Hashable, str]) -> list[SSEEvent]:
         return [
@@ -325,7 +325,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             key = self._channel_key(kind, payload)
             if isinstance(payload.get(field), str):
                 payload[field] = pool.get(key, json_source=json_source).feed(payload[field])
-                event.data = json.dumps(payload, ensure_ascii=False)
+                event.data = json_text(payload)
             return [event]
 
         if event_type in _DONE_EVENTS:
@@ -335,14 +335,14 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             synthetic = [self._synthetic_delta(key, leftover)] if leftover else []
             if isinstance(payload.get(field), str):
                 payload[field] = pool.rehydrate_whole(payload[field], json_source=json_source)
-                event.data = json.dumps(payload, ensure_ascii=False)
+                event.data = json_text(payload)
             return [*synthetic, event]
 
         if event_type == "response.content_part.done":
             part = payload.get("part")
             if isinstance(part, dict):
                 payload["part"] = self._rehydrate_embedded(part, pool)
-                event.data = json.dumps(payload, ensure_ascii=False)
+                event.data = json_text(payload)
             return [event]
 
         if event_type == "response.output_item.done":
@@ -354,7 +354,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     pool.flush_matching(lambda k: isinstance(k, tuple) and k[0] == item_id)
                 )
                 payload["item"] = self._rehydrate_embedded(item, pool)
-                event.data = json.dumps(payload, ensure_ascii=False)
+                event.data = json_text(payload)
             return [*synthetic, event]
 
         if event_type in _TERMINAL_EVENTS:
@@ -362,7 +362,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             response = payload.get("response")
             if isinstance(response, dict):
                 payload["response"] = self._rehydrate_embedded(response, pool)
-                event.data = json.dumps(payload, ensure_ascii=False)
+                event.data = json_text(payload)
             return [*synthetic, event]
 
         # created / in_progress / output_item.added / content_part.added /

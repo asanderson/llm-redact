@@ -670,6 +670,14 @@ class RdbmsStore:
 
         self._run(op)
 
+    @property
+    def owner_bound_shared(self) -> bool:
+        """Whether the response map could not gain its ``kind`` column (the
+        database user may not ALTER it, see ``_ensure_kind_column``): stored
+        objects' owner records then share the Responses rows' bound. Read at
+        startup only — adding the column takes a restart."""
+        return not self._row_kinds
+
     def _kind_missing(self, conn: Any) -> bool:
         """Whether the response map lacks the ``kind`` column (the portable
         probe of ``_table_missing``, for a column)."""
@@ -702,7 +710,8 @@ class RdbmsStore:
                 logger.warning(
                     "vault: could not add the kind column to llm_redact_response_sessions"
                     " (%s); stored objects' owner records share the Responses bound until"
-                    " it is added (ALTER TABLE llm_redact_response_sessions ADD %s)",
+                    " it is added (ALTER TABLE llm_redact_response_sessions ADD %s) and the"
+                    " proxy restarted",
                     type(exc).__name__,
                     _KIND_COLUMN,
                 )
@@ -1222,6 +1231,11 @@ class RdbmsVaultManager:
 
     def sessions_summary(self) -> list[dict[str, object]]:
         return self._store.sessions_summary()
+
+    @property
+    def owner_bound_shared(self) -> bool:
+        """``RdbmsStore.owner_bound_shared`` (surfaced in /status and doctor)."""
+        return self._store.owner_bound_shared
 
     def prune_sessions(self, days: int, *, exclude: frozenset[str] = frozenset()) -> int:
         doomed = self._store.prune_sessions(days, exclude=exclude)

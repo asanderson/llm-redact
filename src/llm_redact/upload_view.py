@@ -33,12 +33,11 @@ caller's decision (the proxy refuses them when its own credential is spent).
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, NamedTuple
 
 from llm_redact import multipart
-from llm_redact.jsonwalk import loads_request
+from llm_redact.jsonwalk import json_bytes, loads_request
 
 # What the proxy reads as a part's plain bytes, and as a field's text: any
 # other transfer encoding or charset is decoded by the upstream, never here.
@@ -57,19 +56,6 @@ REPEATED_KEY = "a multipart form field repeats a JSON key"
 # A field name's bracket path: the base, then zero or more "[segment]"s.
 _BRACKETED = re.compile(r"([^\[\]]*)((?:\[[^\[\]]*\])+)")
 _SEGMENT = re.compile(r"\[([^\[\]]*)\]")
-
-
-def json_line(value: Any) -> bytes:
-    """``value`` re-serialized as one JSON line of UTF-8, non-ASCII kept as
-    is — how an uploaded line the proxy rewrites (a redacted value, a
-    repeated key) is sent. A lone surrogate, which only a ``\\ud800``-style
-    escape can carry, has no UTF-8 form: that value is written with every
-    non-ASCII character escaped instead — the same JSON value, never a
-    failed request."""
-    try:
-        return json.dumps(value, ensure_ascii=False).encode("utf-8")
-    except UnicodeEncodeError:
-        return json.dumps(value).encode("ascii")
 
 
 class UploadView(NamedTuple):
@@ -156,7 +142,7 @@ class _Reader:
             self._spend(len(stripped))
             self.cited.append(obj)
             if duplicate_keys:
-                lines[index] = json_line(obj)
+                lines[index] = json_bytes(obj)
                 rewrote = True
         if rewrote:
             part.content = b"\n".join(lines)

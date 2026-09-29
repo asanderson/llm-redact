@@ -410,10 +410,16 @@ async def test_other_pass_through_bodies_are_never_parsed(
     ("raw", "headers"),
     [
         pytest.param(b'{"a": 1}', {"content-encoding": "gzip"}, id="gzip"),
+        pytest.param(
+            b'{"a": 1}',
+            [("content-encoding", "identity"), ("content-encoding", "identity, br")],
+            id="second-encoding-header",
+        ),
         pytest.param(b'{"file_ids": ["file-a"], "file_ids": ["file-b"]}', {}, id="repeated-key"),
         pytest.param(
             b" \n\xef\xbb\xbf" + b'{"file_ids": []' + b" " * 64 + b"}", {}, id="oversized-json"
         ),
+        pytest.param(b"\x00[" + b"\x00 " * 40 + b"\x00]", {}, id="oversized-utf16"),
         pytest.param(b"\xff\xfb" + b"\x00" * 200, {}, id="oversized-audio"),
     ],
 )
@@ -969,29 +975,45 @@ async def test_an_uploaded_batch_files_lines_are_checked_before_anything_is_sent
     assert row["status"] == 403
 
 
+@pytest.mark.parametrize("detection", [True, False], ids=["detection-on", "detection-off"])
 async def test_an_upload_is_checked_once_with_what_it_cites(
-    monkeypatch: pytest.MonkeyPatch,
+    detection: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The check reads the upload whether or not the route redacts; a CSV
+    # file has no JSON line to cite. Where redaction applies, its lines —
+    # not JSONL — are then refused by the scanned-body rule; detection =
+    # false forwards the upload as sent.
     router = LineRouter()
     upstream = Upstream()
-    app = _app(monkeypatch, router, upstream)
+    app = _app(
+        monkeypatch,
+        router,
+        upstream,
+        providers={"openai": ProviderConfig(UPSTREAM, detection=detection)},
+    )
     async with _client(app) as client:
         response = await client.post(
             "/v1/files",
             files={"file": ("contacts.csv", b"name,email\nada,x\n", "text/csv")},
             data={"purpose": "assistants"},
         )
-    assert response.status_code == 200 and len(upstream.requests) == 1
+    assert response.status_code == (400 if detection else 200)
+    assert len(upstream.requests) == (0 if detection else 1)
     assert router.checks == [("openai", "POST", "/v1/files", [{"purpose": "assistants"}], False)]
 
 
-@pytest.mark.parametrize(("proxy_credential", "status"), [(None, 400), (False, 200)])
+@pytest.mark.parametrize(
+    ("proxy_credential", "detection", "status"),
+    [(None, True, 400), (None, False, 400), (False, True, 400), (False, False, 200)],
+)
 async def test_an_upload_the_check_cannot_read_is_never_sent_with_the_proxys_credential(
-    proxy_credential: bool | None, status: int, monkeypatch: pytest.MonkeyPatch
+    proxy_credential: bool | None, detection: bool, status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A multipart upload outside the canonical grammar is forwarded unread
-    (its lines never reach the check): refused when the routed plan would
-    send it with the proxy's own credential."""
+    """A multipart upload outside the canonical grammar would be forwarded
+    unread (its lines never reach the check): refused when the routed plan
+    would send it with the proxy's own credential, and — the scanned-body
+    rule — wherever redaction applies; forwarded as sent only with the
+    client's own credential and detection = false."""
     router = LineRouter()
     kwargs = {} if proxy_credential is None else {"proxy_credential": proxy_credential}
     fake = FakeRouter(
@@ -1000,8 +1022,9 @@ async def test_an_upload_the_check_cannot_read_is_never_sent_with_the_proxys_cre
     reg, _ = install(monkeypatch, fake)
     _registry(monkeypatch, router, reg)
     upstream = Upstream()
+    openai = ProviderConfig(UPSTREAM, detection=detection)
     app = create_app(
-        routed_config(providers={**Config().providers, "openai": ProviderConfig(UPSTREAM)}),
+        routed_config(providers={**Config().providers, "openai": openai}),
         upstream_transport=httpx.MockTransport(upstream),
     )
     line = json.dumps(_batch_line("file-a")).encode()

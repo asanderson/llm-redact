@@ -133,14 +133,15 @@ def test_a_line_repeating_a_key_is_read_as_the_provider_reads_it() -> None:
 
 
 def test_a_rewritten_line_keeps_a_lone_surrogate_as_the_same_json_value() -> None:
-    # Only a \ud800-style escape can carry a lone surrogate, which has no
-    # UTF-8 form: the rewritten line escapes it again (every non-ASCII
-    # character escaped, the same JSON value) instead of failing the upload.
+    # A \ud800-style escape can carry a lone surrogate, which has no UTF-8
+    # form: the rewritten line escapes it again (jsonwalk.json_bytes — only
+    # the surrogate, every other character as the upload had it; the same
+    # JSON value) instead of failing the upload.
     repeated = b'{"body": {"file_id": "file-a"}, "body": {"input": "\\ud800 \xc2\xab"}}\n'
     body = _form(_file(repeated))
     view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
-    assert view.cited == [{"body": {"input": "\ud800 \u00ab"}}]
-    assert view.normalized == body.replace(repeated, b'{"body": {"input": "\\ud800 \\u00ab"}}\n')
+    assert view.cited == [{"body": {"input": "\ud800 «"}}]
+    assert view.normalized == body.replace(repeated, b'{"body": {"input": "\\ud800 \xc2\xab"}}\n')
 
 
 @pytest.mark.parametrize(
@@ -419,11 +420,12 @@ async def test_with_the_clients_own_credential_a_pass_through_upload_is_not_read
 
 
 @pytest.mark.parametrize(
-    ("headers", "why"),
+    ("headers", "why", "status"),
     [
         pytest.param(
             [("content-type", "application/json"), ("content-encoding", "gzip")],
             "content-encoded",
+            415,
             id="content-encoded",
         ),
         pytest.param(
@@ -432,12 +434,13 @@ async def test_with_the_clients_own_credential_a_pass_through_upload_is_not_read
                 ("content-type", "multipart/form-data; boundary=b"),
             ],
             "more than one Content-Type",
+            400,
             id="two-content-types",
         ),
     ],
 )
 async def test_a_matched_body_the_check_cannot_read_is_never_sent_with_the_proxys_credential(
-    headers: list[tuple[str, str]], why: str, monkeypatch: pytest.MonkeyPatch
+    headers: list[tuple[str, str]], why: str, status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     router = LineRouter()
     app, fake, upstream = _routed(
@@ -453,16 +456,17 @@ async def test_a_matched_body_the_check_cannot_read_is_never_sent_with_the_proxy
             content=body,
             headers=httpx.Headers([*headers, (ROUTE_HEADER, "r")]),
         )
-    assert response.status_code == 400
+    assert response.status_code == status
     assert why in response.json()["error"]["message"]  # provider-shaped: a matched route
     assert router.checks == [] and fake.plans[0].begun == [] and upstream.requests == []
-    # With the client's own credential the same body is not refused here.
+    # With the client's own credential and detection = false (the explicit
+    # opt-out) the same body is not refused: nothing reads it at all.
     app, fake, _ = _routed(
         monkeypatch,
         LineRouter(),
         "/v1/chat/completions",
         proxy_credential=False,
-        providers={**Config().providers, "openai": ProviderConfig(UPSTREAM)},
+        providers={**Config().providers, "openai": ProviderConfig(UPSTREAM, detection=False)},
     )
     async with _client(app) as client:
         response = await client.post(
@@ -478,9 +482,11 @@ async def test_a_matched_body_the_check_cannot_read_is_never_sent_with_the_proxy
 
 async def test_an_upload_over_the_part_cap_is_never_read(monkeypatch: pytest.MonkeyPatch) -> None:
     # A body of many empty parts costs the event loop per part: the check
-    # never parses one over max_body_strings. On a matched route redaction
-    # answers it 413; under the proxy's credential the check cannot read it,
-    # so it is refused 413 before redaction — nothing upstream.
+    # never parses one over max_body_strings. Where the scanned-body rule
+    # holds — redaction applies, or the proxy's credential is spent — the
+    # parts are counted before the rule parses anything and the upload is
+    # refused 413 before the check is asked — nothing upstream; with the
+    # client's own key and detection = false it goes out as sent, unread.
     import llm_redact.proxy as proxy_module
 
     def no_read(*args: Any, **kwargs: Any) -> Any:
@@ -512,5 +518,15 @@ async def test_an_upload_over_the_part_cap_is_never_read(monkeypatch: pytest.Mon
             "/v1/files", content=upload, headers={**HEADERS, ROUTE_HEADER: "r"}
         )
     assert response.status_code == 413
-    assert "more parts than llm-redact max_body_strings (2)" in response.json()["error"]["message"]
+    assert "max_body_strings (2)" in response.json()["error"]["message"]
     assert router.checks == [] and fake.plans[0].begun == [] and upstream.requests == []
+
+    router = LineRouter()
+    upstream = Upstream()
+    app = _app(monkeypatch, router, upstream, max_body_strings=2, providers=OFF)
+    async with _client(app) as client:
+        response = await client.post("/v1/files", content=upload, headers=HEADERS)
+    assert response.status_code == 200
+    (sent,) = upstream.requests
+    assert sent.content == upload  # forwarded as sent, never read
+    assert router.checks == [("openai", "POST", "/v1/files", None, False)]

@@ -30,15 +30,31 @@ Classifications:
   identity), and on a routed request (the llm-redact-pro routing layer)
   whose plan sends an operator key or no key at all — the proxy lends such
   a credential only to the routes it recognizes, and the refusal comes
-  before the body is read. On an identity-authorized provider a chat or redact-only route
-  likewise signs only a body the proxy redacted: a non-empty body that is
-  not a JSON object (or canonical multipart on a route whose multipart
-  form is scanned), or that carries a `Content-Encoding` (any coding but
-  `identity`, in any of its Content-Encoding headers) or a repeated
-  `Content-Type`, is refused with a recorded 400 instead of being
-  forwarded verbatim
+  before the body is read
 - **websocket** — relayed by `realtime.py` (see the realtime sections of
   the README and threat model)
+
+A chat or redact-only route forwards only a request body the proxy
+scanned — wherever redaction applies (`detection` on, the client's own
+key included) and wherever the request spends a credential the PROXY
+holds (`auth = "identity"`, or a routed plan's operator key), whatever
+`detection` says. A non-empty body that is not a JSON object (JSON is
+read from the bytes whatever the content-type; a UTF-8 BOM or UTF-16/32
+is fine) or canonical multipart on a route whose multipart form is
+scanned — bytes after the JSON value, invalid UTF-8 (a Latin-1 body), a
+top-level array or scalar, whitespace only, multipart anywhere else — or
+that is sent with a repeated `Content-Type`, is refused with a recorded,
+provider-shaped 400 instead of being forwarded verbatim (a lenient
+upstream would decode what the proxy never read: take the first JSON
+value, substitute bad bytes). A `Content-Encoding` other than `identity`,
+in any of the request's Content-Encoding headers, is refused **415** with
+`Accept-Encoding: identity`: llm-redact does not decode request bodies —
+send it uncompressed. Inside an accepted upload every piece must be
+scanned too (the `/v1/files` rows below). `[providers.NAME] detection =
+false` with the client's own key forwards such a body as sent, and so does
+every pass-through route (a route this table does not claim) — reached
+only with the client's own credential, since a credential the proxy holds
+is never lent to one (above).
 
 ## Anthropic
 
@@ -107,7 +123,7 @@ matches](#requests-no-route-matches).
 | `DELETE /v1/conversations/{id}` | redact-only | ids only |
 | `DELETE /v1/conversations/{id}/items/{item_id}` | redact-only | ids only |
 | `POST /v1/embeddings` | redact-only | vectors come back verbatim |
-| `POST /v1/files` | chat | multipart upload; JSONL file-part lines (batch + fine-tune), every part's `filename` / `filename*` and every non-structural plain form field redacted (structural fields — `purpose`, `expires_after[…]` — as sent), all other bytes preserved; the file object answering it echoes the filename, restored |
+| `POST /v1/files` | chat | multipart upload; JSONL file-part lines (batch + fine-tune), every part's `filename` / `filename*` and every plain form field (the structural `purpose`, `expires_after[…]` too, scanned as text) redacted, all other bytes preserved; a file that is not JSONL (a PDF, an image, a text file), a line that is not a JSON object, a form field that is not UTF-8, a preamble or epilogue, a part header without one reading, a Content-Transfer-Encoding or a declared charset other than UTF-8/US-ASCII refuses the upload (400: llm-redact cannot scan it — `detection = false` forwards it as sent); the file object answering it echoes the filename, restored |
 | `GET /v1/files` | chat | the file list: each echoed filename restored in the request's own session |
 | `GET /v1/files/{id}` | chat | the file object: its echoed filename restored |
 | `GET /v1/files/{id}/content` | chat | batch output JSONL restored line by line |
@@ -218,7 +234,7 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/conversations/{id}` | chat | |
 | `GET /openai/v1/conversations/{id}/items` | chat | list-envelope walk |
 | `DELETE /openai/v1/conversations/{id}` | redact-only | ids only |
-| `POST /openai/files` | chat | multipart JSONL upload, lines and filenames redacted (+ note on chat-shaped lines), the echoed filename restored; under identity auth a non-JSON-object line, a non-JSONL file, a non-UTF-8 form field, a part header without one reading (a `filename*` outside UTF-8 included), a Content-Transfer-Encoding, or a declared charset other than UTF-8/US-ASCII refuses the upload (400), and every form field is scanned as text (under key auth all but the structural ones) |
+| `POST /openai/files` | chat | multipart JSONL upload, lines and filenames redacted (+ note on chat-shaped lines), the echoed filename restored; a non-JSON-object line, a non-JSONL file, a non-UTF-8 form field, a part header without one reading (a `filename*` outside UTF-8 included), a Content-Transfer-Encoding, or a declared charset other than UTF-8/US-ASCII refuses the upload (400) — under identity auth, and under key auth wherever redaction applies — and every form field is scanned as text |
 | `POST /openai/v1/files` | chat | |
 | `GET /openai/files` | chat | the file list: echoed filenames restored |
 | `GET /openai/files/{id}` | chat | the file object: echoed filename restored |

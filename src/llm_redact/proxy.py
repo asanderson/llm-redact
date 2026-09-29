@@ -75,7 +75,7 @@ from llm_redact.detection.engine import (
 )
 from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
-from llm_redact.jsonwalk import loads_request
+from llm_redact.jsonwalk import json_bytes, loads_request
 from llm_redact.licensing import ResolvedLicense, resolve_license
 from llm_redact.metrics import Metrics
 from llm_redact.multipart import parse as parse_multipart
@@ -616,6 +616,8 @@ class ProxyState:
         vault = self.vault_manager.get(session_id)
         if session_id not in self._known_sessions:
             self._known_sessions.add(session_id)
+            # Searched for placeholders only, never encoded or sent: the
+            # plain dump is fine even with a lone surrogate in it.
             flat = json.dumps(parsed_body, ensure_ascii=False) if parsed_body is not None else ""
             if self._is_compaction_fork(session_id, vault, flat):
                 # A brand-new conversation whose history already contains
@@ -1890,6 +1892,12 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
             )
             # The identity token's TLS link is unverified (the hatch is set).
             vault_block["tls_unverified"] = identity_tls_unverified(config.vault)
+            # The database user could not ALTER the response map to add its
+            # kind column: stored objects' owner records share the Responses
+            # rows' bound (a manager without the member reports False).
+            vault_block["owner_bound_shared"] = (
+                getattr(state.vault_manager, "owner_bound_shared", False) is True
+            )
         return JSONResponse(
             {
                 "version": __version__,
@@ -2076,7 +2084,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                     except TimeoutError:
                         yield b": keepalive\n\n"
                         continue
-                    yield b"data: " + json.dumps(row, ensure_ascii=False).encode() + b"\n\n"
+                    yield b"data: " + json_bytes(row) + b"\n\n"
             finally:
                 state.event_subscribers.discard(queue)
 
@@ -2637,45 +2645,6 @@ async def _read_capped(request: Request, limit: int) -> bytes | None:
     return b"".join(chunks)
 
 
-def _identity_body_problem(
-    adapter: ProviderAdapter, path: str, headers: Headers, body: bytes, parsed: Any
-) -> str | None:
-    """Why a non-empty request body on a matched route must NOT be signed
-    with the proxy's own identity, or None when the proxy redacts it.
-
-    Signable: a JSON object (what ``prepare_request`` walks; JSON is read
-    from the bytes whatever the content-type, a UTF-8 BOM or UTF-16/32
-    encoding included), or canonical multipart on a route whose
-    ``redact_multipart`` scans it. Everything else would be forwarded
-    verbatim: non-JSON bytes, invalid UTF-8, a top-level array or scalar
-    (``null`` included — never walked), whitespace only, multipart on any
-    other route, and any content-encoded body (the proxy never decodes
-    one, so it cannot see what the upstream would) — every coding of every
-    Content-Encoding header counts, as the upstream reads them all. A
-    repeated Content-Type is refused too: it is a singleton field, and a
-    second one could name a multipart boundary the proxy never parsed
-    with. The route is checked before the multipart parse, so a body
-    refused on its route is never parsed. The result names the body's
-    KIND only — never its content."""
-    if _content_encoded(headers):
-        return _CONTENT_ENCODED
-    content_types = headers.getlist("content-type")
-    if len(content_types) > 1:
-        return "the request carries more than one Content-Type header"
-    if isinstance(parsed, dict):
-        return None
-    boundary = (
-        parse_multipart_boundary(content_types[0]) if parsed is None and content_types else None
-    )
-    if boundary is None:
-        return "the request body is not a JSON object llm-redact can redact"
-    if not adapter.redacts_multipart(path):
-        return "the multipart body is on a route llm-redact does not redact multipart for"
-    if parse_multipart(body, boundary) is None:
-        return "the multipart body is outside the canonical form llm-redact can redact"
-    return None
-
-
 def _lends_credential(plan: RoutePlan) -> bool:
     """Whether a routed request may reach its provider with a credential the
     PROXY holds (``RoutePlan.proxy_credential``, optional): only an explicit
@@ -2686,14 +2655,77 @@ def _lends_credential(plan: RoutePlan) -> bool:
 
 
 class _Unreadable(NamedTuple):
-    """Why a body sent with the proxy's own credential cannot be checked
-    (status, message — the body's KIND only, never its content)."""
+    """Why a request body cannot be forwarded as it is: the proxy cannot
+    read it — for the stored-object check, or to redact it (status,
+    message — the body's KIND only, never its content)."""
 
     status: int
     message: str
 
 
-_CONTENT_ENCODED = "the request body is content-encoded (llm-redact does not decode request bodies)"
+_CONTENT_ENCODED = (
+    "the request body is content-encoded (llm-redact does not decode request bodies;"
+    " send it uncompressed)"
+)
+# RFC 9110 §15.5.16: a 415 over a content coding names the codings accepted.
+_IDENTITY_ONLY = {"accept-encoding": "identity"}
+
+
+def _unscanned_body(
+    adapter: ProviderAdapter, path: str, headers: Headers, body: bytes, parsed: Any
+) -> _Unreadable | None:
+    """Why a non-empty request body on a matched route must NOT be
+    forwarded, or None when the proxy reads — and so redacts — all of it.
+    The scanned-body rule: it holds where redaction applies (detection on,
+    the client's own key included) and wherever the request spends a
+    credential the proxy holds, whatever ``detection`` says.
+
+    Forwardable: a JSON object (what ``prepare_request`` walks; JSON is read
+    from the bytes whatever the content-type, a UTF-8 BOM or UTF-16/32
+    encoding included), or canonical multipart on a route whose
+    ``redact_multipart`` scans it (each part is then scanned, or the
+    request refused). Everything else would be forwarded verbatim, and a
+    lenient upstream decodes what the proxy never read: non-JSON bytes,
+    invalid UTF-8, bytes after the JSON value, a top-level array or scalar
+    (``null`` included — never walked), whitespace only, multipart on any
+    other route, and any content-encoded body (415: the proxy never decodes
+    one) — every coding of every Content-Encoding header counts, as the
+    upstream reads them all. A repeated Content-Type is refused too: it is a
+    singleton field, and a second one could name a multipart boundary the
+    proxy never parsed with. The route is checked before the multipart
+    parse, so a body refused on its route is never parsed. The message
+    names the body's KIND only — never its content."""
+    if _content_encoded(headers):
+        return _Unreadable(415, _CONTENT_ENCODED)
+    content_types = headers.getlist("content-type")
+    if len(content_types) > 1:
+        return _Unreadable(400, "the request carries more than one Content-Type header")
+    if isinstance(parsed, dict):
+        return None
+    boundary = (
+        parse_multipart_boundary(content_types[0]) if parsed is None and content_types else None
+    )
+    if boundary is None:
+        return _Unreadable(400, "the request body is not a JSON object llm-redact can redact")
+    if not adapter.redacts_multipart(path):
+        return _Unreadable(
+            400, "the multipart body is on a route llm-redact does not redact multipart for"
+        )
+    if parse_multipart(body, boundary) is None:
+        return _Unreadable(
+            400, "the multipart body is outside the canonical form llm-redact can redact"
+        )
+    return None
+
+
+def _scanned_body_clause(*, identity: bool, proxy_credential: bool) -> str:
+    """Why the scanned-body rule holds for this request: whose credential
+    it would be sent with."""
+    if identity:
+        return "this provider is authorized with the proxy's own identity"
+    if proxy_credential:
+        return "this request would be sent with the proxy's own provider credential"
+    return "on this route llm-redact forwards only bodies it has redacted"
 
 
 def _content_encoded(headers: Headers) -> bool:
@@ -2730,10 +2762,14 @@ def _ownership_body(
     form field can name a file; whether the route redacts (``detection``)
     changes nothing here. (A pass-through route is never sent with the
     proxy's credential — refused before the body is read — so its body is
-    never read for the check.)"""
+    never read for the check.) Wherever such a body reaches this check the
+    scanned-body rule (``_unscanned_body``) has already refused a content
+    coding, a repeated Content-Type and an upload over the parts cap under
+    the proxy's credential; the check keeps those refusals of its own, so
+    it fails closed whatever runs before it."""
     if proxy_credential:
         if _content_encoded(headers):
-            return None, None, _Unreadable(400, _CONTENT_ENCODED)
+            return None, None, _Unreadable(415, _CONTENT_ENCODED)
         if len(headers.getlist("content-type")) > 1:
             return None, None, _Unreadable(400, "the request carries more than one Content-Type")
     if parsed is not None:
@@ -3328,6 +3364,50 @@ async def handle(request: Request) -> Response:
                 path=path,
                 started=started,
             )
+    detection_off = provider_conf is not None and not provider_conf.detection
+    if adapter is not None and body_bytes and (proxy_credential or not detection_off):
+        # The scanned-body rule: a matched route forwards only a body the
+        # proxy read — where redaction applies (detection on, the client's
+        # own key included) and wherever the proxy's own credential is spent
+        # (detection = false turns redaction off, never this rule: the
+        # ownership check and object tracking read the parsed body too). A
+        # body it cannot read would go out verbatim, and a lenient upstream
+        # decodes it anyway (inflates gzip, takes the first JSON value,
+        # substitutes bad bytes). Refused here, before the stored-object
+        # check, the session, redaction, any credential, the plan's begin()
+        # and any upstream contact. detection = false with the client's own
+        # key, and unmatched pass-through (only ever sent with the client's
+        # own credential: refused above under one the proxy holds), still
+        # forward such bodies verbatim.
+        if parsed is None and _multipart_parts_over(request.headers, body_bytes, max_body_strings):
+            # More parts than max_body_strings allows: refused before any
+            # parse — a body of many empty parts costs the event loop per
+            # part, not per byte. Like max_body_bytes, the cap holds on every
+            # route this rule covers.
+            return _body_too_large(
+                state,
+                request,
+                adapter,
+                session=state.config.vault.session,
+                path=path,
+                started=started,
+                cap="max_body_strings",
+                limit=max_body_strings,
+            )
+        unscanned = _unscanned_body(adapter, path, request.headers, body_bytes, parsed)
+        if unscanned is not None:
+            return _unscanned_body_refused(
+                state,
+                adapter,
+                unscanned,
+                clause=_scanned_body_clause(
+                    identity=upstream_auth is not None, proxy_credential=proxy_credential
+                ),
+                provider_name=provider_name,
+                request=request,
+                path=path,
+                started=started,
+            )
     check_body: Any = parsed
     # An upload whose checked lines repeat a key, re-serialized: what a
     # route that forwards the body unredacted (detection = false) sends.
@@ -3473,36 +3553,6 @@ async def handle(request: Request) -> Response:
     # The decoded form of `outbound` (None for pass-through / non-JSON
     # bodies): the routed path applies per-hop body rewrites to it.
     outbound_obj: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
-    detection_off = provider_conf is not None and not provider_conf.detection
-    if (
-        adapter is not None
-        and parsed is None
-        and body_bytes
-        and (upstream_auth is not None or not detection_off)
-        and _multipart_parts_over(request.headers, body_bytes, max_body_strings)
-    ):
-        # A multipart body on a matched route (redacted there, or vouched
-        # for under identity auth) with more parts than max_body_strings
-        # allows: refused before any parse — a body of many empty parts
-        # costs the event loop per part, not per byte. Like max_body_bytes,
-        # the cap holds on every matched route.
-        return too_many_strings(adapter)
-    if upstream_auth is not None and adapter is not None and body_bytes:
-        # The proxy's own identity signs only a body the proxy could read:
-        # one it cannot walk would otherwise be forwarded verbatim —
-        # refused here, before redaction, any credential fetch or upstream
-        # contact. detection = false turns REDACTION off, not this rule:
-        # the ownership check (object_access_refusal, above) and object
-        # tracking read the parsed body too, and a body they could not
-        # read (gzip, non-JSON bytes) must not carry the proxy's identity.
-        problem = _identity_body_problem(adapter, path, request.headers, body_bytes, parsed)
-        if problem is not None:
-            return refused_response(
-                f"llm-redact: {problem}, and this provider is authorized with the proxy's"
-                " own identity; the request was not forwarded",
-                adapter,
-                f"{problem} under identity auth",
-            )
     if adapter is not None and detection_off:
         # [providers.NAME] detection = false: the deliberate off-switch.
         # The request is forwarded byte-identical — no detection, no deny
@@ -3520,7 +3570,7 @@ async def handle(request: Request) -> Response:
             # tracking read its LAST occurrence, so exactly that is sent — a
             # first-wins upstream would otherwise act on a value nobody
             # checked (another user's previous_response_id, a `store`).
-            outbound = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+            outbound = json_bytes(parsed)
         elif checked_upload is not None:
             # Likewise an uploaded line repeating a key (a batch input
             # file's request, run later with this upload's credential).
@@ -3565,16 +3615,16 @@ async def handle(request: Request) -> Response:
         if duplicate_keys or sum(state.detection_counts.values()) != sum(
             detection_counts_before.values()
         ):
-            outbound = json.dumps(prepared, ensure_ascii=False).encode("utf-8")
+            outbound = json_bytes(prepared)
     elif adapter is not None and parsed is None and body_bytes:
-        # Matched routes with non-JSON bodies: multipart uploads (OpenAI
-        # /v1/files) get their JSONL file parts redacted; anything the
-        # adapter declines to rewrite forwards verbatim (the non-JSON-body
-        # default that keeps unknown formats working) — except under
-        # identity auth: refused above (_identity_body_problem), and any
-        # part the adapter would forward unscanned refused here. What the
-        # upload cites (its lines and form fields) was checked above,
-        # before anything was redacted (_ownership_body).
+        # Matched routes with non-JSON bodies: only canonical multipart on a
+        # route that scans it gets here (the scanned-body rule, above) —
+        # uploads (OpenAI /v1/files: JSONL file parts, file names, form
+        # fields) and the prompt-field media routes. Every part must be
+        # scanned: one the adapter would forward unscanned refuses the whole
+        # request (require_scanned). What the upload cites (its lines and
+        # form fields) was checked above, before anything was redacted
+        # (_ownership_body).
         boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
         if boundary is not None:
             try:
@@ -3587,9 +3637,9 @@ async def handle(request: Request) -> Response:
                     # max_body_strings.
                     ctx.redactor.with_budget(max_body_strings),
                     inject_note=note_wanted and adapter.wants_system_note(kind, path),
-                    # Under the proxy's own identity every part must be
-                    # scanned: an unscanned piece refuses the whole request.
-                    require_scanned=upstream_auth is not None,
+                    # The scanned-body rule, part by part: an unscanned
+                    # piece refuses the whole request.
+                    require_scanned=True,
                 )
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the
@@ -3600,11 +3650,13 @@ async def handle(request: Request) -> Response:
             except PlaceholderLimitReached as exc:
                 return refused_response(str(exc), adapter, "no placeholder number left")
             except UnredactableRequest as exc:
+                clause = _scanned_body_clause(
+                    identity=upstream_auth is not None, proxy_credential=proxy_credential
+                )
                 return refused_response(
-                    f"llm-redact: {exc}, and this provider is authorized with the proxy's"
-                    " own identity; the request was not forwarded",
+                    f"llm-redact: {exc}, and {clause}; the request was not forwarded",
                     adapter,
-                    "unscanned multipart content under identity auth",
+                    "unscanned multipart content",
                 )
             except SealedSessionError:
                 return sealed_response(adapter)
@@ -4287,7 +4339,7 @@ def _restore_buffered(
             if route is not None and route.observe_payload(rehydrated, kind):
                 changed = True
             if changed:
-                raw = json.dumps(rehydrated, ensure_ascii=False).encode("utf-8")
+                raw = json_bytes(rehydrated)
     elif kind is RouteKind.CHAT and adapter is not None and raw:
         # Non-JSON buffered CHAT responses: file downloads whose contents
         # can carry placeholders (OpenAI batch output JSONL). The adapter
@@ -4313,7 +4365,7 @@ def _restore_buffered(
         except ValueError:
             payload = None
         if payload is not None and route.observe_payload(payload, kind):
-            raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            raw = json_bytes(payload)
 
     lister = (
         state.object_lister(adapter, request.method, path, request.headers, request.url.query)
@@ -4544,7 +4596,52 @@ def _unchecked_body_refused(
         if adapter is not None
         else {"error": message}
     )
-    return JSONResponse(error, status_code=unreadable.status)
+    return JSONResponse(
+        error,
+        status_code=unreadable.status,
+        headers=_IDENTITY_ONLY if unreadable.status == 415 else None,
+    )
+
+
+def _unscanned_body_refused(
+    state: ProxyState,
+    adapter: ProviderAdapter,
+    unreadable: _Unreadable,
+    *,
+    clause: str,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A body the scanned-body rule refuses (``_unscanned_body``): recorded,
+    provider-shaped, before the stored-object check, the session, redaction,
+    any credential, the plan and any upstream contact — so no audit START
+    row either. The message names the body's kind and why the rule holds
+    (``clause``), never the content."""
+    message = f"llm-redact: {unreadable.message}, and {clause}; the request was not forwarded"
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=unreadable.status,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info(
+        "%s %s -> %d refused (a request body llm-redact cannot redact)",
+        request.method,
+        path,
+        unreadable.status,
+    )
+    return JSONResponse(
+        adapter.error_body(message, status=unreadable.status),
+        status_code=unreadable.status,
+        headers=_IDENTITY_ONLY if unreadable.status == 415 else None,
+    )
 
 
 def _restore_listing(
@@ -4594,7 +4691,7 @@ def _restore_listing(
         if restored != delivered_items[index]:
             delivered_items[index] = restored
             changed = True
-    return json.dumps(delivered, ensure_ascii=False).encode("utf-8") if changed else None
+    return json_bytes(delivered) if changed else None
 
 
 def _listing_fault(state: ProxyState, exc: Exception) -> None:

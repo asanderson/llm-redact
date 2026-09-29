@@ -31,7 +31,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from llm_redact.jsonwalk import transform_strings
+from llm_redact.jsonwalk import json_text, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.rehydrate import Rehydrator, RehydratorPool, StreamingRehydrator
 from llm_redact.sse import SSEEvent
@@ -252,7 +252,7 @@ class GeminiAdapter(ProviderAdapter):
             whole=pool.rehydrate_whole,
         )
         if rehydrated != payload:  # else the provider's own bytes go out
-            event.data = json.dumps(rehydrated, ensure_ascii=False)
+            event.data = json_text(rehydrated)
         return [event]
 
     def rehydrate_body(self, body: Any, rehydrator: Rehydrator) -> Any:

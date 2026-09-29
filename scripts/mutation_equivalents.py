@@ -933,5 +933,9 @@ OSCILLATING_MUTANTS: frozenset[str] = frozenset(
         # per-mutant time limit on a slow runner: survived -> timeout.
         "llm_redact.vault.xǁSqliteVaultǁplaceholder_for__mutmut_8",
         "llm_redact.vault.xǁSqliteVaultǁplaceholder_for__mutmut_15",
+        # popitem(last=False) -> last=None (equivalent: None is falsy exactly
+        # like False): survives when run alone, but CI once reported it killed
+        # by a test that coverage-based selection attached to it.
+        "llm_redact.vault.xǁSqliteVaultManagerǁget__mutmut_17",
     }
 )

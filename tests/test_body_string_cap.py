@@ -193,7 +193,9 @@ def _app(upstream: _Upstream, **config: Any) -> Any:
 
 
 def _client(app: Any) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
+    # A loopback name: a request that spends the proxy's own credential
+    # (identity auth) must name a host the proxy answers to.
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
 
 
 def _chat(strings: int) -> dict[str, Any]:

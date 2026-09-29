@@ -15,7 +15,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import (
     Bundle,
@@ -856,6 +856,9 @@ _DUP_SECRET = "dup.secret@corp.example"
 
 @settings(deadline=None)
 @given(body=_bodies, key=_body_keys, depth=st.integers(min_value=0, max_value=3))
+# A lone surrogate (only a \ud800-style escape can carry one) has no UTF-8
+# form: the rewritten line must still be sent, the same JSON value.
+@example(body="\ud800", key="content", depth=0)
 def test_a_repeated_key_is_always_flagged_and_never_leaks_from_a_jsonl_line(
     body: object, key: str, depth: int
 ) -> None:

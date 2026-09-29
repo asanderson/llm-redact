@@ -169,7 +169,8 @@ CREATE TABLE IF NOT EXISTS mappings (
 CREATE TABLE IF NOT EXISTS response_sessions (
   response_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  kind TEXT NOT NULL DEFAULT 'response'
 );
 """
 
@@ -191,15 +192,24 @@ CREATE TABLE IF NOT EXISTS mappings ({_MAPPINGS_V3_COLUMNS});
 CREATE TABLE IF NOT EXISTS response_sessions (
   response_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  kind TEXT NOT NULL DEFAULT 'response'
 );
 CREATE TABLE IF NOT EXISTS vault_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 # The response-id map keeps at most this many rows of sessions that hold no
 # mappings; rows of live sessions are removed with their session (prune).
+# Its two kinds of rows are bounded APART: a Responses chain's rows
+# (``record_response_session``) and a stored object's owner record
+# (``record_object_session``) — every Responses turn writes one, so a shared
+# bound let ordinary traffic push out who created a file whose creating
+# session never redacted anything (then attributed to nobody: refused).
 _MAX_RESPONSE_ROWS = 10000
+_MAX_OBJECT_ROWS = 10000
 _RESPONSE_PRUNE_EVERY = 256
+_RESPONSE_KIND = "response"
+_OBJECT_KIND = "object"
 # How many ids one batched response-map lookup binds per query (well under
 # every engine's parameter limit: sqlite's, and Oracle's 1000-item IN list).
 LOOKUP_CHUNK = 500
@@ -249,6 +259,25 @@ def _open_connection(path: Path, cipher: "VaultCipher | None" = None) -> sqlite3
     conn.executescript(_SCHEMA_V2)
     _migrate_to_v3(conn, cipher)
     return conn
+
+
+def _has_kind_column(conn: sqlite3.Connection) -> bool:
+    return any(row[1] == "kind" for row in conn.execute("PRAGMA table_info(response_sessions)"))
+
+
+def _ensure_kind_column(conn: sqlite3.Connection) -> None:
+    """Give a response map created before its rows had a ``kind`` the
+    column (every existing row is a Responses row as far as the bound goes:
+    the default). A concurrent opener that added it first is fine."""
+    if _has_kind_column(conn):
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE response_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'response'"
+        )
+    except sqlite3.OperationalError:
+        if not _has_kind_column(conn):
+            raise
 
 
 def _verify_key(conn: sqlite3.Connection, cipher: "VaultCipher", path: Path) -> None:
@@ -545,6 +574,11 @@ class VaultManager(Protocol):
 
     def record_response_session(self, response_id: str, session_id: str) -> None: ...
 
+    # Optional, read with getattr by the proxy: ``record_object_session(
+    # object_id, session_id)`` — a stored object's owner record, bounded
+    # apart from the Responses rows. A manager without it records owners
+    # through ``record_response_session`` (one shared bound).
+
     def lookup_response_session(self, response_id: str) -> str | None: ...
 
     def close(self) -> None: ...
@@ -602,6 +636,9 @@ class InMemoryVaultManager:
     def record_response_session(self, response_id: str, session_id: str) -> None:
         pass  # the SessionRouter's in-memory map is authoritative here
 
+    def record_object_session(self, object_id: str, session_id: str) -> None:
+        pass  # likewise: no durable map
+
     def lookup_response_session(self, response_id: str) -> str | None:
         return None
 
@@ -624,10 +661,11 @@ class SqliteVaultManager:
         self, path: Path, *, cipher: "VaultCipher | None" = None, view_cache_size: int = 64
     ) -> None:
         self._conn = _open_connection(path, cipher)
+        _ensure_kind_column(self._conn)
         self._cipher = cipher
         self._views: OrderedDict[str, SqliteVault] = OrderedDict()
         self._view_cache_size = view_cache_size
-        self._response_inserts = 0
+        self._inserts = {_RESPONSE_KIND: 0, _OBJECT_KIND: 0}
 
     def get(self, session_id: str) -> Vault:
         view = self._views.get(session_id)
@@ -720,25 +758,37 @@ class SqliteVaultManager:
         return int(present)
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
+        """Map a Responses chain's response id to its session."""
+        self._record(response_id, session_id, _RESPONSE_KIND, _MAX_RESPONSE_ROWS)
+
+    def record_object_session(self, object_id: str, session_id: str) -> None:
+        """Record the session that created a stored object (the router's
+        ownership record); bounded apart from the Responses rows."""
+        self._record(object_id, session_id, _OBJECT_KIND, _MAX_OBJECT_ROWS)
+
+    def _record(self, row_id: str, session_id: str, kind: str, cap: int) -> None:
         self._conn.execute(
-            "INSERT OR REPLACE INTO response_sessions (response_id, session_id) VALUES (?, ?)",
-            (response_id, session_id),
+            "INSERT OR REPLACE INTO response_sessions (response_id, session_id, kind)"
+            " VALUES (?, ?, ?)",
+            (row_id, session_id, kind),
         )
-        self._response_inserts += 1
-        if self._response_inserts >= _RESPONSE_PRUNE_EVERY:
-            self._response_inserts = 0
+        self._inserts[kind] += 1
+        if self._inserts[kind] >= _RESPONSE_PRUNE_EVERY:
+            self._inserts[kind] = 0
             # Beyond the cap, only rows whose session holds no mappings go
             # (a pruned session, or one that never redacted anything): a
             # router reads a missing row as "that session was pruned", and a
             # chain into a LIVE session resumed in a fresh one would reissue
             # «EMAIL_001» for a new value while the provider's history still
             # means the old one. Live sessions' rows leave with the session.
+            # Each kind keeps its own newest rows.
             self._conn.execute(
-                "DELETE FROM response_sessions WHERE response_id NOT IN"
-                " (SELECT response_id FROM response_sessions ORDER BY created_at DESC LIMIT ?)"
+                "DELETE FROM response_sessions WHERE kind = ? AND response_id NOT IN"
+                " (SELECT response_id FROM response_sessions WHERE kind = ?"
+                " ORDER BY created_at DESC LIMIT ?)"
                 " AND NOT EXISTS"
                 " (SELECT 1 FROM mappings m WHERE m.session_id = response_sessions.session_id)",
-                (_MAX_RESPONSE_ROWS,),
+                (kind, kind, cap),
             )
 
     def lookup_response_session(self, response_id: str) -> str | None:

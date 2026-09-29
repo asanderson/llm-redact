@@ -40,6 +40,7 @@ from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
+from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS, json_line
 
 _FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
 # The file list and one file's object: both echo each upload's filename.
@@ -193,12 +194,6 @@ def _multipart_floors(parsed: multipart.Multipart, *, media: bool) -> dict[str, 
     return floors
 
 
-# What an identity-authorized upload may declare: a part the proxy cannot
-# read as its plain bytes is never signed.
-_PLAIN_TRANSFER_ENCODINGS = frozenset({b"7bit", b"8bit", b"binary"})
-_PLAIN_CHARSETS = frozenset({"utf-8", "us-ascii"})
-
-
 def _require_plain_encoding(part: multipart.MultipartPart, *, scanned: bool) -> None:
     """Identity auth: refuse a part the proxy could not read as plain bytes
     (the body-part twin of the request Content-Encoding rule): any
@@ -207,7 +202,7 @@ def _require_plain_encoding(part: multipart.MultipartPart, *, scanned: bool) -> 
     other than UTF-8/US-ASCII, whether its own Content-Type parameter or
     the RFC 7578 §4.6 ``_charset_`` field. AmbiguousHeaders propagates."""
     encoding = part.header("content-transfer-encoding")
-    if encoding is not None and encoding.lower() not in _PLAIN_TRANSFER_ENCODINGS:
+    if encoding is not None and encoding.lower() not in PLAIN_TRANSFER_ENCODINGS:
         raise UnredactableRequest(
             "a multipart part declares a Content-Transfer-Encoding llm-redact does not decode"
         )
@@ -217,7 +212,7 @@ def _require_plain_encoding(part: multipart.MultipartPart, *, scanned: bool) -> 
     declared = [] if charset is None else [charset.value]
     if part.name == "_charset_":
         declared.append(part.content.decode("latin-1").strip())
-    if any(name.lower() not in _PLAIN_CHARSETS for name in declared):
+    if any(name.lower() not in PLAIN_CHARSETS for name in declared):
         raise UnredactableRequest("a multipart part declares a charset llm-redact does not decode")
 
 
@@ -298,6 +293,26 @@ _LISTING_RE = re.compile(r"(?:^|/)(?:files|batches|videos|chat/completions)$")
 # The Uploads API (large files in parts): completing an upload creates the
 # stored FILE, named in the answer's nested `file` object.
 _UPLOAD_COMPLETE_RE = re.compile(r"(?:^|/)uploads/[^/]+/complete$")
+
+
+def _completed_upload_file(body: Any) -> tuple[str, ...]:
+    """The file a completed Upload created — unless it holds requests the
+    provider will run (``purpose`` batch), or its purpose is not stated:
+    the Uploads API's parts are forwarded unread (an opaque byte range can
+    split a line), so the stored objects those requests cite were never
+    checked, and the file is not reported as its uploader's (it stays one
+    nobody is recorded creating)."""
+    if not isinstance(body, dict):
+        return ()
+    file = body.get("file")
+    if not isinstance(file, dict):
+        return ()
+    purposes = [purpose for purpose in (body.get("purpose"), file.get("purpose")) if purpose]
+    if not purposes or any(
+        not isinstance(purpose, str) or purpose.lower() == "batch" for purpose in purposes
+    ):
+        return ()
+    return _string_ids(file, ("id",))
 
 
 def _tail_is_create(path: str) -> bool:
@@ -429,7 +444,7 @@ class OpenAIAdapter(ProviderAdapter):
         if _BATCH_OBJECT_RE.search(path) is not None:
             return _string_ids(body, _BATCH_FILE_KEYS)
         if _UPLOAD_COMPLETE_RE.search(path.rstrip("/")) is not None:
-            return _string_ids(body.get("file") if isinstance(body, dict) else None, ("id",))
+            return _completed_upload_file(body)
         if path.rstrip("/").endswith("/batches"):
             return _string_ids(body, ("id", *_BATCH_FILE_KEYS))
         return _string_ids(body, ("id",))
@@ -497,7 +512,6 @@ class OpenAIAdapter(ProviderAdapter):
         *,
         inject_note: bool,
         require_scanned: bool = False,
-        cited: list[Any] | None = None,
     ) -> bytes | None:
         parsed = multipart.parse(body, boundary)
         if parsed is None:
@@ -533,7 +547,6 @@ class OpenAIAdapter(ProviderAdapter):
                     media=media,
                     inject_note=inject_note,
                     require_scanned=require_scanned,
-                    cited=cited,
                 )
         except multipart.AmbiguousHeaders as exc:
             # Only reachable under identity auth (require_scanned): a part
@@ -549,7 +562,6 @@ class OpenAIAdapter(ProviderAdapter):
         media: bool,
         inject_note: bool,
         require_scanned: bool,
-        cited: list[Any] | None = None,
     ) -> bool:
         # The upload's file name is user content on every route (the part
         # name is structural, like a JSON key). Strict under identity auth,
@@ -564,7 +576,6 @@ class OpenAIAdapter(ProviderAdapter):
                 redactor,
                 inject_note=inject_note,
                 require_scanned=require_scanned,
-                cited=cited,
             )
             if new_content != part.content:
                 part.content = new_content
@@ -580,7 +591,6 @@ class OpenAIAdapter(ProviderAdapter):
         *,
         inject_note: bool,
         require_scanned: bool = False,
-        cited: list[Any] | None = None,
     ) -> bytes:
         out: list[bytes] = []
         for line in data.split(b"\n"):
@@ -592,10 +602,6 @@ class OpenAIAdapter(ProviderAdapter):
                     )
                 out.append(line)  # blank/binary/unparseable: byte-identical
                 continue
-            if cited is not None:
-                # As the provider will read it: a repeated key's line is
-                # re-serialized below, so the last occurrence is what it sees.
-                cited.append(obj)
             redacted = redactor.redact_json(obj)
             changed = redacted != obj
             if not changed and not duplicate_keys:
@@ -611,7 +617,7 @@ class OpenAIAdapter(ProviderAdapter):
                 elif isinstance(redacted.get("messages"), list):
                     # Fine-tuning line: a bare chat example.
                     redacted = self.inject_system_note(redacted)
-            out.append(json.dumps(redacted, ensure_ascii=False).encode("utf-8"))
+            out.append(json_line(redacted))
         return b"\n".join(out)
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:

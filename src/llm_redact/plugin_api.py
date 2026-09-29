@@ -119,18 +119,24 @@ class SessionRouter(Protocol):
     identity (``[providers.NAME] auth = "identity"``), or the request is
     routed and its plan may send an operator key or no key at all
     (``RoutePlan.proxy_credential``). ``body`` is the parsed request body —
-    None for non-JSON bodies, and for pass-through routes unless the
-    request is sent with the proxy's credential: then a JSON body is parsed
-    for this check alone (still forwarded byte-for-byte), and one the check
-    cannot read — content-encoded, repeating a key, or JSON beyond
-    ``max_body_bytes`` — is refused before this is asked. A multipart
-    upload whose file lines the adapter parses (a batch input file: its
-    requests run later, with the credential the upload is sent with) is
-    asked about a SECOND time, after redaction and still before any
-    upstream contact, with ``body`` the list of those lines' JSON objects
-    (and one outside the canonical multipart grammar is refused under the
-    proxy's credential, its lines unreadable). A string refuses
-    the request with a recorded, provider-shaped 403 carrying exactly that
+    None for a body that is neither JSON nor an upload, and for
+    pass-through routes unless the request is sent with the proxy's
+    credential: then a JSON body is parsed for this check alone (still
+    forwarded byte-for-byte). A multipart/form-data upload is read for this
+    check alone (``upload_view``) — on a matched route whatever the
+    credential and whether or not it redacts (``detection``), on a
+    pass-through route under the proxy's credential — and ``body`` is then
+    a LIST of what it cites: each JSON-object line of its file parts (a
+    batch input file's requests run later, with the credential the upload
+    is sent with) and each form field as an object nested along its name
+    (``file_ids[]`` → ``{"file_ids": [value]}``). Under the proxy's
+    credential a body the check cannot read is refused before this is
+    asked: content-encoded, more than one Content-Type, JSON repeating a
+    key (a pass-through body; a matched one is re-serialized as checked),
+    JSON beyond ``max_body_bytes``, or an upload outside the canonical
+    grammar, with a transfer encoding, a form field that is not UTF-8
+    text, or more JSON than ``max_body_bytes``. A string refuses the
+    request with a recorded, provider-shaped 403 carrying exactly that
     text: a FIXED reason chosen by the router, never an object id, a user
     name or content. None forwards. An exception refuses too (fail closed;
     logged by exception type only). A router without the member is never
@@ -165,14 +171,17 @@ class SessionRouter(Protocol):
     and recreated since the object was created holds NEW values under the
     same token names). Otherwise the item keeps the provider's placeholders
     — name an empty session to keep an item OUT of the request's own
-    session. None (or an exception) leaves the item as the request's own
-    session delivers it. A listing never records ownership: nothing here
-    reaches ``record_object_id``. OPTIONAL batched form
+    session (a router that separates namespaces does so for every item it
+    cannot vouch for: the request's own session may hold other values
+    under the same token names). None leaves the item as the request's own
+    session delivers it. An exception delivers the item exactly as the
+    provider sent it: a router that cannot answer vouches for nothing. A
+    listing never records ownership: nothing here reaches
+    ``record_object_id``. OPTIONAL batched form
     ``listing_item_sessions(object_ids) -> Sequence[str | None]``, one
     answer per id in order, asked ONCE per listing instead when present (a
     router can then read its own records in one query); an exception or a
-    miscounted answer leaves every item as the request's own session
-    delivers it.
+    miscounted answer delivers EVERY item exactly as the provider sent it.
 
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the

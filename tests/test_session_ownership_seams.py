@@ -318,6 +318,65 @@ async def test_a_router_without_the_member_is_never_called(
     assert app.state.proxy.vault_manager.lookup_response_session("batch_9") is None
 
 
+@pytest.mark.parametrize(
+    ("upload_purpose", "file_purpose", "reported"),
+    [
+        ("user_data", "user_data", True),
+        ("fine-tune", None, True),
+        (None, "assistants", True),
+        ("batch", "batch", False),
+        ("user_data", "batch", False),  # either one saying batch: unsure
+        ("Batch", None, False),
+        (None, None, False),  # no purpose stated: unsure
+        (7, None, False),
+    ],
+)
+def test_a_completed_upload_of_batch_requests_is_never_reported(
+    upload_purpose: Any, file_purpose: Any, reported: bool
+) -> None:
+    """The Uploads API forwards its parts unread (an opaque byte range can
+    split a line), so the requests a batch input file assembled from them
+    holds were never checked for the stored objects they cite: the file is
+    not reported as its uploader's — it stays an object nobody is recorded
+    creating (the session router's unknown-object case)."""
+    body: dict[str, Any] = {"id": "upload_1", "object": "upload"}
+    body["file"] = {"id": "file-big", "object": "file"}
+    if upload_purpose is not None:
+        body["purpose"] = upload_purpose
+    if file_purpose is not None:
+        body["file"]["purpose"] = file_purpose
+    ids = OpenAIAdapter().object_ids_from_body("POST", "/v1/uploads/upload_1/complete", body)
+    assert ids == (("file-big",) if reported else ())
+
+
+@pytest.mark.parametrize(("purpose", "reported"), [("batch", False), ("user_data", True)])
+async def test_a_completed_batch_upload_reaches_no_router(
+    purpose: str, reported: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    router = OwnershipRouter()
+    _registry(monkeypatch, build_session_router=lambda config, **kw: router)
+    completed = {
+        "id": "upload_1",
+        "object": "upload",
+        "status": "completed",
+        "purpose": purpose,
+        "file": {"id": "file-parts", "object": "file", "purpose": purpose},
+    }
+    config = Config(
+        providers={**Config().providers, "openai": ProviderConfig(UPSTREAM)},
+        vault=VaultConfig(backend="sqlite", path=str(tmp_path / "v.db")),
+    )
+    app = create_app(
+        config,
+        upstream_transport=httpx.MockTransport(lambda r: httpx.Response(200, json=completed)),
+    )
+    response = await _post(app, "/v1/uploads/upload_1/complete", {"part_ids": ["part_1"]})
+    assert response.status_code == 200
+    assert router.objects == ([("file-parts", "user:n1:main")] if reported else [])
+    recorded = app.state.proxy.vault_manager.lookup_response_session("file-parts")
+    assert recorded == ("user:n1:main" if reported else None)
+
+
 # --- video jobs and stored chat completions -------------------------------------------
 
 
@@ -494,7 +553,12 @@ def test_every_provider_reports_the_jobs_and_files_read_back_by_id() -> None:
     assert openai.tracks_object_ids("POST", "/openai/v1/uploads/upload_1/complete/")
     assert not openai.tracks_object_ids("POST", "/v1/uploads/upload_1/parts")
     assert not openai.tracks_object_ids("POST", "/v1/uploads")
-    done = {"id": "upload_1", "object": "upload", "file": {"id": "file-big", "object": "file"}}
+    done = {
+        "id": "upload_1",
+        "object": "upload",
+        "purpose": "user_data",
+        "file": {"id": "file-big", "object": "file", "purpose": "user_data"},
+    }
     assert openai.object_ids_from_body("POST", complete, done) == ("file-big",)
     assert openai.object_ids_from_body("POST", complete, {"id": "upload_1", "file": None}) == ()
     assert openai.object_ids_from_body("POST", complete, ["x"]) == ()
@@ -523,6 +587,99 @@ def test_every_provider_reports_the_jobs_and_files_read_back_by_id() -> None:
     assert bedrock.object_ids_from_body("POST", "/async-invoke", {"invocationArn": arn}) == (arn,)
     assert bedrock.object_ids_from_body("POST", "/async-invoke", {"invocationArn": 7}) == ()
     assert bedrock.object_ids_from_body("POST", "/async-invoke", None) == ()
+
+
+def test_the_gemini_files_api_is_tracked() -> None:
+    """The Gemini API's Files API: a file is created by the media upload
+    (the multipart protocol, or a resumable upload's finalizing chunk), the
+    metadata-only create, or ``files:register``; a batch's status names its
+    output file once it finished. Each is reported as ``files/<id>``."""
+    gemini = GeminiAdapter()
+    for path in ("/upload/v1beta/files", "/v1beta/files", "/v1beta/files:register"):
+        assert gemini.tracks_object_ids("POST", path), path
+    assert gemini.tracks_object_ids("GET", "/v1beta/batches/b1")
+    for method, path in [
+        ("GET", "/v1beta/files/abc"),
+        ("DELETE", "/v1beta/files/abc"),
+        ("GET", "/v1beta/files"),
+        ("GET", "/download/v1beta/files/abc:download"),
+        ("POST", "/upload/v1beta/files/abc"),
+        ("GET", "/v1beta/batches"),
+        ("POST", "/v1beta/batches/b1:cancel"),
+        ("DELETE", "/v1beta/batches/b1"),
+        ("POST", "/v1/files"),  # OpenAI's collection, never the Gemini API's
+    ]:
+        assert not gemini.tracks_object_ids(method, path), (method, path)
+    uri = "https://generativelanguage.googleapis.com/v1beta/files/abc-123"
+    uploaded = {"file": {"name": "files/abc-123", "uri": uri, "state": "ACTIVE"}}
+    for path in ("/upload/v1beta/files", "/v1beta/files"):
+        assert gemini.object_ids_from_body("POST", path, uploaded) == ("files/abc-123",)
+    assert gemini.object_ids_from_body("POST", "/upload/v1beta/files", {"file": {}}) == ()
+    assert gemini.object_ids_from_body("POST", "/upload/v1beta/files", {"file": "x"}) == ()
+    assert gemini.object_ids_from_body("POST", "/upload/v1beta/files", ["x"]) == ()
+    registered = {"files": [{"name": "files/a"}, {"name": "files/b"}, {"name": 7}, "x"]}
+    assert gemini.object_ids_from_body("POST", "/v1beta/files:register", registered) == (
+        "files/a",
+        "files/b",
+    )
+    assert gemini.object_ids_from_body("POST", "/v1beta/files:register", {"files": "x"}) == ()
+    status = {
+        "name": "batches/b1",
+        "done": True,
+        "metadata": {"state": "BATCH_STATE_SUCCEEDED", "output": {"responsesFile": "files/o1"}},
+        "response": {"@type": "type.googleapis.com/x", "responsesFile": "files/o1"},
+    }
+    assert gemini.object_ids_from_body("GET", "/v1beta/batches/b1", status) == ("files/o1",)
+    running = {"name": "batches/b1", "done": False, "metadata": {"state": "BATCH_STATE_RUNNING"}}
+    assert gemini.object_ids_from_body("GET", "/v1beta/batches/b1", running) == ()
+    inline = {"name": "batches/b1", "response": {"inlinedResponses": {"inlinedResponses": []}}}
+    assert gemini.object_ids_from_body("GET", "/v1beta/batches/b1", inline) == ()
+    assert gemini.object_ids_from_body("GET", "/v1beta/batches/b1", {"response": "x"}) == ()
+    # Only a Files API name counts (never an operation or a stray string).
+    odd = {"file": {"name": "batches/b1"}}
+    assert gemini.object_ids_from_body("POST", "/upload/v1beta/files", odd) == ()
+
+
+async def test_a_gemini_file_upload_and_a_batch_output_are_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Pass-through Gemini Files routes: the upload's answer names the file,
+    and a finished batch's status its output file — both reported with the
+    session that created (or first read) them."""
+    router = OwnershipRouter()
+    _registry(monkeypatch, build_session_router=lambda config, **kw: router)
+    uri = "https://generativelanguage.googleapis.com/v1beta/files/abc-123"
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/files"):
+            return httpx.Response(200, json={"file": {"name": "files/abc-123", "uri": uri}})
+        return httpx.Response(
+            200, json={"name": "batches/b1", "response": {"responsesFile": "files/o1"}}
+        )
+
+    config = Config(
+        providers={**Config().providers, "gemini": ProviderConfig(UPSTREAM)},
+        vault=VaultConfig(backend="sqlite", path=str(tmp_path / "v.db")),
+    )
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        upload = await client.post(
+            "/upload/v1beta/files",
+            content=b"--b\r\n\r\n{}\r\n--b--",
+            headers={"x-goog-upload-protocol": "multipart", "content-type": "multipart/related"},
+        )
+        status = await client.get("/v1beta/batches/b1")
+    assert upload.status_code == 200 and status.status_code == 200
+    assert router.objects == [("files/abc-123", "user:n1:main"), ("files/o1", "user:n1:main")]
+    manager = app.state.proxy.vault_manager
+    assert manager.lookup_response_session("files/abc-123") == "user:n1:main"
+
+
+def test_gemini_file_downloads_reach_the_gemini_upstream() -> None:
+    state = create_app(Config()).state.proxy
+    for path in ("/download/v1beta/files/abc:download", "/upload/v1beta/files"):
+        assert state.provider_for(None, path) == "gemini", path
 
 
 async def test_an_anthropic_files_upload_is_reported_with_its_session(

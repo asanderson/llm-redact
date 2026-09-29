@@ -48,6 +48,19 @@ _OPERATION_VERBS = frozenset({"batchGenerateContent", "predictLongRunning"})
 # redact. The per-cache GET/PATCH/DELETE and list return metadata (name, model,
 # token counts, expiry) — never the cached content — so they pass through.
 _GEMINI_CACHED_CREATE = re.compile(r"/(?:v1|v1beta)/cachedContents")
+# The Files API (media — the documented non-goal — so every route passes
+# through, never redacted or restored). A file is created by the media
+# upload (``/upload/v1beta/files``: the multipart protocol's one request, or
+# a resumable upload's finalizing chunk when it is sent through the proxy),
+# the metadata-only create, or ``files:register`` (Cloud Storage objects);
+# each answer names the file(s) as ``files/<id>``, which later bodies cite
+# (``fileData.fileUri``, a batch's input ``fileName``) and paths read.
+_GEMINI_FILE_CREATE = re.compile(r"(?:/upload)?/v1beta/files(?::register)?")
+# A batch's status (the operation read back by name): once it finished it
+# names the batch's output FILE — the creator's (only the creator's own read
+# of the batch reaches the provider and gets here unsealed).
+_GEMINI_BATCH_STATUS = re.compile(r"/v1beta/batches/[^/:]+")
+_FILE_PREFIX = "files/"
 
 # Live drift detector reference sets (tests/test_live.py): observed keys must
 # be subsets of these, or the API shape moved under us.
@@ -107,6 +120,41 @@ def cache_object_ids(body: Any) -> tuple[str, ...]:
     return (name[at:] if at >= 0 else name,)
 
 
+def _file_name(value: Any) -> str | None:
+    """A Files API file's name (``files/<id>``) from a File object."""
+    name = value.get("name") if isinstance(value, dict) else None
+    return name if isinstance(name, str) and name.startswith(_FILE_PREFIX) else None
+
+
+def file_object_ids(body: Any) -> tuple[str, ...]:
+    """The files a Files API create answers with: the upload's (and the
+    metadata-only create's) ``{"file": File}``, or ``files:register``'s
+    ``{"files": [File, …]}``."""
+    if not isinstance(body, dict):
+        return ()
+    listed = body.get("files")
+    files = [body.get("file"), *(listed if isinstance(listed, list) else ())]
+    return tuple(name for name in map(_file_name, files) if name is not None)
+
+
+def batch_output_file_ids(body: Any) -> tuple[str, ...]:
+    """The output file a finished batch's status names: ``response``'s (and
+    the metadata's ``output``) ``responsesFile``; none while it runs, or for
+    results inlined in the operation."""
+    if not isinstance(body, dict):
+        return ()
+    metadata = body.get("metadata")
+    outputs = (body.get("response"), metadata.get("output") if isinstance(metadata, dict) else None)
+    found = (
+        output.get("responsesFile") if isinstance(output, dict) else None for output in outputs
+    )
+    return tuple(
+        dict.fromkeys(
+            name for name in found if isinstance(name, str) and name.startswith(_FILE_PREFIX)
+        )
+    )
+
+
 class GeminiAdapter(ProviderAdapter):
     name = "gemini"
 
@@ -139,18 +187,25 @@ class GeminiAdapter(ProviderAdapter):
 
     def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
         # A context cache: later generateContent requests name it in
-        # `cachedContent`, and the model echoes its (redacted) content. And
-        # the long-running jobs whose results are read back by their
-        # operation NAME: a batch (`batches/<id>`, results inlined) and a
-        # Veo video (`models/<m>/operations/<id>`).
+        # `cachedContent`, and the model echoes its (redacted) content. The
+        # long-running jobs whose results are read back by their operation
+        # NAME: a batch (`batches/<id>`) and a Veo video
+        # (`models/<m>/operations/<id>`). A Files API file (every create
+        # form), and a finished batch's output file, named on its status.
+        if method == "GET":
+            return _GEMINI_BATCH_STATUS.fullmatch(path) is not None
         if method != "POST":
             return False
-        if _GEMINI_CACHED_CREATE.fullmatch(path) is not None:
+        if _GEMINI_CACHED_CREATE.fullmatch(path) or _GEMINI_FILE_CREATE.fullmatch(path):
             return True
         match = _GEMINI_PATH.fullmatch(path)
         return match is not None and match.group(1) in _OPERATION_VERBS
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
+        if _GEMINI_FILE_CREATE.fullmatch(path):
+            return file_object_ids(body)
+        if method == "GET":
+            return batch_output_file_ids(body)
         return cache_object_ids(body)
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:

@@ -309,7 +309,6 @@ class ProviderAdapter(ABC):
         *,
         inject_note: bool,
         require_scanned: bool = False,
-        cited: list[Any] | None = None,
     ) -> bytes | None:
         """Rewrite a multipart/form-data request body for ``path``.
 
@@ -319,11 +318,9 @@ class ProviderAdapter(ABC):
         uploaded file is a leak. ``require_scanned`` (identity auth) makes
         every piece the adapter would forward unscanned an
         ``UnredactableRequest`` naming its kind: the proxy's own identity
-        signs only what the proxy scanned. This base scans nothing.
-        ``cited``, when given, collects the JSON object of every uploaded
-        line the adapter parsed (a batch input file's requests, as the
-        provider will run them), so the proxy can check the stored objects
-        they cite.
+        signs only what the proxy scanned. This base scans nothing. (What
+        an upload cites for the stored-object check is read separately,
+        before redaction: ``upload_view.read_upload``.)
 
         The proxy cannot see inside the parts, so an adapter that redacts
         them first raises ``redactor``'s token floors (``with_floors``) to

@@ -3855,8 +3855,9 @@ def vault_fault_types(manager: object) -> tuple[type[BaseException], ...]:
     """What a vault fault raises while a request's placeholders are issued
     (``vault.run_batched``): sqlite's errors — the sqlite vaults, whose batch
     rolls back and re-raises a failed write or COMMIT — and the manager's
-    own (optional ``fault_types``: an RDBMS vault's DB-API driver errors).
-    Anything else is not the vault's and propagates as before."""
+    own (optional ``fault_types``: an RDBMS vault's DB-API driver errors and
+    its ``RdbmsAllocationError``). Anything else is not the vault's and
+    propagates as before."""
     declared = getattr(manager, "fault_types", ())
     return (sqlite3.Error, *tuple(declared))
 

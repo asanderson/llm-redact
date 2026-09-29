@@ -742,11 +742,6 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "raise the SAME exception type -> identical verbatim-degrade downstream; "
         "only the never-asserted message text differs."
     ),
-    "llm_redact.upload_view.x_json_line__mutmut_2": (
-        "json.dumps(ensure_ascii=False) -> ensure_ascii=None: json only "
-        "truth-tests the flag, and None is falsy exactly like False - the same "
-        "raw UTF-8 line."
-    ),
     "llm_redact.upload_view.xǁ_Readerǁread__mutmut_11": (
         "header name 'content-disposition' upper-cased: "
         "MultipartPart.header/params look the name up lower-cased (name.lower()), "

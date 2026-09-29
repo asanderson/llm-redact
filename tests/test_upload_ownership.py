@@ -132,6 +132,17 @@ def test_a_line_repeating_a_key_is_read_as_the_provider_reads_it() -> None:
     )
 
 
+def test_a_rewritten_file_before_other_parts_is_still_normalized() -> None:
+    # Whatever parts follow the file whose line was rewritten, the body sent
+    # is the rewritten one.
+    repeated = b'{"body": {"file_id": "file-a"}, "body": {"file_id": "file-own"}}\n'
+    body = _form(_file(repeated), _field("purpose", b"batch"), _file(b"plain text\n"))
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    assert view.normalized == body.replace(
+        repeated, json.dumps({"body": {"file_id": "file-own"}}).encode() + b"\n"
+    )
+
+
 def test_a_rewritten_line_keeps_a_lone_surrogate_as_the_same_json_value() -> None:
     # Only a \ud800-style escape can carry a lone surrogate, which has no
     # UTF-8 form: the rewritten line escapes it again (every non-ASCII
@@ -208,6 +219,53 @@ def test_more_json_than_the_check_reads_is_oversized() -> None:
     # Media files carry no JSON: never counted, whatever their size.
     media = _form(_file(b"\x00" * 10_000, filename=b"a.mp3"))
     assert read_upload(media, BOUNDARY, max_json_bytes=16) == UploadView([])
+
+
+def test_the_budget_may_be_spent_to_the_last_byte() -> None:
+    # Exactly the budget is read; one byte more is oversized — for a file's
+    # lines (the newline is not counted) and for a form field alike.
+    line = json.dumps({"custom_id": "x" * 40}).encode()
+    body = _form(_file(line + b"\n" + line + b"\n"))
+    assert (
+        read_upload(body, BOUNDARY, max_json_bytes=2 * len(line)).cited
+        == [{"custom_id": "x" * 40}] * 2
+    )
+    assert read_upload(body, BOUNDARY, max_json_bytes=2 * len(line) - 1).oversized
+    fields = _form(_field("prompt", b"p" * 64))
+    assert read_upload(fields, BOUNDARY, max_json_bytes=64) == UploadView([{"prompt": "p" * 64}])
+
+
+def test_every_object_line_is_read_whatever_precedes_it() -> None:
+    # Blank lines, lines that are not JSON and JSON lines that are not
+    # objects are skipped — never the end of the reading.
+    content = b"\n   \nnot json\n[1, 2]\n" + json.dumps(_batch_line("file-9")).encode() + b"\n"
+    view = read_upload(_form(_file(content)), BOUNDARY, max_json_bytes=10_000)
+    assert view == UploadView([_batch_line("file-9")])
+
+
+def test_a_file_named_only_by_its_extended_filename_is_read_as_a_file() -> None:
+    body = _form(
+        _part(
+            b"Content-Disposition: form-data; name=\"file\"; filename*=UTF-8''in.jsonl",
+            _lines(_batch_line("file-7")),
+        )
+    )
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    assert view == UploadView([_batch_line("file-7")])
+
+
+def test_a_json_array_form_field_is_read_as_json() -> None:
+    body = _form(_field("file_ids", b' ["file-1", "file-2"] '))
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    assert view == UploadView([{"file_ids": ["file-1", "file-2"]}])
+
+
+def test_a_rewritten_line_keeps_its_non_ascii_text_as_utf8() -> None:
+    repeated = '{"body": {"input": "a"}, "body": {"input": "«é»"}}\n'.encode()
+    body = _form(_file(repeated))
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    assert view.cited == [{"body": {"input": "«é»"}}]
+    assert view.normalized == body.replace(repeated, '{"body": {"input": "«é»"}}\n'.encode())
 
 
 # --- detection = false: checked like a redacted route ---------------------------------

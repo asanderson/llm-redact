@@ -3,17 +3,29 @@
 import hmac
 import os
 import sqlite3
+import time
+import weakref
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn, Protocol
+from typing import TYPE_CHECKING, NoReturn, Protocol, TypeVar
 
 from llm_redact.placeholders import MAX_TOKEN_NUMBER, format_placeholder
 
 if TYPE_CHECKING:
     from llm_redact.config import VaultConfig
     from llm_redact.plugin_api import VaultCipher
+
+T = TypeVar("T")
+
+# How long a persistent view (sqlite, RDBMS) serves from its caches before it
+# re-reads its session's retired number: another proxy instance sharing the
+# database may have deleted the session meanwhile. Stale caches can never
+# restore a WRONG value (a deleted session's numbers are never issued again —
+# see ``delete_sessions``); this bounds how long a deleted session's values
+# stay restorable from another instance's memory.
+CACHE_CHECK_SECONDS = 1.0
 
 
 class VaultKeyError(RuntimeError):
@@ -74,6 +86,26 @@ class Vault(Protocol):
         """Number of mappings held (for /status; never the values)."""
         ...
 
+    # Optional, read with getattr (``run_batched``): ``batched(work)`` runs
+    # ``work`` — one request's redaction — with every NEW value it issues
+    # written in ONE transaction, committed once when it returns and rolled
+    # back whole if anything in it fails. A vault without it issues per call.
+
+
+def run_batched(vault: Vault, work: Callable[[], T]) -> T:
+    """Run ``work`` — one request's whole redaction — with every new value
+    it issues written in one transaction where the vault offers that (its
+    optional ``batched``: the sqlite vault), else per call as before.
+
+    ``work`` is synchronous by construction: it cannot await, so no other
+    request can reach the vault's shared connection while the transaction
+    is open, and nothing it issued can be forwarded before it committed."""
+    batched = getattr(vault, "batched", None)
+    if batched is None:
+        return work()
+    result: T = batched(work)
+    return result
+
 
 class InMemoryVault:
     """Session-scoped vault: deterministic within one proxy process.
@@ -101,6 +133,14 @@ class InMemoryVault:
 
     def original_for(self, placeholder: str) -> str | None:
         return self._reverse.get(placeholder)
+
+    def forget_mappings(self) -> None:
+        """Drop every mapping but keep the numbering: a new value is
+        numbered above everything this session ever issued, so a dropped
+        token still in a provider's history (or a live connection's frames)
+        never gains a second meaning."""
+        self._forward.clear()
+        self._reverse.clear()
 
     def close(self) -> None:
         pass
@@ -146,6 +186,12 @@ class EncryptedInMemoryVault:
         token = self._reverse.get(placeholder)
         return None if token is None else self._cipher.decrypt(token)
 
+    def forget_mappings(self) -> None:
+        """InMemoryVault.forget_mappings: the mappings go, the numbering
+        stays."""
+        self._forward.clear()
+        self._reverse.clear()
+
     def close(self) -> None:
         pass
 
@@ -153,8 +199,17 @@ class EncryptedInMemoryVault:
         return len(self._reverse)
 
 
+# A whole-session delete (prune, forget) retires every number the session
+# held: the session's new values are numbered above it, forever (see
+# ``delete_sessions``). One row per session ever deleted; no values.
+_RETIRED_TABLE = (
+    "CREATE TABLE IF NOT EXISTS retired_numbers"
+    " (session_id TEXT PRIMARY KEY, n INTEGER NOT NULL) WITHOUT ROWID"
+)
+
 # v2: plaintext originals. v3: HMAC index + Fernet ciphertext (crypto extra).
-_SCHEMA_V2 = """
+_SCHEMA_V2 = f"""
+{_RETIRED_TABLE};
 CREATE TABLE IF NOT EXISTS mappings (
   session_id TEXT NOT NULL,
   detector_type TEXT NOT NULL,
@@ -188,6 +243,7 @@ _MAPPINGS_V3_COLUMNS = """
 """
 
 _SCHEMA_V3 = f"""
+{_RETIRED_TABLE};
 CREATE TABLE IF NOT EXISTS mappings ({_MAPPINGS_V3_COLUMNS});
 CREATE TABLE IF NOT EXISTS response_sessions (
   response_id TEXT PRIMARY KEY,
@@ -392,6 +448,101 @@ def rotate_vault_key(
     return len(rows)
 
 
+def _retired_number(conn: sqlite3.Connection, session: str) -> int:
+    """The highest number ``session`` held in rows since deleted (0: none)."""
+    row = conn.execute("SELECT n FROM retired_numbers WHERE session_id = ?", (session,)).fetchone()
+    return 0 if row is None else int(row[0])
+
+
+def delete_sessions(conn: sqlite3.Connection, session_ids: Sequence[str]) -> int:
+    """Inside an open write transaction: delete whole sessions — their
+    mappings and response-map rows — after raising each one's retired number
+    to the highest number it holds. Returns how many of them held mappings.
+
+    New values are always numbered above the retired number, so no number a
+    deleted session issued is ever issued again there: a provider's history,
+    another proxy instance's cache or a live connection still holding one of
+    its tokens can only ever restore it to its own value, or not at all —
+    never to a value issued after the delete. Whole sessions only, as
+    before; the retired row is all that stays (one per session, no values).
+    """
+    present = 0
+    for start in range(0, len(session_ids), LOOKUP_CHUNK):
+        chunk = list(session_ids[start : start + LOOKUP_CHUNK])
+        marks = ",".join("?" * len(chunk))
+        present += conn.execute(
+            f"SELECT COUNT(DISTINCT session_id) FROM mappings WHERE session_id IN ({marks})",
+            chunk,
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT OR REPLACE INTO retired_numbers (session_id, n)"
+            " SELECT m.session_id, max(MAX(m.n), COALESCE(r.n, 0)) FROM mappings m"
+            " LEFT JOIN retired_numbers r ON r.session_id = m.session_id"
+            f" WHERE m.session_id IN ({marks}) GROUP BY m.session_id",
+            chunk,
+        )
+        conn.execute(f"DELETE FROM mappings WHERE session_id IN ({marks})", chunk)
+        conn.execute(f"DELETE FROM response_sessions WHERE session_id IN ({marks})", chunk)
+    return int(present)
+
+
+def prune_idle_sessions(
+    conn: sqlite3.Connection, days: int, *, exclude: frozenset[str] = frozenset()
+) -> list[str]:
+    """Delete (``delete_sessions``) every session that issued no new value in
+    the last ``days`` days, but those in ``exclude``; returns their ids.
+
+    The idle check runs INSIDE the delete's write transaction: no writer —
+    another proxy instance sharing the file included — can issue a value in
+    a session between the check that found it idle and its delete."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        doomed = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT session_id FROM mappings GROUP BY session_id"
+                " HAVING MAX(created_at) < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
+                (f"-{days} days",),
+            ).fetchall()
+            if str(row[0]) not in exclude
+        ]
+        delete_sessions(conn, doomed)
+        conn.execute("COMMIT")
+    except BaseException:
+        with suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        raise
+    return doomed
+
+
+class _Batch:
+    """The write transaction one request's new values share (``batched``)."""
+
+    __slots__ = ("begun", "failure", "views")
+
+    def __init__(self) -> None:
+        # BEGIN IMMEDIATE is issued at the first new value, not before: a
+        # request whose values are all known writes (and locks) nothing.
+        self.begun = False
+        # A write that failed inside the batch, even if the work swallowed
+        # it: the batch then rolls back instead of committing around it.
+        self.failure: BaseException | None = None
+        # The views holding staged rows, settled at the batch's end.
+        self.views: list[SqliteVault] = []
+
+
+class _Connection:
+    """What every view over one database connection shares: the connection
+    and the batch open on it — at most one, since ``batched`` runs its work
+    synchronously."""
+
+    __slots__ = ("conn", "batch")
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        self.batch: _Batch | None = None
+
+
 class SqliteVault:
     """Per-session view over a shared persistent database.
 
@@ -404,145 +555,291 @@ class SqliteVault:
     directory (WAL sidecars inherit the file's mode). synchronous=FULL is
     deliberate — a mapping lost to power failure would let MAX(n) reissue an
     old placeholder for a *different* value, silently rehydrating history to
-    the wrong secret. Inserts happen only on first sight of a value, so the
-    fsync cost is negligible.
+    the wrong secret. The fsync that costs is paid once per request, not
+    once per value: ``batched`` writes a request's new values in one
+    transaction.
 
-    A write-through cache preloaded per session keeps ``original_for`` off
-    the database on the streaming hot path. Views share one connection
-    (single-process asyncio; point ops are microseconds).
+    A number is never issued twice in a session: a new value is numbered
+    above the session's live numbers AND its retired number (every number a
+    whole-session delete removed), read inside the write lock. So the
+    write-through caches — loaded at creation, written only after COMMIT —
+    can go stale (another instance deleted the session) without ever
+    restoring a wrong value; ``_revalidate`` re-reads the retired number
+    (``CACHE_CHECK_SECONDS``) and rebuilds them when it moved. Views share
+    one connection (single-process asyncio; point ops are microseconds).
     """
+
+    # Set by _load. Caches are keyed by plaintext either way, so the hot path
+    # (a cache hit) is identical with and without encryption; decryption
+    # happens once per row at load.
+    _forward: dict[str, str]
+    _reverse: dict[str, str]
+    # The session's retired number when the caches were loaded (its epoch),
+    # and when to re-read it.
+    _retired: int
+    _next_check: float
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        shared: _Connection,
         session: str,
         *,
         owns_connection: bool,
         cipher: "VaultCipher | None" = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._conn = conn
+        self._shared = shared
         self._session = session
         self._owns_connection = owns_connection
         self._cipher = cipher
-        # Caches are keyed by plaintext either way, so the hot path (a cache
-        # hit) is identical with and without encryption; decryption happens
-        # once per row at preload.
-        self._forward: dict[str, str] = {}
-        self._reverse: dict[str, str] = {}
-        if cipher is None:
-            preload = self._conn.execute(
+        self._clock = clock
+        # Rows written inside the open batch and not committed yet: visible
+        # to the request's own lookups, entering the caches only after the
+        # COMMIT (dropped by a rollback).
+        self._staged_forward: dict[str, str] = {}
+        self._staged_reverse: dict[str, str] = {}
+        self._load()
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        return self._shared.conn
+
+    @_conn.setter
+    def _conn(self, conn: sqlite3.Connection) -> None:
+        self._shared.conn = conn
+
+    def _load(self) -> None:
+        """(Re)build the caches from the database: the retired number FIRST,
+        then the rows. A delete landing between the two reads leaves the
+        recorded number behind the database's, so the next check reloads;
+        the other order could record the new number over the old rows and
+        never notice. Never run while a batch is open (``_revalidate``), and
+        a manager keeps one view per session, so no staged row of this
+        session can be read here as if committed."""
+        conn = self._conn
+        self._retired = _retired_number(conn, self._session)
+        forward: dict[str, str] = {}
+        reverse: dict[str, str] = {}
+        if self._cipher is None:
+            rows = conn.execute(
                 "SELECT detector_type, original, placeholder FROM mappings WHERE session_id = ?",
-                (session,),
+                (self._session,),
             )
-            for detector_type, original, placeholder in preload:
-                self._forward[f"{detector_type}::{original}"] = placeholder
-                self._reverse[placeholder] = original
+            for detector_type, original, placeholder in rows:
+                forward[f"{detector_type}::{original}"] = placeholder
+                reverse[placeholder] = original
         else:
-            preload = self._conn.execute(
+            rows = conn.execute(
                 "SELECT detector_type, original_ct, placeholder FROM mappings WHERE session_id = ?",
-                (session,),
+                (self._session,),
             )
-            for detector_type, original_ct, placeholder in preload:
-                original = cipher.decrypt(original_ct)
-                self._forward[f"{detector_type}::{original}"] = placeholder
-                self._reverse[placeholder] = original
+            for detector_type, original_ct, placeholder in rows:
+                original = self._cipher.decrypt(original_ct)
+                forward[f"{detector_type}::{original}"] = placeholder
+                reverse[placeholder] = original
+        self._forward = forward
+        self._reverse = reverse
+        self._next_check = self._clock() + CACHE_CHECK_SECONDS
+
+    def _revalidate(self) -> None:
+        """Re-read the session's retired number — called once the check is
+        due (``self._clock() >= self._next_check``, compared at each call
+        site so a cache hit pays a clock read, not a call), never while a
+        batch is open. If it moved, the session was deleted (by another
+        instance) since the caches were loaded: they are rebuilt, so its
+        values stop being restorable here too."""
+        if self._shared.batch is not None:
+            return
+        if _retired_number(self._conn, self._session) != self._retired:
+            self._load()
+            return
+        self._next_check = self._clock() + CACHE_CHECK_SECONDS
 
     def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
+        if self._clock() >= self._next_check:
+            self._revalidate()
         key = f"{detector_type}::{original}"
-        existing = self._forward.get(key)
+        existing = self._forward.get(key) or self._staged_forward.get(key)
         if existing is not None:
             return existing
+        batch = self._shared.batch
+        if batch is None:
+            placeholder = self._issue_alone(detector_type, original, floor)
+        else:
+            placeholder = self._issue_in(batch, detector_type, original, floor)
+        self._remember(key, placeholder, original)
+        return placeholder
+
+    def _issue_alone(self, detector_type: str, original: str, floor: int) -> str:
+        """Outside a batch: one write transaction for this one value."""
         try:
             self._conn.execute("BEGIN IMMEDIATE")
-            # MAX(n) read fresh inside the write lock: a retry after a
-            # rolled-back write computes the same max(MAX(n), floor) + 1.
-            row = self._conn.execute(
-                "SELECT COALESCE(MAX(n), 0) FROM mappings"
-                " WHERE session_id = ? AND detector_type = ?",
-                (self._session, detector_type),
-            ).fetchone()
-            n = next_number(int(row[0]), floor, detector_type)
-            placeholder = format_placeholder(detector_type, n)
-            if self._cipher is None:
-                self._conn.execute(
-                    "INSERT INTO mappings (session_id, detector_type, original, placeholder, n)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (self._session, detector_type, original, placeholder, n),
-                )
-            else:
-                self._conn.execute(
-                    "INSERT INTO mappings"
-                    " (session_id, detector_type, original_mac, original_ct, placeholder, n)"
-                    " VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        self._session,
-                        detector_type,
-                        self._cipher.mac(self._session, detector_type, original),
-                        self._cipher.encrypt(original),
-                        placeholder,
-                        n,
-                    ),
-                )
+            placeholder = self._insert(detector_type, original, floor)
             self._conn.execute("COMMIT")
-        except sqlite3.IntegrityError:
-            # Another process sharing the DB inserted this original first.
-            self._conn.execute("ROLLBACK")
-            if self._cipher is None:
-                row = self._conn.execute(
-                    "SELECT placeholder FROM mappings"
-                    " WHERE session_id = ? AND detector_type = ? AND original = ?",
-                    (self._session, detector_type, original),
-                ).fetchone()
-            else:
-                row = self._conn.execute(
-                    "SELECT placeholder FROM mappings"
-                    " WHERE session_id = ? AND detector_type = ? AND original_mac = ?",
-                    (
-                        self._session,
-                        detector_type,
-                        self._cipher.mac(self._session, detector_type, original),
-                    ),
-                ).fetchone()
-            if row is None:  # pragma: no cover - constraint failed another way
-                raise
-            placeholder = str(row[0])
         except BaseException:
-            # Any other failure (disk full, I/O error, lock timeout, a cipher
+            # Any failure (disk full, I/O error, lock timeout, a cipher
             # fault, an exhausted number space): roll back so the open BEGIN
             # IMMEDIATE can't wedge the connection for the next request, and
             # fail closed. Nothing was cached (the caches are written only
-            # after a successful commit below), and n is computed from MAX(n)
-            # read fresh on every call, so the next attempt reissues the same
+            # after a successful commit), and n is computed from MAX(n) read
+            # fresh on every call, so the next attempt reissues the same
             # number — never a skipped number, never a reused token.
             with suppress(sqlite3.Error):
                 self._conn.execute("ROLLBACK")
             raise
-        self._forward[key] = placeholder
-        self._reverse[placeholder] = original
         return placeholder
 
+    def _issue_in(self, batch: _Batch, detector_type: str, original: str, floor: int) -> str:
+        """Inside a batch: the batch's transaction, begun at its first new
+        value and committed (or rolled back) once, by ``batched``."""
+        try:
+            if not batch.begun:
+                self._conn.execute("BEGIN IMMEDIATE")
+                batch.begun = True
+            return self._insert(detector_type, original, floor)
+        except BaseException as exc:
+            # Whatever failed — the lock, a write, the cipher, the number
+            # space — the batch must not commit: even a failure the work
+            # swallows rolls it back whole (a sqlite I/O error may already
+            # have rolled the transaction back under the staged rows).
+            batch.failure = exc
+            raise
+
+    def _insert(self, detector_type: str, original: str, floor: int) -> str:
+        """The value's placeholder, inserting a NEW row when it has none —
+        inside an open write transaction, so nothing another connection
+        does can come between the reads and the insert."""
+        conn = self._conn
+        cipher = self._cipher
+        # The row's key: the value itself, or its HMAC index when encrypted.
+        if cipher is None:
+            column, index = "original", original
+        else:
+            column, index = "original_mac", cipher.mac(self._session, detector_type, original)
+        row = conn.execute(
+            "SELECT placeholder FROM mappings"
+            f" WHERE session_id = ? AND detector_type = ? AND {column} = ?",
+            (self._session, detector_type, index),
+        ).fetchone()
+        if row is not None:
+            # Another connection (a second proxy instance) mapped it after
+            # this view's caches were loaded: its token, never a second one.
+            return str(row[0])
+        # The live numbers and the retired number, read fresh inside the
+        # write lock: a retry after a rolled-back write computes the same
+        # number, and nothing a deleted incarnation issued is issued again.
+        issued = conn.execute(
+            "SELECT COALESCE(MAX(n), 0),"
+            " (SELECT COALESCE(MAX(n), 0) FROM retired_numbers WHERE session_id = ?)"
+            " FROM mappings WHERE session_id = ? AND detector_type = ?",
+            (self._session, self._session, detector_type),
+        ).fetchone()
+        n = next_number(max(int(issued[0]), int(issued[1])), floor, detector_type)
+        placeholder = format_placeholder(detector_type, n)
+        if cipher is None:
+            conn.execute(
+                "INSERT INTO mappings (session_id, detector_type, original, placeholder, n)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (self._session, detector_type, index, placeholder, n),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO mappings"
+                " (session_id, detector_type, original_mac, original_ct, placeholder, n)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (self._session, detector_type, index, cipher.encrypt(original), placeholder, n),
+            )
+        return placeholder
+
+    def _remember(self, key: str, placeholder: str, original: str) -> None:
+        """Cache a row read or written: straight into the caches outside a
+        batch (its transaction committed), staged inside one."""
+        batch = self._shared.batch
+        if batch is None:
+            self._forward[key] = placeholder
+            self._reverse[placeholder] = original
+            return
+        if not self._staged_forward:
+            batch.views.append(self)
+        self._staged_forward[key] = placeholder
+        self._staged_reverse[placeholder] = original
+
+    def _keep_staged(self) -> None:
+        """The batch committed: its staged rows join the caches."""
+        self._forward.update(self._staged_forward)
+        self._reverse.update(self._staged_reverse)
+        self._drop_staged()
+
+    def _drop_staged(self) -> None:
+        self._staged_forward.clear()
+        self._staged_reverse.clear()
+
+    def batched(self, work: Callable[[], T]) -> T:
+        """Run ``work`` with every new value it issues — in this view or in
+        any other over the same connection — written in ONE transaction:
+        BEGIN IMMEDIATE at the first, one COMMIT when ``work`` returns, the
+        caches updated only after it. Any exception (a write fault, a failed
+        COMMIT, a blocked value, a cap refusal, a bug) rolls the whole batch
+        back and leaves the caches untouched — so no token issued inside a
+        rolled-back batch is ever restored, and its number is issued again
+        only to the same value (dense, from MAX(n) read fresh). Re-entrant:
+        a nested call joins the open batch. ``work`` must not await (see
+        ``run_batched``); holding the write lock for its duration, another
+        process sharing the file waits (busy_timeout) and fails closed past
+        it."""
+        shared = self._shared
+        if shared.batch is not None:
+            return work()
+        if self._clock() >= self._next_check:
+            self._revalidate()  # before anything is staged
+        batch = shared.batch = _Batch()
+        try:
+            result = work()
+            if batch.failure is not None:
+                raise batch.failure
+            if batch.begun:
+                shared.conn.execute("COMMIT")
+        except BaseException:
+            if batch.begun:
+                with suppress(sqlite3.Error):
+                    shared.conn.execute("ROLLBACK")
+            for view in batch.views:
+                view._drop_staged()
+            raise
+        finally:
+            shared.batch = None
+        for view in batch.views:
+            view._keep_staged()
+        return result
+
     def original_for(self, placeholder: str) -> str | None:
+        if self._clock() >= self._next_check:
+            self._revalidate()
         cached = self._reverse.get(placeholder)
         if cached is not None:
             return cached
-        # Cache miss can only mean another process issued the token.
+        # A cache miss can only mean another connection issued the token —
+        # or, inside a batch, this one did (the read sees the batch's own
+        # rows; what it finds is staged like them).
         if self._cipher is None:
             row = self._conn.execute(
-                "SELECT original FROM mappings WHERE session_id = ? AND placeholder = ?",
+                "SELECT detector_type, original FROM mappings"
+                " WHERE session_id = ? AND placeholder = ?",
                 (self._session, placeholder),
             ).fetchone()
             if row is None:
                 return None
-            original = str(row[0])
+            original = str(row[1])
         else:
             row = self._conn.execute(
-                "SELECT original_ct FROM mappings WHERE session_id = ? AND placeholder = ?",
+                "SELECT detector_type, original_ct FROM mappings"
+                " WHERE session_id = ? AND placeholder = ?",
                 (self._session, placeholder),
             ).fetchone()
             if row is None:
                 return None
-            original = self._cipher.decrypt(row[0])
-        self._reverse[placeholder] = original
+            original = self._cipher.decrypt(row[1])
+        self._remember(f"{row[0]}::{original}", placeholder, original)
         return original
 
     def close(self) -> None:
@@ -556,7 +853,9 @@ class SqliteVault:
 def open_sqlite_vault(path: Path, session: str, cipher: "VaultCipher | None" = None) -> SqliteVault:
     """Standalone single-session vault owning its connection (static mode,
     tests)."""
-    return SqliteVault(_open_connection(path, cipher), session, owns_connection=True, cipher=cipher)
+    return SqliteVault(
+        _Connection(_open_connection(path, cipher)), session, owns_connection=True, cipher=cipher
+    )
 
 
 class VaultManager(Protocol):
@@ -591,7 +890,9 @@ class InMemoryVaultManager:
 
     def __init__(self, cipher: "VaultCipher | None" = None) -> None:
         self._cipher = cipher
-        self._vaults: dict[str, Vault] = {}
+        # One vault per session for the process lifetime: a forgotten
+        # session keeps its vault, emptied, so its numbering never restarts.
+        self._vaults: dict[str, InMemoryVault | EncryptedInMemoryVault] = {}
 
     def get(self, session_id: str) -> Vault:
         vault = self._vaults.get(session_id)
@@ -611,16 +912,19 @@ class InMemoryVaultManager:
         return vault is not None and len(vault) > 0
 
     def session_count(self) -> int:
-        return len(self._vaults)
+        """Sessions holding mappings (the persistent managers' count)."""
+        return sum(len(vault) > 0 for vault in self._vaults.values())
 
     def total_entries(self) -> int:
         return sum(len(v) for v in self._vaults.values())
 
     def sessions_summary(self) -> list[dict[str, object]]:
-        # Memory mappings carry no timestamps: counts only, insertion order.
+        # Sessions holding mappings, like the persistent managers. Memory
+        # mappings carry no timestamps: counts only, insertion order.
         return [
             {"session": session_id, "entries": len(vault), "first": None, "last": None}
             for session_id, vault in self._vaults.items()
+            if len(vault) > 0
         ]
 
     def prune_sessions(self, days: int, *, exclude: frozenset[str] = frozenset()) -> int:
@@ -629,9 +933,18 @@ class InMemoryVaultManager:
         return 0
 
     def forget_sessions(self, session_ids: Iterable[str]) -> int:
-        """Drop whole sessions (a purged user's); how many existed."""
-        dropped = [self._vaults.pop(session_id, None) for session_id in set(session_ids)]
-        return sum(vault is not None for vault in dropped)
+        """Drop whole sessions' mappings (a purged user's); how many held
+        mappings. Each vault is emptied IN PLACE and kept: a holder of it (a
+        live realtime connection) sees the mappings go too, and a new value
+        is numbered above every number the session issued — a token of the
+        dropped mappings never gains a second meaning."""
+        forgotten = 0
+        for session_id in set(session_ids):
+            vault = self._vaults.get(session_id)
+            if vault is not None and len(vault) > 0:
+                vault.forget_mappings()
+                forgotten += 1
+        return forgotten
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
         pass  # the SessionRouter's in-memory map is authoritative here
@@ -653,25 +966,52 @@ class SqliteVaultManager:
     """One shared connection; per-session views cached in a small LRU.
 
     Eviction only drops a view's write-through cache — every mapping lives in
-    the database, and a re-created view preloads its session's rows (small
-    for per-conversation sessions).
+    the database, and a re-created view loads its session's rows (small for
+    per-conversation sessions). A view evicted while still held elsewhere
+    (an in-flight request, a realtime connection) is handed out again, not
+    duplicated: one view per session, so a delete reaches every live one.
     """
 
     def __init__(
-        self, path: Path, *, cipher: "VaultCipher | None" = None, view_cache_size: int = 64
+        self,
+        path: Path,
+        *,
+        cipher: "VaultCipher | None" = None,
+        view_cache_size: int = 64,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._conn = _open_connection(path, cipher)
+        self._shared = _Connection(_open_connection(path, cipher))
         _ensure_kind_column(self._conn)
         self._cipher = cipher
+        self._clock = clock
         self._views: OrderedDict[str, SqliteVault] = OrderedDict()
         self._view_cache_size = view_cache_size
+        # Every live view, wherever it is held (weakly: the LRU above and the
+        # holders keep them alive).
+        self._live: weakref.WeakValueDictionary[str, SqliteVault] = weakref.WeakValueDictionary()
         self._inserts = {_RESPONSE_KIND: 0, _OBJECT_KIND: 0}
 
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        return self._shared.conn
+
+    @_conn.setter
+    def _conn(self, conn: sqlite3.Connection) -> None:
+        self._shared.conn = conn
+
     def get(self, session_id: str) -> Vault:
-        view = self._views.get(session_id)
+        # Every view the LRU holds is live, so the registry answers for both.
+        view = self._live.get(session_id)
         if view is None:
-            view = SqliteVault(self._conn, session_id, owns_connection=False, cipher=self._cipher)
-            self._views[session_id] = view
+            view = SqliteVault(
+                self._shared,
+                session_id,
+                owns_connection=False,
+                cipher=self._cipher,
+                clock=self._clock,
+            )
+            self._live[session_id] = view
+        self._views[session_id] = view
         self._views.move_to_end(session_id)
         while len(self._views) > self._view_cache_size:
             self._views.popitem(last=False)
@@ -695,67 +1035,47 @@ class SqliteVaultManager:
         ]
 
     def prune_sessions(self, days: int, *, exclude: frozenset[str] = frozenset()) -> int:
-        """Delete whole idle sessions in one transaction, then drop their
-        cached views.
+        """Delete whole idle sessions (``prune_idle_sessions``: the idle
+        check and the delete are one write transaction), then rebuild every
+        live view of them.
 
-        Whole sessions only — the same rule as the CLI: deleting individual
-        rows would let MAX(n)+1 reissue a still-referenced placeholder
-        number for a different value. Unlike the CLI (which requires a
-        proxy restart), this runs inside the live process, so evicting the
-        views keeps the proxy from serving pruned mappings from cache;
-        callers exclude the always-live static session.
+        Whole sessions only — the same rule as the CLI — and each one's
+        numbers are retired (``delete_sessions``): an instance or a live
+        view still holding one of its tokens can never see the number issued
+        to another value. Callers exclude the always-live static session.
         """
-        doomed = [
-            str(row[0])
-            for row in self._conn.execute(
-                "SELECT session_id FROM mappings GROUP BY session_id"
-                " HAVING MAX(created_at) < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
-                (f"-{days} days",),
-            )
-            if str(row[0]) not in exclude
-        ]
-        if not doomed:
-            return 0
-        marks = ",".join("?" * len(doomed))
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            self._conn.execute(f"DELETE FROM mappings WHERE session_id IN ({marks})", doomed)
-            self._conn.execute(
-                f"DELETE FROM response_sessions WHERE session_id IN ({marks})", doomed
-            )
-            self._conn.execute("COMMIT")
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        for session_id in doomed:
-            self._views.pop(session_id, None)
+        doomed = prune_idle_sessions(self._conn, days, exclude=exclude)
+        self._drop_views(doomed)
         return len(doomed)
 
     def forget_sessions(self, session_ids: Iterable[str]) -> int:
-        """Delete whole named sessions (mappings and response rows) in one
-        transaction and drop their cached views; how many held mappings.
-        Whole sessions only, like prune — never a partial delete."""
+        """Delete whole named sessions (mappings and response rows, their
+        numbers retired) in one transaction and rebuild every live view of
+        them; how many held mappings. Whole sessions only, like prune."""
         wanted = sorted(set(session_ids))
         if not wanted:
             return 0
-        marks = ",".join("?" * len(wanted))
         self._conn.execute("BEGIN IMMEDIATE")
         try:
-            present = self._conn.execute(
-                f"SELECT COUNT(DISTINCT session_id) FROM mappings WHERE session_id IN ({marks})",
-                wanted,
-            ).fetchone()[0]
-            self._conn.execute(f"DELETE FROM mappings WHERE session_id IN ({marks})", wanted)
-            self._conn.execute(
-                f"DELETE FROM response_sessions WHERE session_id IN ({marks})", wanted
-            )
+            present = delete_sessions(self._conn, wanted)
             self._conn.execute("COMMIT")
         except BaseException:
-            self._conn.execute("ROLLBACK")
+            with suppress(sqlite3.Error):
+                self._conn.execute("ROLLBACK")
             raise
-        for session_id in wanted:
+        self._drop_views(wanted)
+        return present
+
+    def _drop_views(self, session_ids: Iterable[str]) -> None:
+        """After a delete: evict the sessions' cached views, and rebuild any
+        still held elsewhere (an in-flight request, a realtime connection)
+        from the database — empty now, so the deleted values stop being
+        restorable there at once."""
+        for session_id in session_ids:
             self._views.pop(session_id, None)
-        return int(present)
+            view = self._live.get(session_id)
+            if view is not None:
+                view._load()
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
         """Map a Responses chain's response id to its session."""

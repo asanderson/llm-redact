@@ -309,8 +309,9 @@ def test_view_cache_boundary_and_lru_direction(tmp_path: Path) -> None:
     assert len(manager._views) == 2
     assert manager.get("a") is view_a  # refreshes a's recency
     view_c = manager.get("c")  # evicts the LRU entry, which is now b
-    # The newest view must never be the eviction victim (kills popitem
-    # last=False -> last=True) and a stays cached after its refresh.
+    # The least recently used entry is the victim, never the newest (kills
+    # popitem last=False -> last=True), and a stays cached after its refresh.
+    assert list(manager._views) == ["a", "c"]
     assert manager.get("c") is view_c
     assert manager.get("a") is view_a
     # Manager views never own the shared connection: a view-close path would
@@ -329,9 +330,9 @@ def test_default_view_cache_size_is_64(tmp_path: Path) -> None:
 
 def test_prune_multiple_sessions_and_view_eviction(tmp_path: Path) -> None:
     # Two idle sessions pruned in ONE call (the IN (?,?) placeholder list —
-    # kills the join-separator mutant) and their cached views dropped so the
-    # proxy cannot keep serving pruned mappings from cache (kills
-    # views.pop(None)).
+    # kills the join-separator mutant); their views leave the LRU, and a view
+    # still held elsewhere (an in-flight request) is rebuilt in place, so the
+    # proxy cannot keep serving pruned mappings from cache.
     manager = SqliteVaultManager(tmp_path / "m.db")
     for name in ("old1", "old2", "fresh"):
         manager.get(name).placeholder_for("EMAIL", f"{name}@x.example")
@@ -342,7 +343,11 @@ def test_prune_multiple_sessions_and_view_eviction(tmp_path: Path) -> None:
     stale_view = manager.get("old1")
     assert manager.prune_sessions(days=30) == 2
     assert manager.session_count() == 1
-    assert manager.get("old1") is not stale_view
+    assert set(manager._views) == {"fresh"}
+    assert len(stale_view) == 0
+    assert stale_view.original_for("«EMAIL_001»") is None
+    # Still the one view of its session: handed out again, not duplicated.
+    assert manager.get("old1") is stale_view
     manager.close()
 
 

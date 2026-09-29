@@ -197,7 +197,10 @@ indistinguishable from the attacker above.
 - Session isolation is **strict by construction**: token names collide
   across sessions deliberately, so there is no fallback lookup — a
   cross-session hit would silently restore someone else's secret.
-  Pruning deletes whole sessions only.
+  Pruning deletes whole sessions only, and **retires** their numbers: a
+  session's new values are numbered above every number it ever held, so
+  no deleted token — still in a provider history, another instance's
+  cache or an open connection — can ever be restored to a later value.
 - Because names collide across sessions, a request can carry tokens its
   own session never issued (a compacted history, a pasted answer). A new
   value is numbered above every such token the request carries — the

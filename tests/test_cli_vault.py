@@ -55,12 +55,65 @@ def test_sessions_prune_whole_sessions_only(
 
     assert _run(["sessions", "prune", "--older-than", "90d", "--yes", "--db", str(db)]) == 0
     out = capsys.readouterr().out
-    assert "conv-aaaa" in out and "restart" in out
+    assert "conv-aaaa" in out and "deleted 1 session(s)" in out and "retired" in out
 
     conn = sqlite3.connect(db)
     sessions = {row[0] for row in conn.execute("SELECT DISTINCT session_id FROM mappings")}
+    retired = conn.execute("SELECT session_id, n FROM retired_numbers").fetchall()
     conn.close()
     assert sessions == {"conv-bbbb"}  # recent session untouched
+    # The pruned session's numbers are retired: a re-created conv-aaaa never
+    # hands «EMAIL_001»/«EMAIL_002» to a new value.
+    assert retired == [("conv-aaaa", 2)]
+    revived = open_sqlite_vault(db, "conv-aaaa")
+    assert revived.placeholder_for("EMAIL", "carol@corp.example") == "«EMAIL_003»"
+    revived.close()
+
+
+def test_sessions_prune_retires_numbers_in_a_database_predating_the_table(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A vault written by an older version has no retired_numbers table; the
+    # CLI creates it before its delete retires the session's numbers.
+    db = tmp_path / "vault.db"
+    _seed_plain(db)
+    _age_session(db, "conv-aaaa", 120)
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TABLE retired_numbers")
+    conn.commit()
+    conn.close()
+    assert _run(["sessions", "prune", "--older-than", "90d", "--yes", "--db", str(db)]) == 0
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT session_id, n FROM retired_numbers").fetchall() == [
+        ("conv-aaaa", 2)
+    ]
+    conn.close()
+
+
+def test_sessions_prune_keeps_a_session_used_after_the_listing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The idle check is repeated inside the delete's write transaction: a
+    # session that issued a value between the listing and the confirmation
+    # (a proxy still running) is kept.
+    db = tmp_path / "vault.db"
+    _seed_plain(db)
+    _age_session(db, "conv-aaaa", 120)
+
+    def confirm_after_use(prompt: str) -> str:
+        vault = open_sqlite_vault(db, "conv-aaaa")
+        vault.placeholder_for("EMAIL", "late@corp.example")
+        vault.close()
+        return "y"
+
+    monkeypatch.setattr("builtins.input", confirm_after_use)
+    assert _run(["sessions", "prune", "--older-than", "90d", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "would delete conv-aaaa" in out and "deleted 0 session(s)" in out
+    conn = sqlite3.connect(db)
+    kept = conn.execute("SELECT COUNT(*) FROM mappings WHERE session_id = 'conv-aaaa'").fetchone()
+    conn.close()
+    assert kept == (3,)
 
 
 def test_sessions_prune_bad_cutoff(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

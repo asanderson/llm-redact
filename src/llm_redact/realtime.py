@@ -63,6 +63,7 @@ from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_
 from llm_redact.providers.gemini import StreamedText
 from llm_redact.redactor import BlockedRequest, Redactor, TooManyStrings, UnredactableRequest
 from llm_redact.rehydrate import RehydratorPool
+from llm_redact.vault import run_batched
 
 if TYPE_CHECKING:
     from llm_redact.plugin_api import UpstreamAuth
@@ -1255,11 +1256,17 @@ async def ws_handle(websocket: WebSocket) -> None:
                 outbound = (
                     data
                     if not provider_config.detection
-                    else adapter.redact_message(
-                        data,
-                        frame_ctx,
-                        inject_note=state.config.inject_system_note,
-                        require_json=require_json,
+                    # One vault transaction per frame, committed before
+                    # the frame is sent (run_batched).
+                    else run_batched(
+                        ctx.vault,
+                        functools.partial(
+                            adapter.redact_message,
+                            data,
+                            frame_ctx,
+                            inject_note=state.config.inject_system_note,
+                            require_json=require_json,
+                        ),
                     )
                 )
                 await upstream.send(outbound)

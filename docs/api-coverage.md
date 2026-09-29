@@ -191,7 +191,7 @@ because they echo the user `metadata` a batch create carries.
 | `GET /openai/files/{id}/content` | chat | batch output JSONL restored line by line |
 | `GET /openai/v1/files/{id}/content` | chat | |
 | `POST /openai/batches` | chat | file ids + user `metadata` (redacted out, restored in the echo) |
-| `GET /openai/batches` | redact-only | the batch LIST is never restored: it spans batches other users created, so restoring in the reader's vault namespace could hand one user another's value (pro named users); placeholders in listed `metadata` stay as placeholders |
+| `GET /openai/batches` | redact-only | the batch LIST is never restored in the reader's vault namespace: it spans batches other users created, so that could hand one user another's value (pro named users). A session router that attributes listed items (`listing_item_session`, llm-redact-pro named users) restores each batch the READER created in the session it was created in; every other item's `metadata` keeps its placeholders |
 | `GET /openai/v1/batches/{id}` | chat | |
 | `POST /openai/batches/{id}/cancel` | chat | |
 | `GET /openai/models` | redact-only | model listing |

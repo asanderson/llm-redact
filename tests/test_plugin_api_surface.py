@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import re
 
 import pytest
 
@@ -264,3 +265,26 @@ def test_db_password_provider_alias_is_snapshotted() -> None:
     from collections.abc import Callable
 
     assert plugin_api.DbPasswordProvider == Callable[[], str]
+
+
+# Protocol name -> the OPTIONAL members its docstring documents (read via
+# getattr by the core, so they are not Protocol methods). Pinned as the
+# documented call shapes, whitespace-normalized: renaming or re-shaping one
+# is a deliberate edit here and a pro floor bump, like any other member.
+OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
+    "SessionRouter": (
+        "``is_durable(session_id) -> bool``",
+        "``record_object_id(object_id, session_id) -> bool | None``",
+        "``object_access_refusal(adapter_name, method, path, body, *, identity) -> str | None``",
+        "``listing_item_session(object_id) -> str | None``",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(OPTIONAL_MEMBERS))
+def test_optional_members_are_documented(name: str) -> None:
+    doc = " ".join((getattr(plugin_api, name).__doc__ or "").split())
+    for member in OPTIONAL_MEMBERS[name]:
+        assert member in doc, f"{name}: {member}"
+    documented = set(re.findall(r"OPTIONAL (?:member[^:]*: )?``(\w+)\(", doc))
+    assert documented == {m.strip("`").split("(")[0] for m in OPTIONAL_MEMBERS[name]}

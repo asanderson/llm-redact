@@ -183,6 +183,24 @@ while the vault row is the secret store and is never exported.
   behavior. The live prune (`session_ttl_days`, `POST
   /__llm-redact/sessions/prune`) keeps each user's copy like the static
   session itself.
+- **Stored objects** (named users, **Pro**): the core reports the ids of
+  objects the provider stores for later reads — uploaded files, batches,
+  message batches, stored conversations, Gemini context caches, video
+  jobs and stored chat completions — with the session that created them
+  (`SessionRouter.record_object_id`). A session router may then refuse a
+  request that reaches another namespace's object
+  (`object_access_refusal`): the core answers a recorded, provider-shaped
+  **403** before the audit START row, redaction, any upstream credential
+  and any upstream contact, and is told whether the provider is
+  authorized with the proxy's own cloud identity. llm-redact-pro refuses
+  every such reference under identity auth and every write (delete,
+  cancel, update) under passthrough keys. On an OpenAI-shaped listing
+  (`GET` files, batches, video jobs, stored chat completions — OpenAI,
+  Azure and `/custom/<name>/` alike) the router may name the session
+  each listed object was created in (`listing_item_session`): the core
+  restores that item there — from the provider's own bytes, only when the
+  session exists — and leaves every other item's placeholders in place,
+  so each user sees their own items restored and nobody else's.
 - `compaction_forks` counts only a session first seen by this process
   whose history carries placeholders it cannot own: a persisted session
   resumed after a restart (its vault already holds the tokens) and a

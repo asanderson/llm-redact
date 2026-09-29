@@ -525,6 +525,12 @@ class InMemoryVaultManager:
             self._vaults[session_id] = vault
         return vault
 
+    def has_session(self, session_id: str) -> bool:
+        """Whether the session holds mappings, WITHOUT creating it (``get``
+        would add an empty session to this manager)."""
+        vault = self._vaults.get(session_id)
+        return vault is not None and len(vault) > 0
+
     def session_count(self) -> int:
         return len(self._vaults)
 

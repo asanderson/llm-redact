@@ -267,6 +267,20 @@ class ProviderAdapter(ABC):
         object's id, plus a batch's output and error file ids)."""
         return ()
 
+    def lists_objects(self, method: str, path: str) -> bool:
+        """Whether this request reads a COLLECTION of provider-stored objects
+        (a listing whose items a session router may attribute to their
+        creator's session) — only then is a 2xx JSON response parsed for
+        ``listing_items``."""
+        return False
+
+    def listing_items(self, body: Any) -> list[Any] | None:
+        """The listing's item array (each item a stored object whose string
+        ``id`` names it), or None when ``body`` is not this adapter's
+        listing shape. The returned list belongs to ``body``: the proxy
+        replaces items in it by position."""
+        return None
+
     @abstractmethod
     def rehydrate_event(self, event: SSEEvent, pool: RehydratorPool) -> list[SSEEvent]:
         """Rewrite one SSE event; may inject synthetic flush events."""

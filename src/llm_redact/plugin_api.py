@@ -104,6 +104,33 @@ class SessionRouter(Protocol):
     of the creator's namespace. ``False`` vetoes the durable mirror, as for
     response ids; a router without the member is never called.
 
+    OPTIONAL ``object_access_refusal(adapter_name, method, path, body, *,
+    identity) -> str | None``: asked once for EVERY forwarded HTTP request
+    (matched or pass-through; ``body`` is the parsed request body, None for
+    pass-through and non-JSON bodies) after admission and before the audit
+    START row, redaction, any upstream credential and any upstream contact
+    — whatever the router's ``mode``. ``identity`` is True when the target
+    provider is authorized with the proxy's OWN cloud identity
+    (``[providers.NAME] auth = "identity"``), so every forwarded request
+    spends a principal the client never presented. A string refuses the
+    request with a recorded, provider-shaped 403 carrying exactly that
+    text: a FIXED reason chosen by the router, never an object id, a user
+    name or content. None forwards. An exception refuses too (fail closed;
+    logged by exception type only). A router without the member is never
+    asked, and one that keeps no ownership should return None at once.
+
+    OPTIONAL ``listing_item_session(object_id) -> str | None``: for a 2xx
+    listing of stored objects (``ProviderAdapter.lists_objects`` /
+    ``listing_items`` — OpenAI-shaped ``{"object": "list", "data": [...]}``
+    collections of files, batches, video jobs and stored chat completions),
+    the vault session each listed item's placeholders should be restored
+    in. The proxy rehydrates that item — as a whole object, from the bytes
+    the provider sent — in the named session only when the session already
+    exists in the vault (it never creates one) and leaves every other item
+    as the request's own session delivers it. None (or an exception) leaves
+    the item alone. A listing never records ownership: nothing here reaches
+    ``record_object_id``.
+
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the
     router refused it (a response must never move to another namespace) or

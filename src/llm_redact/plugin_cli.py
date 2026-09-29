@@ -42,11 +42,11 @@ def _default_probe(url: str) -> bool:
 
 
 def _default_base_url() -> str | None:
-    from llm_redact.config import apply_env_overrides, load_config
+    from llm_redact.config import apply_env_overrides, dial_url, load_config
 
     try:
         config = apply_env_overrides(load_config(None))
-        return f"http://{config.host}:{config.port}"
+        return dial_url(config.host, config.port)
     except Exception:  # noqa: BLE001 — posture helpers never fail the install
         return None
 

@@ -35,6 +35,13 @@ exists for exactly one confined case: a container that binds `0.0.0.0`
 *inside its own network namespace* while the operator publishes it to
 loopback only. Setting it anywhere else is on you.
 
+The client-side commands on the proxy's own machine (`llm-redact status`,
+`doctor`, `run`, the `plugin install` probe and `vault rotate-key`'s
+liveness check) reach it at the configured `host`: a wildcard bind
+(`0.0.0.0`, `::`, or empty) at loopback — `127.0.0.1`, or `[::1]` for `::`
+— and an IPv6 literal in brackets (`http://[::1]:8787`). `run` exports that
+same URL to the tools it wraps.
+
 **Default deployment (recommended): loopback.** Point the tool's base URL
 at `http://127.0.0.1:8787` (or use `llm-redact run -- <tool>`, which
 injects the right env vars). Nothing else to configure.

@@ -2544,3 +2544,40 @@ def validate_bind_security(host: str, tls: TlsConfig, environ: Mapping[str, str]
             " for binds that are confined some other way (container netns with"
             " a loopback-only publish)."
         )
+
+
+def url_host(host: str) -> str:
+    """``host`` as the host part of a URL: an IPv6 literal in brackets
+    (``::1`` -> ``[::1]``; ``http://::1:8787`` is no URL), anything else as
+    written."""
+    return f"[{host}]" if ":" in host and not host.startswith("[") else host
+
+
+def dial_host(host: str) -> str:
+    """The URL host a client on THIS machine dials to reach a proxy bound to
+    ``host`` (the ``host`` config key). A wildcard bind (``0.0.0.0``, ``::``
+    or empty: every interface) is dialed at loopback — ``127.0.0.1``, or
+    ``[::1]`` for an IPv6 one (an IPv6-only listener never answers on
+    127.0.0.1); an IPv6 literal is bracketed (``url_host``); a host name or
+    any other address as written."""
+    bare = host.strip()
+    if bare.startswith("[") and bare.endswith("]"):
+        bare = bare[1:-1]
+    if not bare:
+        return "127.0.0.1"
+    try:
+        address = ipaddress.ip_address(bare)
+    except ValueError:
+        return bare  # a host name
+    if address.is_unspecified:
+        return "[::1]" if address.version == 6 else "127.0.0.1"
+    return url_host(bare)
+
+
+def dial_url(host: str, port: int, *, scheme: str = "http") -> str:
+    """``scheme://host:port`` for a client on this machine reaching a proxy
+    bound to ``host`` (``dial_host``) — the base of the ``status``,
+    ``doctor``, ``run``, ``plugin install`` and ``vault rotate-key``
+    probes and of what ``run`` exports to tools. No path: a log line may
+    print it whole."""
+    return f"{scheme}://{dial_host(host)}:{port}"

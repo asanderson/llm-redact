@@ -155,10 +155,20 @@ PDF or other non-JSONL file cannot be uploaded with the proxy's identity —
 use key auth for those), plain form fields (`purpose`, `user`, `size`, …)
 are scanned as UTF-8 text (a field that is not UTF-8 is refused), and
 bytes outside every part (a multipart preamble or epilogue) are refused.
-The image and mask parts of an image edit are media — the documented
-non-goal, as base64 media in a JSON body — and are signed as sent.
-Key-authorized uploads are unchanged: unscanned pieces forward verbatim
-and plain form fields are not scanned. Realtime
+So is a part header without a single reading — a folded or repeated
+header line, a filename holding a backslash that is not a `\"` or `\\`
+escape, a malformed `filename*` or one in a charset other than UTF-8 —
+and a part the proxy could not read as its plain bytes: a
+Content-Transfer-Encoding other than `7bit`/`8bit`/`binary` on any part
+(RFC 7578 deprecates them), or, on a part whose content is scanned, a
+declared charset other than UTF-8/US-ASCII (its Content-Type `charset`,
+or the RFC 7578 `_charset_` field). The image and mask parts of an
+image edit are media — the documented non-goal, as base64 media in a
+JSON body — and are signed as sent (their filenames redacted).
+Key-authorized uploads are unchanged: unscanned pieces forward verbatim,
+plain form fields are not scanned, a filename without a single reading
+is left as sent, and declared encodings are the encoding non-goal (the
+proxy scans the bytes it receives). Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with
@@ -211,7 +221,15 @@ results stream restored line by line) and OpenAI Files + Batches (the
 uploaded JSONL file part — batch inputs and fine-tuning examples — is
 redacted line by line with every other byte of the multipart body
 preserved; batch output downloads are restored the same way) are
-covered. Batch flows use the static vault session (with llm-redact-pro's
+covered. An upload's file NAME is content too (`jane.doe@corp.example
+notes.jsonl`): every part's Content-Disposition `filename` and RFC 8187
+`filename*` (UTF-8) is redacted on every multipart route — only those
+value bytes change, the part `name` and every other header stay as
+sent — and the file object the provider echoes it in (the upload
+response, `GET /v1/files`, `GET /v1/files/{id}`, and Azure's
+`/openai/files` twins) comes back with the name restored. A filename
+with no single reading (a bare backslash, a folded header) is left as
+sent with key auth and refused with identity auth. Batch flows use the static vault session (with llm-redact-pro's
 named users, the submitting user's own copy of it), and uploads larger
 than `max_body_bytes` are rejected 413 fail-closed — raise the cap for
 large batch files (`llm-redact doctor` reminds you).

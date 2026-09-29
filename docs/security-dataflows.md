@@ -48,7 +48,9 @@ deliberate scope decisions rather than gaps:
   on a recognized route a non-empty body the proxy did not redact (not a
   JSON object or scanned canonical multipart, or content-encoded — or,
   inside a multipart upload, a file line that is not a JSON object, a
-  non-UTF-8 form field, or a preamble/epilogue) is a
+  non-UTF-8 form field, a preamble/epilogue, a part header without a
+  single reading, a Content-Transfer-Encoding, or a declared charset
+  other than UTF-8/US-ASCII) is a
   recorded **400 before any credential fetch or upstream contact** — a
   non-JSON realtime frame closes the connection 1008 unsent. The
   same principle degrades a corrupt Bedrock eventstream frame to verbatim

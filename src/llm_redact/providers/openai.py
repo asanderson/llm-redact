@@ -28,6 +28,8 @@ from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
 
 _FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
+# The file list and one file's object: both echo each upload's filename.
+_FILE_OBJECT_RE = re.compile(r"/v1/files(?:/[^/]+)?")
 _STORED_COMPLETION_RE = re.compile(r"/v1/chat/completions/[^/]+")
 
 # Multipart endpoints whose TEXT FORM FIELDS are the content (their file
@@ -86,6 +88,34 @@ def _redact_text_part(
         return False
     part.content = redacted.encode("utf-8")
     return True
+
+
+# What an identity-authorized upload may declare: a part the proxy cannot
+# read as its plain bytes is never signed.
+_PLAIN_TRANSFER_ENCODINGS = frozenset({b"7bit", b"8bit", b"binary"})
+_PLAIN_CHARSETS = frozenset({"utf-8", "us-ascii"})
+
+
+def _require_plain_encoding(part: multipart.MultipartPart, *, scanned: bool) -> None:
+    """Identity auth: refuse a part the proxy could not read as plain bytes
+    (the body-part twin of the request Content-Encoding rule): any
+    Content-Transfer-Encoding but 7bit/8bit/binary (RFC 7578 deprecates
+    them), and — on a part whose content is scanned — a declared charset
+    other than UTF-8/US-ASCII, whether its own Content-Type parameter or
+    the RFC 7578 §4.6 ``_charset_`` field. AmbiguousHeaders propagates."""
+    encoding = part.header("content-transfer-encoding")
+    if encoding is not None and encoding.lower() not in _PLAIN_TRANSFER_ENCODINGS:
+        raise UnredactableRequest(
+            "a multipart part declares a Content-Transfer-Encoding llm-redact does not decode"
+        )
+    if not scanned:
+        return
+    charset = (part.params("content-type") or {}).get("charset")
+    declared = [] if charset is None else [charset.value]
+    if part.name == "_charset_":
+        declared.append(part.content.decode("latin-1").strip())
+    if any(name.lower() not in _PLAIN_CHARSETS for name in declared):
+        raise UnredactableRequest("a multipart part declares a charset llm-redact does not decode")
 
 
 # Delta fields that carry reasoning-model chain-of-thought as a string,
@@ -184,9 +214,10 @@ class OpenAIAdapter(ProviderAdapter):
             # forwarding raw secrets is never acceptable.)
             return RouteKind.REDACT_ONLY
         if method == "POST" and path == "/v1/files":
-            # Multipart upload whose JSONL file part carries user content;
-            # redacted via redact_multipart. The response is file metadata.
-            return RouteKind.REDACT_ONLY
+            # Multipart upload whose JSONL file part (and file NAME) carries
+            # user content; redacted via redact_multipart. The response is
+            # the file object, echoing the redacted filename: restored.
+            return RouteKind.CHAT
         if method == "POST" and path == "/v1/images/generations":
             # The OUTPUT is media (the non-goal) but the prompt is plain
             # text that must not reach the provider in the clear. Response
@@ -219,6 +250,12 @@ class OpenAIAdapter(ProviderAdapter):
             # Batch output downloads: JSONL rehydrated line by line via
             # rehydrate_raw_body (no request body — redaction no-ops).
             return RouteKind.CHAT
+        if method == "GET" and _FILE_OBJECT_RE.fullmatch(path):
+            # The file list and a file's metadata echo the filename the
+            # upload redacted: restored in the request's own session (a
+            # user-scoping router answers listings and foreign reads from
+            # an empty one). DELETE carries ids only and passes through.
+            return RouteKind.CHAT
         if path.startswith("/v1/conversations"):
             # Stateful item store paired with the Responses API. Item content
             # (message text) rode through UNREDACTED before this. POST create /
@@ -238,8 +275,8 @@ class OpenAIAdapter(ProviderAdapter):
         # File uploads inject per JSONL line (into chat-shaped bodies)
         # inside redact_multipart; this gate just allows that to happen.
         # Legacy completions have no messages field — a note would corrupt
-        # the body shape.
-        if path == "/v1/completions":
+        # the body shape — and file downloads/objects are body-less GETs.
+        if path == "/v1/completions" or path.startswith("/v1/files/"):
             return False
         if path.startswith("/v1/conversations"):
             # Item bodies carry `items`, not `messages`; injecting the note
@@ -336,28 +373,59 @@ class OpenAIAdapter(ProviderAdapter):
         # the Azure subclass's /openai/... path shapes reuse this unchanged.
         media = path.endswith(_PROMPT_FIELD_PATH_SUFFIXES)
         changed = False
-        for part in parsed.parts:
-            if media and part.name in _PROMPT_FIELDS:
-                # Matched by NAME regardless of a filename attribute: a
-                # prompt part dressed up as a file upload must not slip past
-                # the scan (fail closed) — binary content skips via the
-                # decode (refused under identity).
-                changed |= _redact_text_part(part, redactor, require_scanned=require_scanned)
-            elif part.filename is not None:
-                if media:
-                    continue  # the image/video itself: media, never scanned
-                new_content = self._redact_jsonl(
-                    part.content, redactor, inject_note=inject_note, require_scanned=require_scanned
+        try:
+            for part in parsed.parts:
+                changed |= self._redact_part(
+                    part,
+                    redactor,
+                    media=media,
+                    inject_note=inject_note,
+                    require_scanned=require_scanned,
                 )
-                if new_content != part.content:
-                    part.content = new_content
-                    changed = True
-            elif require_scanned:
-                # Plain form fields (purpose, model, size, user, ...) are
-                # forwarded as-is by default; the proxy's own identity signs
-                # them only once scanned as text.
-                changed |= _redact_text_part(part, redactor, require_scanned=True)
+        except multipart.AmbiguousHeaders as exc:
+            # Only reachable under identity auth (require_scanned): a part
+            # header without a single reading is never signed.
+            raise UnredactableRequest(str(exc)) from None
         return parsed.serialize() if changed else None
+
+    def _redact_part(
+        self,
+        part: multipart.MultipartPart,
+        redactor: Redactor,
+        *,
+        media: bool,
+        inject_note: bool,
+        require_scanned: bool,
+    ) -> bool:
+        # The upload's file name is user content on every route (the part
+        # name is structural, like a JSON key). Strict under identity auth,
+        # so the routing reads below always see the one reading.
+        changed = part.redact_filenames(redactor.redact_text, strict=require_scanned)
+        if media and part.name in _PROMPT_FIELDS:
+            # Matched by NAME regardless of a filename attribute: a prompt
+            # part dressed up as a file upload must not slip past the scan
+            # (fail closed) — binary content skips via the decode (refused
+            # under identity).
+            kind = "text"
+        elif part.filename is not None:
+            kind = "media" if media else "jsonl"  # media: never scanned
+        else:
+            # Plain form fields (purpose, model, size, user, ...) are
+            # forwarded as-is by default; the proxy's own identity signs
+            # them only once scanned as text.
+            kind = "text" if require_scanned else "field"
+        if require_scanned:
+            _require_plain_encoding(part, scanned=kind != "media")
+        if kind == "jsonl":
+            new_content = self._redact_jsonl(
+                part.content, redactor, inject_note=inject_note, require_scanned=require_scanned
+            )
+            if new_content != part.content:
+                part.content = new_content
+                changed = True
+        elif kind == "text":
+            changed |= _redact_text_part(part, redactor, require_scanned=require_scanned)
+        return changed
 
     def _redact_jsonl(
         self, data: bytes, redactor: Redactor, *, inject_note: bool, require_scanned: bool = False

@@ -246,6 +246,42 @@ def test_multipart_parse_serialize_is_byte_identical(pair: tuple[bytes, bytes]) 
         assert parsed.serialize() == body
 
 
+# Filename text a quoted-string can carry: every character but the controls
+# the grammar refuses (HTAB is allowed) and lone surrogates.
+_filename_text = st.text(
+    alphabet=st.characters(
+        blacklist_categories=("Cs",),
+        blacklist_characters=[chr(c) for c in (*range(0x09), *range(0x0A, 0x20), 0x7F)],
+    ),
+    max_size=40,
+)
+
+
+@settings(deadline=None)
+@given(text=_filename_text)
+def test_quoted_filename_rewrite_round_trips(text: str) -> None:
+    from llm_redact.multipart import MultipartPart, _quote
+
+    head = b'Content-Disposition: form-data; name="f"; filename="'
+    tail = b'"\r\nContent-Type: application/jsonl'
+    part = MultipartPart(headers=head + _quote(text).encode() + tail, content=b"")
+    params = part.params("content-disposition") or {}
+    assert params["filename"].value == text  # quoting is the parser's inverse
+    assert part.redact_filenames(lambda s: s + "«EMAIL_001»", strict=True) is True
+    assert part.headers is not None
+    assert part.headers.startswith(head) and part.headers.endswith(tail)
+    assert (part.params("content-disposition") or {})["filename"].value == text + "«EMAIL_001»"
+
+
+@settings(deadline=None)
+@given(data=st.binary(max_size=40))
+def test_ext_value_encoding_round_trips(data: bytes) -> None:
+    from llm_redact.multipart import Param, _ext_encode, _ext_value
+
+    encoded = "UTF-8'en'" + _ext_encode(data)
+    assert _ext_value(Param(encoded, False, 0, len(encoded))) == ("UTF-8", "en", data)
+
+
 @settings(deadline=None)
 @given(names=st.lists(st.text(min_size=1, max_size=8), min_size=0, max_size=5))
 def test_sse_serialize_parse_preserves_event_fields(names: list[str]) -> None:

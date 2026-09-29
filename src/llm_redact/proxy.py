@@ -57,6 +57,7 @@ from llm_redact.config import (
     default_config_path,
     identity_upstream_problem,
     load_config,
+    normalize_origin,
     resolve_config_path,
     resolve_credentials,
     unsupported_plugin_capabilities,
@@ -1895,6 +1896,10 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 # would spend a credential the proxy holds, as addressed to a
                 # host name it does not answer to — by kind, never a value.
                 "request_origin_refusals_total": dict(state.request_origin_refusals),
+                # How many browser origins the operator listed in
+                # allowed_origins (the count, not the list): pages there can
+                # read restored values back through the proxy — opt-in.
+                "allowed_origins": len(config.allowed_origins),
                 "detection": {
                     "enabled_rules": list(config.detection.enabled),
                     # None = all languages; otherwise the active scope and
@@ -2229,9 +2234,13 @@ REQUEST_ORIGIN_REFUSALS = {
         "this proxy does not answer to that host name (a DNS-rebinding defense);"
         " list it in allowed_hosts if a client uses it"
     ),
-    "origin": "a web page on another origin sent this request; llm-redact does not serve those",
+    "origin": (
+        "a web page on another origin sent this request; llm-redact serves only the origins"
+        " in allowed_origins"
+    ),
     "fetch_site": (
-        "a web page on another site or origin sent this request; llm-redact does not serve those"
+        "a page on another site or origin sent this request without an Origin to check"
+        " against allowed_origins"
     ),
 }
 
@@ -2285,12 +2294,16 @@ def request_origin_refusal(
     A request with browser markers (``_browser_request``) must be addressed
     to a host name the proxy answers to (DNS rebinding), carry only its own
     origin (CSRF, cross-site WebSocket hijacking) and a ``Sec-Fetch-Site``
-    of ``same-origin`` or ``none``. One that would spend a credential the
-    proxy holds (``lends_credential``) must name such a host even without
-    markers — a browser lacking Fetch Metadata sends none on a same-origin
-    GET — unless it arrived over TLS: a browser verifies the proxy's
-    certificate against the name it resolved, so a rebound page never
-    reaches a TLS listener, and a team's clients may use any name the
+    of ``same-origin`` or ``none``. The one exception is the operator's
+    opt-in: an Origin listed in ``allowed_origins`` (compared in its
+    serialized form, ``normalize_origin``) is served although it is
+    cross-site by definition — its Origin, which page script cannot forge,
+    vouches for it; the Host rule still holds. One that would spend a
+    credential the proxy holds (``lends_credential``) must name such a host
+    even without markers — a browser lacking Fetch Metadata sends none on a
+    same-origin GET — unless it arrived over TLS: a browser verifies the
+    proxy's certificate against the name it resolved, so a rebound page
+    never reaches a TLS listener, and a team's clients may use any name the
     certificate covers. CLI tools and SDKs send no browser markers, so an
     alias host (a compose service) keeps working on the client's own
     credential."""
@@ -2302,8 +2315,15 @@ def request_origin_refusal(
     if not _host_allowed(conn, state):
         return "host"
     headers = conn.headers
-    if not all(_own_origin(conn, state, origin) for origin in headers.getlist("origin")):
-        return "origin"
+    listed = False
+    for origin in headers.getlist("origin"):
+        if _own_origin(conn, state, origin):
+            continue
+        if normalize_origin(origin) not in state.config.allowed_origins:
+            return "origin"
+        listed = True
+    if listed:
+        return None  # a listed page's fetch is cross-site by definition
     for site in headers.getlist("sec-fetch-site"):
         if site.strip().lower() not in _OWN_FETCH_SITES:
             return "fetch_site"

@@ -39,9 +39,13 @@ web pages"):
   in `allowed_hosts` and restart
   ([deployment.md](deployment.md#host-names-the-proxy-answers-to-allowed_hosts)).
 - `origin` / `fetch_site`: the request carried an `Origin` other than the
-  proxy's own, or a `Sec-Fetch-Site` of `cross-site`/`same-site`. A
-  browser-based client served from another origin cannot use the proxy by
-  design; run the tool outside the browser.
+  proxy's own or one listed in `allowed_origins`, or a `Sec-Fetch-Site` of
+  `cross-site`/`same-site` without an `Origin` to check. A browser app on
+  another origin is served only when you list its exact origin in
+  `allowed_origins` (`scheme://host[:port]`, then restart) — and a listed
+  page can read your restored values back
+  ([deployment.md](deployment.md#browser-apps-on-other-origins-allowed_origins)).
+  Otherwise run the tool outside the browser.
 
 ## "request body exceeds llm-redact max_body_bytes"
 
@@ -74,8 +78,8 @@ message names the exact offender; fix it and re-run `serve --check`.
 Log lines from a `kill -HUP`. The first means the new file failed to parse
 or build — the proxy deliberately keeps serving the old config rather than
 crash; fix the file (`serve --check` shows the error) and HUP again. The
-second lists fields (host, port, allowed_hosts, vault, audit, log, tls,
-otel, users, email) that only apply on a full restart.
+second lists fields (host, port, allowed_hosts, allowed_origins, vault,
+audit, log, tls, otel, users, email) that only apply on a full restart.
 
 ## "the vault at {path} is encrypted; set [vault] encryption = \"fernet\" …"
 

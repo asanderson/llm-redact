@@ -15,6 +15,15 @@ port = 8787
 # Service); names only, no scheme or port. Restart-only. Default: none.
 # allowed_hosts = ["llm-redact", "llm-redact.team.svc.cluster.local"]
 
+# Browser apps on OTHER origins the proxy may serve (a web chat UI, a local
+# dev server). OPT-IN, default none: a page on a listed origin — and any code
+# running on it — can READ YOUR RESTORED VALUES back through the proxy and
+# spend every credential it holds; list only origins you trust with them.
+# Exact web origins: scheme://host[:port], https (http only for localhost /
+# loopback), no path or wildcard; never "null". The provider must accept
+# browser calls (CORS is forwarded as is). Restart-only. Default: none.
+# allowed_origins = ["https://chat.example.com", "http://localhost:3000"]
+
 # When a request was redacted, append a short system note asking the model to
 # reproduce «TYPE_NNN» tokens exactly. Reduces the risk of the model mangling
 # placeholders so they can't be restored.

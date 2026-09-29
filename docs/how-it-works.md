@@ -352,7 +352,21 @@ while the vault row is the secret store and is never exported.
   are in play — so each user sees their own items restored and nobody
   else's, whatever session the listing itself is read in. The
   batch list itself is a **chat** route: with one shared namespace it is
-  restored like a single batch.
+  restored like a single batch. A router may also OBSERVE answers
+  (`SessionRouter.response_observer`, read-only and provider-neutral):
+  for each upstream answer the proxy delivers it is told the adapter,
+  method, path, status, content type, the request body as sent upstream,
+  the session and whether a proxy-held credential was spent, and may
+  return a callable that the proxy then hands each JSON value of the
+  answer AS THE PROVIDER SENT IT — before rehydration, so placeholders
+  only, never a restored value; each its own parse, so nothing it does
+  changes what the client receives: a buffered JSON body once, an SSE
+  stream per event, an NDJSON stream per line, an AWS eventstream per
+  frame (realtime frames are not observed). A fault there is contained
+  like the other bookkeeping (stage `response_observer`); a router
+  without the member costs one attribute test per answer.
+  llm-redact-pro learns from it which session an OpenAI compaction's
+  opaque encrypted item was issued in.
 - `compaction_forks` counts only a session first seen by this process
   whose history carries placeholders it cannot own: a persisted session
   resumed after a restart (its vault already holds the tokens) and a

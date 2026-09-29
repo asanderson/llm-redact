@@ -989,6 +989,13 @@ async def ws_handle(websocket: WebSocket) -> None:
 
     started = time.perf_counter()
     static_ctx = state.context_for(None, "GET", path, None)
+    if static_ctx.sealed:
+        # A session the router says must stay empty cannot carry a
+        # conversation whose every message is redacted into it.
+        logger.info("WS %s -> refused (sealed session)", path)
+        _record_ws_refusal(state, adapter, path, 403, started)
+        await _reject(websocket, "the session router sealed this connection's vault session")
+        return
     # Thin per-connection wrapper (the context_for pattern: object
     # construction only): a tee counter gives exact per-connection
     # detection counts that still land in the process totals.

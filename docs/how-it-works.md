@@ -195,8 +195,18 @@ while the vault row is the secret store and is never exported.
   **403** before the audit START row, redaction, any upstream credential
   and any upstream contact, and is told whether the provider is
   authorized with the proxy's own cloud identity. llm-redact-pro refuses
-  every such reference under identity auth and every write (delete,
-  cancel, update) under passthrough keys. On an OpenAI-shaped listing
+  every such reference under identity auth, and in every mode anything
+  but a pure read (a body-less `GET`/`HEAD`): writes, and requests that
+  carry content of their own while citing the object (a chat's file
+  part, a `previous_response_id` continuation, a remix) — their own new
+  values would share placeholder names with the object's in the one
+  session the answer is restored from. A router may also mark the session
+  it resolved a request to as **sealed** (`SessionRouter.sealed`): the
+  core then reads it for rehydration but never writes to it — a request
+  that would redact a value there gets a recorded 403 before any upstream
+  contact (a realtime connection is refused), so an empty session a
+  router hands out for an object of unconfirmed ownership stays empty.
+  On an OpenAI-shaped listing
   (`GET` files, batches, video jobs, stored chat completions — OpenAI,
   Azure and `/custom/<name>/` alike) the router may name the session
   each listed object was created in (`listing_item_session`): the core

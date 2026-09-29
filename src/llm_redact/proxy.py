@@ -162,17 +162,62 @@ logger = logging.getLogger("llm_redact")
 
 
 class RequestContext:
-    """The session-scoped objects one request redacts and rehydrates with."""
+    """The session-scoped objects one request redacts and rehydrates with.
 
-    __slots__ = ("session_id", "vault", "redactor", "rehydrator")
+    ``sealed``: the session router resolved this request to a session that
+    must stay EMPTY (``SessionRouter.sealed``) — its redactor refuses to
+    write (``SealedSessionError``), so a request with anything to redact is
+    refused and the session is never populated."""
+
+    __slots__ = ("session_id", "vault", "redactor", "rehydrator", "sealed")
 
     def __init__(
-        self, session_id: str, vault: Vault, redactor: Redactor, rehydrator: Rehydrator
+        self,
+        session_id: str,
+        vault: Vault,
+        redactor: Redactor,
+        rehydrator: Rehydrator,
+        sealed: bool = False,
     ) -> None:
         self.session_id = session_id
         self.vault = vault
         self.redactor = redactor
         self.rehydrator = rehydrator
+        self.sealed = sealed
+
+
+class SealedSessionError(Exception):
+    """A request resolved to a sealed session had something to redact:
+    writing it would populate a session that must stay empty."""
+
+
+class _SealedVault:
+    """A read-through view of a sealed session: lookups pass through, and
+    any new placeholder raises ``SealedSessionError`` instead of writing."""
+
+    def __init__(self, vault: Vault) -> None:
+        self._vault = vault
+
+    def placeholder_for(self, detector_type: str, original: str) -> str:
+        raise SealedSessionError(detector_type)
+
+    def original_for(self, placeholder: str) -> str | None:
+        return self._vault.original_for(placeholder)
+
+    def close(self) -> None:
+        pass
+
+    def __len__(self) -> int:
+        return len(self._vault)
+
+
+# The 403 text when a request resolved to a sealed session would redact a
+# value (never the value, never an id).
+_SEALED_REFUSAL = (
+    "llm-redact: this request is served in a vault session that must stay empty (it"
+    " reaches content llm-redact cannot attribute to you), and it carries values that"
+    " would need redacting there; it was not forwarded"
+)
 
 
 # Hop-by-hop / recomputed headers dropped when forwarding either direction.
@@ -366,6 +411,7 @@ class ProxyState:
         self._object_access_refusal = getattr(self.session_router, "object_access_refusal", None)
         self._listing_item_session = getattr(self.session_router, "listing_item_session", None)
         self._record_object_id = getattr(self.session_router, "record_object_id", None)
+        self._sealed = getattr(self.session_router, "sealed", None)
         self._static_context = RequestContext(
             config.vault.session, self.vault, self.redactor, self.rehydrator
         )
@@ -497,7 +543,8 @@ class ProxyState:
         session_id = self.session_router.resolve(
             adapter.name if adapter is not None else None, method, path, parsed_body
         )
-        if session_id == self._static_context.session_id:
+        sealed = self._session_sealed(session_id)
+        if session_id == self._static_context.session_id and not sealed:
             return self._static_context
         vault = self.vault_manager.get(session_id)
         if session_id not in self._known_sessions:
@@ -525,7 +572,7 @@ class ProxyState:
         # counters: object construction only — no regex compilation, no DB open.
         redactor = Redactor(
             self.detectors,
-            vault,
+            _SealedVault(vault) if sealed else vault,
             self.allowlist,
             counts=self.detection_counts,
             modes=self.modes,
@@ -534,7 +581,20 @@ class ProxyState:
         rehydrator = Rehydrator(
             vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
         )
-        return RequestContext(session_id, vault, redactor, rehydrator)
+        return RequestContext(session_id, vault, redactor, rehydrator, sealed=sealed)
+
+    def _session_sealed(self, session_id: str) -> bool:
+        """The optional ``SessionRouter.sealed`` for the session this
+        request was just resolved to. A router that raises seals it: the
+        cost of being wrong is a refusal, never a populated session."""
+        check = self._sealed
+        if check is None:
+            return False
+        try:
+            return bool(check(session_id))
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            logger.warning("session router sealed failed (%s); sealing", type(exc).__name__)
+            return True
 
     def record_response_id(self, response_id: str, session_id: str) -> None:
         if self.session_router.mode == "static":
@@ -2441,6 +2501,24 @@ async def handle(request: Request) -> Response:
         )
         return JSONResponse(refused_adapter.error_body(message, status=400), status_code=400)
 
+    def sealed_response(sealed_adapter: ProviderAdapter) -> JSONResponse:
+        # The session router sealed this request's session (it must stay
+        # empty) and redaction would have written to it: refused before
+        # any upstream contact, the session untouched.
+        logger.info("%s %s -> 403 refused (sealed session)", request.method, path)
+        state.record_request(
+            session=ctx.session_id,
+            provider=sealed_adapter.name,
+            method=request.method,
+            path=path,
+            status=403,
+            started=started,
+            streamed=False,
+            detections={},
+            rehydrations={},
+        )
+        return JSONResponse(sealed_adapter.error_body(_SEALED_REFUSAL, status=403), status_code=403)
+
     # Routing (the llm-redact-pro routing layer): the router plans BEFORE
     # redaction because the FIRST upstream's inject_system_note governs the
     # prepared body (decision 4; the redacted body is reused on later hops).
@@ -2506,6 +2584,8 @@ async def handle(request: Request) -> Response:
             return blocked_response(exc, adapter)
         except UnredactableRequest as exc:
             return refused_response(str(exc), adapter, "undecodable field")
+        except SealedSessionError:
+            return sealed_response(adapter)
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
@@ -2548,6 +2628,8 @@ async def handle(request: Request) -> Response:
                 # One leaking line in an uploaded file is a leak: the
                 # whole request is rejected.
                 return blocked_response(exc, adapter)
+            except SealedSessionError:
+                return sealed_response(adapter)
             if rewritten is not None:
                 outbound = rewritten
 

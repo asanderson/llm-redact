@@ -292,3 +292,37 @@ async def test_identity_path_on_websocket_is_refused_and_never_logged(
             assert closed.value.rcvd is not None and closed.value.rcvd.code == 1011
         assert fake.paths == []
     assert "SUPERSECRET" not in caplog.text
+
+
+async def test_a_sealed_session_refuses_the_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SessionRouter.sealed: every message of a realtime conversation is
+    # redacted into the connection's session, so a session that must stay
+    # empty cannot carry one — refused before any upstream contact.
+    import llm_redact.registry as registry_mod
+    from llm_redact.registry import Registry
+
+    class SealingRouter:
+        mode = "per-user"
+
+        def resolve(self, adapter_name: Any, method: str, path: str, body: Any) -> str:
+            return "user:n1:conv-sealed"
+
+        def record_response_id(self, response_id: str, session_id: str) -> None:
+            return None
+
+        def sealed(self, session_id: str) -> bool:
+            return True
+
+    reg = Registry()
+    reg.build_session_router = lambda config, **kw: SealingRouter()
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    async with (
+        _relay_setup() as (fake, proxy_host),
+        websockets.connect(f"ws://{proxy_host}/v1/realtime") as client,
+    ):
+        with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
+            await client.recv()
+        assert closed.value.rcvd is not None
+        assert closed.value.rcvd.code == 1011
+        assert "sealed" in closed.value.rcvd.reason
+    assert fake.paths == []

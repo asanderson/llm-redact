@@ -122,6 +122,18 @@ class SessionRouter(Protocol):
     logged by exception type only). A router without the member is never
     asked, and one that keeps no ownership should return None at once.
 
+    OPTIONAL ``sealed(session_id) -> bool``: asked right after ``resolve``
+    (so never in static mode, where nothing is resolved) with the session
+    the request was resolved to. True means that session must stay EMPTY:
+    the proxy reads it for rehydration, but redacting anything into it is
+    refused — an HTTP request with a value to redact gets a recorded,
+    provider-shaped 403 before any upstream contact (nothing is written),
+    a realtime connection is refused outright. A router uses it where it
+    resolves a request to an empty session because what the request reads
+    has another (or no confirmed) owner: whatever the request itself sent
+    would otherwise share placeholder names with what it reads. An
+    exception seals; a router without the member never seals.
+
     OPTIONAL ``listing_item_session(object_id) -> str | None``: for a 2xx
     listing of stored objects (``ProviderAdapter.lists_objects`` /
     ``listing_items`` — OpenAI-shaped ``{"object": "list", "data": [...]}``

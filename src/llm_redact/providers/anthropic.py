@@ -27,6 +27,48 @@ _PASSTHROUGH_EVENTS = frozenset(
 
 _BATCH_RESULTS_RE = re.compile(r"/v1/messages/batches/[^/]+/results")
 
+# The files a server tool WROTE, as a Messages answer names them: a code
+# execution tool result (``code_execution_tool_result``, and the
+# ``bash_code_execution_tool_result`` / ``text_editor_…`` forms of the
+# current tool) lists each file its run created as an ``…_output`` entry of
+# its ``content.content`` with a ``file_id`` — downloadable through the
+# Files API (``GET /v1/files/{id}/content``) and citable by later messages.
+# Only these are the provider's creations: a ``container_upload`` or a
+# document ``source.file_id`` names a file the REQUEST supplied.
+_CODE_RESULT_SUFFIX = "code_execution_tool_result"
+_OUTPUT_SUFFIX = "_output"
+# A key every event naming a generated file carries (never inside a JSON
+# string: a quote there is escaped), so an event without it is never parsed.
+_FILE_ID_KEY = '"file_id"'
+
+
+def generated_file_ids(blocks: Any) -> tuple[str, ...]:
+    """The files the code execution results among ``blocks`` (Messages
+    content blocks) name as their run's outputs, each once, in order."""
+    found: list[str] = []
+    for block in blocks if isinstance(blocks, list) else ():
+        kind = block.get("type") if isinstance(block, dict) else None
+        if not (isinstance(kind, str) and kind.endswith(_CODE_RESULT_SUFFIX)):
+            continue
+        result = block.get("content")
+        outputs = result.get("content") if isinstance(result, dict) else None
+        for output in outputs if isinstance(outputs, list) else ():
+            if not isinstance(output, dict):
+                continue
+            output_kind, file_id = output.get("type"), output.get("file_id")
+            if (
+                isinstance(output_kind, str)
+                and output_kind.endswith(_OUTPUT_SUFFIX)
+                and isinstance(file_id, str)
+                and file_id
+            ):
+                found.append(file_id)
+    return tuple(dict.fromkeys(found))
+
+
+def _creates_message(path: str) -> bool:
+    return path.rstrip("/") == "/v1/messages"
+
 
 def inject_anthropic_system_note(body: dict[str, Any]) -> dict[str, Any]:
     """Messages-API note injection, shared with the Bedrock adapter
@@ -132,17 +174,46 @@ class AnthropicAdapter(ProviderAdapter):
         return RouteKind.NONE
 
     def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
-        # A message batch (its later results are read by id), and a Files API
+        # A message batch (its later results are read by id), a Files API
         # upload (POST /v1/files with anthropic-version — pass-through, the
         # document is media — read back by id and cited by later messages as
-        # a document or container_upload `file_id`).
+        # a document or container_upload `file_id`), and a message: the
+        # files its code execution runs wrote (generated_file_ids).
         tail = path.rstrip("/")
-        return method == "POST" and (tail.endswith("/messages/batches") or tail == "/v1/files")
+        return method == "POST" and (
+            tail.endswith("/messages/batches") or tail in ("/v1/files", "/v1/messages")
+        )
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
+        if _creates_message(path):
+            # The message id names no stored object; its generated files do.
+            return generated_file_ids(body.get("content") if isinstance(body, dict) else None)
         if isinstance(body, dict) and isinstance(body.get("id"), str) and body["id"]:
             return (str(body["id"]),)
         return ()
+
+    def object_ids_from_event(self, method: str, path: str, event: SSEEvent) -> tuple[str, ...]:
+        # A streamed message: a code execution result arrives WHOLE in its
+        # content_block_start (server tool results are never streamed as
+        # deltas); message_start's content is read too, for completeness.
+        if not _creates_message(path):
+            return super().object_ids_from_event(method, path, event)
+        if _FILE_ID_KEY not in event.data:
+            return ()
+        try:
+            payload = json.loads(event.data)
+        except ValueError:
+            return ()
+        if not isinstance(payload, dict):
+            return ()
+        if payload.get("type") == "content_block_start":
+            return generated_file_ids([payload.get("content_block")])
+        message = payload.get("message") if payload.get("type") == "message_start" else None
+        return generated_file_ids(message.get("content") if isinstance(message, dict) else None)
+
+    def reports_object_ids_once(self, method: str, path: str) -> bool:
+        # A message's files are named block by block: every event is read.
+        return not _creates_message(path)
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         # count_tokens accepts the same `system` field as /v1/messages, and

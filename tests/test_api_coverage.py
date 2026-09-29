@@ -73,6 +73,7 @@ MATRIX: list[tuple[str, str, str]] = [
     ("DELETE", "/v1/videos/{id}", PASS),
     ("POST", "/v1/fine_tuning/jobs", PASS),
     ("GET", "/v1/fine_tuning/jobs", PASS),
+    ("GET", "/v1/fine_tuning/jobs/{id}", PASS),
     # Google Vertex AI
     *[
         ("POST", f"{_VX}/publishers/google/models/{{m}}:{verb}", kind)

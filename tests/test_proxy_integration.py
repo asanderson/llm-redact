@@ -953,6 +953,9 @@ def test_provider_inference_covers_pass_through_surfaces() -> None:
         "/v1/vector_stores/vs_1/search": "openai",
         "/v1/assistants": "openai",
         "/v1/threads/th_1/messages": "openai",
+        # The code interpreter's containers: the files a Response's code
+        # wrote are read back here (GET …/containers/{c}/files/{f}/content).
+        "/v1/containers/cntr_1/files/cfile_1/content": "openai",
         "/upload/v1beta/files": "gemini",
         "/guardrail/g1/version/1/apply": "bedrock",
         "/async-invoke": "bedrock",

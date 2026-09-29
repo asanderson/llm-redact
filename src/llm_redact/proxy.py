@@ -1353,6 +1353,9 @@ class ProxyState:
                 "/v1/vector_stores",
                 "/v1/assistants",
                 "/v1/threads",
+                # The code interpreter's containers (the files a Response's
+                # code wrote are read back from them).
+                "/v1/containers",
             )
         ):
             return "openai"
@@ -1572,11 +1575,17 @@ async def _stream_rehydrated(
     request_meta: RequestMeta,
     route: RouteDelivery | None = None,
     object_tracker: ProviderAdapter | None = None,
+    request_body: Any = None,
 ) -> AsyncIterator[bytes]:
     method, path, started, detections, warned, audit_token = request_meta
     parser = SSEParser()
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
     response_id_seen = False
+    objects = (
+        _StreamedObjects(object_tracker, method, path, request_body)
+        if object_tracker is not None
+        else None
+    )
     status = upstream.status_code  # 502 when the proxy itself cut the stream
     try:
         async for chunk in upstream.aiter_bytes():
@@ -1596,15 +1605,15 @@ async def _stream_rehydrated(
                             ctx.session_id,
                         )
                         response_id_seen = True
-                if object_tracker is not None and _record_streamed_object_ids(
-                    state, ctx, object_tracker, method, path, event
-                ):
-                    object_tracker = None  # the first event naming it suffices
+                if objects is not None and objects.report(state, ctx, event):
+                    objects = None  # nothing more to read from this stream
                 for out in adapter.rehydrate_event(event, pool):
                     if route is not None:
                         out = route.observe_event(out)
                     yield serialize(out)
         for event in parser.close():
+            if objects is not None:
+                objects.report(state, ctx, event)
             for out in adapter.rehydrate_event(event, pool):
                 if route is not None:
                     out = route.observe_event(out)
@@ -1655,27 +1664,64 @@ async def _stream_rehydrated(
         )
 
 
-def _record_streamed_object_ids(
-    state: ProxyState,
-    ctx: RequestContext,
-    tracker: ProviderAdapter,
-    method: str,
-    path: str,
-    event: SSEEvent,
-) -> bool:
-    """Report the stored-object ids a streamed event names (a stored chat
-    completion's chunks carry its id); True once some were reported."""
-    try:
-        payload = json.loads(event.data)
-    except ValueError:
-        return False  # [DONE], keep-alives, anything not JSON
-    object_ids = tracker.object_ids_from_body(method, path, payload)
-    if object_ids:
-        # Contained like the buffered report: the stream goes on either way.
-        _contained(
-            state, "object_ids", method, path, state.record_object_ids, object_ids, ctx.session_id
-        )
-    return bool(object_ids)
+class _StreamedObjects:
+    """The stored-object ids a tracked stream names, reported to the session
+    router as they appear — each id once, and never one the request itself
+    cites (``_uncited``). A stream that names all its objects on one event
+    (``reports_object_ids_once``: a stored chat completion's id rides every
+    chunk) is read until the first event naming some; any other (the files
+    a tool run wrote, named on the events that carry them) to its end."""
+
+    def __init__(self, tracker: ProviderAdapter, method: str, path: str, request_body: Any) -> None:
+        self._tracker = tracker
+        self._method = method
+        self._path = path
+        self._request_body = request_body
+        self._once = tracker.reports_object_ids_once(method, path)
+        self._seen: set[str] = set()
+
+    def report(self, state: ProxyState, ctx: RequestContext, event: SSEEvent) -> bool:
+        """Report what ``event`` newly names — contained, like the buffered
+        report: the stream goes on either way. True when the stream needs no
+        further reading (its objects are named, or reading them failed)."""
+        named = False
+
+        def record() -> None:
+            nonlocal named
+            found = self._tracker.object_ids_from_event(self._method, self._path, event)
+            fresh = [object_id for object_id in found if object_id not in self._seen]
+            if not fresh:
+                return
+            named = True
+            self._seen.update(fresh)
+            created = _uncited(fresh, self._request_body)
+            if created:
+                state.record_object_ids(created, ctx.session_id)
+
+        recorded = _contained(state, "object_ids", self._method, self._path, record)
+        return not recorded or (named and self._once)
+
+
+def _uncited(object_ids: Sequence[str], request_body: Any) -> list[str]:
+    """``object_ids`` without any the request body carries as a string: an
+    id the request itself cites (a file it attached or uploaded into a
+    container, an earlier answer's citation it resends) names an EXISTING
+    object the answer merely echoes — never one this request created, so it
+    is never reported as the requester's. Read only when an answer names
+    objects; the walk stops once every id is found."""
+    wanted = set(object_ids)
+    cited: set[str] = set()
+    stack: list[Any] = [request_body]
+    while stack and len(cited) < len(wanted):
+        node = stack.pop()
+        if isinstance(node, str):
+            if node in wanted:
+                cited.add(node)
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return [object_id for object_id in object_ids if object_id not in cited]
 
 
 def _stream_delivery_fault(state: ProxyState, method: str, path: str, exc: Exception) -> int:
@@ -3770,6 +3816,7 @@ async def _deliver(
                     if 200 <= upstream.status_code < 300
                     else None
                 ),
+                request_body=request_body,
             ),
             status_code=upstream.status_code,
             headers=headers,
@@ -3978,26 +4025,48 @@ def _restore_buffered(
     )
     if tracker is not None:
         # Objects the provider stores for later reads (uploaded files,
-        # batches, stored conversations): their ids go to the session router
-        # with the session that created them. A body no adapter tracks is
+        # batches, stored conversations, the files a tool run wrote): their
+        # ids go to the session router with the session that created them —
+        # never an id the request itself cites. A body no adapter tracks is
         # never parsed here (pass-through routes carry no adapter, so the
-        # provider's is looked up by name).
+        # provider's is looked up by name). Contained, reading included: a
+        # lost record is the router's unknown-object case, never a lost answer.
         try:
             stored = payload if payload is not None else json.loads(raw)
         except ValueError:
             stored = None
-        object_ids = tracker.object_ids_from_body(request.method, path, stored)
-        if object_ids:
-            _contained(
-                state,
-                "object_ids",
-                request.method,
-                path,
-                state.record_object_ids,
-                object_ids,
-                ctx.session_id,
-            )
+        _contained(
+            state,
+            "object_ids",
+            request.method,
+            path,
+            _report_object_ids,
+            state,
+            tracker,
+            request.method,
+            path,
+            stored,
+            request_body,
+            ctx.session_id,
+        )
     return raw
+
+
+def _report_object_ids(
+    state: ProxyState,
+    tracker: ProviderAdapter,
+    method: str,
+    path: str,
+    answer: Any,
+    request_body: Any,
+    session_id: str,
+) -> None:
+    """Report the stored objects a buffered answer names that the request
+    itself does not cite (``_uncited``)."""
+    object_ids = tracker.object_ids_from_body(method, path, answer)
+    created = _uncited(object_ids, request_body) if object_ids else []
+    if created:
+        state.record_object_ids(created, session_id)
 
 
 def _contained(

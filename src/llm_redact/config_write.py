@@ -494,6 +494,8 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append("\n[users]")
         if config.users.path is not None:
             lines.append(f"path = {_toml_str(config.users.path)}")
+        if config.users.unrecorded_objects != UsersConfig().unrecorded_objects:
+            lines.append(f"unrecorded_objects = {_toml_str(config.users.unrecorded_objects)}")
 
     if config.email != EmailConfig():
         # The SMTP password is env-only by design and never appears here.

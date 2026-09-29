@@ -572,11 +572,20 @@ class OtelConfig:
     service_name: str = "llm-redact"
 
 
+# [users] unrecorded_objects: the shape of llm-redact-pro's unknown-owner
+# policy (docs/authentication.md there). "refuse" (default): under a
+# credential the proxy holds, a named user's reference to a stored object no
+# user is recorded creating is refused. "allow": forwarded, and read sealed.
+UNRECORDED_OBJECT_POLICIES = ("refuse", "allow")
+
+
 @dataclass(frozen=True)
 class UsersConfig:
     # Named-user registry database (Pro+ tiers; llm-redact-pro docs/licensing.md).
     # Default: $XDG_DATA_HOME/llm-redact/users.db. Restart-only.
     path: str | None = None
+    # One of UNRECORDED_OBJECT_POLICIES; implemented by llm-redact-pro only.
+    unrecorded_objects: str = "refuse"
 
 
 @dataclass(frozen=True)
@@ -2476,8 +2485,17 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     )
 
     users_raw = raw.get("users", {})
-    _require_keys(users_raw, {"path"}, "[users]")
-    users_cfg = UsersConfig(path=str(users_raw["path"]) if "path" in users_raw else None)
+    _require_keys(users_raw, {"path", "unrecorded_objects"}, "[users]")
+    unrecorded = users_raw.get("unrecorded_objects", UsersConfig().unrecorded_objects)
+    if not isinstance(unrecorded, str) or unrecorded not in UNRECORDED_OBJECT_POLICIES:
+        raise ConfigError(
+            '[users] unrecorded_objects must be "refuse" (the default) or "allow"'
+            " (llm-redact-pro docs/authentication.md)"
+        )
+    users_cfg = UsersConfig(
+        path=str(users_raw["path"]) if "path" in users_raw else None,
+        unrecorded_objects=unrecorded,
+    )
 
     email_cfg = _parse_email(raw.get("email", {}))
 

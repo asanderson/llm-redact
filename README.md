@@ -222,7 +222,8 @@ llm-redact run -- claude -p "hello"         # env injected; ephemeral proxy if n
 
 Or run it long-lived (`llm-redact serve`, listens on `127.0.0.1:8787`)
 and point tools at it via their base-URL variables (`ANTHROPIC_BASE_URL`,
-`OPENAI_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`, `OLLAMA_HOST`). From there:
+`OPENAI_BASE_URL` — with `/v1`: `http://127.0.0.1:8787/v1` —,
+`GOOGLE_GEMINI_BASE_URL`, `OLLAMA_HOST`). From there:
 
 - **Five-minute walkthrough** — install, init, run, verify, preflight:
   [docs/quickstart.md](docs/quickstart.md).

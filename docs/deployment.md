@@ -43,8 +43,9 @@ liveness check) reach it at the configured `host`: a wildcard bind
 same URL to the tools it wraps.
 
 **Default deployment (recommended): loopback.** Point the tool's base URL
-at `http://127.0.0.1:8787` (or use `llm-redact run -- <tool>`, which
-injects the right env vars). Nothing else to configure.
+at `http://127.0.0.1:8787` — `http://127.0.0.1:8787/v1` for
+`OPENAI_BASE_URL` — or use `llm-redact run -- <tool>`, which injects the
+right env vars. Nothing else to configure.
 
 **Remote / shared deployment** — serving clients on other hosts — means
 operating a client-certificate PKI: configure the full `[tls]` trio

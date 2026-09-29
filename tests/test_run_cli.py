@@ -20,6 +20,7 @@ from llm_redact.run_cli import run_run
 CHILD_SNIPPET = (
     "import os, sys;"
     "print('ANTH=' + os.environ.get('ANTHROPIC_BASE_URL', ''));"
+    "print('OPENAI=' + os.environ.get('OPENAI_BASE_URL', ''));"
     "print('OLLAMA=' + os.environ.get('OLLAMA_HOST', ''));"
     "sys.exit(7)"
 )
@@ -67,8 +68,11 @@ def test_auto_start_injects_env_and_tears_down(
     code = run_run(_args(port, config_file, None, ["--", sys.executable, "-c", CHILD_SNIPPET]))
     out, err = capfd.readouterr()
     assert code == 7  # child's exit code propagates
-    assert f"ANTH=http://127.0.0.1:{port}" in out
-    assert f"OLLAMA=http://127.0.0.1:{port}" in out
+    assert f"ANTH=http://127.0.0.1:{port}\n" in out.replace("\r\n", "\n")
+    # OpenAI SDKs (Codex, OpenCode) join /responses onto a base that
+    # includes /v1: without it they reached no provider's path.
+    assert f"OPENAI=http://127.0.0.1:{port}/v1\n" in out.replace("\r\n", "\n")
+    assert f"OLLAMA=http://127.0.0.1:{port}\n" in out.replace("\r\n", "\n")
     assert "started for this run" in err
     # The ephemeral proxy is gone: nothing answers on the port anymore.
     deadline = time.monotonic() + 5
@@ -264,15 +268,16 @@ def test_plugin_decorates_the_exported_base_url(
     reg.tool_base_url = lambda base: f"{base}/u/lrk_secret"
     monkeypatch.setattr(registry_mod, "_registry", reg)
     monkeypatch.setattr(run_cli_mod, "_proxy_running", lambda url: True)
-    code = run_run(
-        _proxy_args(
-            config_file,
-            ["--", sys.executable, "-c", CHILD_SNIPPET],
-            proxy_url="http://127.0.0.1:9",
-        )
+    args = _proxy_args(
+        config_file,
+        ["--", sys.executable, "-c", CHILD_SNIPPET],
+        proxy_url="http://127.0.0.1:9",
     )
+    args.tools = "claude,codex"
+    code = run_run(args)
     assert code == 7
     out, err = capfd.readouterr()
     assert "ANTH=http://127.0.0.1:9/u/lrk_secret" in out
+    assert "OPENAI=http://127.0.0.1:9/u/lrk_secret/v1" in out  # the identity prefix first
     assert "with a client identity" in err
     assert "lrk_secret" not in err

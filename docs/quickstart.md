@@ -40,8 +40,8 @@ Or run the proxy long-lived and point tools at it yourself:
 ```bash
 llm-redact serve &
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8787   # Claude Code
-# OPENAI_BASE_URL for Codex-style tools; GOOGLE_GEMINI_BASE_URL for Gemini;
-# OLLAMA_HOST for ollama; see init's output
+export OPENAI_BASE_URL=http://127.0.0.1:8787/v1   # Codex, OpenCode (the /v1 matters)
+# GOOGLE_GEMINI_BASE_URL for Gemini; OLLAMA_HOST for ollama; see init's output
 ```
 
 For a tool whose variable llm-redact does not know:

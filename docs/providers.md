@@ -10,9 +10,9 @@ At a glance:
 | Provider | Point at the proxy | Covered surface |
 |---|---|---|
 | Anthropic | `ANTHROPIC_BASE_URL` | Messages (+streaming), count_tokens, Message Batches, beta Files |
-| OpenAI | `OPENAI_BASE_URL` | Chat Completions, Responses, Conversations, legacy completions, embeddings, Files+Batches, Realtime WS |
+| OpenAI | `OPENAI_BASE_URL` (ending in `/v1`) | Chat Completions, Responses, Conversations, legacy completions, embeddings, Files+Batches, Realtime WS |
 | Azure OpenAI | `[providers.azure]` + tool's Azure endpoint | same OpenAI surface incl. Responses/Conversations/Realtime, legacy completions, image/speech prompts, files/batches, model listings |
-| Google Gemini | `GOOGLE_GEMINI_BASE_URL` | generateContent/stream, countTokens, embeddings, cachedContents, batch, Live WS |
+| Google Gemini | `GOOGLE_GEMINI_BASE_URL` | generateContent/stream, countTokens, embeddings, cachedContents, batch, Live WS, the OpenAI-compatible `/v1beta/openai/` surface |
 | Vertex AI | `[providers.vertex]` | Gemini-on-Vertex + Claude-on-Vertex (`rawPredict`/`streamRawPredict`), context caching, computeTokens/embedContent, Imagen/Veo, model listings |
 | AWS Bedrock | `[providers.bedrock]` (bearer keys, or the proxy's own identity) | converse(+stream), invoke(+response-stream), binary eventstream, count-tokens, ApplyGuardrail, async invoke |
 | Cohere | `[providers.cohere]` | v2 chat (+streaming), embed, rerank, legacy v1 chat/generate |
@@ -32,8 +32,9 @@ proxy and the default upstreams apply:
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude -p "hello"
-# OpenAI-compatible tools (chat completions and /v1/responses, e.g. Codex CLI):
-OPENAI_BASE_URL=http://127.0.0.1:8787 <your-tool>
+# OpenAI-compatible tools (chat completions and /v1/responses, e.g. Codex CLI,
+# OpenCode, the OpenAI SDKs) — the /v1 is part of the base URL:
+OPENAI_BASE_URL=http://127.0.0.1:8787/v1 <your-tool>
 # Gemini (generateContent / streamGenerateContent / countTokens):
 GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787 <your-tool>
 # Ollama's native API (/api/chat, /api/generate, /api/embed):
@@ -44,6 +45,28 @@ OLLAMA_HOST=http://127.0.0.1:8787 <your-tool>
 agent with the llm-redact plugin installed can confirm its traffic is
 actually flowing through the proxy with `/llm-redact:status` and
 `/llm-redact:recent` ([plugins.md](plugins.md)).
+
+The OpenAI SDKs (and Codex and OpenCode) append endpoint paths such as
+`/responses` to a base URL that already includes `/v1` — their default is
+`https://api.openai.com/v1`. With the old `OPENAI_BASE_URL=http://127.0.0.1:8787`
+the proxy receives `/responses`, which is no provider's path: it answers a
+404 naming the fix and forwards nothing. (Releases up to 1.8.0 sent such a
+request to the anthropic upstream with the OpenAI key and the prompt,
+unredacted.)
+
+The proxy forwards a request no route matches only to a provider it can
+positively attribute it to — a path family, or a header only that
+provider's clients send (`anthropic-version`, a Google API key, …) —
+never to a guessed one; anything else is a recorded local 404. A path
+spelled differently from the API's own route (an empty `//` segment, a
+trailing `/`, another case) is refused 400, a recognized route under an
+extra prefix (`/v1/v1/messages`: a base URL repeating the version) is a
+404, and `GET`/`HEAD /` is answered locally. See
+[api-coverage.md](api-coverage.md#requests-no-route-matches). Point each
+`upstream_base_url` at the API's final `https` URL: the proxy never relays
+an upstream redirect that a following client would answer by re-sending
+a redacted request's unredacted original to the `Location` — it answers
+502.
 
 ## Azure OpenAI
 
@@ -226,8 +249,10 @@ every other route too — see the threat model's "Requests from web pages".
 Supported out of the box (`OLLAMA_HOST=http://127.0.0.1:8787`, or point
 the tool at the proxy): `/api/chat` and `/api/generate` are redacted and
 rehydrated including their newline-delimited-JSON streaming, and
-`/api/embed`/`/api/embeddings` inputs are scrubbed. The default
-upstream is the local daemon at `http://127.0.0.1:11434`.
+`/api/embed`/`/api/embeddings` inputs are scrubbed. The model inventory
+(`/api/tags`, `/api/ps`, `/api/show`) and `/api/version` are recognized,
+and the ollama CLI's `HEAD /` heartbeat is answered by the proxy itself.
+The default upstream is the local daemon at `http://127.0.0.1:11434`.
 
 Ollama (like a local vLLM or LM Studio server) needs no key, so the proxy
 lends whoever reaches it access to the model — and it rewrites `Host` when
@@ -244,7 +269,15 @@ own `/v1` endpoints) are covered by pointing
 `[providers.openai] upstream_base_url` at them, so even self-hosted
 model traffic can be redacted — or run **several side by side** as
 named custom upstreams (`[providers.custom.NAME]`, served under
-`/custom/NAME/` with the full OpenAI surface, including Responses).
+`/custom/NAME/` with the full OpenAI surface, including Responses). A
+custom upstream's endpoints are recognized under whatever base path it
+serves them — `/v1`, `/openai/v1`, `/api/v1`, `/inference`, `/models`,
+`/api/paas/v4`, a Cloudflare AI Gateway's `/v1/{account}/{gateway}/openai`
+— and the path after `/custom/NAME` is forwarded byte-for-byte: point the
+tool at `http://127.0.0.1:8787/custom/NAME` plus the base path the
+upstream's own docs give. Gemini's OpenAI-compatible surface needs no
+custom provider: `http://127.0.0.1:8787/v1beta/openai/` reaches
+`[providers.gemini]`, redacted like OpenAI's.
 
 ## Embeddings
 

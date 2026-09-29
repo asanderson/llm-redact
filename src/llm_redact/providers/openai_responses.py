@@ -116,6 +116,10 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             # Stored responses AND their input-item echoes both repeat
             # content that carried placeholders upstream.
             return RouteKind.CHAT
+        if method == "DELETE" and _RESPONSE_ID_PATH.fullmatch(path):
+            # A stored response's delete carries its id only: recognized
+            # (a no-op redaction), like the chat adapter's deletes.
+            return RouteKind.REDACT_ONLY
         return RouteKind.NONE
 
     def error_body(self, message: str, *, status: int = 413) -> dict[str, Any]:

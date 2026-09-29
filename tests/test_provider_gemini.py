@@ -26,7 +26,11 @@ def test_routing_matrix() -> None:
         is RouteKind.REDACT_ONLY
     )
     assert adapter.matches("GET", GEN) is RouteKind.NONE
-    assert adapter.matches("GET", "/v1beta/models") is RouteKind.NONE
+    # Model metadata (no :verb): recognized, redact-only (a body-less no-op).
+    assert adapter.matches("GET", "/v1beta/models") is RouteKind.REDACT_ONLY
+    assert adapter.matches("GET", "/v1beta/models/gemini-2.5-pro") is RouteKind.REDACT_ONLY
+    assert adapter.matches("GET", "/v1beta/models/a/b") is RouteKind.NONE
+    assert not adapter.wants_system_note(RouteKind.REDACT_ONLY, "/v1beta/models")
     # Redact-only since 0.6.0: embeddings input is redactable text; the
     # response is vectors with nothing to rehydrate.
     assert adapter.matches("POST", "/v1beta/models/x:embedContent") is RouteKind.REDACT_ONLY

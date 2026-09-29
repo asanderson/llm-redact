@@ -85,9 +85,11 @@ spec:
           env:
             # Route the tool's provider traffic through the sidecar. These are
             # exactly the variables/values `llm-redact run` injects
-            # (TOOL_EXPORTS) — the plain proxy base URL, no /v1 suffix.
+            # (TOOL_EXPORTS): the plain proxy base URL, plus /v1 for
+            # OPENAI_BASE_URL (OpenAI SDKs join /responses onto a base that
+            # includes the version).
             - { name: ANTHROPIC_BASE_URL, value: "http://127.0.0.1:8787" }
-            - { name: OPENAI_BASE_URL, value: "http://127.0.0.1:8787" }
+            - { name: OPENAI_BASE_URL, value: "http://127.0.0.1:8787/v1" }
             - { name: GOOGLE_GEMINI_BASE_URL, value: "http://127.0.0.1:8787" }
             - { name: OLLAMA_HOST, value: "http://127.0.0.1:8787" }
           securityContext:

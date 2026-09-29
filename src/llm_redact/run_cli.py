@@ -21,7 +21,7 @@ import time
 from types import FrameType
 
 from llm_redact.config import apply_env_overrides, dial_url, load_config
-from llm_redact.init_cli import TOOL_EXPORTS
+from llm_redact.init_cli import TOOL_EXPORTS, export_value
 
 _READY_TIMEOUT_SECONDS = 15.0
 
@@ -165,7 +165,10 @@ def run_run(args: argparse.Namespace) -> int:
 
     env = dict(os.environ)
     for tool in tools:
-        env[TOOL_EXPORTS[tool][0]] = tool_base
+        variable = TOOL_EXPORTS[tool][0]
+        # After any plugin decoration (a /u/<key> identity prefix stays
+        # first): OPENAI_BASE_URL gets its /v1.
+        env[variable] = export_value(variable, tool_base)
     for name in extra_env:
         env[name] = tool_base
     routed = ",".join([*tools, *extra_env])

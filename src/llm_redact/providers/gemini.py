@@ -60,6 +60,9 @@ _GEMINI_FILE_CREATE = re.compile(r"(?:/upload)?/v1beta/files(?::register)?")
 # names the batch's output FILE — the creator's (only the creator's own read
 # of the batch reaches the provider and gets here unsealed).
 _GEMINI_BATCH_STATUS = re.compile(r"/v1beta/batches/[^/:]+")
+# The model listing and one model's metadata (no :verb): recognized,
+# redact-only — a body-less no-op, like Vertex's model metadata.
+_GEMINI_MODELS = re.compile(r"/v1beta/models(?:/[^/:]+)?")
 _FILE_PREFIX = "files/"
 
 # Live drift detector reference sets (tests/test_live.py): observed keys must
@@ -159,6 +162,8 @@ class GeminiAdapter(ProviderAdapter):
     name = "gemini"
 
     def matches(self, method: str, path: str) -> RouteKind:
+        if method == "GET" and _GEMINI_MODELS.fullmatch(path):
+            return RouteKind.REDACT_ONLY
         if method != "POST":
             return RouteKind.NONE
         # Cache-create carries contents + systemInstruction to redact; the

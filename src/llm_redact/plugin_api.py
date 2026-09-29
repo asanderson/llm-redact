@@ -118,24 +118,25 @@ class SessionRouter(Protocol):
     never presented: the provider is authorized with the proxy's own cloud
     identity (``[providers.NAME] auth = "identity"``), or the request is
     routed and its plan may send an operator key or no key at all
-    (``RoutePlan.proxy_credential``). ``body`` is the parsed request body —
-    None for a body that is neither JSON nor an upload, and for
-    pass-through routes unless the request is sent with the proxy's
-    credential: then a JSON body is parsed for this check alone (still
-    forwarded byte-for-byte). A multipart/form-data upload is read for this
-    check alone (``upload_view``) — on a matched route whatever the
-    credential and whether or not it redacts (``detection``), on a
-    pass-through route under the proxy's credential — and ``body`` is then
-    a LIST of what it cites: each JSON-object line of its file parts (a
-    batch input file's requests run later, with the credential the upload
-    is sent with) and each form field as an object nested along its name
-    (``file_ids[]`` → ``{"file_ids": [value]}``). Under the proxy's
-    credential a body the check cannot read is refused before this is
-    asked: content-encoded, more than one Content-Type, JSON repeating a
-    key (a pass-through body; a matched one is re-serialized as checked),
-    JSON beyond ``max_body_bytes``, or an upload outside the canonical
+    (``RoutePlan.proxy_credential``). A pass-through route (no adapter
+    matches it) is never sent with a credential the proxy holds — it is
+    refused with a recorded 403 before its body is read and before this is
+    asked — so ``identity`` is always False for one, and its ``body`` is
+    None. ``body`` is the parsed request body of a matched route — None
+    for a body that is neither JSON nor an upload. A multipart/form-data
+    upload on a matched route is read for this check alone
+    (``upload_view``), whatever the credential and whether or not the
+    route redacts (``detection``), and ``body`` is then a LIST of what it
+    cites: each JSON-object line of its file parts (a batch input file's
+    requests run later, with the credential the upload is sent with) and
+    each form field as an object nested along its name (``file_ids[]`` →
+    ``{"file_ids": [value]}``). Under the proxy's credential a body the
+    check cannot read is refused before this is asked: content-encoded,
+    more than one Content-Type, or an upload outside the canonical
     grammar, with a transfer encoding, a form field that is not UTF-8
-    text, or more JSON than ``max_body_bytes``. A string refuses the
+    text, more parts than ``max_body_strings`` or more JSON than
+    ``max_body_bytes`` (a matched JSON body repeating a key is
+    re-serialized as checked). A string refuses the
     request with a recorded, provider-shaped 403 carrying exactly that
     text: a FIXED reason chosen by the router, never an object id, a user
     name or content. None forwards. An exception refuses too (fail closed;
@@ -222,7 +223,11 @@ class RouteInbound:
     top-level ``model`` when it is a string, else None (a Gemini request
     carries its model in the path — the router derives it). The core never
     hands the router a request body: the redacted body reaches the plan at
-    ``begin`` time only.
+    ``begin`` time only. A request no adapter recognizes (``adapter_name``
+    None) is planned before its body is read, and only once the core has
+    attributed it to a provider: ``provider_name`` is always a provider the
+    request positively names (a path family or one provider's markers) —
+    an unattributable request is answered 404 and never planned.
     """
 
     adapter_name: str | None
@@ -377,7 +382,9 @@ class RoutePlan(Protocol):
     chain member — attaches a credential the PROXY holds (an operator key)
     or none at all, instead of forwarding the client's own: every client is
     then one principal upstream, so the session router's
-    ``object_access_refusal`` is asked with ``identity=True``. A plan
+    ``object_access_refusal`` is asked with ``identity=True``, and a request
+    no adapter recognizes (pass-through) is refused with a recorded 403
+    before its body is read and ``begin`` — such a plan is dropped. A plan
     without the member counts as True (fail closed); only an explicit
     False says the client's own credential is what the provider sees.
     """

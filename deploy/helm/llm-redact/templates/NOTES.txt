@@ -11,7 +11,8 @@ Mode: STANDALONE — a shared in-cluster proxy (Deployment + Service{{ if .Value
     http://{{ include "llm-redact.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
 
   Point your tool at it, e.g.:
-    ANTHROPIC_BASE_URL / OPENAI_BASE_URL / GOOGLE_GEMINI_BASE_URL = that URL.
+    ANTHROPIC_BASE_URL / GOOGLE_GEMINI_BASE_URL = that URL,
+    OPENAI_BASE_URL = that URL + /v1.
 
   The proxy answers to that Service's in-cluster names (allowed_hosts). A
   request that spends a credential the proxy holds (auth = "identity", a

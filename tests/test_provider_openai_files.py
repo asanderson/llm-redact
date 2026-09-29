@@ -202,9 +202,9 @@ def _fake_upstream() -> Starlette:
         import re as _re
 
         # The injected system note itself contains example tokens
-        # («TYPE_NNN», «EMAIL_001») — echo only vault-issued EMAIL tokens
-        # from the actual message content.
-        tokens = _re.findall("«EMAIL_[0-9]+»", parsed.parts[1].content.decode())
+        # («TYPE_NNN», «EMAIL_000», a number the vault never issues) — echo
+        # only vault-issued EMAIL tokens from the actual message content.
+        tokens = _re.findall("«EMAIL_(?!000»)[0-9]+»", parsed.parts[1].content.decode())
         lines = b"".join(
             json.dumps(
                 {

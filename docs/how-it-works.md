@@ -77,7 +77,7 @@ injected system note telling the model to reproduce tokens exactly:
     "role": "user",
     "content": "Email «EMAIL_001» that the key «AWS_KEY_001» was found in the repo and must be rotated."
   }],
-  "system": "Some values in this conversation have been replaced with privacy tokens of the form «TYPE_NNN» (for example «EMAIL_001»). Treat each token as an opaque identifier for the real value and reproduce every token exactly, character for character, whenever you refer to it."
+  "system": "Some values in this conversation have been replaced with privacy tokens of the form «TYPE_NNN» (for example «EMAIL_000»). Treat each token as an opaque identifier for the real value and reproduce every token exactly, character for character, whenever you refer to it."
 }
 ```
 

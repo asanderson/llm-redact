@@ -8,9 +8,12 @@ from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
 
+# The example token is number 000, which the vault never issues (numbering
+# starts at 001), so the note can never name a real value or raise a token
+# floor.
 SYSTEM_NOTE = (
     "Some values in this conversation have been replaced with privacy tokens "
-    "of the form «TYPE_NNN» (for example «EMAIL_001»). Treat each token as an "
+    "of the form «TYPE_NNN» (for example «EMAIL_000»). Treat each token as an "
     "opaque identifier for the real value and reproduce every token exactly, "
     "character for character, whenever you refer to it."
 )

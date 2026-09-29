@@ -1154,7 +1154,7 @@ async def ws_handle(websocket: WebSocket) -> None:
             # still in it (the client never resends history, as on HTTP).
             # Upstream frames are not read: model output is provider-side
             # history, as on HTTP (and a session echo carries the proxy's
-            # own note, whose example token must not raise the floor).
+            # own note, whose «EMAIL_000» example is never issued anyway).
             ctx.redactor = ctx.redactor.with_floors(frame_floors(data))
             try:
                 # [providers.NAME] detection = false applies to realtime

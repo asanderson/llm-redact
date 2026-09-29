@@ -11,6 +11,8 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-09-29
+
 Hardening of the request path. Web pages can no longer use the proxy; a request
 goes only to a provider it is positively attributed to; a recognized route forwards
 only a body the proxy read; a placeholder can no longer be given a second meaning;

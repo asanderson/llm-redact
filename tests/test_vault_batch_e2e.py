@@ -32,6 +32,19 @@ from llm_redact.config import Config, DetectionConfig, ProviderConfig, VaultConf
 from llm_redact.proxy import create_app
 from test_vault_faults import _FlakyConn
 
+
+class _FlakyAnyCase(_FlakyConn):
+    """``_FlakyConn`` matching its SQL in any case, as the engine reads it:
+    a statement spelled in another case is the same statement and fails
+    the same way."""
+
+    def execute(self, sql: str, *args: object) -> object:
+        if self._fail_on.lower() in sql.lower() and self._times > 0:
+            self._times -= 1
+            raise sqlite3.OperationalError("database or disk is full")
+        return self._real.execute(sql, *args)
+
+
 EMAILS = [f"user{i}@corp.example" for i in range(12)]
 
 
@@ -279,6 +292,7 @@ def _relay(
     seen: list[str],
     *,
     fail_on: str | None = None,
+    flaky: type[_FlakyConn] = _FlakyConn,
     apps: list[Any] | None = None,
 ) -> Iterator[str]:
     """The proxy in uvicorn's own thread — built there too (a factory):
@@ -292,7 +306,7 @@ def _relay(
             lambda sql: seen.append(sql) if sql in ("BEGIN IMMEDIATE", "COMMIT") else None
         )
         if fail_on is not None:
-            manager._conn = _FlakyConn(manager._conn, fail_on)
+            manager._conn = flaky(manager._conn, fail_on)
         if apps is not None:
             apps.append(app)
         return app
@@ -434,7 +448,7 @@ async def test_a_vault_fault_opening_the_requests_session_refuses_it(
     app, _ = _app(tmp_path, sent)
     manager = app.state.proxy.vault_manager
     real = manager._conn
-    manager._conn = _FlakyConn(real, "FROM retired_numbers")
+    manager._conn = _FlakyAnyCase(real, "FROM retired_numbers")
     headers = {"authorization": "Bearer sk-proj-FAKE"} if provider == "openai" else {}
     with caplog.at_level("ERROR", logger="llm_redact"):
         response = await _post(app, path, json=_messages(EMAILS[0]), headers=headers)
@@ -471,7 +485,9 @@ async def test_a_vault_fault_opening_a_realtime_session_closes_1011(
             },
             vault=VaultConfig(backend="sqlite", path=str(tmp_path / "vault.db")),
         )
-        with _relay(config, seen, fail_on="FROM retired_numbers", apps=apps) as host:
+        with _relay(
+            config, seen, fail_on="FROM retired_numbers", flaky=_FlakyAnyCase, apps=apps
+        ) as host:
             async with websockets.connect(f"ws://{host}/v1/realtime") as client:
                 with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
                     await asyncio.wait_for(client.recv(), 10)

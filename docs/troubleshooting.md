@@ -47,6 +47,20 @@ web pages"):
   ([deployment.md](deployment.md#browser-apps-on-other-origins-allowed_origins)).
   Otherwise run the tool outside the browser.
 
+## "llm-redact config reload changed this connection's …; reconnect"
+
+A realtime (WebSocket) connection closed by the proxy with code 1012
+(Service Restart). A config reload (SIGHUP, the config editor) changed
+something the connection was admitted with. The reason names what changed:
+the provider's `[providers.NAME] settings`, the `upstream authorizer`, or
+the `[detection] policy`. Nothing is wrong: reconnect, and the new
+connection runs under the new configuration in the same vault session.
+Frames the client sent after the reload were not forwarded; resend them on
+the new connection. A client that was still writing may see a connection
+reset instead of this close frame. A reload that changes nothing a
+connection depends on leaves it open
+([deployment.md](deployment.md#reloads-and-open-realtime-connections)).
+
 ## "request body exceeds llm-redact max_body_bytes"
 
 A 413: the redactable body is bigger than the cap (default ~10 MiB), and

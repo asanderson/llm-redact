@@ -68,6 +68,7 @@ from llm_redact.detection.engine import (
 )
 from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
+from llm_redact.jsonwalk import loads_request
 from llm_redact.licensing import ResolvedLicense, resolve_license
 from llm_redact.metrics import Metrics
 from llm_redact.multipart import parse as parse_multipart
@@ -2304,9 +2305,12 @@ async def handle(request: Request) -> Response:
         body_bytes = await request.body()
 
     parsed: Any = None
+    # A repeated JSON key: the parse keeps the last occurrence, so the walk
+    # never sees the earlier ones — such a body is always re-serialized.
+    duplicate_keys = False
     if adapter is not None and body_bytes:
         try:
-            parsed = json.loads(body_bytes)
+            parsed, duplicate_keys = loads_request(body_bytes)
         except ValueError:
             parsed = None
 
@@ -2446,7 +2450,11 @@ async def handle(request: Request) -> Response:
         # prepare_request), so an unchanged count means the prepared body is
         # byte-for-byte the original. Forward the raw bytes and skip the
         # parse→dump round-trip — the common nothing-to-redact large-body case.
-        if sum(state.detection_counts.values()) != sum(detection_counts_before.values()):
+        # Never with a repeated key: the raw bytes still hold the earlier
+        # occurrences the walk never saw (an upstream may keep the first).
+        if duplicate_keys or sum(state.detection_counts.values()) != sum(
+            detection_counts_before.values()
+        ):
             outbound = json.dumps(prepared, ensure_ascii=False).encode("utf-8")
     elif adapter is not None and parsed is None and body_bytes:
         # Matched routes with non-JSON bodies: multipart uploads (OpenAI

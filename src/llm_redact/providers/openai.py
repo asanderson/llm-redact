@@ -21,7 +21,7 @@ from collections.abc import Hashable, Mapping
 from typing import Any
 
 from llm_redact import multipart
-from llm_redact.jsonwalk import transform_strings
+from llm_redact.jsonwalk import loads_request, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
@@ -52,6 +52,19 @@ def _parse_object_line(line: bytes) -> dict[str, Any] | None:
     except ValueError:
         return None
     return obj if isinstance(obj, dict) else None
+
+
+def _parse_request_line(line: bytes) -> tuple[dict[str, Any] | None, bool]:
+    """``_parse_object_line`` for an uploaded REQUEST line, plus whether an
+    object in it repeats a key (then the line must be re-serialized)."""
+    stripped = line.strip()
+    if not stripped:
+        return None, False
+    try:
+        obj, duplicate_keys = loads_request(stripped)
+    except ValueError:
+        return None, False
+    return (obj, duplicate_keys) if isinstance(obj, dict) else (None, False)
 
 
 # Delta fields that carry reasoning-model chain-of-thought as a string,
@@ -316,15 +329,18 @@ class OpenAIAdapter(ProviderAdapter):
     def _redact_jsonl(self, data: bytes, redactor: Redactor, *, inject_note: bool) -> bytes:
         out: list[bytes] = []
         for line in data.split(b"\n"):
-            obj = _parse_object_line(line)
+            obj, duplicate_keys = _parse_request_line(line)
             if obj is None:
                 out.append(line)  # blank/binary/unparseable: byte-identical
                 continue
             redacted = redactor.redact_json(obj)
-            if redacted == obj:
+            changed = redacted != obj
+            if not changed and not duplicate_keys:
+                # Unchanged — and no repeated key whose earlier occurrence
+                # the walk never saw — so the original line is safe.
                 out.append(line)
                 continue
-            if inject_note:
+            if inject_note and changed:
                 body_obj = redacted.get("body")
                 if isinstance(body_obj, dict) and isinstance(body_obj.get("messages"), list):
                     # Batch input line: {custom_id, method, url, body}.

@@ -32,6 +32,16 @@ Bedrock's binary eventstream, and realtime WebSocket deltas):
 
 *Animated. Static [PNG](diagrams/sequence-streaming.png) · [GIF](diagrams/sequence-streaming.gif) · [Mermaid source](diagrams/sequence-streaming.mmd).*
 
+A request body with nothing to redact is forwarded as its original bytes
+(no parse-and-reserialize round trip). The one exception is a JSON object
+that repeats a key, at any depth: the parser keeps the last occurrence,
+so the redactor never sees the earlier ones — while the provider's parser
+might keep the first. Such a body (and such an uploaded JSONL line) is
+always re-serialized from the walked object, so the earlier occurrences
+never leave the machine; realtime frames are always re-serialized anyway,
+and a Bedrock `count-tokens` base64 body that repeats a key is refused
+with a 400.
+
 Watch the round trip live: `llm-redact status` and the `/recent` feed
 ([dashboard.md](dashboard.md)) show detections and restores, and an
 agent with the slash-command plugins installed can do the same in-tool with

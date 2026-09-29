@@ -47,6 +47,7 @@ from collections.abc import Callable
 from typing import Any
 
 from llm_redact.eventstream import EventStreamMessage, string_header
+from llm_redact.jsonwalk import loads_request
 from llm_redact.providers.anthropic import (
     inject_anthropic_system_note,
     rehydrate_messages_payload,
@@ -141,14 +142,25 @@ def _looks_like_converse(body: dict[str, Any]) -> bool:
 def _decode_invoke_body(encoded: str) -> Any:
     """The JSON value inside a CountTokens ``invokeModel.body`` blob, or
     UnredactableRequest (naming the field only) when it is not base64 of
-    UTF-8 JSON."""
+    UTF-8 JSON — or repeats a JSON key: the blob is forwarded as the
+    ORIGINAL base64 whenever the walk changed nothing (here and in the
+    proxy's envelope short-circuit, which cannot see inside it), and its
+    earlier occurrences were never walked."""
     try:
-        return json.loads(base64.b64decode(encoded, validate=True).decode("utf-8"))
+        inner, duplicate_keys = loads_request(
+            base64.b64decode(encoded, validate=True).decode("utf-8")
+        )
     except ValueError as exc:  # binascii.Error and UnicodeDecodeError included
         raise UnredactableRequest(
             "llm-redact: input.invokeModel.body is not base64-encoded JSON, so it"
             " cannot be redacted; the request was not forwarded"
         ) from exc
+    if duplicate_keys:
+        raise UnredactableRequest(
+            "llm-redact: input.invokeModel.body repeats a JSON key, so it cannot be"
+            " redacted; the request was not forwarded"
+        )
+    return inner
 
 
 def _event_headers(event_type: str) -> list[tuple[str, int, object]]:

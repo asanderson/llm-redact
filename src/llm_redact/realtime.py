@@ -1231,7 +1231,10 @@ def _unparsed_frame(data: str | bytes, require_json: bool) -> str | bytes:
 
 def parse_json_text(data: str | bytes) -> tuple[Any, bool] | None:
     """(parsed, was_binary) when ``data`` is a JSON text/binary frame, else
-    None — the caller must then forward the frame byte-identically."""
+    None — the caller must then forward the frame byte-identically. A
+    parsed client frame is ALWAYS re-serialized (``_dump_frame``), never
+    forwarded as its original bytes, so a repeated key's earlier
+    occurrence (dropped by the parse, never walked) cannot leave."""
     try:
         if isinstance(data, bytes):
             return json.loads(data.decode("utf-8")), True

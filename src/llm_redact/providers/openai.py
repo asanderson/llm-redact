@@ -8,8 +8,12 @@ both carry user content, so every line that parses as a JSON object is
 redacted (and chat-shaped ones get the system note); anything else in the
 upload — form fields, binary documents, unparseable lines — is preserved
 byte-identically. ``GET /v1/files/{id}/content`` rehydrates batch OUTPUT
-files the same way, line by line. ``/v1/batches`` itself carries only file
-ids and processing metadata: deliberate pass-through, pinned by test.
+files the same way, line by line. ``/v1/batches`` carries file ids,
+processing state and the caller's own ``metadata`` (free-form strings the
+batch object echoes on every read): create is redacted and its echo
+restored, as are a batch's GET and cancel (Azure's handling); the batch
+LIST stays pass-through (another user's batches must not be restored in
+the reader's session — a session router may attribute listed items).
 Batch flows use the static vault session (an async fetch has no
 conversation anchor — the realtime WS stance); a user-scoping session
 router (llm-redact-pro's named users) makes that the user's own copy.
@@ -40,6 +44,12 @@ _PROMPT_FIELDS = frozenset({"prompt"})
 # binary /content download deliberately does NOT match (media
 # pass-through) — only single-segment ids and the /remix action do.
 _VIDEO_ROUTE_RE = re.compile(r"/v1/videos(?:/[^/]+(?:/remix)?)?")
+
+# Batches whose request or response carries the caller's `metadata`:
+# create (POST /v1/batches), a batch's GET and its cancel (both answer with
+# the batch object, which echoes that metadata).
+_BATCH_POST_RE = re.compile(r"/v1/batches|/v1/batches/[^/]+/cancel")
+_BATCH_ITEM_RE = re.compile(r"/v1/batches/[^/]+")
 
 
 def _parse_object_line(line: bytes) -> dict[str, Any] | None:
@@ -203,8 +213,19 @@ class OpenAIAdapter(ProviderAdapter):
             if method in ("POST", "GET"):
                 return RouteKind.CHAT
             return RouteKind.NONE
-        # /v1/batches and file list/metadata/delete carry ids and
-        # processing metadata only: deliberate pass-through, pinned by test.
+        if (method == "POST" and _BATCH_POST_RE.fullmatch(path)) or (
+            method == "GET" and _BATCH_ITEM_RE.fullmatch(path)
+        ):
+            # Batches: create carries the caller's free-form `metadata`
+            # (redacted out), and create/retrieve/cancel all answer with the
+            # batch object echoing it (restored back). Structural fields —
+            # input_file_id, endpoint, completion_window, ids, status,
+            # counts — carry nothing a detector matches (pinned by test).
+            # The batch LIST stays pass-through: it spans batches other
+            # users created (a session router attributes listed items).
+            return RouteKind.CHAT
+        # File list/metadata/delete carry ids and processing metadata only:
+        # deliberate pass-through, pinned by test.
         return RouteKind.NONE
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
@@ -218,9 +239,9 @@ class OpenAIAdapter(ProviderAdapter):
             # Item bodies carry `items`, not `messages`; injecting the note
             # would graft a spurious `messages` field and corrupt the request.
             return False
-        if path.startswith("/v1/videos"):
-            # Video job bodies have no messages field either — a note would
-            # graft one and corrupt the create/remix request.
+        if path.startswith(("/v1/videos", "/v1/batches")):
+            # Video job and batch bodies have no messages field either — a
+            # note would graft one and corrupt the request.
             return False
         return kind is RouteKind.CHAT or path == "/v1/files"
 

@@ -184,7 +184,8 @@ def _client(app: Any) -> httpx.AsyncClient:
     [
         ("DELETE", "/v1/files/file-1", None, None),  # pass-through: no adapter, no body
         ("GET", "/v1/files/file-1/content", "openai", None),
-        ("POST", "/v1/batches/batch_1/cancel", None, None),
+        ("POST", "/v1/batches/batch_1/cancel", "openai", None),
+        ("DELETE", "/v1/videos/video_1", None, None),
         ("POST", "/v1/videos/video_1/remix", "openai", {"prompt": "a dog"}),
     ],
 )

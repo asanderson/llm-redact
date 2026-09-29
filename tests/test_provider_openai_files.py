@@ -3,7 +3,8 @@
 The upload's JSONL file part is redacted line by line (batch lines get the
 system note inside body; fine-tune lines directly); everything else in the
 multipart body — form fields, binary parts, unparseable lines — must be
-byte-identical. /v1/batches and file metadata stay pass-through.
+byte-identical. File metadata and the batch list stay pass-through; batch
+create/retrieve/cancel redact and restore the caller's ``metadata``.
 """
 
 import json
@@ -61,9 +62,18 @@ def test_files_routing() -> None:
     assert adapter.matches("GET", "/v1/files") is RouteKind.NONE
     assert adapter.matches("GET", "/v1/files/file_abc") is RouteKind.NONE
     assert adapter.matches("DELETE", "/v1/files/file_abc") is RouteKind.NONE
-    assert adapter.matches("POST", "/v1/batches") is RouteKind.NONE
-    assert adapter.matches("GET", "/v1/batches/batch_1") is RouteKind.NONE
-    assert adapter.matches("POST", "/v1/batches/batch_1/cancel") is RouteKind.NONE
+    # Batches: create, retrieve and cancel carry (or echo) the caller's
+    # `metadata`; the list stays pass-through (per-item attribution is the
+    # session router's), as do unknown batch sub-routes.
+    assert adapter.matches("POST", "/v1/batches") is RouteKind.CHAT
+    assert adapter.matches("GET", "/v1/batches/batch_1") is RouteKind.CHAT
+    assert adapter.matches("POST", "/v1/batches/batch_1/cancel") is RouteKind.CHAT
+    assert adapter.matches("GET", "/v1/batches") is RouteKind.NONE
+    assert adapter.matches("POST", "/v1/batches/batch_1") is RouteKind.NONE
+    assert adapter.matches("DELETE", "/v1/batches/batch_1") is RouteKind.NONE
+    assert adapter.matches("GET", "/v1/batches/batch_1/cancel") is RouteKind.NONE
+    for path in ("/v1/batches", "/v1/batches/batch_1", "/v1/batches/batch_1/cancel"):
+        assert not adapter.wants_system_note(RouteKind.CHAT, path)
 
 
 def test_upload_batch_lines_redacted_and_noted() -> None:
@@ -246,7 +256,7 @@ async def test_files_batch_round_trip(client: httpx.AsyncClient) -> None:
     assert EMAIL.encode() not in received["upload_raw"]
     assert "«EMAIL_001»".encode() in received["upload_raw"]
 
-    # Batch creation is metadata: passes through untouched.
+    # Batch creation with nothing to redact: forwarded byte-identical.
     batch = await client.post("/v1/batches", json={"input_file_id": "file_abc"})
     assert batch.json()["id"] == "batch_1"
     assert received["batch_create"] == {"input_file_id": "file_abc"}

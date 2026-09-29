@@ -309,6 +309,12 @@ class ProviderAdapter(ABC):
         """
         return None
 
+    def redacts_multipart(self, path: str) -> bool:
+        """Whether ``path`` is a multipart route whose body ``redact_multipart``
+        scans. Consulted only under identity auth, where a multipart body on
+        any other route is refused rather than signed unscanned."""
+        return False
+
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
         """Rehydrate a buffered non-JSON response body (None = untouched).
 

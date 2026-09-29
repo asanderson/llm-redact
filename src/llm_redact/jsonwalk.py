@@ -18,6 +18,7 @@ user data slip past it:
   there is data, not protocol.
 """
 
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -186,3 +187,30 @@ def _walk(
                 out[key] = _walk(value, fn, skip_keys, key_overrides, key)
         return out
     return obj
+
+
+class _DuplicateKey(Exception):
+    """Internal signal: an object in the document repeats a key."""
+
+
+def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        raise _DuplicateKey
+    return obj
+
+
+def loads_request(data: bytes | str) -> tuple[Any, bool]:
+    """``json.loads(data)`` plus whether ANY object in it repeats a key.
+
+    The parsed value keeps the LAST occurrence (Python's rule); an earlier
+    one is never walked. A caller that would forward the ORIGINAL bytes
+    when the walk changed nothing must re-serialize instead when this is
+    True — an upstream parser may keep the first occurrence, which the
+    redactor never saw. Raises ValueError like ``json.loads``. The hook
+    runs per object (exact, nested ones included); the second, plain parse
+    happens only for a duplicate-bearing document."""
+    try:
+        return json.loads(data, object_pairs_hook=_unique_pairs), False
+    except _DuplicateKey:
+        return json.loads(data), True

@@ -68,6 +68,7 @@ from llm_redact.detection.engine import (
 )
 from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
+from llm_redact.jsonwalk import loads_request
 from llm_redact.licensing import ResolvedLicense, resolve_license
 from llm_redact.metrics import Metrics
 from llm_redact.multipart import parse as parse_multipart
@@ -2164,6 +2165,36 @@ async def _read_capped(request: Request, limit: int) -> bytes | None:
     return b"".join(chunks)
 
 
+def _identity_body_problem(
+    adapter: ProviderAdapter, path: str, headers: Mapping[str, str], body: bytes, parsed: Any
+) -> str | None:
+    """Why a non-empty request body on a matched route must NOT be signed
+    with the proxy's own identity, or None when the proxy redacts it.
+
+    Signable: a JSON object (what ``prepare_request`` walks; JSON is read
+    from the bytes whatever the content-type, a UTF-8 BOM or UTF-16/32
+    encoding included), or canonical multipart on a route whose
+    ``redact_multipart`` scans it. Everything else would be forwarded
+    verbatim: non-JSON bytes, invalid UTF-8, a top-level array or scalar
+    (``null`` included — never walked), whitespace only, multipart on any
+    other route, and any content-encoded body (the proxy never decodes
+    one, so it cannot see what the upstream would). The result names the
+    body's KIND only — never its content."""
+    encoding = headers.get("content-encoding", "").strip().lower()
+    if encoding not in ("", "identity"):
+        return "the request body is content-encoded (llm-redact does not decode request bodies)"
+    if isinstance(parsed, dict):
+        return None
+    boundary = parse_multipart_boundary(headers.get("content-type", "")) if parsed is None else None
+    if boundary is None:
+        return "the request body is not a JSON object llm-redact can redact"
+    if parse_multipart(body, boundary) is None:
+        return "the multipart body is outside the canonical form llm-redact can redact"
+    if not adapter.redacts_multipart(path):
+        return "the multipart body is on a route llm-redact does not redact multipart for"
+    return None
+
+
 async def handle(request: Request) -> Response:
     state: ProxyState = request.app.state.proxy
     if not origin_form_target(request.scope):
@@ -2356,9 +2387,12 @@ async def handle(request: Request) -> Response:
         body_bytes = await request.body()
 
     parsed: Any = None
+    # A repeated JSON key: the parse keeps the last occurrence, so the walk
+    # never sees the earlier ones — such a body is always re-serialized.
+    duplicate_keys = False
     if adapter is not None and body_bytes:
         try:
-            parsed = json.loads(body_bytes)
+            parsed, duplicate_keys = loads_request(body_bytes)
         except ValueError:
             parsed = None
 
@@ -2478,6 +2512,19 @@ async def handle(request: Request) -> Response:
     # bodies): the routed path applies per-hop body rewrites to it.
     outbound_obj: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
     detection_off = provider_conf is not None and not provider_conf.detection
+    if upstream_auth is not None and adapter is not None and body_bytes and not detection_off:
+        # The proxy's own identity signs only what the proxy could redact:
+        # a body it cannot walk would otherwise be forwarded verbatim —
+        # refused here, before redaction, any credential fetch or upstream
+        # contact. (detection = false is the explicit unredacted opt-out.)
+        problem = _identity_body_problem(adapter, path, request.headers, body_bytes, parsed)
+        if problem is not None:
+            return refused_response(
+                f"llm-redact: {problem}, and this provider is authorized with the proxy's"
+                " own identity; the request was not forwarded",
+                adapter,
+                f"{problem} under identity auth",
+            )
     if adapter is not None and detection_off:
         # [providers.NAME] detection = false: the deliberate off-switch.
         # The request is forwarded byte-identical — no detection, no deny
@@ -2508,29 +2555,19 @@ async def handle(request: Request) -> Response:
         # prepare_request), so an unchanged count means the prepared body is
         # byte-for-byte the original. Forward the raw bytes and skip the
         # parse→dump round-trip — the common nothing-to-redact large-body case.
-        if sum(state.detection_counts.values()) != sum(detection_counts_before.values()):
+        # Never with a repeated key: the raw bytes still hold the earlier
+        # occurrences the walk never saw (an upstream may keep the first).
+        if duplicate_keys or sum(state.detection_counts.values()) != sum(
+            detection_counts_before.values()
+        ):
             outbound = json.dumps(prepared, ensure_ascii=False).encode("utf-8")
     elif adapter is not None and parsed is None and body_bytes:
         # Matched routes with non-JSON bodies: multipart uploads (OpenAI
         # /v1/files) get their JSONL file parts redacted; anything the
         # adapter declines to rewrite forwards verbatim (the non-JSON-body
-        # default that keeps unknown formats working).
+        # default that keeps unknown formats working) — except under
+        # identity auth, refused above (_identity_body_problem).
         boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
-        if (
-            boundary is not None
-            and upstream_auth is not None
-            and parse_multipart(body_bytes, boundary) is None
-        ):
-            # Outside the codec's canonical grammar the upload would be
-            # forwarded verbatim — never under the proxy's own identity,
-            # which must only ever sign what the proxy could redact.
-            return refused_response(
-                "llm-redact: the multipart body is outside the canonical form llm-redact"
-                " can redact, and this provider is authorized with the proxy's own"
-                " identity; the request was not forwarded",
-                adapter,
-                "non-canonical multipart under identity auth",
-            )
         if boundary is not None:
             try:
                 rewritten = adapter.redact_multipart(

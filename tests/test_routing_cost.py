@@ -70,8 +70,17 @@ SHAPES: dict[str, tuple[str, str, str]] = {
     "custom-repeats": ("/x", "/custom/lm", ""),
     "api-repeats": ("/x", "/api", ""),
     "model-repeats": ("/x", "/model/m", ""),
-    # Spellings: a trailing '/' and another case double every step.
+    # Spellings: a trailing '/' and another case double every step, and each
+    # front-end normalization (\ for /, ;params, trailing whitespace and
+    # dots, a second decoding, NFKC, .NET case folding) adds its own.
     "upper-trailing-slash": ("/X", "/V1BETA/OPENAI", "/"),
+    "backslashes": ("/x", "%5Cv1", ""),
+    "params": ("/x", "/v1;a", ""),
+    "trailing-whitespace": ("/x", "/v1%20%09.", ""),
+    "double-encoded": ("/x", "%255Cv1", ""),
+    "percent-u": ("/x", "/%u0076%u0031", ""),
+    "non-ascii": ("/x", "/%C4%B1%EF%BD%83", "/"),
+    "every-normalization": ("/X%5C", "V1BETA;a/OPENAI%20%09./%C4%B1%255C", "/"),
     # A greedy slash-bearing id (Bedrock) and a path family of its own.
     "bedrock-id": ("/model", "/a", "/x"),
     "azure-family": ("/openai", "/a", ""),

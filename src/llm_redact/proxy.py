@@ -29,6 +29,7 @@ import secrets
 import signal
 import sqlite3
 import time
+import unicodedata
 import urllib.parse
 from collections import Counter, deque
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -2824,8 +2825,9 @@ class _Misaddressed(NamedTuple):
 
 _SPELLING = (
     "llm-redact: the request path must be spelled exactly as the provider's API defines it"
-    " (no trailing '/', its exact case); this spelling of an API route llm-redact redacts"
-    " was not forwarded"
+    " (its exact case; no trailing '/', no '\\', no ';' parameters, no trailing spaces, tabs"
+    " or dots, no double encoding); this spelling of an API route llm-redact redacts was not"
+    " forwarded"
 )
 _MISSING_VERSION = (
     "llm-redact: this path lacks the API's /v1 segment, so it was not forwarded: an"
@@ -2842,6 +2844,47 @@ _EXTRA_PREFIX = (
 # one or two (/v1/v1/…, /api/v1/…); each candidate tail costs a match of up
 # to the whole path, so trying every tail was quadratic in its length.
 _MAX_EXTRA_PREFIX = 8
+# IIS's non-standard %uXXXX escape.
+_PERCENT_U = re.compile(r"%[uU]([0-9A-Fa-f]{4})")
+# What IIS trims from the end of a path segment (Windows file-name rules:
+# spaces and dots), and the other whitespace a decoded %09/%0B/%0C carries.
+_SEGMENT_TRAILER = " \t\r\n\x0b\x0c."
+
+
+def _normalized_path(path: str) -> str:
+    """``path`` (decoded) as a front end that normalizes paths serves it:
+    Unicode compatibility forms folded (NFKC: a full-width letter is its
+    ASCII one), ``\\`` read as ``/`` (IIS, Azure API Management, Envoy's
+    path normalization), and in every segment its ``;params`` dropped
+    (Tomcat, Jetty, Spring) and trailing whitespace and dots trimmed (IIS);
+    the empty segments that leaves (and a trailing ``/``) merged."""
+    text = unicodedata.normalize("NFKC", path).replace("\\", "/")
+    segments = (part.split(";", 1)[0].rstrip(_SEGMENT_TRAILER) for part in text.split("/"))
+    return "/" + "/".join(segment for segment in segments if segment)
+
+
+def _decoded_again(path: str) -> str:
+    """``path`` percent-decoded once more — IIS's ``%uXXXX`` escapes and a
+    ``+`` for a space included — as a gateway that decodes before an app
+    server decodes again would read it."""
+    unescaped = _PERCENT_U.sub(lambda match: chr(int(match.group(1), 16)), path)
+    return urllib.parse.unquote_plus(unescaped)
+
+
+def _spellings(path: str) -> tuple[str, ...]:
+    """The spellings of ``path`` an upstream (or a front end before it) may
+    serve as the same route: without a trailing ``/``; normalized
+    (``_normalized_path``), as sent and decoded once more; each in its own
+    case, lower case and folded the way .NET's OrdinalIgnoreCase compares
+    (upper-cased first: a dotless ``ı`` is ``I``). A bounded few, each
+    linear in the path's length."""
+    stripped = path[:-1] if len(path) > 1 and path.endswith("/") else path
+    forms = (stripped, _normalized_path(path), _normalized_path(_decoded_again(path)))
+    return tuple(
+        dict.fromkeys(
+            spelling for form in forms for spelling in (form, form.lower(), form.upper().lower())
+        )
+    )
 
 
 def _misaddressed(
@@ -2854,10 +2897,13 @@ def _misaddressed(
     """Why an UNRECOGNIZED path must not be forwarded although it names a
     route llm-redact recognizes — or None. Forwarded, each would carry its
     body unredacted to an upstream that may serve it as that very route
-    (routers that ignore a trailing ``/`` or case: Express, fiber, ASP.NET):
+    (routers that ignore a trailing ``/`` or case: Express, fiber, ASP.NET;
+    front ends that normalize paths: IIS, API Management, Tomcat, Envoy):
 
-    - another spelling of the route — a trailing ``/``, another case (400;
-      the matched path must be the forwarded path, as for dot segments);
+    - another spelling of the route (``_spellings``) — a trailing ``/``,
+      another case, ``\\`` for ``/``, ``;params``, trailing whitespace or
+      dots, a second encoding (400; the matched path must be the forwarded
+      path, as for dot segments);
     - the route without its ``/v1`` segment, or an OpenAI resource without
       it (404: an OpenAI-compatible base URL that lacks ``/v1``);
     - the route under an extra leading prefix of up to ``_MAX_EXTRA_PREFIX``
@@ -2866,11 +2912,13 @@ def _misaddressed(
       their adapters read their own tails; an Azure tail is never taken as a
       sign of an extra prefix.
 
-    It costs a bounded number of route matches, each linear in the path's
-    length: it runs before most refusals, for any client.
+    Only a path one of whose spellings matches a route is refused: a Gemini
+    ``:method`` or a Bedrock ARN is matched as sent, and a spelling of a
+    pass-through route stays pass-through. It costs a bounded number of
+    route matches, each linear in the path's length: it runs before most
+    refusals, for any client.
     """
-    stripped = path[:-1] if len(path) > 1 and path.endswith("/") else path
-    spellings = tuple(dict.fromkeys((stripped, stripped.lower())))
+    spellings = _spellings(path)
     for candidate in spellings:
         if candidate == path:
             continue

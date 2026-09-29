@@ -452,24 +452,43 @@ Anything else is answered locally with a **recorded 404** that names the
 path (never the query) and why, and nothing is forwarded. So are paths
 that only look unrecognized — each would otherwise carry its body
 unredacted to an upstream that may serve it as the recognized route
-(routers that ignore a trailing `/` or case):
+(routers that ignore a trailing `/` or case, front ends that normalize
+paths):
 
 - an **empty path segment** (`//`, in the raw or decoded path, `\`
   counted as `/`) is refused with a 400 before admission, like a `.`/`..`
   segment — never recorded or logged with its path (it may still hold an
   identity-prefix key). A base URL ending in `/` joined onto an endpoint
   path is the usual cause;
-- **another spelling** of a recognized route — a trailing `/`, another
-  case — is refused with a recorded, provider-shaped 400: the path that
-  was matched must be the path that is forwarded, byte for byte;
+- **another spelling** of a recognized route is refused with a recorded,
+  provider-shaped 400: the path that was matched must be the path that is
+  forwarded, byte for byte. A spelling is the path as a router or a
+  normalizing front end reads it: without a trailing `/`; in another case
+  (lower case, and .NET's case-insensitive comparison, where a dotless `ı`
+  is `I`); with `\` (or `%5C`) as `/` (IIS, Azure API Management, Envoy);
+  with each segment's `;params` dropped (Tomcat, Jetty, Spring) and its
+  trailing spaces, tabs and dots trimmed (IIS); in Unicode compatibility
+  form (a full-width `ｃ` is `c`); and percent-decoded a second time, IIS's
+  `%uXXXX` escapes included (a gateway that decodes before the app server
+  does). Only a path one of whose spellings matches a route is refused: a
+  Gemini `:method` or a Bedrock ARN (`%3A`, `%2F`) is matched as sent, and
+  a spelling of a pass-through route stays pass-through;
 - a recognized route **without its `/v1`** (`/chat/completions`,
   `/responses`, `/models`, … — an OpenAI-compatible base URL that lacks
   `/v1`) is a recorded 404 whose message gives the fix
   (`OPENAI_BASE_URL=http://127.0.0.1:8787/v1`);
-- a recognized route **under an extra prefix** (`/v1/v1/messages` — a
-  base URL that repeats the API version) is a recorded 404. Azure's
-  `/openai/…` and custom `/custom/NAME/…` paths embed OpenAI routes by
-  design and are exempt.
+- a recognized route **under an extra prefix** of up to eight segments
+  (`/v1/v1/messages` — a base URL that repeats the API version) is a
+  recorded 404. Azure's `/openai/…` and custom `/custom/NAME/…` paths
+  embed OpenAI routes by design and are exempt.
+
+These checks, like every routing step, cost time linear in the path's
+length, and they run only for a request the request-origin rule and the
+access gate admit (a refused request gets its own refusal). An
+OpenAI-compatible prefix (`/custom/NAME/…`, `/v1beta/openai/…`) is matched
+on the endpoint's tail: tails of at most eight segments after `/v1` (every
+OpenAI endpoint has four or fewer), and the one at the first OpenAI
+resource name.
 
 `GET /` and `HEAD /` — the proxy's base URL itself, no provider's API —
 are answered locally with a 200 (a client's liveness probe: the ollama

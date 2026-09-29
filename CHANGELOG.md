@@ -26,9 +26,12 @@ providers refuse to start.
   get a `404` that names the fix. `llm-redact run`, `init` and the deploy manifests
   now export it with `/v1`.
 - A path with an empty segment (`//`, often a base URL ending in `/`) is refused
-  `400`. Another spelling of a recognized route (a trailing `/`, other case) is a
-  recorded `400`; a recognized route without its `/v1`, or under an extra prefix
-  such as `/v1/v1/…`, is a recorded `404`.
+  `400`. Another spelling of a recognized route (a trailing `/`, other case, or what
+  a front end that normalizes paths reads as the route: `\` or `%5C` for `/`, a
+  segment's `;params`, trailing spaces, tabs or dots, `%uXXXX` escapes or a second
+  percent-encoding, Unicode compatibility forms) is a recorded `400`; a recognized
+  route without its `/v1`, or under an extra prefix such as `/v1/v1/…`, is a
+  recorded `404`.
 - Requests from web pages are refused. A browser request (one carrying `Origin` or
   a `Sec-Fetch-*` header) from another origin or site, or addressed to a host name
   the proxy does not answer to, gets a recorded `403` (WebSocket: close `1008`).
@@ -106,16 +109,20 @@ providers refuse to start.
   `/v1/organization` added). Anything else, or markers of two providers, is a
   recorded `404`.
 - **Misaddressed routes were forwarded unredacted.** Trailing-slash, doubled-slash
-  and case spellings of recognized routes, a recognized route missing `/v1` or
-  under an extra prefix, and OpenAI-compatible endpoints under a base path without
-  `/v1` (custom upstreams such as `/custom/NAME/inference/…` or `…/api/paas/v4/…`,
-  and the Gemini API's `/v1beta/openai/` surface) all reached their upstream
-  unredacted. They are now refused as above, or matched on the endpoint's tail and
-  redacted. Routing a path costs time linear in its length, and the misaddressing
-  check runs only for a request the request-origin rule and the access gate admit:
-  the tail search tries tails of at most eight segments after `/v1` (every OpenAI
-  endpoint has four or fewer) and the one at the first OpenAI resource name, and an
-  extra prefix is looked for up to eight segments deep.
+  and case spellings of recognized routes, the spellings front ends normalize to
+  them (`/v1/chat%5Ccompletions` reached api.openai.com unredacted, and so did
+  `…/chat/completions;x` and `…/chat/completions%20`: IIS and API Management read
+  `\` as `/`, Tomcat and Jetty drop `;params`, IIS trims trailing spaces and dots),
+  a recognized route missing `/v1` or under an extra prefix, and OpenAI-compatible
+  endpoints under a base path without `/v1` (custom upstreams such as
+  `/custom/NAME/inference/…` or `…/api/paas/v4/…`, and the Gemini API's
+  `/v1beta/openai/` surface) all reached their upstream unredacted. They are now
+  refused as above, or matched on the endpoint's tail and redacted. Routing a path
+  costs time linear in its length, and the misaddressing check runs only for a
+  request the request-origin rule and the access gate admit: the tail search tries
+  tails of at most eight segments after `/v1` (every OpenAI endpoint has four or
+  fewer) and the one at the first OpenAI resource name, and an extra prefix is
+  looked for up to eight segments deep.
 - **Recognized routes forward only a body the proxy read.** Wherever redaction
   applies, and whatever `detection` says when a request spends a credential the
   proxy holds, the bodies listed under Upgrading are refused before the

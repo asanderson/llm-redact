@@ -426,6 +426,107 @@ async def test_another_spelling_of_a_recognized_route_is_refused(
     assert row["status"] == 400
 
 
+# A recognized route as a front end that normalizes paths reads it: '\' (and
+# %5C) as '/' (IIS, Azure API Management, Envoy), ';params' dropped per segment
+# (Tomcat, Jetty, Spring), trailing spaces, tabs and dots trimmed per segment
+# (IIS: Windows file-name rules), %uXXXX escapes (IIS), a second
+# percent-decoding (a gateway in front of an app server), Unicode
+# compatibility forms, and case folded the way .NET's OrdinalIgnoreCase
+# does (dotless 'ı' is 'I'). Each went out unredacted.
+NORMALIZED_SPELLINGS: list[tuple[str, dict[str, str], str]] = [
+    ("/v1/chat%5Ccompletions", OPENAI, "openai"),
+    ("/v1/chat%5ccompletions", OPENAI, "openai"),
+    ("/v1/chat\\completions", OPENAI, "openai"),
+    ("/openai/deployments/d/chat%5Ccompletions?api-version=1", {"api-key": "az"}, "azure"),
+    ("/openai/deployments/d/chat/completions;x?api-version=1", {"api-key": "az"}, "azure"),
+    ("/v1/chat/completions;jsessionid=abc", OPENAI, "openai"),
+    ("/v1/chat;v=1/completions", OPENAI, "openai"),
+    ("/v1/chat/completions%20", OPENAI, "openai"),
+    ("/v1/chat/completions%09", OPENAI, "openai"),
+    ("/v1/chat/completions%20%09%20", OPENAI, "openai"),
+    ("/v1/chat/completions.", OPENAI, "openai"),
+    ("/v1/chat/completions%20/", OPENAI, "openai"),
+    ("/V1/CHAT/COMPLETIONS;X", OPENAI, "openai"),
+    ("/v1/chat%255Ccompletions", OPENAI, "openai"),
+    ("/v1/chat/%u0063ompletions", OPENAI, "openai"),
+    ("/v1/chat/complet%C4%B1ons", OPENAI, "openai"),
+    ("/v1/chat/%EF%BD%83ompletions", OPENAI, "openai"),
+    ("/v1/responses%20", OPENAI, "openai"),
+    ("/v1/messages;x", ANTHROPIC, "anthropic"),
+    ("/v1/messages%20", ANTHROPIC, "anthropic"),
+    ("/api/chat;x", {}, "ollama"),
+    ("/model/m/converse%20", {"authorization": "Bearer ABSK"}, "bedrock"),
+    ("/custom/lm/v1/chat/completions;x", OPENAI, "custom:lm"),
+    ("/custom/lm/chat%5Ccompletions", OPENAI, "custom:lm"),
+    (f"/v1beta/models/m:generateContent%20?key={GOOGLE_KEY}", {}, "gemini"),
+    ("/v1beta/openai/chat/completions;x", {"authorization": f"Bearer {GOOGLE_KEY}"}, "gemini"),
+]
+
+
+@pytest.mark.parametrize(("target", "headers", "provider"), NORMALIZED_SPELLINGS)
+async def test_a_spelling_a_normalizing_front_end_serves_as_the_route_is_refused(
+    target: str, headers: dict[str, str], provider: str
+) -> None:
+    app, upstream = _app()
+    response = await _send(app, "POST", target, headers=headers, body=_chat())
+    assert response.status_code == 400, response.text
+    assert "spelled exactly" in response.text
+    assert EMAIL not in response.text
+    assert upstream.requests == []
+    (row,) = app.state.proxy.recent
+    assert row["status"] == 400 and row["provider"] == provider
+
+
+@pytest.mark.parametrize(
+    ("target", "why"),
+    [
+        ("/v1/v1/chat%5Ccompletions", "extra prefix"),
+        ("/v1/v1/chat/completions;x", "extra prefix"),
+        ("/chat%5Ccompletions", "/v1"),
+        ("/chat/completions%20", "/v1"),
+    ],
+)
+async def test_a_normalized_spelling_is_checked_for_a_prefix_and_version_too(
+    target: str, why: str
+) -> None:
+    app, upstream = _app()
+    response = await _send(app, "POST", target, headers=OPENAI, body=_chat())
+    assert response.status_code == 404, response.text
+    assert why in response.json()["error"]["message"]
+    assert upstream.requests == []
+
+
+ARN = (
+    "arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Ainference-profile"
+    "%2Fus.anthropic.claude-3-5-sonnet-20240620-v1%3A0"
+)
+
+
+@pytest.mark.parametrize(
+    ("target", "headers", "provider", "redacted"),
+    [
+        # Recognized as sent: Gemini method names, Bedrock's encoded ARNs.
+        (f"/v1beta/models/gemini-2.0-flash:generateContent?key={GOOGLE_KEY}", {}, "gemini", True),
+        (f"/model/{ARN}/converse", {"authorization": "Bearer ABSK"}, "bedrock", True),
+        # No normalization makes these a recognized route: pass-through as before.
+        (f"/model/{ARN}/unknown-op", {"authorization": "Bearer ABSK"}, "bedrock", False),
+        (f"/v1beta/models/m:unknownVerb?key={GOOGLE_KEY}", {}, "gemini", False),
+        ("/v1/vector_stores;x", OPENAI, "openai", False),
+        ("/v1/moderations%20", OPENAI, "openai", False),
+    ],
+)
+async def test_only_a_spelling_that_normalizes_to_a_route_is_refused(
+    target: str, headers: dict[str, str], provider: str, redacted: bool
+) -> None:
+    app, upstream = _app()
+    response = await _send(app, "POST", target, headers=headers, body=_chat())
+    assert response.status_code == 200, response.text
+    (sent,) = upstream.requests
+    assert sent.url.host == HOSTS[provider]
+    assert sent.url.raw_path.split(b"?")[0] == target.split("?")[0].encode()
+    assert (EMAIL not in sent.content.decode("utf-8")) is redacted
+
+
 # --- OpenAI-compatible bases without a /v1 segment (C-R2-06) -------------------------------
 
 

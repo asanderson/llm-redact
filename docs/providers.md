@@ -59,9 +59,11 @@ positively attribute it to — a path family, or a header only that
 provider's clients send (`anthropic-version`, a Google API key, …) —
 never to a guessed one; anything else is a recorded local 404. A path
 spelled differently from the API's own route (an empty `//` segment, a
-trailing `/`, another case) is refused 400, a recognized route under an
-extra prefix (`/v1/v1/messages`: a base URL repeating the version) is a
-404, and `GET`/`HEAD /` is answered locally. See
+trailing `/`, another case, or a spelling a normalizing front end reads as
+the route: `\` for `/`, `;params`, trailing spaces or dots, a second
+encoding) is refused 400, a recognized route under an extra prefix
+(`/v1/v1/messages`: a base URL repeating the version) is a 404, and
+`GET`/`HEAD /` is answered locally. See
 [api-coverage.md](api-coverage.md#requests-no-route-matches). Point each
 `upstream_base_url` at the API's final `https` URL: the proxy never relays
 an upstream redirect that a following client would answer by re-sending

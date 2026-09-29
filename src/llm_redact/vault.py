@@ -200,6 +200,9 @@ CREATE TABLE IF NOT EXISTS vault_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL
 # mappings; rows of live sessions are removed with their session (prune).
 _MAX_RESPONSE_ROWS = 10000
 _RESPONSE_PRUNE_EVERY = 256
+# How many ids one batched response-map lookup binds per query (well under
+# every engine's parameter limit: sqlite's, and Oracle's 1000-item IN list).
+LOOKUP_CHUNK = 500
 
 
 def default_vault_path() -> Path:
@@ -602,6 +605,9 @@ class InMemoryVaultManager:
     def lookup_response_session(self, response_id: str) -> str | None:
         return None
 
+    def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:
+        return {}
+
     def close(self) -> None:
         pass
 
@@ -740,6 +746,24 @@ class SqliteVaultManager:
             "SELECT session_id FROM response_sessions WHERE response_id = ?", (response_id,)
         ).fetchone()
         return str(row[0]) if row is not None else None
+
+    def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:
+        """``lookup_response_session`` for many ids at once — one query per
+        ``LOOKUP_CHUNK`` distinct ids, not one per id (a listing names
+        thousands): the recorded ids with their sessions, an unknown id
+        simply absent."""
+        wanted = list(dict.fromkeys(response_ids))
+        found: dict[str, str] = {}
+        for start in range(0, len(wanted), LOOKUP_CHUNK):
+            chunk = wanted[start : start + LOOKUP_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                "SELECT response_id, session_id FROM response_sessions"
+                f" WHERE response_id IN ({marks})",
+                chunk,
+            )
+            found.update((str(response_id), str(session_id)) for response_id, session_id in rows)
+        return found
 
     def close(self) -> None:
         self._conn.close()

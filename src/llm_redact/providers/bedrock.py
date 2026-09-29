@@ -208,6 +208,15 @@ class BedrockAdapter(ProviderAdapter):
         # assessed as submitted content).
         return kind is RouteKind.CHAT and _ROUTE.match(path) is not None
 
+    def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
+        # StartAsyncInvoke: the job is read back by its invocation ARN
+        # (GET /async-invoke/{arn}), so its creator is reported.
+        return method == "POST" and _ASYNC_INVOKE.match(path) is not None
+
+    def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
+        arn = body.get("invocationArn") if isinstance(body, dict) else None
+        return (arn,) if isinstance(arn, str) and arn else ()
+
     def prepare_request(
         self,
         body: dict[str, Any],

@@ -189,9 +189,14 @@ class FakePlan:
         wants_payload: bool = True,
         mutate: bool = False,
         deadline_seconds: float = 600.0,
+        proxy_credential: bool | None = None,
     ) -> None:
         self.actions = list(actions)
         self.inject_system_note = inject_system_note
+        if proxy_credential is not None:
+            # The optional RoutePlan member; left unset, the core reads the
+            # plan as lending the proxy's credential (fail closed).
+            self.proxy_credential = proxy_credential
         self.deadline = time.monotonic() + deadline_seconds
         self.rule = rule
         self.delivery_headers = dict(delivery_headers or {})

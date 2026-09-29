@@ -53,6 +53,7 @@ from llm_redact.placeholders import format_placeholder
 from llm_redact.vault import (
     _MAX_RESPONSE_ROWS,
     _RESPONSE_PRUNE_EVERY,
+    LOOKUP_CHUNK,
     PlaceholderSpaceExhausted,
     Vault,
     VaultKeyError,
@@ -1052,6 +1053,29 @@ class RdbmsStore:
         result: str | None = self._run(op)
         return result
 
+    def lookup_response_sessions(self, response_ids: list[str]) -> dict[str, str]:
+        """Many ids in one round trip per ``LOOKUP_CHUNK`` (the sqlite
+        store's batched lookup): recorded ids with their sessions."""
+
+        def op(conn: Any) -> dict[str, str]:
+            found: dict[str, str] = {}
+            for start in range(0, len(response_ids), LOOKUP_CHUNK):
+                chunk = response_ids[start : start + LOOKUP_CHUNK]
+                params = {f"r{index}": value for index, value in enumerate(chunk)}
+                marks = ", ".join(f":{name}" for name in params)
+                rows = self._execute(
+                    conn,
+                    "SELECT response_id, session_id FROM llm_redact_response_sessions"
+                    f" WHERE response_id IN ({marks})",
+                    params,
+                ).fetchall()
+                found.update((str(row[0]), str(row[1])) for row in rows)
+            conn.commit()
+            return found
+
+        result: dict[str, str] = self._run(op)
+        return result
+
     def close(self) -> None:
         with suppress(Exception):
             self._conn.close()
@@ -1146,6 +1170,10 @@ class RdbmsVaultManager:
 
     def lookup_response_session(self, response_id: str) -> str | None:
         return self._store.lookup_response_session(response_id)
+
+    def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:
+        wanted = list(dict.fromkeys(response_ids))
+        return self._store.lookup_response_sessions(wanted) if wanted else {}
 
     def close(self) -> None:
         self._store.close()

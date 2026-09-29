@@ -33,6 +33,7 @@ from typing import Any, NamedTuple
 
 import httpx
 from starlette.applications import Starlette
+from starlette.datastructures import Headers
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
@@ -418,6 +419,7 @@ class ProxyState:
         # hot path one `is None` test each.
         self._object_access_refusal = getattr(self.session_router, "object_access_refusal", None)
         self._listing_item_session = getattr(self.session_router, "listing_item_session", None)
+        self._listing_item_sessions = getattr(self.session_router, "listing_item_sessions", None)
         self._record_object_id = getattr(self.session_router, "record_object_id", None)
         self._sealed = getattr(self.session_router, "sealed", None)
         self._static_context = RequestContext(
@@ -658,6 +660,12 @@ class ProxyState:
             if record(object_id, session_id) is not False:
                 self.vault_manager.record_response_session(object_id, session_id)
 
+    @property
+    def checks_object_access(self) -> bool:
+        """Whether the session router checks stored-object access at all
+        (the optional ``object_access_refusal``)."""
+        return self._object_access_refusal is not None
+
     def object_access_refusal(
         self, adapter_name: str | None, method: str, path: str, body: Any, *, identity: bool
     ) -> str | None:
@@ -692,7 +700,7 @@ class ProxyState:
         """The adapter whose ``lists_objects`` claims this request (the
         routed one, else the addressed provider's), or None — always None
         when the session router attributes no listed items."""
-        if self._listing_item_session is None:
+        if self._listing_item_session is None and self._listing_item_sessions is None:
             return None
         if adapter is not None:
             return adapter if adapter.lists_objects(method, path) else None
@@ -702,34 +710,101 @@ class ProxyState:
                 return candidate
         return None
 
-    def listing_restorer(self, object_id: str) -> tuple[bool, Rehydrator | None]:
-        """How one listed object is delivered (``listing_item_session``):
-        ``(False, None)`` — no session named (or the router failed): the item
-        stays as this request's own session delivers it; ``(True, None)`` —
-        the named session does not exist or holds nothing (it is never
-        created here), so restoring in it restores nothing: the item is
-        delivered as the provider sent it; ``(True, rehydrator)`` — restored
-        in that session."""
+    def listing_restorers(self, object_ids: Sequence[str]) -> dict[str, Rehydrator | None]:
+        """How each listed object is delivered, for one listing: an id ABSENT
+        from the answer stays as this request's own session delivers it (no
+        session named, or the router failed); ``None`` — the item is
+        delivered exactly as the provider sent it, because the named session
+        does not exist or holds nothing (it is never created here), or is
+        not the session the durable map records the object in (a session
+        pruned since the object was created and recreated with new values:
+        its placeholders are not the object's — or the check itself failed);
+        a rehydrator — restored in the named session."""
+        named = self._listing_sessions(object_ids)
+        if not named:
+            return {}
+        recorded = self._recorded_sessions(named)
+        rehydrators: dict[str, Rehydrator | None] = {}
+        restorers: dict[str, Rehydrator | None] = {}
+        for object_id, session_id in named.items():
+            if recorded is not None and recorded.get(object_id) != session_id:
+                restorers[object_id] = None
+                continue
+            if session_id not in rehydrators:
+                rehydrators[session_id] = self._existing_session_rehydrator(session_id)
+            restorers[object_id] = rehydrators[session_id]
+        return restorers
+
+    def _listing_sessions(self, object_ids: Sequence[str]) -> dict[str, str]:
+        """The session the router names for each listed object — asked once
+        for the whole listing (the optional ``listing_item_sessions``), else
+        per item (``listing_item_session``); ids it names none for (or that
+        fail) are left out."""
+        batched = self._listing_item_sessions
+        if batched is not None:
+            try:
+                answer = list(batched(list(object_ids)))
+            except Exception as exc:  # noqa: BLE001 — unsure means placeholders
+                logger.warning(
+                    "session router listing_item_sessions failed (%s); items left as is",
+                    type(exc).__name__,
+                )
+                return {}
+            if len(answer) != len(object_ids):
+                logger.warning("session router listing_item_sessions miscounted; items left as is")
+                return {}
+            pairs = list(zip(object_ids, answer, strict=True))
+        else:
+            pairs = [
+                (object_id, self._listing_item_session_of(object_id)) for object_id in object_ids
+            ]
+        return {object_id: session for object_id, session in pairs if isinstance(session, str)}
+
+    def _listing_item_session_of(self, object_id: str) -> Any:
+        """The router's per-item answer (only a string names a session)."""
         name_session = self._listing_item_session
         if name_session is None:
-            return False, None
+            return None
         try:
-            session_id = name_session(object_id)
+            return name_session(object_id)
         except Exception as exc:  # noqa: BLE001 — unsure means placeholders
             logger.warning(
                 "session router listing_item_session failed (%s); item left as is",
                 type(exc).__name__,
             )
-            return False, None
-        if not isinstance(session_id, str):
-            return False, None
+            return None
+
+    def _recorded_sessions(self, named: Mapping[str, str]) -> dict[str, str] | None:
+        """The durable map's record of each named object (one batched query
+        where the vault manager offers one), or None without a durable map
+        (the in-memory manager never prunes, so there the router's record is
+        the truth). A lookup that fails answers "nothing recorded": every
+        named item then keeps the provider's placeholders."""
+        manager = self.vault_manager
+        if not getattr(manager, "durable_response_map", True):
+            return None
+        try:
+            many = getattr(manager, "lookup_response_sessions", None)
+            if many is not None:
+                return dict(many(named))
+            found = ((object_id, manager.lookup_response_session(object_id)) for object_id in named)
+            return {object_id: session for object_id, session in found if session is not None}
+        except Exception as exc:  # noqa: BLE001 — unsure means placeholders
+            logger.warning(
+                "listing ownership check failed (%s); items left as is", type(exc).__name__
+            )
+            return {}
+
+    def _existing_session_rehydrator(self, session_id: str) -> Rehydrator | None:
+        """A rehydrator over ``session_id`` when it exists and holds
+        mappings, else None — never creating it."""
         has_session = getattr(self.vault_manager, "has_session", None)
         if has_session is not None and not has_session(session_id):
-            return True, None
+            return None
         vault = self.vault_manager.get(session_id)
         if len(vault) == 0:
-            return True, None
-        return True, Rehydrator(
+            return None
+        return Rehydrator(
             vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
         )
 
@@ -2272,6 +2347,62 @@ def _identity_body_problem(
     return None
 
 
+def _lends_credential(plan: RoutePlan) -> bool:
+    """Whether a routed request may reach its provider with a credential the
+    PROXY holds (``RoutePlan.proxy_credential``, optional): only an explicit
+    False — every upstream the plan may use forwards the client's own
+    credential — says no; a plan without the member counts as the proxy's
+    (fail closed: the stored-object check is then only stricter)."""
+    return getattr(plan, "proxy_credential", True) is not False
+
+
+class _Unreadable(NamedTuple):
+    """Why a pass-through body cannot be checked (status, message — the
+    body's KIND only, never its content)."""
+
+    status: int
+    message: str
+
+
+# The bytes a JSON document may start with before its first value: ASCII
+# whitespace, the UTF-8/16/32 byte-order marks, and the NULs of UTF-16/32.
+_JSON_LEAD = re.compile(rb"[^\x00\t\n\r \xef\xbb\xbf\xfe\xff]")
+
+
+def _pass_through_check_body(
+    headers: Headers, body: bytes, max_body_bytes: int
+) -> tuple[Any, _Unreadable | None]:
+    """A routed pass-through body, parsed for the stored-object check only
+    (the bytes are forwarded as they are): ``(parsed JSON or None, None)``,
+    or ``(None, why)`` when the body could cite an object the check cannot
+    see — content-encoded (the proxy never decodes one; every
+    Content-Encoding header counts), a JSON document over
+    ``max_body_bytes``, or one that repeats a key (the check would see the
+    last occurrence, an upstream may keep the first). A body that is not
+    JSON at all (a multipart upload, audio) has nothing the check reads:
+    None."""
+    for value in headers.getlist("content-encoding"):
+        if any(c.strip().lower() not in ("", "identity") for c in value.split(",")):
+            return None, _Unreadable(
+                400,
+                "the request body is content-encoded (llm-redact does not decode request bodies)",
+            )
+    if len(body) > max_body_bytes:
+        lead = _JSON_LEAD.search(body)
+        if lead is not None and body[lead.start()] in b"{[":
+            return None, _Unreadable(
+                413, f"the request body exceeds llm-redact max_body_bytes ({max_body_bytes})"
+            )
+        return None, None
+    try:
+        parsed, duplicate_keys = loads_request(body)
+    except ValueError:
+        return None, None
+    if duplicate_keys:
+        return None, _Unreadable(400, "the request body repeats a JSON key")
+    return parsed, None
+
+
 async def handle(request: Request) -> Response:
     state: ProxyState = request.app.state.proxy
     if not origin_form_target(request.scope):
@@ -2473,12 +2604,82 @@ async def handle(request: Request) -> Response:
         except ValueError:
             parsed = None
 
+    # Routing (the llm-redact-pro routing layer): the router plans BEFORE the
+    # stored-object check below — the check must know whose credential the
+    # request will spend (a routed upstream may send the operator's own key)
+    # — and before redaction, because the FIRST upstream's
+    # inject_system_note governs the prepared body (decision 4; the redacted
+    # body is reused on later hops). A plan is side-effect free until
+    # begin(): one abandoned by a refusal below is simply dropped. An
+    # unrouted request — no router held, or a provider outside the router's
+    # protocols (plan() returns None) — never constructs a routing object and
+    # takes the legacy path below byte-for-byte.
+    plan: RoutePlan | None = None
+    upstream_auth = state.upstream_auth.get(provider_name)
+    # A provider the proxy authorizes with its own cloud identity is never
+    # routed (the routing protocols are anthropic/openai/gemini/ollama, and
+    # a routed hop carries the router's own credentials): the router is not
+    # even asked, so the request below is always signed by its authorizer.
+    if state.router is not None and upstream_auth is None:
+        model = parsed.get("model") if isinstance(parsed, dict) else None
+        planned = state.router.plan(
+            RouteInbound(
+                adapter_name=adapter.name if adapter is not None else None,
+                provider_name=provider_name,
+                method=request.method,
+                path=path,
+                raw_path=_upstream_path(request, path),
+                query=request.url.query,
+                headers=request.headers,
+                model=model if isinstance(model, str) else None,
+            )
+        )
+        if isinstance(planned, RouteRefusal):
+            # No rule and no default for this protocol: proxy-generated
+            # 502, never forwarded by guesswork (decision 2) — before
+            # redaction, like the router decided it.
+            return _route_refusal(
+                state,
+                state.config.vault.session,
+                adapter,
+                planned,
+                request=request,
+                path=path,
+                started=started,
+            )
+        plan = planned
+
+    # Whose credential the provider will see. The proxy's OWN — its cloud
+    # identity, or a routed plan's operator key (RoutePlan.proxy_credential;
+    # a plan without the member counts as the proxy's: fail closed) — makes
+    # every client the same principal upstream, so the stored-object check
+    # applies its identity policy.
+    proxy_credential = upstream_auth is not None or (plan is not None and _lends_credential(plan))
+    check_body: Any = parsed
+    if adapter is None and proxy_credential and body_bytes and state.checks_object_access:
+        # A routed pass-through request spent with the proxy's credential:
+        # its body may cite a stored object (a vector store's file_ids, a
+        # fine-tuning job's training_file), so it is parsed for the check
+        # alone — the bytes are still forwarded verbatim. A body the check
+        # cannot read is never sent with the proxy's credential.
+        check_body, unreadable = _pass_through_check_body(
+            request.headers, body_bytes, state.config.max_body_bytes
+        )
+        if unreadable is not None:
+            return _unchecked_body_refused(
+                state,
+                unreadable,
+                provider_name=provider_name,
+                request=request,
+                path=path,
+                started=started,
+            )
     refusal = state.object_access_refusal(
         adapter.name if adapter is not None else None,
         request.method,
         path,
-        parsed,
-        identity=provider_name in state.upstream_auth,
+        check_body,
+        identity=proxy_credential,
     )
     if refusal is not None:
         # The session router (llm-redact-pro named users) refused a request
@@ -2567,40 +2768,6 @@ async def handle(request: Request) -> Response:
         reason = ctx.sealed or _SEALED_REFUSAL
         return JSONResponse(sealed_adapter.error_body(reason, status=403), status_code=403)
 
-    # Routing (the llm-redact-pro routing layer): the router plans BEFORE
-    # redaction because the FIRST upstream's inject_system_note governs the
-    # prepared body (decision 4; the redacted body is reused on later hops).
-    # An unrouted request — no router held, or a provider outside the
-    # router's protocols (plan() returns None) — never constructs a routing
-    # object and takes the legacy path below byte-for-byte.
-    plan: RoutePlan | None = None
-    upstream_auth = state.upstream_auth.get(provider_name)
-    # A provider the proxy authorizes with its own cloud identity is never
-    # routed (the routing protocols are anthropic/openai/gemini/ollama, and
-    # a routed hop carries the router's own credentials): the router is not
-    # even asked, so the request below is always signed by its authorizer.
-    if state.router is not None and upstream_auth is None:
-        model = parsed.get("model") if isinstance(parsed, dict) else None
-        planned = state.router.plan(
-            RouteInbound(
-                adapter_name=adapter.name if adapter is not None else None,
-                provider_name=provider_name,
-                method=request.method,
-                path=path,
-                raw_path=_upstream_path(request, path),
-                query=request.url.query,
-                headers=request.headers,
-                model=model if isinstance(model, str) else None,
-            )
-        )
-        if isinstance(planned, RouteRefusal):
-            # No rule and no default for this protocol: proxy-generated
-            # 502, never forwarded by guesswork (decision 2) — before
-            # redaction, like the router decided it.
-            return _route_refusal(
-                state, ctx, adapter, planned, request=request, path=path, started=started
-            )
-        plan = planned
     note_wanted = plan.inject_system_note if plan is not None else state.config.inject_system_note
 
     outbound = body_bytes
@@ -2680,6 +2847,26 @@ async def handle(request: Request) -> Response:
         # part the adapter would forward unscanned refused here.
         boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
         if boundary is not None:
+            # The requests an uploaded file's lines carry (a batch input
+            # file) are run by the provider later, with the credential this
+            # upload is sent with: collected for the stored-object check.
+            lines: list[Any] | None = [] if state.checks_object_access else None
+            if (
+                lines is not None
+                and proxy_credential
+                and adapter.redacts_multipart(path)
+                and parse_multipart(body_bytes, boundary) is None
+            ):
+                # An upload the adapter would forward unread (outside the
+                # canonical grammar) could carry lines citing any stored
+                # object: never sent with the proxy's own credential.
+                return refused_response(
+                    "llm-redact: the multipart body is outside the canonical form llm-redact"
+                    " can check, and this request would be sent with the proxy's own provider"
+                    " credential; the request was not forwarded",
+                    adapter,
+                    "unchecked multipart under the proxy's credential",
+                )
             try:
                 rewritten = adapter.redact_multipart(
                     path,
@@ -2690,6 +2877,7 @@ async def handle(request: Request) -> Response:
                     # Under the proxy's own identity every part must be
                     # scanned: an unscanned piece refuses the whole request.
                     require_scanned=upstream_auth is not None,
+                    cited=lines,
                 )
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the
@@ -2706,6 +2894,27 @@ async def handle(request: Request) -> Response:
                 )
             except SealedSessionError:
                 return sealed_response(adapter)
+            refusal = (
+                state.object_access_refusal(
+                    adapter.name, request.method, path, lines, identity=proxy_credential
+                )
+                if lines
+                else None
+            )
+            if refusal is not None:
+                # A line citing another namespace's stored object: refused
+                # like the same citation in a JSON body — still before any
+                # upstream contact (what was redacted stays in this
+                # request's own session).
+                return _object_access_refused(
+                    state,
+                    adapter,
+                    refusal,
+                    provider_name=provider_name,
+                    request=request,
+                    path=path,
+                    started=started,
+                )
             if rewritten is not None:
                 outbound = rewritten
 
@@ -3315,6 +3524,44 @@ def _object_access_refused(
     return JSONResponse(error, status_code=403)
 
 
+def _unchecked_body_refused(
+    state: ProxyState,
+    unreadable: _Unreadable,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A routed pass-through request the proxy would send with its own
+    credential, whose body the stored-object check cannot read: refused,
+    recorded, before any upstream contact (the pass-through error shape —
+    no adapter matched)."""
+    message = (
+        f"llm-redact: {unreadable.message}, and this request would be sent with the"
+        " proxy's own provider credential, so the stored objects it cites must be"
+        " checked; the request was not forwarded"
+    )
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=unreadable.status,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info(
+        "%s %s -> %d refused (unchecked body under the proxy's credential)",
+        request.method,
+        path,
+        unreadable.status,
+    )
+    return JSONResponse({"error": message}, status_code=unreadable.status)
+
+
 def _restore_listing(
     state: ProxyState, lister: ProviderAdapter, upstream_raw: bytes, raw: bytes
 ) -> bytes | None:
@@ -3335,12 +3582,15 @@ def _restore_listing(
     items = lister.listing_items(original)
     if not items:
         return None
-    restorers: dict[int, Rehydrator | None] = {}
-    for index, item in enumerate(items):
-        if isinstance(item, dict) and isinstance(item.get("id"), str):
-            named, rehydrator = state.listing_restorer(item["id"])
-            if named:
-                restorers[index] = rehydrator
+    listed = {
+        index: item["id"]
+        for index, item in enumerate(items)
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    by_id = state.listing_restorers(list(dict.fromkeys(listed.values())))
+    restorers = {
+        index: by_id[object_id] for index, object_id in listed.items() if object_id in by_id
+    }
     if not restorers:
         return None
     delivered = json.loads(raw)  # a fresh tree to edit (raw is JSON: upstream_raw or a dump)
@@ -3372,7 +3622,7 @@ def _restore_listing(
 
 def _route_refusal(
     state: ProxyState,
-    ctx: RequestContext,
+    session: str,
     adapter: ProviderAdapter | None,
     refusal: RouteRefusal,
     *,
@@ -3389,7 +3639,7 @@ def _route_refusal(
     row = dict(refusal.row)
     logger.info("%s %s -> %d%s", request.method, path, refusal.status, _route_log_suffix(row))
     state.record_request(
-        session=ctx.session_id,
+        session=session,
         provider=adapter.name if adapter is not None else None,
         method=request.method,
         path=path,
@@ -3554,7 +3804,7 @@ async def _handle_routed(
     if refused is not None:
         return _route_refusal(
             state,
-            ctx,
+            ctx.session_id,
             adapter,
             refused,
             request=request,
@@ -3581,7 +3831,7 @@ async def _handle_routed(
     if isinstance(first, RouteRefusal):
         return _route_refusal(
             state,
-            ctx,
+            ctx.session_id,
             adapter,
             first,
             request=request,

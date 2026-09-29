@@ -132,8 +132,12 @@ class AnthropicAdapter(ProviderAdapter):
         return RouteKind.NONE
 
     def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
-        # A message batch: its later results are read by id.
-        return method == "POST" and path.rstrip("/").endswith("/messages/batches")
+        # A message batch (its later results are read by id), and a Files API
+        # upload (POST /v1/files with anthropic-version — pass-through, the
+        # document is media — read back by id and cited by later messages as
+        # a document or container_upload `file_id`).
+        tail = path.rstrip("/")
+        return method == "POST" and (tail.endswith("/messages/batches") or tail == "/v1/files")
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
         if isinstance(body, dict) and isinstance(body.get("id"), str) and body["id"]:

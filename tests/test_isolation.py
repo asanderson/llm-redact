@@ -1,10 +1,10 @@
 """The suite never touches the developer's real machine (tests/isolation.py).
 
-conftest.py points HOME and the XDG config/data/state dirs into a throwaway
-directory for the whole session — unconditionally, subprocesses included —
-drops a deployment's LLM_REDACT_* variables, and fails the run when the
-real llm-redact dirs, the agent plugins' command dirs or the user service
-unit changed while it ran.
+conftest.py points HOME (USERPROFILE on Windows) and the XDG config/data/state
+dirs into a throwaway directory for the whole session — unconditionally,
+subprocesses included — drops a deployment's LLM_REDACT_* variables, and fails
+the run when the real llm-redact dirs, the agent plugins' command dirs or the
+user service unit changed while it ran.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ def _defaults() -> list[Path]:
 
 
 def test_every_default_location_is_in_the_throwaway_home(isolation_root: Path) -> None:
-    for name in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+    for name in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
         assert Path(os.environ[name]).resolve().is_relative_to(isolation_root), name
     for path in _defaults():
         assert path.resolve().is_relative_to(isolation_root), path
@@ -111,11 +111,12 @@ def test_isolate_rewires_home_and_xdg_and_drops_deployment_settings(tmp_path: Pa
     isolation.isolate(environ, tmp_path)
     assert environ == {
         "HOME": str(tmp_path / "home"),
+        "USERPROFILE": str(tmp_path / "home"),
         "XDG_CONFIG_HOME": str(tmp_path / "config"),
         "XDG_DATA_HOME": str(tmp_path / "data"),
         "XDG_STATE_HOME": str(tmp_path / "state"),
         # Third-party caches stay where they were.
-        "XDG_CACHE_HOME": "/real/home/.cache",
+        "XDG_CACHE_HOME": str(Path("/real/home") / ".cache"),
         "LLM_REDACT_TEST_PG_DSN": "postgresql://ci",
         "PATH": "/usr/bin",
     }
@@ -130,7 +131,8 @@ def test_the_watched_paths_cover_every_default_writer(
     # Resolved against a stand-in for the real environment, every default
     # location the src writes lies at or under one watched path.
     monkeypatch.setattr(sys, "platform", platform)
-    monkeypatch.setenv("HOME", str(tmp_path / "real-home"))
+    for name in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(name, str(tmp_path / "real-home"))
     for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"):
         if tool_dirs:
             monkeypatch.setenv(name, str(tmp_path / name.lower()))
@@ -192,7 +194,7 @@ def test_a_session_that_writes_to_a_real_location_fails(tmp_path: Path, allow: b
         for name, value in os.environ.items()
         if not name.startswith("XDG_") and name != isolation.ALLOW_REAL_DIR_CHANGES
     }
-    env["HOME"] = str(real_home)
+    env["HOME"] = env["USERPROFILE"] = str(real_home)
     env["GUARD_TARGET"] = str(real_home / ".local" / "share" / "llm-redact")
     if allow:
         env[isolation.ALLOW_REAL_DIR_CHANGES] = "1"

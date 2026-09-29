@@ -29,10 +29,11 @@ def pytest_configure(config: pytest.Config) -> None:
     tests/license_fixtures.py) — no signing, no resolver.
 
     Before anything is collected, the session is isolated from the real
-    machine (tests/isolation.py): HOME and the XDG config/data/state dirs
-    point into one throwaway directory — unconditionally, whatever the
-    environment already set — and a deployment's LLM_REDACT_* variables are
-    dropped; subprocesses inherit all of it."""
+    machine (tests/isolation.py): HOME (USERPROFILE on Windows) and the XDG
+    config/data/state dirs point into one throwaway directory —
+    unconditionally, whatever the environment already set — and a
+    deployment's LLM_REDACT_* variables are dropped; subprocesses inherit all
+    of it."""
     global ISOLATION_ROOT, _REAL_WATCHED, _REAL_BEFORE
     _REAL_WATCHED = isolation.watched_paths(os.environ, Path.home())
     _REAL_BEFORE = isolation.snapshot(_REAL_WATCHED)

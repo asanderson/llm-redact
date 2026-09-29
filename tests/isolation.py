@@ -2,8 +2,9 @@
 
 conftest.py applies it before anything is collected: every default location
 llm-redact and its CLIs read or write — the XDG config/data dirs, ``HOME``
-(``Path.home()``: the service unit, the agent plugins' command dirs, ``~``
-in configured paths) and the agent tools' own dir variables — points into
+and ``USERPROFILE`` (``Path.home()`` reads the latter on Windows: the service
+unit, the agent plugins' command dirs, ``~`` in configured paths) and the
+agent tools' own dir variables — points into
 one throwaway directory for the whole session, subprocesses included (they
 inherit the environment); a deployment's ``LLM_REDACT_*`` variables (its
 config file, vault DSN and key, a proxy URL, a bind address) are dropped, so
@@ -59,8 +60,12 @@ def watched_paths(
     user service unit."""
     config = Path(environ.get("XDG_CONFIG_HOME") or home / ".config")
     data = Path(environ.get("XDG_DATA_HOME") or home / ".local" / "share")
-    claude = Path(environ.get("CLAUDE_CONFIG_DIR") or home / ".claude")
-    codex = Path(environ.get("CODEX_HOME") or home / ".codex")
+    # `llm-redact plugin` prefers HOME to Path.home(); the two differ only on
+    # Windows (where Path.home() reads USERPROFILE).
+    tool_home = Path(environ.get("HOME") or home)
+    claude = Path(environ.get("CLAUDE_CONFIG_DIR") or tool_home / ".claude")
+    codex = Path(environ.get("CODEX_HOME") or tool_home / ".codex")
+    opencode = Path(environ.get("XDG_CONFIG_HOME") or tool_home / ".config")
     unit = (
         home / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
         if platform == "darwin"
@@ -71,8 +76,8 @@ def watched_paths(
         data / "llm-redact",
         claude / "commands",
         codex / "prompts",
-        config / "opencode" / "commands",
-        home / ".cursor" / "commands",
+        opencode / "opencode" / "commands",
+        tool_home / ".cursor" / "commands",
         unit,
     ]
 
@@ -104,7 +109,9 @@ def changes(before: Snapshot, after: Snapshot) -> list[str]:
 
 def isolate(environ: MutableMapping[str, str], root: Path) -> None:
     """Point ``environ``'s home and XDG dirs into ``root`` and drop the
-    deployment variables (in place; ``root`` is created)."""
+    deployment variables (in place; ``root`` is created). The home is both
+    ``HOME`` and ``USERPROFILE``: ``Path.home()`` reads the latter on Windows
+    and the former everywhere else."""
     real_home = Path(environ.get("HOME") or Path.home())
     # Third-party caches (the hypothesis/spaCy/tldextract kind) stay where
     # they were: llm-redact never reads XDG_CACHE_HOME, and an empty cache
@@ -112,6 +119,7 @@ def isolate(environ: MutableMapping[str, str], root: Path) -> None:
     environ.setdefault("XDG_CACHE_HOME", str(real_home / ".cache"))
     for name, sub in (
         ("HOME", "home"),
+        ("USERPROFILE", "home"),
         ("XDG_CONFIG_HOME", "config"),
         ("XDG_DATA_HOME", "data"),
         ("XDG_STATE_HOME", "state"),

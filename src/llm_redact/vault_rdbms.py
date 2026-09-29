@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib
+import logging
 import os
 import re
 from collections import OrderedDict
@@ -51,7 +52,10 @@ from urllib.parse import parse_qs, urlsplit
 
 from llm_redact.placeholders import format_placeholder
 from llm_redact.vault import (
+    _MAX_OBJECT_ROWS,
     _MAX_RESPONSE_ROWS,
+    _OBJECT_KIND,
+    _RESPONSE_KIND,
     _RESPONSE_PRUNE_EVERY,
     LOOKUP_CHUNK,
     PlaceholderSpaceExhausted,
@@ -63,6 +67,8 @@ from llm_redact.vault import (
 if TYPE_CHECKING:
     from llm_redact.config import VaultConfig
     from llm_redact.plugin_api import DbPasswordProvider, VaultCipher
+
+logger = logging.getLogger("llm_redact")
 
 ENV_DSN = "LLM_REDACT_VAULT_DSN"
 # The documented hatch for the off-box rule below: set to 1 to run a
@@ -92,6 +98,12 @@ _SCHEMES = {
 _LONG_TEXT = {"postgresql": "TEXT", "mysql": "LONGTEXT", "oracle": "CLOB", "dbapi": "TEXT"}
 
 _ALLOCATION_ATTEMPTS = 3
+
+# The response map's row kind (a Responses chain's row, or a stored object's
+# owner record): each kind is bounded apart (see llm_redact.vault). One
+# portable column definition for the create and the upgrade of a schema
+# created before it (DEFAULT before NOT NULL: Oracle's order, read by all).
+_KIND_COLUMN = "kind VARCHAR(8) DEFAULT 'response' NOT NULL"
 
 _PARAM_RE = re.compile(r":([a-z_][a-z0-9_]*)")
 
@@ -144,10 +156,11 @@ def _ddl(backend: str) -> dict[str, str]:
   CONSTRAINT llmr_uq_placeholder UNIQUE (session_id, placeholder),
   CONSTRAINT llmr_uq_n UNIQUE (session_id, detector_type, n)
 )""",
-        "llm_redact_response_sessions": """CREATE TABLE llm_redact_response_sessions (
+        "llm_redact_response_sessions": f"""CREATE TABLE llm_redact_response_sessions (
   response_id VARCHAR(192) NOT NULL,
   session_id VARCHAR(128) NOT NULL,
   created_at VARCHAR(20) NOT NULL,
+  {_KIND_COLUMN},
   PRIMARY KEY (response_id)
 )""",
         "llm_redact_meta": """CREATE TABLE llm_redact_meta (
@@ -592,7 +605,10 @@ class RdbmsStore:
                 retryable.append(exc_type)
         self._retryable: tuple[type[BaseException], ...] = tuple(retryable)
         self._conn = connect()
-        self._response_inserts = 0
+        self._inserts = {_RESPONSE_KIND: 0, _OBJECT_KIND: 0}
+        # False only when a schema from before the row kind could not gain
+        # its column (see _ensure_kind_column): one shared bound, as before.
+        self._row_kinds = True
         self._ensure_schema()
 
     # -- plumbing ---------------------------------------------------------
@@ -650,8 +666,46 @@ class RdbmsStore:
                     conn.commit()
             conn.commit()
             self._check_meta(conn)
+            self._ensure_kind_column(conn)
 
         self._run(op)
+
+    def _kind_missing(self, conn: Any) -> bool:
+        """Whether the response map lacks the ``kind`` column (the portable
+        probe of ``_table_missing``, for a column)."""
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT kind FROM llm_redact_response_sessions WHERE 1 = 0")
+            cursor.fetchall()
+            return False
+        except self._module.Error:
+            self._rollback(conn)
+            return True
+
+    def _ensure_kind_column(self, conn: Any) -> None:
+        """Give a response map created before its rows had a kind the
+        column (existing rows default to Responses rows). A database user
+        that may not ALTER the table keeps the store working as before —
+        stored-object records then share the Responses bound — with a
+        warning naming the table, never the DSN. Another replica adding it
+        first is fine."""
+        if not self._kind_missing(conn):
+            conn.commit()  # close the probe's read snapshot
+            return
+        try:
+            conn.cursor().execute(f"ALTER TABLE llm_redact_response_sessions ADD {_KIND_COLUMN}")
+            conn.commit()
+        except self._module.Error as exc:
+            self._rollback(conn)
+            if self._kind_missing(conn):
+                self._row_kinds = False
+                logger.warning(
+                    "vault: could not add the kind column to llm_redact_response_sessions"
+                    " (%s); stored objects' owner records share the Responses bound until"
+                    " it is added (ALTER TABLE llm_redact_response_sessions ADD %s)",
+                    type(exc).__name__,
+                    _KIND_COLUMN,
+                )
 
     def _check_meta(self, conn: Any) -> None:
         from llm_redact.config import ConfigError
@@ -989,10 +1043,31 @@ class RdbmsStore:
         return result
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
-        self._response_inserts += 1
-        cap_now = self._response_inserts >= _RESPONSE_PRUNE_EVERY
+        """Map a Responses chain's response id to its session."""
+        self._record(response_id, session_id, _RESPONSE_KIND, _MAX_RESPONSE_ROWS)
+
+    def record_object_session(self, object_id: str, session_id: str) -> None:
+        """Record the session that created a stored object; bounded apart
+        from the Responses rows (see llm_redact.vault)."""
+        self._record(object_id, session_id, _OBJECT_KIND, _MAX_OBJECT_ROWS)
+
+    def _record(self, row_id: str, session_id: str, kind: str, cap: int) -> None:
+        if not self._row_kinds:  # a schema that could not gain the column
+            kind, cap = _RESPONSE_KIND, _MAX_RESPONSE_ROWS
+        self._inserts[kind] += 1
+        cap_now = self._inserts[kind] >= _RESPONSE_PRUNE_EVERY
         if cap_now:
-            self._response_inserts = 0
+            self._inserts[kind] = 0
+        # Only the columns this schema has: every row is a Responses row
+        # to a map that could not gain the kind column.
+        insert = (
+            "INSERT INTO llm_redact_response_sessions"
+            " (response_id, session_id, created_at, kind) VALUES (:r, :s, :ts, :k)"
+            if self._row_kinds
+            else "INSERT INTO llm_redact_response_sessions"
+            " (response_id, session_id, created_at) VALUES (:r, :s, :ts)"
+        )
+        of_kind = " WHERE kind = :k" if self._row_kinds else ""
 
         def op(conn: Any) -> None:
             try:
@@ -1001,18 +1076,14 @@ class RdbmsStore:
                 self._execute(
                     conn,
                     "DELETE FROM llm_redact_response_sessions WHERE response_id = :r",
-                    {"r": response_id},
+                    {"r": row_id},
                 )
-                self._execute(
-                    conn,
-                    "INSERT INTO llm_redact_response_sessions"
-                    " (response_id, session_id, created_at) VALUES (:r, :s, :ts)",
-                    {"r": response_id, "s": session_id, "ts": _utcnow_iso()},
-                )
+                params = {"r": row_id, "s": session_id, "ts": _utcnow_iso()}
+                self._execute(conn, insert, {**params, "k": kind} if self._row_kinds else params)
                 if cap_now:
                     if self._backend == "oracle":
                         keepers = (
-                            "SELECT response_id FROM llm_redact_response_sessions"
+                            f"SELECT response_id FROM llm_redact_response_sessions{of_kind}"
                             " ORDER BY created_at DESC FETCH FIRST :cap ROWS ONLY"
                         )
                     else:
@@ -1020,18 +1091,20 @@ class RdbmsStore:
                         # restriction and its same-table-delete rule (1093).
                         keepers = (
                             "SELECT response_id FROM (SELECT response_id, created_at"
-                            " FROM llm_redact_response_sessions"
+                            f" FROM llm_redact_response_sessions{of_kind}"
                             " ORDER BY created_at DESC LIMIT :cap) keepers"
                         )
                     # Only rows of sessions without mappings (see the
                     # sqlite store): a live session's chain must resolve.
+                    # Each kind keeps its own newest rows.
                     self._execute(
                         conn,
                         "DELETE FROM llm_redact_response_sessions"
-                        f" WHERE response_id NOT IN ({keepers})"
+                        f" WHERE {'kind = :k AND ' if self._row_kinds else ''}"
+                        f"response_id NOT IN ({keepers})"
                         " AND NOT EXISTS (SELECT 1 FROM llm_redact_mappings m"
                         " WHERE m.session_id = llm_redact_response_sessions.session_id)",
-                        {"cap": _MAX_RESPONSE_ROWS},
+                        {"cap": cap, "k": kind} if self._row_kinds else {"cap": cap},
                     )
                 conn.commit()
             except self._module.Error:
@@ -1167,6 +1240,9 @@ class RdbmsVaultManager:
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
         self._store.record_response_session(response_id, session_id)
+
+    def record_object_session(self, object_id: str, session_id: str) -> None:
+        self._store.record_object_session(object_id, session_id)
 
     def lookup_response_session(self, response_id: str) -> str | None:
         return self._store.lookup_response_session(response_id)

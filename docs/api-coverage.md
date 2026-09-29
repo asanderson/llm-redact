@@ -284,6 +284,20 @@ stance; with llm-redact-pro's named users, the user's own copy of it),
 keeping redact/rehydrate always in agreement. The per-cache
 GET/PATCH/DELETE and list return metadata only and pass through.
 
+The Gemini **Files API** passes through — files are media, the documented
+non-goal: the upload (`POST /upload/v1beta/files`), the metadata-only
+create (`POST /v1beta/files`), `files:register`, a file's metadata, delete
+and download (`GET /v1beta/files/{id}[:download]`, `DELETE`), the list,
+and `GET /download/v1beta/files/{id}:download` (a batch's output file),
+all forwarded to the Gemini upstream. What llm-redact reads is who owns
+what: the file a create answers with (`files/<id>`), and the output file a
+finished batch's status names (`GET /v1beta/batches/{id}`), are reported to
+a session router that tracks stored objects (llm-redact-pro's named users;
+see [how-it-works.md](how-it-works.md)). The google-genai SDKs upload with
+the resumable protocol and send the data chunks — the last one answers
+with the file — to the upload URL Google returns, not through the proxy:
+such a file is created without the proxy ever seeing its name.
+
 A pass-through request under `/v1/` that carries a **Google API key**
 (`x-goog-api-key`, or a `key=`/`$key=` query parameter) is forwarded to
 the Gemini upstream, not inferred as OpenAI: Gemini's v1 surface
@@ -359,7 +373,11 @@ that is not there:
   secret can straddle a part boundary, so per-line scanning cannot be applied
   safely; real coverage would need stateful cross-part buffering. Pass-through,
   routed to the OpenAI upstream (pinned by test — it previously
-  fell through to the anthropic default).
+  fell through to the anthropic default). For the same reason the File a
+  completed Upload creates is reported to a session router as its creator's
+  only when its `purpose` is stated and is not `batch`: a batch input file's
+  requests would be run with the upload's credential, and the stored objects
+  they cite were never checked.
 - **OpenAI Assistants / Threads / vector-store search** — on OpenAI's
   announced deprecation path (Responses/Conversations is the successor), so
   not built. The same holds for their Azure v1 twins (`/openai/v1/threads`,

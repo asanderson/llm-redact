@@ -218,15 +218,29 @@ while the vault row is the secret store and is never exported.
 - **Stored objects** (named users, **Pro**): the core reports the ids of
   objects the provider stores for later reads — uploaded files (OpenAI,
   Azure, custom providers, Anthropic's Files API, a completed OpenAI
-  Upload), batches, message batches, stored conversations, Gemini context
-  caches, video jobs (OpenAI/Azure `/videos`), stored chat completions,
+  Upload — except one of `purpose` batch, or of no stated purpose: the
+  Uploads API's parts are forwarded unread, an opaque byte range can split
+  a line, so the requests such a file holds were never checked for the
+  stored objects they cite, and it stays an object nobody is recorded
+  creating), batches, message batches, stored conversations, Gemini context
+  caches, Gemini API Files (`files/<id>`: the multipart upload, a
+  resumable upload's finalizing chunk when it is sent through the proxy,
+  the metadata-only create and `files:register`; and a finished Gemini
+  batch's output file, named on the status its creator reads), video jobs
+  (OpenAI/Azure `/videos`), stored chat completions,
   and the long-running jobs read back by name: Gemini API batches and Veo
   operations, Vertex Veo operations (`:predictLongRunning`, polled through
   `:fetchPredictOperation`) and Bedrock async invocations (`POST
   /async-invoke`, polled by ARN) — with the session that created them
   (`SessionRouter.record_object_id`, in every vault mode: a router may
   serve unattributed traffic on the static path next to named users, and
-  that shared session's objects are no user's). A session router may then
+  that shared session's objects are no user's). With a sqlite or RDBMS
+  vault the record is mirrored in the durable map as an owner record
+  (`record_object_session`), bounded APART from the Responses chain rows:
+  past its newest 10,000 records, only one whose creating session holds
+  no mappings can be dropped, and Responses traffic never pushes one out
+  (an RDBMS user that may not `ALTER` the table keeps the old shared
+  bound, with a warning). A session router may then
   refuse a request that reaches another namespace's object
   (`object_access_refusal`): the core answers a recorded, provider-shaped
   **403** before the audit START row, redaction, any upstream credential
@@ -237,12 +251,22 @@ while the vault row is the secret store and is never exported.
   (`RoutePlan.proxy_credential`; a plan that does not say counts as the
   proxy's). Under such a credential a routed pass-through request's JSON
   body is parsed for the check alone (still forwarded byte-for-byte), and
-  one the check cannot read — content-encoded, repeating a key, JSON over
-  `max_body_bytes` — is refused. The requests inside an uploaded batch
-  input file are checked too: after redaction, still before any upstream
-  contact, the router is asked again with the upload's parsed lines (and
-  an upload outside the canonical multipart grammar, whose lines would be
-  forwarded unread, is refused under a proxy-held credential).
+  one the check cannot read — content-encoded, with more than one
+  Content-Type, repeating a key, JSON over `max_body_bytes` — is refused
+  (a matched route's content-encoded or doubly-typed body too). An upload
+  (multipart/form-data) is read for the check alone (`upload_view`),
+  whether or not its route redacts (`detection = false` included) and, on
+  a pass-through route, under a proxy-held credential: the router is
+  asked with the list of what it cites — the JSON lines of its file parts
+  (a batch input file's requests, run later with the upload's credential)
+  and its form fields, nested along their names (`file_ids[]` →
+  `{"file_ids": [...]}`) — before redaction and any upstream contact. An
+  upload the check cannot read (outside the canonical grammar, a part
+  header without one reading, a transfer encoding, a form field that is
+  not UTF-8 text, more JSON than `max_body_bytes`, and on a pass-through
+  route a line repeating a key) is refused under a proxy-held credential;
+  with `detection = false` a line repeating a key is sent re-serialized,
+  exactly as checked.
   llm-redact-pro refuses every such reference under a proxy-held
   credential (and, for a named user, a reference to an object no user is
   recorded creating), and in every mode anything but a pure read (a
@@ -267,9 +291,14 @@ while the vault row is the secret store and is never exported.
   durable map still records the object in exactly that session: a session
   pruned and recreated since holds NEW values under the same token names,
   so the item keeps the provider's placeholders. Items the router names
-  nothing for stay as the listing's own session delivers them. llm-redact-pro reads a named user's listing in
+  nothing for stay as the listing's own session delivers them; if its
+  answer fails (an exception, a miscounted batch), every item it failed
+  for goes out exactly as the provider sent it — a router that cannot
+  answer vouches for nothing. llm-redact-pro reads a named user's listing in
   an empty session and names each item's creator session or an empty
-  one, so each user sees their own items restored and nobody else's. The
+  one — an item nobody is recorded creating included, while named users
+  are in play — so each user sees their own items restored and nobody
+  else's, whatever session the listing itself is read in. The
   batch list itself is a **chat** route: with one shared namespace it is
   restored like a single batch.
 - `compaction_forks` counts only a session first seen by this process

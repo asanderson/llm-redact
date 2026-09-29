@@ -107,7 +107,8 @@ async def test_a_lost_ownership_record_still_delivers_the_answer(
         def locked(object_id: str, session_id: str) -> None:
             raise fault
 
-        monkeypatch.setattr(state.vault_manager, "record_response_session", locked)
+        # A stored object's owner record (bounded apart from Responses rows).
+        monkeypatch.setattr(state.vault_manager, "record_object_session", locked)
     caplog.set_level(logging.WARNING, logger="llm_redact")
     async with _client(app) as client:
         response = await client.post(

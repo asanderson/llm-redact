@@ -826,6 +826,57 @@ async def test_a_failing_batched_answer_leaves_the_listing_alone(
     assert logged in caplog.text and "secret-id" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("answer", "logged"),
+    [
+        (RuntimeError("secret-id"), "listing_item_sessions failed (RuntimeError)"),
+        (["user:n1:main"], "listing_item_sessions miscounted"),
+    ],
+)
+async def test_a_failing_answer_delivers_every_item_as_the_provider_sent_it(
+    answer: Any, logged: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The listing is read in a POPULATED session (an unattributed reader on
+    the static path holds its own «EMAIL_001»): a router that cannot answer
+    vouches for no item, so none is restored with that session's values —
+    each goes out exactly as the provider sent it."""
+    router = BatchedRouter(session="shared", answer=answer)
+    listing = {"object": "list", "data": [{"id": "a", "note": TOKEN}, {"id": "b", "note": TOKEN}]}
+    app = _app(monkeypatch, router, Upstream(listing))
+    app.state.proxy.vault_manager.get("shared").placeholder_for("EMAIL", BOB)
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        async with _client(app) as client:
+            response = await client.get("/v1/files")
+    assert [item["note"] for item in response.json()["data"]] == [TOKEN, TOKEN]
+    assert BOB not in response.text
+    assert logged in caplog.text and "secret-id" not in caplog.text
+    # One listing, one bookkeeping fault (/status bookkeeping_errors_total).
+    assert app.state.proxy.bookkeeping_errors == {"listing": 1}
+
+
+async def test_an_item_whose_answer_fails_is_delivered_as_the_provider_sent_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class OneFails(ScriptedRouter):
+        def listing_item_session(self, object_id: str) -> str | None:
+            self.listed.append(object_id)
+            if object_id == "b":
+                raise LookupError("secret-b")
+            return None  # the router names no session: the listing's own session
+
+    router = OneFails(session="shared")
+    listing = {"object": "list", "data": [{"id": "a", "note": TOKEN}, {"id": "b", "note": TOKEN}]}
+    app = _app(monkeypatch, router, Upstream(listing))
+    app.state.proxy.vault_manager.get("shared").placeholder_for("EMAIL", BOB)
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        async with _client(app) as client:
+            data = (await client.get("/v1/files")).json()["data"]
+    assert [item["note"] for item in data] == [BOB, TOKEN]
+    assert "listing_item_session failed (LookupError)" in caplog.text
+    assert "secret-b" not in caplog.text
+    assert app.state.proxy.bookkeeping_errors == {"listing": 1}
+
+
 class BatchedOnlyRouter:
     """A router offering only the batched listing member."""
 
@@ -887,13 +938,14 @@ def test_the_memory_manager_has_no_durable_answers() -> None:
 
 
 class LineRouter(ScriptedRouter):
-    """Refuses only the second check: the uploaded lines (a list body)."""
+    """Refuses an upload (a list body: what it cites) that names ``file-a``
+    anywhere — in an uploaded line or a form field."""
 
     def object_access_refusal(
         self, adapter_name: str | None, method: str, path: str, body: Any, *, identity: bool
     ) -> Any:
         self.checks.append((adapter_name, method, path, body, identity))
-        return REFUSAL if isinstance(body, list) else None
+        return REFUSAL if isinstance(body, list) and "file-a" in json.dumps(body) else None
 
 
 def _batch_line(file_id: str) -> dict[str, Any]:
@@ -912,7 +964,7 @@ async def test_an_uploaded_batch_files_lines_are_checked_before_anything_is_sent
     router = LineRouter()
     upstream = Upstream()
     app = _app(monkeypatch, router, upstream)
-    lines = [_batch_line("file-a"), {"custom_id": "2", "body": {"input": "hi"}}]
+    lines = [_batch_line("file-a"), {"custom_id": "2", "body": {"input": f"hi {ADA}"}}]
     upload = b"".join(json.dumps(line).encode() + b"\n" for line in lines) + b"not json\n"
     async with _client(app) as client:
         response = await client.post(
@@ -922,14 +974,15 @@ async def test_an_uploaded_batch_files_lines_are_checked_before_anything_is_sent
         )
     assert response.status_code == 403 and REFUSAL in response.text
     assert upstream.requests == []
-    first, second = router.checks
-    assert first[3] is None  # the multipart body itself is not JSON
-    assert second == ("openai", "POST", "/v1/files", lines, False)
+    # ONE check, of everything the upload cites (its form field, then the
+    # file's JSON lines), asked BEFORE redaction: nothing was written.
+    assert router.checks == [("openai", "POST", "/v1/files", [{"purpose": "batch"}, *lines], False)]
+    assert app.state.proxy.vault_manager.total_entries() == 0
     (row,) = app.state.proxy.recent
     assert row["status"] == 403
 
 
-async def test_an_upload_without_json_lines_is_checked_once(
+async def test_an_upload_is_checked_once_with_what_it_cites(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     router = LineRouter()
@@ -942,7 +995,7 @@ async def test_an_upload_without_json_lines_is_checked_once(
             data={"purpose": "assistants"},
         )
     assert response.status_code == 200 and len(upstream.requests) == 1
-    assert len(router.checks) == 1
+    assert router.checks == [("openai", "POST", "/v1/files", [{"purpose": "assistants"}], False)]
 
 
 @pytest.mark.parametrize(("proxy_credential", "status"), [(None, 400), (False, 200)])

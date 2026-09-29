@@ -526,55 +526,75 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
-    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_10": (
-        "_response_inserts += 1 -> += 2: prunes every 128th insert instead of "
-        "every 256th — a strictly more frequent amortization with the same bound "
-        "(pinned by test_response_session_map_stays_bounded)."
-    ),
-    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_19": (
+    "llm_redact.vault.x__has_kind_column__mutmut_8": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
-    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_20": (
+    "llm_redact.vault.x__has_kind_column__mutmut_9": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
-    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_22": (
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_6": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
-    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_23": (
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_7": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
-    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_25": (
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_9": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
-    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_27": (
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_21": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
-    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_28": (
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_22": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
-    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_6": (
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_24": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
     ),
-    "llm_redact.vault.xǁSqliteVaultManagerǁrecord_response_session__mutmut_7": (
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_25": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
         "names are case-insensitive, so the statement is byte-for-byte equivalent "
         "to the engine."
+    ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_27": (
+        "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
+        "names are case-insensitive, so the statement is byte-for-byte equivalent "
+        "to the engine."
+    ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_28": (
+        "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
+        "names are case-insensitive, so the statement is byte-for-byte equivalent "
+        "to the engine."
+    ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_30": (
+        "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
+        "names are case-insensitive, so the statement is byte-for-byte equivalent "
+        "to the engine."
+    ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_32": (
+        "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
+        "names are case-insensitive, so the statement is byte-for-byte equivalent "
+        "to the engine."
+    ),
+    "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_33": (
+        "SQL case change only (the NOT EXISTS subquery upper-cased): SQLite "
+        "keywords and identifiers are case-insensitive — equivalent; its test run "
+        "can tip over the per-mutant time limit (survived/timeout: OSCILLATING)."
     ),
     "llm_redact.vault.xǁSqliteVaultManagerǁsession_count__mutmut_4": (
         "SQL/PRAGMA case change only: SQLite keywords, identifiers, and PRAGMA "
@@ -933,5 +953,6 @@ OSCILLATING_MUTANTS: frozenset[str] = frozenset(
         # per-mutant time limit on a slow runner: survived -> timeout.
         "llm_redact.vault.xǁSqliteVaultǁplaceholder_for__mutmut_8",
         "llm_redact.vault.xǁSqliteVaultǁplaceholder_for__mutmut_15",
+        "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_33",
     }
 )

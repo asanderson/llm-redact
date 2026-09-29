@@ -68,7 +68,7 @@ reference and enforcement internals ship with it.
 | [SBOM.md](SBOM.md) | The software bill of materials: every package by install path — runtime closure, extras, dev toolchain — and how to verify the per-release CycloneDX artifact (pinned to pyproject by test). |
 | [versioning.md](versioning.md) | SemVer policy: what counts as breaking, deprecation windows, release verification. |
 | [ner-landscape.md](ner-landscape.md) | The FOSS NER landscape survey behind the optional backends. |
-| [compaction-relink.md](compaction-relink.md) | The rejected design record for relinking history-compaction session forks — read before re-attempting. |
+| [compaction-relink.md](compaction-relink.md) | The rejected design record for relinking history-compaction session forks — read before re-attempting — and the token floor that keeps a fork (or any request carrying tokens its session never issued) from giving one token two meanings, with its exact residual. |
 
 ## Contributing and releasing
 

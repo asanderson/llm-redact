@@ -48,6 +48,7 @@ from typing import Any
 
 from llm_redact.eventstream import EventStreamMessage, string_header
 from llm_redact.jsonwalk import loads_request
+from llm_redact.placeholders import json_floors
 from llm_redact.providers.anthropic import (
     inject_anthropic_system_note,
     rehydrate_messages_payload,
@@ -228,6 +229,9 @@ class BedrockAdapter(ProviderAdapter):
         # never scanned). Undecodable = unredactable = refused.
         encoded: str = invoke["body"]
         inner = _decode_invoke_body(encoded)
+        # The proxy's token floors saw only base64 here: the decoded prompt's
+        # own tokens join them before any of its values is numbered.
+        redactor = redactor.with_floors(json_floors(inner))
         redacted_inner = super().prepare_request(
             {"body": inner}, redactor, inject_note=False, mcp_exempt=mcp_exempt
         )["body"]

@@ -131,11 +131,15 @@ silently rehydrate the *wrong* secret. Treat it accordingly.
   *through* the WAL, so it is safe against a running proxy and cannot tear
   a mapping the way `cp vault.db` can. The destination is created `0600`.
 - **Verify integrity.** `llm-redact vault verify` is a read-only sweep:
-  it checks that token numbers are dense (`1..N` per session/type — a gap
-  is what would let a reissue collide) and, for encrypted vaults, that
+  it checks that every row's token matches its own number (in
+  `1..999999999`; the UNIQUE constraints already bar a reused number, so
+  `MAX(n)` truly bounds what was issued) and, for encrypted vaults, that
   every ciphertext decrypts and every HMAC index matches its plaintext.
-  It prints sessions/types/counts only, never a value, and exits non-zero
-  on any failure. Run it after a restore or before a key rotation.
+  Gaps in the numbering are noted, not failed: a request carrying tokens
+  its session never issued has its new values numbered past them (the
+  token floor). It prints sessions/types/counts only, never a value, and
+  exits non-zero on any failure. Run it after a restore or before a key
+  rotation.
 - **Bound growth.** `[vault] session_ttl_days = N` prunes whole sessions
   idle longer than N days via a background task (never the active
   session, nor a session the session router marks durable, such as a

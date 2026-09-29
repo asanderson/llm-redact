@@ -31,6 +31,7 @@ from typing import Any
 
 from llm_redact import multipart
 from llm_redact.jsonwalk import loads_request, transform_strings
+from llm_redact.placeholders import json_floors, may_carry_tokens, merge_floors, token_floors
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
@@ -103,6 +104,56 @@ def _redact_text_part(
         return False
     part.content = redacted.encode("utf-8")
     return True
+
+
+def _part_kind(part: multipart.MultipartPart, *, media: bool, require_scanned: bool) -> str:
+    """How the upload's part loop reads a part: "jsonl" (a file part of a
+    JSONL upload, line by line), "text" (UTF-8 text), "media" (a media file
+    part, never read) or "field" (a plain form field, forwarded as-is)."""
+    if media and part.name in _PROMPT_FIELDS:
+        # Matched by NAME regardless of a filename attribute: a prompt
+        # part dressed up as a file upload must not slip past the scan
+        # (fail closed) — binary content skips via the decode (refused
+        # under identity).
+        return "text"
+    if part.filename is not None:
+        return "media" if media else "jsonl"  # media: never scanned
+    # Plain form fields (purpose, model, size, user, ...) are forwarded
+    # as-is by default; the proxy's own identity signs them only once
+    # scanned as text.
+    return "text" if require_scanned else "field"
+
+
+def _multipart_floors(parsed: multipart.Multipart, *, media: bool) -> dict[str, int]:
+    """The token floors of an upload, read the way its part loop reads it:
+    every file name (decoded, ``filename*`` included), every JSONL line as
+    the JSON it parses to (escapes resolved) or else as UTF-8 text, and
+    every other part except media files as UTF-8 text — plain form fields
+    too, since the upstream reads them. Media file parts are never read
+    (the documented non-goal)."""
+    floors: dict[str, int] = {}
+
+    def observe(text: str) -> str:
+        merge_floors(floors, token_floors(text))
+        return text
+
+    for part in parsed.parts:
+        part.redact_filenames(observe, strict=False)  # returns every name unchanged
+        # require_scanned=True: a plain form field reads as "text" here.
+        kind = _part_kind(part, media=media, require_scanned=True)
+        if kind == "text":
+            observe(part.content.decode("utf-8", "replace"))
+        elif kind == "jsonl":
+            for line in part.content.split(b"\n"):
+                if may_carry_tokens(line):
+                    obj, _ = _parse_request_line(line)
+                    merge_floors(
+                        floors,
+                        json_floors(obj)
+                        if obj is not None
+                        else token_floors(line.decode("utf-8", "replace")),
+                    )
+    return floors
 
 
 # What an identity-authorized upload may declare: a part the proxy cannot
@@ -415,6 +466,11 @@ class OpenAIAdapter(ProviderAdapter):
         # non-goal); the user text rides named form fields. Suffix match so
         # the Azure subclass's /openai/... path shapes reuse this unchanged.
         media = path.endswith(_PROMPT_FIELD_PATH_SUFFIXES)
+        if may_carry_tokens(body):
+            # Token floors from the WHOLE upload before any part is redacted:
+            # a token in a later line bounds the numbers an earlier line's
+            # values take (one batch file, one session, one output file).
+            redactor = redactor.with_floors(_multipart_floors(parsed, media=media))
         changed = False
         try:
             for part in parsed.parts:
@@ -444,19 +500,7 @@ class OpenAIAdapter(ProviderAdapter):
         # name is structural, like a JSON key). Strict under identity auth,
         # so the routing reads below always see the one reading.
         changed = part.redact_filenames(redactor.redact_text, strict=require_scanned)
-        if media and part.name in _PROMPT_FIELDS:
-            # Matched by NAME regardless of a filename attribute: a prompt
-            # part dressed up as a file upload must not slip past the scan
-            # (fail closed) — binary content skips via the decode (refused
-            # under identity).
-            kind = "text"
-        elif part.filename is not None:
-            kind = "media" if media else "jsonl"  # media: never scanned
-        else:
-            # Plain form fields (purpose, model, size, user, ...) are
-            # forwarded as-is by default; the proxy's own identity signs
-            # them only once scanned as text.
-            kind = "text" if require_scanned else "field"
+        kind = _part_kind(part, media=media, require_scanned=require_scanned)
         if require_scanned:
             _require_plain_encoding(part, scanned=kind != "media")
         if kind == "jsonl":

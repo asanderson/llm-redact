@@ -252,6 +252,23 @@ def test_all_is_snapshotted_and_resolves() -> None:
     assert plugin_api.SSEEvent is SSEEvent
 
 
+def test_vault_placeholder_for_takes_a_keyword_only_floor() -> None:
+    # The re-exported Vault protocol lives in vault.py, which is in the
+    # mutation scope (its methods carry mutmut trampolines there), so it is
+    # pinned by signature here rather than by the member snapshot above.
+    # placeholder_for gained the keyword-only token floor; the redactor
+    # passes it only when non-zero, so a vault predating it still serves
+    # every request that carries no tokens.
+    vault = plugin_api.Vault
+    assert getattr(vault, "_is_protocol", False)
+    placeholder_for = inspect.signature(vault.placeholder_for)
+    assert list(placeholder_for.parameters) == ["self", "detector_type", "original", "floor"]
+    floor = placeholder_for.parameters["floor"]
+    assert floor.kind is inspect.Parameter.KEYWORD_ONLY
+    assert floor.default == 0
+    assert list(inspect.signature(vault.original_for).parameters) == ["self", "placeholder"]
+
+
 def test_upstream_auth_error_is_a_plain_exception() -> None:
     # The core catches it to answer the credential 502; pro raises it from
     # UpstreamAuth.authorize with a source-only message.

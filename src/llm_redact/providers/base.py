@@ -316,6 +316,11 @@ class ProviderAdapter(ABC):
         every piece the adapter would forward unscanned an
         ``UnredactableRequest`` naming its kind: the proxy's own identity
         signs only what the proxy scanned. This base scans nothing.
+
+        The proxy cannot see inside the parts, so an adapter that redacts
+        them first raises ``redactor``'s token floors (``with_floors``) to
+        every token the upload carries as it reads it — or a value could be
+        numbered onto a token a later part already holds.
         """
         if require_scanned:
             raise UnredactableRequest("this route's multipart body is not one llm-redact redacts")

@@ -43,11 +43,16 @@ about *code roles*, and it is where to look when auditing.
 Two request-path outcomes are **fail-open by design**, and both are
 deliberate scope decisions rather than gaps:
 
-- **Unrecognized traffic passes through verbatim** (gate ③). Breaking the
-  tool teaches users to remove the proxy, which protects nothing. The
-  exception is a provider authorized with the proxy's OWN identity
-  (`auth = "identity"`): there an unrecognized path is a recorded 403, and
-  on a recognized route a non-empty body the proxy did not redact (not a
+- **Unrecognized traffic passes through verbatim** (gate ③) — to the
+  provider it is positively attributed to (a path family, or one
+  provider's markers such as `anthropic-version` or a Google key), never
+  a guessed one; an unattributable request, and a misspelled or
+  misaddressed variant of a recognized route, is refused locally (404/400)
+  instead. Breaking the tool teaches users to remove the proxy, which
+  protects nothing. The exception is a credential the proxy holds — its
+  OWN identity (`auth = "identity"`) or a routed operator key: there an
+  unrecognized path is a recorded 403, and under identity auth on a
+  recognized route a non-empty body the proxy did not redact (not a
   JSON object or scanned canonical multipart, content-encoded in any
   Content-Encoding header, or sent with a repeated Content-Type — or,
   inside a multipart upload, a file line that is not a JSON object, a

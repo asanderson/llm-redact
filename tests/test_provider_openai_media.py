@@ -232,9 +232,12 @@ def test_speech_and_videos_routing() -> None:
     assert adapter.matches("GET", "/v1/videos") is RouteKind.CHAT
     assert adapter.matches("GET", "/v1/videos/video_1") is RouteKind.CHAT
     assert adapter.matches("POST", "/v1/videos/video_1/remix") is RouteKind.CHAT
-    # ... while the binary download and delete stay pass-through.
-    assert adapter.matches("GET", "/v1/videos/video_1/content") is RouteKind.NONE
-    assert adapter.matches("DELETE", "/v1/videos/video_1") is RouteKind.NONE
+    # ... while the binary download and a job's delete are redact-only
+    # (body-less no-ops: recognized, nothing restored).
+    assert adapter.matches("GET", "/v1/videos/video_1/content") is RouteKind.REDACT_ONLY
+    assert adapter.matches("DELETE", "/v1/videos/video_1") is RouteKind.REDACT_ONLY
+    assert adapter.matches("DELETE", "/v1/videos") is RouteKind.NONE
+    assert adapter.matches("PATCH", "/v1/videos/video_1") is RouteKind.NONE
     # No note injection anywhere near these bodies: no messages field.
     assert not adapter.wants_system_note(RouteKind.REDACT_ONLY, "/v1/audio/speech")
     assert not adapter.wants_system_note(RouteKind.CHAT, "/v1/videos")

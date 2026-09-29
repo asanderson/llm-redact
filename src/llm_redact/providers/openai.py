@@ -36,6 +36,7 @@ from typing import Any
 from llm_redact import multipart
 from llm_redact.jsonwalk import loads_request, transform_strings
 from llm_redact.placeholders import json_floors, may_carry_tokens, merge_floors, token_floors
+from llm_redact.providers.attribution import provider_markers
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
@@ -84,9 +85,15 @@ _STRUCTURAL_FORM_FIELDS = frozenset(
 )
 
 # Sora video jobs: list/create, item retrieve/delete, and remix. The
-# binary /content download deliberately does NOT match (media
-# pass-through) — only single-segment ids and the /remix action do.
+# binary /content download is matched on its own (_VIDEO_CONTENT_RE).
 _VIDEO_ROUTE_RE = re.compile(r"/v1/videos(?:/[^/]+(?:/remix)?)?")
+_VIDEO_ITEM_RE = re.compile(r"/v1/videos/[^/]+")
+_VIDEO_CONTENT_RE = re.compile(r"/v1/videos/[^/]+/content")
+# The model listing and one model (shared with Anthropic, the Gemini API's
+# v1 surface and Cohere: matches_request leaves their marked requests alone).
+_MODELS_RE = re.compile(r"/v1/models(?:/[^/]+)?")
+# Deleting a stored object carries its id only.
+_DELETE_RE = re.compile(r"/v1/files/[^/]+|/v1/conversations/[^/]+(?:/items/[^/]+)?")
 
 # Batches whose request or response carries the caller's `metadata`:
 # create (POST /v1/batches) and cancel, a batch's GET and the list (every
@@ -388,11 +395,15 @@ class OpenAIAdapter(ProviderAdapter):
             # Sora video jobs: create/remix prompts are text, and the job
             # object ECHOES the prompt — so create/remix/list/retrieve are
             # all CHAT (request redacted where present, echoed prompt
-            # restored). The binary /content download and delete stay
-            # pass-through.
+            # restored). A job's delete carries its id only.
             if method in ("POST", "GET"):
                 return RouteKind.CHAT
+            if method == "DELETE" and _VIDEO_ITEM_RE.fullmatch(path):
+                return RouteKind.REDACT_ONLY
             return RouteKind.NONE
+        if method == "GET" and _VIDEO_CONTENT_RE.fullmatch(path):
+            # The rendered video: media bytes, nothing to restore.
+            return RouteKind.REDACT_ONLY
         if method == "GET" and _FILE_CONTENT_RE.fullmatch(path):
             # Batch output downloads: JSONL rehydrated line by line via
             # rehydrate_raw_body (no request body — redaction no-ops).
@@ -401,8 +412,14 @@ class OpenAIAdapter(ProviderAdapter):
             # The file list and a file's metadata echo the filename the
             # upload redacted: restored in the request's own session (a
             # user-scoping router answers listings and foreign reads from
-            # an empty one). DELETE carries ids only and passes through.
+            # an empty one).
             return RouteKind.CHAT
+        if method == "GET" and _MODELS_RE.fullmatch(path):
+            # The model listing: metadata only. REDACT_ONLY on a body-less
+            # request is a no-op that makes the route RECOGNIZED — the id and
+            # metadata routes below are too (the Azure stance), so a routed
+            # request that spends a key the proxy holds may still reach them.
+            return RouteKind.REDACT_ONLY
         if path.startswith("/v1/conversations"):
             # Stateful item store paired with the Responses API. Item content
             # (message text) rode through UNREDACTED before this. POST create /
@@ -413,7 +430,12 @@ class OpenAIAdapter(ProviderAdapter):
             # enforced in sessions.py), so redact and rehydrate always agree.
             if method in ("POST", "GET"):
                 return RouteKind.CHAT
+            if method == "DELETE" and _DELETE_RE.fullmatch(path):
+                return RouteKind.REDACT_ONLY
             return RouteKind.NONE
+        if method == "DELETE" and _DELETE_RE.fullmatch(path):
+            # A file's delete: its id only.
+            return RouteKind.REDACT_ONLY
         if (method == "POST" and _BATCH_POST_RE.fullmatch(path)) or (
             method == "GET" and _BATCH_GET_RE.fullmatch(path)
         ):
@@ -426,8 +448,6 @@ class OpenAIAdapter(ProviderAdapter):
             # completion_window, ids, status, counts — carry nothing a
             # detector matches (pinned by test).
             return RouteKind.CHAT
-        # File delete carries ids only: deliberate pass-through, pinned by
-        # test.
         return RouteKind.NONE
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
@@ -486,7 +506,11 @@ class OpenAIAdapter(ProviderAdapter):
         return data if isinstance(data, list) else None
 
     def matches_request(
-        self, method: str, path: str, headers: "Mapping[str, str] | None" = None
+        self,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str] | None" = None,
+        query: str = "",
     ) -> RouteKind:
         # /v1/files and /v1/batches are shared with Anthropic's beta Files
         # API; an anthropic-version header marks that traffic, which is
@@ -496,6 +520,11 @@ class OpenAIAdapter(ProviderAdapter):
             and "anthropic-version" in headers
             and path.startswith(("/v1/files", "/v1/batches"))
         ):
+            return RouteKind.NONE
+        # The model listing is every provider's: a request carrying another
+        # provider's marker (anthropic-version, a Google key, the Cohere
+        # SDK's header) is that provider's, never the OpenAI upstream's.
+        if _MODELS_RE.fullmatch(path) and provider_markers(headers, query) - {"openai"}:
             return RouteKind.NONE
         return self.matches(method, path)
 

@@ -23,6 +23,45 @@ A request arrived under `/custom/NAME/` but the config has no matching
 `[providers.custom.NAME]` section. Same fail-closed rule as above. Check
 the prefix your tool uses against `llm-redact config show`.
 
+## "this path lacks the API's /v1 segment" (HTTP 404)
+
+The tool's OpenAI-compatible base URL is missing `/v1`: the OpenAI SDKs,
+Codex and OpenCode append `/responses` or `/chat/completions` to a base
+that already includes it. Set `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`
+(`llm-redact run` exports that). Nothing was forwarded. An upstream that
+serves its OpenAI-compatible API without `/v1` is a
+`[providers.custom.NAME]` upstream.
+
+## "is not an API path llm-redact can attribute to a provider" (HTTP 404)
+
+The request matched no route and nothing names its provider: no path
+family (`/v1beta/…` is Gemini's, `/api/…` Ollama's, …) and no header only
+one provider's clients send (`anthropic-version`, a Google API key, an
+`openai-*` header, …) — or headers of two providers at once. The proxy
+never forwards such a request to a guessed provider (that would hand one
+provider's key and your content to another). Check the tool's base URL
+against [providers.md](providers.md); `/recent` shows the path.
+
+## "this path carries an extra prefix" (HTTP 404) / "must be spelled exactly" (HTTP 400) / "must not contain an empty segment" (HTTP 400)
+
+The base URL is off: it repeats the API version (`/v1/v1/messages` —
+`ANTHROPIC_BASE_URL` takes no `/v1`), ends in `/` and is joined naively
+(`//`), or the tool changed the path's case or added a trailing `/`. A
+spelling the API does not define is never forwarded: an upstream that
+ignores case or a trailing slash would run it unredacted.
+
+## "the upstream answered a redirect (NNN), which llm-redact does not relay" (HTTP 502)
+
+The upstream answered a 3xx with a `Location` to a request whose repeat
+would leak — a body on a route the proxy redacts, a routed or
+identity-signed request, a request carrying a credential for the proxy, or
+any request to a custom upstream: a following client would re-send your
+original, unredacted request — credentials included — to wherever it
+points, so the proxy refuses to relay it. Usually `upstream_base_url` is
+an `http://` URL whose server redirects to `https://`, or an old path:
+set it to the API's final `https` URL. Counted in
+`llm_redact_upstream_errors_total`.
+
 ## "this proxy does not answer to that host name" / "a web page on another origin sent this request"
 
 A 403 (WebSocket: close 1008) from the proxy itself, before any upstream

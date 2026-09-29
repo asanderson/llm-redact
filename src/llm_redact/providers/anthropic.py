@@ -7,15 +7,18 @@ The results endpoint returns ``application/x-jsonl``, one complete result
 object per line ({custom_id, result:{type, message?}}) — rehydrated line by
 line with whole-string restoration (lines are complete, no streaming
 channels needed). Poll/list/cancel/delete carry processing metadata only in
-both directions and deliberately pass through.
+both directions: recognized as redact-only (a no-op on a body-less request),
+like the model listing — so a routed request spending a key the proxy holds
+may still reach them, while an unrecognized route never can.
 """
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from llm_redact.jsonwalk import transform_strings
+from llm_redact.providers.attribution import provider_markers
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import RehydratorPool
@@ -26,6 +29,15 @@ _PASSTHROUGH_EVENTS = frozenset(
 )
 
 _BATCH_RESULTS_RE = re.compile(r"/v1/messages/batches/[^/]+/results")
+# Batch list/poll/delete (GET, DELETE) and cancel (POST): processing
+# metadata only in both directions.
+_BATCH_ITEM_RE = re.compile(r"/v1/messages/batches/[^/]+")
+_BATCH_CANCEL_RE = re.compile(r"/v1/messages/batches/[^/]+/cancel")
+# The model listing and one model, shared with OpenAI (and the Gemini API's
+# v1 surface): Anthropic's only when the request carries its marker alone.
+_MODELS_RE = re.compile(r"/v1/models(?:/[^/]+)?")
+# The routes whose bodies carry the Messages `system` field the note joins.
+_NOTE_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens", "/v1/messages/batches"})
 
 # The files a server tool WROTE, as a Messages answer names them: a code
 # execution tool result (``code_execution_tool_result``, and the
@@ -170,8 +182,32 @@ class AnthropicAdapter(ProviderAdapter):
             # one); the JSONL response rehydrates via rehydrate_ndjson_line.
             return RouteKind.CHAT
         # Batch poll/list/cancel/delete carry processing metadata only in
-        # both directions — deliberate pass-through, pinned by test.
+        # both directions: recognized, redact-only (a body-less no-op).
+        if (
+            (method == "GET" and (path == "/v1/messages/batches" or _BATCH_ITEM_RE.fullmatch(path)))
+            or (method == "POST" and _BATCH_CANCEL_RE.fullmatch(path))
+            or (method == "DELETE" and _BATCH_ITEM_RE.fullmatch(path))
+        ):
+            return RouteKind.REDACT_ONLY
         return RouteKind.NONE
+
+    def matches_request(
+        self,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str] | None" = None,
+        query: str = "",
+    ) -> RouteKind:
+        # GET /v1/models is shared with OpenAI: Anthropic's when the request
+        # carries anthropic-version (every Anthropic SDK request does) and no
+        # other provider's marker. Metadata only — recognized, redact-only.
+        if (
+            method == "GET"
+            and _MODELS_RE.fullmatch(path)
+            and provider_markers(headers, query) == {"anthropic"}
+        ):
+            return RouteKind.REDACT_ONLY
+        return self.matches(method, path)
 
     def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
         # A message batch (its later results are read by id), a Files API
@@ -218,9 +254,11 @@ class AnthropicAdapter(ProviderAdapter):
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         # count_tokens accepts the same `system` field as /v1/messages, and
         # the note is part of what the real request will carry — keep the
-        # count honest (this preserves pre-hook behavior exactly). The
-        # legacy /v1/complete body has no system field: a note would 400.
-        return path != "/v1/complete"
+        # count honest (this preserves pre-hook behavior exactly); a batch
+        # create injects per entry. The legacy /v1/complete body has no
+        # system field (a note would 400), and the metadata routes carry no
+        # Messages body at all.
+        return path in _NOTE_PATHS
 
     def error_body(self, message: str, *, status: int = 413) -> dict[str, Any]:
         # Routing (the llm-redact-pro routing layer) adds the budget 402 and

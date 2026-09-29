@@ -191,12 +191,18 @@ class ProviderAdapter(ABC):
     def matches(self, method: str, path: str) -> RouteKind: ...
 
     def matches_request(
-        self, method: str, path: str, headers: "Mapping[str, str] | None" = None
+        self,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str] | None" = None,
+        query: str = "",
     ) -> RouteKind:
-        """Header-aware routing hook; the default ignores headers.
+        """Header-aware routing hook; the default ignores headers and query.
 
         Used where a path is shared between providers (OpenAI and
-        Anthropic both use /v1/files) and only a header disambiguates.
+        Anthropic both use /v1/files and /v1/models) and only a provider's
+        marker — a header, or a Google ``key=`` query parameter — says whose
+        request it is (``providers.attribution.provider_markers``).
         """
         return self.matches(method, path)
 

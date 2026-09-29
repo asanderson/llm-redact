@@ -31,11 +31,19 @@ def test_batch_routing() -> None:
     adapter = AnthropicAdapter()
     assert adapter.matches("POST", "/v1/messages/batches") is RouteKind.REDACT_ONLY
     assert adapter.matches("GET", "/v1/messages/batches/msgbatch_01/results") is RouteKind.CHAT
-    # Poll/list/cancel/delete carry processing metadata only: pass-through.
-    assert adapter.matches("GET", "/v1/messages/batches") is RouteKind.NONE
-    assert adapter.matches("GET", "/v1/messages/batches/msgbatch_01") is RouteKind.NONE
-    assert adapter.matches("POST", "/v1/messages/batches/msgbatch_01/cancel") is RouteKind.NONE
-    assert adapter.matches("DELETE", "/v1/messages/batches/msgbatch_01") is RouteKind.NONE
+    # Poll/list/cancel/delete carry processing metadata only: recognized,
+    # redact-only (a body-less no-op), so a proxy-held credential reaches them.
+    assert adapter.matches("GET", "/v1/messages/batches") is RouteKind.REDACT_ONLY
+    assert adapter.matches("GET", "/v1/messages/batches/msgbatch_01") is RouteKind.REDACT_ONLY
+    assert (
+        adapter.matches("POST", "/v1/messages/batches/msgbatch_01/cancel") is RouteKind.REDACT_ONLY
+    )
+    assert adapter.matches("DELETE", "/v1/messages/batches/msgbatch_01") is RouteKind.REDACT_ONLY
+    assert adapter.matches("PATCH", "/v1/messages/batches/msgbatch_01") is RouteKind.NONE
+    assert adapter.matches("DELETE", "/v1/messages/batches") is RouteKind.NONE
+    # No metadata route carries the note (no Messages body).
+    assert not adapter.wants_system_note(RouteKind.REDACT_ONLY, "/v1/messages/batches/msgbatch_01")
+    assert adapter.wants_system_note(RouteKind.REDACT_ONLY, "/v1/messages/batches")
     # A nested path that only LOOKS like results must not match.
     assert adapter.matches("GET", "/v1/messages/batches/a/b/results") is RouteKind.NONE
 

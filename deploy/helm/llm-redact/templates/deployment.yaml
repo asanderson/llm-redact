@@ -38,7 +38,7 @@ spec:
           image: {{ .Values.tool.image }}
           env:
             - { name: ANTHROPIC_BASE_URL, value: "http://127.0.0.1:8787" }
-            - { name: OPENAI_BASE_URL, value: "http://127.0.0.1:8787" }
+            - { name: OPENAI_BASE_URL, value: "http://127.0.0.1:8787/v1" }
             - { name: GOOGLE_GEMINI_BASE_URL, value: "http://127.0.0.1:8787" }
             - { name: OLLAMA_HOST, value: "http://127.0.0.1:8787" }
           securityContext:

@@ -20,7 +20,8 @@ Everything else — availability, latency, even correctness of responses —
 is subordinate to that goal. The proxy fails *closed* wherever the goal is
 at stake (oversized bodies are rejected rather than forwarded unredacted;
 a wrong vault key aborts startup rather than serving garbage) and fails
-*open* only where it is not (unrecognized traffic passes through verbatim,
+*open* only where it is not (unrecognized traffic passes through verbatim
+— to the provider it is positively attributed to, never a guessed one —
 because breaking the tool teaches users to bypass the proxy).
 
 ## Assets
@@ -189,9 +190,30 @@ own answer decides whether the page may read a response).
   top-level `instances`/`parameters` (arbitrary custom-model input) — a
   metadata label or a feature column named `id`, `name` or `type` is the
   caller's data, not protocol.
-- A request path with a `.`/`..` segment (any spelling) is refused 400
-  before any upstream contact: matching and forwarding must address the
-  same resource.
+- A request path with a `.`/`..` segment or an empty segment (`//`), in
+  any spelling, is refused 400 before admission and any upstream contact,
+  and another spelling of a recognized route (a trailing `/`, another
+  case) is a recorded 400: matching and forwarding must address the same
+  resource, and an upstream that ignores case or a trailing slash would
+  otherwise serve the unredacted body as the route itself.
+- A request no route matches is forwarded only to a provider it can be
+  POSITIVELY attributed to — a path family, or the headers only one
+  provider's clients send (`anthropic-version`, a Google key, …) — never
+  to a guessed default, which would hand one provider's credential and the
+  client's unredacted content to another. An unattributable request, a
+  recognized route missing its `/v1`, and a recognized route under an
+  extra prefix are recorded local 404s ([api-coverage.md](api-coverage.md#requests-no-route-matches)).
+- A credential the PROXY holds — its own cloud identity, or a routed
+  upstream's operator key (or no key at all) — is lent only to routes the
+  proxy recognizes: an unrecognized route under one is a recorded 403
+  before its body is read, never forwarded unredacted as the operator.
+- The proxy never follows an upstream redirect, and relays one only when
+  the client's repeat of its original request would carry nothing the
+  proxy protects: never for a request with a body on a route it redacts,
+  a routed or identity-signed request, a request that presented a proxy
+  credential, or a custom upstream — a following client would re-send the
+  unredacted body and its credential headers to the `Location` (a
+  recorded 502 naming the status only).
 - Bodies too large to buffer and redact are rejected **413 fail-closed**.
 - Per-rule `block` mode rejects requests before any upstream contact.
 - Auth headers pass through untouched and are never logged.

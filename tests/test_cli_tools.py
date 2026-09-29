@@ -49,7 +49,7 @@ def test_init_flags(xdg_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert config.vault.backend == "sqlite"
     assert config.vault.encryption == "fernet"
     out = capsys.readouterr().out
-    assert "OPENAI_BASE_URL=http://127.0.0.1:9000" in out
+    assert "OPENAI_BASE_URL=http://127.0.0.1:9000/v1 " in out  # OpenAI SDKs need the /v1
     assert "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:9000" in out
     assert "ANTHROPIC_BASE_URL" not in out
     assert "gen-key" in out

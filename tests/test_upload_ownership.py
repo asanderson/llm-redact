@@ -350,75 +350,57 @@ PARTS = "/v1/uploads/upload_1/parts"  # pass-through: no adapter matches it
 
 
 @pytest.mark.parametrize(
-    "upload",
+    ("upload", "config"),
     [
         pytest.param(
-            _form(_file(_lines(_batch_line("file-a")), filename=b"part.jsonl")), id="line"
+            _form(_file(_lines(_batch_line("file-a")), filename=b"part.jsonl")), {}, id="line"
         ),
-        pytest.param(_form(_field("file_ids[]", b"file-a")), id="field"),
-    ],
-)
-async def test_a_routed_pass_through_upload_is_checked_under_the_proxys_credential(
-    upload: bytes, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    router = LineRouter()
-    app, fake, upstream = _routed(monkeypatch, router, PARTS)
-    async with _client(app) as client:
-        refused = await client.post(PARTS, content=upload, headers={**HEADERS, ROUTE_HEADER: "r"})
-    assert refused.status_code == 403 and refused.json() == {"error": REFUSAL}
-    assert fake.plans[0].begun == [] and upstream.requests == []
-    ((adapter, _method, path, body, identity),) = router.checks
-    assert (adapter, path, identity) == (None, PARTS, True) and "file-a" in json.dumps(body)
-
-
-async def test_an_allowed_pass_through_upload_is_forwarded_byte_for_byte(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    router = LineRouter()
-    app, fake, _ = _routed(monkeypatch, router, PARTS)
-    upload = _form(_field("note", EMAIL.encode()), _file(_lines({"q": EMAIL}), filename=b"p.jsonl"))
-    async with _client(app) as client:
-        response = await client.post(PARTS, content=upload, headers={**HEADERS, ROUTE_HEADER: "r"})
-    assert response.status_code == 200
-    assert fake.plans[0].begun[0][0] == upload  # never redacted, never rewritten
-    assert router.checks == [(None, "POST", PARTS, [{"note": EMAIL}, {"q": EMAIL}], True)]
-
-
-@pytest.mark.parametrize(
-    ("upload", "status", "why"),
-    [
-        pytest.param(b"--XyZ\nlf only\n--XyZ--", 400, "outside the canonical form", id="lf-only"),
+        pytest.param(_form(_field("file_ids[]", b"file-a")), {}, id="field"),
+        pytest.param(
+            _form(_field("note", EMAIL.encode()), _file(_lines({"q": EMAIL}), filename=b"p.jsonl")),
+            {},
+            id="allowed",
+        ),
+        pytest.param(b"--XyZ\nlf only\n--XyZ--", {}, id="lf-only"),
         pytest.param(
             _form(_file(b"eyJ9", b"\r\nContent-Transfer-Encoding: base64")),
-            400,
-            "Content-Transfer-Encoding",
+            {},
             id="transfer-encoded",
         ),
-        pytest.param(_form(_field("file_id", b"\xff")), 400, "not UTF-8 text", id="not-text"),
+        pytest.param(_form(_field("file_id", b"\xff")), {}, id="not-text"),
         pytest.param(
             _form(_file(b'{"file_id": "file-a", "file_id": "file-own"}\n')),
-            400,
-            "repeats a JSON key",
+            {},
             id="repeated-key-line",
         ),
+        pytest.param(_form(_file(_lines({"q": "x" * 80}))), {"max_body_bytes": 64}, id="oversized"),
         pytest.param(
-            _form(_file(_lines({"q": "x" * 80}))), 413, "max_body_bytes (64)", id="oversized"
+            _form(*[_field("purpose", b"batch")] * 3), {"max_body_strings": 2}, id="over-part-cap"
         ),
     ],
 )
-async def test_an_upload_the_check_cannot_read_is_refused_on_a_pass_through_route(
-    upload: bytes, status: int, why: str, monkeypatch: pytest.MonkeyPatch
+async def test_a_routed_pass_through_upload_under_the_proxys_credential_is_refused_unread(
+    upload: bytes, config: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An unrecognized route (the Uploads API's parts) is never sent with a
+    credential the proxy holds (C-R2-04): refused before the upload is
+    read — whatever it holds, readable or not, allowed or not — or the
+    ownership check asked; nothing upstream."""
+    import llm_redact.proxy as proxy_module
+
+    def no_read(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("read an upload on a refused route")
+
+    monkeypatch.setattr(proxy_module, "read_upload", no_read)
     router = LineRouter()
-    app, fake, upstream = _routed(monkeypatch, router, PARTS, max_body_bytes=64)
+    app, fake, upstream = _routed(monkeypatch, router, PARTS, **config)
     async with _client(app) as client:
         response = await client.post(PARTS, content=upload, headers={**HEADERS, ROUTE_HEADER: "r"})
-    assert response.status_code == status
-    assert why in response.json()["error"]
-    assert "proxy's own provider credential" in response.json()["error"]
+    assert response.status_code == 403
+    assert "credential the proxy holds" in response.json()["error"]
     assert router.checks == [] and fake.plans[0].begun == [] and upstream.requests == []
     (row,) = app.state.proxy.recent
-    assert row["status"] == status and row["provider"] == "openai"
+    assert row["status"] == 403 and row["provider"] == "openai"
 
 
 async def test_with_the_clients_own_credential_a_pass_through_upload_is_not_read(
@@ -497,8 +479,8 @@ async def test_a_matched_body_the_check_cannot_read_is_never_sent_with_the_proxy
 async def test_an_upload_over_the_part_cap_is_never_read(monkeypatch: pytest.MonkeyPatch) -> None:
     # A body of many empty parts costs the event loop per part: the check
     # never parses one over max_body_strings. On a matched route redaction
-    # answers it 413; under the proxy's credential a pass-through upload
-    # cannot be checked, so it is refused 413 too — nothing upstream.
+    # answers it 413; under the proxy's credential the check cannot read it,
+    # so it is refused 413 before redaction — nothing upstream.
     import llm_redact.proxy as proxy_module
 
     def no_read(*args: Any, **kwargs: Any) -> Any:
@@ -518,9 +500,17 @@ async def test_an_upload_over_the_part_cap_is_never_read(monkeypatch: pytest.Mon
     assert upstream.requests == []
 
     router = LineRouter()
-    app, fake, upstream = _routed(monkeypatch, router, PARTS, max_body_strings=2)
+    app, fake, upstream = _routed(
+        monkeypatch,
+        router,
+        "/v1/files",
+        max_body_strings=2,
+        providers={**Config().providers, "openai": ProviderConfig(UPSTREAM)},
+    )
     async with _client(app) as client:
-        response = await client.post(PARTS, content=upload, headers={**HEADERS, ROUTE_HEADER: "r"})
+        response = await client.post(
+            "/v1/files", content=upload, headers={**HEADERS, ROUTE_HEADER: "r"}
+        )
     assert response.status_code == 413
-    assert "more parts than llm-redact max_body_strings (2)" in response.json()["error"]
+    assert "more parts than llm-redact max_body_strings (2)" in response.json()["error"]["message"]
     assert router.checks == [] and fake.plans[0].begun == [] and upstream.requests == []

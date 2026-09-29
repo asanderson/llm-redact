@@ -32,6 +32,7 @@ from llm_redact.vault_rdbms import (
     ENV_DSN,
     ENV_REMOTE_PLAINTEXT,
     ENV_TLS_UNVERIFIED,
+    RdbmsAllocationError,
     RdbmsStore,
     RdbmsVault,
     RdbmsVaultManager,
@@ -198,6 +199,15 @@ def _battery(make_store: Any) -> None:
     assert pruned == 1
     assert manager.session_count() == 1
     assert manager.lookup_response_session("resp_1") is None  # rode along
+    # The pruned session's numbers are retired: re-created, it numbers above
+    # them — carol's «EMAIL_001» never gets a second value.
+    assert store.retired("sess-b") == 1
+    # A view the manager never handed out (another instance's) may still
+    # restore carol for a moment — her token's own value, never another.
+    assert other.original_for("«EMAIL_001»") in (None, "carol@corp.example")
+    assert other.placeholder_for("EMAIL", "zed@corp.example") == "«EMAIL_002»"
+    assert RdbmsVault(store, "sess-b").original_for("«EMAIL_002»") == "zed@corp.example"
+    assert manager.forget_sessions(["sess-b"]) == 1
     # sess-a survived intact, and its numbering continues densely.
     survivor = manager.get("sess-a")
     assert survivor.placeholder_for("EMAIL", "dan@corp.example") == "«EMAIL_003»"
@@ -532,6 +542,40 @@ def test_write_fault_fails_closed_then_reissues_same_number(
     store.close()
 
 
+def test_an_allocation_that_keeps_colliding_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    store = RdbmsStore(config, None)
+    vault = RdbmsVault(store, "s")
+    for _ in range(3):
+        driver.inject_fault("INSERT INTO llm_redact_mappings", sqlite3.IntegrityError("taken"))
+    with pytest.raises(RdbmsAllocationError, match="kept colliding"):
+        vault.placeholder_for("EMAIL", "ada@corp.example")
+    assert vault.original_for("«EMAIL_001»") is None  # nothing cached
+    assert vault.placeholder_for("EMAIL", "ada@corp.example") == "«EMAIL_001»"
+    store.close()
+
+
+def test_the_store_names_what_a_failed_allocation_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The driver's DB-API Error and a colliding allocation: the proxy
+    refuses a request whose placeholders hit either 503
+    (proxy.vault_fault_types), never a bare 500."""
+    from llm_redact.proxy import vault_fault_types
+
+    config, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    store = RdbmsStore(config, None)
+    manager = RdbmsVaultManager(store)
+    assert manager.fault_types == store.fault_types == (sqlite3.Error, RdbmsAllocationError)
+    assert set(vault_fault_types(manager)) == {sqlite3.Error, RdbmsAllocationError}
+    # A driver without a DB-API Error class still names the collision.
+    monkeypatch.setattr(driver, "Error", None)
+    assert store.fault_types == (RdbmsAllocationError,)
+    store.close()
+
+
 def test_dropped_connection_reconnects_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -849,7 +893,12 @@ def _drop_tables(config: VaultConfig) -> None:
 
     module, connect = _resolve_connector(config)
     conn = connect()
-    for table in ("llm_redact_mappings", "llm_redact_response_sessions", "llm_redact_meta"):
+    for table in (
+        "llm_redact_mappings",
+        "llm_redact_response_sessions",
+        "llm_redact_meta",
+        "llm_redact_retired",
+    ):
         with suppress(module.Error):
             conn.cursor().execute(f"DROP TABLE {table}")
             conn.commit()

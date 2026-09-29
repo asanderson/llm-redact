@@ -9,12 +9,14 @@ redacted (and chat-shaped ones get the system note). Every part's
 ``filename`` is redacted too, and the file object the provider echoes (the
 upload response, the file list, one file's metadata) is restored. Plain
 form fields are scanned as UTF-8 text like the JSON strings they mirror (a
-``user`` field as a chat body's ``user``), except the structural ones —
-enums, sizes, counts, the model — which key auth forwards as sent. Under
-key auth anything the proxy cannot read in the upload — binary documents,
-unparseable lines, a field that is not UTF-8 — is preserved
-byte-identically; under the proxy's own identity every piece must be
-scanned or the upload is refused.
+``user`` field as a chat body's ``user``). The proxy requires every piece
+of an upload scanned (``require_scanned``, the scanned-body rule: under the
+proxy's own identity, and under the client's own key wherever redaction
+applies): anything it cannot read — a binary or text document, an
+unparseable line, a field that is not UTF-8 — refuses the upload. A caller
+that does not require it (``require_scanned=False``) gets the lenient
+reading: the structural fields — enums, sizes, counts, the model — as
+sent, and what cannot be read preserved byte-identically.
 ``GET /v1/files/{id}/content`` rehydrates batch OUTPUT files the same way,
 line by line. ``/v1/batches`` carries file ids,
 processing state and the caller's own ``metadata`` (free-form strings the
@@ -34,13 +36,14 @@ from collections.abc import Hashable, Mapping
 from typing import Any
 
 from llm_redact import multipart
-from llm_redact.jsonwalk import loads_request, transform_strings
+from llm_redact.jsonwalk import json_bytes, json_text, loads_request, transform_strings
 from llm_redact.placeholders import json_floors, may_carry_tokens, merge_floors, token_floors
+from llm_redact.providers.attribution import provider_markers
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
-from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS, json_line
+from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS
 
 _FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
 # The file list and one file's object: both echo each upload's filename.
@@ -57,7 +60,8 @@ _PROMPT_FIELDS = frozenset({"prompt"})
 # twin of jsonwalk.STRUCTURAL_KEYS: enums, sizes, counts and the model name
 # of the multipart routes redact_multipart handles (verified against the
 # OpenAI/Azure Files upload, Images edit and Videos create schemas), plus
-# RFC 7578's ``_charset_`` declaration. Key auth forwards them as sent;
+# RFC 7578's ``_charset_`` declaration. The lenient reading
+# (``require_scanned=False``) forwards them as sent;
 # every other plain field (``user``, ``prompt``, anything unknown) is user
 # content and is redacted as text, as its JSON twin is. The proxy's own
 # identity scans them all (it signs only what it read).
@@ -84,9 +88,15 @@ _STRUCTURAL_FORM_FIELDS = frozenset(
 )
 
 # Sora video jobs: list/create, item retrieve/delete, and remix. The
-# binary /content download deliberately does NOT match (media
-# pass-through) — only single-segment ids and the /remix action do.
+# binary /content download is matched on its own (_VIDEO_CONTENT_RE).
 _VIDEO_ROUTE_RE = re.compile(r"/v1/videos(?:/[^/]+(?:/remix)?)?")
+_VIDEO_ITEM_RE = re.compile(r"/v1/videos/[^/]+")
+_VIDEO_CONTENT_RE = re.compile(r"/v1/videos/[^/]+/content")
+# The model listing and one model (shared with Anthropic, the Gemini API's
+# v1 surface and Cohere: matches_request leaves their marked requests alone).
+_MODELS_RE = re.compile(r"/v1/models(?:/[^/]+)?")
+# Deleting a stored object carries its id only.
+_DELETE_RE = re.compile(r"/v1/files/[^/]+|/v1/conversations/[^/]+(?:/items/[^/]+)?")
 
 # Batches whose request or response carries the caller's `metadata`:
 # create (POST /v1/batches) and cancel, a batch's GET and the list (every
@@ -124,8 +134,8 @@ def _redact_text_part(
     part: multipart.MultipartPart, redactor: Redactor, *, require_scanned: bool
 ) -> bool:
     """Redact a form part's content as UTF-8 text, in place; True when it
-    changed. Content that is not UTF-8 is left alone — or, under identity
-    auth (``require_scanned``), refused as unscannable."""
+    changed. Content that is not UTF-8 is left alone — or, when every piece
+    must be scanned (``require_scanned``), refused as unscannable."""
     try:
         text = part.content.decode("utf-8")
     except UnicodeDecodeError:
@@ -241,12 +251,11 @@ def _leftover_to_delta(key: Hashable, text: str) -> tuple[int, dict[str, Any]] |
 
 def _synthetic_chunk(index: int, delta: dict[str, Any]) -> SSEEvent:
     return SSEEvent(
-        data=json.dumps(
+        data=json_text(
             {
                 "object": "chat.completion.chunk",
                 "choices": [{"index": index, "delta": delta, "finish_reason": None}],
-            },
-            ensure_ascii=False,
+            }
         )
     )
 
@@ -388,11 +397,15 @@ class OpenAIAdapter(ProviderAdapter):
             # Sora video jobs: create/remix prompts are text, and the job
             # object ECHOES the prompt — so create/remix/list/retrieve are
             # all CHAT (request redacted where present, echoed prompt
-            # restored). The binary /content download and delete stay
-            # pass-through.
+            # restored). A job's delete carries its id only.
             if method in ("POST", "GET"):
                 return RouteKind.CHAT
+            if method == "DELETE" and _VIDEO_ITEM_RE.fullmatch(path):
+                return RouteKind.REDACT_ONLY
             return RouteKind.NONE
+        if method == "GET" and _VIDEO_CONTENT_RE.fullmatch(path):
+            # The rendered video: media bytes, nothing to restore.
+            return RouteKind.REDACT_ONLY
         if method == "GET" and _FILE_CONTENT_RE.fullmatch(path):
             # Batch output downloads: JSONL rehydrated line by line via
             # rehydrate_raw_body (no request body — redaction no-ops).
@@ -401,8 +414,14 @@ class OpenAIAdapter(ProviderAdapter):
             # The file list and a file's metadata echo the filename the
             # upload redacted: restored in the request's own session (a
             # user-scoping router answers listings and foreign reads from
-            # an empty one). DELETE carries ids only and passes through.
+            # an empty one).
             return RouteKind.CHAT
+        if method == "GET" and _MODELS_RE.fullmatch(path):
+            # The model listing: metadata only. REDACT_ONLY on a body-less
+            # request is a no-op that makes the route RECOGNIZED — the id and
+            # metadata routes below are too (the Azure stance), so a routed
+            # request that spends a key the proxy holds may still reach them.
+            return RouteKind.REDACT_ONLY
         if path.startswith("/v1/conversations"):
             # Stateful item store paired with the Responses API. Item content
             # (message text) rode through UNREDACTED before this. POST create /
@@ -413,7 +432,12 @@ class OpenAIAdapter(ProviderAdapter):
             # enforced in sessions.py), so redact and rehydrate always agree.
             if method in ("POST", "GET"):
                 return RouteKind.CHAT
+            if method == "DELETE" and _DELETE_RE.fullmatch(path):
+                return RouteKind.REDACT_ONLY
             return RouteKind.NONE
+        if method == "DELETE" and _DELETE_RE.fullmatch(path):
+            # A file's delete: its id only.
+            return RouteKind.REDACT_ONLY
         if (method == "POST" and _BATCH_POST_RE.fullmatch(path)) or (
             method == "GET" and _BATCH_GET_RE.fullmatch(path)
         ):
@@ -426,8 +450,6 @@ class OpenAIAdapter(ProviderAdapter):
             # completion_window, ids, status, counts — carry nothing a
             # detector matches (pinned by test).
             return RouteKind.CHAT
-        # File delete carries ids only: deliberate pass-through, pinned by
-        # test.
         return RouteKind.NONE
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
@@ -486,7 +508,11 @@ class OpenAIAdapter(ProviderAdapter):
         return data if isinstance(data, list) else None
 
     def matches_request(
-        self, method: str, path: str, headers: "Mapping[str, str] | None" = None
+        self,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str] | None" = None,
+        query: str = "",
     ) -> RouteKind:
         # /v1/files and /v1/batches are shared with Anthropic's beta Files
         # API; an anthropic-version header marks that traffic, which is
@@ -496,6 +522,11 @@ class OpenAIAdapter(ProviderAdapter):
             and "anthropic-version" in headers
             and path.startswith(("/v1/files", "/v1/batches"))
         ):
+            return RouteKind.NONE
+        # The model listing is every provider's: a request carrying another
+        # provider's marker (anthropic-version, a Google key, the Cohere
+        # SDK's header) is that provider's, never the OpenAI upstream's.
+        if _MODELS_RE.fullmatch(path) and provider_markers(headers, query) - {"openai"}:
             return RouteKind.NONE
         return self.matches(method, path)
 
@@ -576,7 +607,7 @@ class OpenAIAdapter(ProviderAdapter):
                     require_scanned=require_scanned,
                 )
         except multipart.AmbiguousHeaders as exc:
-            # Only reachable under identity auth (require_scanned): a part
+            # Only reachable with require_scanned (strict header reads): a part
             # header without a single reading is never signed.
             raise UnredactableRequest(str(exc)) from None
         return parsed.serialize() if changed else None
@@ -591,7 +622,7 @@ class OpenAIAdapter(ProviderAdapter):
         require_scanned: bool,
     ) -> bool:
         # The upload's file name is user content on every route (the part
-        # name is structural, like a JSON key). Strict under identity auth,
+        # name is structural, like a JSON key). Strict with require_scanned,
         # so the routing reads below always see the one reading.
         changed = part.redact_filenames(redactor.redact_text, strict=require_scanned)
         kind = _part_kind(part, media=media, require_scanned=require_scanned)
@@ -644,7 +675,7 @@ class OpenAIAdapter(ProviderAdapter):
                 elif isinstance(redacted.get("messages"), list):
                     # Fine-tuning line: a bare chat example.
                     redacted = self.inject_system_note(redacted)
-            out.append(json_line(redacted))
+            out.append(json_bytes(redacted))
         return b"\n".join(out)
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
@@ -661,7 +692,7 @@ class OpenAIAdapter(ProviderAdapter):
             if hydrated == obj:
                 out.append(line)
             else:
-                out.append(json.dumps(hydrated, ensure_ascii=False).encode("utf-8"))
+                out.append(json_bytes(hydrated))
                 changed = True
         return b"\n".join(out) if changed else None
 
@@ -717,7 +748,7 @@ class OpenAIAdapter(ProviderAdapter):
             synthetic.extend(self._flush_to_events(pool.flush_matching(_for_choice)))
 
         if changed:
-            event.data = json.dumps(payload, ensure_ascii=False)
+            event.data = json_text(payload)
         return [*synthetic, event]
 
     @staticmethod
@@ -728,12 +759,11 @@ class OpenAIAdapter(ProviderAdapter):
                 # Legacy completions leftover: a text_completion-shaped chunk.
                 events.append(
                     SSEEvent(
-                        data=json.dumps(
+                        data=json_text(
                             {
                                 "object": "text_completion",
                                 "choices": [{"index": key[0], "text": text, "finish_reason": None}],
-                            },
-                            ensure_ascii=False,
+                            }
                         )
                     )
                 )

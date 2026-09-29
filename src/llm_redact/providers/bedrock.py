@@ -47,7 +47,7 @@ from collections.abc import Callable
 from typing import Any
 
 from llm_redact.eventstream import EventStreamMessage, string_header
-from llm_redact.jsonwalk import loads_request
+from llm_redact.jsonwalk import json_bytes, loads_request
 from llm_redact.placeholders import json_floors
 from llm_redact.providers.anthropic import (
     inject_anthropic_system_note,
@@ -249,8 +249,7 @@ class BedrockAdapter(ProviderAdapter):
             envelope, redactor, inject_note=inject_note, mcp_exempt=mcp_exempt
         )
         if redacted_inner != inner:
-            raw = json.dumps(redacted_inner, ensure_ascii=False).encode("utf-8")
-            encoded = base64.b64encode(raw).decode("ascii")
+            encoded = base64.b64encode(json_bytes(redacted_inner)).decode("ascii")
         out["input"]["invokeModel"]["body"] = encoded
         return out
 
@@ -321,7 +320,7 @@ class BedrockAdapter(ProviderAdapter):
             if item is inner:
                 out.append(message)  # unchanged: byte-identical re-emit
                 continue
-            raw = json.dumps(item, ensure_ascii=False).encode("utf-8")
+            raw = json_bytes(item)
             body = json.dumps({**payload, "bytes": base64.b64encode(raw).decode("ascii")}).encode(
                 "utf-8"
             )
@@ -369,9 +368,7 @@ class BedrockAdapter(ProviderAdapter):
             }
         else:
             return [message]
-        message.payload = json.dumps({**payload, "delta": new_delta}, ensure_ascii=False).encode(
-            "utf-8"
-        )
+        message.payload = json_bytes({**payload, "delta": new_delta})
         return [message]
 
     def _rehydrate_converse_stop(
@@ -387,10 +384,7 @@ class BedrockAdapter(ProviderAdapter):
         for channel, delta_shape in channel_shapes:
             leftover = pool.flush(channel)
             if leftover:
-                body = json.dumps(
-                    {"contentBlockIndex": index, "delta": delta_shape(leftover)},
-                    ensure_ascii=False,
-                ).encode("utf-8")
+                body = json_bytes({"contentBlockIndex": index, "delta": delta_shape(leftover)})
                 synthetic.append(
                     EventStreamMessage(headers=_event_headers("contentBlockDelta"), payload=body)
                 )

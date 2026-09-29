@@ -33,12 +33,11 @@ caller's decision (the proxy refuses them when its own credential is spent).
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, NamedTuple
 
 from llm_redact import multipart
-from llm_redact.jsonwalk import loads_request
+from llm_redact.jsonwalk import json_bytes, loads_request
 
 # What the proxy reads as a part's plain bytes, and as a field's text: any
 # other transfer encoding or charset is decoded by the upstream, never here.
@@ -57,19 +56,6 @@ REPEATED_KEY = "a multipart form field repeats a JSON key"
 # A field name's bracket path: the base, then zero or more "[segment]"s.
 _BRACKETED = re.compile(r"([^\[\]]*)((?:\[[^\[\]]*\])+)")
 _SEGMENT = re.compile(r"\[([^\[\]]*)\]")
-
-
-def json_line(value: Any) -> bytes:
-    """``value`` re-serialized as one JSON line of UTF-8, non-ASCII kept as
-    is — how an uploaded line the proxy rewrites (a redacted value, a
-    repeated key) is sent. A lone surrogate, which only a ``\\ud800``-style
-    escape can carry, has no UTF-8 form: that value is written with every
-    non-ASCII character escaped instead — the same JSON value, never a
-    failed request."""
-    try:
-        return json.dumps(value, ensure_ascii=False).encode("utf-8")
-    except UnicodeEncodeError:
-        return json.dumps(value).encode("ascii")
 
 
 class UploadView(NamedTuple):
@@ -96,14 +82,15 @@ def read_upload(body: bytes, boundary: bytes, *, max_json_bytes: int) -> UploadV
     if parsed is None:
         return UploadView([], problem=OUTSIDE_GRAMMAR)
     reader = _Reader(max_json_bytes)
+    rewrote = False
     try:
         for part in parsed.parts:
-            reader.read(part)
+            rewrote |= reader.read(part)
     except _Unreadable as exc:
         return UploadView([], problem=str(exc))
     except _Oversized:
         return UploadView([], oversized=True)
-    return UploadView(reader.cited, normalized=parsed.serialize() if reader.rewrote else None)
+    return UploadView(reader.cited, normalized=parsed.serialize() if rewrote else None)
 
 
 class _Reader:
@@ -111,7 +98,6 @@ class _Reader:
 
     def __init__(self, budget: int) -> None:
         self.cited: list[Any] = []
-        self.rewrote = False
         self._budget = budget
 
     def _spend(self, size: int) -> None:
@@ -119,9 +105,12 @@ class _Reader:
         if self._budget < 0:
             raise _Oversized
 
-    def read(self, part: multipart.MultipartPart) -> None:
+    def read(self, part: multipart.MultipartPart) -> bool:
+        """Read one part into ``cited``; True when its content was rewritten
+        (a file line repeating a key, re-serialized as the provider reads
+        it)."""
         if part.headers is None:
-            return  # no header block: nothing a server reads as a named part
+            return False  # no header block: nothing a server reads as a named part
         try:
             encoding = part.header("content-transfer-encoding")
             disposition = part.params("content-disposition") or {}
@@ -131,18 +120,19 @@ class _Reader:
         if encoding is not None and encoding.lower() not in PLAIN_TRANSFER_ENCODINGS:
             raise _Unreadable(TRANSFER_ENCODED)
         if "filename" in disposition or "filename*" in disposition:
-            self._read_file(part)
-            return
+            return self._read_file(part)
         name = disposition.get("name")
         if name is not None:  # an unnamed part is no form field
             self._read_field(name.value, part, content_type)
+        return False
 
-    def _read_file(self, part: multipart.MultipartPart) -> None:
+    def _read_file(self, part: multipart.MultipartPart) -> bool:
         """Every line that parses as a JSON object (a batch input file's
         requests; other files have none), re-serialized where it repeats a
-        key — the reading the adapters' JSONL redaction shares."""
+        key — the reading the adapters' JSONL redaction shares. True when a
+        line was."""
         lines = part.content.split(b"\n")
-        rewrote = False
+        rewritten = False
         for index, line in enumerate(lines):
             stripped = line.strip()
             if not stripped:
@@ -156,11 +146,11 @@ class _Reader:
             self._spend(len(stripped))
             self.cited.append(obj)
             if duplicate_keys:
-                lines[index] = json_line(obj)
-                rewrote = True
-        if rewrote:
+                lines[index] = json_bytes(obj)
+                rewritten = True
+        if rewritten:
             part.content = b"\n".join(lines)
-            self.rewrote = True
+        return rewritten
 
     def _read_field(
         self, name: str, part: multipart.MultipartPart, content_type: dict[str, multipart.Param]
@@ -169,7 +159,7 @@ class _Reader:
         if charset is not None and charset.value.lower() not in PLAIN_CHARSETS:
             raise _Unreadable(CHARSET)
         try:
-            text = part.content.decode("utf-8")
+            text = part.content.decode()  # strict UTF-8
         except UnicodeDecodeError:
             raise _Unreadable(NOT_TEXT) from None
         if name == "_charset_" and text.strip().lower() not in PLAIN_CHARSETS:

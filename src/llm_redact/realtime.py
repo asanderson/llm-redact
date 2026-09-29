@@ -40,6 +40,13 @@ earlier client frame carried is still in it. A connection keeps a RUNNING
 floor (``frame_floors`` of every client frame, raised before the frame is
 redacted): a new value is never numbered onto a token the conversation
 already holds — the per-request floor of the HTTP path, per connection.
+
+Reloads: a connection is served under the admission it was opened with
+(``RealtimeRelay``). A reload that changes it — the provider's settings, the
+authorizer that opened its upstream session, the detection policy — revokes
+the relay in the same synchronous step that swaps the configuration in: it
+closes both sides with 1012 (reconnect) and never forwards a client frame
+it reads after the swap under the configuration it was opened with.
 """
 
 import asyncio
@@ -53,18 +60,22 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from llm_redact.audit import AuditWriteError
-from llm_redact.jsonwalk import STRUCTURAL_KEYS, transform_strings
+from llm_redact.jsonwalk import STRUCTURAL_KEYS, json_bytes, json_text, transform_strings
 from llm_redact.placeholders import json_floors, may_carry_tokens, token_floors
 from llm_redact.plugin_api import UpstreamAuthError
 from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
 from llm_redact.providers.gemini import StreamedText
 from llm_redact.redactor import BlockedRequest, Redactor, TooManyStrings, UnredactableRequest
 from llm_redact.rehydrate import RehydratorPool
+from llm_redact.vault import run_batched
 
 if TYPE_CHECKING:
+    from llm_redact.config import ProviderConfig
+    from llm_redact.detection.base import Detector
+    from llm_redact.detection.engine import Allowlist
     from llm_redact.plugin_api import UpstreamAuth
     from llm_redact.proxy import ProxyState, RequestContext
 
@@ -923,6 +934,112 @@ def _record_refused(
     )
 
 
+# The close code a reload closes a relay with: 1012 Service Restart (the IANA
+# WebSocket close code registry) — the service restarted and the client may
+# reconnect, which is exactly how the new configuration reaches it. uvicorn
+# closes its connections with the same code when it shuts down. Not 1008:
+# the client violated nothing; not 1011: nothing failed; not 1001: the proxy
+# is not going away.
+RELOAD_CLOSE_CODE = 1012
+
+
+def _reload_reason(changed: str) -> str:
+    """The client-facing close reason: what changed, never a value."""
+    return f"llm-redact config reload changed this connection's {changed}; reconnect"
+
+
+class RealtimeRelay:
+    """One open realtime connection's admission, as a reload sees it.
+
+    A relay serves its whole connection under what it was admitted with: its
+    provider's settings (``[providers.NAME]`` upstream, enabled, detection,
+    auth, region), the upstream authorizer that opens its upstream session
+    under ``auth = "identity"``, and the detectors, allowlist and modes its
+    client frames are redacted with — read in the one synchronous stretch
+    after admission, so they are one consistent snapshot. ProxyState holds
+    every open relay (``realtime_relays``), and ``apply_config`` REVOKES
+    each relay whose admission its swap changed (``stale``) in the same
+    synchronous step as the swap.
+
+    A revoked relay never dials an upstream it has not dialled yet, never
+    redacts or forwards a client frame it reads after the swap, and closes
+    both sides (the client with 1012: reconnect). The relay checks
+    ``revoked`` between reading a frame and redacting it with no await in
+    between, and the swap runs on the same event loop (SIGHUP's handler,
+    the config editor's request), so a frame read after the swap is always
+    seen as revoked: the only frame that can still leave under the old
+    admission is one the relay had already read, redacted and handed to
+    the upstream socket when the swap ran."""
+
+    __slots__ = (
+        "_loop",
+        "_revoked_event",
+        "allowlist",
+        "detectors",
+        "modes",
+        "provider",
+        "provider_config",
+        "revoked",
+        "upstream_auth",
+    )
+
+    def __init__(
+        self,
+        provider: str,
+        provider_config: "ProviderConfig",
+        upstream_auth: "UpstreamAuth | None",
+        detectors: "Sequence[Detector]",
+        allowlist: "Allowlist",
+        modes: Mapping[str, str],
+    ) -> None:
+        self.provider = provider
+        self.provider_config = provider_config
+        self.upstream_auth = upstream_auth
+        self.detectors = detectors
+        self.allowlist = allowlist
+        self.modes = modes
+        # Once revoked: what the reload changed (a fixed phrase, value-free).
+        self.revoked: str | None = None
+        self._loop = asyncio.get_running_loop()
+        self._revoked_event = asyncio.Event()
+
+    def stale(self, state: "ProxyState") -> str | None:
+        """What of this relay's admission ``state`` no longer grants, or
+        None. Any field of its provider's settings; its authorizer
+        (``apply_config`` rebuilds every authorizer when any provider's
+        identity settings change, and closes the ones it displaces); the
+        detection objects, which ``apply_config`` rebuilds exactly when
+        ``[detection]`` changed. The rest of what a relay uses is read per
+        frame, live (note injection, ``max_body_strings``), or cannot change
+        without a restart (the vault session, the access gate)."""
+        if state.config.providers.get(self.provider) != self.provider_config:
+            return f"[providers.{self.provider}] settings"
+        if state.upstream_auth.get(self.provider) is not self.upstream_auth:
+            return "upstream authorizer"
+        if (
+            state.detectors is not self.detectors
+            or state.allowlist is not self.allowlist
+            or state.modes is not self.modes
+        ):
+            return "[detection] policy"
+        return None
+
+    def revoke(self, changed: str) -> None:
+        """Mark the relay revoked — at once, for its per-frame check — and
+        wake it to close both sides. Never raises: a reload revokes every
+        relay it changed."""
+        if self.revoked is not None:
+            return
+        self.revoked = changed
+        # Thread-safe, and fine from the loop's own thread (where reloads
+        # run). A closed loop has no connection left to close.
+        with contextlib.suppress(RuntimeError):
+            self._loop.call_soon_threadsafe(self._revoked_event.set)
+
+    async def wait_revoked(self) -> None:
+        await self._revoked_event.wait()
+
+
 async def _authorize_upgrade(
     state: "ProxyState",
     websocket: WebSocket,
@@ -1089,10 +1206,6 @@ async def ws_handle(websocket: WebSocket) -> None:
         )
         return
 
-    import websockets
-
-    from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
-
     static_ctx = state.context_for(None, "GET", path, None)
     if static_ctx.sealed:
         # A session the router says must stay empty cannot carry a
@@ -1101,6 +1214,42 @@ async def ws_handle(websocket: WebSocket) -> None:
         _record_ws_refusal(state, adapter, path, 403, started)
         await _reject(websocket, "the session router sealed this connection's vault session")
         return
+    # The connection's admission: its provider's settings and authorizer
+    # (read above) and the detection policy, all read since admission with
+    # no await in between. Held by ProxyState while the connection is open,
+    # so a reload that changes it revokes the relay (RealtimeRelay).
+    relay = RealtimeRelay(
+        adapter.provider,
+        provider_config,
+        upstream_auth,
+        state.detectors,
+        state.allowlist,
+        state.modes,
+    )
+    state.realtime_relays.add(relay)
+    try:
+        await _relay(state, websocket, adapter, relay, static_ctx, path, started)
+    finally:
+        state.realtime_relays.discard(relay)
+
+
+async def _relay(
+    state: "ProxyState",
+    websocket: WebSocket,
+    adapter: WsAdapter,
+    relay: RealtimeRelay,
+    static_ctx: "RequestContext",
+    path: str,
+    started: float,
+) -> None:
+    """Dial, relay and record one admitted connection, under ``relay``'s
+    admission until a reload revokes it."""
+    import websockets
+
+    from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
+
+    provider_config = relay.provider_config
+    upstream_auth = relay.upstream_auth
     # Thin per-connection wrapper (the context_for pattern: object
     # construction only): a tee counter gives exact per-connection
     # detection counts that still land in the process totals. Its redactor
@@ -1110,11 +1259,11 @@ async def ws_handle(websocket: WebSocket) -> None:
         static_ctx.session_id,
         static_ctx.vault,
         Redactor(
-            state.detectors,
+            relay.detectors,
             static_ctx.vault,
-            state.allowlist,
+            relay.allowlist,
             counts=connection_counts,
-            modes=state.modes,
+            modes=relay.modes,
             warn_counts=state.warn_counts,
         ),
         static_ctx.rehydrator,
@@ -1152,6 +1301,14 @@ async def ws_handle(websocket: WebSocket) -> None:
         if authorized is None:
             return
         http_url, headers, subprotocols = authorized
+        if relay.revoked is not None:
+            # A reload changed the connection's admission while the proxy
+            # was obtaining its credential: the upstream is never dialled
+            # under it (the only await between admission and the dial).
+            logger.info("WS %s -> refused (a config reload changed its %s)", path, relay.revoked)
+            _record_ws_refusal(state, adapter, path, 503, started)
+            await _reject(websocket, _reload_reason(relay.revoked), code=RELOAD_CLOSE_CODE)
+            return
     url = _ws_form(http_url)
 
     # [audit] required: same rule as HTTP — no durably committed audit row,
@@ -1218,6 +1375,20 @@ async def ws_handle(websocket: WebSocket) -> None:
             await websocket.close(code=code, reason=_close_reason(reason))
         await upstream.close(code=1000)
 
+    async def close_on_reload(changed: str) -> None:
+        # Only a connection still open on both sides: one that a policy
+        # close, the client or the upstream ended first keeps that close.
+        if (
+            websocket.application_state is not WebSocketState.CONNECTED
+            or websocket.client_state is not WebSocketState.CONNECTED
+        ):
+            return
+        logger.info(
+            "WS %s -> closed %d (a config reload changed its %s)", path, RELOAD_CLOSE_CODE, changed
+        )
+        with contextlib.suppress(Exception):  # the client may vanish meanwhile
+            await close_on_policy(_reload_reason(changed), code=RELOAD_CLOSE_CODE)
+
     async def client_to_upstream() -> None:
         nonlocal status
         while True:
@@ -1225,6 +1396,11 @@ async def ws_handle(websocket: WebSocket) -> None:
             if message["type"] == "websocket.disconnect":
                 code = _sendable_close_code(int(message.get("code") or 1000))
                 await upstream.close(code=code)
+                return
+            if relay.revoked is not None:
+                # A reload changed this connection's admission: the frame is
+                # neither redacted under the policy it was opened with nor
+                # sent on its upstream session. The relay closes (1012).
                 return
             data: str | bytes
             if message.get("text") is not None:
@@ -1255,11 +1431,17 @@ async def ws_handle(websocket: WebSocket) -> None:
                 outbound = (
                     data
                     if not provider_config.detection
-                    else adapter.redact_message(
-                        data,
-                        frame_ctx,
-                        inject_note=state.config.inject_system_note,
-                        require_json=require_json,
+                    # One vault transaction per frame, committed before
+                    # the frame is sent (run_batched).
+                    else run_batched(
+                        ctx.vault,
+                        functools.partial(
+                            adapter.redact_message,
+                            data,
+                            frame_ctx,
+                            inject_note=state.config.inject_system_note,
+                            require_json=require_json,
+                        ),
                     )
                 )
                 await upstream.send(outbound)
@@ -1286,6 +1468,24 @@ async def ws_handle(websocket: WebSocket) -> None:
                 logger.info("WS %s -> blocked (%s)", path, blocked)
                 await close_on_policy(f"blocked by llm-redact policy ({blocked})")
                 return
+            except state.vault_faults as fault:
+                # The vault could not record this frame's placeholders (a
+                # write or its COMMIT failed; the frame's batch rolled
+                # back): never sent, and the session cannot continue without
+                # it — closed 1011 (internal error), recorded as the HTTP
+                # path's 503, counted as the "vault" bookkeeping stage;
+                # exception TYPE only.
+                state.bookkeeping_errors["vault"] += 1
+                logger.error(
+                    "WS %s -> closed 1011 (vault write failed: %s); frame not sent",
+                    path,
+                    type(fault).__name__,
+                )
+                status = 503
+                await close_on_policy(
+                    "llm-redact could not record this frame's placeholders", code=1011
+                )
+                return
 
     async def upstream_to_client() -> None:
         try:
@@ -1308,12 +1508,17 @@ async def ws_handle(websocket: WebSocket) -> None:
         tasks = {
             asyncio.create_task(client_to_upstream()),
             asyncio.create_task(upstream_to_client()),
+            # A reload that revokes the relay wakes it here, whichever way
+            # frames are (or are not) flowing.
+            asyncio.create_task(relay.wait_revoked()),
         }
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        if relay.revoked is not None:
+            await close_on_reload(relay.revoked)
         for task in done:
             exc = task.exception()
             if exc is not None and not isinstance(
@@ -1381,5 +1586,4 @@ def frame_floors(data: str | bytes) -> dict[str, int]:
 def _dump_frame(payload: Any, was_binary: bool) -> str | bytes:
     """Re-serialize a rewritten event in the SAME frame type it arrived in
     (Gemini Live sends JSON in binary frames; OpenAI uses text)."""
-    text = json.dumps(payload, ensure_ascii=False)
-    return text.encode("utf-8") if was_binary else text
+    return json_bytes(payload) if was_binary else json_text(payload)

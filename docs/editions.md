@@ -50,7 +50,9 @@ proprietary **`llm-redact-pro`** package.
   seat checks and the admin endpoints. This repository only exposes a
   generic admission hook, and even without the package it never
   forwards a proxy credential: every `x-llm-redact-*` request header is
-  dropped before forwarding, and a `/u/<key>/` path is answered locally.
+  dropped before forwarding, a `/u/<key>/` path is answered locally, and
+  an upstream redirect is never relayed to a request that presented one
+  (the client would re-send it to the `Location`).
   Transport mutual TLS (`[tls] client_ca`) stays here as the bind-safety
   rule for non-loopback serving; it identifies no user.
 

@@ -222,7 +222,8 @@ llm-redact run -- claude -p "hello"         # env injected; ephemeral proxy if n
 
 Or run it long-lived (`llm-redact serve`, listens on `127.0.0.1:8787`)
 and point tools at it via their base-URL variables (`ANTHROPIC_BASE_URL`,
-`OPENAI_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`, `OLLAMA_HOST`). From there:
+`OPENAI_BASE_URL` — with `/v1`: `http://127.0.0.1:8787/v1` —,
+`GOOGLE_GEMINI_BASE_URL`, `OLLAMA_HOST`). From there:
 
 - **Five-minute walkthrough** — install, init, run, verify, preflight:
   [docs/quickstart.md](docs/quickstart.md).
@@ -381,7 +382,10 @@ essentials:
   with a "require restart"
   warning, and so are sections a plugin adds (llm-redact-pro's `[auth]`).
   A broken config file is logged and ignored — the running config stays
-  active.
+  active. An open realtime connection whose provider settings, upstream
+  identity or detection policy the reload changed is closed with code
+  1012, so the client reconnects under the new config
+  ([details](docs/deployment.md#reloads-and-open-realtime-connections)).
 - **Agent plugins**: the ops workflows ship as slash commands —
   `/llm-redact:status`, `/llm-redact:recent`, `/llm-redact:doctor`, and
   a guarded `/llm-redact:config-edit` that mirrors the reload flow

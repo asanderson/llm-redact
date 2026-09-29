@@ -55,6 +55,21 @@ Responses `arguments` JSON-source escaping. The session-router mutants are
 pinned in the llm-redact-pro repo (`test_sessions_pro.py`); the codec mutants
 are pinned here in `tests/test_codec_mutation_kills.py`.
 
+Round 3 added `upload_view.py` — the stored-object ownership check's reading
+of multipart uploads — and re-ran `vault.py` after the per-request write
+batch and the retired-number rework (whole-session deletes never reissue a
+number). `upload_view.py`: **150 mutants — 147 killed, 3 reviewed
+equivalents** (header names the multipart reader looks up lower-cased); the
+kills include a lost re-serialization (`rewrote |=` → `=`: a rewritten
+upload line followed by another part would have been forwarded as
+uploaded), a read that stopped at the first line that is not a JSON object,
+and the byte budget's exact boundary. `vault.py`: **991 mutants
+— 861 killed, 128 reviewed equivalents** (SQL case changes, and two
+falsy-`None`-for-`False` flags); the new tests kill, among others, a delete
+that skipped chunks of its session list, a view recording the retired number
+of the wrong session (it would have reloaded on every check), and a batch
+that committed around a write error the redaction swallowed.
+
 **Where the paid code's mutation coverage runs.** The per-conversation
 session router is part of the separately-installed `llm-redact-pro` package
 (the Free core ships only the static router), so its mutation coverage (the

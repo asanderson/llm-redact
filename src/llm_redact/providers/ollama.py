@@ -26,12 +26,14 @@ note only weakens token preservation.
 import json
 from typing import Any
 
-from llm_redact.jsonwalk import transform_strings
+from llm_redact.jsonwalk import json_bytes, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.rehydrate import RehydratorPool
 from llm_redact.sse import SSEEvent
 
 _CHAT_CHANNEL = ("ollama", "chat")
+# The installed and running models, and the server version.
+_METADATA_GETS = frozenset({"/api/tags", "/api/ps", "/api/version"})
 _GENERATE_CHANNEL = ("ollama", "generate")
 
 
@@ -40,13 +42,20 @@ class OllamaAdapter(ProviderAdapter):
     handles_ndjson = True
 
     def matches(self, method: str, path: str) -> RouteKind:
+        if method == "GET" and path in _METADATA_GETS:
+            # Local model inventory and the server version: metadata only.
+            # Recognized (redact-only, a body-less no-op) so the ollama CLI
+            # keeps working when a routed request spends a key — or no key —
+            # the proxy holds, which reaches only recognized routes.
+            return RouteKind.REDACT_ONLY
         if method != "POST":
             return RouteKind.NONE
         if path in ("/api/chat", "/api/generate"):
             return RouteKind.CHAT
         # /api/embeddings is the deprecated predecessor of /api/embed; both
-        # carry user text in, vectors out.
-        if path in ("/api/embed", "/api/embeddings"):
+        # carry user text in, vectors out. /api/show names a model and
+        # answers its metadata (the `ollama run` preflight).
+        if path in ("/api/embed", "/api/embeddings", "/api/show"):
             return RouteKind.REDACT_ONLY
         return RouteKind.NONE
 
@@ -98,7 +107,7 @@ class OllamaAdapter(ProviderAdapter):
                 new_text += pool.flush(_GENERATE_CHANNEL)
             if new_text == payload["response"]:
                 return line
-            return json.dumps({**payload, "response": new_text}, ensure_ascii=False).encode()
+            return json_bytes({**payload, "response": new_text})
 
         message = payload.get("message")
         if not isinstance(message, dict):
@@ -126,4 +135,4 @@ class OllamaAdapter(ProviderAdapter):
                 changed = True
         if not changed:
             return line
-        return json.dumps({**payload, "message": new_message}, ensure_ascii=False).encode()
+        return json_bytes({**payload, "message": new_message})

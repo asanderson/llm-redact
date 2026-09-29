@@ -43,8 +43,9 @@ liveness check) reach it at the configured `host`: a wildcard bind
 same URL to the tools it wraps.
 
 **Default deployment (recommended): loopback.** Point the tool's base URL
-at `http://127.0.0.1:8787` (or use `llm-redact run -- <tool>`, which
-injects the right env vars). Nothing else to configure.
+at `http://127.0.0.1:8787` — `http://127.0.0.1:8787/v1` for
+`OPENAI_BASE_URL` — or use `llm-redact run -- <tool>`, which injects the
+right env vars. Nothing else to configure.
 
 **Remote / shared deployment** — serving clients on other hosts — means
 operating a client-certificate PKI: configure the full `[tls]` trio
@@ -236,6 +237,50 @@ edits the file, gates on `serve --check`, reloads via SIGHUP, and reads
 back the coverage posture — and `/llm-redact:doctor` runs the same
 read-only preflight as the CLI ([plugins.md](plugins.md)).
 
+### Reloads and open realtime connections
+
+The in-flight rule above covers one request. An open realtime (WebSocket)
+connection lasts far longer (realtime sessions run for tens of minutes), so
+a reload reaches it: a relay redacts and forwards every client frame under
+the configuration it was admitted with, and a reload that changes that
+configuration closes it. What a connection was admitted with is:
+
+- its provider's `[providers.NAME]` settings (`upstream_base_url`,
+  `enabled`, `detection`, `auth`, `region`);
+- the upstream authorizer that opened it under `auth = "identity"` (a
+  change to any identity provider's `auth`, `region` or upstream rebuilds
+  them all);
+- everything under `[detection]` (rules, deny strings, allowlists, modes,
+  NER, languages).
+
+When a reload (SIGHUP or the config editor) changes any of these, the proxy
+closes the connection on both sides. The client gets WebSocket close code
+**1012** (Service Restart: reconnect), with a reason that names what
+changed and never a value. Reconnecting puts the client under the new
+configuration in the same vault session, so tokens issued before the
+reload still restore.
+
+Reloads run on the proxy's event loop, and the relay checks for a reload
+between reading a client frame and redacting it, so no frame it reads after
+the reload is redacted or forwarded under the old configuration. The one
+exception is a frame the relay had already read and handed to the
+provider's socket when the reload ran. A connection still being authorized
+under the proxy's identity when the reload lands is never dialled: it is
+closed 1012 and recorded as a 503. One whose upstream handshake was already
+under way completes it (the in-flight rule above) and is then closed before
+it relays a frame. Each connection still gets its one `/recent` and audit
+row when it closes.
+
+Two settings are read per frame and apply to open connections at once:
+`inject_system_note` and `max_body_strings`. `rehydration.fuzzy` applies to
+connections opened after the reload. A reload that changes nothing an open
+connection depends on (another provider, the body limits, note injection,
+routing) leaves it open.
+
+A client still writing frames when the proxy closes it may see a connection
+reset instead of the 1012 frame, because the server closes its socket right
+after sending the close frame. Treat either as "reconnect".
+
 ## Vault lifecycle in production
 
 The sqlite vault (`[vault] backend = "sqlite"`) is the one piece of state
@@ -264,7 +309,20 @@ silently rehydrate the *wrong* secret. Treat it accordingly.
   `llm-redact sessions prune --older-than 90d` deletes whole idle sessions
   (partial deletion could reuse a still-referenced number).
   `POST /__llm-redact/sessions/prune` (and the llm-redact-pro dashboard,
-  which calls it) does the same, safe against the live process.
+  which calls it) does the same, safe against the live process. Every
+  delete **retires** the session's numbers (a small `retired_numbers` row
+  per deleted session, no values, never removed): a new value in that
+  session is numbered above them, so a token of the deleted session — in
+  a provider's history, in another proxy instance's memory, on a realtime
+  connection still open — is never restored to a different value. Several
+  instances may share one vault file: each drops a session another one
+  deleted from its memory within a second. A session counts as idle when
+  it issued no NEW value for N days, and each instance's prune spares only
+  its own static session (and the router's durable ones) — so on a shared
+  vault one instance can prune another's static session that kept re-using
+  known values. That costs the deleted tokens their restoration (they pass
+  through verbatim), never a wrong value; set `session_ttl_days` above the
+  longest such pause, or leave it `0` on a shared vault.
 
 At-rest **encryption** of the vault (`[vault] encryption = "fernet"`), **key
 rotation** (`vault rotate-key`), and the **server RDBMS** backends are Pro

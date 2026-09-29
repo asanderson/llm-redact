@@ -221,7 +221,7 @@ async def test_pass_through_refusal_with_headers(monkeypatch: pytest.MonkeyPatch
     upstream = _Upstream()
     router = FakeRouter(refusal_headers={"x-llm-redact-reissue": "skipped; reason=no-candidate"})
     state, client = _app(monkeypatch, router, upstream)
-    response = await client.get("/v1/models/x", headers={ROUTE_HEADER: "refuse"})
+    response = await client.get("/v1/fine_tuning/jobs", headers={ROUTE_HEADER: "refuse"})
     assert response.status_code == 502
     assert response.json() == {"error": "fake no_route"}  # adapter None: the bare shape
     assert response.headers["x-llm-redact-reissue"] == "skipped; reason=no-candidate"
@@ -230,7 +230,8 @@ async def test_pass_through_refusal_with_headers(monkeypatch: pytest.MonkeyPatch
     assert row["provider"] is None and row["route"]["class"] == "no_route"
     inbound = router.inbounds[0]
     assert inbound.adapter_name is None and inbound.provider_name == "openai"
-    assert inbound.method == "GET" and inbound.path == "/v1/models/x" and inbound.model is None
+    assert inbound.method == "GET" and inbound.path == "/v1/fine_tuning/jobs"
+    assert inbound.model is None
 
 
 async def test_begin_refusal_carries_audit_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -764,11 +765,16 @@ async def test_redact_only_payload_observed(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 async def test_passthrough_payload_not_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
-    url = "http://a.example/v1/models/x"
+    url = "http://a.example/v1/fine_tuning/jobs/x"
     upstream = _Upstream({url: b'{"id" : "x"}'})
+    # The client's own credential: an unrecognized route is never routed
+    # with one the proxy holds (tests/test_lent_credentials.py).
     router = FakeRouter(
         {"skip": [Hop("a", url), Stop()], "want": [Hop("a", url), Stop()]},
-        plan_kwargs={"skip": {"wants_payload": False}},
+        plan_kwargs={
+            "skip": {"wants_payload": False, "proxy_credential": False},
+            "want": {"proxy_credential": False},
+        },
     )
     _state, client = _app(monkeypatch, router, upstream)
     loads_calls: list[Any] = []
@@ -779,14 +785,14 @@ async def test_passthrough_payload_not_parsed(monkeypatch: pytest.MonkeyPatch) -
         return real_loads(*args, **kwargs)
 
     monkeypatch.setattr(proxy_mod.json, "loads", counting_loads)
-    response = await client.get("/v1/models/x", headers={ROUTE_HEADER: "skip"})
+    response = await client.get("/v1/fine_tuning/jobs/x", headers={ROUTE_HEADER: "skip"})
     assert response.status_code == 200 and response.content == b'{"id" : "x"}'
     assert loads_calls == []  # a pass-through body the router does not want is never parsed
     delivered = router.plans[0].delivered
     assert delivered is not None
     assert delivered.wants_payload_calls == [RouteKind.NONE] and delivered.payloads == []
 
-    response = await client.get("/v1/models/x", headers={ROUTE_HEADER: "want"})
+    response = await client.get("/v1/fine_tuning/jobs/x", headers={ROUTE_HEADER: "want"})
     assert response.status_code == 200 and response.content == b'{"id" : "x"}'
     assert loads_calls == [b'{"id" : "x"}']  # wanted: parsed once, observed, left unchanged
     delivered = router.plans[1].delivered
@@ -921,7 +927,7 @@ async def _fixture_traffic(
     snapshots.append(_snapshot(state, upstream, response))
     response = await client.post("/v1/messages", json=_messages(f"again {EMAIL}", stream=True))
     snapshots.append(_snapshot(state, upstream, response))
-    response = await client.get("/v1/models/x")
+    response = await client.get("/v1/fine_tuning/jobs/x")  # pass-through
     snapshots.append(_snapshot(state, upstream, response))
     return snapshots
 
@@ -945,7 +951,7 @@ def _fixture_upstream() -> _Upstream:
     return _Upstream(
         {
             "https://api.anthropic.com/v1/messages": by_body,
-            "https://api.openai.com/v1/models/x": b'{"id":"x"}',
+            "https://api.openai.com/v1/fine_tuning/jobs/x": b'{"id":"x"}',
         }
     )
 

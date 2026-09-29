@@ -182,17 +182,18 @@ def test_sqlite_exhaustion_rolls_back_the_open_transaction(tmp_path: Path) -> No
 
 
 def test_sqlite_views_of_one_session_never_reuse_a_floored_number(tmp_path: Path) -> None:
-    # Two views of one session (a second proxy instance, an evicted and
-    # recreated view): MAX(n) is read fresh inside the write lock, so the
-    # floor-free view continues ABOVE the other's floored number.
-    manager = SqliteVaultManager(tmp_path / "vault.db", view_cache_size=1)
-    first = manager.get("s")
+    # Two views of one session (a second proxy instance over the same file):
+    # MAX(n) is read fresh inside the write lock, so the floor-free view
+    # continues ABOVE the other's floored number.
+    first_instance = SqliteVaultManager(tmp_path / "vault.db")
+    second_instance = SqliteVaultManager(tmp_path / "vault.db")
+    first = first_instance.get("s")
+    second = second_instance.get("s")  # loaded before the floored value existed
     assert first.placeholder_for("EMAIL", "a@corp.example", floor=6) == "«EMAIL_007»"
-    manager.get("other")  # evicts "s": the next view starts cold
-    second = manager.get("s")
     assert second is not first
     assert second.placeholder_for("EMAIL", "b@corp.example") == "«EMAIL_008»"
-    manager.close()
+    first_instance.close()
+    second_instance.close()
 
 
 @pytest.mark.parametrize("backend", ["postgresql", "mysql", "oracle"])

@@ -10,11 +10,11 @@ never widen the content — in particular it never serializes arbitrary record
 attributes someone attaches later.
 """
 
-import json
 import logging
 from datetime import UTC, datetime
 
 from llm_redact import __version__
+from llm_redact.jsonwalk import json_text
 
 _SERVICE = "llm-redact"
 
@@ -31,7 +31,7 @@ class JsonFormatter(logging.Formatter):
         }
         if record.exc_info:
             entry["exception"] = self.formatException(record.exc_info)
-        return json.dumps(entry, ensure_ascii=False)
+        return json_text(entry)
 
 
 def setup_logging(log_format: str) -> None:

@@ -186,7 +186,9 @@ async def test_a_cross_site_request_without_an_origin_is_not_a_listed_one() -> N
     async with _client(app) as client:
         response = await client.get("/v1/models", headers={"sec-fetch-site": "cross-site"})
     assert response.status_code == 403
-    assert "allowed_origins" in response.json()["error"]
+    # GET /v1/models is a recognized (redact-only) OpenAI route: the
+    # refusal is OpenAI-shaped.
+    assert "allowed_origins" in response.json()["error"]["message"]
     assert upstream.requests == []
     assert dict(_state(app).request_origin_refusals) == {"fetch_site": 1}
 

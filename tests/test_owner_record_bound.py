@@ -335,3 +335,102 @@ async def test_a_memory_vault_proxy_still_reports_objects(monkeypatch: pytest.Mo
     )
     assert (await _post_batch(app)).status_code == 200
     assert router.objects == [("batch_9", "user:n1:main")]
+
+
+# --- the shared bound is surfaced, value-free ---------------------------------------
+
+
+def _no_alter_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, alter_refused: bool
+) -> tuple[VaultConfig, RdbmsStore]:
+    config, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    with sqlite3.connect(tmp_path / "postgresql.db") as conn:
+        conn.executescript(OLD_RDBMS_MAP)
+    if alter_refused:
+        driver.inject_fault("ALTER TABLE", sqlite3.OperationalError("permission denied"))
+    return config, RdbmsStore(config, None)
+
+
+@pytest.mark.parametrize("alter_refused", [True, False], ids=["alter-refused", "column-added"])
+def test_the_store_and_manager_say_whether_the_bound_is_shared(
+    alter_refused: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, store = _no_alter_store(tmp_path, monkeypatch, alter_refused=alter_refused)
+    assert store.owner_bound_shared is alter_refused
+    assert RdbmsVaultManager(store).owner_bound_shared is alter_refused
+    store.close()
+
+
+class _OlderManager:
+    """An RDBMS manager from before the member (an older llm-redact-pro's)."""
+
+    def __init__(self, inner: RdbmsVaultManager) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "owner_bound_shared":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+
+@pytest.mark.parametrize(
+    ("alter_refused", "older", "shared"),
+    [(True, False, True), (False, False, False), (True, True, False)],
+    ids=["alter-refused", "column-added", "manager-without-the-member"],
+)
+async def test_status_and_its_posture_surface_the_shared_bound(
+    alter_refused: bool,
+    older: bool,
+    shared: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    import llm_redact.registry as registry_mod
+    from llm_redact.cli import _print_posture
+    from llm_redact.registry import Registry
+
+    config, store = _no_alter_store(tmp_path, monkeypatch, alter_refused=alter_refused)
+    manager = RdbmsVaultManager(store)
+    reg = Registry()
+    reg.build_vault_manager = lambda cfg: _OlderManager(manager) if older else manager
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    app = create_app(Config(vault=config))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        status = (await client.get("/__llm-redact/status")).json()
+    assert status["vault"]["owner_bound_shared"] is shared
+    assert "db.corp.example" not in json.dumps(status)  # value-free: never the DSN
+    _print_posture(status)
+    out = capsys.readouterr().out
+    assert ("owner records share the Responses bound" in out) is shared
+    store.close()
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_doctor_warns_when_the_running_proxy_shares_the_bound(
+    shared: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact import __version__, doctor_cli
+
+    def get(url: str, **kwargs: Any) -> httpx.Response:
+        body = {"version": __version__, "vault": {"backend": "postgresql"}}
+        if shared:
+            body["vault"]["owner_bound_shared"] = True
+        return httpx.Response(200, json=body, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", get)
+    report = doctor_cli._Report(json_mode=True)
+    doctor_cli._check_proxy(report, Config())
+    vault_rows = [row for row in report.rows if row["area"] == "vault"]
+    if shared:
+        [row] = vault_rows
+        assert row["level"] == "WARN"
+        assert "could not add the kind column" in row["message"]
+        assert "ALTER TABLE llm_redact_response_sessions" in row["message"]
+    else:
+        assert vault_rows == []
+    assert report.rows[0]["area"] == "proxy" and report.rows[0]["level"] == "PASS"

@@ -94,18 +94,23 @@ async def test_repeated_key_signed_as_checked_under_identity_with_detection_off(
 
 
 @pytest.mark.parametrize(
-    ("body", "headers"),
+    ("body", "headers", "status"),
     [
         (
             gzip.compress(json.dumps({"cachedContent": "cachedContents/cache-a"}).encode()),
             {"content-type": "application/json", "content-encoding": "gzip"},
+            415,
         ),
-        (b"\x08\x96\x01 cachedContents/cache-a", {"content-type": "application/x-protobuf"}),
+        (
+            b"\x08\x96\x01 cachedContents/cache-a",
+            {"content-type": "application/x-protobuf"},
+            400,
+        ),
     ],
     ids=["gzip", "non-json"],
 )
 async def test_identity_never_signs_a_body_the_ownership_check_could_not_read(
-    monkeypatch: pytest.MonkeyPatch, body: bytes, headers: dict[str, str]
+    monkeypatch: pytest.MonkeyPatch, body: bytes, headers: dict[str, str], status: int
 ) -> None:
     router = ScriptedRouter()
     upstream = Upstream({})
@@ -123,7 +128,7 @@ async def test_identity_never_signs_a_body_the_ownership_check_could_not_read(
             content=body,
             headers=headers,
         )
-    assert response.status_code == 400
+    assert response.status_code == status
     assert "proxy's own identity" in response.json()["error"]["message"]
     assert upstream.requests == [] and built[0].calls == []
 

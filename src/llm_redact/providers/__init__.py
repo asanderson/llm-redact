@@ -4,6 +4,7 @@ from llm_redact.providers.base import ProviderAdapter, RouteKind
 from llm_redact.providers.bedrock import BedrockAdapter
 from llm_redact.providers.claude_vertex import ClaudeVertexAdapter
 from llm_redact.providers.cohere import CohereAdapter
+from llm_redact.providers.custom import GeminiOpenAIAdapter, GeminiOpenAIResponsesAdapter
 from llm_redact.providers.gemini import GeminiAdapter
 from llm_redact.providers.ollama import OllamaAdapter
 from llm_redact.providers.openai import OpenAIAdapter
@@ -15,6 +16,11 @@ ALL_ADAPTERS: tuple[type[ProviderAdapter], ...] = (
     OpenAIAdapter,
     OpenAIResponsesAdapter,
     GeminiAdapter,
+    # The Gemini API's OpenAI-compatible surface (/v1beta/openai/...): the
+    # OpenAI adapters under that prefix, disjoint from GeminiAdapter's
+    # /v1beta/models|tunedModels|cachedContents routes (proven by test).
+    GeminiOpenAIAdapter,
+    GeminiOpenAIResponsesAdapter,
     VertexAdapter,
     # After VertexAdapter: matches the same host's Claude publisher paths
     # (rawPredict), proven disjoint from Vertex's generateContent verbs.
@@ -37,6 +43,8 @@ __all__ = [
     "ClaudeVertexAdapter",
     "CohereAdapter",
     "GeminiAdapter",
+    "GeminiOpenAIAdapter",
+    "GeminiOpenAIResponsesAdapter",
     "OllamaAdapter",
     "OpenAIAdapter",
     "OpenAIResponsesAdapter",

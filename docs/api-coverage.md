@@ -15,21 +15,48 @@ stream event names ⊆ the adapters' known sets.
 Classifications:
 
 - **chat** — request redacted AND response rehydrated (streaming included)
-- **redact-only** — request redacted; response has nothing to restore
-- **pass-through** — deliberately forwarded verbatim (metadata/ids only,
-  or a documented non-goal); the disabled-provider 502 still applies. On a
-  provider configured `auth = "identity"` (Bedrock, Vertex AI, Azure — the
-  proxy signs with its OWN cloud identity) a pass-through route is instead
-  REFUSED with a recorded local 403: the proxy lends its identity only to
-  the routes it recognizes. On such a provider a chat or redact-only route
-  likewise signs only a body the proxy redacted: a non-empty body that is
-  not a JSON object (or canonical multipart on a route whose multipart
-  form is scanned), or that carries a `Content-Encoding` (any coding but
-  `identity`, in any of its Content-Encoding headers) or a repeated
-  `Content-Type`, is refused with a recorded 400 instead of being
-  forwarded verbatim
+- **redact-only** — request redacted; response has nothing to restore. A
+  body-less id or metadata route (a model listing, a batch poll, a delete)
+  is redact-only too: a no-op that makes the route RECOGNIZED, so a
+  credential the proxy holds may reach it (below)
+- **pass-through** — deliberately forwarded verbatim (a documented
+  non-goal, or content not covered yet — see the honest gaps below), to
+  the provider the request is positively attributed to ([requests no route
+  matches](#requests-no-route-matches)); the disabled-provider 502 still
+  applies. A request that would reach its provider with a credential the
+  PROXY holds is instead REFUSED with a recorded local 403 on a
+  pass-through route: on a provider configured `auth = "identity"`
+  (Bedrock, Vertex AI, Azure — the proxy signs with its OWN cloud
+  identity), and on a routed request (the llm-redact-pro routing layer)
+  whose plan sends an operator key or no key at all — the proxy lends such
+  a credential only to the routes it recognizes, and the refusal comes
+  before the body is read
 - **websocket** — relayed by `realtime.py` (see the realtime sections of
   the README and threat model)
+
+A chat or redact-only route forwards only a request body the proxy
+scanned — wherever redaction applies (`detection` on, the client's own
+key included) and wherever the request spends a credential the PROXY
+holds (`auth = "identity"`, or a routed plan's operator key), whatever
+`detection` says. A non-empty body that is not a JSON object (JSON is
+read from the bytes whatever the content-type; a UTF-8 BOM or UTF-16/32
+is fine) or canonical multipart on a route whose multipart form is
+scanned — bytes after the JSON value, invalid UTF-8 (a Latin-1 body), a
+top-level array or scalar, whitespace only, multipart anywhere else — or
+that is sent with a repeated `Content-Type`, is refused with a recorded,
+provider-shaped 400 instead of being forwarded verbatim (a lenient
+upstream would decode what the proxy never read: take the first JSON
+value, substitute bad bytes). A `Content-Encoding` other than `identity`,
+in any of the request's Content-Encoding headers, is refused **415** with
+`Accept-Encoding: identity`: llm-redact does not decode request bodies —
+send it uncompressed. Inside an accepted upload every piece must be
+scanned too wherever redaction applies (the `/v1/files` rows below; with
+`detection = false` an upload's file parts go out as sent, a proxy-held
+credential included, once the stored-object check has read the upload). `[providers.NAME] detection =
+false` with the client's own key forwards such a body as sent, and so does
+every pass-through route (a route this table does not claim) — reached
+only with the client's own credential, since a credential the proxy holds
+is never lent to one (above).
 
 ## Anthropic
 
@@ -38,30 +65,33 @@ Classifications:
 | `POST /v1/messages` | chat | MCP connector: `mcp_servers[]` blocks pass through unredacted BY DESIGN — the provider must hold the real `authorization_token` to call the MCP server; everything else in the body is redacted. The files a code execution run WROTE (`code_execution_output` / `bash_code_execution_output` entries of a code execution tool result, streaming included) are reported to a session router as the requester's |
 | `POST /v1/messages/count_tokens` | redact-only | note counted too, keeping counts honest |
 | `POST /v1/messages/batches` | redact-only | each `requests[].params` redacted + noted |
-| `GET /v1/messages/batches` | pass-through | processing metadata only |
-| `GET /v1/messages/batches/{id}` | pass-through | processing metadata only |
+| `GET /v1/messages/batches` | redact-only | processing metadata only (a body-less no-op: recognized) |
+| `GET /v1/messages/batches/{id}` | redact-only | processing metadata only |
 | `GET /v1/messages/batches/{id}/results` | chat | JSONL restored line by line |
-| `POST /v1/messages/batches/{id}/cancel` | pass-through | no content either way |
-| `DELETE /v1/messages/batches/{id}` | pass-through | no content either way |
-| `GET /v1/models` | pass-through | model listings carry no user content |
-| `GET /v1/models/{id}` | pass-through | |
+| `POST /v1/messages/batches/{id}/cancel` | redact-only | no content either way |
+| `DELETE /v1/messages/batches/{id}` | redact-only | no content either way |
+| `GET /v1/models` | redact-only | with `anthropic-version` (every Anthropic SDK request carries it): the model listing, metadata only |
+| `GET /v1/models/{id}` | redact-only | with `anthropic-version` |
 | `POST /v1/complete` | chat | legacy Text Completions: prompt redacted, completion restored (streaming included); no system note (the body has no system field) |
+| `POST /v1/files` (with `anthropic-version`) | pass-through | beta Files API: the uploaded document is media (the non-goal) |
+| `GET /v1/files/{id}/content` (with `anthropic-version`) | pass-through | the document back, verbatim |
 | `GET /v1/organizations/...` (Admin API) | pass-through | org metadata |
 | WebSocket realtime | websocket | not offered by Anthropic today |
 
-`GET /v1/models` stays pass-through in both provider tables (the
-Anthropic row above, the OpenAI row below). With the llm-redact-pro
+`GET /v1/models` is shared: the Anthropic row above when the request
+carries `anthropic-version` (and no other provider's marker), the OpenAI
+row below otherwise — a request carrying a Google API key or the Cohere
+SDK's header goes to that provider instead. With the llm-redact-pro
 routing layer and `[routing] expose_models = true`, `GET /v1/models` is
 answered **locally** instead (never forwarded) — Anthropic shape when
 the request carries `anthropic-version`, OpenAI shape otherwise — so
-Claude Code's gateway model discovery works; the adapter matrix row
-stays pass-through. The local answer sits behind the same gates as every
-proxy-generated reply for a real API path: the path infers provider
-`openai`, so `[providers.openai] enabled = false` refuses it 502 (the
-Anthropic-shaped call too), and an llm-redact-pro access gate refuses an
-unadmitted client 403, before the catalog is consulted. The row
-does not change: that answer is a routing feature, not a redaction
-classification. Under `[routing]` the id-only rows here and below —
+Claude Code's gateway model discovery works. The local answer sits
+behind the same gates as every proxy-generated reply for a real API
+path: the provider the request is addressed to (`anthropic` for the
+Anthropic-shaped call, `openai` otherwise) refuses it 502 when disabled,
+and an llm-redact-pro access gate refuses an unadmitted client 403,
+before the catalog is consulted. The rows do not change: that answer is
+a routing feature, not a redaction classification. Under `[routing]` the id-only rows here and below —
 `GET /v1/responses/{id}`, conversation item reads,
 `GET /v1/files/{id}/content`, batch polls and results — carry no model,
 so they take the protocol's `default_upstream` unless a path-matched
@@ -72,7 +102,10 @@ OpenAI's. Routing is header-aware here: requests carrying an
 `anthropic-version` header pass through to the ANTHROPIC upstream
 (their uploads are documents — the media non-goal — so pass-through is
 the correct handling, but they must reach the right host); everything
-else takes the OpenAI files handling below.
+else takes the OpenAI files handling below. Any other request with
+`anthropic-version` that no route matches is Anthropic's too (a newer
+Anthropic API such as `/v1/skills`) — see [requests no route
+matches](#requests-no-route-matches).
 
 ## OpenAI
 
@@ -83,24 +116,26 @@ else takes the OpenAI files handling below.
 | `POST /v1/responses` | chat | MCP connector: `tools[].type == "mcp"` entries (server_url, headers) pass through unredacted BY DESIGN — the provider needs the real credential; `mcp_call` arguments/output in responses are rehydrated, streaming included. The files the code interpreter WROTE into its container (`container_file_citation` annotations, a code interpreter call's output files; streaming included) are reported to a session router as the requester's |
 | `GET /v1/responses/{id}` | chat | stored responses rehydrated |
 | `GET /v1/responses/{id}/input_items` | chat | input-item echoes restored |
-| `DELETE /v1/responses/{id}` | pass-through | |
+| `DELETE /v1/responses/{id}` | redact-only | id only (a body-less no-op: recognized) |
 | `POST /v1/conversations` | chat | create: item content redacted, echoed response restored |
 | `POST /v1/conversations/{id}/items` | chat | add items: content redacted + echo restored |
 | `GET /v1/conversations/{id}` | chat | retrieve conversation, restored |
 | `GET /v1/conversations/{id}/items` | chat | list items, stored content restored (list-envelope walk) |
 | `GET /v1/conversations/{id}/items/{item_id}` | chat | single item restored |
-| `DELETE /v1/conversations/{id}` (and `/items/{item_id}`) | pass-through | ids only |
+| `DELETE /v1/conversations/{id}` | redact-only | ids only |
+| `DELETE /v1/conversations/{id}/items/{item_id}` | redact-only | ids only |
 | `POST /v1/embeddings` | redact-only | vectors come back verbatim |
-| `POST /v1/files` | chat | multipart upload; JSONL file-part lines (batch + fine-tune), every part's `filename` / `filename*` and every non-structural plain form field redacted (structural fields — `purpose`, `expires_after[…]` — as sent), all other bytes preserved; the file object answering it echoes the filename, restored |
+| `POST /v1/files` | chat | multipart upload; JSONL file-part lines (batch + fine-tune), every part's `filename` / `filename*` and every plain form field (the structural `purpose`, `expires_after[…]` too, scanned as text) redacted, all other bytes preserved; a file that is not JSONL (a PDF, an image, a text file), a line that is not a JSON object, a form field that is not UTF-8, a preamble or epilogue, a part header without one reading, a Content-Transfer-Encoding or a declared charset other than UTF-8/US-ASCII refuses the upload (400: llm-redact cannot scan it — `detection = false` forwards it as sent); the file object answering it echoes the filename, restored |
 | `GET /v1/files` | chat | the file list: each echoed filename restored in the request's own session |
 | `GET /v1/files/{id}` | chat | the file object: its echoed filename restored |
 | `GET /v1/files/{id}/content` | chat | batch output JSONL restored line by line |
-| `DELETE /v1/files/{id}` | pass-through | |
+| `DELETE /v1/files/{id}` | redact-only | id only |
 | `POST /v1/batches` | chat | the caller's free-form `metadata` values are redacted out and restored in the echoed batch object; structural fields (`input_file_id`, `endpoint`, `completion_window`) carry nothing a detector matches and are forwarded byte-identical; no system note |
 | `GET /v1/batches` | chat | the LIST is restored in the request's own session, like a single batch: one shared namespace holds every batch's tokens. With llm-redact-pro named users a listing resolves to an EMPTY session, and the session router's `listing_item_session` restores only the batches the READER created, each in the session it was created in; every other item keeps its placeholders. No system note |
 | `GET /v1/batches/{id}` | chat | the batch object echoes `metadata`: restored |
 | `POST /v1/batches/{id}/cancel` | chat | the cancelled batch object echoes `metadata`: restored |
-| `GET /v1/models` | pass-through | |
+| `GET /v1/models` | redact-only | the model listing, metadata only |
+| `GET /v1/models/{id}` | redact-only | |
 | `POST /v1/completions` | chat | legacy text completions: prompt redacted, choices[].text restored (streaming included); no system note |
 | `POST /v1/moderations` | pass-through | DOCUMENTED GAP: moderation input is user text; redacting it would change moderation results, so it is deliberately untouched |
 | `POST /v1/audio/transcriptions` | pass-through | audio media non-goal (multipart audio is never decoded) |
@@ -113,11 +148,20 @@ else takes the OpenAI files handling below.
 | `GET /v1/videos` | chat | job list: echoed prompts restored via the list-envelope walk |
 | `GET /v1/videos/{id}` | chat | job retrieve: echoed prompt restored |
 | `POST /v1/videos/{id}/remix` | chat | remix prompt redacted; echo restored |
-| `GET /v1/videos/{id}/content` | pass-through | the rendered video: media bytes verbatim |
-| `DELETE /v1/videos/{id}` | pass-through | id only |
+| `GET /v1/videos/{id}/content` | redact-only | the rendered video: media bytes verbatim (a body-less no-op) |
+| `DELETE /v1/videos/{id}` | redact-only | id only |
 | `POST /v1/fine_tuning/jobs` | pass-through | file ids only; the training FILE is covered at upload via `/v1/files`; the created job is reported to a session router as its creator's |
 | `GET /v1/fine_tuning/jobs` | pass-through | |
 | `GET /v1/fine_tuning/jobs/{id}` | pass-through | the job's `result_files` are reported to a session router (like a batch's output files on its status; also on the job's `cancel`, `pause` and `resume`) |
+| `POST /v1/uploads` | pass-through | DOCUMENTED GAP: the Uploads API (see the honest gaps below) |
+| `POST /v1/uploads/{id}/parts` | pass-through | an opaque byte range of the file |
+| `POST /v1/vector_stores` | pass-through | DOCUMENTED GAP: names and attributes are forwarded as sent |
+| `POST /v1/assistants` | pass-through | DOCUMENTED GAP: Assistants (deprecated) |
+| `POST /v1/threads/{id}/messages` | pass-through | DOCUMENTED GAP: Threads (deprecated) carry message content |
+| `GET /v1/containers/{id}/files/{file_id}/content` | pass-through | a code-interpreter container's file, verbatim |
+| `GET /v1/evals` | pass-through | |
+| `POST /v1/realtime/client_secrets` | pass-through | an ephemeral Realtime key for a browser client; the WebSocket session itself is covered below |
+| `GET /v1/organization/...` (Admin API) | pass-through | org metadata (singular: `/v1/organizations/` is Anthropic's) |
 | WebSocket `/v1/realtime` | websocket | beta + GA event vocabularies; MCP tool config preserved, MCP arguments rehydrated |
 
 ## Google Vertex AI
@@ -192,7 +236,7 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/conversations/{id}` | chat | |
 | `GET /openai/v1/conversations/{id}/items` | chat | list-envelope walk |
 | `DELETE /openai/v1/conversations/{id}` | redact-only | ids only |
-| `POST /openai/files` | chat | multipart JSONL upload, lines and filenames redacted (+ note on chat-shaped lines), the echoed filename restored; under identity auth a non-JSON-object line, a non-JSONL file, a non-UTF-8 form field, a part header without one reading (a `filename*` outside UTF-8 included), a Content-Transfer-Encoding, or a declared charset other than UTF-8/US-ASCII refuses the upload (400), and every form field is scanned as text (under key auth all but the structural ones) |
+| `POST /openai/files` | chat | multipart JSONL upload, lines and filenames redacted (+ note on chat-shaped lines), the echoed filename restored; a non-JSON-object line, a non-JSONL file, a non-UTF-8 form field, a part header without one reading (a `filename*` outside UTF-8 included), a Content-Transfer-Encoding, or a declared charset other than UTF-8/US-ASCII refuses the upload (400) — under identity auth, and under key auth wherever redaction applies — and every form field is scanned as text |
 | `POST /openai/v1/files` | chat | |
 | `GET /openai/files` | chat | the file list: echoed filenames restored |
 | `GET /openai/files/{id}` | chat | the file object: echoed filename restored |
@@ -299,14 +343,24 @@ the resumable protocol and send the data chunks — the last one answers
 with the file — to the upload URL Google returns, not through the proxy:
 such a file is created without the proxy ever seeing its name.
 
-A pass-through request under `/v1/` that carries a **Google API key**
-(`x-goog-api-key`, or a `key=`/`$key=` query parameter) is forwarded to
-the Gemini upstream, not inferred as OpenAI: Gemini's v1 surface
-(`GET /v1/models[/{m}]`, …) shares OpenAI's prefix, and the Google key must
-never be sent to api.openai.com. An explicit Vertex path family
-(`/v1/projects/…`, `/v1/publishers/…`, `/v1beta1/…`) stays Vertex's
-whatever key it carries (express mode and service-account API keys
-authorize Vertex that way) — never sent to the Gemini API's host.
+A pass-through request that carries a **Google API key**
+(`x-goog-api-key`, or a `key=`/`$key=` query parameter) or any other
+`x-goog-*` header is forwarded to the Gemini upstream, never another
+provider's: Gemini's v1 surface (`GET /v1/models[/{m}]`, …) shares OpenAI's
+prefix, and the Google key must never be sent to api.openai.com. An
+explicit Vertex path family (`/v1/projects/…`, `/v1/publishers/…`,
+`/v1beta1/…`) stays Vertex's whatever key it carries (express mode and
+service-account API keys authorize Vertex that way) — never sent to the
+Gemini API's host. The Gemini model listing and one model's metadata
+(`GET /v1beta/models[/{m}]`) are recognized, redact-only (a body-less
+no-op).
+
+The Gemini API's **OpenAI-compatible surface** (`/v1beta/openai/…`: the
+OpenAI SDK with `base_url` `…/v1beta/openai/`) is the OpenAI surface
+above under that prefix, on `[providers.gemini]`: chat completions
+(streaming included), embeddings, files and batches are redacted and
+restored exactly as OpenAI's (`GeminiOpenAIAdapter`,
+`GeminiOpenAIResponsesAdapter`; the raw path is forwarded unchanged).
 
 Gemini **Imagen** (`models/{m}:predict`) and **Veo**
 (`models/{m}:predictLongRunning`) are redact-only: `instances[].prompt`
@@ -358,9 +412,88 @@ full OpenAI surface above per upstream. Their inner path is normalized
 before matching (`_canonical`): OpenAI-compatible upstreams serve those
 same endpoints under varied base paths — Groq `/openai/v1`, OpenRouter
 `/api/v1`, Fireworks `/inference/v1` — and some tools bake `/v1` into
-`upstream_base_url` so the inner path omits it. The path is re-anchored at
-the last `/v1/` (or `/v1` is prepended) so a known endpoint always routes;
-an unknown tail still falls through to pass-through via the exact matcher.
+`upstream_base_url` so the inner path omits it — and others serve them
+without any `/v1/` segment: Gemini `/v1beta/openai`, GitHub Models
+`/inference`, Azure AI `/models`, Zhipu `/api/paas/v4`, a Cloudflare AI
+Gateway `/v1/{account}/{gateway}/openai`. The endpoint is the path's TAIL:
+the longest tail, at a segment boundary, that is a known OpenAI endpoint
+(as is when it starts `/v1/`, else under `/v1`) is matched, so a known
+endpoint routes under any base path; the stripped inner path is forwarded
+byte-for-byte. An unknown tail still falls through to pass-through (to
+that custom upstream) via the exact matcher.
+
+## Requests no route matches
+
+A request no route above matches is forwarded verbatim (pass-through) —
+but only to a provider the proxy can POSITIVELY attribute it to
+(`providers/attribution.py`), never to a guessed default (a guess hands
+one provider's credential and the client's unredacted content to another:
+the old anthropic default sent an OpenAI key and prompt to
+api.anthropic.com):
+
+1. an explicit path family, whatever the request carries: `/v1beta/…`,
+   `/upload/v1beta/…`, `/download/v1beta/…` (Gemini API), `/v1/projects/…`,
+   `/v1/publishers/…`, `/v1beta1/…` (Vertex AI), `/openai/…` (Azure),
+   `/model/…`, `/guardrail/…`, `/async-invoke…` (Bedrock), `/api/…` (Ollama),
+   `/v2/…` (Cohere), `/custom/NAME/…` (that custom upstream), and
+   Anthropic's own `/v1/messages…`, `/v1/complete`, `/v1/organizations/…`;
+2. otherwise the markers only one provider's clients send:
+   `anthropic-version` (every Anthropic SDK request carries it) →
+   Anthropic; a Google API key (`x-goog-api-key`, `key=`/`$key=`) or any
+   other `x-goog-*` header → Gemini; an `openai-*` header → OpenAI; the
+   Cohere SDK's `x-fern-sdk-name` → Cohere. Markers of two providers
+   attribute nothing;
+3. otherwise OpenAI: an `Authorization: Bearer sk-…` key that is not an
+   Anthropic token (`sk-ant-…`), or a path under one of OpenAI's own API
+   prefixes (`/v1/chat`, `/v1/files`, `/v1/fine_tuning`, `/v1/assistants`,
+   `/v1/organization`, …).
+
+Anything else is answered locally with a **recorded 404** that names the
+path (never the query) and why, and nothing is forwarded. So are paths
+that only look unrecognized — each would otherwise carry its body
+unredacted to an upstream that may serve it as the recognized route
+(routers that ignore a trailing `/` or case):
+
+- an **empty path segment** (`//`, in the raw or decoded path, `\`
+  counted as `/`) is refused with a 400 before admission, like a `.`/`..`
+  segment — never recorded or logged with its path (it may still hold an
+  identity-prefix key). A base URL ending in `/` joined onto an endpoint
+  path is the usual cause;
+- **another spelling** of a recognized route — a trailing `/`, another
+  case — is refused with a recorded, provider-shaped 400: the path that
+  was matched must be the path that is forwarded, byte for byte;
+- a recognized route **without its `/v1`** (`/chat/completions`,
+  `/responses`, `/models`, … — an OpenAI-compatible base URL that lacks
+  `/v1`) is a recorded 404 whose message gives the fix
+  (`OPENAI_BASE_URL=http://127.0.0.1:8787/v1`);
+- a recognized route **under an extra prefix** (`/v1/v1/messages` — a
+  base URL that repeats the API version) is a recorded 404. Azure's
+  `/openai/…` and custom `/custom/NAME/…` paths embed OpenAI routes by
+  design and are exempt.
+
+`GET /` and `HEAD /` — the proxy's base URL itself, no provider's API —
+are answered locally with a 200 (a client's liveness probe: the ollama
+CLI's heartbeat), never forwarded or recorded; like every other answer
+outside the reserved prefix, only after the request-origin check (a web
+page on another site gets its recorded 403 instead).
+
+An upstream **redirect** (a 3xx other than 304 carrying a `Location`) is
+relayed only when the client's repeat of its original request would carry
+nothing the proxy protects. A following client repeats its ORIGINAL
+request at the `Location` — the unredacted body, and the credential
+headers its HTTP library keeps across hosts — and a relative `Location`
+resolves against the proxy (without a `/custom/NAME` prefix). So a redirect
+answering a request with a body on a route the proxy redacts, a routed or
+identity-signed request, a request that presented a credential for the
+proxy itself (an identity path prefix, an `x-llm-redact-*` header, an
+access-gate subject), or any request to a custom upstream is answered with
+a recorded, provider-shaped 502 naming the status only (the `Location` is
+never relayed or logged) and counted as an upstream error; a routed hop
+that redirects is a hop fault the router can fail over from. A
+first-party provider's redirect is still relayed for plain pass-through
+(the body already went to that provider verbatim) and for a body-less
+read of a recognized route (a download CDN — its bytes then bypass
+rehydration, placeholders intact), with the client's own credential.
 
 ## Known uncovered content surfaces (honest gaps)
 
@@ -373,21 +506,24 @@ that is not there:
   large-file sibling of `/v1/files`. Each part is an opaque byte range and a
   secret can straddle a part boundary, so per-line scanning cannot be applied
   safely; real coverage would need stateful cross-part buffering. Pass-through,
-  routed to the OpenAI upstream (pinned by test — it previously
-  fell through to the anthropic default). For the same reason the File a
-  completed Upload creates is reported to a session router as its creator's
-  only when its `purpose` is stated and is not `batch`: a batch input file's
-  requests would be run with the upload's credential, and the stored objects
-  they cite were never checked.
+  routed to the OpenAI upstream with the client's own credential (pinned by
+  test — it previously fell through to the anthropic default; a credential
+  the proxy holds is never lent to it: a recorded 403). For the same reason
+  the File a completed Upload creates is reported to a session router as its
+  creator's only when its `purpose` is stated and is not `batch`: a batch
+  input file's requests would be run with the upload's credential, and the
+  stored objects they cite were never checked.
 - **OpenAI Assistants / Threads / vector-store search** — on OpenAI's
   announced deprecation path (Responses/Conversations is the successor), so
   not built. The same holds for their Azure v1 twins (`/openai/v1/threads`,
   `/openai/v1/vector_stores/{id}/search`), and Azure's `/openai/v1/evals`
   and `/openai/v1/containers` are not covered either — pass-through, and
-  refused under `auth = "identity"`. OpenAI's own `/v1/containers` (the
-  code interpreter's containers and their files) passes through to the
-  OpenAI upstream too; the files a Response's code wrote into a container
-  are reported to a session router as that Response's creator's.
+  refused wherever the proxy's own credential would carry them
+  (`auth = "identity"`, or a routed operator key). OpenAI's own
+  `/v1/containers` (the code interpreter's containers and their files)
+  passes through to the OpenAI upstream too, on the same terms; the files a
+  Response's code wrote into a container are reported to a session router
+  as that Response's creator's.
 - **OpenAI WebRTC realtime** (`POST /v1/realtime/calls`, SDP offer/answer) —
   after setup, media and the event data channel flow peer-to-peer and never
   transit this HTTP/WS proxy at all: structurally unreachable, not merely

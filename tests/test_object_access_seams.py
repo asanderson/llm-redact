@@ -182,10 +182,11 @@ def _client(app: Any) -> httpx.AsyncClient:
 @pytest.mark.parametrize(
     ("method", "path", "adapter_name", "body"),
     [
-        ("DELETE", "/v1/files/file-1", None, None),  # pass-through: no adapter, no body
+        ("DELETE", "/v1/vector_stores/vs_1", None, None),  # pass-through: no adapter, no body
+        ("DELETE", "/v1/files/file-1", "openai", None),  # recognized: an id-only route
         ("GET", "/v1/files/file-1/content", "openai", None),
         ("POST", "/v1/batches/batch_1/cancel", "openai", None),
-        ("DELETE", "/v1/videos/video_1", None, None),
+        ("DELETE", "/v1/videos/video_1", "openai", None),
         ("POST", "/v1/videos/video_1/remix", "openai", {"prompt": "a dog"}),
     ],
 )
@@ -235,7 +236,7 @@ async def test_a_non_reason_answer_refuses_with_the_fixed_text(
     upstream = Upstream()
     app = _app(monkeypatch, ScriptedRouter(verdict=verdict), upstream)
     async with _client(app) as client:
-        response = await client.delete("/v1/files/file-1")
+        response = await client.delete("/v1/vector_stores/vs_1")  # pass-through
     assert response.status_code == 403
     assert "ownership check failed" in response.json()["error"]
     assert upstream.requests == []
@@ -358,20 +359,23 @@ def _routed_pass_through(
     return create_app(routed_config(), upstream_transport=httpx.MockTransport(upstream)), fake
 
 
-async def test_a_routed_pass_through_body_is_parsed_for_the_check_only(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("lends", [None, True], ids=["member-absent", "true"])
+async def test_a_routed_pass_through_under_the_proxys_credential_is_refused_unread(
+    lends: bool | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An unrecognized route is never lent a credential the proxy holds
+    (C-R2-04): refused before its body is read or the ownership check is
+    asked — it once went out unredacted with the operator's key."""
     router = ScriptedRouter()
-    app, fake = _routed_pass_through(monkeypatch, router)
+    app, fake = _routed_pass_through(monkeypatch, router, proxy_credential=lends)
     raw = b'{"name": "mine",   "file_ids": ["file-a"]}'
     async with _client(app) as client:
         response = await client.post("/v1/vector_stores", content=raw, headers={ROUTE_HEADER: "r"})
-    assert response.status_code == 200
-    assert router.checks == [
-        (None, "POST", "/v1/vector_stores", {"name": "mine", "file_ids": ["file-a"]}, True)
-    ]
+    assert response.status_code == 403
+    assert "credential the proxy holds" in response.json()["error"]
+    assert router.checks == []
     (plan,) = fake.plans
-    assert plan.begun[0][0] == raw  # forwarded byte-for-byte
+    assert plan.begun == []  # never begun: no audit row, no hop
 
 
 @pytest.mark.parametrize(
@@ -379,7 +383,7 @@ async def test_a_routed_pass_through_body_is_parsed_for_the_check_only(
     [
         pytest.param(False, True, True, id="client-credential"),
         pytest.param(None, False, True, id="unrouted"),
-        pytest.param(None, True, False, id="no-ownership-check"),
+        pytest.param(False, True, False, id="no-ownership-check"),
     ],
 )
 async def test_other_pass_through_bodies_are_never_parsed(
@@ -403,42 +407,30 @@ async def test_other_pass_through_bodies_are_never_parsed(
 
 
 @pytest.mark.parametrize(
-    ("raw", "headers", "status", "why"),
+    ("raw", "headers"),
     [
-        pytest.param(b'{"a": 1}', {"content-encoding": "gzip"}, 400, "content-encoded", id="gzip"),
+        pytest.param(b'{"a": 1}', {"content-encoding": "gzip"}, id="gzip"),
         pytest.param(
             b'{"a": 1}',
             [("content-encoding", "identity"), ("content-encoding", "identity, br")],
-            400,
-            "content-encoded",
             id="second-encoding-header",
         ),
+        pytest.param(b'{"file_ids": ["file-a"], "file_ids": ["file-b"]}', {}, id="repeated-key"),
         pytest.param(
-            b'{"file_ids": ["file-a"], "file_ids": ["file-b"]}',
-            {},
-            400,
-            "repeats a JSON key",
-            id="repeated-key",
+            b" \n\xef\xbb\xbf" + b'{"file_ids": []' + b" " * 64 + b"}", {}, id="oversized-json"
         ),
-        pytest.param(
-            b" \n\xef\xbb\xbf" + b'{"file_ids": []' + b" " * 64 + b"}",
-            {},
-            413,
-            "max_body_bytes (64)",
-            id="oversized-json",
-        ),
-        pytest.param(
-            b"\x00[" + b"\x00 " * 40 + b"\x00]", {}, 413, "max_body_bytes", id="oversized-utf16"
-        ),
+        pytest.param(b"\x00[" + b"\x00 " * 40 + b"\x00]", {}, id="oversized-utf16"),
+        pytest.param(b"\xff\xfb" + b"\x00" * 200, {}, id="oversized-audio"),
     ],
 )
-async def test_a_body_the_check_cannot_read_is_never_sent_with_the_proxys_credential(
+async def test_no_pass_through_body_is_read_under_the_proxys_credential(
     raw: bytes,
     headers: Any,
-    status: int,
-    why: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Whatever the body — one the check could not read, or one it need not
+    — an unrecognized route under the proxy's credential is refused before
+    the (unbounded) body read: the same recorded 403 for every body."""
     router = ScriptedRouter()
     hop = Hop("x", "http://x.example/v1/vector_stores")
     fake = FakeRouter({"r": [hop, Stop()]})
@@ -452,20 +444,20 @@ async def test_a_body_the_check_cannot_read_is_never_sent_with_the_proxys_creden
     request_headers[ROUTE_HEADER] = "r"
     async with _client(app) as client:
         response = await client.post("/v1/vector_stores", content=raw, headers=request_headers)
-    assert response.status_code == status
-    assert why in response.json()["error"] and "proxy's own provider credential" in response.text
+    assert response.status_code == 403
+    assert "credential the proxy holds" in response.json()["error"]
     assert router.checks == [] and upstream.requests == []
     assert fake.plans[0].begun == []
     (row,) = app.state.proxy.recent
-    assert row["status"] == status and row["provider"] == "openai"
+    assert row["status"] == 403 and row["provider"] == "openai"
 
 
-async def test_an_oversized_body_that_is_not_json_is_forwarded_unchecked(
+async def test_with_the_clients_own_credential_a_pass_through_body_is_forwarded_unread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     router = ScriptedRouter()
     hop = Hop("x", "http://x.example/v1/audio/transcriptions")
-    fake = FakeRouter({"r": [hop, Stop()]})
+    fake = FakeRouter({"r": [hop, Stop()]}, plan_kwargs={"r": {"proxy_credential": False}})
     reg, _ = install(monkeypatch, fake)
     _registry(monkeypatch, router, reg)
     app = create_app(
@@ -477,7 +469,8 @@ async def test_an_oversized_body_that_is_not_json_is_forwarded_unchecked(
             "/v1/audio/transcriptions", content=raw, headers={ROUTE_HEADER: "r"}
         )
     assert response.status_code == 200
-    assert router.checks == [(None, "POST", "/v1/audio/transcriptions", None, True)]
+    assert router.checks == [(None, "POST", "/v1/audio/transcriptions", None, False)]
+    assert fake.plans[0].begun[0][0] == raw  # forwarded byte-for-byte
 
 
 async def test_an_older_router_is_never_asked(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -982,29 +975,45 @@ async def test_an_uploaded_batch_files_lines_are_checked_before_anything_is_sent
     assert row["status"] == 403
 
 
+@pytest.mark.parametrize("detection", [True, False], ids=["detection-on", "detection-off"])
 async def test_an_upload_is_checked_once_with_what_it_cites(
-    monkeypatch: pytest.MonkeyPatch,
+    detection: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The check reads the upload whether or not the route redacts; a CSV
+    # file has no JSON line to cite. Where redaction applies, its lines —
+    # not JSONL — are then refused by the scanned-body rule; detection =
+    # false forwards the upload as sent.
     router = LineRouter()
     upstream = Upstream()
-    app = _app(monkeypatch, router, upstream)
+    app = _app(
+        monkeypatch,
+        router,
+        upstream,
+        providers={"openai": ProviderConfig(UPSTREAM, detection=detection)},
+    )
     async with _client(app) as client:
         response = await client.post(
             "/v1/files",
             files={"file": ("contacts.csv", b"name,email\nada,x\n", "text/csv")},
             data={"purpose": "assistants"},
         )
-    assert response.status_code == 200 and len(upstream.requests) == 1
+    assert response.status_code == (400 if detection else 200)
+    assert len(upstream.requests) == (0 if detection else 1)
     assert router.checks == [("openai", "POST", "/v1/files", [{"purpose": "assistants"}], False)]
 
 
-@pytest.mark.parametrize(("proxy_credential", "status"), [(None, 400), (False, 200)])
+@pytest.mark.parametrize(
+    ("proxy_credential", "detection", "status"),
+    [(None, True, 400), (None, False, 400), (False, True, 400), (False, False, 200)],
+)
 async def test_an_upload_the_check_cannot_read_is_never_sent_with_the_proxys_credential(
-    proxy_credential: bool | None, status: int, monkeypatch: pytest.MonkeyPatch
+    proxy_credential: bool | None, detection: bool, status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A multipart upload outside the canonical grammar is forwarded unread
-    (its lines never reach the check): refused when the routed plan would
-    send it with the proxy's own credential."""
+    """A multipart upload outside the canonical grammar would be forwarded
+    unread (its lines never reach the check): refused when the routed plan
+    would send it with the proxy's own credential, and — the scanned-body
+    rule — wherever redaction applies; forwarded as sent only with the
+    client's own credential and detection = false."""
     router = LineRouter()
     kwargs = {} if proxy_credential is None else {"proxy_credential": proxy_credential}
     fake = FakeRouter(
@@ -1013,8 +1022,9 @@ async def test_an_upload_the_check_cannot_read_is_never_sent_with_the_proxys_cre
     reg, _ = install(monkeypatch, fake)
     _registry(monkeypatch, router, reg)
     upstream = Upstream()
+    openai = ProviderConfig(UPSTREAM, detection=detection)
     app = create_app(
-        routed_config(providers={**Config().providers, "openai": ProviderConfig(UPSTREAM)}),
+        routed_config(providers={**Config().providers, "openai": openai}),
         upstream_transport=httpx.MockTransport(upstream),
     )
     line = json.dumps(_batch_line("file-a")).encode()

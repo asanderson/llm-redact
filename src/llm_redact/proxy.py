@@ -98,6 +98,8 @@ from llm_redact.plugin_api import (
     HopRequest,
     HopResult,
     LocalAnswer,
+    ResponseContext,
+    ResponseObserver,
     RouteDelivery,
     RouteInbound,
     RoutePlan,
@@ -449,7 +451,8 @@ class ProxyState:
         self.upstream_errors: Counter[str] = Counter()
         # Faults in the proxy's own bookkeeping, by stage: after the provider
         # answered, "response_id" / "object_ids" / "listing" are session
-        # bookkeeping (contained — the answer is still delivered, never a
+        # bookkeeping and "response_observer" the router's observation of the
+        # answer (contained — the answer is still delivered, never a
         # wrong value) and "delivery" is restoring the answer itself (a
         # buffered one fails closed with a recorded 502; a stream is cut);
         # before any upstream contact, "vault" is issuing a request's
@@ -495,6 +498,11 @@ class ProxyState:
         self._listing_item_sessions = getattr(self.session_router, "listing_item_sessions", None)
         self._record_object_id = getattr(self.session_router, "record_object_id", None)
         self._sealed = getattr(self.session_router, "sealed", None)
+        # Optional response observation (plugin_api.SessionRouter), read ONCE
+        # like the members above: without it, delivering an answer costs one
+        # test of this flag and no observation code runs.
+        self._response_observer = getattr(self.session_router, "response_observer", None)
+        self.observes_responses = self._response_observer is not None
         self._static_context = RequestContext(
             config.vault.session, self.vault, self.redactor, self.rehydrator
         )
@@ -743,6 +751,22 @@ class ProxyState:
         for object_id in object_ids:
             if record(object_id, session_id) is not False:
                 mirror(object_id, session_id)
+
+    def response_observer(self, context: ResponseContext) -> ResponseObserver | None:
+        """The session router's observer for one upstream answer (optional
+        ``response_observer``), or None: the router declined, has no such
+        member, answered something that cannot be called, or failed — a
+        failure contained like the bookkeeping after an answer (counted,
+        logged by exception type only)."""
+        factory = self._response_observer
+        if factory is None:
+            return None
+        try:
+            observer = factory(context)
+        except Exception as exc:  # noqa: BLE001 — contained by design
+            _bookkeeping_fault(self, _OBSERVER_STAGE, context.method, context.path, exc)
+            return None
+        return observer if callable(observer) else None
 
     @property
     def checks_object_access(self) -> bool:
@@ -1568,6 +1592,7 @@ async def _stream_rehydrated(
     route: RouteDelivery | None = None,
     object_tracker: ProviderAdapter | None = None,
     request_body: Any = None,
+    observe: ResponseObserver | None = None,
 ) -> AsyncIterator[bytes]:
     method, path, started, detections, warned, audit_token = request_meta
     parser = SSEParser()
@@ -1599,6 +1624,8 @@ async def _stream_rehydrated(
                         response_id_seen = True
                 if objects is not None and objects.report(state, ctx, event):
                     objects = None  # nothing more to read from this stream
+                if observe is not None:
+                    observe = _observe(state, observe, method, path, event.data)
                 for out in adapter.rehydrate_event(event, pool):
                     if route is not None:
                         out = route.observe_event(out)
@@ -1606,6 +1633,8 @@ async def _stream_rehydrated(
         for event in parser.close():
             if objects is not None:
                 objects.report(state, ctx, event)
+            if observe is not None:
+                observe = _observe(state, observe, method, path, event.data)
             for out in adapter.rehydrate_event(event, pool):
                 if route is not None:
                     out = route.observe_event(out)
@@ -1740,6 +1769,7 @@ async def _stream_rehydrated_eventstream(
     ctx: RequestContext,
     *,
     request_meta: RequestMeta,
+    observe: ResponseObserver | None = None,
 ) -> AsyncIterator[bytes]:
     """The binary-framing twin of _stream_rehydrated (Bedrock streams).
 
@@ -1768,6 +1798,8 @@ async def _stream_rehydrated_eventstream(
                 yield parser.residual
                 continue
             for frame in frames:
+                if observe is not None:
+                    observe = _observe(state, observe, method, path, frame.payload)
                 for out in adapter.rehydrate_eventstream_message(frame, pool):
                     yield serialize_eventstream(out)
         if not degraded:
@@ -2414,6 +2446,7 @@ async def _stream_rehydrated_ndjson(
     *,
     request_meta: RequestMeta,
     route: RouteDelivery | None = None,
+    observe: ResponseObserver | None = None,
 ) -> AsyncIterator[bytes]:
     """The NDJSON twin of _stream_rehydrated (Ollama streams).
 
@@ -2428,6 +2461,8 @@ async def _stream_rehydrated_ndjson(
     try:
         async for chunk in upstream.aiter_bytes():
             for line in parser.feed(chunk):
+                if observe is not None:
+                    observe = _observe(state, observe, method, path, line)
                 out = adapter.rehydrate_ndjson_line(line, pool)
                 if route is not None:
                     out = route.observe_line(out)
@@ -2436,6 +2471,8 @@ async def _stream_rehydrated_ndjson(
         if tail:
             # A stream that ended without a final newline: the tail may
             # still be one complete JSON object.
+            if observe is not None:
+                observe = _observe(state, observe, method, path, tail)
             out = adapter.rehydrate_ndjson_line(tail, pool)
             if route is not None:
                 out = route.observe_line(out)
@@ -3816,6 +3853,7 @@ async def handle(request: Request) -> Response:
             started=started,
             new_counts=new_counts,
             new_warned=new_warned,
+            identity=proxy_credential,
         )
 
     upstream_base = provider_conf.upstream_base_url  # the admitted config's, not a reload's
@@ -3944,6 +3982,8 @@ async def handle(request: Request) -> Response:
         audit_token=audit_token,
         route=None,
         request_body=parsed,
+        sent_body=outbound_obj,
+        identity=proxy_credential,
         # A following client repeats its ORIGINAL request at the Location:
         # safe to relay only when that carries nothing the proxy protects —
         # no body the proxy redacted (a pass-through body went out verbatim
@@ -4253,6 +4293,8 @@ async def _deliver(
     route: RouteDelivery | None,
     request_body: Any = None,
     relay_redirects: bool = False,
+    sent_body: Any = None,
+    identity: bool = False,
 ) -> Response:
     """Hand an upstream response to the client: the streaming branches
     (chosen by the upstream RESPONSE content-type, never the request's
@@ -4261,7 +4303,10 @@ async def _deliver(
     also run the router's delivery hooks (a rewritten model id restored,
     usage tracked for its budget ledger) and stamp the x-llm-redact-*
     headers. An upstream redirect is relayed only on the unrouted requests
-    ``relay_redirects`` marks (see ``_redirect_refused``)."""
+    ``relay_redirects`` marks (see ``_redirect_refused``). A session router
+    with the optional ``response_observer`` observes the answer as the
+    provider sent it (``sent_body``: the request body as sent upstream;
+    ``identity``: a credential the proxy holds was spent)."""
     if _is_redirect(upstream) and not (relay_redirects and route is None):
         await upstream.aclose()
         return _redirect_refused(
@@ -4282,6 +4327,22 @@ async def _deliver(
     if route is not None:
         headers.update(route.headers)
     request_meta = RequestMeta(request.method, path, started, new_counts, new_warned, audit_token)
+    observe = (
+        state.response_observer(
+            ResponseContext(
+                adapter.name if adapter is not None else None,
+                request.method,
+                path,
+                upstream.status_code,
+                content_type,
+                sent_body,
+                ctx.session_id,
+                identity,
+            )
+        )
+        if state.observes_responses
+        else None
+    )
 
     if kind is RouteKind.CHAT and adapter is not None and "text/event-stream" in content_type:
         return StreamingResponse(
@@ -4305,6 +4366,7 @@ async def _deliver(
                     else None
                 ),
                 request_body=request_body,
+                observe=observe,
             ),
             status_code=upstream.status_code,
             headers=headers,
@@ -4320,7 +4382,7 @@ async def _deliver(
         # Bedrock only — never a routed protocol, so no route wrapper.
         return StreamingResponse(
             _stream_rehydrated_eventstream(
-                upstream, adapter, state, ctx, request_meta=request_meta
+                upstream, adapter, state, ctx, request_meta=request_meta, observe=observe
             ),
             status_code=upstream.status_code,
             headers=headers,
@@ -4335,7 +4397,13 @@ async def _deliver(
     ):
         return StreamingResponse(
             _stream_rehydrated_ndjson(
-                upstream, adapter, state, ctx, request_meta=request_meta, route=route
+                upstream,
+                adapter,
+                state,
+                ctx,
+                request_meta=request_meta,
+                route=route,
+                observe=observe,
             ),
             status_code=upstream.status_code,
             headers=headers,
@@ -4363,6 +4431,7 @@ async def _deliver(
         )
     await upstream.aclose()
 
+    received = raw  # the provider's own bytes: what an observer reads
     rehydration_counts_before = dict(state.rehydration_counts)
     try:
         raw = _restore_buffered(
@@ -4392,6 +4461,8 @@ async def _deliver(
             audit_token=audit_token,
             route=route,
         )
+    if observe is not None and received and "application/json" in content_type:
+        _observe(state, observe, request.method, path, received)
 
     # Every request is recorded — pass-through included (provider=None maps
     # to the "passthrough" metrics label); audit rows likewise when enabled.
@@ -4652,16 +4723,46 @@ def _contained(
     try:
         bookkeeping(*args)
     except Exception as exc:  # noqa: BLE001 — contained by design, see above
-        state.bookkeeping_errors[stage] += 1
-        logger.warning(
-            "%s %s -> %s bookkeeping failed (%s); the answer is delivered",
-            method,
-            path,
-            stage,
-            type(exc).__name__,
-        )
+        _bookkeeping_fault(state, stage, method, path, exc)
         return False
     return True
+
+
+def _bookkeeping_fault(
+    state: ProxyState, stage: str, method: str, path: str, exc: Exception
+) -> None:
+    """Count and log one contained bookkeeping fault: the stage and the
+    exception TYPE only."""
+    state.bookkeeping_errors[stage] += 1
+    logger.warning(
+        "%s %s -> %s bookkeeping failed (%s); the answer is delivered",
+        method,
+        path,
+        stage,
+        type(exc).__name__,
+    )
+
+
+# The bookkeeping stage a session router's response observer faults count in.
+_OBSERVER_STAGE = "response_observer"
+
+
+def _observe(
+    state: ProxyState, observe: ResponseObserver, method: str, path: str, data: bytes | str
+) -> ResponseObserver | None:
+    """Hand ``observe`` its OWN parse of one JSON value of the provider's
+    answer (``data``: a buffered body, an SSE event's data, an NDJSON line,
+    an eventstream frame's payload) — before rehydration, and never the
+    object the client's answer is built from, so the observer can change
+    nothing the client receives. What is not JSON (or nests deeper than
+    MAX_JSON_DEPTH) is skipped. Returns ``observe``, or None once it failed:
+    the fault is contained (``_contained``) and that answer is observed no
+    further."""
+    try:
+        payload = loads_bounded(data)
+    except ValueError:
+        return observe
+    return observe if _contained(state, _OBSERVER_STAGE, method, path, observe, payload) else None
 
 
 def _delivery_fault_response(
@@ -5095,6 +5196,7 @@ async def _handle_routed(
     started: float,
     new_counts: dict[str, int],
     new_warned: dict[str, int],
+    identity: bool = False,
 ) -> Response:
     """The routed request path: the router's pre-audit refusal, the
     write-ahead audit START row, the first hop, then issue/decide until the
@@ -5206,6 +5308,8 @@ async def _handle_routed(
         audit_token=audit_token,
         route=route,
         request_body=outbound_obj,
+        sent_body=outbound_obj,
+        identity=identity,
     )
 
 

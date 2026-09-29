@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import re
+from typing import Any
 
 import pytest
 
@@ -172,6 +173,11 @@ DATACLASSES: dict[str, str] = {
         " fault: 'str | None') -> None"
     ),
     "HopDecision": "(next: 'HopRequest | None', wait_seconds: 'float' = 0.0) -> None",
+    "ResponseContext": (
+        "(adapter_name: 'str | None', method: 'str', path: 'str', status: 'int',"
+        " content_type: 'str', request_body: 'Any', session_id: 'str', identity: 'bool')"
+        " -> None"
+    ),
     "LocalAnswer": (
         "(status: 'int', body: 'Mapping[str, Any]', provider: 'str', reason: 'str') -> None"
     ),
@@ -191,6 +197,8 @@ ALL: tuple[str, ...] = (
     "LocalAnswer",
     "MAX_RESPONSE_ROWS",
     "RESPONSE_PRUNE_EVERY",
+    "ResponseContext",
+    "ResponseObserver",
     "RouteDelivery",
     "RouteInbound",
     "RouteKind",
@@ -284,6 +292,14 @@ def test_db_password_provider_alias_is_snapshotted() -> None:
     assert plugin_api.DbPasswordProvider == Callable[[], str]
 
 
+def test_response_observer_alias_is_snapshotted() -> None:
+    # What the optional SessionRouter.response_observer returns: called with
+    # each JSON value of one answer as the provider sent it.
+    from collections.abc import Callable
+
+    assert plugin_api.ResponseObserver == Callable[[Any], None]
+
+
 # Protocol name -> the OPTIONAL members its docstring documents (read via
 # getattr by the core, so they are not Protocol methods). Pinned as the
 # documented call shapes, whitespace-normalized: renaming or re-shaping one
@@ -295,6 +311,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``object_access_refusal(adapter_name, method, path, body, *, identity) -> str | None``",
         "``sealed(session_id) -> bool | str``",
         "``listing_item_session(object_id) -> str | None``",
+        "``response_observer(context) -> ResponseObserver | None``",
     ),
 }
 

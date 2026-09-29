@@ -101,35 +101,87 @@ class SessionRouter(Protocol):
     (uploaded files, batches, message batches, stored conversations — see
     ``ProviderAdapter.object_ids_from_body``) with the session that created
     them, so a router can keep another user's later read of that object out
-    of the creator's namespace. ``False`` vetoes the durable mirror, as for
-    response ids; a router without the member is never called.
+    of the creator's namespace. Reported in EVERY ``mode`` (static
+    included: a router may serve unattributed traffic on the static path
+    and still need to know what that shared session created). ``False``
+    vetoes the durable mirror, as for response ids; a router without the
+    member is never called.
 
     OPTIONAL ``object_access_refusal(adapter_name, method, path, body, *,
     identity) -> str | None``: asked once for EVERY forwarded HTTP request
-    (matched or pass-through; ``body`` is the parsed request body, None for
-    pass-through and non-JSON bodies) after admission and before the audit
-    START row, redaction, any upstream credential and any upstream contact
-    — whatever the router's ``mode``. ``identity`` is True when the target
-    provider is authorized with the proxy's OWN cloud identity
-    (``[providers.NAME] auth = "identity"``), so every forwarded request
-    spends a principal the client never presented. A string refuses the
+    (matched or pass-through) after admission and the routing layer's
+    ``plan`` (a plan is only ever begun after this answer) and before the
+    audit START row, redaction, any upstream credential and any upstream
+    contact — whatever the router's ``mode``. ``identity`` is True when the
+    request reaches its provider with a credential the PROXY holds, so
+    every client is one principal upstream and the request spends one it
+    never presented: the provider is authorized with the proxy's own cloud
+    identity (``[providers.NAME] auth = "identity"``), or the request is
+    routed and its plan may send an operator key or no key at all
+    (``RoutePlan.proxy_credential``). ``body`` is the parsed request body —
+    None for a body that is neither JSON nor an upload, and for
+    pass-through routes unless the request is sent with the proxy's
+    credential: then a JSON body is parsed for this check alone (still
+    forwarded byte-for-byte). A multipart/form-data upload is read for this
+    check alone (``upload_view``) — on a matched route whatever the
+    credential and whether or not it redacts (``detection``), on a
+    pass-through route under the proxy's credential — and ``body`` is then
+    a LIST of what it cites: each JSON-object line of its file parts (a
+    batch input file's requests run later, with the credential the upload
+    is sent with) and each form field as an object nested along its name
+    (``file_ids[]`` → ``{"file_ids": [value]}``). Under the proxy's
+    credential a body the check cannot read is refused before this is
+    asked: content-encoded, more than one Content-Type, JSON repeating a
+    key (a pass-through body; a matched one is re-serialized as checked),
+    JSON beyond ``max_body_bytes``, or an upload outside the canonical
+    grammar, with a transfer encoding, a form field that is not UTF-8
+    text, or more JSON than ``max_body_bytes``. A string refuses the
     request with a recorded, provider-shaped 403 carrying exactly that
     text: a FIXED reason chosen by the router, never an object id, a user
     name or content. None forwards. An exception refuses too (fail closed;
     logged by exception type only). A router without the member is never
     asked, and one that keeps no ownership should return None at once.
 
+    OPTIONAL ``sealed(session_id) -> bool | str``: asked right after
+    ``resolve`` (so never in static mode, where nothing is resolved) with
+    the session the request was resolved to. True — or a non-empty string,
+    the fixed refusal reason the router chooses (never an id or content) —
+    means that session must stay EMPTY: the proxy reads it for
+    rehydration, but redacting anything into it is refused — an HTTP
+    request with a value to redact gets a recorded, provider-shaped 403
+    (with the router's reason, else the core's) before any upstream
+    contact (nothing is written), a realtime connection is refused
+    outright. A router uses it where it resolves a request to an empty
+    session because what the request reads has another (or no confirmed)
+    owner, or lives on provider-side where this proxy no longer knows it:
+    whatever the request itself sent would otherwise share placeholder
+    names with what it reads. An exception seals; a router without the
+    member never seals.
+
     OPTIONAL ``listing_item_session(object_id) -> str | None``: for a 2xx
     listing of stored objects (``ProviderAdapter.lists_objects`` /
     ``listing_items`` — OpenAI-shaped ``{"object": "list", "data": [...]}``
     collections of files, batches, video jobs and stored chat completions),
     the vault session each listed item's placeholders should be restored
-    in. The proxy rehydrates that item — as a whole object, from the bytes
-    the provider sent — in the named session only when the session already
-    exists in the vault (it never creates one) and leaves every other item
-    as the request's own session delivers it. None (or an exception) leaves
-    the item alone. A listing never records ownership: nothing here reaches
-    ``record_object_id``.
+    in. The proxy rebuilds that item from the bytes the provider sent and
+    rehydrates it, as a whole object, in the named session — only when
+    that session exists and holds mappings (the proxy never creates one)
+    and, with a vault that keeps a durable response map, only when that
+    map still records the object in exactly that session (a session pruned
+    and recreated since the object was created holds NEW values under the
+    same token names). Otherwise the item keeps the provider's placeholders
+    — name an empty session to keep an item OUT of the request's own
+    session (a router that separates namespaces does so for every item it
+    cannot vouch for: the request's own session may hold other values
+    under the same token names). None leaves the item as the request's own
+    session delivers it. An exception delivers the item exactly as the
+    provider sent it: a router that cannot answer vouches for nothing. A
+    listing never records ownership: nothing here reaches
+    ``record_object_id``. OPTIONAL batched form
+    ``listing_item_sessions(object_ids) -> Sequence[str | None]``, one
+    answer per id in order, asked ONCE per listing instead when present (a
+    router can then read its own records in one query); an exception or a
+    miscounted answer delivers EVERY item exactly as the provider sent it.
 
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the
@@ -316,7 +368,18 @@ class RoutePlan(Protocol):
     hop's httpx timeout from it. ``wait`` is the sleep the core awaits for a
     positive ``wait_seconds`` (injectable by the router's tests). Every
     decision is made on response HEADERS; the core never sends a byte to the
-    client before ``decide`` returned ``next = None``.
+    client before ``decide`` returned ``next = None``. A plan is created
+    before the stored-object check and redaction, and may be abandoned
+    before ``begin`` (a refusal) without the router being told.
+
+    OPTIONAL ``proxy_credential: bool``, read via ``getattr``: whether any
+    upstream this plan may send the request to — the first, or a fallback
+    chain member — attaches a credential the PROXY holds (an operator key)
+    or none at all, instead of forwarding the client's own: every client is
+    then one principal upstream, so the session router's
+    ``object_access_refusal`` is asked with ``identity=True``. A plan
+    without the member counts as True (fail closed); only an explicit
+    False says the client's own credential is what the provider sees.
     """
 
     inject_system_note: bool

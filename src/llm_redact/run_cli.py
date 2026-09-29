@@ -20,7 +20,7 @@ import sys
 import time
 from types import FrameType
 
-from llm_redact.config import apply_env_overrides, load_config
+from llm_redact.config import apply_env_overrides, dial_url, load_config
 from llm_redact.init_cli import TOOL_EXPORTS
 
 _READY_TIMEOUT_SECONDS = 15.0
@@ -69,7 +69,8 @@ def _proxy_running(base_url: str, timeout: float = 1.0) -> bool:
 
     try:
         return httpx.get(_status_url(base_url), timeout=timeout).status_code == 200
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
+        # InvalidURL is no HTTPError: nothing answers at a host no URL carries.
         return False
 
 
@@ -142,7 +143,9 @@ def run_run(args: argparse.Namespace) -> int:
             # safely — point at it with an https LLM_REDACT_PROXY_URL instead.
             print("llm-redact run supports plain-http loopback proxies only ([tls] is set)")
             return 2
-        base_url = f"http://{config.host}:{port}"
+        # Loopback for a wildcard bind, an IPv6 literal in brackets: the URL
+        # the wrapped tools can actually dial.
+        base_url = dial_url(config.host, port)
 
         if _proxy_running(base_url):
             origin = "already running"

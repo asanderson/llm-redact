@@ -51,7 +51,8 @@ llm-redact-pro dashboard's config editor:
    editable surface is the hot-reloadable one: [detection] enabled
    rules, modes, deny strings, allowlists, languages, custom rules and
    validators, [detection.ner], [providers.*] (enabled, detection,
-   upstreams, custom providers), [rehydration], max_body_bytes. The
+   upstreams, custom providers), [rehydration], max_body_bytes,
+   max_body_strings. The
    routing sections — [upstreams.*], [routing], [[routing.rule]],
    [prices] (the llm-redact-pro routing guide) — hot-apply through this
    same file flow (the llm-redact-pro web editor refuses them); a chain

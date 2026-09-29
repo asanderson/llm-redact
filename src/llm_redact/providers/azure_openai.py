@@ -14,10 +14,11 @@ would route Azure traffic to api.openai.com.
 
 Covered beyond chat: legacy completions, embeddings, image generation/edit
 prompts and text-to-speech input on both path families; Files (multipart
-JSONL upload, batch-output download) and Batches; the v1 Conversations item
-store; and the model/deployment/file listings — recognized (REDACT_ONLY, a
-no-op on a body-less GET) so that ``[providers.azure] auth = "identity"``,
-which forwards only recognized routes, does not refuse them.
+JSONL upload with its filename, batch-output download, and the file list and
+objects that echo the filename) and Batches; the v1 Conversations item
+store; and the model/deployment listings — recognized (REDACT_ONLY, a no-op
+on a body-less GET) so that ``[providers.azure] auth = "identity"``, which
+forwards only recognized routes, does not refuse them.
 """
 
 import re
@@ -64,22 +65,21 @@ class AzureOpenAIAdapter(OpenAIAdapter):
 
     def matches(self, method: str, path: str) -> RouteKind:
         # The content routes (chat, completions, embeddings, media, Files
-        # upload/download, Conversations) are classified as the OpenAI
-        # adapter classifies them. The rest does NOT mirror OpenAI, which
-        # leaves them as pass-through: file list/metadata/delete, the batch
+        # upload/download and file objects, Conversations) are classified as
+        # the OpenAI adapter classifies them. The rest does NOT mirror OpenAI,
+        # which leaves them as pass-through: file delete, the batch
         # routes, model/deployment listings and conversation delete are
         # RECOGNIZED here, because a provider authorized with the proxy's own
         # identity forwards only recognized routes, and Azure is one of the
         # three that can be. On a body-less request REDACT_ONLY is a no-op,
         # so a key-authorized setup forwards the same bytes it did before.
-        # Batch create/cancel and a single batch's GET are CHAT (the batch
-        # object echoes the creator's own `metadata`); the batch COLLECTION
-        # GET is REDACT_ONLY: a list spans batches other users created, and
-        # restoring their placeholders in the READER's vault namespace
-        # (llm-redact-pro named users) could hand one user a value bound in
-        # another's — the list passes through unrestored instead, except for
-        # items a session router attributes (`listing_item_session`), each
-        # restored in the session that created it.
+        # Batch create/cancel, a single batch's GET and the batch list are
+        # CHAT (batch objects echo the creator's own `metadata`). The list
+        # is restored in the request's own session: one shared namespace
+        # holds every batch's tokens, and llm-redact-pro resolves a named
+        # user's listing to an EMPTY session, then restores only the items
+        # that user created (`listing_item_session`) — never another
+        # user's placeholder in the reader's namespace.
         if method == "POST":
             return self._match_post(path)
         if method == "GET":
@@ -96,8 +96,10 @@ class AzureOpenAIAdapter(OpenAIAdapter):
         if match is not None:
             return RouteKind.CHAT if match.group(1) in _CHAT_ROUTES else RouteKind.REDACT_ONLY
         if _AZURE_FILES.fullmatch(path):
-            # Multipart upload; the JSONL hooks are inherited verbatim.
-            return RouteKind.REDACT_ONLY
+            # Multipart upload; the JSONL and filename hooks are inherited
+            # verbatim. The file object answering it echoes the redacted
+            # filename: restored, as on OpenAI's /v1/files.
+            return RouteKind.CHAT
         if _AZURE_BATCH_COLLECTION.fullmatch(path) or _AZURE_BATCH_CANCEL.fullmatch(path):
             # Batch create carries file ids and user `metadata`, which the
             # batch object echoes on every read: redacted out, restored back.
@@ -108,8 +110,6 @@ class AzureOpenAIAdapter(OpenAIAdapter):
 
     @staticmethod
     def _match_get(path: str) -> RouteKind:
-        if _AZURE_BATCH_COLLECTION.fullmatch(path):
-            return RouteKind.REDACT_ONLY  # the list: only attributed items restored
         if (
             _AZURE_FILE_CONTENT.fullmatch(path)
             or _AZURE_BATCHES.fullmatch(path)
@@ -118,11 +118,11 @@ class AzureOpenAIAdapter(OpenAIAdapter):
             # Batch output JSONL, batch objects (echoed metadata), stored
             # conversation items: content restored.
             return RouteKind.CHAT
-        if (
-            _AZURE_FILES.fullmatch(path)
-            or _AZURE_FILE_ITEM.fullmatch(path)
-            or _AZURE_METADATA.fullmatch(path)
-        ):
+        if _AZURE_FILES.fullmatch(path) or _AZURE_FILE_ITEM.fullmatch(path):
+            # The file list and a file's metadata echo the redacted upload
+            # filename: restored, as on OpenAI's /v1/files.
+            return RouteKind.CHAT
+        if _AZURE_METADATA.fullmatch(path):
             return RouteKind.REDACT_ONLY
         return RouteKind.NONE
 

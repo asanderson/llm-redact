@@ -18,8 +18,8 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from llm_redact.config import apply_env_overrides, load_config
-from llm_redact.placeholders import canonicalize
+from llm_redact.config import apply_env_overrides, dial_url, load_config
+from llm_redact.placeholders import MAX_TOKEN_NUMBER, canonicalize
 from llm_redact.vault import VaultKeyError, default_vault_path
 
 if TYPE_CHECKING:
@@ -371,12 +371,15 @@ def _lookup_by_value(
 
 
 def run_vault_verify(args: argparse.Namespace) -> int:
-    """Read-only integrity sweep. Checks the cardinal counter invariant
-    (n is exactly 1..N per session/type — a gap would let MAX(n)+1 reissue a
-    live number for a different value) and, for encrypted vaults, that every
-    ciphertext decrypts and every MAC index matches its plaintext. Never
-    prints a stored value — sessions, types, and counts only. Safe against a
-    running proxy (WAL readers)."""
+    """Read-only integrity sweep. Checks the counter invariant every row
+    must hold (its number is in 1..MAX_TOKEN_NUMBER and its token is exactly
+    «TYPE_NNN» for its own type and number — the UNIQUE constraints already
+    bar a reused number, so MAX(n) then truly bounds what was issued) and,
+    for encrypted vaults, that every ciphertext decrypts and every MAC index
+    matches its plaintext. Gaps in the numbering are reported but are not a
+    fault: a request's token floor numbers new values past the tokens it
+    carries. Never prints a stored value — sessions, types, and counts
+    only. Safe against a running proxy (WAL readers)."""
     rdbms = _rdbms_config(args)
     if rdbms is not None:
         print(
@@ -406,19 +409,35 @@ def run_vault_verify(args: argparse.Namespace) -> int:
 
     failed = False
 
-    # Counter density: UNIQUE(session,type,n) already bars duplicates; this
-    # catches GAPS (a hand-deleted row) that break the 1..N invariant.
-    bad_density = conn.execute(
-        "SELECT session_id, detector_type, MIN(n), MAX(n), COUNT(*) FROM mappings"
-        " GROUP BY session_id, detector_type HAVING MAX(n) != COUNT(*) OR MIN(n) != 1"
+    # Counter integrity: UNIQUE(session,type,n) already bars a reused number;
+    # this catches a row whose number is out of range or disagrees with its
+    # own token — MAX(n), the next number's base, would then misstate what
+    # the session issued. printf('%03d') renders n exactly as the vault does.
+    bad_rows = conn.execute(
+        "SELECT session_id, detector_type, n FROM mappings"
+        " WHERE n < 1 OR n > ?"
+        " OR placeholder != '«' || detector_type || '_' || printf('%03d', n) || '»'",
+        (MAX_TOKEN_NUMBER,),
     ).fetchall()
-    if bad_density:
+    if bad_rows:
         failed = True
-        print(f"  FAIL counter density: {len(bad_density)} (session,type) group(s) not 1..N")
-        for session_id, detector_type, lo, hi, count in bad_density[:10]:
-            print(f"       {session_id} / {detector_type}: n in [{lo}..{hi}], count {count}")
+        print(f"  FAIL counter integrity: {len(bad_rows)} row(s) whose number and token disagree")
+        for session_id, detector_type, n in bad_rows[:10]:
+            print(f"       {session_id} / {detector_type}: n = {n}")
     else:
-        print("  PASS counter density (n is 1..N per session/type)")
+        print("  PASS counter integrity (each token matches its own number; none reused)")
+    # Gaps are expected, never a fault: a request carrying tokens its
+    # session never issued (a compacted history, a pasted answer) has its new
+    # values numbered past them. Reported so a hand-deleted row stays visible.
+    gapped = conn.execute(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM mappings GROUP BY session_id, detector_type"
+        " HAVING MAX(n) != COUNT(*))"
+    ).fetchone()[0]
+    if gapped:
+        print(
+            f"  note: {gapped} (session,type) group(s) skip numbers — token floors (numbers a"
+            " request's own tokens held), or a deleted row; never a reuse"
+        )
 
     if cipher is not None:
         checked = decrypt_fail = mac_fail = 0
@@ -467,11 +486,11 @@ def _proxy_reachable(args: argparse.Namespace) -> bool:
     from llm_redact.proxy import RESERVED_PREFIX
 
     scheme = "https" if config.tls.enabled else "http"
-    url = f"{scheme}://{config.host}:{config.port}{RESERVED_PREFIX}/status"
+    url = f"{dial_url(config.host, config.port, scheme=scheme)}{RESERVED_PREFIX}/status"
     try:
         httpx.get(url, timeout=1.0).raise_for_status()
         return True
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return False
 
 

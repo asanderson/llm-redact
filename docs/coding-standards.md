@@ -57,7 +57,10 @@ that weakens one will be rejected regardless of how clean it looks.
   than error.
 - **Never a wrong value.** A token is only ever restored from the session that
   owns it; a miss passes through verbatim. Vault writes fail closed and roll
-  back; counters are dense so a retry reissues the *same* number.
+  back; the next number is computed fresh inside the write, so a retry
+  reissues the *same* number, and a new value is numbered above every token
+  its request already carries (the token floor) so no name gains a second
+  meaning.
 - **Never log or echo secrets.** Log lines carry paths, statuses, and detection
   counts — never header values, body content, query strings, DSNs, keys, or the
   matched secrets. **Error messages name positions or types, never values.**

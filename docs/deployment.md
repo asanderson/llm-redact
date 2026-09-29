@@ -35,6 +35,13 @@ exists for exactly one confined case: a container that binds `0.0.0.0`
 *inside its own network namespace* while the operator publishes it to
 loopback only. Setting it anywhere else is on you.
 
+The client-side commands on the proxy's own machine (`llm-redact status`,
+`doctor`, `run`, the `plugin install` probe and `vault rotate-key`'s
+liveness check) reach it at the configured `host`: a wildcard bind
+(`0.0.0.0`, `::`, or empty) at loopback — `127.0.0.1`, or `[::1]` for `::`
+— and an IPv6 literal in brackets (`http://[::1]:8787`). `run` exports that
+same URL to the tools it wraps.
+
 **Default deployment (recommended): loopback.** Point the tool's base URL
 at `http://127.0.0.1:8787` (or use `llm-redact run -- <tool>`, which
 injects the right env vars). Nothing else to configure.
@@ -88,6 +95,48 @@ and standalone modes, optional HPA autoscaling) at
 `deploy/helm/llm-redact/` — its `NOTES.txt` and `values.yaml` document
 the modes and guardrails.
 
+## Host names the proxy answers to (`allowed_hosts`)
+
+Any web page in your browser can send requests to the proxy on
+127.0.0.1 (see the threat model's "Requests from web pages"). Before any
+upstream contact the proxy refuses — HTTP 403, WebSocket close 1008:
+
+- a **browser request** (one carrying `Origin` or a `Sec-Fetch-*` header)
+  from another origin or site, or addressed to a host name the proxy does
+  not answer to (DNS rebinding); and
+- a request that would **spend a credential the proxy holds**
+  (`[providers.NAME] auth = "identity"`, or a routed upstream with an
+  operator key or no key) addressed over plain HTTP to a host name the
+  proxy does not answer to.
+
+The proxy answers to `127.0.0.1`, `localhost`, `::1`, its bind host and,
+with llm-redact-pro's access gate, the gate's public origin. When clients
+reach a plain-HTTP proxy under another name AND it spends its own
+credential, list those names:
+
+```toml
+allowed_hosts = ["llm-redact", "llm-redact.team.svc.cluster.local"]
+```
+
+- A top-level key (before any `[table]`), restart-only. Names only: no
+  scheme, port, path or wildcard; IP literals are accepted.
+- Typical names: a compose service, `host.docker.internal` (a devcontainer
+  reaching a proxy on the host), a Kubernetes Service. The Helm chart's
+  standalone mode lists its own Service's in-cluster names; its
+  `allowedHosts` value adds more.
+- Not needed for CLI tools and SDKs on their own credential (they send no
+  browser markers, so any name works), for loopback clients, or for a TLS
+  listener: a browser verifies the proxy's certificate against the name it
+  resolved, so a rebound page cannot reach it, and clients may use any
+  name the certificate covers.
+- `llm-redact doctor` reports the configured names, and WARNs when a
+  non-loopback plain-HTTP bind spends a proxy-held credential with none
+  listed. `/status` counts refusals by kind in
+  `request_origin_refusals_total` (`host`, `origin`, `fetch_site`).
+- A browser-based client served from another origin (a web chat UI, a
+  browser extension, an Electron renderer) is refused by design: it cannot
+  be told apart from a malicious page.
+
 ## Service management (native installs)
 
 `llm-redact service install` writes a per-user launchd (macOS) or systemd
@@ -105,10 +154,14 @@ own restarts and log retention:
 
 Config changes apply on **SIGHUP** without dropping in-flight requests
 (`kill -HUP $(pgrep -f 'llm-redact serve')`, or `docker kill
---signal=HUP`). Detection rules, allowlists, NER, fuzzy rehydration, note
-injection, `max_body_bytes`, upstream URLs, and the routing sections
+--signal=HUP`). A request keeps the configuration it was admitted under:
+its provider's upstream and authorization mode (`auth`, the authorizer
+it holds) are read once, before its body, so a reload that lands while a
+body is still arriving never signs a pass-through request with the
+proxy's identity. Detection rules, allowlists, NER, fuzzy rehydration, note
+injection, `max_body_bytes`, `max_body_strings`, upstream URLs, and the routing sections
 `[upstreams]`/`[routing]`/`[prices]` (llm-redact-pro) hot-reload; vault, audit,
-host, port, log, TLS, OTel, users, and email changes warn "require restart"
+host, port, allowed_hosts, log, TLS, OTel, users, and email changes warn "require restart"
 and keep the old value; so do sections a plugin adds, such as llm-redact-pro's
 `[auth]`. A broken config file is logged and ignored — the running config
 stays live. There is deliberately no HTTP reload endpoint (it would be a
@@ -131,11 +184,15 @@ silently rehydrate the *wrong* secret. Treat it accordingly.
   *through* the WAL, so it is safe against a running proxy and cannot tear
   a mapping the way `cp vault.db` can. The destination is created `0600`.
 - **Verify integrity.** `llm-redact vault verify` is a read-only sweep:
-  it checks that token numbers are dense (`1..N` per session/type — a gap
-  is what would let a reissue collide) and, for encrypted vaults, that
+  it checks that every row's token matches its own number (in
+  `1..999999999`; the UNIQUE constraints already bar a reused number, so
+  `MAX(n)` truly bounds what was issued) and, for encrypted vaults, that
   every ciphertext decrypts and every HMAC index matches its plaintext.
-  It prints sessions/types/counts only, never a value, and exits non-zero
-  on any failure. Run it after a restore or before a key rotation.
+  Gaps in the numbering are noted, not failed: a request carrying tokens
+  its session never issued has its new values numbered past them (the
+  token floor). It prints sessions/types/counts only, never a value, and
+  exits non-zero on any failure. Run it after a restore or before a key
+  rotation.
 - **Bound growth.** `[vault] session_ttl_days = N` prunes whole sessions
   idle longer than N days via a background task (never the active
   session, nor a session the session router marks durable, such as a

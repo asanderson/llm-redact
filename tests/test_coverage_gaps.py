@@ -90,12 +90,12 @@ def test_legacy_routes_and_note_suppression() -> None:
 
 def test_azure_files_routes_and_raw_delegation() -> None:
     adapter = AzureOpenAIAdapter()
-    assert adapter.matches("POST", "/openai/files") is RouteKind.REDACT_ONLY
+    assert adapter.matches("POST", "/openai/files") is RouteKind.CHAT
     assert adapter.matches("GET", "/openai/files/file_a/content") is RouteKind.CHAT
     # Recognized since the identity-auth route survey (so auth = "identity"
-    # does not refuse them): file metadata is a body-less REDACT_ONLY no-op,
-    # a batch object echoes user metadata and is restored like CHAT.
-    assert adapter.matches("GET", "/openai/files/file_a") is RouteKind.REDACT_ONLY
+    # does not refuse them): a file object echoes the redacted filename and
+    # a batch object echoes user metadata — both restored like CHAT.
+    assert adapter.matches("GET", "/openai/files/file_a") is RouteKind.CHAT
     assert adapter.matches("POST", "/openai/batches") is RouteKind.CHAT
     assert adapter.matches("PUT", "/openai/files/file_a") is RouteKind.NONE
     vault = InMemoryVault()
@@ -108,7 +108,7 @@ def test_azure_files_routes_and_raw_delegation() -> None:
 def test_openai_adapter_defers_anthropic_files_by_header() -> None:
     adapter = OpenAIAdapter()
     plain = adapter.matches_request("POST", "/v1/files", {"authorization": "Bearer x"})
-    assert plain is RouteKind.REDACT_ONLY
+    assert plain is RouteKind.CHAT
     deferred = adapter.matches_request(
         "POST", "/v1/files", {"anthropic-version": "2023-06-01", "x-api-key": "k"}
     )

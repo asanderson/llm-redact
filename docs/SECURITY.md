@@ -36,6 +36,9 @@ boundary is *tested* — the attacker-scenario → coverage map — is in
 error responses; redaction bypasses on covered body shapes; cross-session
 placeholder restoration; vault files created with permissive modes;
 `/__llm-redact/*` endpoints reachable cross-origin or forwarded upstream;
+a web page able to drive an API route or a realtime connection through the
+proxy (CSRF, DNS rebinding, cross-site WebSocket) — spending a credential
+the proxy holds or reading rehydrated values back;
 at-rest encryption not actually encrypting.
 
 **Out of scope (documented limitations, not vulnerabilities)**: plaintext

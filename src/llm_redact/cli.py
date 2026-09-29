@@ -13,7 +13,9 @@ from llm_redact.config import (
     Config,
     ConfigError,
     apply_env_overrides,
+    dial_url,
     load_config,
+    url_host,
     validate_bind_security,
 )
 
@@ -438,14 +440,12 @@ def main(argv: list[str] | None = None) -> None:
 
         scheme = "https" if config.tls.enabled else "http"
         logging.getLogger("llm_redact").info(
-            "llm-redact %s serving on %s://%s:%d — status %s://%s:%d/__llm-redact/status",
+            "llm-redact %s serving on %s://%s:%d — status %s/__llm-redact/status",
             __version__,
             scheme,
-            config.host,
+            url_host(config.host),
             config.port,
-            scheme,
-            "127.0.0.1" if config.host == "0.0.0.0" else config.host,
-            config.port,
+            dial_url(config.host, config.port, scheme=scheme),
         )
         app = create_app(config, config_path=args.config)
         exposure = identity_exposure_warning(app.state.proxy, config.host)
@@ -664,7 +664,9 @@ def run_status(args: argparse.Namespace) -> int:
     else:
         port = args.port if args.port is not None else config.port
         scheme = "https" if config.tls.enabled else "http"
-        base = f"{scheme}://{config.host}:{port}"
+        # The address the configured bind is reached at: loopback for a
+        # wildcard bind, an IPv6 literal in brackets.
+        base = dial_url(config.host, port, scheme=scheme)
     url = f"{base}{RESERVED_PREFIX}/status"
     request_kwargs: dict[str, Any] = {"timeout": 5.0}
     if base.startswith("https://"):
@@ -678,12 +680,14 @@ def run_status(args: argparse.Namespace) -> int:
     try:
         response = httpx.get(url, **request_kwargs)
         response.raise_for_status()
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
         # Never echo the raw exception verbatim: httpx.HTTPStatusError embeds
         # the full request URL, which may carry a /u/<key> identity credential
         # from LLM_REDACT_PROXY_URL. Report the netloc + a URL-free reason
         # (the `run` command's scheme://netloc discipline). Fail closed if the
-        # message somehow still contains the URL path.
+        # message somehow still contains the URL path. InvalidURL (a host no
+        # URL can carry) is no HTTPError: reported the same way, never a
+        # traceback.
         if isinstance(exc, httpx.HTTPStatusError):
             detail = f"HTTP {exc.response.status_code}"
         else:

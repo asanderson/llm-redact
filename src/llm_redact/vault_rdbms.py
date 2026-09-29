@@ -9,11 +9,12 @@ bounded retry, which is the SqliteVault recipe generalized to any engine.
 
 Semantics mirror SqliteVault and are pinned by the same invariant battery
 (tests/test_vault_rdbms.py): deterministic (session, type, value) → token,
-dense per-(session, type) counters (n is MAX(n)+1 read fresh inside the
-transaction, so a rolled-back allocation reissues the SAME number — reuse
-is the danger, gaps would come from counters tables, which is why there is
-none), caches written only after COMMIT, any write fault rolls back and
-fails closed, whole-session prune only.
+per-(session, type) counters that never reuse a number (n is
+max(MAX(n), floor)+1 with MAX(n) read fresh inside the transaction, so a
+rolled-back allocation reissues the SAME number — reuse is the danger; the
+only gaps are the ones a request's token floor asks for, and there is no
+counters table to lose one), caches written only after COMMIT, any write
+fault rolls back and fails closed, whole-session prune only.
 
 Two deliberate deltas from the sqlite schema:
 
@@ -39,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib
+import logging
 import os
 import re
 from collections import OrderedDict
@@ -50,15 +52,23 @@ from urllib.parse import parse_qs, urlsplit
 
 from llm_redact.placeholders import format_placeholder
 from llm_redact.vault import (
+    _MAX_OBJECT_ROWS,
     _MAX_RESPONSE_ROWS,
+    _OBJECT_KIND,
+    _RESPONSE_KIND,
     _RESPONSE_PRUNE_EVERY,
+    LOOKUP_CHUNK,
+    PlaceholderSpaceExhausted,
     Vault,
     VaultKeyError,
+    next_number,
 )
 
 if TYPE_CHECKING:
     from llm_redact.config import VaultConfig
     from llm_redact.plugin_api import DbPasswordProvider, VaultCipher
+
+logger = logging.getLogger("llm_redact")
 
 ENV_DSN = "LLM_REDACT_VAULT_DSN"
 # The documented hatch for the off-box rule below: set to 1 to run a
@@ -88,6 +98,12 @@ _SCHEMES = {
 _LONG_TEXT = {"postgresql": "TEXT", "mysql": "LONGTEXT", "oracle": "CLOB", "dbapi": "TEXT"}
 
 _ALLOCATION_ATTEMPTS = 3
+
+# The response map's row kind (a Responses chain's row, or a stored object's
+# owner record): each kind is bounded apart (see llm_redact.vault). One
+# portable column definition for the create and the upgrade of a schema
+# created before it (DEFAULT before NOT NULL: Oracle's order, read by all).
+_KIND_COLUMN = "kind VARCHAR(8) DEFAULT 'response' NOT NULL"
 
 _PARAM_RE = re.compile(r":([a-z_][a-z0-9_]*)")
 
@@ -140,10 +156,11 @@ def _ddl(backend: str) -> dict[str, str]:
   CONSTRAINT llmr_uq_placeholder UNIQUE (session_id, placeholder),
   CONSTRAINT llmr_uq_n UNIQUE (session_id, detector_type, n)
 )""",
-        "llm_redact_response_sessions": """CREATE TABLE llm_redact_response_sessions (
+        "llm_redact_response_sessions": f"""CREATE TABLE llm_redact_response_sessions (
   response_id VARCHAR(192) NOT NULL,
   session_id VARCHAR(128) NOT NULL,
   created_at VARCHAR(20) NOT NULL,
+  {_KIND_COLUMN},
   PRIMARY KEY (response_id)
 )""",
         "llm_redact_meta": """CREATE TABLE llm_redact_meta (
@@ -588,7 +605,10 @@ class RdbmsStore:
                 retryable.append(exc_type)
         self._retryable: tuple[type[BaseException], ...] = tuple(retryable)
         self._conn = connect()
-        self._response_inserts = 0
+        self._inserts = {_RESPONSE_KIND: 0, _OBJECT_KIND: 0}
+        # False only when a schema from before the row kind could not gain
+        # its column (see _ensure_kind_column): one shared bound, as before.
+        self._row_kinds = True
         self._ensure_schema()
 
     # -- plumbing ---------------------------------------------------------
@@ -646,8 +666,46 @@ class RdbmsStore:
                     conn.commit()
             conn.commit()
             self._check_meta(conn)
+            self._ensure_kind_column(conn)
 
         self._run(op)
+
+    def _kind_missing(self, conn: Any) -> bool:
+        """Whether the response map lacks the ``kind`` column (the portable
+        probe of ``_table_missing``, for a column)."""
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT kind FROM llm_redact_response_sessions WHERE 1 = 0")
+            cursor.fetchall()
+            return False
+        except self._module.Error:
+            self._rollback(conn)
+            return True
+
+    def _ensure_kind_column(self, conn: Any) -> None:
+        """Give a response map created before its rows had a kind the
+        column (existing rows default to Responses rows). A database user
+        that may not ALTER the table keeps the store working as before —
+        stored-object records then share the Responses bound — with a
+        warning naming the table, never the DSN. Another replica adding it
+        first is fine."""
+        if not self._kind_missing(conn):
+            conn.commit()  # close the probe's read snapshot
+            return
+        try:
+            conn.cursor().execute(f"ALTER TABLE llm_redact_response_sessions ADD {_KIND_COLUMN}")
+            conn.commit()
+        except self._module.Error as exc:
+            self._rollback(conn)
+            if self._kind_missing(conn):
+                self._row_kinds = False
+                logger.warning(
+                    "vault: could not add the kind column to llm_redact_response_sessions"
+                    " (%s); stored objects' owner records share the Responses bound until"
+                    " it is added (ALTER TABLE llm_redact_response_sessions ADD %s)",
+                    type(exc).__name__,
+                    _KIND_COLUMN,
+                )
 
     def _check_meta(self, conn: Any) -> None:
         from llm_redact.config import ConfigError
@@ -715,7 +773,11 @@ class RdbmsStore:
         result: list[tuple[str, str, str]] = self._run(op)
         return result
 
-    def get_or_create(self, session: str, detector_type: str, original: str) -> str:
+    def get_or_create(
+        self, session: str, detector_type: str, original: str, *, floor: int = 0
+    ) -> str:
+        """The value's token in ``session``; a NEW value is numbered above
+        the session's numbers and above ``floor`` (vault.next_number)."""
         original_key = self._original_key(session, detector_type, original)
 
         def op(conn: Any) -> str:
@@ -731,11 +793,15 @@ class RdbmsStore:
                     return str(row[0])
                 nrow = self._execute(
                     conn,
-                    "SELECT COALESCE(MAX(n), 0) + 1 FROM llm_redact_mappings"
+                    "SELECT COALESCE(MAX(n), 0) FROM llm_redact_mappings"
                     " WHERE session_id = :s AND detector_type = :t",
                     {"s": session, "t": detector_type},
                 ).fetchone()
-                n = int(nrow[0])
+                try:
+                    n = next_number(int(nrow[0]), floor, detector_type)
+                except PlaceholderSpaceExhausted:
+                    self._rollback(conn)  # close the read transaction; nothing written
+                    raise
                 placeholder = format_placeholder(detector_type, n)
                 params: dict[str, Any] = {
                     "s": session,
@@ -769,8 +835,8 @@ class RdbmsStore:
                     continue
                 except self._module.Error:
                     # Any other write failure: roll back and fail closed.
-                    # Nothing was cached, and n is MAX(n)+1 read fresh, so
-                    # the next attempt reissues the same number.
+                    # Nothing was cached, and n comes from MAX(n) read fresh,
+                    # so the next attempt reissues the same number.
                     self._rollback(conn)
                     raise
             raise RuntimeError(
@@ -977,10 +1043,31 @@ class RdbmsStore:
         return result
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
-        self._response_inserts += 1
-        cap_now = self._response_inserts >= _RESPONSE_PRUNE_EVERY
+        """Map a Responses chain's response id to its session."""
+        self._record(response_id, session_id, _RESPONSE_KIND, _MAX_RESPONSE_ROWS)
+
+    def record_object_session(self, object_id: str, session_id: str) -> None:
+        """Record the session that created a stored object; bounded apart
+        from the Responses rows (see llm_redact.vault)."""
+        self._record(object_id, session_id, _OBJECT_KIND, _MAX_OBJECT_ROWS)
+
+    def _record(self, row_id: str, session_id: str, kind: str, cap: int) -> None:
+        if not self._row_kinds:  # a schema that could not gain the column
+            kind, cap = _RESPONSE_KIND, _MAX_RESPONSE_ROWS
+        self._inserts[kind] += 1
+        cap_now = self._inserts[kind] >= _RESPONSE_PRUNE_EVERY
         if cap_now:
-            self._response_inserts = 0
+            self._inserts[kind] = 0
+        # Only the columns this schema has: every row is a Responses row
+        # to a map that could not gain the kind column.
+        insert = (
+            "INSERT INTO llm_redact_response_sessions"
+            " (response_id, session_id, created_at, kind) VALUES (:r, :s, :ts, :k)"
+            if self._row_kinds
+            else "INSERT INTO llm_redact_response_sessions"
+            " (response_id, session_id, created_at) VALUES (:r, :s, :ts)"
+        )
+        of_kind = " WHERE kind = :k" if self._row_kinds else ""
 
         def op(conn: Any) -> None:
             try:
@@ -989,18 +1076,14 @@ class RdbmsStore:
                 self._execute(
                     conn,
                     "DELETE FROM llm_redact_response_sessions WHERE response_id = :r",
-                    {"r": response_id},
+                    {"r": row_id},
                 )
-                self._execute(
-                    conn,
-                    "INSERT INTO llm_redact_response_sessions"
-                    " (response_id, session_id, created_at) VALUES (:r, :s, :ts)",
-                    {"r": response_id, "s": session_id, "ts": _utcnow_iso()},
-                )
+                params = {"r": row_id, "s": session_id, "ts": _utcnow_iso()}
+                self._execute(conn, insert, {**params, "k": kind} if self._row_kinds else params)
                 if cap_now:
                     if self._backend == "oracle":
                         keepers = (
-                            "SELECT response_id FROM llm_redact_response_sessions"
+                            f"SELECT response_id FROM llm_redact_response_sessions{of_kind}"
                             " ORDER BY created_at DESC FETCH FIRST :cap ROWS ONLY"
                         )
                     else:
@@ -1008,18 +1091,20 @@ class RdbmsStore:
                         # restriction and its same-table-delete rule (1093).
                         keepers = (
                             "SELECT response_id FROM (SELECT response_id, created_at"
-                            " FROM llm_redact_response_sessions"
+                            f" FROM llm_redact_response_sessions{of_kind}"
                             " ORDER BY created_at DESC LIMIT :cap) keepers"
                         )
                     # Only rows of sessions without mappings (see the
                     # sqlite store): a live session's chain must resolve.
+                    # Each kind keeps its own newest rows.
                     self._execute(
                         conn,
                         "DELETE FROM llm_redact_response_sessions"
-                        f" WHERE response_id NOT IN ({keepers})"
+                        f" WHERE {'kind = :k AND ' if self._row_kinds else ''}"
+                        f"response_id NOT IN ({keepers})"
                         " AND NOT EXISTS (SELECT 1 FROM llm_redact_mappings m"
                         " WHERE m.session_id = llm_redact_response_sessions.session_id)",
-                        {"cap": _MAX_RESPONSE_ROWS},
+                        {"cap": cap, "k": kind} if self._row_kinds else {"cap": cap},
                     )
                 conn.commit()
             except self._module.Error:
@@ -1041,6 +1126,29 @@ class RdbmsStore:
         result: str | None = self._run(op)
         return result
 
+    def lookup_response_sessions(self, response_ids: list[str]) -> dict[str, str]:
+        """Many ids in one round trip per ``LOOKUP_CHUNK`` (the sqlite
+        store's batched lookup): recorded ids with their sessions."""
+
+        def op(conn: Any) -> dict[str, str]:
+            found: dict[str, str] = {}
+            for start in range(0, len(response_ids), LOOKUP_CHUNK):
+                chunk = response_ids[start : start + LOOKUP_CHUNK]
+                params = {f"r{index}": value for index, value in enumerate(chunk)}
+                marks = ", ".join(f":{name}" for name in params)
+                rows = self._execute(
+                    conn,
+                    "SELECT response_id, session_id FROM llm_redact_response_sessions"
+                    f" WHERE response_id IN ({marks})",
+                    params,
+                ).fetchall()
+                found.update((str(row[0]), str(row[1])) for row in rows)
+            conn.commit()
+            return found
+
+        result: dict[str, str] = self._run(op)
+        return result
+
     def close(self) -> None:
         with suppress(Exception):
             self._conn.close()
@@ -1060,12 +1168,12 @@ class RdbmsVault:
             self._forward[f"{detector_type}::{original}"] = placeholder
             self._reverse[placeholder] = original
 
-    def placeholder_for(self, detector_type: str, original: str) -> str:
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
         key = f"{detector_type}::{original}"
         existing = self._forward.get(key)
         if existing is not None:
             return existing
-        placeholder = self._store.get_or_create(self._session, detector_type, original)
+        placeholder = self._store.get_or_create(self._session, detector_type, original, floor=floor)
         self._forward[key] = placeholder
         self._reverse[placeholder] = original
         return placeholder
@@ -1133,8 +1241,15 @@ class RdbmsVaultManager:
     def record_response_session(self, response_id: str, session_id: str) -> None:
         self._store.record_response_session(response_id, session_id)
 
+    def record_object_session(self, object_id: str, session_id: str) -> None:
+        self._store.record_object_session(object_id, session_id)
+
     def lookup_response_session(self, response_id: str) -> str | None:
         return self._store.lookup_response_session(response_id)
+
+    def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:
+        wanted = list(dict.fromkeys(response_ids))
+        return self._store.lookup_response_sessions(wanted) if wanted else {}
 
     def close(self) -> None:
         self._store.close()

@@ -157,6 +157,17 @@ def test_helm_chart_hardening_and_guardrail_present() -> None:
     assert "never-wrong-value" in helpers
 
 
+def test_helm_standalone_lists_its_service_names_as_allowed_hosts() -> None:
+    # Stdlib needle: a standalone proxy is dialled by its Service's DNS
+    # names, and a request spending a credential the proxy holds (identity
+    # auth via IRSA / Workload Identity) is refused under any name the proxy
+    # does not answer to — so the generated config must list them.
+    helpers = (HELM_CHART / "templates" / "_helpers.tpl").read_text()
+    assert "allowed_hosts = {{ toJson $hosts }}" in helpers
+    assert ".svc.cluster.local" in helpers
+    assert "allowedHosts: []" in (HELM_CHART / "values.yaml").read_text()
+
+
 def test_helm_hpa_targets_the_deployment() -> None:
     hpa = (HELM_CHART / "templates" / "hpa.yaml").read_text()
     assert "kind: HorizontalPodAutoscaler" in hpa
@@ -301,3 +312,34 @@ def test_helm_standalone_single_replica_sqlite_allowed() -> None:
     # A single standalone replica on sqlite is fine — no cross-pod divergence.
     result = _helm_template("mode=standalone", "vault.backend=sqlite")
     assert result.returncode == 0, result.stderr
+
+
+def _rendered_config(*set_args: str) -> Config:
+    """The proxy config the chart renders, parsed by the production parser."""
+    import tomllib
+
+    from llm_redact.config import parse_config
+
+    yaml = pytest.importorskip("yaml")
+    cmd = ["helm", "template", "rel", str(HELM_CHART), "--namespace", "team"]
+    for kv in set_args:
+        cmd += ["--set", kv]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    [configmap] = [d for d in yaml.safe_load_all(result.stdout) if d and d["kind"] == "ConfigMap"]
+    return parse_config(tomllib.loads(configmap["data"]["config.toml"]), "<chart>")
+
+
+@_needs_helm
+def test_helm_allowed_hosts_render_and_parse() -> None:
+    standalone = _rendered_config("mode=standalone", "vault.backend=postgresql")
+    assert standalone.allowed_hosts == (
+        "rel-llm-redact",
+        "rel-llm-redact.team",
+        "rel-llm-redact.team.svc",
+        "rel-llm-redact.team.svc.cluster.local",
+    )
+    # Sidecar: the tool dials 127.0.0.1, nothing to list unless asked.
+    assert _rendered_config().allowed_hosts == ()
+    extra = _rendered_config("allowedHosts[0]=Redact.Example", "mode=sidecar")
+    assert extra.allowed_hosts == ("redact.example",)

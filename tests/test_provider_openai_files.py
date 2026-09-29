@@ -3,7 +3,9 @@
 The upload's JSONL file part is redacted line by line (batch lines get the
 system note inside body; fine-tune lines directly); everything else in the
 multipart body — form fields, binary parts, unparseable lines — must be
-byte-identical. /v1/batches and file metadata stay pass-through.
+byte-identical (part filenames excepted: redacted, and restored in the file
+objects the provider echoes); batch create, retrieve, cancel and list redact
+and restore the caller's ``metadata``.
 """
 
 import json
@@ -55,15 +57,24 @@ def _upload_body(*lines: str) -> bytes:
 
 def test_files_routing() -> None:
     adapter = OpenAIAdapter()
-    assert adapter.matches("POST", "/v1/files") is RouteKind.REDACT_ONLY
+    assert adapter.matches("POST", "/v1/files") is RouteKind.CHAT
     assert adapter.matches("GET", "/v1/files/file_abc/content") is RouteKind.CHAT
+    # File objects echo the (redacted) upload filename: restored.
+    assert adapter.matches("GET", "/v1/files") is RouteKind.CHAT
+    assert adapter.matches("GET", "/v1/files/file_abc") is RouteKind.CHAT
     # Metadata surfaces stay pass-through: ids and processing state only.
-    assert adapter.matches("GET", "/v1/files") is RouteKind.NONE
-    assert adapter.matches("GET", "/v1/files/file_abc") is RouteKind.NONE
     assert adapter.matches("DELETE", "/v1/files/file_abc") is RouteKind.NONE
-    assert adapter.matches("POST", "/v1/batches") is RouteKind.NONE
-    assert adapter.matches("GET", "/v1/batches/batch_1") is RouteKind.NONE
-    assert adapter.matches("POST", "/v1/batches/batch_1/cancel") is RouteKind.NONE
+    # Batches: create, retrieve, cancel and the list carry (or echo) the
+    # caller's `metadata`; unknown batch sub-routes stay pass-through.
+    assert adapter.matches("POST", "/v1/batches") is RouteKind.CHAT
+    assert adapter.matches("GET", "/v1/batches/batch_1") is RouteKind.CHAT
+    assert adapter.matches("POST", "/v1/batches/batch_1/cancel") is RouteKind.CHAT
+    assert adapter.matches("GET", "/v1/batches") is RouteKind.CHAT
+    assert adapter.matches("POST", "/v1/batches/batch_1") is RouteKind.NONE
+    assert adapter.matches("DELETE", "/v1/batches/batch_1") is RouteKind.NONE
+    assert adapter.matches("GET", "/v1/batches/batch_1/cancel") is RouteKind.NONE
+    for path in ("/v1/batches", "/v1/batches/batch_1", "/v1/batches/batch_1/cancel"):
+        assert not adapter.wants_system_note(RouteKind.CHAT, path)
 
 
 def test_upload_batch_lines_redacted_and_noted() -> None:
@@ -191,9 +202,9 @@ def _fake_upstream() -> Starlette:
         import re as _re
 
         # The injected system note itself contains example tokens
-        # («TYPE_NNN», «EMAIL_001») — echo only vault-issued EMAIL tokens
-        # from the actual message content.
-        tokens = _re.findall("«EMAIL_[0-9]+»", parsed.parts[1].content.decode())
+        # («TYPE_NNN», «EMAIL_000», a number the vault never issues) — echo
+        # only vault-issued EMAIL tokens from the actual message content.
+        tokens = _re.findall("«EMAIL_(?!000»)[0-9]+»", parsed.parts[1].content.decode())
         lines = b"".join(
             json.dumps(
                 {
@@ -246,7 +257,7 @@ async def test_files_batch_round_trip(client: httpx.AsyncClient) -> None:
     assert EMAIL.encode() not in received["upload_raw"]
     assert "«EMAIL_001»".encode() in received["upload_raw"]
 
-    # Batch creation is metadata: passes through untouched.
+    # Batch creation with nothing to redact: forwarded byte-identical.
     batch = await client.post("/v1/batches", json={"input_file_id": "file_abc"})
     assert batch.json()["id"] == "batch_1"
     assert received["batch_create"] == {"input_file_id": "file_abc"}

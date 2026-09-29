@@ -361,10 +361,14 @@ async def test_identity_subprotocol_allowlist(offered: list[str], kept: list[str
     assert identity_subprotocols(offered) == expected
 
 
-# --- Azure batch list is never rehydrated ------------------------------------------
+# --- Azure batch list is restored in the request's own session ---------------------
 
 
-async def test_azure_batch_list_passes_through_but_a_batch_is_restored() -> None:
+async def test_azure_batch_list_and_a_batch_are_restored_in_the_requests_session() -> None:
+    # One shared namespace holds every batch's tokens, so the list is
+    # restored like a single batch; llm-redact-pro reads a named user's
+    # listing in an EMPTY session instead and restores only that user's
+    # own items (tests/test_object_access_seams.py, pro's e2e).
     upstream = _Upstream()
     app = create_app(
         _config(azure=ProviderConfig(AZURE)), upstream_transport=httpx.MockTransport(upstream)
@@ -382,8 +386,8 @@ async def test_azure_batch_list_passes_through_but_a_batch_is_restored() -> None
         listing = await client.get("/openai/batches?api-version=2024-10-21")
         upstream.content = batch
         single = await client.get("/openai/batches/b1?api-version=2024-10-21")
-    assert listing.json()["data"][0]["metadata"]["owner"] == token  # not restored
-    assert single.json()["metadata"]["owner"] == EMAIL  # the batch's own read: restored
+    assert listing.json()["data"][0]["metadata"]["owner"] == EMAIL
+    assert single.json()["metadata"]["owner"] == EMAIL
 
 
 # --- Bedrock CountTokens: the base64 invoke body is redacted -----------------------
@@ -621,3 +625,53 @@ async def test_google_authenticated_v1_passthrough_goes_to_gemini(
     async with _client(app) as client:
         assert (await client.get(path, headers=headers)).status_code == 200
     assert upstream.requests[0].url.host == host
+
+
+# The Google-key rule separates Gemini from OpenAI on the shared /v1 prefix;
+# an explicit Vertex path family (projects/…, publishers/…) is Vertex's
+# whatever key channel it carries (express mode and service-account API
+# keys authorize Vertex with ?key= / x-goog-api-key too).
+_VERTEX_PASSTHROUGH = [
+    ("POST", "/v1/projects/p/locations/us-east5/endpoints/e:rawPredict"),
+    ("GET", "/v1/projects/p/locations/us-east5/batchPredictionJobs"),
+    ("POST", "/v1/publishers/google/models/gemini-2.0-flash:streamRawPredict"),
+]
+_GOOGLE_KEYS = [({}, ""), ({}, "?key=AIza-fake"), ({"x-goog-api-key": "AIza-fake"}, "")]
+
+
+@pytest.mark.parametrize(("method", "path"), _VERTEX_PASSTHROUGH)
+@pytest.mark.parametrize(("headers", "query"), _GOOGLE_KEYS)
+async def test_vertex_path_families_win_over_the_google_key_rule(
+    method: str, path: str, headers: dict[str, str], query: str
+) -> None:
+    upstream = _Upstream(b"{}")
+    providers = {
+        **Config().providers,
+        "vertex": ProviderConfig(VERTEX),
+        # A Vertex-only deployment: the Gemini API is switched off.
+        "gemini": ProviderConfig("https://generativelanguage.googleapis.com", enabled=False),
+    }
+    app = create_app(Config(providers=providers), upstream_transport=httpx.MockTransport(upstream))
+    async with _client(app) as client:
+        response = await client.request(method, path + query, headers=headers, content=b"{}")
+    assert response.status_code == 200
+    assert upstream.requests[0].url.host == "us-east5-aiplatform.googleapis.com"
+
+
+@pytest.mark.parametrize(("headers", "query"), _GOOGLE_KEYS)
+async def test_unrecognized_vertex_route_under_identity_stays_refused(
+    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str], query: str
+) -> None:
+    _, built = _install(monkeypatch)
+    upstream = _Upstream(b"{}")
+    app = create_app(
+        _config(vertex=_identity(VERTEX)), upstream_transport=httpx.MockTransport(upstream)
+    )
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/projects/p/locations/us-east5/endpoints/e:deployModel" + query,
+            headers=headers,
+            json={},
+        )
+    assert response.status_code == 403
+    assert upstream.requests == [] and built[0].calls == []

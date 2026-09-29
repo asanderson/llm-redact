@@ -7,8 +7,10 @@ it. Anything else (non-JSON bytes, invalid UTF-8, a top-level array or
 scalar, whitespace, a content-encoded body, multipart elsewhere) is a
 recorded, provider-shaped 400 before the authorizer or the upstream is
 touched. An empty body still forwards, ``detection = false`` stays the
-explicit unredacted opt-out, and passthrough-auth providers keep forwarding
-non-JSON verbatim (never break the tool). The realtime relay applies the
+explicit unredacted opt-out for a body the proxy can read (redaction off,
+never the body rule: the ownership check reads the parsed body too), and
+passthrough-auth providers keep forwarding non-JSON verbatim (never break
+the tool). The realtime relay applies the
 same rule per frame: a non-JSON frame on an identity connection closes it
 1008, never relayed.
 """
@@ -224,11 +226,19 @@ async def test_detection_off_stays_the_unredacted_opt_out(
         _config(**{provider: _identity(base, detection=False)}),
         upstream_transport=httpx.MockTransport(upstream),
     )
-    body = f"mail {EMAIL}".encode()
     async with _client(app) as client:
-        response = await client.post(path, content=body, headers={"content-type": "text/plain"})
+        response = await client.post(
+            path, content=_OBJECT, headers={"content-type": "application/json"}
+        )
+        # detection = false turns redaction off, not the body rule: the
+        # ownership check reads the parsed body, so one it could not read
+        # never carries the proxy's identity.
+        text = await client.post(
+            path, content=f"mail {EMAIL}".encode(), headers={"content-type": "text/plain"}
+        )
     assert response.status_code == 200
-    assert upstream.requests[0].content == body and len(built[0].calls) == 1
+    assert upstream.requests[0].content == _OBJECT and len(built[0].calls) == 1
+    assert text.status_code == 400 and len(upstream.requests) == 1
 
 
 @pytest.mark.parametrize(("provider", "base", "path"), FAMILIES)
@@ -246,7 +256,103 @@ async def test_passthrough_auth_still_forwards_verbatim(
     async with _client(app) as client:
         response = await client.post(path, content=body, headers=headers)
     assert response.status_code == 200
-    assert upstream.requests[0].content == body
+    if provider == "azure" and kind == "multipart-off-route":
+        # Key auth scans what it can read: the OpenAI-family multipart hook
+        # redacts a plain form field on any matched route (a filename or an
+        # uploaded JSONL line there too), like its JSON twin.
+        sent = upstream.requests[0].content
+        assert EMAIL.encode() not in sent and "«EMAIL_001»".encode() in sent
+    else:
+        assert upstream.requests[0].content == body
+
+
+# Every Content-Encoding value counts, not just the first header's: the
+# upstream decodes the list the proxy forwards. And Content-Type is a
+# singleton field — a second one could name a boundary the proxy never
+# parsed with — so under identity a repeated one is refused too.
+DUPLICATE_HEADERS: dict[str, list[tuple[str, str]]] = {
+    "encoding-identity-then-gzip": [
+        ("content-type", "application/json"),
+        ("content-encoding", "identity"),
+        ("content-encoding", "gzip"),
+    ],
+    "encoding-empty-then-deflate": [
+        ("content-type", "application/json"),
+        ("content-encoding", ""),
+        ("content-encoding", "deflate"),
+    ],
+    "encoding-list": [("content-type", "application/json"), ("content-encoding", "identity, gzip")],
+    "content-type-twice": [
+        ("content-type", "application/json"),
+        ("content-type", "multipart/form-data; boundary=x"),
+    ],
+}
+
+
+@pytest.mark.parametrize(("provider", "base", "path"), FAMILIES)
+@pytest.mark.parametrize("case", sorted(DUPLICATE_HEADERS))
+async def test_every_header_value_counts_under_identity(
+    monkeypatch: pytest.MonkeyPatch, provider: str, base: str, path: str, case: str
+) -> None:
+    _, built = _install(monkeypatch)
+    upstream = _Upstream(b"{}")
+    app = create_app(
+        _config(**{provider: _identity(base)}), upstream_transport=httpx.MockTransport(upstream)
+    )
+    async with _client(app) as client:
+        response = await client.post(path, content=_OBJECT, headers=DUPLICATE_HEADERS[case])
+    assert response.status_code == 400
+    assert upstream.requests == [] and built[0].calls == []
+    assert "proxy's own identity" in _error_message(provider, response.json())
+    assert app.state.proxy.recent[-1]["status"] == 400
+
+
+async def test_identity_encodings_in_every_header_still_signed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, built = _install(monkeypatch)
+    upstream = _Upstream(b"{}")
+    app = create_app(
+        _config(azure=_identity(AZURE)), upstream_transport=httpx.MockTransport(upstream)
+    )
+    headers = [
+        ("content-type", "application/json"),
+        ("content-encoding", "identity"),
+        ("content-encoding", " Identity ,identity"),
+    ]
+    async with _client(app) as client:
+        response = await client.post(
+            AZURE_PATH + "?api-version=1", content=_OBJECT, headers=headers
+        )
+    assert response.status_code == 200 and len(built[0].calls) == 1
+
+
+async def test_multipart_off_route_is_refused_without_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A route that never scans multipart refuses it on the route alone: the
+    # parser (whatever its cost) never runs on a body that is refused anyway.
+    import llm_redact.proxy as proxy_mod
+
+    parsed: list[bytes] = []
+
+    def spy(body: bytes, boundary: bytes) -> Any:
+        parsed.append(boundary)
+        raise AssertionError("parsed a body refused on its route")
+
+    monkeypatch.setattr(proxy_mod, "parse_multipart", spy)
+    _, built = _install(monkeypatch)
+    upstream = _Upstream(b"{}")
+    app = create_app(
+        _config(bedrock=_identity(BEDROCK)), upstream_transport=httpx.MockTransport(upstream)
+    )
+    body = b"--b" + b"\r\n\r\n\r\n--b" * 1000 + b"--\r\n"
+    async with _client(app) as client:
+        response = await client.post(
+            BEDROCK_PATH, content=body, headers={"content-type": "multipart/form-data; boundary=b"}
+        )
+    assert response.status_code == 400 and parsed == []
+    assert upstream.requests == [] and built[0].calls == []
 
 
 def test_redacts_multipart_names_only_the_scanned_routes() -> None:

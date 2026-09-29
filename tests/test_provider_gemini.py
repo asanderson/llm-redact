@@ -154,47 +154,101 @@ def _candidate(index: int, *parts: dict[str, Any], finish: str | None = None) ->
     return candidate
 
 
-def _fixture_events(token: str) -> list[SSEEvent]:
+# Function-call args are caller JSON (an opaque position): keys that are
+# structural names elsewhere are the tool's own parameter names.
+_ARG_NAMES = ("to", "id", "name", "type", "data", "model", "role", "signature")
+
+
+def _fixture_payloads(token: str) -> list[dict[str, Any]]:
     """Canonical stream: token split across chunks in text AND thought
-    channels, a functionCall with a placeholder inside args, a
-    metadata-only chunk, and a finish chunk with a trailing partial."""
+    channels, a functionCall whose args hide placeholders under structural
+    names, generated code, grounding metadata, a metadata-only chunk, and a
+    finish chunk with a trailing partial."""
     head, tail = token[:4], token[4:]
     return [
-        _chunk(_candidate(0, {"text": f"mail {head}"})),
-        _chunk(
-            _candidate(
-                0,
-                {"text": f"{tail} ok"},
-                {"text": f"note {head}", "thought": True},
-            )
-        ),
-        _chunk(
-            _candidate(
-                0,
-                {"text": tail, "thought": True},
-                {"functionCall": {"name": "send", "args": {"to": token}}},
-            )
-        ),
-        SSEEvent(data=json.dumps({"usageMetadata": {"totalTokenCount": 5}})),
-        _chunk(_candidate(0, {"text": "tail «EMAIL_"}, finish="STOP")),
+        {"candidates": [_candidate(0, {"text": f"mail {head}"})]},
+        {
+            "candidates": [
+                _candidate(
+                    0,
+                    {"text": f"{tail} ok"},
+                    {"text": f"note {head}", "thought": True},
+                )
+            ]
+        },
+        {
+            "candidates": [
+                _candidate(
+                    0,
+                    {"text": tail, "thought": True},
+                    {
+                        "functionCall": {
+                            "id": "call_1",
+                            "name": "send",
+                            "args": {name: token for name in _ARG_NAMES},
+                        }
+                    },
+                    {"executableCode": {"language": "PYTHON", "code": f"send({token!r})"}},
+                )
+            ]
+        },
+        {"usageMetadata": {"totalTokenCount": 5}},
+        {
+            "candidates": [
+                {
+                    **_candidate(0, {"text": "tail «EMAIL_"}, finish="STOP"),
+                    "groundingMetadata": {"webSearchQueries": [f"who is {token}"]},
+                }
+            ]
+        },
     ]
 
 
-def _collect(events: list[SSEEvent]) -> dict[str, Any]:
+def _fixture_events(token: str) -> list[SSEEvent]:
+    return [
+        SSEEvent(data=json.dumps(payload, ensure_ascii=False))
+        for payload in _fixture_payloads(token)
+    ]
+
+
+def _collect_payloads(payloads: list[Any]) -> dict[str, Any]:
     text: list[str] = []
     thought: list[str] = []
     args: list[Any] = []
-    for event in events:
-        if not event.data:
-            continue
-        payload = json.loads(event.data)
+    code: list[str] = []
+    queries: list[str] = []
+    for payload in payloads:
         for candidate in payload.get("candidates") or []:
+            queries.extend((candidate.get("groundingMetadata") or {}).get("webSearchQueries", []))
             for part in (candidate.get("content") or {}).get("parts") or []:
                 if isinstance(part.get("text"), str):
                     (thought if part.get("thought") else text).append(part["text"])
                 if "functionCall" in part:
+                    assert part["functionCall"]["name"] == "send"
+                    assert part["functionCall"]["id"] == "call_1"
                     args.append(part["functionCall"]["args"])
-    return {"text": "".join(text), "thought": "".join(thought), "args": args}
+                if "executableCode" in part:
+                    code.append(part["executableCode"]["code"])
+    return {
+        "text": "".join(text),
+        "thought": "".join(thought),
+        "args": args,
+        "code": code,
+        "queries": queries,
+    }
+
+
+def _collect(events: list[SSEEvent]) -> dict[str, Any]:
+    return _collect_payloads([json.loads(event.data) for event in events if event.data])
+
+
+_EXPECTED = {
+    "text": "mail jane@corp.example oktail «EMAIL_",
+    "thought": "note jane@corp.example",
+    "args": [{name: "jane@corp.example" for name in _ARG_NAMES}],
+    "code": ["send('jane@corp.example')"],
+    "queries": ["who is jane@corp.example"],
+}
 
 
 @pytest.mark.parametrize("fuzzy", [False, True])
@@ -204,11 +258,7 @@ def test_stream_split_at_every_byte_offset(fuzzy: bool) -> None:
     token = "«email-1»" if fuzzy else "«EMAIL_001»"
 
     raw = b"".join(serialize(e) for e in _fixture_events(token))
-    expected = {
-        "text": "mail jane@corp.example oktail «EMAIL_",
-        "thought": "note jane@corp.example",
-        "args": [{"to": "jane@corp.example"}],
-    }
+    expected = _EXPECTED
 
     for offset in range(len(raw) + 1):
         adapter = GeminiAdapter()
@@ -223,6 +273,49 @@ def test_stream_split_at_every_byte_offset(fuzzy: bool) -> None:
         assert _collect(out) == expected, f"offset {offset}"
         # finishReason flushed every channel: nothing left for stream close.
         assert pool.flush_all() == {}, f"offset {offset}"
+
+
+@pytest.mark.parametrize("fuzzy", [False, True])
+def test_array_form_and_buffered_body_match_the_stream(fuzzy: bool) -> None:
+    """The three delivery forms of one answer restore the same values: the
+    SSE stream (swept above), the non-SSE JSON array of the same chunks, and
+    — for everything but the chunk-split text — the buffered response."""
+    vault = InMemoryVault()
+    vault.placeholder_for("EMAIL", "jane@corp.example")
+    token = "«email-1»" if fuzzy else "«EMAIL_001»"
+    chunks = _fixture_payloads(token)
+    array = GeminiAdapter().rehydrate_body(chunks, Rehydrator(vault, fuzzy=fuzzy))
+    assert _collect_payloads(array) == _EXPECTED
+    # The input list is not left holding anything the walk put in it.
+    assert json.loads(json.dumps(chunks)) == _fixture_payloads(token)
+
+    merged = {
+        "candidates": [
+            {
+                **chunks[4]["candidates"][0],
+                "content": {
+                    "parts": [
+                        part
+                        for chunk in chunks
+                        for candidate in chunk.get("candidates", [])
+                        for part in candidate["content"]["parts"]
+                        if "text" not in part
+                    ]
+                },
+            }
+        ]
+    }
+    buffered = GeminiAdapter().rehydrate_body(merged, Rehydrator(vault, fuzzy=fuzzy))
+    collected = _collect_payloads([buffered])
+    for field in ("args", "code", "queries"):
+        assert collected[field] == _EXPECTED[field]
+
+
+def test_non_candidate_chunks_of_the_array_form_are_restored(vault: InMemoryVault) -> None:
+    token = vault.placeholder_for("EMAIL", "jane@corp.example")
+    body = [{"promptFeedback": {"note": token}}, {"candidates": [_candidate(0, {"text": "x"})]}]
+    out = GeminiAdapter().rehydrate_body(body, Rehydrator(vault))
+    assert out[0] == {"promptFeedback": {"note": "jane@corp.example"}}
 
 
 def test_list_body_split_across_elements(vault: InMemoryVault) -> None:
@@ -286,3 +379,52 @@ def test_finish_chunk_without_content_gains_leftover_part(vault: InMemoryVault) 
         out.extend(adapter.rehydrate_event(event, pool))
     assert _collect(out)["text"] == "dangling «EMAIL_"
     assert pool.flush_all() == {}
+
+
+# --- end to end: every delivery form restores the same args ------------------------
+
+
+@pytest.mark.parametrize("form", ["buffered", "sse", "array"])
+async def test_every_form_restores_structural_named_args_end_to_end(form: str) -> None:
+    import httpx
+
+    from llm_redact.config import Config
+    from llm_redact.proxy import create_app
+
+    email = "jane.doe@corp.example"
+    token = "«EMAIL_001»"
+    args = {name: token for name in _ARG_NAMES}
+    call = {"functionCall": {"id": "call_1", "name": "send", "args": args}}
+    chunk = {"candidates": [_candidate(0, call, finish="STOP")]}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        assert email.encode() not in request.content
+        if form == "sse":
+            body = b"data: " + json.dumps(chunk).encode() + b"\r\n\r\n"
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, json=[chunk] if form == "array" else chunk)
+
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    verb = "generateContent" if form == "buffered" else "streamGenerateContent"
+    query = "?alt=sse" if form == "sse" else ""
+    request = {"contents": [{"role": "user", "parts": [{"text": f"look up {email}"}]}]}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.post(
+            f"/v1beta/models/gemini-2.5-flash:{verb}{query}",
+            json=request,
+            headers={"x-goog-api-key": "k"},
+        )
+    assert response.status_code == 200
+    if form == "sse":
+        payloads = [
+            json.loads(line[len("data: ") :])
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+    else:
+        body = response.json()
+        payloads = body if isinstance(body, list) else [body]
+    (restored,) = _collect_payloads(payloads)["args"]
+    assert restored == dict.fromkeys(_ARG_NAMES, email)

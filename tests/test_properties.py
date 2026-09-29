@@ -8,10 +8,14 @@ properties is about speed.
 """
 
 import json
+import tempfile
 import uuid as uuid_module
 from collections.abc import Callable
+from functools import cache
+from pathlib import Path
+from typing import Any
 
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import (
     Bundle,
@@ -21,6 +25,7 @@ from hypothesis.stateful import (
     rule,
 )
 
+from fake_cipher import FakeVaultCipher
 from llm_redact.detection.base import Detection
 from llm_redact.detection.engine import (
     DetectionConfig,
@@ -46,13 +51,20 @@ from llm_redact.eventstream import (
 )
 from llm_redact.jsonwalk import (
     ENUM_LIST_POSITIONS,
+    MEDIA_POSITIONS,
     OPAQUE_ANYWHERE,
     OPAQUE_POSITIONS,
     STRUCTURAL_KEYS,
     loads_request,
     transform_strings,
 )
-from llm_redact.placeholders import PLACEHOLDER_RE, canonicalize, format_placeholder
+from llm_redact.placeholders import (
+    PLACEHOLDER_RE,
+    canonicalize,
+    format_placeholder,
+    json_floors,
+    may_carry_tokens,
+)
 from llm_redact.providers.base import _EXEMPT_STASH_SENTINEL, stash_exempt_mcp_blocks
 from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.redactor import Redactor, _resolve_overlaps, _sweep
@@ -62,7 +74,13 @@ from llm_redact.rehydrate import (
     StreamingRehydrator,
     substitute_tokens,
 )
-from llm_redact.vault import InMemoryVault, InMemoryVaultManager
+from llm_redact.vault import (
+    EncryptedInMemoryVault,
+    InMemoryVault,
+    InMemoryVaultManager,
+    Vault,
+    open_sqlite_vault,
+)
 
 # --- fuzzy placeholder grammar ---------------------------------------------
 
@@ -246,6 +264,42 @@ def test_multipart_parse_serialize_is_byte_identical(pair: tuple[bytes, bytes]) 
         assert parsed.serialize() == body
 
 
+# Filename text a quoted-string can carry: every character but the controls
+# the grammar refuses (HTAB is allowed) and lone surrogates.
+_filename_text = st.text(
+    alphabet=st.characters(
+        blacklist_categories=("Cs",),
+        blacklist_characters=[chr(c) for c in (*range(0x09), *range(0x0A, 0x20), 0x7F)],
+    ),
+    max_size=40,
+)
+
+
+@settings(deadline=None)
+@given(text=_filename_text)
+def test_quoted_filename_rewrite_round_trips(text: str) -> None:
+    from llm_redact.multipart import MultipartPart, _quote
+
+    head = b'Content-Disposition: form-data; name="f"; filename="'
+    tail = b'"\r\nContent-Type: application/jsonl'
+    part = MultipartPart(headers=head + _quote(text).encode() + tail, content=b"")
+    params = part.params("content-disposition") or {}
+    assert params["filename"].value == text  # quoting is the parser's inverse
+    assert part.redact_filenames(lambda s: s + "«EMAIL_001»", strict=True) is True
+    assert part.headers is not None
+    assert part.headers.startswith(head) and part.headers.endswith(tail)
+    assert (part.params("content-disposition") or {})["filename"].value == text + "«EMAIL_001»"
+
+
+@settings(deadline=None)
+@given(data=st.binary(max_size=40))
+def test_ext_value_encoding_round_trips(data: bytes) -> None:
+    from llm_redact.multipart import Param, _ext_encode, _ext_value
+
+    encoded = "UTF-8'en'" + _ext_encode(data)
+    assert _ext_value(Param(encoded, False, 0, len(encoded))) == ("UTF-8", "en", data)
+
+
 @settings(deadline=None)
 @given(names=st.lists(st.text(min_size=1, max_size=8), min_size=0, max_size=5))
 def test_sse_serialize_parse_preserves_event_fields(names: list[str]) -> None:
@@ -272,7 +326,8 @@ def test_sse_serialize_parse_preserves_event_fields(names: list[str]) -> None:
 # ANY mix of known/foreign/unknown/mangled tokens in a text, ANY chunking of
 # the stream, and ANY truncation point, a placeholder restores to EXACTLY the
 # value its own session stored for it — or passes through verbatim. Never
-# another session's secret, never a different value, and counters stay dense.
+# another session's secret, never a different value, and counters stay dense
+# (but for the gaps a request's token floor asks for — never a reuse).
 # (Write-path faults are the sqlite battery's job: test_vault_faults.py.)
 
 # Two deliberately shared type names force per-(session, type) counter
@@ -292,6 +347,9 @@ class NeverWrongValueMachine(RuleBasedStateMachine):
         # Shadow model: (session, type, value) -> token and its inverse.
         self.tokens: dict[tuple[str, str, str], str] = {}
         self.by_session: dict[str, dict[str, str]] = {}
+        # (session, type) -> [(number, the floor it was issued under)], in
+        # issue order.
+        self.issued: dict[tuple[str, str], list[tuple[int, int]]] = {}
 
     @rule(target=sessions, name=st.sampled_from(["s1", "s2", "s3", "s4"]))
     def open_session(self, name: str) -> str:
@@ -301,17 +359,40 @@ class NeverWrongValueMachine(RuleBasedStateMachine):
     @rule(session=sessions, detector_type=st.sampled_from(_NWV_TYPES), value=_nwv_values)
     def write(self, session: str, detector_type: str, value: str) -> None:
         token = self.manager.get(session).placeholder_for(detector_type, value)
+        self._check_write(session, detector_type, value, token, floor=0)
+
+    @rule(
+        session=sessions,
+        detector_type=st.sampled_from(_NWV_TYPES),
+        value=_nwv_values,
+        floor=st.integers(min_value=0, max_value=12),
+    )
+    def write_above_floor(self, session: str, detector_type: str, value: str, floor: int) -> None:
+        # A request carrying tokens up to `floor` (a compacted history, a
+        # pasted answer): a fresh value is numbered above them AND above the
+        # session's own numbers; a mapped value keeps its token regardless.
+        token = self.manager.get(session).placeholder_for(detector_type, value, floor=floor)
+        self._check_write(session, detector_type, value, token, floor=floor)
+
+    def _check_write(
+        self, session: str, detector_type: str, value: str, token: str, *, floor: int
+    ) -> None:
         key = (session, detector_type, value)
         if key in self.tokens:
             # Deterministic: the same triple always yields the same token.
             assert token == self.tokens[key]
-        else:
-            # Fresh value: a canonical, never-before-issued token in this
-            # session (distinct values never share a token).
-            assert PLACEHOLDER_RE.fullmatch(token)
-            assert token not in self.by_session[session]
-            self.tokens[key] = token
-            self.by_session[session][token] = value
+            return
+        # Fresh value: a canonical, never-before-issued token in this
+        # session (distinct values never share a token), numbered exactly
+        # max(highest issued, floor) + 1.
+        assert PLACEHOLDER_RE.fullmatch(token)
+        assert token not in self.by_session[session]
+        issued = self.issued.setdefault((session, detector_type), [])
+        expected = max(max((n for n, _ in issued), default=0), floor) + 1
+        assert token == format_placeholder(detector_type, expected)
+        issued.append((expected, floor))
+        self.tokens[key] = token
+        self.by_session[session][token] = value
 
     @rule(
         session=sessions,
@@ -370,9 +451,11 @@ class NeverWrongValueMachine(RuleBasedStateMachine):
 
     @invariant()
     def counters_stay_dense(self) -> None:
-        # Per (session, type): issued numbers are exactly 1..n — no gap (a
-        # lost number) and no reuse (a collision that would rehydrate the
-        # wrong secret).
+        # Per (session, type): issued numbers are 1..n — no gap (a lost
+        # number) and no reuse (a collision that would rehydrate the wrong
+        # secret) — except the gaps a token floor asked for: in issue order
+        # each number is exactly max(the previous one, its floor) + 1, so
+        # with floor 0 throughout this is the plain dense 1..n.
         for mapping in self.by_session.values():
             by_type: dict[str, list[int]] = {}
             for token in mapping:
@@ -380,7 +463,18 @@ class NeverWrongValueMachine(RuleBasedStateMachine):
                 type_name, _, digits = body.rpartition("_")
                 by_type.setdefault(type_name, []).append(int(digits))
             for numbers in by_type.values():
-                assert sorted(numbers) == list(range(1, len(numbers) + 1))
+                assert len(set(numbers)) == len(numbers)
+        for (session, detector_type), issued in self.issued.items():
+            previous = 0
+            for number, floor in issued:
+                assert number == max(previous, floor) + 1
+                previous = number
+            mapped = sorted(
+                int(token[1:-1].rpartition("_")[2])
+                for token in self.by_session[session]
+                if token[1:-1].rpartition("_")[0] == detector_type
+            )
+            assert mapped == [number for number, _ in issued]
 
 
 NeverWrongValueMachine.TestCase.settings = settings(deadline=None)
@@ -412,13 +506,26 @@ _body_keys = st.sampled_from(
         "name",
         "data",
         "object",
-        # Opaque-position keys (tool calls/results, documents).
+        # Opaque-position keys (tool calls/results, documents, and the
+        # caller-keyed maps: metadata, prompt variables, :predict input).
         "functionCall",
         "args",
         "json",
         "documents",
+        "metadata",
+        "requestMetadata",
+        "prompt",
+        "variables",
+        "instances",
+        "parameters",
+        "id",
+        # The empty key: a parent of "" is not the top level (None).
+        "",
         "session",
         "modalities",
+        # Bedrock base64 media: source.bytes.
+        "source",
+        "bytes",
     ]
 )
 _bodies = st.recursive(
@@ -464,7 +571,14 @@ _REF_OPAQUE = {
     ("call", "parameters"),
     ("tool_calls", "parameters"),
     ("function", "arguments"),
+    ("prompt", "variables"),
+    # None: the top level of a body (a :predict request).
+    (None, "instances"),
+    (None, "parameters"),
 }
+_REF_OPAQUE_ANYWHERE = {"documents", "metadata", "requestMetadata"}
+# Base64 media strings, skipped only at this position.
+_REF_MEDIA = {("source", "bytes")}
 
 
 _REF_ENUM_LISTS = {
@@ -484,7 +598,8 @@ _REF_ENUM_LISTS = {
 
 def test_reference_opaque_positions_match_jsonwalk() -> None:
     assert frozenset(_REF_OPAQUE) == OPAQUE_POSITIONS
-    assert frozenset({"documents"}) == OPAQUE_ANYWHERE
+    assert frozenset(_REF_OPAQUE_ANYWHERE) == OPAQUE_ANYWHERE
+    assert frozenset(_REF_MEDIA) == MEDIA_POSITIONS
     assert frozenset(_REF_ENUM_LISTS) == ENUM_LIST_POSITIONS
 
 
@@ -510,14 +625,18 @@ def _reference_walk(obj: object, fn: "Callable[[str], str]", parent: str | None 
         out: dict[object, object] = {}
         for key, value in obj.items():
             scalar = not isinstance(value, dict | list)
-            if key == "documents" or (parent or "", key) in _REF_OPAQUE:
+            if key in _REF_OPAQUE_ANYWHERE or (parent, key) in _REF_OPAQUE:
                 out[key] = _reference_all(value, fn)
             elif key == "data" and obj.get("type") == "text" and isinstance(value, str):
                 out[key] = fn(value)
-            elif (key in STRUCTURAL_KEYS and scalar) or (
-                (parent or "", key) in _REF_ENUM_LISTS
-                and isinstance(value, list)
-                and all(not isinstance(item, dict | list) for item in value)
+            elif (
+                (key in STRUCTURAL_KEYS and scalar)
+                or ((parent, key) in _REF_MEDIA and isinstance(value, str))
+                or (
+                    (parent, key) in _REF_ENUM_LISTS
+                    and isinstance(value, list)
+                    and all(not isinstance(item, dict | list) for item in value)
+                )
             ):
                 out[key] = value
             else:
@@ -616,6 +735,58 @@ def test_deny_tier0_wins_every_overlap(detections: list[Detection]) -> None:
         assert all(other.end <= d.start or d.end <= other.start for d in deny_out)
 
 
+# --- DetectorPlan: the gated path equals every detector ----------------------
+#
+# The per-string gate (engine.DetectorPlan) is a quick-reject: skipping a
+# detector that would have fired is a silent recall bug. Texts are glued
+# from what the gate reads — every declared literal (case-insensitive ones
+# in any case), recall-corpus values whole and truncated, digits in other
+# scripts, the IGNORECASE letters İ/ı/ſ, separators — plus arbitrary text.
+
+
+@cache
+def _plan_under_test() -> tuple[Any, Any]:
+    from llm_redact.detection.engine import DetectorPlan
+
+    detectors = build_detectors(DetectionConfig())
+    return detectors, DetectorPlan(detectors, gated_max_chars=10**9)
+
+
+def _plan_fragments() -> list[str]:
+    import random
+
+    from llm_redact.bench.corpus import VALUE_GENERATORS
+
+    literals = {lit for rule in BUILTIN_RULES for group in rule.required for lit in group}
+    literals |= {lit.upper() for lit in literals} | {lit.title() for lit in literals}
+    rng = random.Random(1)
+    values = [gen(rng) for _type, gen in VALUE_GENERATORS.values() for _ in range(2)]
+    pieces = [value[: rng.randrange(1, len(value) + 1)] for value in values]
+    digits = [chr(zero + d) for zero in (0x30, 0xFF10, 0x0660, 0x0966) for d in range(10)]
+    return sorted(literals) + values + pieces + digits + list(" -.:=_@/+()\n\u0130\u0131\u017fxZ")
+
+
+_plan_texts = st.lists(
+    st.one_of(st.sampled_from(_plan_fragments()), st.text(max_size=4)), max_size=10
+).map("".join)
+
+
+@settings(deadline=None, max_examples=300)
+@given(text=_plan_texts)
+def test_gated_detection_equals_every_detector_for_any_text(text: str) -> None:
+    from llm_redact.detection.engine import Allowlist
+
+    detectors, plan = _plan_under_test()
+    no_allow = Allowlist(exact=frozenset(), patterns=())
+    gated = plan.detect(text, no_allow)
+    assert gated == plan.detect_each(text, no_allow)
+    naive = sorted(
+        (d for det in detectors for d in det.detect(text)),
+        key=lambda d: (d.start, -(d.end - d.start), d.priority),
+    )
+    assert gated == naive
+
+
 # --- language scope: only out-of-scope national-id rules drop ---------------
 
 _LANG_CODES = sorted({lang for rule in BUILTIN_RULES if rule.languages for lang in rule.languages})
@@ -685,6 +856,9 @@ _DUP_SECRET = "dup.secret@corp.example"
 
 @settings(deadline=None)
 @given(body=_bodies, key=_body_keys, depth=st.integers(min_value=0, max_value=3))
+# A lone surrogate (only a \ud800-style escape can carry one) has no UTF-8
+# form: the rewritten line must still be sent, the same JSON value.
+@example(body="\ud800", key="content", depth=0)
 def test_a_repeated_key_is_always_flagged_and_never_leaks_from_a_jsonl_line(
     body: object, key: str, depth: int
 ) -> None:
@@ -706,3 +880,130 @@ def test_a_repeated_key_is_always_flagged_and_never_leaks_from_a_jsonl_line(
     redactor = Redactor(build_detectors(config), InMemoryVault(), build_allowlist(config))
     out = OpenAIAdapter()._redact_jsonl(injected.encode(), redactor, inject_note=False)
     assert _DUP_SECRET.encode() not in out
+
+
+# --- token floors: a request never gives a token it carries a second meaning -----
+#
+# Every session numbers its own tokens from 001, so a request can carry
+# tokens its session never issued (a compacted history forked into a fresh
+# session, an answer pasted from elsewhere). Whatever the history holds — in
+# canonical, fuzzy-mangled or JSON-escaped form, sent in any encoding — a
+# value redacted in that request never takes one of those names: each stays
+# unissued, so its echo passes through verbatim instead of restoring the new
+# value. The carried (type, n) pairs come from the generator, never from the
+# scan under test.
+
+_FLOOR_TYPES = ("EMAIL", "PHONE", "IBAN")
+_floor_emails = st.from_regex(r"[a-z]{1,8}\.[a-z]{1,8}@corp\.example", fullmatch=True)
+
+
+@st.composite
+def _carried_tokens(draw: st.DrawFn) -> tuple[str, int, str]:
+    """(type, number, the token as the request spells it)."""
+    detector_type = draw(st.sampled_from(_FLOOR_TYPES))
+    n = draw(st.integers(min_value=1, max_value=40))
+    canonical = format_placeholder(detector_type, n)
+    form = draw(st.sampled_from(["canonical", "mangled", "escaped"]))
+    if form == "canonical":
+        return detector_type, n, canonical
+    if form == "escaped":
+        # JSON-source text (a tool call's arguments) escaping its guillemets.
+        return detector_type, n, "\\u00ab" + canonical[1:-1] + "\\u00bb"
+    body = "".join(ch.lower() if draw(st.booleans()) else ch for ch in detector_type)
+    separator = draw(st.sampled_from(["_", "-"]))
+    digits = "0" * draw(st.integers(0, 3)) + str(n)
+    pad = draw(st.sampled_from(["", " ", "\xa0"]))
+    return detector_type, n, f"«{pad}{body}{separator}{digits}{pad}»"
+
+
+@cache
+def _floor_detection() -> tuple[object, object]:
+    config = DetectionConfig()
+    return build_detectors(config), build_allowlist(config)
+
+
+def _floor_vault(backend: str, directory: str) -> Vault:
+    if backend == "memory":
+        return InMemoryVault()
+    if backend == "encrypted":
+        return EncryptedInMemoryVault(FakeVaultCipher(), "s")
+    return open_sqlite_vault(Path(directory) / "vault.db", "s")
+
+
+@settings(deadline=None)
+@given(
+    carried=st.lists(_carried_tokens(), max_size=6),
+    values=st.lists(_floor_emails, min_size=1, max_size=6, unique=True),
+    backend=st.sampled_from(["memory", "encrypted", "sqlite"]),
+    ensure_ascii=st.booleans(),
+    data=st.data(),
+)
+def test_no_new_value_takes_a_token_the_request_carries(
+    carried: list[tuple[str, int, str]],
+    values: list[str],
+    backend: str,
+    ensure_ascii: bool,
+    data: st.DataObject,
+) -> None:
+    split = data.draw(st.integers(min_value=0, max_value=len(values) - 1))
+    own, new = values[:split], values[split:]
+    detectors, allowlist = _floor_detection()
+    with tempfile.TemporaryDirectory() as directory:
+        vault = _floor_vault(backend, directory)
+        # The session's own history: values it already mapped, dense.
+        before = {value: vault.placeholder_for("EMAIL", value) for value in own}
+        resent = data.draw(st.lists(st.sampled_from(own), max_size=2)) if own else []
+        body = {
+            "messages": [
+                {"role": "user", "content": "summary: " + " / ".join(t for _, _, t in carried)},
+                {"role": "user", "content": "mail " + ", ".join([*new, *resent])},
+            ]
+        }
+        # The proxy's JSON path: the byte gate, then the decoded walk.
+        raw = json.dumps(body, ensure_ascii=ensure_ascii).encode()
+        parsed = json.loads(raw)
+        redactor = Redactor(detectors, vault, allowlist)  # type: ignore[arg-type]
+        if may_carry_tokens(raw):
+            redactor = redactor.with_floors(json_floors(parsed))
+        redacted = redactor.redact_json(parsed)
+
+        carried_pairs = {(detector_type, n) for detector_type, n, _ in carried}
+        for value in new:
+            token = vault.placeholder_for("EMAIL", value)  # mapped by the request
+            type_name, _, digits = token[1:-1].rpartition("_")
+            assert (type_name, int(digits)) not in carried_pairs
+        for value, token in before.items():
+            assert vault.placeholder_for("EMAIL", value) == token  # determinism
+        # Every carried token the session did not already own is STILL
+        # unissued: its echo passes through verbatim, never the new value.
+        owned = set(before.values())
+        for detector_type, n, _ in carried:
+            canonical = format_placeholder(detector_type, n)
+            if canonical not in owned:
+                assert vault.original_for(canonical) is None
+        # And the redacted turn restores to exactly what was sent.
+        restored = Rehydrator(vault, fuzzy=True).rehydrate_json(redacted)
+        assert restored["messages"][1] == parsed["messages"][1]
+        vault.close()
+
+
+@settings(deadline=None)
+@given(
+    carried=st.lists(_carried_tokens(), min_size=1, max_size=6),
+    encoding=st.sampled_from(["utf-8", "utf-16", "utf-32", "escaped"]),
+)
+def test_the_floor_scan_finds_every_carried_token_in_any_encoding(
+    carried: list[tuple[str, int, str]], encoding: str
+) -> None:
+    body = {"messages": [{"role": "user", "content": " ".join(t for _, _, t in carried)}]}
+    raw = (
+        json.dumps(body).encode()
+        if encoding == "escaped"
+        else json.dumps(body, ensure_ascii=False).encode(encoding)
+    )
+    # The gate never turns away a body that carries a token...
+    assert may_carry_tokens(raw)
+    # ...and the decoded walk finds each one, whatever its spelling.
+    floors = json_floors(json.loads(raw))
+    for detector_type, n, _ in carried:
+        assert floors.get(detector_type, 0) >= n

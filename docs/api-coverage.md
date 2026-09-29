@@ -24,8 +24,10 @@ Classifications:
   the routes it recognizes. On such a provider a chat or redact-only route
   likewise signs only a body the proxy redacted: a non-empty body that is
   not a JSON object (or canonical multipart on a route whose multipart
-  form is scanned), or that carries a `Content-Encoding`, is refused with
-  a recorded 400 instead of being forwarded verbatim
+  form is scanned), or that carries a `Content-Encoding` (any coding but
+  `identity`, in any of its Content-Encoding headers) or a repeated
+  `Content-Type`, is refused with a recorded 400 instead of being
+  forwarded verbatim
 - **websocket** — relayed by `realtime.py` (see the realtime sections of
   the README and threat model)
 
@@ -89,15 +91,15 @@ else takes the OpenAI files handling below.
 | `GET /v1/conversations/{id}/items/{item_id}` | chat | single item restored |
 | `DELETE /v1/conversations/{id}` (and `/items/{item_id}`) | pass-through | ids only |
 | `POST /v1/embeddings` | redact-only | vectors come back verbatim |
-| `POST /v1/files` | redact-only | multipart upload; JSONL file-part lines (batch + fine-tune) redacted, all other bytes preserved |
-| `GET /v1/files` | pass-through | metadata only |
-| `GET /v1/files/{id}` | pass-through | metadata only |
+| `POST /v1/files` | chat | multipart upload; JSONL file-part lines (batch + fine-tune), every part's `filename` / `filename*` and every non-structural plain form field redacted (structural fields — `purpose`, `expires_after[…]` — as sent), all other bytes preserved; the file object answering it echoes the filename, restored |
+| `GET /v1/files` | chat | the file list: each echoed filename restored in the request's own session |
+| `GET /v1/files/{id}` | chat | the file object: its echoed filename restored |
 | `GET /v1/files/{id}/content` | chat | batch output JSONL restored line by line |
 | `DELETE /v1/files/{id}` | pass-through | |
-| `POST /v1/batches` | pass-through | file ids + metadata only |
-| `GET /v1/batches` | pass-through | |
-| `GET /v1/batches/{id}` | pass-through | |
-| `POST /v1/batches/{id}/cancel` | pass-through | |
+| `POST /v1/batches` | chat | the caller's free-form `metadata` values are redacted out and restored in the echoed batch object; structural fields (`input_file_id`, `endpoint`, `completion_window`) carry nothing a detector matches and are forwarded byte-identical; no system note |
+| `GET /v1/batches` | chat | the LIST is restored in the request's own session, like a single batch: one shared namespace holds every batch's tokens. With llm-redact-pro named users a listing resolves to an EMPTY session, and the session router's `listing_item_session` restores only the batches the READER created, each in the session it was created in; every other item keeps its placeholders. No system note |
+| `GET /v1/batches/{id}` | chat | the batch object echoes `metadata`: restored |
+| `POST /v1/batches/{id}/cancel` | chat | the cancelled batch object echoes `metadata`: restored |
 | `GET /v1/models` | pass-through | |
 | `POST /v1/completions` | chat | legacy text completions: prompt redacted, choices[].text restored (streaming included); no system note |
 | `POST /v1/moderations` | pass-through | DOCUMENTED GAP: moderation input is user text; redacting it would change moderation results, so it is deliberately untouched |
@@ -105,7 +107,7 @@ else takes the OpenAI files handling below.
 | `POST /v1/audio/translations` | pass-through | audio media non-goal |
 | `POST /v1/audio/speech` | redact-only | the text-to-speech `input` is user text and is redacted; the audio response is bytes forwarded verbatim |
 | `POST /v1/images/generations` | redact-only | the OUTPUT is media, but the `prompt` is plain text and is redacted; the response (`b64_json`/`url`) comes back verbatim — a dall-e-3 `revised_prompt` echo may carry placeholder tokens (fail-safe: the value it hides was never exposed) |
-| `POST /v1/images/edits` | redact-only | multipart: the `prompt` form FIELD is redacted; image/mask file parts are media and stay byte-identical |
+| `POST /v1/images/edits` | redact-only | multipart: the `prompt` form FIELD is redacted, and so is every other non-structural plain field (`user`, like its JSON twin); structural fields (`model`, `size`, `n`, `quality`, `response_format`, …) are forwarded as sent; image/mask file parts are media and stay byte-identical |
 | `POST /v1/images/variations` | pass-through | image in, images out — no text anywhere in the request |
 | `POST /v1/videos` | chat | Sora job create: the `prompt` (JSON or multipart form field) is redacted, and the returned job object's prompt ECHO is restored; multipart `input_reference` media stays byte-identical |
 | `GET /v1/videos` | chat | job list: echoed prompts restored via the list-envelope walk |
@@ -158,11 +160,13 @@ Both path families: the api-version form (`/openai/deployments/{d}/…`,
 `/openai/files`, `?api-version=` in the query) and the v1 API
 (`/openai/v1/…`, the model in the body). Classifications mirror the OpenAI
 table above, with one deliberate difference: the id/metadata routes OpenAI
-leaves as pass-through (file list/metadata/delete, batches, model and
-deployment listings, response/conversation delete) are RECOGNIZED on Azure,
-so `[providers.azure] auth = "identity"` does not refuse them. On a
-body-less request redact-only is a no-op; batch objects are **chat**
-because they echo the user `metadata` a batch create carries.
+leaves as pass-through (file delete, model and deployment listings,
+response/conversation delete) are RECOGNIZED on Azure, so
+`[providers.azure] auth = "identity"` does not refuse them. On a body-less
+request redact-only is a no-op; batch objects and the batch list are
+**chat** on both providers because they echo the user `metadata` a batch
+create carries, and file objects (the upload response, the list and one
+file) because they echo the upload's redacted filename.
 
 | Endpoint | Classification | Notes |
 |---|---|---|
@@ -173,7 +177,7 @@ because they echo the user `metadata` a batch create carries.
 | `POST /openai/deployments/{d}/embeddings` | redact-only | |
 | `POST /openai/v1/embeddings` | redact-only | |
 | `POST /openai/deployments/{d}/images/generations` | redact-only | the prompt is redacted; image output verbatim |
-| `POST /openai/deployments/{d}/images/edits` | redact-only | multipart: the `prompt` form field is redacted, image parts byte-identical |
+| `POST /openai/deployments/{d}/images/edits` | redact-only | multipart: the `prompt` and every other non-structural form field (`user`) redacted, structural fields as sent, image parts byte-identical; under identity auth the structural fields are scanned as text too |
 | `POST /openai/deployments/{d}/audio/speech` | redact-only | text-to-speech `input` redacted; audio bytes verbatim |
 | `POST /openai/deployments/{d}/audio/transcriptions` | pass-through | audio media non-goal (identity auth refuses it) |
 | `POST /openai/responses` | chat | Responses on Azure, inherited from the OpenAI Responses adapter |
@@ -187,15 +191,17 @@ because they echo the user `metadata` a batch create carries.
 | `GET /openai/v1/conversations/{id}` | chat | |
 | `GET /openai/v1/conversations/{id}/items` | chat | list-envelope walk |
 | `DELETE /openai/v1/conversations/{id}` | redact-only | ids only |
-| `POST /openai/files` | redact-only | multipart JSONL upload, lines redacted (+ note on chat-shaped lines) |
-| `POST /openai/v1/files` | redact-only | |
-| `GET /openai/files` | redact-only | metadata only |
-| `GET /openai/files/{id}` | redact-only | metadata only |
+| `POST /openai/files` | chat | multipart JSONL upload, lines and filenames redacted (+ note on chat-shaped lines), the echoed filename restored; under identity auth a non-JSON-object line, a non-JSONL file, a non-UTF-8 form field, a part header without one reading (a `filename*` outside UTF-8 included), a Content-Transfer-Encoding, or a declared charset other than UTF-8/US-ASCII refuses the upload (400), and every form field is scanned as text (under key auth all but the structural ones) |
+| `POST /openai/v1/files` | chat | |
+| `GET /openai/files` | chat | the file list: echoed filenames restored |
+| `GET /openai/files/{id}` | chat | the file object: echoed filename restored |
+| `GET /openai/v1/files` | chat | |
+| `GET /openai/v1/files/{id}` | chat | |
 | `DELETE /openai/files/{id}` | redact-only | |
 | `GET /openai/files/{id}/content` | chat | batch output JSONL restored line by line |
 | `GET /openai/v1/files/{id}/content` | chat | |
 | `POST /openai/batches` | chat | file ids + user `metadata` (redacted out, restored in the echo) |
-| `GET /openai/batches` | redact-only | the batch LIST is never restored in the reader's vault namespace: it spans batches other users created, so that could hand one user another's value (pro named users). A session router that attributes listed items (`listing_item_session`, llm-redact-pro named users) restores each batch the READER created in the session it was created in; every other item's `metadata` keeps its placeholders |
+| `GET /openai/batches` | chat | the LIST is restored in the request's own session (both path families); with llm-redact-pro named users only the reader's own batches are restored (an empty listing session + `listing_item_session`), every other item keeps its placeholders |
 | `GET /openai/v1/batches/{id}` | chat | |
 | `POST /openai/batches/{id}/cancel` | chat | |
 | `GET /openai/models` | redact-only | model listing |
@@ -278,11 +284,28 @@ stance; with llm-redact-pro's named users, the user's own copy of it),
 keeping redact/rehydrate always in agreement. The per-cache
 GET/PATCH/DELETE and list return metadata only and pass through.
 
+The Gemini **Files API** passes through — files are media, the documented
+non-goal: the upload (`POST /upload/v1beta/files`), the metadata-only
+create (`POST /v1beta/files`), `files:register`, a file's metadata, delete
+and download (`GET /v1beta/files/{id}[:download]`, `DELETE`), the list,
+and `GET /download/v1beta/files/{id}:download` (a batch's output file),
+all forwarded to the Gemini upstream. What llm-redact reads is who owns
+what: the file a create answers with (`files/<id>`), and the output file a
+finished batch's status names (`GET /v1beta/batches/{id}`), are reported to
+a session router that tracks stored objects (llm-redact-pro's named users;
+see [how-it-works.md](how-it-works.md)). The google-genai SDKs upload with
+the resumable protocol and send the data chunks — the last one answers
+with the file — to the upload URL Google returns, not through the proxy:
+such a file is created without the proxy ever seeing its name.
+
 A pass-through request under `/v1/` that carries a **Google API key**
 (`x-goog-api-key`, or a `key=`/`$key=` query parameter) is forwarded to
 the Gemini upstream, not inferred as OpenAI: Gemini's v1 surface
 (`GET /v1/models[/{m}]`, …) shares OpenAI's prefix, and the Google key must
-never be sent to api.openai.com.
+never be sent to api.openai.com. An explicit Vertex path family
+(`/v1/projects/…`, `/v1/publishers/…`, `/v1beta1/…`) stays Vertex's
+whatever key it carries (express mode and service-account API keys
+authorize Vertex that way) — never sent to the Gemini API's host.
 
 Gemini **Imagen** (`models/{m}:predict`) and **Veo**
 (`models/{m}:predictLongRunning`) are redact-only: `instances[].prompt`
@@ -316,8 +339,8 @@ upstream; its matcher is proven disjoint from the Gemini Vertex adapter's
 (`rawPredict` vs `generateContent` verbs), and other publishers' rawPredict
 traffic (Llama, etc.) is deliberately not matched. Azure files
 uploads (`POST /openai/files`, `/openai/v1/files`) and content downloads
-reuse the OpenAI multipart/JSONL handling on Azure's path shapes; batches
-and file metadata are recognized (see the Azure table). **Azure OpenAI Responses**
+reuse the OpenAI multipart/JSONL/filename handling on Azure's path shapes;
+batches are recognized and file objects restored (see the Azure table). **Azure OpenAI Responses**
 (`POST /openai/responses` and the `/openai/v1/responses` preview, plus the
 stored-response and input-item GETs) reuses `OpenAIResponsesAdapter`
 wholesale via `AzureResponsesAdapter` — identical event vocabulary, delta
@@ -350,7 +373,11 @@ that is not there:
   secret can straddle a part boundary, so per-line scanning cannot be applied
   safely; real coverage would need stateful cross-part buffering. Pass-through,
   routed to the OpenAI upstream (pinned by test — it previously
-  fell through to the anthropic default).
+  fell through to the anthropic default). For the same reason the File a
+  completed Upload creates is reported to a session router as its creator's
+  only when its `purpose` is stated and is not `batch`: a batch input file's
+  requests would be run with the upload's credential, and the stored objects
+  they cite were never checked.
 - **OpenAI Assistants / Threads / vector-store search** — on OpenAI's
   announced deprecation path (Responses/Conversations is the successor), so
   not built. The same holds for their Azure v1 twins (`/openai/v1/threads`,

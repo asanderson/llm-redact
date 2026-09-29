@@ -9,7 +9,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol
 
-from llm_redact.placeholders import format_placeholder
+from llm_redact.placeholders import MAX_TOKEN_NUMBER, format_placeholder
 
 if TYPE_CHECKING:
     from llm_redact.config import VaultConfig
@@ -23,9 +23,45 @@ class VaultKeyError(RuntimeError):
     ``crypto`` extra installed."""
 
 
+class PlaceholderSpaceExhausted(RuntimeError):
+    """A new placeholder would need a number above MAX_TOKEN_NUMBER: the
+    request carries a token numbered at the limit (or, in theory, the
+    session issued that many). Refused, never wrapped around or reused —
+    the redactor turns it into a refused request. The message names the
+    detector type only, never a value."""
+
+    def __init__(self, detector_type: str) -> None:
+        super().__init__(
+            f"no {detector_type} placeholder number above the ones this request carries"
+            f" is left to issue (the limit is {MAX_TOKEN_NUMBER})"
+        )
+        self.detector_type = detector_type
+
+
+def next_number(issued: int, floor: int, detector_type: str) -> int:
+    """The number a NEW placeholder takes: above every number the session
+    has issued (``issued`` is their maximum, 0 when none) AND above
+    ``floor``, the highest same-type number the request being redacted
+    already carries. Without a floor that is the dense MAX(n)+1; with one,
+    the numbers in between are skipped — a gap, never a reuse."""
+    n = max(issued, floor) + 1
+    if n > MAX_TOKEN_NUMBER:
+        raise PlaceholderSpaceExhausted(detector_type)
+    return n
+
+
 class Vault(Protocol):
-    def placeholder_for(self, detector_type: str, original: str) -> str:
-        """Get or create the placeholder for an original value."""
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
+        """Get or create the placeholder for an original value.
+
+        A value the session already mapped keeps its token whatever the
+        floor. A NEW value is numbered ``next_number``: above the session's
+        own numbers and above ``floor`` — the highest same-type token number
+        the request carries (placeholders.token_floors), so a token the
+        session never issued (a compacted history, a pasted answer) never
+        gets a second meaning. Callers pass ``floor`` only when it is
+        non-zero, so a vault predating the keyword still serves every
+        request that carries no tokens."""
         ...
 
     def original_for(self, placeholder: str) -> str | None:
@@ -51,12 +87,12 @@ class InMemoryVault:
         self._reverse: dict[str, str] = {}
         self._counters: dict[str, int] = {}
 
-    def placeholder_for(self, detector_type: str, original: str) -> str:
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
         key = f"{detector_type}::{original}"
         existing = self._forward.get(key)
         if existing is not None:
             return existing
-        n = self._counters.get(detector_type, 0) + 1
+        n = next_number(self._counters.get(detector_type, 0), floor, detector_type)
         self._counters[detector_type] = n
         placeholder = format_placeholder(detector_type, n)
         self._forward[key] = placeholder
@@ -91,16 +127,19 @@ class EncryptedInMemoryVault:
         self._reverse: dict[str, bytes] = {}  # placeholder -> Fernet token
         self._counters: dict[str, int] = {}
 
-    def placeholder_for(self, detector_type: str, original: str) -> str:
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
         mac = self._cipher.mac(self._session_id, detector_type, original)
         existing = self._forward.get(mac)
         if existing is not None:
             return existing
-        n = self._counters.get(detector_type, 0) + 1
+        n = next_number(self._counters.get(detector_type, 0), floor, detector_type)
+        # Encrypt BEFORE any state changes: a failing cipher must leave no
+        # forward entry whose token could never be restored.
+        ciphertext = self._cipher.encrypt(original)
         self._counters[detector_type] = n
         placeholder = format_placeholder(detector_type, n)
         self._forward[mac] = placeholder
-        self._reverse[placeholder] = self._cipher.encrypt(original)
+        self._reverse[placeholder] = ciphertext
         return placeholder
 
     def original_for(self, placeholder: str) -> str | None:
@@ -130,7 +169,8 @@ CREATE TABLE IF NOT EXISTS mappings (
 CREATE TABLE IF NOT EXISTS response_sessions (
   response_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  kind TEXT NOT NULL DEFAULT 'response'
 );
 """
 
@@ -152,15 +192,27 @@ CREATE TABLE IF NOT EXISTS mappings ({_MAPPINGS_V3_COLUMNS});
 CREATE TABLE IF NOT EXISTS response_sessions (
   response_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  kind TEXT NOT NULL DEFAULT 'response'
 );
 CREATE TABLE IF NOT EXISTS vault_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 # The response-id map keeps at most this many rows of sessions that hold no
 # mappings; rows of live sessions are removed with their session (prune).
+# Its two kinds of rows are bounded APART: a Responses chain's rows
+# (``record_response_session``) and a stored object's owner record
+# (``record_object_session``) — every Responses turn writes one, so a shared
+# bound let ordinary traffic push out who created a file whose creating
+# session never redacted anything (then attributed to nobody: refused).
 _MAX_RESPONSE_ROWS = 10000
+_MAX_OBJECT_ROWS = 10000
 _RESPONSE_PRUNE_EVERY = 256
+_RESPONSE_KIND = "response"
+_OBJECT_KIND = "object"
+# How many ids one batched response-map lookup binds per query (well under
+# every engine's parameter limit: sqlite's, and Oracle's 1000-item IN list).
+LOOKUP_CHUNK = 500
 
 
 def default_vault_path() -> Path:
@@ -207,6 +259,25 @@ def _open_connection(path: Path, cipher: "VaultCipher | None" = None) -> sqlite3
     conn.executescript(_SCHEMA_V2)
     _migrate_to_v3(conn, cipher)
     return conn
+
+
+def _has_kind_column(conn: sqlite3.Connection) -> bool:
+    return any(row[1] == "kind" for row in conn.execute("PRAGMA table_info(response_sessions)"))
+
+
+def _ensure_kind_column(conn: sqlite3.Connection) -> None:
+    """Give a response map created before its rows had a ``kind`` the
+    column (every existing row is a Responses row as far as the bound goes:
+    the default). A concurrent opener that added it first is fine."""
+    if _has_kind_column(conn):
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE response_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'response'"
+        )
+    except sqlite3.OperationalError:
+        if not _has_kind_column(conn):
+            raise
 
 
 def _verify_key(conn: sqlite3.Connection, cipher: "VaultCipher", path: Path) -> None:
@@ -376,19 +447,21 @@ class SqliteVault:
                 self._forward[f"{detector_type}::{original}"] = placeholder
                 self._reverse[placeholder] = original
 
-    def placeholder_for(self, detector_type: str, original: str) -> str:
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
         key = f"{detector_type}::{original}"
         existing = self._forward.get(key)
         if existing is not None:
             return existing
         try:
             self._conn.execute("BEGIN IMMEDIATE")
+            # MAX(n) read fresh inside the write lock: a retry after a
+            # rolled-back write computes the same max(MAX(n), floor) + 1.
             row = self._conn.execute(
-                "SELECT COALESCE(MAX(n), 0) + 1 FROM mappings"
+                "SELECT COALESCE(MAX(n), 0) FROM mappings"
                 " WHERE session_id = ? AND detector_type = ?",
                 (self._session, detector_type),
             ).fetchone()
-            n = int(row[0])
+            n = next_number(int(row[0]), floor, detector_type)
             placeholder = format_placeholder(detector_type, n)
             if self._cipher is None:
                 self._conn.execute(
@@ -433,13 +506,14 @@ class SqliteVault:
             if row is None:  # pragma: no cover - constraint failed another way
                 raise
             placeholder = str(row[0])
-        except sqlite3.Error:
-            # Any other write failure (disk full, I/O error, lock timeout):
-            # roll back so the open BEGIN IMMEDIATE can't wedge the connection
-            # for the next request, and fail closed. Nothing was cached (the
-            # caches are written only after a successful commit below), and n
-            # is MAX(n)+1 read fresh on every call, so the next attempt
-            # reissues the same number — never a gap, never a reused token.
+        except BaseException:
+            # Any other failure (disk full, I/O error, lock timeout, a cipher
+            # fault, an exhausted number space): roll back so the open BEGIN
+            # IMMEDIATE can't wedge the connection for the next request, and
+            # fail closed. Nothing was cached (the caches are written only
+            # after a successful commit below), and n is computed from MAX(n)
+            # read fresh on every call, so the next attempt reissues the same
+            # number — never a skipped number, never a reused token.
             with suppress(sqlite3.Error):
                 self._conn.execute("ROLLBACK")
             raise
@@ -500,6 +574,11 @@ class VaultManager(Protocol):
 
     def record_response_session(self, response_id: str, session_id: str) -> None: ...
 
+    # Optional, read with getattr by the proxy: ``record_object_session(
+    # object_id, session_id)`` — a stored object's owner record, bounded
+    # apart from the Responses rows. A manager without it records owners
+    # through ``record_response_session`` (one shared bound).
+
     def lookup_response_session(self, response_id: str) -> str | None: ...
 
     def close(self) -> None: ...
@@ -557,8 +636,14 @@ class InMemoryVaultManager:
     def record_response_session(self, response_id: str, session_id: str) -> None:
         pass  # the SessionRouter's in-memory map is authoritative here
 
+    def record_object_session(self, object_id: str, session_id: str) -> None:
+        pass  # likewise: no durable map
+
     def lookup_response_session(self, response_id: str) -> str | None:
         return None
+
+    def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:
+        return {}
 
     def close(self) -> None:
         pass
@@ -576,10 +661,11 @@ class SqliteVaultManager:
         self, path: Path, *, cipher: "VaultCipher | None" = None, view_cache_size: int = 64
     ) -> None:
         self._conn = _open_connection(path, cipher)
+        _ensure_kind_column(self._conn)
         self._cipher = cipher
         self._views: OrderedDict[str, SqliteVault] = OrderedDict()
         self._view_cache_size = view_cache_size
-        self._response_inserts = 0
+        self._inserts = {_RESPONSE_KIND: 0, _OBJECT_KIND: 0}
 
     def get(self, session_id: str) -> Vault:
         view = self._views.get(session_id)
@@ -672,25 +758,37 @@ class SqliteVaultManager:
         return int(present)
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
+        """Map a Responses chain's response id to its session."""
+        self._record(response_id, session_id, _RESPONSE_KIND, _MAX_RESPONSE_ROWS)
+
+    def record_object_session(self, object_id: str, session_id: str) -> None:
+        """Record the session that created a stored object (the router's
+        ownership record); bounded apart from the Responses rows."""
+        self._record(object_id, session_id, _OBJECT_KIND, _MAX_OBJECT_ROWS)
+
+    def _record(self, row_id: str, session_id: str, kind: str, cap: int) -> None:
         self._conn.execute(
-            "INSERT OR REPLACE INTO response_sessions (response_id, session_id) VALUES (?, ?)",
-            (response_id, session_id),
+            "INSERT OR REPLACE INTO response_sessions (response_id, session_id, kind)"
+            " VALUES (?, ?, ?)",
+            (row_id, session_id, kind),
         )
-        self._response_inserts += 1
-        if self._response_inserts >= _RESPONSE_PRUNE_EVERY:
-            self._response_inserts = 0
+        self._inserts[kind] += 1
+        if self._inserts[kind] >= _RESPONSE_PRUNE_EVERY:
+            self._inserts[kind] = 0
             # Beyond the cap, only rows whose session holds no mappings go
             # (a pruned session, or one that never redacted anything): a
             # router reads a missing row as "that session was pruned", and a
             # chain into a LIVE session resumed in a fresh one would reissue
             # «EMAIL_001» for a new value while the provider's history still
             # means the old one. Live sessions' rows leave with the session.
+            # Each kind keeps its own newest rows.
             self._conn.execute(
-                "DELETE FROM response_sessions WHERE response_id NOT IN"
-                " (SELECT response_id FROM response_sessions ORDER BY created_at DESC LIMIT ?)"
+                "DELETE FROM response_sessions WHERE kind = ? AND response_id NOT IN"
+                " (SELECT response_id FROM response_sessions WHERE kind = ?"
+                " ORDER BY created_at DESC LIMIT ?)"
                 " AND NOT EXISTS"
                 " (SELECT 1 FROM mappings m WHERE m.session_id = response_sessions.session_id)",
-                (_MAX_RESPONSE_ROWS,),
+                (kind, kind, cap),
             )
 
     def lookup_response_session(self, response_id: str) -> str | None:
@@ -698,6 +796,24 @@ class SqliteVaultManager:
             "SELECT session_id FROM response_sessions WHERE response_id = ?", (response_id,)
         ).fetchone()
         return str(row[0]) if row is not None else None
+
+    def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:
+        """``lookup_response_session`` for many ids at once — one query per
+        ``LOOKUP_CHUNK`` distinct ids, not one per id (a listing names
+        thousands): the recorded ids with their sessions, an unknown id
+        simply absent."""
+        wanted = list(dict.fromkeys(response_ids))
+        found: dict[str, str] = {}
+        for start in range(0, len(wanted), LOOKUP_CHUNK):
+            chunk = wanted[start : start + LOOKUP_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                "SELECT response_id, session_id FROM response_sessions"
+                f" WHERE response_id IN ({marks})",
+                chunk,
+            )
+            found.update((str(response_id), str(session_id)) for response_id, session_id in rows)
+        return found
 
     def close(self) -> None:
         self._conn.close()

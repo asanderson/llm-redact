@@ -92,7 +92,10 @@ rewritten output restored; note the guardrail itself therefore judges the
 redacted text, placeholders and all) and
 StartAsyncInvoke (`POST /async-invoke`; its output lands in S3 with the
 placeholders in place) are redacted too, and the async-invoke status reads
-are recognized. A signature the CLIENT computed (SigV4-signed SDK traffic)
+are recognized. Base64 media blocks (`image`/`document`/`video`
+`source.bytes`) are forwarded byte-identical on every route — never
+scanned, like base64 `data` elsewhere (the media non-goal); the text
+beside them is redacted. A signature the CLIENT computed (SigV4-signed SDK traffic)
 remains a permanent non-goal: it covers the payload hash of the
 unredacted body, so no body-rewriting proxy can transit it (see
 [threat-model.md](threat-model.md)). The proxy can instead sign each
@@ -141,18 +144,50 @@ UTF-8 BOM or UTF-16/32 encoding is fine) or canonical multipart on a
 route whose multipart form llm-redact scans (Azure Files uploads and
 image edits). Anything else — non-JSON bytes, invalid UTF-8, a top-level
 JSON array or scalar (`null` included), a whitespace-only body,
-multipart on any other route or outside the canonical form, and any
-`Content-Encoding` other than `identity` (the proxy never decompresses
-a request, so it cannot see what the upstream would) — is refused with a
+multipart on any other route or outside the canonical form, any
+`Content-Encoding` coding other than `identity` in any of the request's
+Content-Encoding headers (the proxy never decompresses a request, so it
+cannot see what the upstream would), and a repeated `Content-Type`
+header (a singleton field; a second one could name a multipart boundary
+the proxy never parsed with) — is refused with a
 recorded, provider-shaped 400 naming the body's kind, before any
 credential is fetched or the upstream contacted. An empty body (a GET,
 DELETE or body-less POST) is forwarded as before; `detection = false`
-stays the explicit unredacted opt-out, and key-authorized providers keep
-forwarding such bodies verbatim. Realtime
+stays the explicit unredacted opt-out for a body the proxy can read (it
+turns redaction off, not this rule: the ownership check of
+llm-redact-pro's named users reads the parsed body too, so a gzip or
+non-JSON body it could not read is refused either way), and
+key-authorized providers keep forwarding such bodies verbatim. Inside an accepted multipart upload every
+piece must be scanned too, or the whole request is refused the same way:
+each non-blank line of an uploaded file must be a JSON object (so a text,
+PDF or other non-JSONL file cannot be uploaded with the proxy's identity —
+use key auth for those), plain form fields (`purpose`, `user`, `size`, …)
+are scanned as UTF-8 text (a field that is not UTF-8 is refused), and
+bytes outside every part (a multipart preamble or epilogue) are refused.
+So is a part header without a single reading — a folded or repeated
+header line, a filename holding a backslash that is not a `\"` or `\\`
+escape, a malformed `filename*` or one in a charset other than UTF-8 —
+and a part the proxy could not read as its plain bytes: a
+Content-Transfer-Encoding other than `7bit`/`8bit`/`binary` on any part
+(RFC 7578 deprecates them), or, on a part whose content is scanned, a
+declared charset other than UTF-8/US-ASCII (its Content-Type `charset`,
+or the RFC 7578 `_charset_` field). The image and mask parts of an
+image edit are media — the documented non-goal, as base64 media in a
+JSON body — and are signed as sent (their filenames redacted).
+Key-authorized uploads scan what they can read and forward the rest
+verbatim: plain form fields are scanned as UTF-8 text like their JSON
+twins (a form's `user` as a chat body's `user`) except the structural
+ones (`purpose`, `model`, `size`, `n`, `quality`, `response_format`, …),
+which are forwarded as sent, as is a field that is not UTF-8; a filename
+without a single reading is left as sent, and declared encodings are the
+encoding non-goal (the proxy scans the bytes it receives). Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with
-exactly the proxy's headers. Only those documented realtime paths are
+exactly the proxy's headers — and never redirected: a 3xx answer to the
+upgrade is a failed dial (1011, counted and recorded), so the proxy's
+credential cannot follow a `Location` to another host or path (nor, on
+key-authorized connections, the client's own key). Only those documented realtime paths are
 authorized (any other WebSocket path to such a provider is refused
 1011 and recorded as a 403), a missing credential closes the connection 1011 naming the
 credential source, a client frame that is not JSON (text or binary —
@@ -171,6 +206,21 @@ llm-redact-pro's access gate (`[auth] require = true`). `llm-redact
 doctor` warns about a non-loopback bind without one, and `llm-redact
 status` lists the providers the proxy holds credentials for.
 
+A web page in your browser is not such a client: a request carrying
+browser markers (`Origin`, `Sec-Fetch-*`) from another origin or site —
+a cross-site "simple" POST, a WebSocket from any page — is refused with a
+recorded 403 (WebSocket: close 1008) before any credential is fetched,
+and so is any request to an identity-authorized provider that names a
+host the proxy does not answer to (DNS rebinding) when it arrives over
+plain HTTP. The proxy answers to 127.0.0.1, localhost, ::1 and its bind
+host; a tool that reaches a plain-HTTP proxy under another name (a
+compose service, a Kubernetes Service) needs that name in
+`allowed_hosts` ([deployment.md](deployment.md#host-names-the-proxy-answers-to-allowed_hosts)).
+An access gate with ambient credentials (client certificates, Basic auth,
+an access proxy's cookie) does not change this: the browser attaches
+those to a page's requests by itself. The same browser rule holds on
+every other route too — see the threat model's "Requests from web pages".
+
 ## Ollama's native API
 
 Supported out of the box (`OLLAMA_HOST=http://127.0.0.1:8787`, or point
@@ -178,6 +228,14 @@ the tool at the proxy): `/api/chat` and `/api/generate` are redacted and
 rehydrated including their newline-delimited-JSON streaming, and
 `/api/embed`/`/api/embeddings` inputs are scrubbed. The default
 upstream is the local daemon at `http://127.0.0.1:11434`.
+
+Ollama (like a local vLLM or LM Studio server) needs no key, so the proxy
+lends whoever reaches it access to the model — and it rewrites `Host` when
+forwarding, which defeats Ollama's own DNS-rebinding check. The proxy
+therefore refuses a web page's request itself (a foreign `Origin`, a
+cross-site `Sec-Fetch-Site`, or a browser request to a host name the proxy
+does not answer to) on these routes as on every other; see the threat
+model's "Requests from web pages". Tools keep working under any name.
 
 ## Local and custom OpenAI-compatible servers
 
@@ -201,9 +259,18 @@ results stream restored line by line) and OpenAI Files + Batches (the
 uploaded JSONL file part — batch inputs and fine-tuning examples — is
 redacted line by line with every other byte of the multipart body
 preserved; batch output downloads are restored the same way) are
-covered. Batch flows use the static vault session (with llm-redact-pro's
+covered. An upload's file NAME is content too (`jane.doe@corp.example
+notes.jsonl`): every part's Content-Disposition `filename` and RFC 8187
+`filename*` (UTF-8) is redacted on every multipart route — only those
+value bytes change, the part `name` and every other header stay as
+sent — and the file object the provider echoes it in (the upload
+response, `GET /v1/files`, `GET /v1/files/{id}`, and Azure's
+`/openai/files` twins) comes back with the name restored. A filename
+with no single reading (a bare backslash, a folded header) is left as
+sent with key auth and refused with identity auth. Batch flows use the static vault session (with llm-redact-pro's
 named users, the submitting user's own copy of it), and uploads larger
-than `max_body_bytes` are rejected 413 fail-closed — raise the cap for
+than `max_body_bytes` — or carrying more lines, strings or parts than
+`max_body_strings` — are rejected 413 fail-closed: raise the caps for
 large batch files (`llm-redact doctor` reminds you).
 
 MCP connector configuration (Anthropic `mcp_servers`, OpenAI
@@ -228,6 +295,9 @@ use the static vault session — the per-conversation mode's
 first-message anchor does not exist at connection time. With
 llm-redact-pro's named users, each user's connection uses that user's own
 copy of the static session ([per-user namespaces](how-it-works.md#session-isolation)).
+A connection keeps a running token floor: a token any of its client
+frames carried (a restored conversation, a pasted answer) is never issued
+to a new value later on that connection ([the vault records](how-it-works.md#the-vault-records)).
 The Azure and Vertex routes work with the proxy's own cloud identity
 ([above](#the-proxys-own-cloud-identity)); the full list of accepted
 WebSocket paths is in [api-coverage.md](api-coverage.md#realtime-websocket-routes).
@@ -258,6 +328,10 @@ unredacted. Each provider also has a deliberate detection off-switch
 (`detection = false`): its requests are forwarded **unredacted** —
 nothing is protected, like warn mode — while rehydration stays active;
 use it only for upstreams you own end to end, such as a local Ollama.
+It turns off redaction only: a body with a repeated JSON key is still
+forwarded as the proxy parsed it (its last occurrence — what the session
+router's ownership check and stored-object tracking read), and an
+identity-authorized provider still refuses a body the proxy cannot read.
 Detection can also be scoped by language
 (`[detection] languages = ["en"]` skips other countries' national-id
 rules; universal rules always run) and per MCP server

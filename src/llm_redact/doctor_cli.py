@@ -24,6 +24,7 @@ from llm_redact.config import (
     ConfigError,
     VaultKmsConfig,
     apply_env_overrides,
+    dial_url,
     load_config,
     resolve_config_path,
     validate_bind_security,
@@ -179,16 +180,16 @@ def _check_build(report: _Report, config: Config) -> None:
 
 
 def _check_body_cap(report: _Report, config: Config) -> None:
-    # Informational: batch/file uploads bigger than the cap are rejected
+    # Informational: batch/file uploads bigger than the caps are rejected
     # 413 fail-closed (never forwarded unredacted) — batch workflows often
-    # need a bigger cap than chat traffic does.
+    # need bigger caps than chat traffic does.
     mib = config.max_body_bytes / (1024 * 1024)
     report.line(
         "PASS",
         "body cap",
-        f"max_body_bytes {config.max_body_bytes} (~{mib:.0f} MiB); redactable"
-        " requests above this answer 413 — raise it for large batch/file"
-        " uploads",
+        f"max_body_bytes {config.max_body_bytes} (~{mib:.0f} MiB), max_body_strings"
+        f" {config.max_body_strings}; redactable requests above either answer 413"
+        " — raise them for large batch/file uploads",
     )
 
 
@@ -198,20 +199,23 @@ def _check_proxy(report: _Report, config: Config) -> None:
     from llm_redact.proxy import RESERVED_PREFIX
 
     scheme = "https" if config.tls.enabled else "http"
-    url = f"{scheme}://{config.host}:{config.port}{RESERVED_PREFIX}/status"
+    # Where the configured bind is reached from this machine: loopback for
+    # a wildcard bind, an IPv6 literal in brackets.
+    base = dial_url(config.host, config.port, scheme=scheme)
+    where = urllib.parse.urlsplit(base).netloc
     try:
-        response = httpx.get(url, timeout=2.0)
+        response = httpx.get(f"{base}{RESERVED_PREFIX}/status", timeout=2.0)
         response.raise_for_status()
-    except httpx.HTTPError as problem:
+    except (httpx.HTTPError, httpx.InvalidURL) as problem:
         if config.tls.mutual:
             report.line(
                 "WARN",
                 "proxy",
-                f"not reachable at {config.host}:{config.port} — mutual TLS is on, so this"
+                f"not reachable at {where} — mutual TLS is on, so this"
                 " may just mean doctor has no client certificate",
             )
         else:
-            report.line("WARN", "proxy", f"not running at {config.host}:{config.port} ({problem})")
+            report.line("WARN", "proxy", f"not running at {where} ({problem})")
         _check_port_free(report, config)
         return
     running = str(response.json().get("version", "?"))
@@ -222,11 +226,24 @@ def _check_proxy(report: _Report, config: Config) -> None:
             f"running version {running} differs from installed {__version__} — restart to update",
         )
     else:
-        report.line("PASS", "proxy", f"running {running} at {config.host}:{config.port}")
+        report.line("PASS", "proxy", f"running {running} at {where}")
 
 
 def _check_port_free(report: _Report, config: Config) -> None:
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # An IPv6 bind needs an IPv6 socket: an IPv4 one fails to bind "::1"
+    # whether or not the port is free.
+    family = socket.AF_INET6 if ":" in config.host else socket.AF_INET
+    try:
+        probe = socket.socket(family, socket.SOCK_STREAM)
+    except OSError as exc:
+        kind = "IPv6" if family == socket.AF_INET6 else "IPv4"
+        report.line(
+            "WARN",
+            "proxy",
+            f"cannot probe port {config.port} on {config.host}: this machine cannot open"
+            f" an {kind} socket ({type(exc).__name__})",
+        )
+        return
     try:
         probe.bind((config.host, config.port))
     except OSError:
@@ -698,6 +715,52 @@ def _check_upstream_auth(report: _Report, config: Config) -> None:
     )
 
 
+def _credential_lenders(config: Config) -> list[str]:
+    """The config sections that make the proxy spend a credential it holds:
+    identity-authorized providers, and — with routing on — every upstream
+    that does not forward the client's own (an operator key, or none)."""
+    lenders = [
+        f"[providers.{name}]"
+        for name, provider in sorted(config.providers.items())
+        if provider.auth != "passthrough"
+    ]
+    if config.routing.enabled:
+        lenders += [
+            f"[upstreams.{upstream.name}]"
+            for upstream in config.routing.upstreams
+            if upstream.credential != "passthrough"
+        ]
+    return lenders
+
+
+def _check_allowed_hosts(report: _Report, config: Config) -> None:
+    """allowed_hosts: the extra host names the proxy answers to. A request
+    that spends a credential the proxy holds must name one (or a loopback
+    name, or the bind host) unless it arrives over TLS — so WARN where a
+    non-loopback plain-HTTP bind lends one with no names listed: a client
+    reaching it as a compose service or a Kubernetes Service would get 403s.
+    Silent when nothing is lent."""
+    if config.allowed_hosts:
+        report.line(
+            "PASS",
+            "hosts",
+            f"allowed_hosts: {len(config.allowed_hosts)} more host name(s) this proxy answers"
+            " to (checked on browser requests and on requests that spend its credential)",
+        )
+        return
+    lenders = _credential_lenders(config)
+    if not lenders or config.tls.enabled or config.host in ("127.0.0.1", "localhost", "::1"):
+        return
+    report.line(
+        "WARN",
+        "hosts",
+        f"{', '.join(lenders)} spend a credential the proxy holds, and this plain-HTTP proxy"
+        f" binds {config.host}: a client addressing it by any name other than 127.0.0.1,"
+        f" localhost, ::1 or {config.host} is refused (403) on those requests — list the"
+        " names clients use (a compose service, a Kubernetes Service) in allowed_hosts",
+    )
+
+
 def _check_routing(report: _Report, config: Config, offline: bool) -> None:
     """R-31 lives in llm-redact-pro (routing is a pro subsystem); this shell
     reports the config/package posture and hands the checks to the package."""
@@ -822,6 +885,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_extras(report, config)
     _check_posture(report, config)
     _check_upstream_auth(report, config)
+    _check_allowed_hosts(report, config)
     _check_routing(report, config, bool(getattr(args, "offline", False)))
     _check_access(report, config)
     _check_email(report, config)

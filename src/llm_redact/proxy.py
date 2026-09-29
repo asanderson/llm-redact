@@ -24,7 +24,7 @@ import signal
 import time
 import urllib.parse
 from collections import Counter, deque
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from datetime import UTC, date, datetime
@@ -33,6 +33,7 @@ from typing import Any, NamedTuple
 
 import httpx
 from starlette.applications import Starlette
+from starlette.datastructures import Headers
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
@@ -74,7 +75,7 @@ from llm_redact.metrics import Metrics
 from llm_redact.multipart import parse as parse_multipart
 from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
-from llm_redact.placeholders import PLACEHOLDER_RE
+from llm_redact.placeholders import PLACEHOLDER_RE, json_floors, may_carry_tokens
 from llm_redact.plugin_api import (
     AccessGate,
     Admission,
@@ -94,10 +95,17 @@ from llm_redact.plugin_api import (
 from llm_redact.providers import ALL_ADAPTERS, ProviderAdapter, RouteKind
 from llm_redact.providers.custom import CUSTOM_ROUTE_PREFIX, build_custom_adapters, custom_prefix
 from llm_redact.realtime import ALL_WS_ADAPTERS, WsAdapter, websockets_available, ws_handle
-from llm_redact.redactor import BlockedRequest, Redactor, UnredactableRequest
+from llm_redact.redactor import (
+    BlockedRequest,
+    PlaceholderLimitReached,
+    Redactor,
+    TooManyStrings,
+    UnredactableRequest,
+)
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent, SSEParser, serialize
+from llm_redact.upload_view import read_upload
 from llm_redact.vault import Vault, VaultManager
 from llm_redact.vault_crypto import key_source as vault_key_source
 from llm_redact.vault_crypto import require_vault_key_source
@@ -137,6 +145,9 @@ _REQUEST_USER: ContextVar[str | None] = ContextVar("llm_redact_user", default=No
 _OBJECT_ACCESS_FAULT = (
     "llm-redact: the stored-object ownership check failed; the request was not forwarded"
 )
+# A listed item the session router failed to answer for (its call raised):
+# delivered exactly as the provider sent it, never restored in a session.
+_UNANSWERED = object()
 
 # Response headers stamped on every reserved-endpoint reply (dashboard, status,
 # metrics, config editor, everything under RESERVED_PREFIX). The dashboard is
@@ -163,17 +174,64 @@ logger = logging.getLogger("llm_redact")
 
 
 class RequestContext:
-    """The session-scoped objects one request redacts and rehydrates with."""
+    """The session-scoped objects one request redacts and rehydrates with.
 
-    __slots__ = ("session_id", "vault", "redactor", "rehydrator")
+    ``sealed``: None, or — when the session router resolved this request to
+    a session that must stay EMPTY (``SessionRouter.sealed``) — the fixed
+    reason a redaction is refused with: the redactor refuses to write
+    (``SealedSessionError``), so a request with anything to redact is
+    refused and the session is never populated."""
+
+    __slots__ = ("session_id", "vault", "redactor", "rehydrator", "sealed")
 
     def __init__(
-        self, session_id: str, vault: Vault, redactor: Redactor, rehydrator: Rehydrator
+        self,
+        session_id: str,
+        vault: Vault,
+        redactor: Redactor,
+        rehydrator: Rehydrator,
+        sealed: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.vault = vault
         self.redactor = redactor
         self.rehydrator = rehydrator
+        self.sealed = sealed
+
+
+class SealedSessionError(Exception):
+    """A request resolved to a sealed session had something to redact:
+    writing it would populate a session that must stay empty."""
+
+
+class _SealedVault:
+    """A read-through view of a sealed session: lookups pass through, and
+    any new placeholder raises ``SealedSessionError`` instead of writing."""
+
+    def __init__(self, vault: Vault) -> None:
+        self._vault = vault
+
+    def placeholder_for(self, detector_type: str, original: str, *, floor: int = 0) -> str:
+        # Whatever the request's token floor: nothing is ever written here.
+        raise SealedSessionError(detector_type)
+
+    def original_for(self, placeholder: str) -> str | None:
+        return self._vault.original_for(placeholder)
+
+    def close(self) -> None:
+        pass
+
+    def __len__(self) -> int:
+        return len(self._vault)
+
+
+# The 403 text when a request resolved to a sealed session would redact a
+# value (never the value, never an id), unless the router named its own.
+_SEALED_REFUSAL = (
+    "llm-redact: this request is served in a vault session that must stay empty (it"
+    " reaches content llm-redact cannot attribute to you), and it carries values that"
+    " would need redacting there; it was not forwarded"
+)
 
 
 # Hop-by-hop / recomputed headers dropped when forwarding either direction.
@@ -339,6 +397,16 @@ class ProxyState:
         # provider — a resilience health signal, metadata only. The proxy
         # fails these closed with a 502; this counts how often.
         self.upstream_errors: Counter[str] = Counter()
+        # Faults in what runs AFTER the provider answered, by stage:
+        # "response_id" / "object_ids" / "listing" are session bookkeeping
+        # (contained — the answer is still delivered, never a wrong value);
+        # "delivery" is restoring the answer itself (a buffered one fails
+        # closed with a recorded 502; a stream is cut).
+        self.bookkeeping_errors: Counter[str] = Counter()
+        # Requests refused as a web page's (request_origin_refusal), by kind:
+        # "host" (a name the proxy does not answer to — DNS rebinding, or an
+        # alias not in allowed_hosts), "origin", "fetch_site". Kinds only.
+        self.request_origin_refusals: Counter[str] = Counter()
         self.redactor = Redactor(
             self.detectors,
             self.vault,
@@ -366,6 +434,9 @@ class ProxyState:
         # hot path one `is None` test each.
         self._object_access_refusal = getattr(self.session_router, "object_access_refusal", None)
         self._listing_item_session = getattr(self.session_router, "listing_item_session", None)
+        self._listing_item_sessions = getattr(self.session_router, "listing_item_sessions", None)
+        self._record_object_id = getattr(self.session_router, "record_object_id", None)
+        self._sealed = getattr(self.session_router, "sealed", None)
         self._static_context = RequestContext(
             config.vault.session, self.vault, self.redactor, self.rehydrator
         )
@@ -497,7 +568,8 @@ class ProxyState:
         session_id = self.session_router.resolve(
             adapter.name if adapter is not None else None, method, path, parsed_body
         )
-        if session_id == self._static_context.session_id:
+        sealed = self._session_sealed(session_id)
+        if session_id == self._static_context.session_id and sealed is None:
             return self._static_context
         vault = self.vault_manager.get(session_id)
         if session_id not in self._known_sessions:
@@ -525,7 +597,7 @@ class ProxyState:
         # counters: object construction only — no regex compilation, no DB open.
         redactor = Redactor(
             self.detectors,
-            vault,
+            _SealedVault(vault) if sealed is not None else vault,
             self.allowlist,
             counts=self.detection_counts,
             modes=self.modes,
@@ -534,7 +606,26 @@ class ProxyState:
         rehydrator = Rehydrator(
             vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
         )
-        return RequestContext(session_id, vault, redactor, rehydrator)
+        return RequestContext(session_id, vault, redactor, rehydrator, sealed=sealed)
+
+    def _session_sealed(self, session_id: str) -> str | None:
+        """The optional ``SessionRouter.sealed`` for the session this
+        request was just resolved to, as the reason a redaction into it is
+        refused with (None: not sealed). A non-empty string is the router's
+        own fixed reason; any other truthy answer — and a router that
+        raises — seals with the core's: the cost of being wrong is a
+        refusal, never a populated session."""
+        check = self._sealed
+        if check is None:
+            return None
+        try:
+            verdict = check(session_id)
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            logger.warning("session router sealed failed (%s); sealing", type(exc).__name__)
+            return _SEALED_REFUSAL
+        if isinstance(verdict, str) and verdict:
+            return verdict
+        return _SEALED_REFUSAL if verdict else None
 
     def record_response_id(self, response_id: str, session_id: str) -> None:
         if self.session_router.mode == "static":
@@ -556,11 +647,13 @@ class ProxyState:
     ) -> ProviderAdapter | None:
         """The adapter whose ``tracks_object_ids`` claims this request — the
         routed one, else (pass-through) the addressed provider's — or None,
-        also whenever no router could use the ids (static mode). ``body`` is
-        the parsed request body (a stored chat completion is flagged there)."""
-        if self.session_router.mode == "static" or not hasattr(
-            self.session_router, "record_object_id"
-        ):
+        also whenever the router tracks no ownership (no optional
+        ``record_object_id``). Asked in EVERY mode: a router in static mode
+        may still separate namespaces (llm-redact-pro serves unattributed
+        traffic on the static path next to named users, and must know which
+        objects that shared session created). ``body`` is the parsed request
+        body (a stored chat completion is flagged there)."""
+        if self._record_object_id is None:
             return None
         if adapter is not None:
             return adapter if adapter.tracks_object_ids(method, path, body=body) else None
@@ -573,16 +666,24 @@ class ProxyState:
     def record_object_ids(self, object_ids: Sequence[str], session_id: str) -> None:
         """Ids of provider-stored objects (files, batches, conversations)
         created or first seen in ``session_id`` — reported to a router that
-        tracks ownership (the optional ``record_object_id``), mirrored in
-        the durable map unless the router vetoes it."""
-        if self.session_router.mode == "static":
-            return
-        record = getattr(self.session_router, "record_object_id", None)
+        tracks ownership (the optional ``record_object_id``, in any mode),
+        mirrored in the durable map unless the router vetoes it: as an owner
+        record (``record_object_session``, bounded apart from the Responses
+        rows) where the vault manager keeps one."""
+        record = self._record_object_id
         if record is None:
             return
+        manager = self.vault_manager
+        mirror = getattr(manager, "record_object_session", manager.record_response_session)
         for object_id in object_ids:
             if record(object_id, session_id) is not False:
-                self.vault_manager.record_response_session(object_id, session_id)
+                mirror(object_id, session_id)
+
+    @property
+    def checks_object_access(self) -> bool:
+        """Whether the session router checks stored-object access at all
+        (the optional ``object_access_refusal``)."""
+        return self._object_access_refusal is not None
 
     def object_access_refusal(
         self, adapter_name: str | None, method: str, path: str, body: Any, *, identity: bool
@@ -618,7 +719,7 @@ class ProxyState:
         """The adapter whose ``lists_objects`` claims this request (the
         routed one, else the addressed provider's), or None — always None
         when the session router attributes no listed items."""
-        if self._listing_item_session is None:
+        if self._listing_item_session is None and self._listing_item_sessions is None:
             return None
         if adapter is not None:
             return adapter if adapter.lists_objects(method, path) else None
@@ -628,24 +729,117 @@ class ProxyState:
                 return candidate
         return None
 
-    def listing_rehydrator(self, object_id: str) -> Rehydrator | None:
-        """A rehydrator over the EXISTING session the router names for one
-        listed object (``listing_item_session``), or None: no session named,
-        the router failed (the item keeps its placeholders), or the session
-        holds no mappings — it is never created here."""
+    def listing_restorers(self, object_ids: Sequence[str]) -> dict[str, Rehydrator | None]:
+        """How each listed object is delivered, for one listing: an id ABSENT
+        from the answer stays as this request's own session delivers it (the
+        router named no session for it); ``None`` — the item is delivered
+        exactly as the provider sent it, because the router's answer failed
+        (for the whole listing, or for that item: a router that cannot answer
+        vouches for nothing, and the listing's own session may hold other
+        values under the same token names), or the named session does not
+        exist or holds nothing (it is never created here), or is not the
+        session the durable map records the object in (a session pruned
+        since the object was created and recreated with new values: its
+        placeholders are not the object's — or the check itself failed); a
+        rehydrator — restored in the named session."""
+        named, unanswered = self._listing_sessions(object_ids)
+        restorers: dict[str, Rehydrator | None] = dict.fromkeys(unanswered)
+        if not named:
+            return restorers
+        recorded = self._recorded_sessions(named)
+        rehydrators: dict[str, Rehydrator | None] = {}
+        for object_id, session_id in named.items():
+            if recorded is not None and recorded.get(object_id) != session_id:
+                restorers[object_id] = None
+                continue
+            if session_id not in rehydrators:
+                try:
+                    rehydrators[session_id] = self._existing_session_rehydrator(session_id)
+                except Exception as exc:  # noqa: BLE001 — a vault read that failed
+                    # The named owner's session cannot be read: its items go
+                    # out as the provider sent them, never what this
+                    # request's session would make of them (another value).
+                    _listing_fault(self, exc)
+                    rehydrators[session_id] = None
+            restorers[object_id] = rehydrators[session_id]
+        return restorers
+
+    def _listing_sessions(self, object_ids: Sequence[str]) -> tuple[dict[str, str], list[str]]:
+        """The session the router names for each listed object — asked once
+        for the whole listing (the optional ``listing_item_sessions``), else
+        per item (``listing_item_session``) — and the ids it failed to
+        answer for: every id when the batched answer raises or miscounts,
+        else each id whose own answer raised (each failure counted as a
+        ``listing`` bookkeeping fault). Ids it names no session for are in
+        neither."""
+        batched = self._listing_item_sessions
+        if batched is not None:
+            try:
+                answer = list(batched(list(object_ids)))
+            except Exception as exc:  # noqa: BLE001 — unsure means placeholders
+                self.bookkeeping_errors["listing"] += 1
+                logger.warning(
+                    "session router listing_item_sessions failed (%s);"
+                    " items delivered as the provider sent them",
+                    type(exc).__name__,
+                )
+                return {}, list(object_ids)
+            if len(answer) != len(object_ids):
+                self.bookkeeping_errors["listing"] += 1
+                logger.warning(
+                    "session router listing_item_sessions miscounted;"
+                    " items delivered as the provider sent them"
+                )
+                return {}, list(object_ids)
+            pairs = list(zip(object_ids, answer, strict=True))
+        else:
+            pairs = [
+                (object_id, self._listing_item_session_of(object_id)) for object_id in object_ids
+            ]
+        named = {object_id: session for object_id, session in pairs if isinstance(session, str)}
+        return named, [object_id for object_id, session in pairs if session is _UNANSWERED]
+
+    def _listing_item_session_of(self, object_id: str) -> Any:
+        """The router's per-item answer (only a string names a session), or
+        ``_UNANSWERED`` when asking raised."""
         name_session = self._listing_item_session
         if name_session is None:
             return None
         try:
-            session_id = name_session(object_id)
+            return name_session(object_id)
         except Exception as exc:  # noqa: BLE001 — unsure means placeholders
+            self.bookkeeping_errors["listing"] += 1
             logger.warning(
-                "session router listing_item_session failed (%s); item left as is",
+                "session router listing_item_session failed (%s);"
+                " item delivered as the provider sent it",
                 type(exc).__name__,
             )
+            return _UNANSWERED
+
+    def _recorded_sessions(self, named: Mapping[str, str]) -> dict[str, str] | None:
+        """The durable map's record of each named object (one batched query
+        where the vault manager offers one), or None without a durable map
+        (the in-memory manager never prunes, so there the router's record is
+        the truth). A lookup that fails answers "nothing recorded": every
+        named item then keeps the provider's placeholders."""
+        manager = self.vault_manager
+        if not getattr(manager, "durable_response_map", True):
             return None
-        if not isinstance(session_id, str):
-            return None
+        try:
+            many = getattr(manager, "lookup_response_sessions", None)
+            if many is not None:
+                return dict(many(named))
+            found = ((object_id, manager.lookup_response_session(object_id)) for object_id in named)
+            return {object_id: session for object_id, session in found if session is not None}
+        except Exception as exc:  # noqa: BLE001 — unsure means placeholders
+            logger.warning(
+                "listing ownership check failed (%s); items left as is", type(exc).__name__
+            )
+            return {}
+
+    def _existing_session_rehydrator(self, session_id: str) -> Rehydrator | None:
+        """A rehydrator over ``session_id`` when it exists and holds
+        mappings, else None — never creating it."""
         has_session = getattr(self.vault_manager, "has_session", None)
         if has_session is not None and not has_session(session_id):
             return None
@@ -1077,6 +1271,16 @@ class ProxyState:
     ) -> str:
         if adapter is not None and adapter.name in self.config.providers:
             return adapter.name
+        # Pass-through traffic: infer the provider from well-known paths;
+        # Anthropic is the default because that is the primary target tool.
+        # An explicit path family wins over every header or key heuristic.
+        if path.startswith("/v1beta/"):
+            return "gemini"
+        if path.startswith(("/v1/projects/", "/v1/publishers/", "/v1beta1/")):
+            # Vertex AI (express mode and service-account API keys send a
+            # Google API key too — still Vertex's traffic, never the
+            # Gemini API's host).
+            return "vertex"
         if path.startswith("/v1/") and _google_authenticated(headers, query):
             # Gemini's v1 surface (GET /v1/models[/{m}], …) shares OpenAI's
             # /v1 prefix; a Google API key (x-goog-api-key or ?key=) marks
@@ -1099,12 +1303,6 @@ class ProxyState:
             # which handle() answers 502 (never forwarded by guesswork).
             name = path[len(CUSTOM_ROUTE_PREFIX) :].split("/", 1)[0]
             return f"custom:{name}"
-        # Pass-through traffic: infer the provider from well-known paths;
-        # Anthropic is the default because that is the primary target tool.
-        if path.startswith("/v1beta/"):
-            return "gemini"
-        if path.startswith(("/v1/projects/", "/v1beta1/")):
-            return "vertex"
         if path.startswith("/openai/"):
             return "azure"
         if path.startswith(("/model/", "/guardrail/", "/async-invoke")):
@@ -1112,10 +1310,12 @@ class ProxyState:
             # are bedrock-runtime paths outside the /model/ regex; without
             # these prefixes they misrouted to the anthropic default.
             return "bedrock"
-        if path.startswith("/upload/v1beta/"):
+        if path.startswith(("/upload/v1beta/", "/download/v1beta/")):
             # Gemini's resumable/multipart Files upload starts with /upload/,
             # not /v1beta/ — any Gemini tool uploading a file through the
-            # proxy hit the wrong host before this prefix existed.
+            # proxy hit the wrong host before this prefix existed — and a
+            # file download (a batch's output: files.download) with
+            # /download/.
             return "gemini"
         if path.startswith("/api/"):
             return "ollama"
@@ -1156,17 +1356,6 @@ class ProxyState:
         ):
             return "openai"
         return "anthropic"
-
-    def upstream_for(
-        self,
-        adapter: ProviderAdapter | None,
-        path: str,
-        headers: "Mapping[str, str] | None" = None,
-        query: str = "",
-    ) -> str:
-        return self.config.providers[
-            self.provider_for(adapter, path, headers, query)
-        ].upstream_base_url
 
 
 def _google_authenticated(headers: "Mapping[str, str] | None", query: str) -> bool:
@@ -1387,13 +1576,24 @@ async def _stream_rehydrated(
     parser = SSEParser()
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
     response_id_seen = False
+    status = upstream.status_code  # 502 when the proxy itself cut the stream
     try:
         async for chunk in upstream.aiter_bytes():
             for event in parser.feed(chunk):
                 if not response_id_seen:
                     response_id = adapter.response_id_from_event(event)
                     if response_id is not None:
-                        state.record_response_id(response_id, ctx.session_id)
+                        # Session bookkeeping never cuts the stream (contained,
+                        # counted); the first id suffices either way.
+                        _contained(
+                            state,
+                            "response_id",
+                            method,
+                            path,
+                            state.record_response_id,
+                            response_id,
+                            ctx.session_id,
+                        )
                         response_id_seen = True
                 if object_tracker is not None and _record_streamed_object_ids(
                     state, ctx, object_tracker, method, path, event
@@ -1425,6 +1625,11 @@ async def _stream_rehydrated(
                 _route_log_suffix(route.row()),
             )
         raise
+    except Exception as exc:
+        status = _stream_delivery_fault(state, method, path, exc)
+        if route is not None:
+            route.mark_failed("stream_error")
+        raise
     finally:
         with suppress(Exception):
             # A stream that errored mid-body can make aclose() itself raise;
@@ -1438,14 +1643,14 @@ async def _stream_rehydrated(
             provider=adapter.name,
             method=method,
             path=path,
-            status=upstream.status_code,
+            status=status,
             started=started,
             streamed=True,
             detections=detections,
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
-            route=(state.finish_route(route, upstream.status_code) if route is not None else None),
+            route=(state.finish_route(route, status) if route is not None else None),
         )
 
 
@@ -1465,8 +1670,28 @@ def _record_streamed_object_ids(
         return False  # [DONE], keep-alives, anything not JSON
     object_ids = tracker.object_ids_from_body(method, path, payload)
     if object_ids:
-        state.record_object_ids(object_ids, ctx.session_id)
+        # Contained like the buffered report: the stream goes on either way.
+        _contained(
+            state, "object_ids", method, path, state.record_object_ids, object_ids, ctx.session_id
+        )
     return bool(object_ids)
+
+
+def _stream_delivery_fault(state: ProxyState, method: str, path: str, exc: Exception) -> int:
+    """A fault restoring a stream after its status went out (a vault read, a
+    router hook): the stream is cut — the honest signal, as for an upstream
+    drop — and the fault counted and logged by exception TYPE. Returns the
+    status the finally block records (and the audit END carries): 502, the
+    proxy's failure — a stream the proxy itself cut is never booked as the
+    upstream's success."""
+    state.bookkeeping_errors["delivery"] += 1
+    logger.warning(
+        "%s %s stream cut: restoring the upstream answer failed (%s)",
+        method,
+        path,
+        type(exc).__name__,
+    )
+    return 502
 
 
 async def _stream_rehydrated_eventstream(
@@ -1488,6 +1713,7 @@ async def _stream_rehydrated_eventstream(
     parser = EventStreamParser(max_frame_bytes=state.config.max_body_bytes)
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
     degraded = False
+    status = upstream.status_code  # 502 when the proxy itself cut the stream
     try:
         async for chunk in upstream.aiter_bytes():
             if degraded:
@@ -1513,6 +1739,11 @@ async def _stream_rehydrated_eventstream(
                 yield parser.residual
             for _key, text in pool.flush_all().items():
                 logger.warning("unflushed stream leftover discarded (%d chars)", len(text))
+    except httpx.TransportError:
+        raise
+    except Exception as exc:
+        status = _stream_delivery_fault(state, method, path, exc)
+        raise
     finally:
         with suppress(Exception):
             # A stream that errored mid-body can make aclose() itself raise;
@@ -1526,7 +1757,7 @@ async def _stream_rehydrated_eventstream(
             provider=adapter.name,
             method=method,
             path=path,
-            status=upstream.status_code,
+            status=status,
             started=started,
             streamed=True,
             detections=detections,
@@ -1658,6 +1889,12 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 "warnings_total": dict(state.warn_counts),
                 "blocked_total": dict(state.blocked_counts),
                 "upstream_errors_total": dict(state.upstream_errors),
+                "bookkeeping_errors_total": dict(state.bookkeeping_errors),
+                # Requests refused before any upstream contact as a web page's
+                # (CSRF, DNS rebinding, cross-site WebSocket) or, when they
+                # would spend a credential the proxy holds, as addressed to a
+                # host name it does not answer to — by kind, never a value.
+                "request_origin_refusals_total": dict(state.request_origin_refusals),
                 "detection": {
                     "enabled_rules": list(config.detection.enabled),
                     # None = all languages; otherwise the active scope and
@@ -1685,6 +1922,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 },
                 "rehydration": {"fuzzy": config.rehydration.fuzzy},
                 "max_body_bytes": config.max_body_bytes,
+                "max_body_strings": config.max_body_strings,
                 "inject_system_note": config.inject_system_note,
                 "providers": {
                     name: provider.upstream_base_url for name, provider in config.providers.items()
@@ -1793,6 +2031,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 vault_sessions=state.vault_manager.session_count(),
                 compaction_forks=state.compaction_forks,
                 upstream_errors=state.upstream_errors,
+                bookkeeping_errors=state.bookkeeping_errors,
             ),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
@@ -1869,7 +2108,11 @@ CSRF_HEADER = "x-llm-redact-csrf"
 
 
 def _allowed_hostnames(state: ProxyState) -> set[str]:
+    """The host names the proxy answers to: its loopback names, its bind
+    host, the operator's ``allowed_hosts``, and the access gate's public
+    origin (only for a gate that guards the reserved endpoints)."""
     names = {"127.0.0.1", "localhost", "::1", state.config.host.lower()}
+    names.update(state.config.allowed_hosts)
     if state.public_origin is not None:
         names.add(state.public_origin[1])
     return names
@@ -1936,27 +2179,167 @@ async def _admit_reserved(request: Request, state: ProxyState) -> Response | Non
     return JSONResponse({"error": admission.refusal}, status_code=403)
 
 
-def _host_allowed(request: Request, state: ProxyState) -> bool:
+def _host_allowed(request: HTTPConnection, state: ProxyState) -> bool:
     """DNS-rebinding defense: a rebinding page's requests carry the
     attacker's domain in Host, while local browsers and tools send the
-    loopback name they connected to."""
+    loopback name they connected to (or a name listed in allowed_hosts)."""
     hostname = request.url.hostname
     return hostname is not None and hostname.lower() in _allowed_hostnames(state)
 
 
 def _origin_allowed(request: Request, state: ProxyState) -> bool:
     """Absent Origin (curl, same-origin GET) is fine — the CSRF token still
-    gates POST. A present Origin must be a local origin ('null' and
-    everything else is rejected); https origins exist only when the proxy
-    itself serves TLS."""
+    gates POST. A present Origin must be a local origin ('null', a
+    malformed value and everything else is rejected); https origins exist
+    only when the proxy itself serves TLS."""
     origin = request.headers.get("origin")
     if origin is None:
         return True
     if state.public_origin is not None and origin.lower() == state.public_origin[2]:
         return True
-    parsed = urllib.parse.urlsplit(origin)
+    try:
+        parsed = urllib.parse.urlsplit(origin)
+    except ValueError:  # e.g. an unterminated IPv6 literal
+        return False
     schemes = ("http", "https") if state.config.tls.enabled else ("http",)
     return parsed.scheme in schemes and (parsed.hostname or "").lower() in _allowed_hostnames(state)
+
+
+# --- requests from web pages (CSRF, DNS rebinding) ------------------------------
+#
+# Every forwarded request borrows something the proxy holds: its vault (a
+# rehydrating route restores the operator's values into whatever the upstream
+# echoes, so a page with its OWN provider key could read the vault back token
+# by token), keyless upstreams it can reach (a local Ollama or vLLM), and —
+# under identity auth or a routed operator key — a credential. A web page in
+# the operator's browser can send requests to 127.0.0.1 (a "simple" POST needs
+# no preflight; WebSocket handshakes get no CORS at all) or, after DNS
+# rebinding, be same-origin with the proxy and read the answers.
+
+# Fetch Metadata values of a request the proxy's own page made, or that the
+# user typed or bookmarked; "same-site" and "cross-site" name another origin.
+_OWN_FETCH_SITES = frozenset({"same-origin", "none"})
+# A request URL's scheme as a web origin's (a WebSocket handshake comes from a
+# page on the http(s) origin of the same host and port).
+_ORIGIN_SCHEMES = {"http": "http", "https": "https", "ws": "http", "wss": "https"}
+# What a refused request is told, by refusal kind — the kind only, never the
+# Host or Origin it carried; short enough for a WebSocket close frame.
+REQUEST_ORIGIN_REFUSALS = {
+    "host": (
+        "this proxy does not answer to that host name (a DNS-rebinding defense);"
+        " list it in allowed_hosts if a client uses it"
+    ),
+    "origin": "a web page on another origin sent this request; llm-redact does not serve those",
+    "fetch_site": (
+        "a web page on another site or origin sent this request; llm-redact does not serve those"
+    ),
+}
+
+
+def _browser_request(conn: HTTPConnection) -> bool:
+    """Whether a browser sent this request: it carries Origin or a Fetch
+    Metadata (``Sec-Fetch-*``) header. Page script can neither set nor
+    remove either (forbidden header names); CLI tools and SDKs send
+    neither."""
+    return any(
+        name == b"origin" or name.startswith(b"sec-fetch-") for name, _ in conn.scope["headers"]
+    )
+
+
+def _own_origin(conn: HTTPConnection, state: ProxyState, origin: str) -> bool:
+    """Whether ``origin`` (an Origin header value) is this request's own:
+    the access gate's public origin, or exactly the scheme, host and port
+    the request was sent to (its Host, which the caller has checked).
+    Port-exact, unlike ``_origin_allowed``: an API route has no CSRF token
+    to stop a page served on another port of the same host name."""
+    value = origin.strip().lower()
+    if state.public_origin is not None and value == state.public_origin[2]:
+        return True
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError:  # a malformed port or IPv6 literal
+        return False
+    own = conn.url
+    scheme = _ORIGIN_SCHEMES.get(own.scheme)
+    if (
+        scheme is None
+        or parsed.scheme != scheme
+        or own.hostname is None
+        or "@" in parsed.netloc  # userinfo: not a serialized origin
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    default = 443 if scheme == "https" else 80
+    return (parsed.hostname, port or default) == (own.hostname.lower(), own.port or default)
+
+
+def request_origin_refusal(
+    conn: HTTPConnection, state: ProxyState, *, lends_credential: bool
+) -> str | None:
+    """Why a request bound for an upstream must be refused as a web page's,
+    or None: a key of ``REQUEST_ORIGIN_REFUSALS``.
+
+    A request with browser markers (``_browser_request``) must be addressed
+    to a host name the proxy answers to (DNS rebinding), carry only its own
+    origin (CSRF, cross-site WebSocket hijacking) and a ``Sec-Fetch-Site``
+    of ``same-origin`` or ``none``. One that would spend a credential the
+    proxy holds (``lends_credential``) must name such a host even without
+    markers — a browser lacking Fetch Metadata sends none on a same-origin
+    GET — unless it arrived over TLS: a browser verifies the proxy's
+    certificate against the name it resolved, so a rebound page never
+    reaches a TLS listener, and a team's clients may use any name the
+    certificate covers. CLI tools and SDKs send no browser markers, so an
+    alias host (a compose service) keeps working on the client's own
+    credential."""
+    if not _browser_request(conn):
+        # No Origin, no Sec-Fetch-*: only the lent credential's host rule.
+        if lends_credential and conn.url.scheme not in ("https", "wss"):
+            return None if _host_allowed(conn, state) else "host"
+        return None
+    if not _host_allowed(conn, state):
+        return "host"
+    headers = conn.headers
+    if not all(_own_origin(conn, state, origin) for origin in headers.getlist("origin")):
+        return "origin"
+    for site in headers.getlist("sec-fetch-site"):
+        if site.strip().lower() not in _OWN_FETCH_SITES:
+            return "fetch_site"
+    return None
+
+
+def _request_origin_refused(
+    state: ProxyState,
+    adapter: ProviderAdapter | None,
+    kind: str,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A request ``request_origin_refusal`` refused: a recorded,
+    provider-shaped 403 before any credential fetch or upstream contact,
+    counted by kind. The answer and the log line name the kind only —
+    never the Host or Origin the request carried."""
+    state.request_origin_refusals[kind] += 1
+    message = f"llm-redact: {REQUEST_ORIGIN_REFUSALS[kind]}; the request was not forwarded"
+    error = adapter.error_body(message, status=403) if adapter is not None else {"error": message}
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=403,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info("%s %s -> 403 refused (request origin: %s)", request.method, path, kind)
+    return JSONResponse(error, status_code=403)
 
 
 async def _stream_rehydrated_ndjson(
@@ -1977,6 +2360,7 @@ async def _stream_rehydrated_ndjson(
     method, path, started, detections, warned, audit_token = request_meta
     parser = NDJSONParser()
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
+    status = upstream.status_code  # 502 when the proxy itself cut the stream
     try:
         async for chunk in upstream.aiter_bytes():
             for line in parser.feed(chunk):
@@ -2007,6 +2391,11 @@ async def _stream_rehydrated_ndjson(
                 _route_log_suffix(route.row()),
             )
         raise
+    except Exception as exc:
+        status = _stream_delivery_fault(state, method, path, exc)
+        if route is not None:
+            route.mark_failed("stream_error")
+        raise
     finally:
         with suppress(Exception):
             # A stream that errored mid-body can make aclose() itself raise;
@@ -2020,14 +2409,14 @@ async def _stream_rehydrated_ndjson(
             provider=adapter.name,
             method=method,
             path=path,
-            status=upstream.status_code,
+            status=status,
             started=started,
             streamed=True,
             detections=detections,
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
-            route=(state.finish_route(route, upstream.status_code) if route is not None else None),
+            route=(state.finish_route(route, status) if route is not None else None),
         )
 
 
@@ -2149,6 +2538,53 @@ async def _guarded_post_json(
         return None, JSONResponse({"error": f"invalid JSON: {exc}"}, status_code=400)
 
 
+def _body_too_large(
+    state: "ProxyState",
+    request: Request,
+    adapter: ProviderAdapter,
+    *,
+    session: str,
+    path: str,
+    started: float,
+    cap: str,
+    limit: int,
+) -> Response:
+    """The recorded, provider-shaped 413 for a redactable body over one of
+    its caps — ``max_body_bytes`` (too big to buffer) or ``max_body_strings``
+    (too many strings or multipart parts to redact on the event loop) —
+    answered before any upstream contact: forwarding it unredacted is never
+    an option. The message names the cap, never the content."""
+    logger.info("%s %s -> 413 body over %s (%d)", request.method, path, cap, limit)
+    state.record_request(
+        session=session,
+        provider=adapter.name,
+        method=request.method,
+        path=path,
+        status=413,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    return Response(
+        content=json.dumps(
+            adapter.error_body(f"request body exceeds llm-redact {cap} ({limit})")
+        ).encode("utf-8"),
+        status_code=413,
+        media_type="application/json",
+    )
+
+
+def _multipart_parts_over(headers: Headers, body: bytes, limit: int) -> bool:
+    """Whether a multipart body may hold more than ``limit`` parts, decided
+    without parsing it: every part multipart.parse finds ends at a
+    ``CRLF--boundary`` delimiter of its own, so their count bounds the
+    parts (bytes.count: no allocation per part). A body that is not
+    multipart/form-data has no parts."""
+    boundary = parse_multipart_boundary(headers.get("content-type", ""))
+    return boundary is not None and body.count(b"\r\n--" + boundary) > limit
+
+
 async def _read_capped(request: Request, limit: int) -> bytes | None:
     """Read the body, aborting as soon as it exceeds ``limit`` bytes.
 
@@ -2166,7 +2602,7 @@ async def _read_capped(request: Request, limit: int) -> bytes | None:
 
 
 def _identity_body_problem(
-    adapter: ProviderAdapter, path: str, headers: Mapping[str, str], body: bytes, parsed: Any
+    adapter: ProviderAdapter, path: str, headers: Headers, body: bytes, parsed: Any
 ) -> str | None:
     """Why a non-empty request body on a matched route must NOT be signed
     with the proxy's own identity, or None when the proxy redacts it.
@@ -2178,21 +2614,158 @@ def _identity_body_problem(
     verbatim: non-JSON bytes, invalid UTF-8, a top-level array or scalar
     (``null`` included — never walked), whitespace only, multipart on any
     other route, and any content-encoded body (the proxy never decodes
-    one, so it cannot see what the upstream would). The result names the
-    body's KIND only — never its content."""
-    encoding = headers.get("content-encoding", "").strip().lower()
-    if encoding not in ("", "identity"):
-        return "the request body is content-encoded (llm-redact does not decode request bodies)"
+    one, so it cannot see what the upstream would) — every coding of every
+    Content-Encoding header counts, as the upstream reads them all. A
+    repeated Content-Type is refused too: it is a singleton field, and a
+    second one could name a multipart boundary the proxy never parsed
+    with. The route is checked before the multipart parse, so a body
+    refused on its route is never parsed. The result names the body's
+    KIND only — never its content."""
+    if _content_encoded(headers):
+        return _CONTENT_ENCODED
+    content_types = headers.getlist("content-type")
+    if len(content_types) > 1:
+        return "the request carries more than one Content-Type header"
     if isinstance(parsed, dict):
         return None
-    boundary = parse_multipart_boundary(headers.get("content-type", "")) if parsed is None else None
+    boundary = (
+        parse_multipart_boundary(content_types[0]) if parsed is None and content_types else None
+    )
     if boundary is None:
         return "the request body is not a JSON object llm-redact can redact"
-    if parse_multipart(body, boundary) is None:
-        return "the multipart body is outside the canonical form llm-redact can redact"
     if not adapter.redacts_multipart(path):
         return "the multipart body is on a route llm-redact does not redact multipart for"
+    if parse_multipart(body, boundary) is None:
+        return "the multipart body is outside the canonical form llm-redact can redact"
     return None
+
+
+def _lends_credential(plan: RoutePlan) -> bool:
+    """Whether a routed request may reach its provider with a credential the
+    PROXY holds (``RoutePlan.proxy_credential``, optional): only an explicit
+    False — every upstream the plan may use forwards the client's own
+    credential — says no; a plan without the member counts as the proxy's
+    (fail closed: the stored-object check is then only stricter)."""
+    return getattr(plan, "proxy_credential", True) is not False
+
+
+class _Unreadable(NamedTuple):
+    """Why a body sent with the proxy's own credential cannot be checked
+    (status, message — the body's KIND only, never its content)."""
+
+    status: int
+    message: str
+
+
+_CONTENT_ENCODED = "the request body is content-encoded (llm-redact does not decode request bodies)"
+
+
+def _content_encoded(headers: Headers) -> bool:
+    """Whether any coding of any Content-Encoding header is not identity
+    (the upstream reads them all; the proxy decodes none)."""
+    return any(
+        coding.strip().lower() not in ("", "identity")
+        for value in headers.getlist("content-encoding")
+        for coding in value.split(",")
+    )
+
+
+def _ownership_body(
+    headers: Headers,
+    body: bytes,
+    parsed: Any,
+    *,
+    matched: bool,
+    proxy_credential: bool,
+    max_body_bytes: int,
+    max_parts: int,
+) -> tuple[Any, bytes | None, _Unreadable | None]:
+    """What the stored-object check reads of a non-empty request body, the
+    body to forward in its place (a checked upload whose repeated-key lines
+    were re-serialized — a matched route only), and why a body the proxy
+    would send with its OWN credential cannot be checked.
+
+    Under the proxy's credential a body the check cannot read is never
+    sent: a content-encoded one, one with more than one Content-Type (a
+    second could name a multipart boundary the check never parsed with),
+    and what ``upload_view.read_upload`` / ``_pass_through_check_body``
+    cannot read. A matched route's JSON is ``parsed``. A multipart/form-data
+    upload is read on a matched route whatever the credential — the lines of
+    an uploaded batch file are requests the provider runs later, with the
+    credential the upload is sent with, and a form field can name a file;
+    whether the route redacts (``detection``) changes nothing here — and on
+    a pass-through route under the proxy's credential only, like its JSON
+    (``_pass_through_check_body``), which is forwarded verbatim: a line
+    there that repeats a key is refused rather than rewritten."""
+    if proxy_credential:
+        if _content_encoded(headers):
+            return None, None, _Unreadable(400, _CONTENT_ENCODED)
+        if len(headers.getlist("content-type")) > 1:
+            return None, None, _Unreadable(400, "the request carries more than one Content-Type")
+    if parsed is not None:
+        return parsed, None, None
+    boundary = parse_multipart_boundary(headers.get("content-type", ""))
+    if boundary is not None and (matched or proxy_credential):
+        if body.count(b"\r\n--" + boundary) > max_parts:
+            # More parts than max_body_strings allows: never parsed, here or
+            # by redaction (which answers it 413 on a matched route) — a
+            # body of many empty parts costs the event loop per part. Under
+            # the proxy's credential it cannot be checked, so it is refused.
+            too_many = _Unreadable(
+                413, f"the upload has more parts than llm-redact max_body_strings ({max_parts})"
+            )
+            return None, None, too_many if proxy_credential else None
+        view = read_upload(body, boundary, max_json_bytes=max_body_bytes)
+        unreadable = None
+        if view.oversized:
+            unreadable = _Unreadable(
+                413, f"the upload carries more than llm-redact max_body_bytes ({max_body_bytes})"
+            )
+        elif view.problem is not None:
+            unreadable = _Unreadable(400, view.problem)
+        elif view.normalized is not None and not matched:
+            unreadable = _Unreadable(400, "an uploaded line repeats a JSON key")
+        if unreadable is not None:
+            # With the client's own credential the upload goes out as the
+            # route sends it, unread (the provider authorizes the client).
+            return None, None, unreadable if proxy_credential else None
+        return view.cited, view.normalized, None
+    if not matched and proxy_credential:
+        check_body, unreadable = _pass_through_check_body(headers, body, max_body_bytes)
+        return check_body, None, unreadable
+    return None, None, None
+
+
+# The bytes a JSON document may start with before its first value: ASCII
+# whitespace, the UTF-8/16/32 byte-order marks, and the NULs of UTF-16/32.
+_JSON_LEAD = re.compile(rb"[^\x00\t\n\r \xef\xbb\xbf\xfe\xff]")
+
+
+def _pass_through_check_body(
+    headers: Headers, body: bytes, max_body_bytes: int
+) -> tuple[Any, _Unreadable | None]:
+    """A routed pass-through body that is not an upload, parsed for the
+    stored-object check only (the bytes are forwarded as they are):
+    ``(parsed JSON or None, None)``, or ``(None, why)`` when the body could
+    cite an object the check cannot see — a JSON document over
+    ``max_body_bytes``, or one that repeats a key (the check would see the
+    last occurrence, an upstream may keep the first). A body that is not
+    JSON at all (audio, an image) has nothing the check reads: None. (A
+    content-encoded body was refused before, by ``_ownership_body``.)"""
+    if len(body) > max_body_bytes:
+        lead = _JSON_LEAD.search(body)
+        if lead is not None and body[lead.start()] in b"{[":
+            return None, _Unreadable(
+                413, f"the request body exceeds llm-redact max_body_bytes ({max_body_bytes})"
+            )
+        return None, None
+    try:
+        parsed, duplicate_keys = loads_request(body)
+    except ValueError:
+        return None, None
+    if duplicate_keys:
+        return None, _Unreadable(400, "the request body repeats a JSON key")
+    return parsed, None
 
 
 async def handle(request: Request) -> Response:
@@ -2252,6 +2825,31 @@ async def handle(request: Request) -> Response:
     # here (forwarding pass-through would send unredacted bodies to it).
     provider_name = state.provider_for(adapter, path, request.headers, request.url.query)
     provider_conf = state.config.providers.get(provider_name)
+    # Read ONCE, with the provider's config and before the first await (the
+    # body read): a reload applied while the body is still arriving must not
+    # change what this request was admitted as. Every identity decision
+    # below — the unrecognized-route 403, the ownership check, the body
+    # rule, stripping and signing — and the upstream it goes to use these
+    # two snapshots; the reload's displaced authorizer stays with the
+    # requests that already hold it.
+    upstream_auth = state.upstream_auth.get(provider_name)
+    # A web page's request (CSRF, DNS rebinding) never reaches an upstream:
+    # refused before anything below answers, reads the body or signs. A
+    # routed plan that spends a key the proxy holds is checked again once
+    # planned (below).
+    origin_refusal = request_origin_refusal(
+        request, state, lends_credential=upstream_auth is not None
+    )
+    if origin_refusal is not None:
+        return _request_origin_refused(
+            state,
+            adapter,
+            origin_refusal,
+            provider_name=provider_name,
+            request=request,
+            path=path,
+            started=started,
+        )
     if provider_conf is None:
         # /custom/<name>/ with no [providers.custom.<name>] entry: there is
         # nowhere sane to forward, and guessing would leak.
@@ -2318,7 +2916,7 @@ async def handle(request: Request) -> Response:
         logger.info("%s %s -> 403 refused by the access gate", request.method, path)
         return JSONResponse(error, status_code=403)
 
-    if adapter is None and provider_name in state.upstream_auth:
+    if adapter is None and upstream_auth is not None:
         # The proxy lends its own cloud identity only to the API routes it
         # recognizes (and redacts). Signing pass-through traffic would hand
         # any client the whole cloud API as the proxy's principal, bodies
@@ -2352,35 +2950,25 @@ async def handle(request: Request) -> Response:
             # gates would refuse. It needs nothing from the body.
             return _answer_locally(state, request, answer, path=path, started=started)
 
+    # The body caps this request is held to, read once like its provider
+    # config: a reload while the body arrives changes neither.
+    max_body_bytes = state.config.max_body_bytes
+    max_body_strings = state.config.max_body_strings
     if adapter is not None:
         # Redactable routes fail closed on oversized bodies: the proxy must
         # buffer the whole body to redact it, and forwarding unredacted is
         # never acceptable. Pass-through routes below are unaffected.
-        capped = await _read_capped(request, state.config.max_body_bytes)
+        capped = await _read_capped(request, max_body_bytes)
         if capped is None:
-            logger.info(
-                "%s %s -> 413 body over %d bytes", request.method, path, state.config.max_body_bytes
-            )
-            state.record_request(
+            return _body_too_large(
+                state,
+                request,
+                adapter,
                 session=state.config.vault.session,
-                provider=adapter.name,
-                method=request.method,
                 path=path,
-                status=413,
                 started=started,
-                streamed=False,
-                detections={},
-                rehydrations={},
-            )
-            return Response(
-                content=json.dumps(
-                    adapter.error_body(
-                        f"request body exceeds llm-redact max_body_bytes"
-                        f" ({state.config.max_body_bytes})"
-                    )
-                ).encode("utf-8"),
-                status_code=413,
-                media_type="application/json",
+                cap="max_body_bytes",
+                limit=max_body_bytes,
             )
         body_bytes = capped
     else:
@@ -2396,12 +2984,109 @@ async def handle(request: Request) -> Response:
         except ValueError:
             parsed = None
 
+    # Routing (the llm-redact-pro routing layer): the router plans BEFORE the
+    # stored-object check below — the check must know whose credential the
+    # request will spend (a routed upstream may send the operator's own key)
+    # — and before redaction, because the FIRST upstream's
+    # inject_system_note governs the prepared body (decision 4; the redacted
+    # body is reused on later hops). A plan is side-effect free until
+    # begin(): one abandoned by a refusal below is simply dropped. An
+    # unrouted request — no router held, or a provider outside the router's
+    # protocols (plan() returns None) — never constructs a routing object and
+    # takes the legacy path below byte-for-byte.
+    plan: RoutePlan | None = None
+    # A provider the proxy authorizes with its own cloud identity is never
+    # routed (the routing protocols are anthropic/openai/gemini/ollama, and
+    # a routed hop carries the router's own credentials): the router is not
+    # even asked, so the request below is always signed by its authorizer.
+    if state.router is not None and upstream_auth is None:
+        model = parsed.get("model") if isinstance(parsed, dict) else None
+        planned = state.router.plan(
+            RouteInbound(
+                adapter_name=adapter.name if adapter is not None else None,
+                provider_name=provider_name,
+                method=request.method,
+                path=path,
+                raw_path=_upstream_path(request, path),
+                query=request.url.query,
+                headers=request.headers,
+                model=model if isinstance(model, str) else None,
+            )
+        )
+        if isinstance(planned, RouteRefusal):
+            # No rule and no default for this protocol: proxy-generated
+            # 502, never forwarded by guesswork (decision 2) — before
+            # redaction, like the router decided it.
+            return _route_refusal(
+                state,
+                state.config.vault.session,
+                adapter,
+                planned,
+                request=request,
+                path=path,
+                started=started,
+            )
+        plan = planned
+
+    # Whose credential the provider will see. The proxy's OWN — its cloud
+    # identity, or a routed plan's operator key (RoutePlan.proxy_credential;
+    # a plan without the member counts as the proxy's: fail closed) — makes
+    # every client the same principal upstream, so the stored-object check
+    # applies its identity policy.
+    proxy_credential = upstream_auth is not None or (plan is not None and _lends_credential(plan))
+    if proxy_credential and upstream_auth is None:
+        # A routed plan spends a key the proxy holds (or none at all): the
+        # host-name rule, applied above to browser requests only, now holds
+        # for every client — before the plan begins, redaction, or any hop.
+        origin_refusal = request_origin_refusal(request, state, lends_credential=True)
+        if origin_refusal is not None:
+            return _request_origin_refused(
+                state,
+                adapter,
+                origin_refusal,
+                provider_name=provider_name,
+                request=request,
+                path=path,
+                started=started,
+            )
+    check_body: Any = parsed
+    # An upload whose checked lines repeat a key, re-serialized: what a
+    # route that forwards the body unredacted (detection = false) sends.
+    checked_upload: bytes | None = None
+    if body_bytes and state.checks_object_access:
+        # What the check reads: a matched route's JSON, an upload's lines
+        # and form fields (redaction or not — ownership is access control),
+        # and, spent with the proxy's credential, a routed pass-through
+        # body (a vector store's file_ids, a fine-tuning job's
+        # training_file), read for the check alone — its bytes are still
+        # forwarded verbatim. A body the check cannot read is never sent
+        # with the proxy's credential.
+        check_body, checked_upload, unreadable = _ownership_body(
+            request.headers,
+            body_bytes,
+            parsed,
+            matched=adapter is not None,
+            proxy_credential=proxy_credential,
+            max_body_bytes=max_body_bytes,
+            max_parts=max_body_strings,
+        )
+        if unreadable is not None:
+            return _unchecked_body_refused(
+                state,
+                adapter,
+                unreadable,
+                provider_name=provider_name,
+                request=request,
+                path=path,
+                started=started,
+                identity=upstream_auth is not None,
+            )
     refusal = state.object_access_refusal(
         adapter.name if adapter is not None else None,
         request.method,
         path,
-        parsed,
-        identity=provider_name in state.upstream_auth,
+        check_body,
+        identity=proxy_credential,
     )
     if refusal is not None:
         # The session router (llm-redact-pro named users) refused a request
@@ -2471,40 +3156,41 @@ async def handle(request: Request) -> Response:
         )
         return JSONResponse(refused_adapter.error_body(message, status=400), status_code=400)
 
-    # Routing (the llm-redact-pro routing layer): the router plans BEFORE
-    # redaction because the FIRST upstream's inject_system_note governs the
-    # prepared body (decision 4; the redacted body is reused on later hops).
-    # An unrouted request — no router held, or a provider outside the
-    # router's protocols (plan() returns None) — never constructs a routing
-    # object and takes the legacy path below byte-for-byte.
-    plan: RoutePlan | None = None
-    upstream_auth = state.upstream_auth.get(provider_name)
-    # A provider the proxy authorizes with its own cloud identity is never
-    # routed (the routing protocols are anthropic/openai/gemini/ollama, and
-    # a routed hop carries the router's own credentials): the router is not
-    # even asked, so the request below is always signed by its authorizer.
-    if state.router is not None and upstream_auth is None:
-        model = parsed.get("model") if isinstance(parsed, dict) else None
-        planned = state.router.plan(
-            RouteInbound(
-                adapter_name=adapter.name if adapter is not None else None,
-                provider_name=provider_name,
-                method=request.method,
-                path=path,
-                raw_path=_upstream_path(request, path),
-                query=request.url.query,
-                headers=request.headers,
-                model=model if isinstance(model, str) else None,
-            )
+    def sealed_response(sealed_adapter: ProviderAdapter) -> JSONResponse:
+        # The session router sealed this request's session (it must stay
+        # empty) and redaction would have written to it: refused before
+        # any upstream contact, the session untouched.
+        logger.info("%s %s -> 403 refused (sealed session)", request.method, path)
+        state.record_request(
+            session=ctx.session_id,
+            provider=sealed_adapter.name,
+            method=request.method,
+            path=path,
+            status=403,
+            started=started,
+            streamed=False,
+            detections={},
+            rehydrations={},
         )
-        if isinstance(planned, RouteRefusal):
-            # No rule and no default for this protocol: proxy-generated
-            # 502, never forwarded by guesswork (decision 2) — before
-            # redaction, like the router decided it.
-            return _route_refusal(
-                state, ctx, adapter, planned, request=request, path=path, started=started
-            )
-        plan = planned
+        reason = ctx.sealed or _SEALED_REFUSAL
+        return JSONResponse(sealed_adapter.error_body(reason, status=403), status_code=403)
+
+    def too_many_strings(capped_adapter: ProviderAdapter) -> Response:
+        # More strings than max_body_strings: counted during redaction, so
+        # refused before any upstream contact (placeholders issued for the
+        # strings before the limit are harmless — the vault is
+        # deterministic and nothing is forwarded).
+        return _body_too_large(
+            state,
+            request,
+            capped_adapter,
+            session=ctx.session_id,
+            path=path,
+            started=started,
+            cap="max_body_strings",
+            limit=max_body_strings,
+        )
+
     note_wanted = plan.inject_system_note if plan is not None else state.config.inject_system_note
 
     outbound = body_bytes
@@ -2512,11 +3198,27 @@ async def handle(request: Request) -> Response:
     # bodies): the routed path applies per-hop body rewrites to it.
     outbound_obj: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
     detection_off = provider_conf is not None and not provider_conf.detection
-    if upstream_auth is not None and adapter is not None and body_bytes and not detection_off:
-        # The proxy's own identity signs only what the proxy could redact:
-        # a body it cannot walk would otherwise be forwarded verbatim —
+    if (
+        adapter is not None
+        and parsed is None
+        and body_bytes
+        and (upstream_auth is not None or not detection_off)
+        and _multipart_parts_over(request.headers, body_bytes, max_body_strings)
+    ):
+        # A multipart body on a matched route (redacted there, or vouched
+        # for under identity auth) with more parts than max_body_strings
+        # allows: refused before any parse — a body of many empty parts
+        # costs the event loop per part, not per byte. Like max_body_bytes,
+        # the cap holds on every matched route.
+        return too_many_strings(adapter)
+    if upstream_auth is not None and adapter is not None and body_bytes:
+        # The proxy's own identity signs only a body the proxy could read:
+        # one it cannot walk would otherwise be forwarded verbatim —
         # refused here, before redaction, any credential fetch or upstream
-        # contact. (detection = false is the explicit unredacted opt-out.)
+        # contact. detection = false turns REDACTION off, not this rule:
+        # the ownership check (object_access_refusal, above) and object
+        # tracking read the parsed body too, and a body they could not
+        # read (gzip, non-JSON bytes) must not carry the proxy's identity.
         problem = _identity_body_problem(adapter, path, request.headers, body_bytes, parsed)
         if problem is not None:
             return refused_response(
@@ -2537,18 +3239,45 @@ async def handle(request: Request) -> Response:
             path,
             provider_name,
         )
+        if duplicate_keys:
+            # Except a repeated JSON key: the ownership check and object
+            # tracking read its LAST occurrence, so exactly that is sent — a
+            # first-wins upstream would otherwise act on a value nobody
+            # checked (another user's previous_response_id, a `store`).
+            outbound = json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+        elif checked_upload is not None:
+            # Likewise an uploaded line repeating a key (a batch input
+            # file's request, run later with this upload's credential).
+            outbound = checked_upload
     elif adapter is not None and isinstance(parsed, dict):
+        # Token floors: a new value is never numbered onto a token this body
+        # already carries (one its session never issued — a compacted
+        # history, a pasted answer — would otherwise gain a second meaning).
+        # The whole decoded body counts, fields the walk skips included; a
+        # body with no guillemet in any encoding pays only the byte gate.
+        # The copy is this body's own: it counts the strings it redacts
+        # against max_body_strings.
+        budgeted = ctx.redactor.with_budget(max_body_strings)
+        redactor = (
+            budgeted.with_floors(json_floors(parsed)) if may_carry_tokens(body_bytes) else budgeted
+        )
         try:
             prepared = adapter.prepare_request(
                 parsed,
-                ctx.redactor,
+                redactor,
                 inject_note=note_wanted and adapter.wants_system_note(kind, path),
                 mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
             )
         except BlockedRequest as exc:
             return blocked_response(exc, adapter)
+        except TooManyStrings:
+            return too_many_strings(adapter)
+        except PlaceholderLimitReached as exc:
+            return refused_response(str(exc), adapter, "no placeholder number left")
         except UnredactableRequest as exc:
             return refused_response(str(exc), adapter, "undecodable field")
+        except SealedSessionError:
+            return sealed_response(adapter)
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
@@ -2566,7 +3295,10 @@ async def handle(request: Request) -> Response:
         # /v1/files) get their JSONL file parts redacted; anything the
         # adapter declines to rewrite forwards verbatim (the non-JSON-body
         # default that keeps unknown formats working) — except under
-        # identity auth, refused above (_identity_body_problem).
+        # identity auth: refused above (_identity_body_problem), and any
+        # part the adapter would forward unscanned refused here. What the
+        # upload cites (its lines and form fields) was checked above,
+        # before anything was redacted (_ownership_body).
         boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
         if boundary is not None:
             try:
@@ -2574,13 +3306,32 @@ async def handle(request: Request) -> Response:
                     path,
                     body_bytes,
                     boundary,
-                    ctx.redactor,
+                    # This body's own copy, counting its strings (form
+                    # fields, file names, JSONL lines) against
+                    # max_body_strings.
+                    ctx.redactor.with_budget(max_body_strings),
                     inject_note=note_wanted and adapter.wants_system_note(kind, path),
+                    # Under the proxy's own identity every part must be
+                    # scanned: an unscanned piece refuses the whole request.
+                    require_scanned=upstream_auth is not None,
                 )
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the
                 # whole request is rejected.
                 return blocked_response(exc, adapter)
+            except TooManyStrings:
+                return too_many_strings(adapter)
+            except PlaceholderLimitReached as exc:
+                return refused_response(str(exc), adapter, "no placeholder number left")
+            except UnredactableRequest as exc:
+                return refused_response(
+                    f"llm-redact: {exc}, and this provider is authorized with the proxy's"
+                    " own identity; the request was not forwarded",
+                    adapter,
+                    "unscanned multipart content under identity auth",
+                )
+            except SealedSessionError:
+                return sealed_response(adapter)
             if rewritten is not None:
                 outbound = rewritten
 
@@ -2605,7 +3356,7 @@ async def handle(request: Request) -> Response:
             new_warned=new_warned,
         )
 
-    upstream_base = state.upstream_for(adapter, path, request.headers, request.url.query)
+    upstream_base = provider_conf.upstream_base_url  # the admitted config's, not a reload's
     if not upstream_base:
         # Providers without a default upstream (azure) answer 502 until
         # configured — proxy-generated, never forwarded.
@@ -3057,6 +3808,76 @@ async def _deliver(
         )
     await upstream.aclose()
 
+    rehydration_counts_before = dict(state.rehydration_counts)
+    try:
+        raw = _restore_buffered(
+            request,
+            state,
+            ctx,
+            adapter,
+            kind,
+            route,
+            raw,
+            path=path,
+            content_type=content_type,
+            status=upstream.status_code,
+            request_body=request_body,
+        )
+    except Exception as exc:  # noqa: BLE001 — never a bare 500 once the provider answered
+        return _delivery_fault_response(
+            state,
+            ctx,
+            adapter,
+            exc,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+            audit_token=audit_token,
+            route=route,
+        )
+
+    # Every request is recorded — pass-through included (provider=None maps
+    # to the "passthrough" metrics label); audit rows likewise when enabled.
+    state.record_request(
+        session=ctx.session_id,
+        provider=adapter.name if adapter is not None else None,
+        method=request.method,
+        path=path,
+        status=upstream.status_code,
+        started=started,
+        streamed=False,
+        detections=new_counts,
+        rehydrations=_count_delta(state.rehydration_counts, rehydration_counts_before),
+        warned=new_warned,
+        audit_token=audit_token,
+        route=(state.finish_route(route, upstream.status_code) if route is not None else None),
+    )
+
+    return Response(content=raw, status_code=upstream.status_code, headers=headers)
+
+
+def _restore_buffered(
+    request: Request,
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    kind: RouteKind,
+    route: RouteDelivery | None,
+    raw: bytes,
+    *,
+    path: str,
+    content_type: str,
+    status: int,
+    request_body: Any,
+) -> bytes:
+    """A buffered upstream answer as the client receives it: rehydrated in
+    the request's session (CHAT), observed by the router, listed objects
+    restored in their owners' sessions, stored objects and response ids
+    reported. The session bookkeeping is contained (``_contained``: the
+    answer is still delivered); a fault restoring the answer itself raises
+    to ``_deliver``'s backstop."""
     received = raw  # the provider's own bytes (a listing restores items from these)
     rehydration_counts_before = dict(state.rehydration_counts)
     payload: Any = None
@@ -3068,7 +3889,15 @@ async def _deliver(
         if payload is not None:
             response_id = adapter.response_id_from_body(payload)
             if response_id is not None:
-                state.record_response_id(response_id, ctx.session_id)
+                _contained(
+                    state,
+                    "response_id",
+                    request.method,
+                    path,
+                    state.record_response_id,
+                    response_id,
+                    ctx.session_id,
+                )
             rehydrated = adapter.rehydrate_body(payload, ctx.rehydrator)
             # No-op short-circuit: every restore increments rehydration_counts
             # (a miss passes through verbatim), so an unchanged count means the
@@ -3110,7 +3939,7 @@ async def _deliver(
 
     lister = (
         state.object_lister(adapter, request.method, path, request.headers)
-        if raw and 200 <= upstream.status_code < 300 and "application/json" in content_type
+        if raw and 200 <= status < 300 and "application/json" in content_type
         else None
     )
     if lister is not None:
@@ -3124,7 +3953,7 @@ async def _deliver(
 
     tracker = (
         state.object_tracker(adapter, request.method, path, request.headers, body=request_body)
-        if raw and 200 <= upstream.status_code < 300 and "application/json" in content_type
+        if raw and 200 <= status < 300 and "application/json" in content_type
         else None
     )
     if tracker is not None:
@@ -3139,26 +3968,97 @@ async def _deliver(
             stored = None
         object_ids = tracker.object_ids_from_body(request.method, path, stored)
         if object_ids:
-            state.record_object_ids(object_ids, ctx.session_id)
+            _contained(
+                state,
+                "object_ids",
+                request.method,
+                path,
+                state.record_object_ids,
+                object_ids,
+                ctx.session_id,
+            )
+    return raw
 
-    # Every request is recorded — pass-through included (provider=None maps
-    # to the "passthrough" metrics label); audit rows likewise when enabled.
+
+def _contained(
+    state: ProxyState,
+    stage: str,
+    method: str,
+    path: str,
+    bookkeeping: Callable[..., object],
+    *args: Any,
+) -> bool:
+    """Run session bookkeeping that follows the provider's answer (a router
+    call, a durable-map write): a fault is counted and logged by stage and
+    exception TYPE (a message can carry an id or a DSN) and never reaches
+    the response — the answer the provider already produced (and billed) is
+    delivered. Losing a record is fail-safe by construction: an unrecorded
+    response id or stored object is the router's unknown-object case (an
+    empty session: placeholders pass through), never a wrong value. False
+    when it failed."""
+    try:
+        bookkeeping(*args)
+    except Exception as exc:  # noqa: BLE001 — contained by design, see above
+        state.bookkeeping_errors[stage] += 1
+        logger.warning(
+            "%s %s -> %s bookkeeping failed (%s); the answer is delivered",
+            method,
+            path,
+            stage,
+            type(exc).__name__,
+        )
+        return False
+    return True
+
+
+def _delivery_fault_response(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    exc: Exception,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+    audit_token: object | None,
+    route: RouteDelivery | None,
+) -> JSONResponse:
+    """The provider answered, but restoring that answer failed (a vault read
+    that cannot complete, a router hook): fail closed with a provider-shaped
+    502 — never a bare 500, never a partial or unrestored body — recorded
+    (the ``[audit] required`` END row included) and counted. The upstream
+    itself did not fail: not an upstream error, and the route is closed as
+    a 502 without a fault class. By exception TYPE only."""
+    state.bookkeeping_errors["delivery"] += 1
+    row = state.finish_route(route, 502) if route is not None else None
+    logger.warning(
+        "%s %s -> 502 restoring the upstream answer failed (%s)%s",
+        request.method,
+        path,
+        type(exc).__name__,
+        _route_log_suffix(row) if row is not None else "",
+    )
     state.record_request(
         session=ctx.session_id,
         provider=adapter.name if adapter is not None else None,
         method=request.method,
         path=path,
-        status=upstream.status_code,
+        status=502,
         started=started,
         streamed=False,
         detections=new_counts,
-        rehydrations=_count_delta(state.rehydration_counts, rehydration_counts_before),
+        rehydrations={},
         warned=new_warned,
         audit_token=audit_token,
-        route=(state.finish_route(route, upstream.status_code) if route is not None else None),
+        route=row,
     )
-
-    return Response(content=raw, status_code=upstream.status_code, headers=headers)
+    message = "llm-redact: the upstream answer could not be restored; nothing was delivered"
+    body = adapter.error_body(message, status=502) if adapter is not None else {"error": message}
+    return JSONResponse(
+        body, status_code=502, headers=dict(route.headers) if route is not None else None
+    )
 
 
 def _object_access_refused(
@@ -3190,16 +4090,69 @@ def _object_access_refused(
     return JSONResponse(error, status_code=403)
 
 
+def _unchecked_body_refused(
+    state: ProxyState,
+    adapter: ProviderAdapter | None,
+    unreadable: _Unreadable,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+    identity: bool,
+) -> JSONResponse:
+    """A request the proxy would send with its own credential — its cloud
+    identity (``identity``), or a routed plan's — whose body the
+    stored-object check cannot read: refused, recorded, before any upstream
+    contact (provider-shaped on a matched route, the pass-through shape
+    otherwise)."""
+    credential = (
+        "this provider is authorized with the proxy's own identity"
+        if identity
+        else "this request would be sent with the proxy's own provider credential"
+    )
+    message = (
+        f"llm-redact: {unreadable.message}, and {credential}, so the stored objects it"
+        " cites must be checked; the request was not forwarded"
+    )
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=unreadable.status,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info(
+        "%s %s -> %d refused (unchecked body under the proxy's credential)",
+        request.method,
+        path,
+        unreadable.status,
+    )
+    error = (
+        adapter.error_body(message, status=unreadable.status)
+        if adapter is not None
+        else {"error": message}
+    )
+    return JSONResponse(error, status_code=unreadable.status)
+
+
 def _restore_listing(
     state: ProxyState, lister: ProviderAdapter, upstream_raw: bytes, raw: bytes
 ) -> bytes | None:
     """Restore each listed stored object in the session the router names
-    for it (``listing_item_session``); every other item, and everything
-    outside the item array, stays exactly as ``raw`` (the bytes about to be
-    delivered) has it. A named item is rehydrated as a whole object from
-    the provider's own bytes (``upstream_raw``) with the adapter's
-    non-streaming transform — never a second pass over an already-restored
-    item. None when nothing was restored (the bytes are then forwarded
+    for it (``listing_item_session``); an item the router named no session
+    for, and everything outside the item array, stays exactly as ``raw``
+    (the bytes about to be delivered) has it. A named item is rebuilt from
+    the provider's own bytes (``upstream_raw``) — rehydrated as a whole
+    object with the adapter's non-streaming transform, never a second pass
+    over an already-restored item; a named session that does not exist (or
+    holds nothing) restores nothing, and neither does a router that failed
+    to answer, so such an item is delivered exactly as the provider sent
+    it. None when nothing changed (the bytes are then forwarded
     untouched)."""
     try:
         original = json.loads(upstream_raw)
@@ -3208,12 +4161,15 @@ def _restore_listing(
     items = lister.listing_items(original)
     if not items:
         return None
-    restorers: dict[int, Rehydrator] = {}
-    for index, item in enumerate(items):
-        if isinstance(item, dict) and isinstance(item.get("id"), str):
-            rehydrator = state.listing_rehydrator(item["id"])
-            if rehydrator is not None:
-                restorers[index] = rehydrator
+    listed = {
+        index: item["id"]
+        for index, item in enumerate(items)
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    by_id = state.listing_restorers(list(dict.fromkeys(listed.values())))
+    restorers = {
+        index: by_id[object_id] for index, object_id in listed.items() if object_id in by_id
+    }
     if not restorers:
         return None
     delivered = json.loads(raw)  # a fresh tree to edit (raw is JSON: upstream_raw or a dump)
@@ -3222,11 +4178,26 @@ def _restore_listing(
         return None  # a routed rewrite changed the shape: leave it alone
     changed = False
     for index, rehydrator in restorers.items():
-        restored = lister.rehydrate_body(items[index], rehydrator)
+        restored = items[index]
+        if rehydrator is not None:
+            try:
+                restored = lister.rehydrate_body(items[index], rehydrator)
+            except Exception as exc:  # noqa: BLE001 — as above: the provider's item
+                _listing_fault(state, exc)
         if restored != delivered_items[index]:
             delivered_items[index] = restored
             changed = True
     return json.dumps(delivered, ensure_ascii=False).encode("utf-8") if changed else None
+
+
+def _listing_fault(state: ProxyState, exc: Exception) -> None:
+    """A listed item whose owner's session could not be read: counted and
+    logged by exception TYPE; the item goes out as the provider sent it."""
+    state.bookkeeping_errors["listing"] += 1
+    logger.warning(
+        "listing restore failed for an item (%s); delivered as the provider sent it",
+        type(exc).__name__,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3241,7 +4212,7 @@ def _restore_listing(
 
 def _route_refusal(
     state: ProxyState,
-    ctx: RequestContext,
+    session: str,
     adapter: ProviderAdapter | None,
     refusal: RouteRefusal,
     *,
@@ -3258,7 +4229,7 @@ def _route_refusal(
     row = dict(refusal.row)
     logger.info("%s %s -> %d%s", request.method, path, refusal.status, _route_log_suffix(row))
     state.record_request(
-        session=ctx.session_id,
+        session=session,
         provider=adapter.name if adapter is not None else None,
         method=request.method,
         path=path,
@@ -3423,7 +4394,7 @@ async def _handle_routed(
     if refused is not None:
         return _route_refusal(
             state,
-            ctx,
+            ctx.session_id,
             adapter,
             refused,
             request=request,
@@ -3450,7 +4421,7 @@ async def _handle_routed(
     if isinstance(first, RouteRefusal):
         return _route_refusal(
             state,
-            ctx,
+            ctx.session_id,
             adapter,
             first,
             request=request,

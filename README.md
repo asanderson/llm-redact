@@ -376,8 +376,8 @@ essentials:
 - **Config reload without a restart**: edit the config file, then send
   SIGHUP — `kill -HUP $(pgrep -f 'llm-redact serve')`, or for containers
   `docker kill --signal=HUP llm-redact`. Detection settings and upstream
-  URLs apply immediately; vault, audit, host, port, log, TLS, OTel,
-  users, and email changes are kept as-is with a "require restart"
+  URLs apply immediately; vault, audit, host, port, allowed_hosts, log,
+  TLS, OTel, users, and email changes are kept as-is with a "require restart"
   warning, and so are sections a plugin adds (llm-redact-pro's `[auth]`).
   A broken config file is logged and ignored — the running config stays
   active.
@@ -433,7 +433,9 @@ the package (see [docs/editions.md](docs/editions.md)).
   a dev container (the prefiltered single-pass-per-anchor scan): ~1 ms
   added per small (2 KB) request end to end, ~14 ms on a secret-dense
   100 KB body, ~5-11 ms on 100 KB of ordinary prose, ~18 MB/s streaming
-  rehydration.
+  rehydration, and ~100 ms for a body of 20,000 short strings (short
+  strings are gated per string: only the rules that could match one run
+  on it — the same body cost ~2 s when every rule ran on every string).
 - `uv run python scripts/live_smoke.py` runs opt-in smoke tests against the
   real provider APIs (needs API keys, spends credits, never runs in default
   test or CI runs) — including an event-shape drift detector for the
@@ -507,6 +509,11 @@ qualify if demand materializes.
   strict `Content-Security-Policy` plus
   `X-Frame-Options`/`nosniff`/`Referrer-Policy` headers, on top of the
   Host/Origin/CSRF gates on the mutating endpoints.
+- **Web pages cannot drive the proxy**: a request a browser page sent
+  from another origin or site, or through DNS rebinding, is refused
+  before any upstream contact — HTTP and WebSocket alike — so no page can
+  spend a credential the proxy holds or read the vault back through
+  rehydration ([threat model](docs/threat-model.md#requests-from-web-pages-the-operators-browser)).
 - **Reporting**: use GitHub private vulnerability reporting — see
   [docs/SECURITY.md](docs/SECURITY.md).
 - **Supply chain**: release artifacts carry Sigstore provenance

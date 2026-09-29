@@ -25,11 +25,13 @@ Boundary map (threat-model.md § / guard):
   B5  Local ops surface / CORS preflight dies (OPTIONS -> 405, no CORS headers)
   B6  Local ops surface / JSON content-type required — 415
   B7  Local ops surface / 1 MiB guarded-POST body cap — 413
-  B8  Outbound requests / max_body_bytes fail-closed — 413, never forwarded
+  B8  Outbound requests / max_body_bytes + max_body_strings fail-closed — 413, never forwarded
   B9  Local ops surface / browser-hardening headers on every reserved reply
   B10 Trust boundaries / fail-closed bind policy (validate_bind_security)
   B11 Logging posture / ?key= query auth never logged (cross-ref canary harness)
   B12 Local ops surface / metadata-only (status/metrics never carry values)
+  B17 Requests from web pages / API routes refuse cross-site, rebound and foreign-Host
+      browser requests (and foreign-Host requests spending a proxy-held credential) — 403
 """
 
 import io
@@ -296,6 +298,19 @@ async def test_b8_oversized_redactable_body_413_not_forwarded() -> None:
     resp = await client.post("/v1/chat/completions", json=body)
     assert resp.status_code == 413
     assert "x" * 500 not in resp.text  # never round-tripped through the upstream
+
+
+@pytest.mark.anyio
+async def test_b8_too_many_strings_413_not_forwarded() -> None:
+    """Threat-model § Outbound requests: redaction costs per string on the
+    event loop, so a body of more strings than max_body_strings is refused
+    413 — never forwarded, partly redacted or not."""
+    client = _client(_base_config(max_body_strings=10))
+    messages = [{"role": "user", "content": f"line {i} x@corp.example"} for i in range(11)]
+    resp = await client.post("/v1/chat/completions", json={"model": "gpt-4o", "messages": messages})
+    assert resp.status_code == 413
+    assert "max_body_strings (10)" in resp.text
+    assert "x@corp.example" not in resp.text  # never round-tripped through the upstream
 
 
 @pytest.mark.anyio
@@ -622,3 +637,65 @@ def test_b16_origin_form_target_reads_the_raw_target() -> None:
     assert origin_form_target({"path": "/v1"})  # servers that omit raw_path
     assert not origin_form_target({"path": "v1"})
     assert not origin_form_target({})
+
+
+# --- B17: a web page never drives an API route (threat-model.md § "Requests from
+# web pages") -------------------------------------------------------------------
+#
+# Every forwarded request borrows the vault (a rehydrating route restores the
+# operator's values into whatever the upstream echoes — a page with its OWN
+# key could read them back), and some borrow a credential the proxy holds. A
+# page reaches 127.0.0.1 with a "simple" POST, a CORS request whose preflight
+# used to be forwarded, a WebSocket handshake (no CORS at all), or — after DNS
+# rebinding — same-origin reads. The WebSocket twin lives in
+# test_realtime_request_origin.py; the proxy-held-credential cases (identity
+# auth, routed operator keys) in test_request_origin.py.
+
+B17_API = "/v1/chat/completions"
+B17_BODY = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"origin": "https://evil.example"},  # CSRF / CORS
+        {"origin": "null"},  # a sandboxed frame
+        {"origin": "http://127.0.0.1:3000"},  # another port of this machine
+        {"sec-fetch-site": "cross-site"},
+        {"sec-fetch-site": "same-site"},
+    ],
+)
+async def test_b17_cross_origin_page_never_reaches_an_upstream(headers: dict[str, str]) -> None:
+    async with _client(_base_config()) as client:
+        post = await client.post(B17_API, json=B17_BODY, headers=headers)
+        preflight = await client.options(
+            B17_API, headers={**headers, "access-control-request-method": "POST"}
+        )
+    for response in (post, preflight):
+        assert response.status_code == 403
+        assert "choices" not in response.text and "seen_path" not in response.text
+        assert not any(h.startswith("access-control-") for h in response.headers)
+
+
+async def test_b17_rebound_page_never_reaches_an_upstream() -> None:
+    # Same-origin to the browser after DNS rebinding: only the Host is foreign.
+    async with _client(_base_config(), base_url="http://rebind.example:8787") as client:
+        response = await client.get("/v1/models", headers={"sec-fetch-site": "same-origin"})
+    assert response.status_code == 403
+    assert "seen_path" not in response.text
+
+
+async def test_b17_tools_and_the_proxys_own_origin_are_served() -> None:
+    # CLI tools and SDKs send no browser markers: an alias host (a compose
+    # service) is served on the client's own credential, as is a page the
+    # proxy itself served.
+    async with _client(_base_config(), base_url="http://llm-redact:8787") as client:
+        tool = await client.post(B17_API, json=B17_BODY)
+    async with _client(_base_config()) as client:
+        own = await client.post(
+            B17_API,
+            json=B17_BODY,
+            headers={"origin": LOOPBACK, "sec-fetch-site": "same-origin"},
+        )
+    assert (tool.status_code, own.status_code) == (200, 200)
+    assert "choices" in tool.text and "choices" in own.text

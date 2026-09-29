@@ -23,11 +23,42 @@ A request arrived under `/custom/NAME/` but the config has no matching
 `[providers.custom.NAME]` section. Same fail-closed rule as above. Check
 the prefix your tool uses against `llm-redact config show`.
 
+## "this proxy does not answer to that host name" / "a web page on another origin sent this request"
+
+A 403 (WebSocket: close 1008) from the proxy itself, before any upstream
+contact, counted in `/status` `request_origin_refusals_total`. The proxy
+refuses requests a web page in a browser could have sent (CSRF, DNS
+rebinding, cross-site WebSockets — see the threat model's "Requests from
+web pages"):
+
+- `host`: a browser request, or a request that would spend a credential
+  the proxy holds (`auth = "identity"`, a routed operator key) over plain
+  HTTP, was addressed to a name other than 127.0.0.1, localhost, ::1, the
+  bind host or `allowed_hosts`. If a tool reaches the proxy as a compose
+  service, `host.docker.internal` or a Kubernetes Service, list that name
+  in `allowed_hosts` and restart
+  ([deployment.md](deployment.md#host-names-the-proxy-answers-to-allowed_hosts)).
+- `origin` / `fetch_site`: the request carried an `Origin` other than the
+  proxy's own, or a `Sec-Fetch-Site` of `cross-site`/`same-site`. A
+  browser-based client served from another origin cannot use the proxy by
+  design; run the tool outside the browser.
+
 ## "request body exceeds llm-redact max_body_bytes"
 
 A 413: the redactable body is bigger than the cap (default ~10 MiB), and
 forwarding it unscanned is never an option. Batch/file uploads legitimately
 exceed chat-sized caps — raise `max_body_bytes` in the config.
+
+## "request body exceeds llm-redact max_body_strings"
+
+A 413 of the same kind: the body carries more strings to redact than the
+cap (default 100,000 — JSON string values, form fields, file names, lines
+of an uploaded JSONL file) or more multipart parts. Redaction costs per
+string on the proxy's event loop, so the cap keeps one request from
+stalling the others. Agent conversations stay far below it; a large batch
+upload of short prompts can exceed it — raise `max_body_strings` (and
+usually `max_body_bytes`) in the config. A realtime connection whose
+client frame exceeds it is closed with code 1009.
 
 ## "config parses but does not BUILD: …"
 
@@ -43,8 +74,8 @@ message names the exact offender; fix it and re-run `serve --check`.
 Log lines from a `kill -HUP`. The first means the new file failed to parse
 or build — the proxy deliberately keeps serving the old config rather than
 crash; fix the file (`serve --check` shows the error) and HUP again. The
-second lists fields (host, port, vault, audit, log, tls, otel, users,
-email) that only apply on a full restart.
+second lists fields (host, port, allowed_hosts, vault, audit, log, tls,
+otel, users, email) that only apply on a full restart.
 
 ## "the vault at {path} is encrypted; set [vault] encryption = \"fernet\" …"
 

@@ -175,7 +175,18 @@ RDBMS_BACKENDS = ("postgresql", "mysql", "oracle", "dbapi")
 # their running values: changing them requires a restart. The single source
 # of truth for apply_config and the editor's read-only set (README.md and
 # docs/deployment.md enumerate it — pinned by test_restart_only_docs.py).
-RESTART_ONLY_KEYS = ("vault", "audit", "host", "port", "log", "tls", "otel", "users", "email")
+RESTART_ONLY_KEYS = (
+    "vault",
+    "audit",
+    "host",
+    "port",
+    "allowed_hosts",
+    "log",
+    "tls",
+    "otel",
+    "users",
+    "email",
+)
 
 # Every top-level key the core itself parses. Anything else must be claimed
 # by a registered plugin section (plugin_api.ConfigSection) or it is a
@@ -184,8 +195,10 @@ CORE_SECTION_KEYS = frozenset(
     {
         "host",
         "port",
+        "allowed_hosts",
         "inject_system_note",
         "max_body_bytes",
+        "max_body_strings",
         "providers",
         "detection",
         "vault",
@@ -638,6 +651,11 @@ class TlsConfig:
 
 DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MiB: covers 200k-token bodies
 # plus image blocks while bounding the memory the proxy buffers per request.
+# Redaction costs per STRING as well as per byte, and runs on the event loop:
+# the strings (JSON string values, form fields, file names, uploaded JSONL
+# lines) and multipart parts one redactable body may carry. A 1M-token Claude
+# Code history is ~12k strings; 10 MiB of tiny strings would be ~300k-2M.
+DEFAULT_MAX_BODY_STRINGS = 100_000
 
 
 # --- [upstreams] / [routing] / [prices] shapes -------------------------------
@@ -825,8 +843,15 @@ class RoutingConfig:
 class Config:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
+    # More host names the proxy answers to besides 127.0.0.1, localhost, ::1
+    # and `host` — a compose service or Kubernetes Service name its clients
+    # use. A request that would spend a credential the proxy holds (or that a
+    # browser sent) must be addressed to one of these names: the DNS-rebinding
+    # defense. Lowercased and sorted, no ports; restart-only like the bind.
+    allowed_hosts: tuple[str, ...] = ()
     inject_system_note: bool = True
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
+    max_body_strings: int = DEFAULT_MAX_BODY_STRINGS
     providers: dict[str, ProviderConfig] = field(default_factory=lambda: dict(DEFAULT_PROVIDERS))
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     vault: VaultConfig = field(default_factory=VaultConfig)
@@ -1006,6 +1031,42 @@ def _str_list(
     if any(not item for item in value):
         raise ConfigError(f"{where} {key} entries must be non-empty strings")
     return tuple(value)
+
+
+# A host name in allowed_hosts: a DNS or container name (letters, digits,
+# "-", "_", inner "."), checked after lowercasing — never a scheme, port,
+# path, userinfo or wildcard. IP literals are accepted separately.
+_ALLOWED_HOST_RE = re.compile(r"[a-z0-9_](?:[a-z0-9_.-]*[a-z0-9_])?\Z")
+
+
+def _parse_allowed_hosts(raw: Mapping[str, Any]) -> tuple[str, ...]:
+    """``allowed_hosts``: more host names the proxy answers to, compared
+    with a request's Host the way ``_host_allowed`` compares its own names
+    (lowercased, no port; an IPv6 literal in its compressed form, brackets
+    optional). A malformed entry is named by its position, never echoed."""
+    if "allowed_hosts" not in raw:
+        return ()
+    value = raw["allowed_hosts"]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(
+            'allowed_hosts must be an array of host names — e.g. allowed_hosts = ["llm-redact"]'
+        )
+    names: set[str] = set()
+    for position, item in enumerate(value, 1):
+        name = item.strip().lower()
+        literal = name[1:-1] if name.startswith("[") and name.endswith("]") else name
+        try:
+            names.add(str(ipaddress.ip_address(literal)))
+            continue
+        except ValueError:
+            pass
+        if not _ALLOWED_HOST_RE.match(name) or ".." in name:
+            raise ConfigError(
+                f"allowed_hosts entry {position} is not a host name: list each name clients"
+                " use exactly, without a scheme, port, path or wildcard"
+            )
+        names.add(name)
+    return tuple(sorted(names))
 
 
 # Object-key prefixes stay in the URI-unreserved set so the SigV4 canonical
@@ -1939,6 +2000,9 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     max_body_bytes = int(raw.get("max_body_bytes", DEFAULT_MAX_BODY_BYTES))
     if max_body_bytes <= 0:
         raise ConfigError("max_body_bytes must be a positive integer")
+    max_body_strings = int(raw.get("max_body_strings", DEFAULT_MAX_BODY_STRINGS))
+    if max_body_strings <= 0:
+        raise ConfigError("max_body_strings must be a positive integer")
 
     providers = dict(DEFAULT_PROVIDERS)
     for name, section in raw.get("providers", {}).items():
@@ -2343,8 +2407,10 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     return Config(
         host=str(raw.get("host", DEFAULT_HOST)),
         port=int(raw.get("port", DEFAULT_PORT)),
+        allowed_hosts=_parse_allowed_hosts(raw),
         inject_system_note=inject_system_note,
         max_body_bytes=max_body_bytes,
+        max_body_strings=max_body_strings,
         providers=providers,
         detection=detection,
         vault=vault,
@@ -2544,3 +2610,40 @@ def validate_bind_security(host: str, tls: TlsConfig, environ: Mapping[str, str]
             " for binds that are confined some other way (container netns with"
             " a loopback-only publish)."
         )
+
+
+def url_host(host: str) -> str:
+    """``host`` as the host part of a URL: an IPv6 literal in brackets
+    (``::1`` -> ``[::1]``; ``http://::1:8787`` is no URL), anything else as
+    written."""
+    return f"[{host}]" if ":" in host and not host.startswith("[") else host
+
+
+def dial_host(host: str) -> str:
+    """The URL host a client on THIS machine dials to reach a proxy bound to
+    ``host`` (the ``host`` config key). A wildcard bind (``0.0.0.0``, ``::``
+    or empty: every interface) is dialed at loopback — ``127.0.0.1``, or
+    ``[::1]`` for an IPv6 one (an IPv6-only listener never answers on
+    127.0.0.1); an IPv6 literal is bracketed (``url_host``); a host name or
+    any other address as written."""
+    bare = host.strip()
+    if bare.startswith("[") and bare.endswith("]"):
+        bare = bare[1:-1]
+    if not bare:
+        return "127.0.0.1"
+    try:
+        address = ipaddress.ip_address(bare)
+    except ValueError:
+        return bare  # a host name
+    if address.is_unspecified:
+        return "[::1]" if address.version == 6 else "127.0.0.1"
+    return url_host(bare)
+
+
+def dial_url(host: str, port: int, *, scheme: str = "http") -> str:
+    """``scheme://host:port`` for a client on this machine reaching a proxy
+    bound to ``host`` (``dial_host``) — the base of the ``status``,
+    ``doctor``, ``run``, ``plugin install`` and ``vault rotate-key``
+    probes and of what ``run`` exports to tools. No path: a log line may
+    print it whole."""
+    return f"{scheme}://{dial_host(host)}:{port}"

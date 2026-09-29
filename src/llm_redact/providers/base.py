@@ -4,13 +4,16 @@ from enum import Enum
 from typing import Any
 
 from llm_redact.eventstream import EventStreamMessage
-from llm_redact.redactor import Redactor
+from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
 
+# The example token is number 000, which the vault never issues (numbering
+# starts at 001), so the note can never name a real value or raise a token
+# floor.
 SYSTEM_NOTE = (
     "Some values in this conversation have been replaced with privacy tokens "
-    "of the form «TYPE_NNN» (for example «EMAIL_001»). Treat each token as an "
+    "of the form «TYPE_NNN» (for example «EMAIL_000»). Treat each token as an "
     "opaque identifier for the real value and reproduce every token exactly, "
     "character for character, whenever you refer to it."
 )
@@ -298,15 +301,34 @@ class ProviderAdapter(ABC):
         return line
 
     def redact_multipart(
-        self, path: str, body: bytes, boundary: bytes, redactor: Redactor, *, inject_note: bool
+        self,
+        path: str,
+        body: bytes,
+        boundary: bytes,
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        require_scanned: bool = False,
     ) -> bytes | None:
         """Rewrite a multipart/form-data request body for ``path``.
 
         None means "leave it alone" — the proxy forwards the original
         bytes verbatim (matching the non-JSON-body default). Raising
         BlockedRequest rejects the whole request: one leaking line in an
-        uploaded file is a leak.
+        uploaded file is a leak. ``require_scanned`` (identity auth) makes
+        every piece the adapter would forward unscanned an
+        ``UnredactableRequest`` naming its kind: the proxy's own identity
+        signs only what the proxy scanned. This base scans nothing. (What
+        an upload cites for the stored-object check is read separately,
+        before redaction: ``upload_view.read_upload``.)
+
+        The proxy cannot see inside the parts, so an adapter that redacts
+        them first raises ``redactor``'s token floors (``with_floors``) to
+        every token the upload carries as it reads it — or a value could be
+        numbered onto a token a later part already holds.
         """
+        if require_scanned:
+            raise UnredactableRequest("this route's multipart body is not one llm-redact redacts")
         return None
 
     def redacts_multipart(self, path: str) -> bool:

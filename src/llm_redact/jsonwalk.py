@@ -9,13 +9,15 @@ user data slip past it:
 
 * a STRUCTURAL key is skipped only when its value is a scalar. The skip set
   guards enum/identifier strings (``model``, ``role``, ``type``, ``id``,
-  base64 ``data``…); an object or array under one of those names is always
-  walked, because user JSON (a tool result, a grounding document) can use
-  the same names for its own keys.
+  base64 ``data``…), as do the base64 media strings at their known
+  positions (Bedrock ``source.bytes``); an object or array under one of
+  those names is always walked, because user JSON (a tool result, a
+  grounding document) can use the same names for its own keys.
 * an OPAQUE position — where the value is caller-supplied JSON of arbitrary
-  shape (tool-call arguments echoed in history, tool results, documents) —
-  is walked with NO skip set at all: a user key named ``id`` or ``name``
-  there is data, not protocol.
+  shape (tool-call arguments echoed in history, tool results, documents)
+  or a map whose keys the caller chooses (``metadata``, prompt-template
+  ``variables``, ``:predict`` instances) — is walked with NO skip set at
+  all: a user key named ``id`` or ``name`` there is data, not protocol.
 """
 
 import json
@@ -81,12 +83,26 @@ OPAQUE_POSITIONS = frozenset(
         # Ollama native: tool_calls[].function.arguments is a parsed object
         # (OpenAI's is a JSON-source string, handled by the string rules).
         ("function", "arguments"),
+        # Maps whose KEYS the caller chooses: OpenAI Responses / Realtime GA
+        # prompt-template variables (`{{name}}`, `{{data}}` are ordinary
+        # variable names) …
+        ("prompt", "variables"),
+        # … and a `:predict` body's top level (parent None): `instances` is
+        # model input of arbitrary shape (a custom Vertex endpoint's feature
+        # columns named `id`, `name`, `type`), `parameters` its settings.
+        # Google's publisher models carry media in `bytesBase64Encoded`,
+        # which no skip set ever guarded.
+        (None, "instances"),
+        (None, "parameters"),
     }
 )
 # Keys whose value is opaque wherever they appear: Cohere `documents` (v1
 # dicts of arbitrary string fields, v2 {"id", "data"} or strings, rerank
-# strings) is grounding content, never protocol.
-OPAQUE_ANYWHERE = frozenset({"documents"})
+# strings) is grounding content, never protocol; `metadata` (OpenAI chat,
+# Responses, batches, conversations and Realtime `response.metadata` /
+# `tracing.metadata`, on OpenAI and Azure; Anthropic Messages) and Bedrock
+# Converse `requestMetadata` are string maps keyed by the caller.
+OPAQUE_ANYWHERE = frozenset({"documents", "metadata", "requestMetadata"})
 _OPAQUE_KEYS = frozenset(key for _, key in OPAQUE_POSITIONS) | OPAQUE_ANYWHERE
 
 # Enum ARRAYS at their known schema positions, (parent key, key): skipped
@@ -109,9 +125,22 @@ ENUM_LIST_POSITIONS = frozenset(
 )
 _ENUM_LIST_KEYS = frozenset(key for _, key in ENUM_LIST_POSITIONS)
 
+# Base64 media STRINGS at their known positions, (parent key, key), skipped
+# like base64 `data`: Bedrock carries image/document/video blocks as
+# {"source": {"bytes": <base64>}} (Converse, ApplyGuardrail, CountTokens,
+# Nova invoke bodies). Plaintext inside base64 is the media non-goal, so
+# scanning it finds nothing real — it only burns event-loop CPU and, when a
+# token-shaped run occurs inside the blob, rewrites it (corrupting the media).
+MEDIA_POSITIONS = frozenset({("source", "bytes")})
+_MEDIA_KEYS = frozenset(key for _, key in MEDIA_POSITIONS)
+
 
 def _is_opaque(parent: str | None, key: str) -> bool:
     return key in _OPAQUE_KEYS and (key in OPAQUE_ANYWHERE or (parent, key) in OPAQUE_POSITIONS)
+
+
+def _is_media(parent: str | None, key: str, value: Any) -> bool:
+    return key in _MEDIA_KEYS and (parent, key) in MEDIA_POSITIONS and isinstance(value, str)
 
 
 def _is_enum_list(parent: str | None, key: str, value: Any) -> bool:
@@ -176,8 +205,10 @@ def _walk(
                 out[key] = _walk_opaque(value, fn)
             elif key == "data" and plaintext_source and isinstance(value, str):
                 out[key] = fn(value)
-            elif (key in skip_keys and not isinstance(value, dict | list)) or _is_enum_list(
-                parent, key, value
+            elif (
+                (key in skip_keys and not isinstance(value, dict | list))
+                or _is_enum_list(parent, key, value)
+                or _is_media(parent, key, value)
             ):
                 # Scalars only: an object/array under a structural name (the
                 # OpenAI {"object": "list", "data": [...]} envelope, a user

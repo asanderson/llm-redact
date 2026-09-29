@@ -5,11 +5,24 @@ platform.openai.com docs, 2026-07): ``POST /v1/files`` is
 multipart/form-data whose file part is JSONL — batch input lines
 ({custom_id, method, url, body}) and fine-tuning lines ({messages: [...]})
 both carry user content, so every line that parses as a JSON object is
-redacted (and chat-shaped ones get the system note); anything else in the
-upload — form fields, binary documents, unparseable lines — is preserved
-byte-identically. ``GET /v1/files/{id}/content`` rehydrates batch OUTPUT
-files the same way, line by line. ``/v1/batches`` itself carries only file
-ids and processing metadata: deliberate pass-through, pinned by test.
+redacted (and chat-shaped ones get the system note). Every part's
+``filename`` is redacted too, and the file object the provider echoes (the
+upload response, the file list, one file's metadata) is restored. Plain
+form fields are scanned as UTF-8 text like the JSON strings they mirror (a
+``user`` field as a chat body's ``user``), except the structural ones —
+enums, sizes, counts, the model — which key auth forwards as sent. Under
+key auth anything the proxy cannot read in the upload — binary documents,
+unparseable lines, a field that is not UTF-8 — is preserved
+byte-identically; under the proxy's own identity every piece must be
+scanned or the upload is refused.
+``GET /v1/files/{id}/content`` rehydrates batch OUTPUT files the same way,
+line by line. ``/v1/batches`` carries file ids,
+processing state and the caller's own ``metadata`` (free-form strings the
+batch object echoes on every read): create is redacted and every echo —
+a batch's GET, its cancel, and the LIST — restored in the request's own
+session (Azure's handling). With llm-redact-pro's named users a listing
+resolves to an empty session and the session router attributes each
+listed batch to the session that created it (``listing_item_session``).
 Batch flows use the static vault session (an async fetch has no
 conversation anchor — the realtime WS stance); a user-scoping session
 router (llm-redact-pro's named users) makes that the user's own copy.
@@ -22,12 +35,16 @@ from typing import Any
 
 from llm_redact import multipart
 from llm_redact.jsonwalk import loads_request, transform_strings
+from llm_redact.placeholders import json_floors, may_carry_tokens, merge_floors, token_floors
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
-from llm_redact.redactor import Redactor
+from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
+from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS, json_line
 
 _FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
+# The file list and one file's object: both echo each upload's filename.
+_FILE_OBJECT_RE = re.compile(r"/v1/files(?:/[^/]+)?")
 _STORED_COMPLETION_RE = re.compile(r"/v1/chat/completions/[^/]+")
 
 # Multipart endpoints whose TEXT FORM FIELDS are the content (their file
@@ -36,10 +53,46 @@ _STORED_COMPLETION_RE = re.compile(r"/v1/chat/completions/[^/]+")
 _PROMPT_FIELD_PATH_SUFFIXES = ("/images/edits", "/videos")
 _PROMPT_FIELDS = frozenset({"prompt"})
 
+# Plain form fields whose values are protocol, not content — the multipart
+# twin of jsonwalk.STRUCTURAL_KEYS: enums, sizes, counts and the model name
+# of the multipart routes redact_multipart handles (verified against the
+# OpenAI/Azure Files upload, Images edit and Videos create schemas), plus
+# RFC 7578's ``_charset_`` declaration. Key auth forwards them as sent;
+# every other plain field (``user``, ``prompt``, anything unknown) is user
+# content and is redacted as text, as its JSON twin is. The proxy's own
+# identity scans them all (it signs only what it read).
+_STRUCTURAL_FORM_FIELDS = frozenset(
+    {
+        "_charset_",
+        "background",
+        "expires_after[anchor]",
+        "expires_after[seconds]",
+        "input_fidelity",
+        "model",
+        "moderation",
+        "n",
+        "output_compression",
+        "output_format",
+        "partial_images",
+        "purpose",
+        "quality",
+        "response_format",
+        "seconds",
+        "size",
+        "stream",
+    }
+)
+
 # Sora video jobs: list/create, item retrieve/delete, and remix. The
 # binary /content download deliberately does NOT match (media
 # pass-through) — only single-segment ids and the /remix action do.
 _VIDEO_ROUTE_RE = re.compile(r"/v1/videos(?:/[^/]+(?:/remix)?)?")
+
+# Batches whose request or response carries the caller's `metadata`:
+# create (POST /v1/batches) and cancel, a batch's GET and the list (every
+# answer is a batch object, or a list of them, echoing that metadata).
+_BATCH_POST_RE = re.compile(r"/v1/batches|/v1/batches/[^/]+/cancel")
+_BATCH_GET_RE = re.compile(r"/v1/batches(?:/[^/]+)?")
 
 
 def _parse_object_line(line: bytes) -> dict[str, Any] | None:
@@ -65,6 +118,102 @@ def _parse_request_line(line: bytes) -> tuple[dict[str, Any] | None, bool]:
     except ValueError:
         return None, False
     return (obj, duplicate_keys) if isinstance(obj, dict) else (None, False)
+
+
+def _redact_text_part(
+    part: multipart.MultipartPart, redactor: Redactor, *, require_scanned: bool
+) -> bool:
+    """Redact a form part's content as UTF-8 text, in place; True when it
+    changed. Content that is not UTF-8 is left alone — or, under identity
+    auth (``require_scanned``), refused as unscannable."""
+    try:
+        text = part.content.decode("utf-8")
+    except UnicodeDecodeError:
+        if require_scanned:
+            raise UnredactableRequest(
+                "a multipart form field is not UTF-8 text llm-redact can redact"
+            ) from None
+        return False
+    redacted = redactor.redact_text(text)
+    if redacted == text:
+        return False
+    part.content = redacted.encode("utf-8")
+    return True
+
+
+def _part_kind(part: multipart.MultipartPart, *, media: bool, require_scanned: bool) -> str:
+    """How the upload's part loop reads a part: "jsonl" (a file part of a
+    JSONL upload, line by line), "text" (UTF-8 text), "media" (a media file
+    part, never read) or "field" (a structural form field, forwarded
+    as-is)."""
+    if media and part.name in _PROMPT_FIELDS:
+        # Matched by NAME regardless of a filename attribute: a prompt
+        # part dressed up as a file upload must not slip past the scan
+        # (fail closed) — binary content skips via the decode (refused
+        # under identity).
+        return "text"
+    if part.filename is not None:
+        return "media" if media else "jsonl"  # media: never scanned
+    # A plain form field is user content (`user`, anything unknown — a part
+    # with no name included) unless structural (`purpose`, `model`, `size`
+    # ...); the proxy's own identity signs even those only once scanned.
+    if require_scanned or part.name not in _STRUCTURAL_FORM_FIELDS:
+        return "text"
+    return "field"
+
+
+def _multipart_floors(parsed: multipart.Multipart, *, media: bool) -> dict[str, int]:
+    """The token floors of an upload, read the way its part loop reads it:
+    every file name (decoded, ``filename*`` included), every JSONL line as
+    the JSON it parses to (escapes resolved) or else as UTF-8 text, and
+    every other part except media files as UTF-8 text — plain form fields
+    too, since the upstream reads them. Media file parts are never read
+    (the documented non-goal)."""
+    floors: dict[str, int] = {}
+
+    def observe(text: str) -> str:
+        merge_floors(floors, token_floors(text))
+        return text
+
+    for part in parsed.parts:
+        part.redact_filenames(observe, strict=False)  # returns every name unchanged
+        # require_scanned=True: a plain form field reads as "text" here.
+        kind = _part_kind(part, media=media, require_scanned=True)
+        if kind == "text":
+            observe(part.content.decode("utf-8", "replace"))
+        elif kind == "jsonl":
+            for line in part.content.split(b"\n"):
+                if may_carry_tokens(line):
+                    obj, _ = _parse_request_line(line)
+                    merge_floors(
+                        floors,
+                        json_floors(obj)
+                        if obj is not None
+                        else token_floors(line.decode("utf-8", "replace")),
+                    )
+    return floors
+
+
+def _require_plain_encoding(part: multipart.MultipartPart, *, scanned: bool) -> None:
+    """Identity auth: refuse a part the proxy could not read as plain bytes
+    (the body-part twin of the request Content-Encoding rule): any
+    Content-Transfer-Encoding but 7bit/8bit/binary (RFC 7578 deprecates
+    them), and — on a part whose content is scanned — a declared charset
+    other than UTF-8/US-ASCII, whether its own Content-Type parameter or
+    the RFC 7578 §4.6 ``_charset_`` field. AmbiguousHeaders propagates."""
+    encoding = part.header("content-transfer-encoding")
+    if encoding is not None and encoding.lower() not in PLAIN_TRANSFER_ENCODINGS:
+        raise UnredactableRequest(
+            "a multipart part declares a Content-Transfer-Encoding llm-redact does not decode"
+        )
+    if not scanned:
+        return
+    charset = (part.params("content-type") or {}).get("charset")
+    declared = [] if charset is None else [charset.value]
+    if part.name == "_charset_":
+        declared.append(part.content.decode("latin-1").strip())
+    if any(name.lower() not in PLAIN_CHARSETS for name in declared):
+        raise UnredactableRequest("a multipart part declares a charset llm-redact does not decode")
 
 
 # Delta fields that carry reasoning-model chain-of-thought as a string,
@@ -141,6 +290,31 @@ def _stored_completion_create(path: str, body: Any) -> bool:
 _LISTING_RE = re.compile(r"(?:^|/)(?:files|batches|videos|chat/completions)$")
 
 
+# The Uploads API (large files in parts): completing an upload creates the
+# stored FILE, named in the answer's nested `file` object.
+_UPLOAD_COMPLETE_RE = re.compile(r"(?:^|/)uploads/[^/]+/complete$")
+
+
+def _completed_upload_file(body: Any) -> tuple[str, ...]:
+    """The file a completed Upload created — unless it holds requests the
+    provider will run (``purpose`` batch), or its purpose is not stated:
+    the Uploads API's parts are forwarded unread (an opaque byte range can
+    split a line), so the stored objects those requests cite were never
+    checked, and the file is not reported as its uploader's (it stays one
+    nobody is recorded creating)."""
+    if not isinstance(body, dict):
+        return ()
+    file = body.get("file")
+    if not isinstance(file, dict):
+        return ()
+    purposes = [purpose for purpose in (body.get("purpose"), file.get("purpose")) if purpose]
+    if not purposes or any(
+        not isinstance(purpose, str) or purpose.lower() == "batch" for purpose in purposes
+    ):
+        return ()
+    return _string_ids(file, ("id",))
+
+
 def _tail_is_create(path: str) -> bool:
     """POST to the collection itself (``…/files``, ``…/batches``,
     ``…/conversations``), not to a member or sub-resource."""
@@ -170,9 +344,10 @@ class OpenAIAdapter(ProviderAdapter):
             # forwarding raw secrets is never acceptable.)
             return RouteKind.REDACT_ONLY
         if method == "POST" and path == "/v1/files":
-            # Multipart upload whose JSONL file part carries user content;
-            # redacted via redact_multipart. The response is file metadata.
-            return RouteKind.REDACT_ONLY
+            # Multipart upload whose JSONL file part (and file NAME) carries
+            # user content; redacted via redact_multipart. The response is
+            # the file object, echoing the redacted filename: restored.
+            return RouteKind.CHAT
         if method == "POST" and path == "/v1/images/generations":
             # The OUTPUT is media (the non-goal) but the prompt is plain
             # text that must not reach the provider in the clear. Response
@@ -205,6 +380,12 @@ class OpenAIAdapter(ProviderAdapter):
             # Batch output downloads: JSONL rehydrated line by line via
             # rehydrate_raw_body (no request body — redaction no-ops).
             return RouteKind.CHAT
+        if method == "GET" and _FILE_OBJECT_RE.fullmatch(path):
+            # The file list and a file's metadata echo the filename the
+            # upload redacted: restored in the request's own session (a
+            # user-scoping router answers listings and foreign reads from
+            # an empty one). DELETE carries ids only and passes through.
+            return RouteKind.CHAT
         if path.startswith("/v1/conversations"):
             # Stateful item store paired with the Responses API. Item content
             # (message text) rode through UNREDACTED before this. POST create /
@@ -216,24 +397,36 @@ class OpenAIAdapter(ProviderAdapter):
             if method in ("POST", "GET"):
                 return RouteKind.CHAT
             return RouteKind.NONE
-        # /v1/batches and file list/metadata/delete carry ids and
-        # processing metadata only: deliberate pass-through, pinned by test.
+        if (method == "POST" and _BATCH_POST_RE.fullmatch(path)) or (
+            method == "GET" and _BATCH_GET_RE.fullmatch(path)
+        ):
+            # Batches: create carries the caller's free-form `metadata`
+            # (redacted out), and create/retrieve/cancel/list all answer
+            # with batch objects echoing it (restored back, in the request's
+            # own session — llm-redact-pro reads a named user's listing in
+            # an empty session and restores only that user's own items).
+            # Structural fields — input_file_id, endpoint,
+            # completion_window, ids, status, counts — carry nothing a
+            # detector matches (pinned by test).
+            return RouteKind.CHAT
+        # File delete carries ids only: deliberate pass-through, pinned by
+        # test.
         return RouteKind.NONE
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         # File uploads inject per JSONL line (into chat-shaped bodies)
         # inside redact_multipart; this gate just allows that to happen.
         # Legacy completions have no messages field — a note would corrupt
-        # the body shape.
-        if path == "/v1/completions":
+        # the body shape — and file downloads/objects are body-less GETs.
+        if path == "/v1/completions" or path.startswith("/v1/files/"):
             return False
         if path.startswith("/v1/conversations"):
             # Item bodies carry `items`, not `messages`; injecting the note
             # would graft a spurious `messages` field and corrupt the request.
             return False
-        if path.startswith("/v1/videos"):
-            # Video job bodies have no messages field either — a note would
-            # graft one and corrupt the create/remix request.
+        if path.startswith(("/v1/videos", "/v1/batches")):
+            # Video job and batch bodies have no messages field either — a
+            # note would graft one and corrupt the request.
             return False
         return kind is RouteKind.CHAT or path == "/v1/files"
 
@@ -241,6 +434,7 @@ class OpenAIAdapter(ProviderAdapter):
         if method == "POST" and (
             _tail_is_create(path)
             or _VIDEO_CREATE_RE.search(path.rstrip("/")) is not None
+            or _UPLOAD_COMPLETE_RE.search(path.rstrip("/")) is not None
             or _stored_completion_create(path, body)
         ):
             return True
@@ -249,6 +443,8 @@ class OpenAIAdapter(ProviderAdapter):
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
         if _BATCH_OBJECT_RE.search(path) is not None:
             return _string_ids(body, _BATCH_FILE_KEYS)
+        if _UPLOAD_COMPLETE_RE.search(path.rstrip("/")) is not None:
+            return _completed_upload_file(body)
         if path.rstrip("/").endswith("/batches"):
             return _string_ids(body, ("id", *_BATCH_FILE_KEYS))
         return _string_ids(body, ("id",))
@@ -308,45 +504,102 @@ class OpenAIAdapter(ProviderAdapter):
         return path.endswith(("/files", *_PROMPT_FIELD_PATH_SUFFIXES))
 
     def redact_multipart(
-        self, path: str, body: bytes, boundary: bytes, redactor: Redactor, *, inject_note: bool
+        self,
+        path: str,
+        body: bytes,
+        boundary: bytes,
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        require_scanned: bool = False,
     ) -> bytes | None:
         parsed = multipart.parse(body, boundary)
         if parsed is None:
             return None  # outside the canonical grammar: forward verbatim
-        changed = False
-        if path.endswith(_PROMPT_FIELD_PATH_SUFFIXES):
-            # Media endpoints: the file parts ARE the media (non-goal); the
-            # user text rides named form fields. Suffix match so the Azure
-            # subclass's /openai/... path shapes reuse this unchanged.
-            # Matched by NAME regardless of a filename attribute: a prompt
-            # part dressed up as a file upload must not slip past the scan
-            # (fail closed) — binary content still skips via the decode.
-            for part in parsed.parts:
-                if part.name not in _PROMPT_FIELDS:
-                    continue
-                try:
-                    text = part.content.decode("utf-8")
-                except UnicodeDecodeError:
-                    continue  # not text: leave the bytes alone
-                redacted = redactor.redact_text(text)
-                if redacted != text:
-                    part.content = redacted.encode("utf-8")
-                    changed = True
-            return parsed.serialize() if changed else None
+        if require_scanned and (parsed.preamble.strip() or parsed.epilogue.strip()):
+            # Bytes outside every part: servers ignore them, but they still
+            # leave the machine under the proxy's identity, unscanned.
+            raise UnredactableRequest(
+                "the multipart body carries a preamble or epilogue llm-redact does not redact"
+            )
+        # Media endpoints: the file parts ARE the media (the documented
+        # non-goal); the user text rides named form fields. Suffix match so
+        # the Azure subclass's /openai/... path shapes reuse this unchanged.
+        media = path.endswith(_PROMPT_FIELD_PATH_SUFFIXES)
         for part in parsed.parts:
-            if part.filename is None:
-                continue  # plain form fields (purpose, ...) are not content
-            new_content = self._redact_jsonl(part.content, redactor, inject_note=inject_note)
+            if not media and part.filename is not None:
+                # Every line of an uploaded JSONL file is a string to redact:
+                # counted against max_body_strings BEFORE anything splits the
+                # file (the floor scan below does) — millions of empty lines
+                # cost per line, not per byte.
+                redactor.charge(part.content.count(b"\n") + 1)
+        if may_carry_tokens(body):
+            # Token floors from the WHOLE upload before any part is redacted:
+            # a token in a later line bounds the numbers an earlier line's
+            # values take (one batch file, one session, one output file).
+            redactor = redactor.with_floors(_multipart_floors(parsed, media=media))
+        changed = False
+        try:
+            for part in parsed.parts:
+                changed |= self._redact_part(
+                    part,
+                    redactor,
+                    media=media,
+                    inject_note=inject_note,
+                    require_scanned=require_scanned,
+                )
+        except multipart.AmbiguousHeaders as exc:
+            # Only reachable under identity auth (require_scanned): a part
+            # header without a single reading is never signed.
+            raise UnredactableRequest(str(exc)) from None
+        return parsed.serialize() if changed else None
+
+    def _redact_part(
+        self,
+        part: multipart.MultipartPart,
+        redactor: Redactor,
+        *,
+        media: bool,
+        inject_note: bool,
+        require_scanned: bool,
+    ) -> bool:
+        # The upload's file name is user content on every route (the part
+        # name is structural, like a JSON key). Strict under identity auth,
+        # so the routing reads below always see the one reading.
+        changed = part.redact_filenames(redactor.redact_text, strict=require_scanned)
+        kind = _part_kind(part, media=media, require_scanned=require_scanned)
+        if require_scanned:
+            _require_plain_encoding(part, scanned=kind != "media")
+        if kind == "jsonl":
+            new_content = self._redact_jsonl(
+                part.content,
+                redactor,
+                inject_note=inject_note,
+                require_scanned=require_scanned,
+            )
             if new_content != part.content:
                 part.content = new_content
                 changed = True
-        return parsed.serialize() if changed else None
+        elif kind == "text":
+            changed |= _redact_text_part(part, redactor, require_scanned=require_scanned)
+        return changed
 
-    def _redact_jsonl(self, data: bytes, redactor: Redactor, *, inject_note: bool) -> bytes:
+    def _redact_jsonl(
+        self,
+        data: bytes,
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        require_scanned: bool = False,
+    ) -> bytes:
         out: list[bytes] = []
         for line in data.split(b"\n"):
             obj, duplicate_keys = _parse_request_line(line)
             if obj is None:
+                if require_scanned and line.strip():
+                    raise UnredactableRequest(
+                        "an uploaded JSONL line is not a JSON object llm-redact can redact"
+                    )
                 out.append(line)  # blank/binary/unparseable: byte-identical
                 continue
             redacted = redactor.redact_json(obj)
@@ -364,7 +617,7 @@ class OpenAIAdapter(ProviderAdapter):
                 elif isinstance(redacted.get("messages"), list):
                     # Fine-tuning line: a bare chat example.
                     redacted = self.inject_system_note(redacted)
-            out.append(json.dumps(redacted, ensure_ascii=False).encode("utf-8"))
+            out.append(json_line(redacted))
         return b"\n".join(out)
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:

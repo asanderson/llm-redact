@@ -82,6 +82,11 @@ Other conventions worth knowing before writing tests:
 2. Declare `required`/`anchors` prefilter literals ONLY with generator
    coverage — a wrong literal is a silent recall bug. The per-rule
    soundness tests and the fast-vs-naive differential suite must cover it.
+   The same literals gate the rule per string (`DetectorPlan`); a rule
+   without literals joins one combined per-string search only if its
+   pattern has no capturing group and no flag, and otherwise runs on every
+   string — so prefer `(?:...)` groups. `tests/test_detector_plan.py`
+   proves the gate against every detector's full scan, rule by rule.
 3. Add a generator to `bench/corpus.py` (positives are generated at
    runtime, never committed).
 4. Run `uv run python -m llm_redact.bench --check`. If the rule fires on

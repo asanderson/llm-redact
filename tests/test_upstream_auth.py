@@ -134,7 +134,7 @@ def _identity(url: str, **extra: Any) -> ProviderConfig:
 
 
 def _client(app: Any) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy.test")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
 
 
 def _claude_body(text: str) -> dict[str, Any]:

@@ -448,8 +448,13 @@ class ProxyState:
         # buffered one fails closed with a recorded 502; a stream is cut);
         # before any upstream contact, "vault" is issuing a request's
         # placeholders (a vault write or its COMMIT failed: rolled back, a
-        # recorded 503 — a realtime frame closes 1011).
+        # recorded 503 — a realtime frame closes 1011); "vault_check" is a
+        # vault view's staleness check that could not read its database
+        # (contained: the view keeps serving its cache, never a wrong value).
         self.bookkeeping_errors: Counter[str] = Counter()
+        bind_fault_counter = getattr(self.vault_manager, "bind_fault_counter", None)
+        if callable(bind_fault_counter):
+            bind_fault_counter(self.bookkeeping_errors)
         # Requests refused as a web page's (request_origin_refusal), by kind:
         # "host" (a name the proxy does not answer to — DNS rebinding, or an
         # alias not in allowed_hosts), "origin", "fetch_site". Kinds only.

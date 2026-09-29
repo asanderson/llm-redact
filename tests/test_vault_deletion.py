@@ -26,6 +26,7 @@ The fix, pinned here for every vault:
 from __future__ import annotations
 
 import sqlite3
+from collections import Counter
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -750,3 +751,147 @@ async def test_a_session_forgotten_under_a_live_view_never_restores_the_wrong_va
     assert connection.original_for(alice) is None
     assert connection.original_for(alice_again) == "alice.a@corp.example"
     state.vault_manager.close()
+
+
+# --- a staleness check that cannot read the database ---------------------------------
+
+
+def _break_retired_reads(manager: Any, patch: pytest.MonkeyPatch) -> type[Exception]:
+    """Make every read of the session's retired number fail the way its
+    database fails (an RDBMS blip, a locked or failing sqlite file); returns
+    the exception type."""
+    if isinstance(manager, SqliteVaultManager):
+        import llm_redact.vault as vault_mod
+
+        def sqlite_down(conn: Any, session: str) -> int:
+            raise sqlite3.OperationalError("disk I/O error at /secret/path")
+
+        patch.setattr(vault_mod, "_retired_number", sqlite_down)
+        return sqlite3.OperationalError
+    error: type[Exception] = manager._store._module.OperationalError
+
+    def rdbms_down(session: str) -> int:
+        raise error("server closed the connection: host db.internal")
+
+    patch.setattr(manager._store, "retired", rdbms_down)
+    return error
+
+
+def test_a_failed_staleness_check_keeps_serving_the_cache(
+    open_instance: Factory, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cache hit never needs the database: a due check that cannot read the
+    retired number keeps the caches (a cached token only ever restores its
+    own value) and is tried again at the next interval — counted per check,
+    logged once per outage by exception TYPE only."""
+    clock = Clock()
+    manager = open_instance(clock)
+    faults: Counter[str] = Counter()
+    getattr(manager, "bind_fault_counter", lambda counter: None)(faults)
+    view = manager.get("s")
+    ada = view.placeholder_for("EMAIL", "ada@corp.example")
+    loaded = view._reverse
+    caplog.set_level("INFO", logger="llm_redact")
+    for outage in (1, 2):
+        with monkeypatch.context() as patch:
+            error = _break_retired_reads(manager, patch)
+            for _ in range(3):
+                clock.now += CACHE_CHECK_SECONDS  # due: the check fails
+                assert view.original_for(ada) == "ada@corp.example"
+                assert view.original_for(ada) == "ada@corp.example"  # not due again yet
+                assert view.placeholder_for("EMAIL", "ada@corp.example") == ada
+            assert view._reverse is loaded
+        assert faults == {"vault_check": 3 * outage}
+        clock.now += CACHE_CHECK_SECONDS  # back up: the check reads again
+        assert view.original_for(ada) == "ada@corp.example"
+        messages = [(r.levelname, r.getMessage()) for r in caplog.records]
+        assert (
+            messages
+            == [
+                (
+                    "WARNING",
+                    f"vault staleness check failed ({error.__name__}): cached values are served"
+                    " until the database answers again",
+                ),
+                ("INFO", "vault staleness check: the database answers again"),
+            ]
+            * outage
+        )  # once per outage, and once when it ends
+        for text in ("ada", "secret", "db.internal", "closed the connection", "disk I/O"):
+            assert text not in caplog.text
+    # The check works again: a delete by another instance is noticed.
+    assert open_instance().forget_sessions(["s"]) == 1
+    clock.now += CACHE_CHECK_SECONDS
+    assert view.original_for(ada) is None
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "rdbms-dbapi"])
+@pytest.mark.parametrize("streamed", [False, True], ids=["buffered", "streamed"])
+async def test_a_database_blip_while_an_answer_is_restored_costs_nothing_cached(
+    backend: str, streamed: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: the staleness check falls due while the upstream answers
+    and the database is down. The answer's cached token is restored anyway
+    — it used to fail the check's read (a buffered answer a recorded 502, a
+    stream cut) — and the fault is counted in /status."""
+    import json
+
+    import llm_redact.registry as registry_mod
+    from llm_redact.registry import Registry
+
+    clock = Clock()
+    manager = _factory(backend, tmp_path, monkeypatch)(clock)
+    registry = Registry()
+    registry.build_vault_manager = lambda config: manager
+    monkeypatch.setattr(registry_mod, "_registry", registry)
+    outage = pytest.MonkeyPatch()  # undone below, before the managers close
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        text = json.loads(request.content)["messages"][-1]["content"]
+        if "again" in text:  # the second request: the database goes down now
+            clock.now += CACHE_CHECK_SECONDS
+            _break_retired_reads(manager, outage)
+        if not streamed:
+            return httpx.Response(
+                200, json={"type": "message", "content": [{"type": "text", "text": text}]}
+            )
+        events = [
+            ("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}}),
+            ("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": text}}),
+            ("content_block_stop", {"index": 0}),
+            ("message_stop", {}),
+        ]
+        body = "".join(
+            f"event: {name}\ndata: {json.dumps({'type': name, **data})}\n\n"
+            for name, data in events
+        )
+        return httpx.Response(
+            200, content=body.encode(), headers={"content-type": "text/event-stream"}
+        )
+
+    config = Config(
+        providers={**Config().providers, "anthropic": ProviderConfig("http://upstream.test")},
+        vault=VaultConfig(backend="sqlite", path=str(tmp_path / "unused.db"), session="s"),
+    )
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            for text in (f"mail {JANE}", f"mail {JANE} again"):
+                response = await client.post(
+                    "/v1/messages",
+                    json={
+                        "model": "m",
+                        "max_tokens": 5,
+                        "stream": streamed,
+                        "messages": [{"role": "user", "content": text}],
+                    },
+                )
+                assert response.status_code == 200, response.text
+                assert text in response.text  # the token restored, the stream whole
+                assert "«EMAIL_" not in response.text
+            status = (await client.get("/__llm-redact/status")).json()
+        assert status["bookkeeping_errors_total"] == {"vault_check": 1}
+    finally:
+        outage.undo()
+        manager.close()

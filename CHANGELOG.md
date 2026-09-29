@@ -176,10 +176,13 @@ providers refuse to start.
   prune`, an access gate's purge), a re-created session could issue a deleted
   value's number again for a new value, and another instance's cache or an open
   realtime connection then restored one value where the other was meant. Every
-  delete now retires the session's highest number
-  (`retired_numbers`, RDBMS `llm_redact_retired`), new values are numbered above it,
-  and views re-check at most once a second. The prune's idle check and its delete
-  are one transaction.
+  delete now retires the session's highest number (`retired_numbers`, RDBMS
+  `llm_redact_retired`), new values are numbered above it, and views re-check at
+  most once a second. The prune's idle check and its delete are one transaction. A
+  re-check that cannot read the database keeps the view's cache (a cached token only
+  ever restores its own value) and runs again a second later, counted as
+  `bookkeeping_errors{stage="vault_check"}` and logged once per outage by exception
+  type: restoring a cached token never needs the database.
 - **A config reload did not reach open realtime connections.** A reload that
   withdrew the proxy's identity (`auth` back to `passthrough`, the provider
   disabled, its upstream moved) kept spending it on the live upstream session, and
@@ -270,8 +273,9 @@ providers refuse to start.
   non-default `[users]` refuses to start).
 - `llm_redact_bookkeeping_errors_total{stage}` and `/status`
   `bookkeeping_errors_total`: faults in the proxy's own bookkeeping after the
-  upstream answered (`response_id`, `object_ids`, `listing`, `delivery`) and vault
-  write faults before it (`vault`).
+  upstream answered (`response_id`, `object_ids`, `listing`, `delivery`), vault
+  write faults before it (`vault`), and vault staleness checks that could not read
+  the database (`vault_check`, contained).
 - Realtime: Azure OpenAI Realtime's GA path (`/openai/v1/realtime?model=…`) and the
   Vertex AI Live API (`/ws/google.cloud.aiplatform.{v1,v1beta1}.LlmBidiService/BidiGenerateContent`,
   `[providers.vertex]`) are relayed. With llm-redact-pro, `auth = "identity"` now

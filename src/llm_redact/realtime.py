@@ -1468,6 +1468,24 @@ async def _relay(
                 logger.info("WS %s -> blocked (%s)", path, blocked)
                 await close_on_policy(f"blocked by llm-redact policy ({blocked})")
                 return
+            except state.vault_faults as fault:
+                # The vault could not record this frame's placeholders (a
+                # write or its COMMIT failed; the frame's batch rolled
+                # back): never sent, and the session cannot continue without
+                # it — closed 1011 (internal error), recorded as the HTTP
+                # path's 503, counted as the "vault" bookkeeping stage;
+                # exception TYPE only.
+                state.bookkeeping_errors["vault"] += 1
+                logger.error(
+                    "WS %s -> closed 1011 (vault write failed: %s); frame not sent",
+                    path,
+                    type(fault).__name__,
+                )
+                status = 503
+                await close_on_policy(
+                    "llm-redact could not record this frame's placeholders", code=1011
+                )
+                return
 
     async def upstream_to_client() -> None:
         try:

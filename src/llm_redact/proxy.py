@@ -27,6 +27,7 @@ import os
 import re
 import secrets
 import signal
+import sqlite3
 import time
 import urllib.parse
 from collections import Counter, deque
@@ -423,6 +424,9 @@ class ProxyState:
         require_vault_key_source(config.vault, registry)
         self.vault_manager: VaultManager = registry.build_vault_manager(config.vault)
         self.vault: Vault = self.vault_manager.get(config.vault.session)
+        # What a vault fault raises while a request's placeholders are issued
+        # (a write, its batch's COMMIT): refused 503, never a bare 500.
+        self.vault_faults = vault_fault_types(self.vault_manager)
         self.detectors = build_detectors(config.detection)
         self.allowlist = build_allowlist(config.detection)
         self.modes = build_modes(config.detection)
@@ -436,11 +440,14 @@ class ProxyState:
         # provider — a resilience health signal, metadata only. The proxy
         # fails these closed with a 502; this counts how often.
         self.upstream_errors: Counter[str] = Counter()
-        # Faults in what runs AFTER the provider answered, by stage:
-        # "response_id" / "object_ids" / "listing" are session bookkeeping
-        # (contained — the answer is still delivered, never a wrong value);
-        # "delivery" is restoring the answer itself (a buffered one fails
-        # closed with a recorded 502; a stream is cut).
+        # Faults in the proxy's own bookkeeping, by stage: after the provider
+        # answered, "response_id" / "object_ids" / "listing" are session
+        # bookkeeping (contained — the answer is still delivered, never a
+        # wrong value) and "delivery" is restoring the answer itself (a
+        # buffered one fails closed with a recorded 502; a stream is cut);
+        # before any upstream contact, "vault" is issuing a request's
+        # placeholders (a vault write or its COMMIT failed: rolled back, a
+        # recorded 503 — a realtime frame closes 1011).
         self.bookkeeping_errors: Counter[str] = Counter()
         # Requests refused as a web page's (request_origin_refusal), by kind:
         # "host" (a name the proxy does not answer to — DNS rebinding, or an
@@ -3612,6 +3619,10 @@ async def handle(request: Request) -> Response:
             return refused_response(str(exc), adapter, "undecodable field")
         except SealedSessionError:
             return sealed_response(adapter)
+        except state.vault_faults as exc:
+            return _vault_fault_refused(
+                state, ctx, adapter, exc, request=request, path=path, started=started
+            )
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
@@ -3673,6 +3684,10 @@ async def handle(request: Request) -> Response:
                 )
             except SealedSessionError:
                 return sealed_response(adapter)
+            except state.vault_faults as exc:
+                return _vault_fault_refused(
+                    state, ctx, adapter, exc, request=request, path=path, started=started
+                )
             if rewritten is not None:
                 outbound = rewritten
 
@@ -3834,6 +3849,56 @@ async def handle(request: Request) -> Response:
         and not provider_name.startswith("custom:")
         and (adapter is None or not body_bytes),
     )
+
+
+def vault_fault_types(manager: object) -> tuple[type[BaseException], ...]:
+    """What a vault fault raises while a request's placeholders are issued
+    (``vault.run_batched``): sqlite's errors — the sqlite vaults, whose batch
+    rolls back and re-raises a failed write or COMMIT — and the manager's
+    own (optional ``fault_types``: an RDBMS vault's DB-API driver errors).
+    Anything else is not the vault's and propagates as before."""
+    declared = getattr(manager, "fault_types", ())
+    return (sqlite3.Error, *tuple(declared))
+
+
+def _vault_fault_refused(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter,
+    exc: BaseException,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """The vault could not issue this request's placeholders — a write or
+    its batch's COMMIT failed, and the batch rolled back whole: a recorded,
+    provider-shaped 503 before any upstream contact (the audit refusal's
+    twin; nothing was forwarded or signed), counted as the "vault"
+    bookkeeping stage and logged by exception TYPE only."""
+    state.bookkeeping_errors["vault"] += 1
+    logger.error(
+        "%s %s -> 503 vault write failed (%s); nothing forwarded",
+        request.method,
+        path,
+        type(exc).__name__,
+    )
+    state.record_request(
+        session=ctx.session_id,
+        provider=adapter.name,
+        method=request.method,
+        path=path,
+        status=503,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    message = (
+        "llm-redact: the vault could not record this request's placeholders; the request"
+        " was not forwarded"
+    )
+    return JSONResponse(adapter.error_body(message, status=503), status_code=503)
 
 
 def _count_delta(after: Counter[str], before: dict[str, int]) -> dict[str, int]:

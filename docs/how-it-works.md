@@ -151,7 +151,9 @@ A request's new values are written in **one transaction**, committed once
 before anything is forwarded (the sqlite vault runs `synchronous=FULL`, so
 each commit is an fsync — once per request, not once per value). A refused
 request (a block-mode value, `max_body_strings`) and a failed commit roll
-the whole transaction back: nothing it issued is kept, cached or sent.
+the whole transaction back: nothing it issued is kept, cached or sent. A
+vault fault answers the request with a recorded 503 (a realtime frame: the
+connection closes 1011), never a bare 500.
 
 ### The audit record
 

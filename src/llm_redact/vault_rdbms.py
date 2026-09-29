@@ -111,6 +111,13 @@ _LONG_TEXT = {"postgresql": "TEXT", "mysql": "LONGTEXT", "oracle": "CLOB", "dbap
 
 _ALLOCATION_ATTEMPTS = 3
 
+
+class RdbmsAllocationError(RuntimeError):
+    """A new placeholder's allocation kept colliding with concurrent writers
+    past ``_ALLOCATION_ATTEMPTS``: refused, never guessed (one of the store's
+    ``fault_types``)."""
+
+
 # The response map's row kind (a Responses chain's row, or a stored object's
 # owner record): each kind is bounded apart (see llm_redact.vault). One
 # portable column definition for the create and the upgrade of a schema
@@ -697,6 +704,15 @@ class RdbmsStore:
         startup only — adding the column takes a restart."""
         return not self._row_kinds
 
+    @property
+    def fault_types(self) -> tuple[type[BaseException], ...]:
+        """What a failed allocation raises: the driver's DB-API ``Error``
+        (after the rollback and the one reconnect-retry) and an allocation
+        that kept colliding — the proxy refuses such a request 503."""
+        driver_error = getattr(self._module, "Error", None)
+        driver = (driver_error,) if isinstance(driver_error, type) else ()
+        return (*driver, RdbmsAllocationError)
+
     def _create(self, conn: Any, table: str, ddl: str) -> None:
         """Create a missing table — or refuse to start, naming it and the
         statement a DBA must run, when this database user may not (a table
@@ -947,7 +963,7 @@ class RdbmsStore:
                     # so the next attempt reissues the same number.
                     self._rollback(conn)
                     raise
-            raise RuntimeError(
+            raise RdbmsAllocationError(
                 "RDBMS vault allocation kept colliding after"
                 f" {_ALLOCATION_ATTEMPTS} attempts; refusing to guess"
             )
@@ -1392,6 +1408,11 @@ class RdbmsVaultManager:
     def owner_bound_shared(self) -> bool:
         """``RdbmsStore.owner_bound_shared`` (surfaced in /status and doctor)."""
         return self._store.owner_bound_shared
+
+    @property
+    def fault_types(self) -> tuple[type[BaseException], ...]:
+        """``RdbmsStore.fault_types`` (the proxy's vault-fault refusal)."""
+        return self._store.fault_types
 
     def prune_sessions(self, days: int, *, exclude: frozenset[str] = frozenset()) -> int:
         doomed = self._store.prune_sessions(days, exclude=exclude)

@@ -6,7 +6,9 @@ multipart upload (``redact_multipart``: form fields, file names, JSONL
 lines) and each realtime client frame (``redact_message``). One COMMIT per
 request — not per value — and it lands BEFORE anything is forwarded: a
 refusal after some values were issued (block mode, max_body_strings) rolls
-them back, and a COMMIT that fails refuses the request with nothing sent.
+them back, and a COMMIT that fails refuses the request with nothing sent: a
+recorded, provider-shaped 503 (a realtime frame: the connection closes
+1011), counted as the "vault" bookkeeping stage — never a bare 500.
 """
 
 from __future__ import annotations
@@ -137,7 +139,7 @@ async def test_a_body_over_max_body_strings_rolls_back(tmp_path: Path) -> None:
 
 
 async def test_a_failed_commit_refuses_the_request_with_nothing_forwarded(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     sent: list[dict[str, Any]] = []
     app, _ = _app(tmp_path, sent)
@@ -145,9 +147,22 @@ async def test_a_failed_commit_refuses_the_request_with_nothing_forwarded(
     real = manager._conn
     manager._conn = _FlakyConn(real, "COMMIT")
     body = _messages(" ".join(EMAILS[:4]))
-    response = await _post(app, "/v1/messages", json=body)
-    assert response.status_code == 500  # failed closed
+    with caplog.at_level("ERROR", logger="llm_redact"):
+        response = await _post(app, "/v1/messages", json=body)
+    # Failed closed: a recorded, provider-shaped 503 — never a bare 500.
+    assert response.status_code == 503
+    refusal = response.json()
+    assert refusal["type"] == "error"  # the Anthropic shape (the route's adapter)
+    assert "vault could not record" in refusal["error"]["message"]
     assert sent == []  # the upstream never saw the request
+    state = app.state.proxy
+    assert state.bookkeeping_errors == {"vault": 1}
+    (row,) = state.recent
+    assert row["status"] == 503 and row["provider"] == "anthropic"
+    # Logged by exception TYPE only: never a value, never the SQL error text.
+    assert "OperationalError" in caplog.text
+    assert "disk is full" not in caplog.text
+    assert not any(email in caplog.text for email in EMAILS)
     manager._conn = real
     assert manager.total_entries() == 0
     assert not real.in_transaction
@@ -156,6 +171,40 @@ async def test_a_failed_commit_refuses_the_request_with_nothing_forwarded(
     assert (await _post(app, "/v1/messages", json=body)).status_code == 200
     assert all(f"«EMAIL_{n:03d}»" in _sent_text(sent) for n in range(1, 5))
     manager.close()
+
+
+async def test_a_failed_commit_refuses_an_upload_with_nothing_forwarded(tmp_path: Path) -> None:
+    sent: list[dict[str, Any]] = []
+    app, _ = _app(tmp_path, sent)
+    manager = app.state.proxy.vault_manager
+    real = manager._conn
+    manager._conn = _FlakyConn(real, "COMMIT")
+    line = json.dumps({"custom_id": "r1", "body": {"input": f"mail {EMAILS[0]}"}})
+    response = await _post(
+        app,
+        "/v1/files",
+        content=_upload(line),
+        headers={"content-type": "multipart/form-data; boundary=b0undary"},
+    )
+    assert response.status_code == 503
+    assert "vault could not record" in response.json()["error"]["message"]
+    assert sent == [] and app.state.proxy.bookkeeping_errors == {"vault": 1}
+    manager._conn = real
+    assert manager.total_entries() == 0
+    manager.close()
+
+
+def test_the_vault_fault_types_are_sqlites_plus_the_managers_own() -> None:
+    from llm_redact.proxy import vault_fault_types
+
+    class Declared(Exception):
+        pass
+
+    class Manager:
+        fault_types = (Declared,)
+
+    assert vault_fault_types(object()) == (sqlite3.Error,)
+    assert vault_fault_types(Manager()) == (sqlite3.Error, Declared)
 
 
 def _upload(*lines: str) -> bytes:
@@ -225,15 +274,27 @@ class _EchoUpstream:
 
 
 @contextlib.contextmanager
-def _relay(config: Config, seen: list[str]) -> Iterator[str]:
+def _relay(
+    config: Config,
+    seen: list[str],
+    *,
+    fail_on: str | None = None,
+    apps: list[Any] | None = None,
+) -> Iterator[str]:
     """The proxy in uvicorn's own thread — built there too (a factory):
-    sqlite connections are per-thread."""
+    sqlite connections are per-thread. ``fail_on``: the vault's SQL that
+    fails once (a disk-full write); ``apps`` collects the built app."""
 
     def factory() -> Any:
         app = create_app(config)
-        app.state.proxy.vault_manager._conn.set_trace_callback(
+        manager = app.state.proxy.vault_manager
+        manager._conn.set_trace_callback(
             lambda sql: seen.append(sql) if sql in ("BEGIN IMMEDIATE", "COMMIT") else None
         )
+        if fail_on is not None:
+            manager._conn = _FlakyConn(manager._conn, fail_on)
+        if apps is not None:
+            apps.append(app)
         return app
 
     server = uvicorn.Server(
@@ -284,4 +345,44 @@ async def test_each_realtime_frame_writes_its_new_values_in_one_commit(tmp_path:
     # Committed before the frame was sent: a fresh connection sees the rows.
     conn = sqlite3.connect(tmp_path / "vault.db")
     assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone() == (4,)
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_commit_closes_the_realtime_connection_1011(tmp_path: Path) -> None:
+    """A frame whose placeholders the vault cannot record is never sent: the
+    connection closes 1011, recorded as the HTTP path's 503 and counted as
+    the "vault" bookkeeping stage."""
+    seen: list[str] = []
+    apps: list[Any] = []
+    async with _EchoUpstream() as upstream:
+        config = Config(
+            providers={
+                **Config().providers,
+                "openai": ProviderConfig(f"http://127.0.0.1:{upstream.port}"),
+            },
+            vault=VaultConfig(backend="sqlite", path=str(tmp_path / "vault.db")),
+        )
+        with _relay(config, seen, fail_on="COMMIT", apps=apps) as host:
+            async with websockets.connect(f"ws://{host}/v1/realtime") as client:
+                frame = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": " ".join(EMAILS[:2])}],
+                    },
+                }
+                await client.send(json.dumps(frame))
+                with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
+                    await asyncio.wait_for(client.recv(), 10)
+    assert closed.value.rcvd is not None and closed.value.rcvd.code == 1011
+    assert "could not record" in closed.value.rcvd.reason
+    assert upstream.received == []  # the frame never left
+    state = apps[0].state.proxy
+    assert state.bookkeeping_errors == {"vault": 1}
+    (row,) = state.recent
+    assert row["method"] == "WS" and row["status"] == 503
+    conn = sqlite3.connect(tmp_path / "vault.db")
+    assert conn.execute("SELECT COUNT(*) FROM mappings").fetchone() == (0,)  # rolled back
     conn.close()

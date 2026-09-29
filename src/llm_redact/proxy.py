@@ -2838,6 +2838,10 @@ _EXTRA_PREFIX = (
     " (a base URL that repeats the API version, such as .../v1/v1/...), so it was not"
     " forwarded; check the tool's base URL"
 )
+# The longest extra prefix looked for, in segments. A base URL mistake adds
+# one or two (/v1/v1/…, /api/v1/…); each candidate tail costs a match of up
+# to the whole path, so trying every tail was quadratic in its length.
+_MAX_EXTRA_PREFIX = 8
 
 
 def _misaddressed(
@@ -2856,10 +2860,14 @@ def _misaddressed(
       the matched path must be the forwarded path, as for dot segments);
     - the route without its ``/v1`` segment, or an OpenAI resource without
       it (404: an OpenAI-compatible base URL that lacks ``/v1``);
-    - the route under an extra leading prefix (404: a base URL repeating the
-      version). Azure's ``/openai/…`` and custom ``/custom/NAME/…`` paths
-      embed OpenAI routes by design, and their adapters read their own
-      tails; an Azure tail is never taken as a sign of an extra prefix.
+    - the route under an extra leading prefix of up to ``_MAX_EXTRA_PREFIX``
+      segments (404: a base URL repeating the version). Azure's ``/openai/…``
+      and custom ``/custom/NAME/…`` paths embed OpenAI routes by design, and
+      their adapters read their own tails; an Azure tail is never taken as a
+      sign of an extra prefix.
+
+    It costs a bounded number of route matches, each linear in the path's
+    length: it runs before most refusals, for any client.
     """
     stripped = path[:-1] if len(path) > 1 and path.endswith("/") else path
     spellings = tuple(dict.fromkeys((stripped, stripped.lower())))
@@ -2885,7 +2893,7 @@ def _misaddressed(
         return None
     for candidate in spellings:
         segments = candidate.split("/")
-        for index in range(2, len(segments)):
+        for index in range(2, min(len(segments), _MAX_EXTRA_PREFIX + 2)):
             tail = "/" + "/".join(segments[index:])
             if tail.startswith("/openai/"):
                 # Azure's family name is a segment of other providers'
@@ -3096,15 +3104,6 @@ async def handle(request: Request) -> Response:
     started = time.perf_counter()
     query = request.url.query
     adapter, kind = state.route(request.method, path, request.headers, query)
-    # An unrecognized path that is another spelling of a recognized route,
-    # or that route without its /v1 or under an extra prefix: refused below
-    # (never forwarded unredacted to an upstream that may serve it as that
-    # route).
-    misaddressed = (
-        _misaddressed(state, request.method, path, request.headers, query)
-        if adapter is None
-        else None
-    )
 
     # A disabled provider fails closed before anything is read or forwarded:
     # matched routes AND pass-through traffic attributed to it are answered
@@ -3145,10 +3144,18 @@ async def handle(request: Request) -> Response:
         return Response(
             b"llm-redact is running\n", media_type="text/plain", headers=dict(_SECURITY_HEADERS)
         )
-    if misaddressed is not None:
-        return _misaddressed_refused(
-            state, misaddressed, request=request, path=path, started=started
-        )
+    if adapter is None and admission.refusal is None:
+        # An unrecognized path that is another spelling of a recognized
+        # route, or that route without its /v1 or under an extra prefix:
+        # refused, never forwarded unredacted to an upstream that may serve
+        # it as that route. Looked for only once the request-origin rule and
+        # the access gate admit the request: a refused one (a web page's, an
+        # unknown client's) gets its refusal without this routing work.
+        misaddressed = _misaddressed(state, request.method, path, request.headers, query)
+        if misaddressed is not None:
+            return _misaddressed_refused(
+                state, misaddressed, request=request, path=path, started=started
+            )
     if provider_name is None:
         return _unattributed_refused(state, request, path=path, started=started)
     if provider_conf is None:

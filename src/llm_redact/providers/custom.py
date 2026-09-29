@@ -60,6 +60,16 @@ _OPENAI_RESOURCES = frozenset(
 )
 
 
+# The deepest endpoint the wrapped OpenAI adapters match has four segments
+# after /v1 (/v1/conversations/{id}/items/{item_id}): a longer tail is never
+# an endpoint, except one starting at an OpenAI resource name (the
+# conversations route reads everything below it). Tails are tried up to
+# this depth — twice the deepest, for headroom — plus the one at the first
+# resource name, so the search costs a bounded number of matches whatever
+# the path (tests/test_api_coverage.py pins the depth of every route).
+MAX_ENDPOINT_SEGMENTS = 8
+
+
 def custom_prefix(provider_key: str) -> str:
     """Route prefix for a "custom:NAME" provider key."""
     return CUSTOM_ROUTE_PREFIX + provider_key.removeprefix("custom:")
@@ -112,14 +122,27 @@ class _PrefixedOpenAIMixin:
         /models/embeddings is the embeddings endpoint, not a GET of a model
         named "embeddings"). Without a match the old rule (re-anchor at the
         last /v1/, else prepend /v1) applies, and an unknown tail still falls
-        through to NONE (pass-through) via the wrapped exact matcher."""
+        through to NONE (pass-through) via the wrapped exact matcher.
+
+        Only tails of at most ``MAX_ENDPOINT_SEGMENTS`` segments after /v1
+        are tried, and the one at the first resource name: no longer tail is
+        an endpoint, and trying every tail of a path (each built and matched
+        in full) made the search quadratic in the path's length."""
         inner = self._strip(path)
         if inner is None:
             return path
         segments = inner.split("/")
-        for index in range(1, len(segments)):
-            if index > 1 and segments[index - 1] in _OPENAI_RESOURCES:
-                break  # every later tail is a sub-resource of that resource
+        count = len(segments)
+        # Tails are tried longest first up to the one at the first resource
+        # name: every later tail is a sub-resource of that resource.
+        last = next(
+            (index for index in range(1, count) if segments[index] in _OPENAI_RESOURCES),
+            count - 1,
+        )
+        # The tail at `index` has count - index segments (a leading "v1" one
+        # of them when it has one).
+        first = max(1, count - 1 - MAX_ENDPOINT_SEGMENTS)
+        for index in range(first, last + 1) if first <= last else (last,):
             tail = "/" + "/".join(segments[index:])
             candidate = tail if tail.startswith("/v1/") else "/v1" + tail
             if self._recognized(candidate, method, kind):

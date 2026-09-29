@@ -242,6 +242,31 @@ def test_route_matches_matrix(
     assert name in (None, provider), f"{method} {path} matched {name}'s adapter"
 
 
+@pytest.mark.parametrize(("method", "path", "classification"), OPENAI_ROWS)
+def test_openai_routes_match_under_any_base_path(
+    method: str, path: str, classification: str
+) -> None:
+    """The prefix mixins (custom upstreams, the Gemini API's OpenAI surface)
+    try only tails of at most MAX_ENDPOINT_SEGMENTS segments after /v1 —
+    twice the deepest OpenAI route, pinned here — so every row routes the
+    same under a deep base path, with or without its /v1."""
+    from llm_redact.providers.custom import (
+        MAX_ENDPOINT_SEGMENTS,
+        CustomOpenAIAdapter,
+        CustomResponsesAdapter,
+    )
+
+    concrete = _concrete(path)
+    expected = _EXPECTED_KIND[classification]
+    if expected is not RouteKind.NONE:
+        assert len(concrete.split("/")) - 2 <= MAX_ENDPOINT_SEGMENTS // 2, path
+    adapters = (CustomOpenAIAdapter("lm"), CustomResponsesAdapter("lm"))
+    for inner in (concrete, concrete.removeprefix("/v1")):
+        target = "/custom/lm" + "/base" * 20 + inner
+        kinds = {adapter.matches(method, target) for adapter in adapters} - {RouteKind.NONE}
+        assert kinds == ({expected} - {RouteKind.NONE}), f"{method} {target}"
+
+
 def _config() -> Config:
     providers = dict(Config().providers)
     for provider, base, _, _ in SECTIONS:

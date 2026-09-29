@@ -111,7 +111,11 @@ providers refuse to start.
   `/v1` (custom upstreams such as `/custom/NAME/inference/…` or `…/api/paas/v4/…`,
   and the Gemini API's `/v1beta/openai/` surface) all reached their upstream
   unredacted. They are now refused as above, or matched on the endpoint's tail and
-  redacted.
+  redacted. Routing a path costs time linear in its length, and the misaddressing
+  check runs only for a request the request-origin rule and the access gate admit:
+  the tail search tries tails of at most eight segments after `/v1` (every OpenAI
+  endpoint has four or fewer) and the one at the first OpenAI resource name, and an
+  extra prefix is looked for up to eight segments deep.
 - **Recognized routes forward only a body the proxy read.** Wherever redaction
   applies, and whatever `detection` says when a request spends a credential the
   proxy holds, the bodies listed under Upgrading are refused before the

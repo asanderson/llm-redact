@@ -274,6 +274,13 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         # Omitted when empty: the proxy then answers to its loopback names
         # and bind host only.
         lines.append(f"allowed_hosts = {_toml_list(config.allowed_hosts)}")
+    if config.allowed_origins:
+        # Omitted when empty (the default): no page on another origin is
+        # served. Annotated: every listed origin can read restored values.
+        lines.append(
+            "# allowed_origins: these pages can read restored values back through the proxy"
+        )
+        lines.append(f"allowed_origins = {_toml_list(config.allowed_origins)}")
     lines.append(f"inject_system_note = {_toml_value(config.inject_system_note)}")
     lines.append(f"max_body_bytes = {config.max_body_bytes}")
     lines.append(f"max_body_strings = {config.max_body_strings}")
@@ -487,6 +494,8 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append("\n[users]")
         if config.users.path is not None:
             lines.append(f"path = {_toml_str(config.users.path)}")
+        if config.users.unrecorded_objects != UsersConfig().unrecorded_objects:
+            lines.append(f"unrecorded_objects = {_toml_str(config.users.unrecorded_objects)}")
 
     if config.email != EmailConfig():
         # The SMTP password is env-only by design and never appears here.

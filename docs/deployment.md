@@ -134,8 +134,70 @@ allowed_hosts = ["llm-redact", "llm-redact.team.svc.cluster.local"]
   listed. `/status` counts refusals by kind in
   `request_origin_refusals_total` (`host`, `origin`, `fetch_site`).
 - A browser-based client served from another origin (a web chat UI, a
-  browser extension, an Electron renderer) is refused by design: it cannot
-  be told apart from a malicious page.
+  browser extension, an Electron renderer) is refused: it cannot be told
+  apart from a malicious page — unless you list its origin in
+  `allowed_origins` (below).
+
+## Browser apps on other origins (`allowed_origins`)
+
+By default a page on another origin — a web chat UI, a local dev server,
+an Electron renderer, a browser extension — cannot use the proxy: it
+cannot be told apart from a malicious page, and any page that reaches the
+proxy could read your redacted values back (every rehydrating route
+restores the vault's values into what the provider sends back). To serve
+a browser app you trust with those values, list its origin:
+
+```toml
+allowed_origins = ["https://chat.example.com", "http://localhost:3000"]
+```
+
+- **What listing means.** A page on a listed origin is served like a local
+  tool: it can read restored values back through the proxy, and spend
+  every credential the proxy holds (`auth = "identity"` providers, routed
+  operator keys). So can any code that runs on that origin — an XSS in
+  the app, a compromised script it loads. List only origins you trust with
+  your redacted values. `llm-redact doctor` WARNs with the list, `/status`
+  carries the count (`allowed_origins`), and `llm-redact status` shows it
+  in its posture block.
+- **Exact origins.** Each entry is a web origin, `scheme://host[:port]`:
+  http or https, no path, query, user info or wildcard. It is stored in
+  the form browsers send (host lowercased, default port left out, IPv6 in
+  brackets) and a request's `Origin` must match it exactly:
+  `https://chat.example.com` admits neither `https://app.chat.example.com`
+  nor `https://chat.example.com:8443`. `http` is accepted only for this
+  machine (`localhost`, names under `.localhost`, loopback addresses):
+  anyone on the network path can serve a page as a remote plain-HTTP
+  origin. The opaque `null` origin (sandboxed frames, `file://` pages) can
+  never be listed, and neither can other schemes (`chrome-extension://`,
+  `app://`). A top-level key (before any `[table]`), restart-only.
+- **Every other rule still holds.** The request must be addressed to a
+  host name the proxy answers to (127.0.0.1, localhost, ::1, the bind
+  host, `allowed_hosts`), and a request without an `Origin` header (an
+  `<img>`, a `no-cors` fetch) is still refused: there is nothing to check
+  against the list. The reserved `/__llm-redact/*` endpoints (the
+  dashboard, `/sessions`, …) never consult it.
+- **CORS stays the provider's.** For a listed origin the proxy forwards the
+  CORS preflight and the request as they are and relays the provider's own
+  CORS answer, so the app works only against a provider that accepts calls
+  from browsers: the Anthropic and OpenAI SDKs need
+  `dangerouslyAllowBrowser: true` (the Anthropic API also wants the
+  `anthropic-dangerous-direct-browser-access: true` header the SDK then
+  sends). An upstream's own policy still applies to its traffic: a local
+  Ollama must allow the origin too (`OLLAMA_ORIGINS`). The proxy's own
+  answers (a 400 block, a 413, a 502) carry no CORS headers, so the app
+  sees a network error for them — `/__llm-redact/recent` and the proxy's
+  log say why. Under `auth = "identity"` a preflight is refused (only the
+  API routes llm-redact recognizes are forwarded), so a browser app cannot
+  call those providers the usual way; a listed page can still send them
+  "simple" requests, which spend the proxy's identity.
+- **Realtime.** A listed origin may open a realtime WebSocket (browsers
+  apply no CORS to WebSockets; the provider sees the page's `Origin`).
+- **The browser may ask first.** Some browsers put a public site's
+  requests to 127.0.0.1 behind a local-network-access permission prompt;
+  allow it for the app's site.
+- **llm-redact-pro's local connector** (`llm-redact connect`) stays
+  same-origin-only in this release: point a browser app at the proxy
+  itself, not at the connector.
 
 ## Service management (native installs)
 
@@ -161,7 +223,8 @@ body is still arriving never signs a pass-through request with the
 proxy's identity. Detection rules, allowlists, NER, fuzzy rehydration, note
 injection, `max_body_bytes`, `max_body_strings`, upstream URLs, and the routing sections
 `[upstreams]`/`[routing]`/`[prices]` (llm-redact-pro) hot-reload; vault, audit,
-host, port, allowed_hosts, log, TLS, OTel, users, and email changes warn "require restart"
+host, port, allowed_hosts, allowed_origins, log, TLS, OTel, users, and email changes warn
+"require restart"
 and keep the old value; so do sections a plugin adds, such as llm-redact-pro's
 `[auth]`. A broken config file is logged and ignored — the running config
 stays live. There is deliberately no HTTP reload endpoint (it would be a

@@ -761,6 +761,26 @@ def _check_allowed_hosts(report: _Report, config: Config) -> None:
     )
 
 
+def _check_allowed_origins(report: _Report, config: Config) -> None:
+    """allowed_origins: browser origins the operator opted in. A page on a
+    listed origin can read restored values back through the proxy (every
+    rehydrating route answers it) and spend any credential the proxy
+    holds, so the opt-in is always a WARN naming them. Silent when none."""
+    if not config.allowed_origins:
+        return
+    lenders = _credential_lenders(config)
+    spends = (
+        f", and spend the credentials the proxy holds for {', '.join(lenders)}" if lenders else ""
+    )
+    report.line(
+        "WARN",
+        "origins",
+        f"allowed_origins: {', '.join(config.allowed_origins)} — pages on these origins can"
+        f" read your redacted values back through the proxy{spends}; list only origins you"
+        " trust with them",
+    )
+
+
 def _check_routing(report: _Report, config: Config, offline: bool) -> None:
     """R-31 lives in llm-redact-pro (routing is a pro subsystem); this shell
     reports the config/package posture and hands the checks to the package."""
@@ -886,6 +906,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_posture(report, config)
     _check_upstream_auth(report, config)
     _check_allowed_hosts(report, config)
+    _check_allowed_origins(report, config)
     _check_routing(report, config, bool(getattr(args, "offline", False)))
     _check_access(report, config)
     _check_email(report, config)

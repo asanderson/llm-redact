@@ -167,3 +167,49 @@ async def test_allowed_hosts_lets_an_alias_host_spend_the_identity(
                 await client.send(_hello("hi"))
                 await client.recv()
     assert len(auth.calls) == 1 and len(fake.paths) == 1
+
+
+# --- allowed_origins: the operator's opt-in browser origins -----------------------------
+
+APP = "https://chat.example.com"
+
+
+async def test_a_listed_origin_may_open_a_realtime_connection() -> None:
+    # A browser realtime app the operator listed: served like a tool, its
+    # Origin forwarded to the provider (which decides for itself), its
+    # frames redacted and restored.
+    async with FakeUpstream() as fake:
+        config = Config(providers=_config(fake.port).providers, allowed_origins=(APP,))
+        with _proxy(config) as proxy_host:
+            async with _connect(proxy_host, "/v1/realtime?model=m", origin=APP) as client:
+                await client.send(_hello(f"mail {EMAIL}"))
+                echoed = json.loads(await client.recv())
+            status = await _proxy_status(proxy_host)
+    assert echoed["item"]["content"][0]["text"] == f"mail {EMAIL}"
+    assert fake.headers[0]["origin"] == APP
+    [frame] = fake.received
+    assert isinstance(frame, str) and EMAIL not in frame
+    assert status["request_origin_refusals_total"] == {}
+    assert status["allowed_origins"] == 1
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "kind"),
+    [
+        ({"origin": EVIL}, "origin"),  # listing one origin admits no other
+        ({"origin": "https://chat.example.com:8443"}, "origin"),
+        ({"origin": APP, "host": "rebind.example:8787"}, "host"),  # still a named Host
+    ],
+)
+async def test_only_the_listed_origin_on_an_answered_host(
+    kwargs: dict[str, Any], kind: str
+) -> None:
+    async with FakeUpstream() as fake:
+        config = Config(providers=_config(fake.port).providers, allowed_origins=(APP,))
+        with _proxy(config) as proxy_host:
+            async with _connect(proxy_host, "/v1/realtime", **kwargs) as client:
+                closed = await _closed(client)
+            status = await _proxy_status(proxy_host)
+    assert closed.code == 1008
+    assert fake.paths == []
+    assert status["request_origin_refusals_total"] == {kind: 1}

@@ -107,7 +107,12 @@ or upstream contact):
   localhost, ::1, its bind host, `allowed_hosts`, the access gate's public
   origin), carry only its own origin (exact scheme, host and port — API
   routes have no CSRF token to cover a same-host page on another port),
-  and a `Sec-Fetch-Site` of `same-origin` or `none`.
+  and a `Sec-Fetch-Site` of `same-origin` or `none`. The one exception is
+  the operator's opt-in `allowed_origins`: a page whose `Origin` matches a
+  listed origin exactly is served although it is cross-site (its Origin,
+  which page script cannot forge, vouches for it) — the Host rule still
+  holds, and a request without an `Origin` is never taken for a listed
+  one.
 - A request that would spend a credential the proxy holds must name such
   a host even without browser markers (a browser lacking Fetch Metadata
   sends none on a same-origin GET) — unless it arrived over **TLS**: a
@@ -125,9 +130,18 @@ including when they reach the proxy by an alias (a compose service, a
 Kubernetes Service, `host.docker.internal`) on their own credential. An
 alias that spends a credential the proxy holds over plain HTTP is listed in
 `allowed_hosts` ([deployment.md](deployment.md#host-names-the-proxy-answers-to-allowed_hosts)).
-By design, a browser-based client served from another origin (a web chat
+By default, a browser-based client served from another origin (a web chat
 UI, a browser extension, an Electron renderer) cannot use the proxy: it is
-indistinguishable from the attacker above.
+indistinguishable from the attacker above. An operator who trusts one lists
+its exact origin in `allowed_origins`
+([deployment.md](deployment.md#browser-apps-on-other-origins-allowed_origins)),
+knowing what that grants: the page — and any code that runs on its origin
+— reads restored values back and spends every credential the proxy holds.
+Only http(s) origins can be listed, plain http only on this machine
+(anyone on the network path can serve a remote http origin), never the
+opaque `null` origin; the reserved `/__llm-redact/*` endpoints never
+consult the list, and the proxy stays transparent to CORS (the provider's
+own answer decides whether the page may read a response).
 
 ### Realtime WebSocket connections
 
@@ -357,6 +371,7 @@ row, is [resilience.md](resilience.md).
 | History compaction rewrites the session anchor | Fails safe: fresh session, no cross-session restore — verified by the dogfood compaction probe. The fork never issues a token its summary carries: the summary is the fork's anchor, so every request of it carries the summary's tokens and the token floor numbers new values past them |
 | A request carries tokens its session did not issue (a pasted answer, a foreign proxy's token) | The token floor keeps the request (and a realtime connection) that carries them from issuing those names. Residual, documented in [compaction-relink.md](compaction-relink.md): a number the session had already issued before the foreign token arrived, another request sharing the session that does not carry the token, and provider-side history (a `previous_response_id` chain, a realtime model's own output) no request of the session carries — the last is what llm-redact-pro's sealed sessions cover |
 | Values pre-escaped inside JSON-source strings | Captured in escaped form; documented limitation |
+| An origin listed in `allowed_origins` — or code that runs on it (an XSS, a compromised script it loads) — reads restored values back and spends the proxy's credentials | By design: listing is the operator's explicit grant, off by default. Exact origins only (normalized; no wildcard, no `null`, no non-web scheme), plain http only for this machine, the Host rule and every other rule unchanged, reserved endpoints never consult the list; `doctor` WARNs with the list, `/status` counts it and `llm-redact status` prints it |
 | A web page in a browser without Fetch Metadata (older than Chrome 76, Firefox 90, Safari 16.4), after DNS rebinding, reads back a Response or file it stored with its own key through a plain-HTTP route that forwards the client's credential | Such a same-origin GET carries no browser marker, so its foreign Host is not checked (an alias host must keep working for CLI tools); every current browser sends `Sec-Fetch-Site`, which subjects it to the Host check. A request spending a credential the proxy holds is Host-checked with or without markers — over TLS the certificate does that, so a wildcard certificate covering a name the attacker controls would reopen it for such a browser |
 | A drifted provider event shape bypasses a rehydration channel | Drift detectors in live tests; unknown shapes pass through rather than corrupt |
 | License enforcement circumvented by patching the source | Accepted: signed keys prevent forgery and the single chokepoint makes tampering auditable, but source-available checks are deterrence, not DRM — the license is a legal instrument, never a security boundary (the `llm-redact-pro` repo's `docs/licensing.md`) |

@@ -699,3 +699,28 @@ async def test_b17_tools_and_the_proxys_own_origin_are_served() -> None:
         )
     assert (tool.status_code, own.status_code) == (200, 200)
     assert "choices" in tool.text and "choices" in own.text
+
+
+async def test_b17_only_the_operators_listed_origin_is_served() -> None:
+    # allowed_origins is the operator's explicit grant: the exact listed
+    # origin reaches the API routes; a look-alike does not, a rebound Host
+    # does not, and the listing never opens the reserved endpoints.
+    listed = "https://chat.example.com"
+    config = _base_config(allowed_origins=(listed,))
+    cross = {"origin": listed, "sec-fetch-site": "cross-site"}
+    async with _client(config) as client:
+        api = await client.post(B17_API, json=B17_BODY, headers=cross)
+        look_alike = await client.post(
+            B17_API,
+            json=B17_BODY,
+            headers={**cross, "origin": "https://chat.example.com.evil.example"},
+        )
+        prune = await client.post(
+            f"{RESERVED_PREFIX}/sessions/prune",
+            json={"older_than_days": 1},
+            headers={**cross, CSRF_HEADER: await _csrf(client)},
+        )
+    async with _client(config, base_url="http://rebind.example:8787") as client:
+        rebound = await client.post(B17_API, json=B17_BODY, headers=cross)
+    assert api.status_code == 200 and "choices" in api.text
+    assert (look_alike.status_code, prune.status_code, rebound.status_code) == (403, 403, 403)

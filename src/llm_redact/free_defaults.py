@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING
 
-from .config import ConfigError
+from .config import ConfigError, UsersConfig
 from .licensing import ENV_KEY, FREE, ResolvedLicense
 
 if TYPE_CHECKING:
@@ -154,7 +154,8 @@ def build_access_gate(config: Config, license: ResolvedLicense) -> AccessGate | 
             " did not load, so its access control is unavailable; upgrade llm-redact-pro"
             " to 0.8 or later (or remove the key to run the Free tier)"
         )
-    if config.users.path is not None:
+    if config.users != UsersConfig():
+        # A registry path, or a policy only the named-user gate implements.
         raise ConfigError(f"[users] configures named users, a paid feature; {_PRO_HINT}")
     return None
 

@@ -181,6 +181,7 @@ RESTART_ONLY_KEYS = (
     "host",
     "port",
     "allowed_hosts",
+    "allowed_origins",
     "log",
     "tls",
     "otel",
@@ -196,6 +197,7 @@ CORE_SECTION_KEYS = frozenset(
         "host",
         "port",
         "allowed_hosts",
+        "allowed_origins",
         "inject_system_note",
         "max_body_bytes",
         "max_body_strings",
@@ -570,11 +572,20 @@ class OtelConfig:
     service_name: str = "llm-redact"
 
 
+# [users] unrecorded_objects: the shape of llm-redact-pro's unknown-owner
+# policy (docs/authentication.md there). "refuse" (default): under a
+# credential the proxy holds, a named user's reference to a stored object no
+# user is recorded creating is refused. "allow": forwarded, and read sealed.
+UNRECORDED_OBJECT_POLICIES = ("refuse", "allow")
+
+
 @dataclass(frozen=True)
 class UsersConfig:
     # Named-user registry database (Pro+ tiers; llm-redact-pro docs/licensing.md).
     # Default: $XDG_DATA_HOME/llm-redact/users.db. Restart-only.
     path: str | None = None
+    # One of UNRECORDED_OBJECT_POLICIES; implemented by llm-redact-pro only.
+    unrecorded_objects: str = "refuse"
 
 
 @dataclass(frozen=True)
@@ -849,6 +860,12 @@ class Config:
     # browser sent) must be addressed to one of these names: the DNS-rebinding
     # defense. Lowercased and sorted, no ports; restart-only like the bind.
     allowed_hosts: tuple[str, ...] = ()
+    # Browser origins (scheme://host[:port], serialized) whose pages the proxy
+    # serves although they are cross-origin — a web chat UI the operator
+    # trusts. OPT-IN and default empty: a listed origin can read restored
+    # values back through the proxy and spend any credential it holds.
+    # Their Host must still be a name the proxy answers to; restart-only.
+    allowed_origins: tuple[str, ...] = ()
     inject_system_note: bool = True
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     max_body_strings: int = DEFAULT_MAX_BODY_STRINGS
@@ -1067,6 +1084,90 @@ def _parse_allowed_hosts(raw: Mapping[str, Any]) -> tuple[str, ...]:
             )
         names.add(name)
     return tuple(sorted(names))
+
+
+def normalize_origin(value: str) -> str | None:
+    """``value`` as a serialized web origin — ``scheme://host[:port]``: http
+    or https, the host lowercased (an IPv6 literal bracketed and compressed),
+    the scheme's default port left out — or None when it is not one: the
+    opaque ``null`` origin, another scheme, a path (a lone ``/`` aside),
+    query, fragment, user info, wildcard, non-ASCII host or bad port. The
+    form browsers send in ``Origin``, so a listed origin and a request's
+    ``Origin`` compare equal exactly when they name the same origin."""
+    text = value.strip()
+    if not text.isascii():
+        return None  # a browser sends the ASCII (punycode) form
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        port = parsed.port
+    except ValueError:  # a malformed port or IPv6 literal
+        return None
+    host = parsed.hostname
+    if (
+        parsed.scheme not in ("http", "https")
+        or not host
+        or port == 0
+        or "@" in parsed.netloc
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if not _ALLOWED_HOST_RE.match(host) or ".." in host:
+            return None  # a wildcard, a stray character, an empty label
+    else:
+        host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+    default_port = 443 if parsed.scheme == "https" else 80
+    return f"{parsed.scheme}://{host}" + ("" if port in (None, default_port) else f":{port}")
+
+
+def _loopback_origin_host(origin: str) -> bool:
+    """Whether a serialized origin's host is this machine: ``localhost``, a
+    name under ``.localhost`` (browsers resolve those to loopback
+    themselves), or a loopback address."""
+    host = urllib.parse.urlsplit(origin).hostname or ""
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _parse_allowed_origins(raw: Mapping[str, Any]) -> tuple[str, ...]:
+    """``allowed_origins``: the browser origins the proxy serves across
+    origins, in their serialized form (``normalize_origin``). A plain-http
+    origin must be this machine: any host on the network path could serve a
+    page as a remote http origin. A malformed entry is named by its
+    position, never echoed."""
+    if "allowed_origins" not in raw:
+        return ()
+    value = raw["allowed_origins"]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(
+            "allowed_origins must be an array of web origins — e.g."
+            ' allowed_origins = ["https://chat.example.com"]'
+        )
+    origins: set[str] = set()
+    for position, item in enumerate(value, 1):
+        origin = normalize_origin(item)
+        if origin is None:
+            raise ConfigError(
+                f"allowed_origins entry {position} is not a web origin: write scheme://host[:port]"
+                " with http or https and an ASCII host — no path, query, user info or wildcard"
+                ' (the opaque "null" origin can never be listed)'
+            )
+        if origin.startswith("http:") and not _loopback_origin_host(origin):
+            raise ConfigError(
+                f"allowed_origins entry {position} is a plain-http origin on another machine:"
+                " anyone on the network path can serve a page as that origin — use https"
+                " (http is accepted for localhost and loopback addresses only)"
+            )
+        origins.add(origin)
+    return tuple(sorted(origins))
 
 
 # Object-key prefixes stay in the URI-unreserved set so the SigV4 canonical
@@ -2384,8 +2485,17 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     )
 
     users_raw = raw.get("users", {})
-    _require_keys(users_raw, {"path"}, "[users]")
-    users_cfg = UsersConfig(path=str(users_raw["path"]) if "path" in users_raw else None)
+    _require_keys(users_raw, {"path", "unrecorded_objects"}, "[users]")
+    unrecorded = users_raw.get("unrecorded_objects", UsersConfig().unrecorded_objects)
+    if not isinstance(unrecorded, str) or unrecorded not in UNRECORDED_OBJECT_POLICIES:
+        raise ConfigError(
+            '[users] unrecorded_objects must be "refuse" (the default) or "allow"'
+            " (llm-redact-pro docs/authentication.md)"
+        )
+    users_cfg = UsersConfig(
+        path=str(users_raw["path"]) if "path" in users_raw else None,
+        unrecorded_objects=unrecorded,
+    )
 
     email_cfg = _parse_email(raw.get("email", {}))
 
@@ -2408,6 +2518,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         host=str(raw.get("host", DEFAULT_HOST)),
         port=int(raw.get("port", DEFAULT_PORT)),
         allowed_hosts=_parse_allowed_hosts(raw),
+        allowed_origins=_parse_allowed_origins(raw),
         inject_system_note=inject_system_note,
         max_body_bytes=max_body_bytes,
         max_body_strings=max_body_strings,

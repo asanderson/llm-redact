@@ -855,6 +855,12 @@ def _print_posture(payload: dict[str, Any]) -> None:
             f"proxy holds cloud credentials for: {', '.join(identity)} (auth = identity —"
             " every client that reaches the proxy spends that identity)"
         )
+    origins = payload.get("allowed_origins") or 0
+    if origins:
+        lines.append(
+            f"{origins} browser origin(s) in allowed_origins: those pages can read restored"
+            " values back through the proxy"
+        )
     exempt = payload.get("mcp_exempt_servers") or 0
     if exempt:
         lines.append(f"MCP exempt servers: {exempt} (their blocks forwarded unredacted)")

@@ -91,7 +91,7 @@ else takes the OpenAI files handling below.
 | `GET /v1/files/{id}/content` | chat | batch output JSONL restored line by line |
 | `DELETE /v1/files/{id}` | pass-through | |
 | `POST /v1/batches` | chat | the caller's free-form `metadata` values are redacted out and restored in the echoed batch object; structural fields (`input_file_id`, `endpoint`, `completion_window`) carry nothing a detector matches and are forwarded byte-identical; no system note |
-| `GET /v1/batches` | pass-through | the LIST spans batches other users created, so it is never restored in the reader's vault namespace; a session router that attributes listed items (`listing_item_session`, llm-redact-pro named users) restores each batch the READER created in the session it was created in |
+| `GET /v1/batches` | chat | the LIST is restored in the request's own session, like a single batch: one shared namespace holds every batch's tokens. With llm-redact-pro named users a listing resolves to an EMPTY session, and the session router's `listing_item_session` restores only the batches the READER created, each in the session it was created in; every other item keeps its placeholders. No system note |
 | `GET /v1/batches/{id}` | chat | the batch object echoes `metadata`: restored |
 | `POST /v1/batches/{id}/cancel` | chat | the cancelled batch object echoes `metadata`: restored |
 | `GET /v1/models` | pass-through | |
@@ -154,11 +154,12 @@ Both path families: the api-version form (`/openai/deployments/{d}/…`,
 `/openai/files`, `?api-version=` in the query) and the v1 API
 (`/openai/v1/…`, the model in the body). Classifications mirror the OpenAI
 table above, with one deliberate difference: the id/metadata routes OpenAI
-leaves as pass-through (file list/metadata/delete, the batch list, model and
-deployment listings, response/conversation delete) are RECOGNIZED on Azure,
-so `[providers.azure] auth = "identity"` does not refuse them. On a
-body-less request redact-only is a no-op; batch objects are **chat** on
-both providers because they echo the user `metadata` a batch create carries.
+leaves as pass-through (file list/metadata/delete, model and deployment
+listings, response/conversation delete) are RECOGNIZED on Azure, so
+`[providers.azure] auth = "identity"` does not refuse them. On a body-less
+request redact-only is a no-op; batch objects and the batch list are
+**chat** on both providers because they echo the user `metadata` a batch
+create carries.
 
 | Endpoint | Classification | Notes |
 |---|---|---|
@@ -191,7 +192,7 @@ both providers because they echo the user `metadata` a batch create carries.
 | `GET /openai/files/{id}/content` | chat | batch output JSONL restored line by line |
 | `GET /openai/v1/files/{id}/content` | chat | |
 | `POST /openai/batches` | chat | file ids + user `metadata` (redacted out, restored in the echo) |
-| `GET /openai/batches` | redact-only | the batch LIST is never restored in the reader's vault namespace: it spans batches other users created, so that could hand one user another's value (pro named users). A session router that attributes listed items (`listing_item_session`, llm-redact-pro named users) restores each batch the READER created in the session it was created in; every other item's `metadata` keeps its placeholders |
+| `GET /openai/batches` | chat | the LIST is restored in the request's own session (both path families); with llm-redact-pro named users only the reader's own batches are restored (an empty listing session + `listing_item_session`), every other item keeps its placeholders |
 | `GET /openai/v1/batches/{id}` | chat | |
 | `POST /openai/batches/{id}/cancel` | chat | |
 | `GET /openai/models` | redact-only | model listing |

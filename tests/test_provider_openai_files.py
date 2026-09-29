@@ -3,8 +3,8 @@
 The upload's JSONL file part is redacted line by line (batch lines get the
 system note inside body; fine-tune lines directly); everything else in the
 multipart body — form fields, binary parts, unparseable lines — must be
-byte-identical. File metadata and the batch list stay pass-through; batch
-create/retrieve/cancel redact and restore the caller's ``metadata``.
+byte-identical. File metadata stays pass-through; batch create, retrieve,
+cancel and list redact and restore the caller's ``metadata``.
 """
 
 import json
@@ -62,13 +62,12 @@ def test_files_routing() -> None:
     assert adapter.matches("GET", "/v1/files") is RouteKind.NONE
     assert adapter.matches("GET", "/v1/files/file_abc") is RouteKind.NONE
     assert adapter.matches("DELETE", "/v1/files/file_abc") is RouteKind.NONE
-    # Batches: create, retrieve and cancel carry (or echo) the caller's
-    # `metadata`; the list stays pass-through (per-item attribution is the
-    # session router's), as do unknown batch sub-routes.
+    # Batches: create, retrieve, cancel and the list carry (or echo) the
+    # caller's `metadata`; unknown batch sub-routes stay pass-through.
     assert adapter.matches("POST", "/v1/batches") is RouteKind.CHAT
     assert adapter.matches("GET", "/v1/batches/batch_1") is RouteKind.CHAT
     assert adapter.matches("POST", "/v1/batches/batch_1/cancel") is RouteKind.CHAT
-    assert adapter.matches("GET", "/v1/batches") is RouteKind.NONE
+    assert adapter.matches("GET", "/v1/batches") is RouteKind.CHAT
     assert adapter.matches("POST", "/v1/batches/batch_1") is RouteKind.NONE
     assert adapter.matches("DELETE", "/v1/batches/batch_1") is RouteKind.NONE
     assert adapter.matches("GET", "/v1/batches/batch_1/cancel") is RouteKind.NONE

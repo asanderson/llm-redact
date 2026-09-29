@@ -198,9 +198,15 @@ while the vault row is the secret store and is never exported.
   (`GET` files, batches, video jobs, stored chat completions — OpenAI,
   Azure and `/custom/<name>/` alike) the router may name the session
   each listed object was created in (`listing_item_session`): the core
-  restores that item there — from the provider's own bytes, only when the
-  session exists — and leaves every other item's placeholders in place,
-  so each user sees their own items restored and nobody else's.
+  rebuilds that item from the provider's own bytes and restores it there
+  (a session that does not exist, or holds nothing, restores nothing —
+  the item keeps the provider's placeholders; the core never creates
+  one). Items the router names nothing for stay as the listing's own
+  session delivers them. llm-redact-pro reads a named user's listing in
+  an empty session and names each item's creator session or an empty
+  one, so each user sees their own items restored and nobody else's. The
+  batch list itself is a **chat** route: with one shared namespace it is
+  restored like a single batch.
 - `compaction_forks` counts only a session first seen by this process
   whose history carries placeholders it cannot own: a persisted session
   resumed after a restart (its vault already holds the tokens) and a

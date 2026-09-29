@@ -124,12 +124,14 @@ class SessionRouter(Protocol):
     ``listing_items`` — OpenAI-shaped ``{"object": "list", "data": [...]}``
     collections of files, batches, video jobs and stored chat completions),
     the vault session each listed item's placeholders should be restored
-    in. The proxy rehydrates that item — as a whole object, from the bytes
-    the provider sent — in the named session only when the session already
-    exists in the vault (it never creates one) and leaves every other item
-    as the request's own session delivers it. None (or an exception) leaves
-    the item alone. A listing never records ownership: nothing here reaches
-    ``record_object_id``.
+    in. The proxy rebuilds that item from the bytes the provider sent and
+    rehydrates it, as a whole object, in the named session; a session that
+    does not exist or holds nothing restores nothing (the proxy never
+    creates one), so the item then keeps the provider's placeholders —
+    name an empty session to keep an item OUT of the request's own
+    session. None (or an exception) leaves the item as the request's own
+    session delivers it. A listing never records ownership: nothing here
+    reaches ``record_object_id``.
 
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the

@@ -10,10 +10,11 @@ upload — form fields, binary documents, unparseable lines — is preserved
 byte-identically. ``GET /v1/files/{id}/content`` rehydrates batch OUTPUT
 files the same way, line by line. ``/v1/batches`` carries file ids,
 processing state and the caller's own ``metadata`` (free-form strings the
-batch object echoes on every read): create is redacted and its echo
-restored, as are a batch's GET and cancel (Azure's handling); the batch
-LIST stays pass-through (another user's batches must not be restored in
-the reader's session — a session router may attribute listed items).
+batch object echoes on every read): create is redacted and every echo —
+a batch's GET, its cancel, and the LIST — restored in the request's own
+session (Azure's handling). With llm-redact-pro's named users a listing
+resolves to an empty session and the session router attributes each
+listed batch to the session that created it (``listing_item_session``).
 Batch flows use the static vault session (an async fetch has no
 conversation anchor — the realtime WS stance); a user-scoping session
 router (llm-redact-pro's named users) makes that the user's own copy.
@@ -46,10 +47,10 @@ _PROMPT_FIELDS = frozenset({"prompt"})
 _VIDEO_ROUTE_RE = re.compile(r"/v1/videos(?:/[^/]+(?:/remix)?)?")
 
 # Batches whose request or response carries the caller's `metadata`:
-# create (POST /v1/batches), a batch's GET and its cancel (both answer with
-# the batch object, which echoes that metadata).
+# create (POST /v1/batches) and cancel, a batch's GET and the list (every
+# answer is a batch object, or a list of them, echoing that metadata).
 _BATCH_POST_RE = re.compile(r"/v1/batches|/v1/batches/[^/]+/cancel")
-_BATCH_ITEM_RE = re.compile(r"/v1/batches/[^/]+")
+_BATCH_GET_RE = re.compile(r"/v1/batches(?:/[^/]+)?")
 
 
 def _parse_object_line(line: bytes) -> dict[str, Any] | None:
@@ -214,15 +215,16 @@ class OpenAIAdapter(ProviderAdapter):
                 return RouteKind.CHAT
             return RouteKind.NONE
         if (method == "POST" and _BATCH_POST_RE.fullmatch(path)) or (
-            method == "GET" and _BATCH_ITEM_RE.fullmatch(path)
+            method == "GET" and _BATCH_GET_RE.fullmatch(path)
         ):
             # Batches: create carries the caller's free-form `metadata`
-            # (redacted out), and create/retrieve/cancel all answer with the
-            # batch object echoing it (restored back). Structural fields —
-            # input_file_id, endpoint, completion_window, ids, status,
-            # counts — carry nothing a detector matches (pinned by test).
-            # The batch LIST stays pass-through: it spans batches other
-            # users created (a session router attributes listed items).
+            # (redacted out), and create/retrieve/cancel/list all answer
+            # with batch objects echoing it (restored back, in the request's
+            # own session — llm-redact-pro reads a named user's listing in
+            # an empty session and restores only that user's own items).
+            # Structural fields — input_file_id, endpoint,
+            # completion_window, ids, status, counts — carry nothing a
+            # detector matches (pinned by test).
             return RouteKind.CHAT
         # File list/metadata/delete carry ids and processing metadata only:
         # deliberate pass-through, pinned by test.

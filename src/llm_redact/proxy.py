@@ -627,14 +627,17 @@ class ProxyState:
                 return candidate
         return None
 
-    def listing_rehydrator(self, object_id: str) -> Rehydrator | None:
-        """A rehydrator over the EXISTING session the router names for one
-        listed object (``listing_item_session``), or None: no session named,
-        the router failed (the item keeps its placeholders), or the session
-        holds no mappings — it is never created here."""
+    def listing_restorer(self, object_id: str) -> tuple[bool, Rehydrator | None]:
+        """How one listed object is delivered (``listing_item_session``):
+        ``(False, None)`` — no session named (or the router failed): the item
+        stays as this request's own session delivers it; ``(True, None)`` —
+        the named session does not exist or holds nothing (it is never
+        created here), so restoring in it restores nothing: the item is
+        delivered as the provider sent it; ``(True, rehydrator)`` — restored
+        in that session."""
         name_session = self._listing_item_session
         if name_session is None:
-            return None
+            return False, None
         try:
             session_id = name_session(object_id)
         except Exception as exc:  # noqa: BLE001 — unsure means placeholders
@@ -642,16 +645,16 @@ class ProxyState:
                 "session router listing_item_session failed (%s); item left as is",
                 type(exc).__name__,
             )
-            return None
+            return False, None
         if not isinstance(session_id, str):
-            return None
+            return False, None
         has_session = getattr(self.vault_manager, "has_session", None)
         if has_session is not None and not has_session(session_id):
-            return None
+            return True, None
         vault = self.vault_manager.get(session_id)
         if len(vault) == 0:
-            return None
-        return Rehydrator(
+            return True, None
+        return True, Rehydrator(
             vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
         )
 
@@ -3159,11 +3162,13 @@ def _restore_listing(
     """Restore each listed stored object in the session the router names
     for it (``listing_item_session``); every other item, and everything
     outside the item array, stays exactly as ``raw`` (the bytes about to be
-    delivered) has it. A named item is rehydrated as a whole object from
-    the provider's own bytes (``upstream_raw``) with the adapter's
-    non-streaming transform — never a second pass over an already-restored
-    item. None when nothing was restored (the bytes are then forwarded
-    untouched)."""
+    delivered) has it. A named item is rebuilt from the provider's own
+    bytes (``upstream_raw``) — rehydrated as a whole object with the
+    adapter's non-streaming transform, never a second pass over an
+    already-restored item; a named session that does not exist (or holds
+    nothing) restores nothing, so that item is delivered exactly as the
+    provider sent it. None when nothing changed (the bytes are then
+    forwarded untouched)."""
     try:
         original = json.loads(upstream_raw)
     except ValueError:
@@ -3171,11 +3176,11 @@ def _restore_listing(
     items = lister.listing_items(original)
     if not items:
         return None
-    restorers: dict[int, Rehydrator] = {}
+    restorers: dict[int, Rehydrator | None] = {}
     for index, item in enumerate(items):
         if isinstance(item, dict) and isinstance(item.get("id"), str):
-            rehydrator = state.listing_rehydrator(item["id"])
-            if rehydrator is not None:
+            named, rehydrator = state.listing_restorer(item["id"])
+            if named:
                 restorers[index] = rehydrator
     if not restorers:
         return None
@@ -3185,7 +3190,11 @@ def _restore_listing(
         return None  # a routed rewrite changed the shape: leave it alone
     changed = False
     for index, rehydrator in restorers.items():
-        restored = lister.rehydrate_body(items[index], rehydrator)
+        restored = (
+            lister.rehydrate_body(items[index], rehydrator)
+            if rehydrator is not None
+            else items[index]
+        )
         if restored != delivered_items[index]:
             delivered_items[index] = restored
             changed = True

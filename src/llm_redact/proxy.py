@@ -165,9 +165,10 @@ logger = logging.getLogger("llm_redact")
 class RequestContext:
     """The session-scoped objects one request redacts and rehydrates with.
 
-    ``sealed``: the session router resolved this request to a session that
-    must stay EMPTY (``SessionRouter.sealed``) — its redactor refuses to
-    write (``SealedSessionError``), so a request with anything to redact is
+    ``sealed``: None, or — when the session router resolved this request to
+    a session that must stay EMPTY (``SessionRouter.sealed``) — the fixed
+    reason a redaction is refused with: the redactor refuses to write
+    (``SealedSessionError``), so a request with anything to redact is
     refused and the session is never populated."""
 
     __slots__ = ("session_id", "vault", "redactor", "rehydrator", "sealed")
@@ -178,7 +179,7 @@ class RequestContext:
         vault: Vault,
         redactor: Redactor,
         rehydrator: Rehydrator,
-        sealed: bool = False,
+        sealed: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.vault = vault
@@ -213,7 +214,7 @@ class _SealedVault:
 
 
 # The 403 text when a request resolved to a sealed session would redact a
-# value (never the value, never an id).
+# value (never the value, never an id), unless the router named its own.
 _SEALED_REFUSAL = (
     "llm-redact: this request is served in a vault session that must stay empty (it"
     " reaches content llm-redact cannot attribute to you), and it carries values that"
@@ -545,7 +546,7 @@ class ProxyState:
             adapter.name if adapter is not None else None, method, path, parsed_body
         )
         sealed = self._session_sealed(session_id)
-        if session_id == self._static_context.session_id and not sealed:
+        if session_id == self._static_context.session_id and sealed is None:
             return self._static_context
         vault = self.vault_manager.get(session_id)
         if session_id not in self._known_sessions:
@@ -573,7 +574,7 @@ class ProxyState:
         # counters: object construction only — no regex compilation, no DB open.
         redactor = Redactor(
             self.detectors,
-            _SealedVault(vault) if sealed else vault,
+            _SealedVault(vault) if sealed is not None else vault,
             self.allowlist,
             counts=self.detection_counts,
             modes=self.modes,
@@ -584,18 +585,24 @@ class ProxyState:
         )
         return RequestContext(session_id, vault, redactor, rehydrator, sealed=sealed)
 
-    def _session_sealed(self, session_id: str) -> bool:
+    def _session_sealed(self, session_id: str) -> str | None:
         """The optional ``SessionRouter.sealed`` for the session this
-        request was just resolved to. A router that raises seals it: the
-        cost of being wrong is a refusal, never a populated session."""
+        request was just resolved to, as the reason a redaction into it is
+        refused with (None: not sealed). A non-empty string is the router's
+        own fixed reason; any other truthy answer — and a router that
+        raises — seals with the core's: the cost of being wrong is a
+        refusal, never a populated session."""
         check = self._sealed
         if check is None:
-            return False
+            return None
         try:
-            return bool(check(session_id))
+            verdict = check(session_id)
         except Exception as exc:  # noqa: BLE001 — fail closed
             logger.warning("session router sealed failed (%s); sealing", type(exc).__name__)
-            return True
+            return _SEALED_REFUSAL
+        if isinstance(verdict, str) and verdict:
+            return verdict
+        return _SEALED_REFUSAL if verdict else None
 
     def record_response_id(self, response_id: str, session_id: str) -> None:
         if self.session_router.mode == "static":
@@ -2551,7 +2558,8 @@ async def handle(request: Request) -> Response:
             detections={},
             rehydrations={},
         )
-        return JSONResponse(sealed_adapter.error_body(_SEALED_REFUSAL, status=403), status_code=403)
+        reason = ctx.sealed or _SEALED_REFUSAL
+        return JSONResponse(sealed_adapter.error_body(reason, status=403), status_code=403)
 
     # Routing (the llm-redact-pro routing layer): the router plans BEFORE
     # redaction because the FIRST upstream's inject_system_note governs the

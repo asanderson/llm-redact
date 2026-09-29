@@ -3552,8 +3552,25 @@ async def handle(request: Request) -> Response:
         )
 
     # Session resolution hashes the raw (pre-redaction) conversation anchor,
-    # so it must happen before prepare_request.
-    ctx = state.context_for(adapter, request.method, path, parsed)
+    # so it must happen before prepare_request. Opening a session this
+    # process has not seen reads the vault (its view loads the rows; a
+    # router may read the durable response map): a fault there is refused
+    # like every vault fault — the request has no session yet, so the row
+    # carries the configured one.
+    try:
+        ctx = state.context_for(adapter, request.method, path, parsed)
+    except state.vault_faults as exc:
+        return _vault_fault_refused(
+            state,
+            state.config.vault.session,
+            adapter,
+            exc,
+            request=request,
+            path=path,
+            started=started,
+            provider_name=provider_name,
+            opening=True,
+        )
 
     detection_counts_before = dict(state.detection_counts)
     warn_counts_before = dict(state.warn_counts)
@@ -3704,7 +3721,7 @@ async def handle(request: Request) -> Response:
             return sealed_response(adapter)
         except state.vault_faults as exc:
             return _vault_fault_refused(
-                state, ctx, adapter, exc, request=request, path=path, started=started
+                state, ctx.session_id, adapter, exc, request=request, path=path, started=started
             )
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
@@ -3769,7 +3786,13 @@ async def handle(request: Request) -> Response:
                 return sealed_response(adapter)
             except state.vault_faults as exc:
                 return _vault_fault_refused(
-                    state, ctx, adapter, exc, request=request, path=path, started=started
+                    state,
+                    ctx.session_id,
+                    adapter,
+                    exc,
+                    request=request,
+                    path=path,
+                    started=started,
                 )
             if rewritten is not None:
                 outbound = rewritten
@@ -3947,29 +3970,35 @@ def vault_fault_types(manager: object) -> tuple[type[BaseException], ...]:
 
 def _vault_fault_refused(
     state: ProxyState,
-    ctx: RequestContext,
-    adapter: ProviderAdapter,
+    session: str,
+    adapter: ProviderAdapter | None,
     exc: BaseException,
     *,
     request: Request,
     path: str,
     started: float,
+    provider_name: str | None = None,
+    opening: bool = False,
 ) -> JSONResponse:
     """The vault could not issue this request's placeholders — a write or
-    its batch's COMMIT failed, and the batch rolled back whole: a recorded,
-    provider-shaped 503 before any upstream contact (the audit refusal's
-    twin; nothing was forwarded or signed), counted as the "vault"
-    bookkeeping stage and logged by exception TYPE only."""
+    its batch's COMMIT failed, and the batch rolled back whole — or, with
+    ``opening``, could not open the session the request resolved to (a new
+    session's view reads its rows; the session router may read the durable
+    response map): a recorded, provider-shaped 503 before any upstream
+    contact (the audit refusal's twin; nothing was forwarded or signed),
+    counted as the "vault" bookkeeping stage and logged by exception TYPE
+    only. A pass-through request (no adapter) gets the generic shape."""
     state.bookkeeping_errors["vault"] += 1
     logger.error(
-        "%s %s -> 503 vault write failed (%s); nothing forwarded",
+        "%s %s -> 503 %s (%s); nothing forwarded",
         request.method,
         path,
+        "vault read failed opening the session" if opening else "vault write failed",
         type(exc).__name__,
     )
     state.record_request(
-        session=ctx.session_id,
-        provider=adapter.name,
+        session=session,
+        provider=adapter.name if adapter is not None else provider_name,
         method=request.method,
         path=path,
         status=503,
@@ -3979,10 +4008,13 @@ def _vault_fault_refused(
         rehydrations={},
     )
     message = (
-        "llm-redact: the vault could not record this request's placeholders; the request"
+        "llm-redact: the vault could not open this request's session; the request was not forwarded"
+        if opening
+        else "llm-redact: the vault could not record this request's placeholders; the request"
         " was not forwarded"
     )
-    return JSONResponse(adapter.error_body(message, status=503), status_code=503)
+    body = adapter.error_body(message, status=503) if adapter is not None else {"error": message}
+    return JSONResponse(body, status_code=503)
 
 
 def _count_delta(after: Counter[str], before: dict[str, int]) -> dict[str, int]:

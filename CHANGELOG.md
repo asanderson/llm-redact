@@ -346,10 +346,12 @@ providers refuse to start.
 
 - A vault that cannot record a request's placeholders (a failed sqlite write or
   COMMIT, an RDBMS driver error, an RDBMS allocation that kept colliding, now
-  `RdbmsAllocationError`) refuses the request with a recorded, provider-shaped `503`
-  before any upstream contact, counted as `bookkeeping_errors{stage="vault"}` and
-  logged by exception type only; a realtime frame closes the connection `1011`. It
-  was an unrecorded bare `500`.
+  `RdbmsAllocationError`), or cannot open the session a request resolves to (a new
+  session's view reads its rows), refuses the request with a recorded,
+  provider-shaped `503` before any upstream contact, counted as
+  `bookkeeping_errors{stage="vault"}` and logged by exception type only; a realtime
+  frame, or a connection whose session cannot be opened, closes `1011`. It was an
+  unrecorded bare `500`.
 - A lone UTF-16 surrogate escape in a body, an answer or a stream no longer causes a
   bare `500`, a `502` or a cut stream: every re-serialization goes through one
   serializer that re-escapes it. Unchanged bodies are still forwarded

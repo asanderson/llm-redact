@@ -1213,7 +1213,22 @@ async def ws_handle(websocket: WebSocket) -> None:
         )
         return
 
-    static_ctx = state.context_for(None, "GET", path, None)
+    try:
+        static_ctx = state.context_for(None, "GET", path, None)
+    except state.vault_faults as fault:
+        # Opening the connection's session reads the vault (a new session's
+        # view loads its rows): a fault refuses the connection before any
+        # dial, recorded as the HTTP path's 503, counted as the "vault"
+        # bookkeeping stage, logged by exception TYPE only.
+        state.bookkeeping_errors["vault"] += 1
+        logger.error(
+            "WS %s -> closed 1011 (vault read failed opening the session: %s)",
+            path,
+            type(fault).__name__,
+        )
+        _record_ws_refusal(state, adapter, path, 503, started)
+        await _reject(websocket, "llm-redact could not open this connection's vault session")
+        return
     if static_ctx.sealed:
         # A session the router says must stay empty cannot carry a
         # conversation whose every message is redacted into it.

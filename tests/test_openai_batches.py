@@ -83,8 +83,8 @@ class BatchStore:
 class ListingRouter:
     """A router in the llm-redact-pro named-users shape: creates resolve in
     the current user's session, a batch LIST in an EMPTY one, and a listed
-    batch is attributed only to the reader who created it. Not static:
-    static mode reports no creators."""
+    batch is attributed only to the reader who created it. Not static: in
+    static mode the core never asks a router to resolve a session."""
 
     def __init__(self) -> None:
         self.mode = "per-user"

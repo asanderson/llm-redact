@@ -187,8 +187,10 @@ while the vault row is the secret store and is never exported.
   objects the provider stores for later reads — uploaded files, batches,
   message batches, stored conversations, Gemini context caches, video
   jobs and stored chat completions — with the session that created them
-  (`SessionRouter.record_object_id`). A session router may then refuse a
-  request that reaches another namespace's object
+  (`SessionRouter.record_object_id`, in every vault mode: a router may
+  serve unattributed traffic on the static path next to named users, and
+  that shared session's objects are no user's). A session router may then
+  refuse a request that reaches another namespace's object
   (`object_access_refusal`): the core answers a recorded, provider-shaped
   **403** before the audit START row, redaction, any upstream credential
   and any upstream contact, and is told whether the provider is

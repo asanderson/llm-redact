@@ -284,15 +284,26 @@ async def test_a_created_vertex_cache_is_reported_in_the_gemini_form(
     assert router.objects == [("cachedContents/c2", "user:n1:main")]
 
 
-async def test_nothing_is_reported_for_errors_or_static_mode(
+async def test_nothing_is_reported_for_errors(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     router = OwnershipRouter()
     await _post_batch(_files_app(monkeypatch, tmp_path, router, status=400))
     assert router.objects == []
+
+
+async def test_static_mode_reports_with_the_static_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A router in static mode may still separate namespaces (llm-redact-pro
+    # serves unattributed traffic on the static path next to named users):
+    # what the SHARED session created is reported under its name, so a
+    # named user's later reference to it can be told apart from their own.
     static = OwnershipRouter(mode="static")
-    await _post_batch(_files_app(monkeypatch, tmp_path, static))
-    assert static.objects == []
+    app = _files_app(monkeypatch, tmp_path, static)
+    assert (await _post_batch(app)).status_code == 200
+    assert static.objects == [("batch_9", "default")]
+    assert app.state.proxy.vault_manager.lookup_response_session("batch_9") == "default"
 
 
 async def test_a_router_without_the_member_is_never_called(

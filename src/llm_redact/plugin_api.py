@@ -101,8 +101,11 @@ class SessionRouter(Protocol):
     (uploaded files, batches, message batches, stored conversations — see
     ``ProviderAdapter.object_ids_from_body``) with the session that created
     them, so a router can keep another user's later read of that object out
-    of the creator's namespace. ``False`` vetoes the durable mirror, as for
-    response ids; a router without the member is never called.
+    of the creator's namespace. Reported in EVERY ``mode`` (static
+    included: a router may serve unattributed traffic on the static path
+    and still need to know what that shared session created). ``False``
+    vetoes the durable mirror, as for response ids; a router without the
+    member is never called.
 
     OPTIONAL ``object_access_refusal(adapter_name, method, path, body, *,
     identity) -> str | None``: asked once for EVERY forwarded HTTP request

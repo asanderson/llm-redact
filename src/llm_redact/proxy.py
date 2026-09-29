@@ -365,6 +365,7 @@ class ProxyState:
         # hot path one `is None` test each.
         self._object_access_refusal = getattr(self.session_router, "object_access_refusal", None)
         self._listing_item_session = getattr(self.session_router, "listing_item_session", None)
+        self._record_object_id = getattr(self.session_router, "record_object_id", None)
         self._static_context = RequestContext(
             config.vault.session, self.vault, self.redactor, self.rehydrator
         )
@@ -555,11 +556,13 @@ class ProxyState:
     ) -> ProviderAdapter | None:
         """The adapter whose ``tracks_object_ids`` claims this request — the
         routed one, else (pass-through) the addressed provider's — or None,
-        also whenever no router could use the ids (static mode). ``body`` is
-        the parsed request body (a stored chat completion is flagged there)."""
-        if self.session_router.mode == "static" or not hasattr(
-            self.session_router, "record_object_id"
-        ):
+        also whenever the router tracks no ownership (no optional
+        ``record_object_id``). Asked in EVERY mode: a router in static mode
+        may still separate namespaces (llm-redact-pro serves unattributed
+        traffic on the static path next to named users, and must know which
+        objects that shared session created). ``body`` is the parsed request
+        body (a stored chat completion is flagged there)."""
+        if self._record_object_id is None:
             return None
         if adapter is not None:
             return adapter if adapter.tracks_object_ids(method, path, body=body) else None
@@ -572,11 +575,9 @@ class ProxyState:
     def record_object_ids(self, object_ids: Sequence[str], session_id: str) -> None:
         """Ids of provider-stored objects (files, batches, conversations)
         created or first seen in ``session_id`` — reported to a router that
-        tracks ownership (the optional ``record_object_id``), mirrored in
-        the durable map unless the router vetoes it."""
-        if self.session_router.mode == "static":
-            return
-        record = getattr(self.session_router, "record_object_id", None)
+        tracks ownership (the optional ``record_object_id``, in any mode),
+        mirrored in the durable map unless the router vetoes it."""
+        record = self._record_object_id
         if record is None:
             return
         for object_id in object_ids:

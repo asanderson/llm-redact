@@ -376,8 +376,9 @@ essentials:
 - **Config reload without a restart**: edit the config file, then send
   SIGHUP — `kill -HUP $(pgrep -f 'llm-redact serve')`, or for containers
   `docker kill --signal=HUP llm-redact`. Detection settings and upstream
-  URLs apply immediately; vault, audit, host, port, allowed_hosts, log,
-  TLS, OTel, users, and email changes are kept as-is with a "require restart"
+  URLs apply immediately; vault, audit, host, port, allowed_hosts,
+  allowed_origins, log, TLS, OTel, users, and email changes are kept as-is
+  with a "require restart"
   warning, and so are sections a plugin adds (llm-redact-pro's `[auth]`).
   A broken config file is logged and ignored — the running config stays
   active.
@@ -514,6 +515,8 @@ qualify if demand materializes.
   before any upstream contact — HTTP and WebSocket alike — so no page can
   spend a credential the proxy holds or read the vault back through
   rehydration ([threat model](docs/threat-model.md#requests-from-web-pages-the-operators-browser)).
+  A browser app you trust with those values is an explicit opt-in:
+  `allowed_origins` ([deployment.md](docs/deployment.md#browser-apps-on-other-origins-allowed_origins)).
 - **Reporting**: use GitHub private vulnerability reporting — see
   [docs/SECURITY.md](docs/SECURITY.md).
 - **Supply chain**: release artifacts carry Sigstore provenance

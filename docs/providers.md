@@ -206,8 +206,9 @@ llm-redact-pro's access gate (`[auth] require = true`). `llm-redact
 doctor` warns about a non-loopback bind without one, and `llm-redact
 status` lists the providers the proxy holds credentials for.
 
-A web page in your browser is not such a client: a request carrying
-browser markers (`Origin`, `Sec-Fetch-*`) from another origin or site —
+A web page in your browser is not such a client (unless you list its
+origin in `allowed_origins`, which lends it the identity too): a request
+carrying browser markers (`Origin`, `Sec-Fetch-*`) from another origin or site —
 a cross-site "simple" POST, a WebSocket from any page — is refused with a
 recorded 403 (WebSocket: close 1008) before any credential is fetched,
 and so is any request to an identity-authorized provider that names a
@@ -235,7 +236,9 @@ forwarding, which defeats Ollama's own DNS-rebinding check. The proxy
 therefore refuses a web page's request itself (a foreign `Origin`, a
 cross-site `Sec-Fetch-Site`, or a browser request to a host name the proxy
 does not answer to) on these routes as on every other; see the threat
-model's "Requests from web pages". Tools keep working under any name.
+model's "Requests from web pages". Tools keep working under any name. A
+browser app you list in `allowed_origins` is served, and Ollama's own
+policy then applies to it: allow the origin in `OLLAMA_ORIGINS` too.
 
 ## Local and custom OpenAI-compatible servers
 

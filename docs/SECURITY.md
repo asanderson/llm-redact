@@ -38,7 +38,8 @@ placeholder restoration; vault files created with permissive modes;
 `/__llm-redact/*` endpoints reachable cross-origin or forwarded upstream;
 a web page able to drive an API route or a realtime connection through the
 proxy (CSRF, DNS rebinding, cross-site WebSocket) — spending a credential
-the proxy holds or reading rehydrated values back;
+the proxy holds or reading rehydrated values back — unless the operator
+listed its origin in `allowed_origins` (an explicit, documented grant);
 at-rest encryption not actually encrypting.
 
 **Out of scope (documented limitations, not vulnerabilities)**: plaintext

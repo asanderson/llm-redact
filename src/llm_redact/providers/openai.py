@@ -23,7 +23,7 @@ from typing import Any
 from llm_redact import multipart
 from llm_redact.jsonwalk import loads_request, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
-from llm_redact.redactor import Redactor
+from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
 
@@ -65,6 +65,27 @@ def _parse_request_line(line: bytes) -> tuple[dict[str, Any] | None, bool]:
     except ValueError:
         return None, False
     return (obj, duplicate_keys) if isinstance(obj, dict) else (None, False)
+
+
+def _redact_text_part(
+    part: multipart.MultipartPart, redactor: Redactor, *, require_scanned: bool
+) -> bool:
+    """Redact a form part's content as UTF-8 text, in place; True when it
+    changed. Content that is not UTF-8 is left alone — or, under identity
+    auth (``require_scanned``), refused as unscannable."""
+    try:
+        text = part.content.decode("utf-8")
+    except UnicodeDecodeError:
+        if require_scanned:
+            raise UnredactableRequest(
+                "a multipart form field is not UTF-8 text llm-redact can redact"
+            ) from None
+        return False
+    redacted = redactor.redact_text(text)
+    if redacted == text:
+        return False
+    part.content = redacted.encode("utf-8")
+    return True
 
 
 # Delta fields that carry reasoning-model chain-of-thought as a string,
@@ -292,45 +313,63 @@ class OpenAIAdapter(ProviderAdapter):
         return path.endswith(("/files", *_PROMPT_FIELD_PATH_SUFFIXES))
 
     def redact_multipart(
-        self, path: str, body: bytes, boundary: bytes, redactor: Redactor, *, inject_note: bool
+        self,
+        path: str,
+        body: bytes,
+        boundary: bytes,
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        require_scanned: bool = False,
     ) -> bytes | None:
         parsed = multipart.parse(body, boundary)
         if parsed is None:
             return None  # outside the canonical grammar: forward verbatim
+        if require_scanned and (parsed.preamble.strip() or parsed.epilogue.strip()):
+            # Bytes outside every part: servers ignore them, but they still
+            # leave the machine under the proxy's identity, unscanned.
+            raise UnredactableRequest(
+                "the multipart body carries a preamble or epilogue llm-redact does not redact"
+            )
+        # Media endpoints: the file parts ARE the media (the documented
+        # non-goal); the user text rides named form fields. Suffix match so
+        # the Azure subclass's /openai/... path shapes reuse this unchanged.
+        media = path.endswith(_PROMPT_FIELD_PATH_SUFFIXES)
         changed = False
-        if path.endswith(_PROMPT_FIELD_PATH_SUFFIXES):
-            # Media endpoints: the file parts ARE the media (non-goal); the
-            # user text rides named form fields. Suffix match so the Azure
-            # subclass's /openai/... path shapes reuse this unchanged.
-            # Matched by NAME regardless of a filename attribute: a prompt
-            # part dressed up as a file upload must not slip past the scan
-            # (fail closed) — binary content still skips via the decode.
-            for part in parsed.parts:
-                if part.name not in _PROMPT_FIELDS:
-                    continue
-                try:
-                    text = part.content.decode("utf-8")
-                except UnicodeDecodeError:
-                    continue  # not text: leave the bytes alone
-                redacted = redactor.redact_text(text)
-                if redacted != text:
-                    part.content = redacted.encode("utf-8")
-                    changed = True
-            return parsed.serialize() if changed else None
         for part in parsed.parts:
-            if part.filename is None:
-                continue  # plain form fields (purpose, ...) are not content
-            new_content = self._redact_jsonl(part.content, redactor, inject_note=inject_note)
-            if new_content != part.content:
-                part.content = new_content
-                changed = True
+            if media and part.name in _PROMPT_FIELDS:
+                # Matched by NAME regardless of a filename attribute: a
+                # prompt part dressed up as a file upload must not slip past
+                # the scan (fail closed) — binary content skips via the
+                # decode (refused under identity).
+                changed |= _redact_text_part(part, redactor, require_scanned=require_scanned)
+            elif part.filename is not None:
+                if media:
+                    continue  # the image/video itself: media, never scanned
+                new_content = self._redact_jsonl(
+                    part.content, redactor, inject_note=inject_note, require_scanned=require_scanned
+                )
+                if new_content != part.content:
+                    part.content = new_content
+                    changed = True
+            elif require_scanned:
+                # Plain form fields (purpose, model, size, user, ...) are
+                # forwarded as-is by default; the proxy's own identity signs
+                # them only once scanned as text.
+                changed |= _redact_text_part(part, redactor, require_scanned=True)
         return parsed.serialize() if changed else None
 
-    def _redact_jsonl(self, data: bytes, redactor: Redactor, *, inject_note: bool) -> bytes:
+    def _redact_jsonl(
+        self, data: bytes, redactor: Redactor, *, inject_note: bool, require_scanned: bool = False
+    ) -> bytes:
         out: list[bytes] = []
         for line in data.split(b"\n"):
             obj, duplicate_keys = _parse_request_line(line)
             if obj is None:
+                if require_scanned and line.strip():
+                    raise UnredactableRequest(
+                        "an uploaded JSONL line is not a JSON object llm-redact can redact"
+                    )
                 out.append(line)  # blank/binary/unparseable: byte-identical
                 continue
             redacted = redactor.redact_json(obj)

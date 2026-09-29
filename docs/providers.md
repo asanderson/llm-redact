@@ -148,7 +148,17 @@ recorded, provider-shaped 400 naming the body's kind, before any
 credential is fetched or the upstream contacted. An empty body (a GET,
 DELETE or body-less POST) is forwarded as before; `detection = false`
 stays the explicit unredacted opt-out, and key-authorized providers keep
-forwarding such bodies verbatim. Realtime
+forwarding such bodies verbatim. Inside an accepted multipart upload every
+piece must be scanned too, or the whole request is refused the same way:
+each non-blank line of an uploaded file must be a JSON object (so a text,
+PDF or other non-JSONL file cannot be uploaded with the proxy's identity —
+use key auth for those), plain form fields (`purpose`, `user`, `size`, …)
+are scanned as UTF-8 text (a field that is not UTF-8 is refused), and
+bytes outside every part (a multipart preamble or epilogue) are refused.
+The image and mask parts of an image edit are media — the documented
+non-goal, as base64 media in a JSON body — and are signed as sent.
+Key-authorized uploads are unchanged: unscanned pieces forward verbatim
+and plain form fields are not scanned. Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with

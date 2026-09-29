@@ -173,7 +173,7 @@ because they echo the user `metadata` a batch create carries.
 | `POST /openai/deployments/{d}/embeddings` | redact-only | |
 | `POST /openai/v1/embeddings` | redact-only | |
 | `POST /openai/deployments/{d}/images/generations` | redact-only | the prompt is redacted; image output verbatim |
-| `POST /openai/deployments/{d}/images/edits` | redact-only | multipart: the `prompt` form field is redacted, image parts byte-identical |
+| `POST /openai/deployments/{d}/images/edits` | redact-only | multipart: the `prompt` form field is redacted, image parts byte-identical; under identity auth every other form field is scanned as text too |
 | `POST /openai/deployments/{d}/audio/speech` | redact-only | text-to-speech `input` redacted; audio bytes verbatim |
 | `POST /openai/deployments/{d}/audio/transcriptions` | pass-through | audio media non-goal (identity auth refuses it) |
 | `POST /openai/responses` | chat | Responses on Azure, inherited from the OpenAI Responses adapter |
@@ -187,7 +187,7 @@ because they echo the user `metadata` a batch create carries.
 | `GET /openai/v1/conversations/{id}` | chat | |
 | `GET /openai/v1/conversations/{id}/items` | chat | list-envelope walk |
 | `DELETE /openai/v1/conversations/{id}` | redact-only | ids only |
-| `POST /openai/files` | redact-only | multipart JSONL upload, lines redacted (+ note on chat-shaped lines) |
+| `POST /openai/files` | redact-only | multipart JSONL upload, lines redacted (+ note on chat-shaped lines); under identity auth a non-JSON-object line, a non-JSONL file or a non-UTF-8 form field refuses the upload (400) and form fields are scanned as text |
 | `POST /openai/v1/files` | redact-only | |
 | `GET /openai/files` | redact-only | metadata only |
 | `GET /openai/files/{id}` | redact-only | metadata only |

@@ -175,7 +175,18 @@ RDBMS_BACKENDS = ("postgresql", "mysql", "oracle", "dbapi")
 # their running values: changing them requires a restart. The single source
 # of truth for apply_config and the editor's read-only set (README.md and
 # docs/deployment.md enumerate it — pinned by test_restart_only_docs.py).
-RESTART_ONLY_KEYS = ("vault", "audit", "host", "port", "log", "tls", "otel", "users", "email")
+RESTART_ONLY_KEYS = (
+    "vault",
+    "audit",
+    "host",
+    "port",
+    "allowed_hosts",
+    "log",
+    "tls",
+    "otel",
+    "users",
+    "email",
+)
 
 # Every top-level key the core itself parses. Anything else must be claimed
 # by a registered plugin section (plugin_api.ConfigSection) or it is a
@@ -184,6 +195,7 @@ CORE_SECTION_KEYS = frozenset(
     {
         "host",
         "port",
+        "allowed_hosts",
         "inject_system_note",
         "max_body_bytes",
         "providers",
@@ -825,6 +837,12 @@ class RoutingConfig:
 class Config:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
+    # More host names the proxy answers to besides 127.0.0.1, localhost, ::1
+    # and `host` — a compose service or Kubernetes Service name its clients
+    # use. A request that would spend a credential the proxy holds (or that a
+    # browser sent) must be addressed to one of these names: the DNS-rebinding
+    # defense. Lowercased and sorted, no ports; restart-only like the bind.
+    allowed_hosts: tuple[str, ...] = ()
     inject_system_note: bool = True
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     providers: dict[str, ProviderConfig] = field(default_factory=lambda: dict(DEFAULT_PROVIDERS))
@@ -1006,6 +1024,42 @@ def _str_list(
     if any(not item for item in value):
         raise ConfigError(f"{where} {key} entries must be non-empty strings")
     return tuple(value)
+
+
+# A host name in allowed_hosts: a DNS or container name (letters, digits,
+# "-", "_", inner "."), checked after lowercasing — never a scheme, port,
+# path, userinfo or wildcard. IP literals are accepted separately.
+_ALLOWED_HOST_RE = re.compile(r"[a-z0-9_](?:[a-z0-9_.-]*[a-z0-9_])?\Z")
+
+
+def _parse_allowed_hosts(raw: Mapping[str, Any]) -> tuple[str, ...]:
+    """``allowed_hosts``: more host names the proxy answers to, compared
+    with a request's Host the way ``_host_allowed`` compares its own names
+    (lowercased, no port; an IPv6 literal in its compressed form, brackets
+    optional). A malformed entry is named by its position, never echoed."""
+    if "allowed_hosts" not in raw:
+        return ()
+    value = raw["allowed_hosts"]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(
+            'allowed_hosts must be an array of host names — e.g. allowed_hosts = ["llm-redact"]'
+        )
+    names: set[str] = set()
+    for position, item in enumerate(value, 1):
+        name = item.strip().lower()
+        literal = name[1:-1] if name.startswith("[") and name.endswith("]") else name
+        try:
+            names.add(str(ipaddress.ip_address(literal)))
+            continue
+        except ValueError:
+            pass
+        if not _ALLOWED_HOST_RE.match(name) or ".." in name:
+            raise ConfigError(
+                f"allowed_hosts entry {position} is not a host name: list each name clients"
+                " use exactly, without a scheme, port, path or wildcard"
+            )
+        names.add(name)
+    return tuple(sorted(names))
 
 
 # Object-key prefixes stay in the URI-unreserved set so the SigV4 canonical
@@ -2343,6 +2397,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     return Config(
         host=str(raw.get("host", DEFAULT_HOST)),
         port=int(raw.get("port", DEFAULT_PORT)),
+        allowed_hosts=_parse_allowed_hosts(raw),
         inject_system_note=inject_system_note,
         max_body_bytes=max_body_bytes,
         providers=providers,

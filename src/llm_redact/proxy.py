@@ -398,6 +398,10 @@ class ProxyState:
         # "delivery" is restoring the answer itself (a buffered one fails
         # closed with a recorded 502; a stream is cut).
         self.bookkeeping_errors: Counter[str] = Counter()
+        # Requests refused as a web page's (request_origin_refusal), by kind:
+        # "host" (a name the proxy does not answer to — DNS rebinding, or an
+        # alias not in allowed_hosts), "origin", "fetch_site". Kinds only.
+        self.request_origin_refusals: Counter[str] = Counter()
         self.redactor = Redactor(
             self.detectors,
             self.vault,
@@ -1859,6 +1863,11 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 "blocked_total": dict(state.blocked_counts),
                 "upstream_errors_total": dict(state.upstream_errors),
                 "bookkeeping_errors_total": dict(state.bookkeeping_errors),
+                # Requests refused before any upstream contact as a web page's
+                # (CSRF, DNS rebinding, cross-site WebSocket) or, when they
+                # would spend a credential the proxy holds, as addressed to a
+                # host name it does not answer to — by kind, never a value.
+                "request_origin_refusals_total": dict(state.request_origin_refusals),
                 "detection": {
                     "enabled_rules": list(config.detection.enabled),
                     # None = all languages; otherwise the active scope and
@@ -2071,7 +2080,11 @@ CSRF_HEADER = "x-llm-redact-csrf"
 
 
 def _allowed_hostnames(state: ProxyState) -> set[str]:
+    """The host names the proxy answers to: its loopback names, its bind
+    host, the operator's ``allowed_hosts``, and the access gate's public
+    origin (only for a gate that guards the reserved endpoints)."""
     names = {"127.0.0.1", "localhost", "::1", state.config.host.lower()}
+    names.update(state.config.allowed_hosts)
     if state.public_origin is not None:
         names.add(state.public_origin[1])
     return names
@@ -2138,27 +2151,167 @@ async def _admit_reserved(request: Request, state: ProxyState) -> Response | Non
     return JSONResponse({"error": admission.refusal}, status_code=403)
 
 
-def _host_allowed(request: Request, state: ProxyState) -> bool:
+def _host_allowed(request: HTTPConnection, state: ProxyState) -> bool:
     """DNS-rebinding defense: a rebinding page's requests carry the
     attacker's domain in Host, while local browsers and tools send the
-    loopback name they connected to."""
+    loopback name they connected to (or a name listed in allowed_hosts)."""
     hostname = request.url.hostname
     return hostname is not None and hostname.lower() in _allowed_hostnames(state)
 
 
 def _origin_allowed(request: Request, state: ProxyState) -> bool:
     """Absent Origin (curl, same-origin GET) is fine — the CSRF token still
-    gates POST. A present Origin must be a local origin ('null' and
-    everything else is rejected); https origins exist only when the proxy
-    itself serves TLS."""
+    gates POST. A present Origin must be a local origin ('null', a
+    malformed value and everything else is rejected); https origins exist
+    only when the proxy itself serves TLS."""
     origin = request.headers.get("origin")
     if origin is None:
         return True
     if state.public_origin is not None and origin.lower() == state.public_origin[2]:
         return True
-    parsed = urllib.parse.urlsplit(origin)
+    try:
+        parsed = urllib.parse.urlsplit(origin)
+    except ValueError:  # e.g. an unterminated IPv6 literal
+        return False
     schemes = ("http", "https") if state.config.tls.enabled else ("http",)
     return parsed.scheme in schemes and (parsed.hostname or "").lower() in _allowed_hostnames(state)
+
+
+# --- requests from web pages (CSRF, DNS rebinding) ------------------------------
+#
+# Every forwarded request borrows something the proxy holds: its vault (a
+# rehydrating route restores the operator's values into whatever the upstream
+# echoes, so a page with its OWN provider key could read the vault back token
+# by token), keyless upstreams it can reach (a local Ollama or vLLM), and —
+# under identity auth or a routed operator key — a credential. A web page in
+# the operator's browser can send requests to 127.0.0.1 (a "simple" POST needs
+# no preflight; WebSocket handshakes get no CORS at all) or, after DNS
+# rebinding, be same-origin with the proxy and read the answers.
+
+# Fetch Metadata values of a request the proxy's own page made, or that the
+# user typed or bookmarked; "same-site" and "cross-site" name another origin.
+_OWN_FETCH_SITES = frozenset({"same-origin", "none"})
+# A request URL's scheme as a web origin's (a WebSocket handshake comes from a
+# page on the http(s) origin of the same host and port).
+_ORIGIN_SCHEMES = {"http": "http", "https": "https", "ws": "http", "wss": "https"}
+# What a refused request is told, by refusal kind — the kind only, never the
+# Host or Origin it carried; short enough for a WebSocket close frame.
+REQUEST_ORIGIN_REFUSALS = {
+    "host": (
+        "this proxy does not answer to that host name (a DNS-rebinding defense);"
+        " list it in allowed_hosts if a client uses it"
+    ),
+    "origin": "a web page on another origin sent this request; llm-redact does not serve those",
+    "fetch_site": (
+        "a web page on another site or origin sent this request; llm-redact does not serve those"
+    ),
+}
+
+
+def _browser_request(conn: HTTPConnection) -> bool:
+    """Whether a browser sent this request: it carries Origin or a Fetch
+    Metadata (``Sec-Fetch-*``) header. Page script can neither set nor
+    remove either (forbidden header names); CLI tools and SDKs send
+    neither."""
+    return any(
+        name == b"origin" or name.startswith(b"sec-fetch-") for name, _ in conn.scope["headers"]
+    )
+
+
+def _own_origin(conn: HTTPConnection, state: ProxyState, origin: str) -> bool:
+    """Whether ``origin`` (an Origin header value) is this request's own:
+    the access gate's public origin, or exactly the scheme, host and port
+    the request was sent to (its Host, which the caller has checked).
+    Port-exact, unlike ``_origin_allowed``: an API route has no CSRF token
+    to stop a page served on another port of the same host name."""
+    value = origin.strip().lower()
+    if state.public_origin is not None and value == state.public_origin[2]:
+        return True
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError:  # a malformed port or IPv6 literal
+        return False
+    own = conn.url
+    scheme = _ORIGIN_SCHEMES.get(own.scheme)
+    if (
+        scheme is None
+        or parsed.scheme != scheme
+        or own.hostname is None
+        or "@" in parsed.netloc  # userinfo: not a serialized origin
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    default = 443 if scheme == "https" else 80
+    return (parsed.hostname, port or default) == (own.hostname.lower(), own.port or default)
+
+
+def request_origin_refusal(
+    conn: HTTPConnection, state: ProxyState, *, lends_credential: bool
+) -> str | None:
+    """Why a request bound for an upstream must be refused as a web page's,
+    or None: a key of ``REQUEST_ORIGIN_REFUSALS``.
+
+    A request with browser markers (``_browser_request``) must be addressed
+    to a host name the proxy answers to (DNS rebinding), carry only its own
+    origin (CSRF, cross-site WebSocket hijacking) and a ``Sec-Fetch-Site``
+    of ``same-origin`` or ``none``. One that would spend a credential the
+    proxy holds (``lends_credential``) must name such a host even without
+    markers — a browser lacking Fetch Metadata sends none on a same-origin
+    GET — unless it arrived over TLS: a browser verifies the proxy's
+    certificate against the name it resolved, so a rebound page never
+    reaches a TLS listener, and a team's clients may use any name the
+    certificate covers. CLI tools and SDKs send no browser markers, so an
+    alias host (a compose service) keeps working on the client's own
+    credential."""
+    if not _browser_request(conn):
+        # No Origin, no Sec-Fetch-*: only the lent credential's host rule.
+        if lends_credential and conn.url.scheme not in ("https", "wss"):
+            return None if _host_allowed(conn, state) else "host"
+        return None
+    if not _host_allowed(conn, state):
+        return "host"
+    headers = conn.headers
+    if not all(_own_origin(conn, state, origin) for origin in headers.getlist("origin")):
+        return "origin"
+    for site in headers.getlist("sec-fetch-site"):
+        if site.strip().lower() not in _OWN_FETCH_SITES:
+            return "fetch_site"
+    return None
+
+
+def _request_origin_refused(
+    state: ProxyState,
+    adapter: ProviderAdapter | None,
+    kind: str,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A request ``request_origin_refusal`` refused: a recorded,
+    provider-shaped 403 before any credential fetch or upstream contact,
+    counted by kind. The answer and the log line name the kind only —
+    never the Host or Origin the request carried."""
+    state.request_origin_refusals[kind] += 1
+    message = f"llm-redact: {REQUEST_ORIGIN_REFUSALS[kind]}; the request was not forwarded"
+    error = adapter.error_body(message, status=403) if adapter is not None else {"error": message}
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=403,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info("%s %s -> 403 refused (request origin: %s)", request.method, path, kind)
+    return JSONResponse(error, status_code=403)
 
 
 async def _stream_rehydrated_ndjson(
@@ -2538,6 +2691,23 @@ async def handle(request: Request) -> Response:
     # two snapshots; the reload's displaced authorizer stays with the
     # requests that already hold it.
     upstream_auth = state.upstream_auth.get(provider_name)
+    # A web page's request (CSRF, DNS rebinding) never reaches an upstream:
+    # refused before anything below answers, reads the body or signs. A
+    # routed plan that spends a key the proxy holds is checked again once
+    # planned (below).
+    origin_refusal = request_origin_refusal(
+        request, state, lends_credential=upstream_auth is not None
+    )
+    if origin_refusal is not None:
+        return _request_origin_refused(
+            state,
+            adapter,
+            origin_refusal,
+            provider_name=provider_name,
+            request=request,
+            path=path,
+            started=started,
+        )
     if provider_conf is None:
         # /custom/<name>/ with no [providers.custom.<name>] entry: there is
         # nowhere sane to forward, and guessing would leak.
@@ -2732,6 +2902,21 @@ async def handle(request: Request) -> Response:
     # every client the same principal upstream, so the stored-object check
     # applies its identity policy.
     proxy_credential = upstream_auth is not None or (plan is not None and _lends_credential(plan))
+    if proxy_credential and upstream_auth is None:
+        # A routed plan spends a key the proxy holds (or none at all): the
+        # host-name rule, applied above to browser requests only, now holds
+        # for every client — before the plan begins, redaction, or any hop.
+        origin_refusal = request_origin_refusal(request, state, lends_credential=True)
+        if origin_refusal is not None:
+            return _request_origin_refused(
+                state,
+                adapter,
+                origin_refusal,
+                provider_name=provider_name,
+                request=request,
+                path=path,
+                started=started,
+            )
     check_body: Any = parsed
     if adapter is None and proxy_credential and body_bytes and state.checks_object_access:
         # A routed pass-through request spent with the proxy's credential:

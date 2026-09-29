@@ -203,6 +203,21 @@ llm-redact-pro's access gate (`[auth] require = true`). `llm-redact
 doctor` warns about a non-loopback bind without one, and `llm-redact
 status` lists the providers the proxy holds credentials for.
 
+A web page in your browser is not such a client: a request carrying
+browser markers (`Origin`, `Sec-Fetch-*`) from another origin or site —
+a cross-site "simple" POST, a WebSocket from any page — is refused with a
+recorded 403 (WebSocket: close 1008) before any credential is fetched,
+and so is any request to an identity-authorized provider that names a
+host the proxy does not answer to (DNS rebinding) when it arrives over
+plain HTTP. The proxy answers to 127.0.0.1, localhost, ::1 and its bind
+host; a tool that reaches a plain-HTTP proxy under another name (a
+compose service, a Kubernetes Service) needs that name in
+`allowed_hosts` ([deployment.md](deployment.md#host-names-the-proxy-answers-to-allowed_hosts)).
+An access gate with ambient credentials (client certificates, Basic auth,
+an access proxy's cookie) does not change this: the browser attaches
+those to a page's requests by itself. The same browser rule holds on
+every other route too — see the threat model's "Requests from web pages".
+
 ## Ollama's native API
 
 Supported out of the box (`OLLAMA_HOST=http://127.0.0.1:8787`, or point
@@ -210,6 +225,14 @@ the tool at the proxy): `/api/chat` and `/api/generate` are redacted and
 rehydrated including their newline-delimited-JSON streaming, and
 `/api/embed`/`/api/embeddings` inputs are scrubbed. The default
 upstream is the local daemon at `http://127.0.0.1:11434`.
+
+Ollama (like a local vLLM or LM Studio server) needs no key, so the proxy
+lends whoever reaches it access to the model — and it rewrites `Host` when
+forwarding, which defeats Ollama's own DNS-rebinding check. The proxy
+therefore refuses a web page's request itself (a foreign `Origin`, a
+cross-site `Sec-Fetch-Site`, or a browser request to a host name the proxy
+does not answer to) on these routes as on every other; see the threat
+model's "Requests from web pages". Tools keep working under any name.
 
 ## Local and custom OpenAI-compatible servers
 

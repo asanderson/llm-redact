@@ -30,13 +30,18 @@ conversation anchor — the realtime WS stance); a user-scoping session
 router (llm-redact-pro's named users) makes that the user's own copy.
 """
 
-import json
 import re
 from collections.abc import Hashable, Mapping
 from typing import Any
 
 from llm_redact import multipart
-from llm_redact.jsonwalk import json_bytes, json_text, loads_request, transform_strings
+from llm_redact.jsonwalk import (
+    json_bytes,
+    json_text,
+    loads_bounded,
+    loads_request,
+    transform_strings,
+)
 from llm_redact.placeholders import json_floors, may_carry_tokens, merge_floors, token_floors
 from llm_redact.providers.attribution import provider_markers
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
@@ -111,7 +116,7 @@ def _parse_object_line(line: bytes) -> dict[str, Any] | None:
     if not stripped:
         return None
     try:
-        obj = json.loads(stripped)
+        obj = loads_bounded(stripped)
     except ValueError:
         return None
     return obj if isinstance(obj, dict) else None
@@ -703,7 +708,7 @@ class OpenAIAdapter(ProviderAdapter):
             # Flush everything still buffered before the terminal sentinel.
             return [*self._flush_to_events(pool.flush_all()), event]
         try:
-            payload = json.loads(event.data)
+            payload = loads_bounded(event.data)
         except ValueError:
             return [event]
 

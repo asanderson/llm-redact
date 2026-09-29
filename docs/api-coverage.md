@@ -42,7 +42,8 @@ holds (`auth = "identity"`, or a routed plan's operator key), whatever
 read from the bytes whatever the content-type; a UTF-8 BOM or UTF-16/32
 is fine) or canonical multipart on a route whose multipart form is
 scanned — bytes after the JSON value, invalid UTF-8 (a Latin-1 body), a
-top-level array or scalar, whitespace only, multipart anywhere else — or
+top-level array or scalar, JSON nesting deeper than 128 levels, whitespace
+only, multipart anywhere else — or
 that is sent with a repeated `Content-Type`, is refused with a recorded,
 provider-shaped 400 instead of being forwarded verbatim (a lenient
 upstream would decode what the proxy never read: take the first JSON

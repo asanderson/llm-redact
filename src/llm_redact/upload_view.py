@@ -26,7 +26,9 @@ The view (``UploadView.cited``) is a list of JSON values:
 content): outside the canonical grammar, a part header without one reading,
 a Content-Transfer-Encoding, a form field that is not UTF-8 text or declares
 another charset (its own, or the RFC 7578 ``_charset_`` field), a JSON form
-field repeating a key. ``oversized``: the JSON and field text it carries
+field repeating a key, a line or JSON form field nesting deeper than
+``MAX_JSON_DEPTH`` (JSON the provider may read, but no walk can).
+``oversized``: the JSON and field text it carries
 exceed what the check reads (``max_json_bytes``). What each means is the
 caller's decision (the proxy refuses them when its own credential is spent).
 """
@@ -37,7 +39,7 @@ import re
 from typing import Any, NamedTuple
 
 from llm_redact import multipart
-from llm_redact.jsonwalk import json_bytes, loads_request
+from llm_redact.jsonwalk import MAX_JSON_DEPTH, JsonTooDeep, json_bytes, loads_request
 
 # What the proxy reads as a part's plain bytes, and as a field's text: any
 # other transfer encoding or charset is decoded by the upstream, never here.
@@ -52,6 +54,7 @@ TRANSFER_ENCODED = (
 CHARSET = "a multipart part declares a charset llm-redact does not decode"
 NOT_TEXT = "a multipart form field is not UTF-8 text"
 REPEATED_KEY = "a multipart form field repeats a JSON key"
+TOO_DEEP = f"a multipart part nests JSON deeper than {MAX_JSON_DEPTH} levels"
 
 # A field name's bracket path: the base, then zero or more "[segment]"s.
 _BRACKETED = re.compile(r"([^\[\]]*)((?:\[[^\[\]]*\])+)")
@@ -139,6 +142,8 @@ class _Reader:
                 continue
             try:
                 obj, duplicate_keys = loads_request(stripped)
+            except JsonTooDeep:
+                raise _Unreadable(TOO_DEEP) from None
             except ValueError:
                 continue
             if not isinstance(obj, dict):
@@ -170,6 +175,8 @@ class _Reader:
         if stripped[:1] in ("{", "["):
             try:
                 value, duplicate_keys = loads_request(stripped)
+            except JsonTooDeep:
+                raise _Unreadable(TOO_DEEP) from None
             except ValueError:
                 value = text
             else:

@@ -21,11 +21,10 @@ adapter does not recognize is forwarded byte-identically — the worst case is
 a placeholder reaching the user unrestored, never a wrong or leaked value.
 """
 
-import json
 from collections.abc import Hashable
 from typing import Any
 
-from llm_redact.jsonwalk import json_text, transform_strings
+from llm_redact.jsonwalk import json_text, loads_bounded, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
@@ -152,7 +151,7 @@ class CohereAdapter(ProviderAdapter):
         if not event.data:
             return [event]
         try:
-            payload = json.loads(event.data)
+            payload = loads_bounded(event.data)
         except ValueError:
             return [event]
         if not isinstance(payload, dict):

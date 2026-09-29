@@ -78,7 +78,13 @@ from llm_redact.detection.engine import (
 )
 from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
-from llm_redact.jsonwalk import json_bytes, loads_request
+from llm_redact.jsonwalk import (
+    MAX_JSON_DEPTH,
+    JsonTooDeep,
+    json_bytes,
+    loads_bounded,
+    loads_request,
+)
 from llm_redact.licensing import ResolvedLicense, resolve_license
 from llm_redact.metrics import Metrics
 from llm_redact.multipart import parse as parse_multipart
@@ -2591,8 +2597,8 @@ async def _guarded_post_json(
     if raw_body is None:
         return None, JSONResponse({"error": "request body over 1 MiB"}, status_code=413)
     try:
-        return json.loads(raw_body), None
-    except json.JSONDecodeError as exc:
+        return loads_bounded(raw_body), None
+    except ValueError as exc:  # JSONDecodeError and JsonTooDeep alike
         return None, JSONResponse({"error": f"invalid JSON: {exc}"}, status_code=400)
 
 
@@ -2686,7 +2692,13 @@ _IDENTITY_ONLY = {"accept-encoding": "identity"}
 
 
 def _unscanned_body(
-    adapter: ProviderAdapter, path: str, headers: Headers, body: bytes, parsed: Any
+    adapter: ProviderAdapter,
+    path: str,
+    headers: Headers,
+    body: bytes,
+    parsed: Any,
+    *,
+    too_deep: bool = False,
 ) -> _Unreadable | None:
     """Why a non-empty request body on a matched route must NOT be
     forwarded, or None when the proxy reads — and so redacts — all of it.
@@ -2701,7 +2713,9 @@ def _unscanned_body(
     request refused). Everything else would be forwarded verbatim, and a
     lenient upstream decodes what the proxy never read: non-JSON bytes,
     invalid UTF-8, bytes after the JSON value, a top-level array or scalar
-    (``null`` included — never walked), whitespace only, multipart on any
+    (``null`` included — never walked), JSON nesting deeper than
+    ``MAX_JSON_DEPTH`` (``too_deep``: no walk could read it), whitespace
+    only, multipart on any
     other route, and any content-encoded body (415: the proxy never decodes
     one) — every coding of every Content-Encoding header counts, as the
     upstream reads them all. A repeated Content-Type is refused too: it is a
@@ -2714,6 +2728,8 @@ def _unscanned_body(
     content_types = headers.getlist("content-type")
     if len(content_types) > 1:
         return _Unreadable(400, "the request carries more than one Content-Type header")
+    if too_deep:
+        return _Unreadable(400, f"the request body nests JSON deeper than {MAX_JSON_DEPTH} levels")
     if isinstance(parsed, dict):
         return None
     boundary = (
@@ -3366,9 +3382,14 @@ async def handle(request: Request) -> Response:
     # A repeated JSON key: the parse keeps the last occurrence, so the walk
     # never sees the earlier ones — such a body is always re-serialized.
     duplicate_keys = False
+    # JSON nesting deeper than any walk may recurse: unreadable, like any
+    # other body the proxy cannot read (the scanned-body rule below).
+    too_deep = False
     if adapter is not None and body_bytes:
         try:
             parsed, duplicate_keys = loads_request(body_bytes)
+        except JsonTooDeep:
+            too_deep = True
         except ValueError:
             parsed = None
 
@@ -3462,7 +3483,9 @@ async def handle(request: Request) -> Response:
                 cap="max_body_strings",
                 limit=max_body_strings,
             )
-        unscanned = _unscanned_body(adapter, path, request.headers, body_bytes, parsed)
+        unscanned = _unscanned_body(
+            adapter, path, request.headers, body_bytes, parsed, too_deep=too_deep
+        )
         if unscanned is not None:
             return _unscanned_body_refused(
                 state,
@@ -4452,7 +4475,7 @@ def _restore_buffered(
     payload: Any = None
     if kind is RouteKind.CHAT and adapter is not None and "application/json" in content_type:
         try:
-            payload = json.loads(raw)
+            payload = loads_bounded(raw)
         except ValueError:
             payload = None
         if payload is not None:
@@ -4500,7 +4523,7 @@ def _restore_buffered(
         # not want is not parsed at all (a large file listing forwards
         # untouched).
         try:
-            payload = json.loads(raw)
+            payload = loads_bounded(raw)
         except ValueError:
             payload = None
         if payload is not None and route.observe_payload(payload, kind):
@@ -4541,7 +4564,7 @@ def _restore_buffered(
         # provider's is looked up by name). Contained, reading included: a
         # lost record is the router's unknown-object case, never a lost answer.
         try:
-            stored = payload if payload is not None else json.loads(raw)
+            stored = payload if payload is not None else loads_bounded(raw)
         except ValueError:
             stored = None
         _contained(
@@ -4798,7 +4821,7 @@ def _restore_listing(
     it. None when nothing changed (the bytes are then forwarded
     untouched)."""
     try:
-        original = json.loads(upstream_raw)
+        original = loads_bounded(upstream_raw)
     except ValueError:
         return None
     items = lister.listing_items(original)
@@ -4815,7 +4838,8 @@ def _restore_listing(
     }
     if not restorers:
         return None
-    delivered = json.loads(raw)  # a fresh tree to edit (raw is JSON: upstream_raw or a dump)
+    # A fresh tree to edit (raw is JSON: upstream_raw or a dump of it).
+    delivered = loads_bounded(raw)
     delivered_items = lister.listing_items(delivered)
     if delivered_items is None or len(delivered_items) != len(items):
         return None  # a routed rewrite changed the shape: leave it alone

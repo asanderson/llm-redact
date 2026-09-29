@@ -68,12 +68,21 @@ _JWT_RE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\Z")
 
 
 def _b64url_json_object(segment: str) -> bool:
+    """Whether a base64url segment decodes to a JSON object. One nesting
+    deeper than the parser reads (a RecursionError, no exception a caller
+    expects from a validator) is judged by its opening: a JSON object that
+    cannot be read to its end is never ruled out, so a value matched by a
+    secret's shape is redacted rather than forwarded on a guess."""
     try:
         decoded = base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
-        obj = json.loads(decoded)
-    except (binascii.Error, ValueError):
+    except binascii.Error:
         return False
-    return isinstance(obj, dict)
+    try:
+        return isinstance(json.loads(decoded), dict)
+    except RecursionError:
+        return decoded.lstrip()[:1] == b"{"
+    except ValueError:  # UnicodeDecodeError included
+        return False
 
 
 def _jwt(match: re.Match[str]) -> bool:

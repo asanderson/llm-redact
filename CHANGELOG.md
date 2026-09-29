@@ -43,10 +43,11 @@ providers refuse to start.
 - Where redaction applies (`detection` on, the default; the client's own key
   included), a recognized route refuses a body it cannot read with a recorded `400`
   instead of forwarding it unredacted: non-JSON bytes, invalid UTF-8, bytes after
-  the JSON value, a top-level JSON array or scalar, whitespace only, multipart on a
-  route that does not redact multipart or outside the canonical form, and a
-  repeated `Content-Type`. A `Content-Encoding` other than `identity` gets `415`
-  with `Accept-Encoding: identity`: send request bodies uncompressed.
+  the JSON value, a top-level JSON array or scalar, JSON nesting deeper than 128
+  levels of objects and arrays (an uploaded JSONL line's too), whitespace only,
+  multipart on a route that does not redact multipart or outside the canonical form,
+  and a repeated `Content-Type`. A `Content-Encoding` other than `identity` gets
+  `415` with `Accept-Encoding: identity`: send request bodies uncompressed.
 - Uploads must be readable in full: a `/v1/files` upload (OpenAI, Azure, custom
   providers) of a file that is not JSONL, such as a PDF, text, CSV or image file,
   is refused `400`, and so is a form field that is not UTF-8, a multipart preamble
@@ -344,6 +345,14 @@ providers refuse to start.
   byte-identical.
 - A codice fiscale or CURP containing a non-ASCII digit crashed the request with an
   unrecorded `500`; it is now detected and redacted.
+- A JSON document nested deeper than the proxy can walk no longer causes a bare,
+  unrecorded `500` (`'{"messages":' + '[' * 200000`), a `502` or a cut stream.
+  Every document the proxy reads may nest at most 128 levels of objects and arrays:
+  a deeper request body, uploaded JSONL line or form field, or Bedrock
+  `count-tokens` blob is a recorded `400` (a realtime client frame closes `1008`),
+  and a deeper answer, SSE event, NDJSON or JSONL line, event-stream payload or
+  realtime frame is forwarded exactly as it came, its placeholders left in place. A
+  JWT whose header is too deep to parse is redacted (it was a `500`).
 - Faults in post-response bookkeeping (response ids, stored objects, the listing
   restore) are contained and counted, and the answer is delivered; a fault restoring
   a buffered answer is a recorded `502`, and a stream the proxy cuts is recorded as

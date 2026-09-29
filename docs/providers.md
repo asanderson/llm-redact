@@ -144,7 +144,8 @@ body-parser substitutes invalid bytes and inflates gzip. So non-JSON
 bytes, invalid UTF-8 (Windows PowerShell 5.1 sends a string `-Body`
 without a charset as ISO-8859-1), bytes after the JSON value (a trailing
 NUL, a second value), a top-level JSON array or scalar (`null` included),
-a whitespace-only body, multipart on any other route or outside the
+JSON nesting deeper than 128 levels of objects and arrays (no walk could
+read it), a whitespace-only body, multipart on any other route or outside the
 canonical form, and a repeated `Content-Type` header (a singleton field;
 a second one could name a multipart boundary the proxy never parsed with)
 are refused with a recorded, provider-shaped **400** naming the body's

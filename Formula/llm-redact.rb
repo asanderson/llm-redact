@@ -11,8 +11,8 @@ class LlmRedact < Formula
 
   desc "Privacy proxy that redacts secrets/PII from LLM API traffic and restores replies"
   homepage "https://github.com/asanderson/llm-redact"
-  url "https://files.pythonhosted.org/packages/77/c3/00ea4a6426ef2488db61c022c7d15e5ec6be56378acf14be968019e937c0/llm_redact_proxy-1.8.0.tar.gz"
-  sha256 "ad0f70973d07f663db47bb2a6ec0abd4e03ff87a40e0c3dc542f7bd860d27bc9"
+  url "https://files.pythonhosted.org/packages/94/17/7c8d360b439a1296dfd6f5cf2f50f2ff600209d4ad6d5860a6239785923f/llm_redact_proxy-1.9.0.tar.gz"
+  sha256 "be9cc7586e0a2d341cdf501d3f61893cd43a6c1c6ad9b6c83f20ac26d4930e1f"
   license "AGPL-3.0-only"
 
   depends_on "python@3.13"

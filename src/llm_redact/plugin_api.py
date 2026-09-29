@@ -190,6 +190,40 @@ class SessionRouter(Protocol):
     router can then read its own records in one query); an exception or a
     miscounted answer delivers EVERY item exactly as the provider sent it.
 
+    OPTIONAL ``response_observer(context) -> ResponseObserver | None``:
+    lets a router OBSERVE upstream answers — read-only, provider-neutral —
+    for state it must learn from what a provider returns (llm-redact-pro
+    learns which session an opaque compaction item was issued in). Asked
+    once for every upstream answer the proxy hands to its client (not for
+    a redirect it refuses, nor for a transport fault), in EVERY ``mode``,
+    when the answer's status and headers arrive, with a ``ResponseContext``:
+    the adapter name (None for pass-through), method, path, the upstream
+    status and content type, the request body AS SENT UPSTREAM (the parsed
+    JSON after redaction and note injection, before any routing rewrite —
+    None for a body that is not a JSON object), the vault session the
+    answer is restored in, and whether the request spent a credential the
+    proxy holds (``identity``, as for ``object_access_refusal``). None —
+    the cheap answer for a request the router does not care about —
+    observes nothing. A callable (``ResponseObserver``) is then handed,
+    synchronously and in order, each JSON value of the answer AS THE
+    PROVIDER SENT IT — before rehydration, so it carries placeholders and
+    never a restored value — every value its own fresh parse, so nothing
+    the observer does changes what the client receives: a buffered answer
+    with a JSON content type once (after its restoration succeeded, before
+    delivery); a server-sent-events stream per event (the event's
+    ``data``); an NDJSON stream per line; an AWS eventstream per frame
+    (its JSON payload — for ``invoke-with-response-stream`` the ``{"bytes":
+    …}`` wrapper, not the decoded inner event). What is not JSON (an SSE
+    ``[DONE]``, a comment, a line that does not parse, a document deeper
+    than the proxy's JSON bound) is skipped. Realtime WebSocket frames are
+    not observed. The return value is ignored. An exception — from the
+    factory or the callable — is contained like the other bookkeeping
+    after the answer (counted as the ``response_observer`` stage, logged
+    by exception type only, the answer delivered unchanged) and ends the
+    observation of that answer. Both run on the event loop between the
+    upstream's bytes and the client's: they must not block (no network
+    I/O). A router without the member costs one attribute test per answer.
+
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the
     router refused it (a response must never move to another namespace) or
@@ -202,6 +236,35 @@ class SessionRouter(Protocol):
     def resolve(self, adapter_name: str | None, method: str, path: str, body: Any) -> str: ...
 
     def record_response_id(self, response_id: str, session_id: str) -> bool | None: ...
+
+
+# --- response observation seam ----------------------------------------------------
+# ``SessionRouter.response_observer`` (optional, see above). The context is a
+# value: what the proxy knows about the exchange when the answer arrives.
+
+
+@dataclass(frozen=True)
+class ResponseContext:
+    """One upstream answer about to be delivered, as the optional
+    ``SessionRouter.response_observer`` is told about it. ``request_body``
+    is the request body as sent upstream (placeholders, never a client's
+    value; None when it is not a JSON object); ``identity`` is True when
+    the request reached its provider with a credential the proxy holds."""
+
+    adapter_name: str | None
+    method: str
+    path: str
+    status: int
+    content_type: str
+    request_body: Any
+    session_id: str
+    identity: bool
+
+
+# What ``response_observer`` returns: called with each JSON value of one
+# answer as the provider sent it (see ``SessionRouter``); the return value is
+# ignored.
+ResponseObserver = Callable[[Any], None]
 
 
 # --- upstream routing seam ----------------------------------------------------
@@ -723,6 +786,8 @@ __all__ = [
     "LocalAnswer",
     "MAX_RESPONSE_ROWS",
     "RESPONSE_PRUNE_EVERY",
+    "ResponseContext",
+    "ResponseObserver",
     "RouteDelivery",
     "RouteInbound",
     "RouteKind",

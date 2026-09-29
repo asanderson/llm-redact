@@ -152,7 +152,8 @@ class Metrics:
         lines.append(
             "# HELP llm_redact_bookkeeping_errors_total Faults in the proxy's own bookkeeping,"
             " by stage: after the upstream answered, session bookkeeping (response_id,"
-            " object_ids, listing — contained, the answer still delivered) and delivery"
+            " object_ids, listing, response_observer — contained, the answer still delivered)"
+            " and delivery"
             " (restoring the answer — a recorded 502); before any upstream contact, vault"
             " (issuing a request's placeholders failed — a recorded 503, a realtime frame"
             " closes 1011); vault_check (a vault view's staleness check could not read its"

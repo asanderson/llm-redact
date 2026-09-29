@@ -11,6 +11,18 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+- Optional `SessionRouter.response_observer(context) -> ResponseObserver | None`
+  (`plugin_api.ResponseContext`, `plugin_api.ResponseObserver`): a plugin observes
+  upstream answers read-only and provider-neutrally. Told the adapter, method, path,
+  status, content type, the request body as sent upstream, the session and whether a
+  proxy-held credential was spent, its callable receives each JSON value of the
+  answer as the PROVIDER sent it (placeholders only, each its own parse): a buffered
+  JSON body once, SSE per event, NDJSON per line, AWS eventstream per frame (realtime
+  is not observed). Faults are contained as bookkeeping stage `response_observer`
+  (type-only log, the answer delivered unchanged); a router without the member costs
+  one attribute test per answer.
+
 ## [1.9.0] - 2026-09-29
 
 Hardening of the request path. Web pages can no longer use the proxy; a request

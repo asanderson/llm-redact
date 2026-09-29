@@ -6,6 +6,15 @@
 host = "127.0.0.1"
 port = 8787
 
+# More host names this proxy answers to, besides 127.0.0.1, localhost, ::1
+# and `host`. Browser requests (Origin / Sec-Fetch-*) and requests that spend
+# a credential the proxy holds ([providers.NAME] auth = "identity", a routed
+# operator key) are refused (403) when addressed to any other name over
+# plain HTTP — the DNS-rebinding defense. List the names tools use to reach a
+# shared proxy (a compose service, host.docker.internal, a Kubernetes
+# Service); names only, no scheme or port. Restart-only. Default: none.
+# allowed_hosts = ["llm-redact", "llm-redact.team.svc.cluster.local"]
+
 # When a request was redacted, append a short system note asking the model to
 # reproduce «TYPE_NNN» tokens exactly. Reduces the risk of the model mangling
 # placeholders so they can't be restored.

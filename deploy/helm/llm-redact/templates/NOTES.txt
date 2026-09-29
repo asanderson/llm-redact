@@ -13,6 +13,11 @@ Mode: STANDALONE — a shared in-cluster proxy (Deployment + Service{{ if .Value
   Point your tool at it, e.g.:
     ANTHROPIC_BASE_URL / OPENAI_BASE_URL / GOOGLE_GEMINI_BASE_URL = that URL.
 
+  The proxy answers to that Service's in-cluster names (allowed_hosts). A
+  request that spends a credential the proxy holds (auth = "identity", a
+  routed operator key) is refused when addressed by any other name — add
+  such names (an Ingress host) with allowedHosts.
+
 {{ if .Values.autoscaling.enabled -}}
   Autoscaling: {{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }} replicas
   (CPU target {{ .Values.autoscaling.targetCPUUtilizationPercentage }}%). Every replica shares one

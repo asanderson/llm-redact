@@ -55,9 +55,79 @@ because breaking the tool teaches users to bypass the proxy).
   user's files; the proxy adds privacy, not sandboxing.
 - **The browser is hostile.** Any web page can issue requests to
   127.0.0.1. This is the one boundary where an active network attacker is
-  in scope — see the local ops surface below.
+  in scope — see "Requests from web pages" and the local ops surface
+  below.
 
 ## Defenses at each boundary
+
+### Requests from web pages (the operator's browser)
+
+The attacker: **a web page the operator's browser visits** — any site, an
+ad, a compromised page. It can reach the proxy on 127.0.0.1 even though
+the operator never pointed anything at it:
+
+- a "simple" cross-origin request (a `text/plain` POST, a GET) needs no
+  CORS preflight, so it is sent without asking;
+- a CORS request carrying headers (an API key) used to have its preflight
+  forwarded to a CORS-friendly upstream, and the upstream's
+  `Access-Control-Allow-Origin` passed back — the page could read the
+  answer;
+- **DNS rebinding** re-resolves the attacker's own name to 127.0.0.1, so
+  the page becomes same-origin with the proxy and reads every answer;
+- a **WebSocket** handshake gets no CORS at all: any page can open
+  `ws://127.0.0.1:8787/v1/realtime` and read every frame.
+
+What the proxy lends such a request, and why each matters:
+
+- **The vault.** Every rehydrating route restores the operator's values
+  into whatever the upstream sends back. A page with its OWN provider key
+  that asks a model to repeat `«EMAIL_001»` (or stores a Response
+  containing it and fetches it back) would read the operator's secret —
+  the vault would leave the machine token by token. This holds for every
+  provider and every credential mode.
+- **A credential the proxy holds.** Under `auth = "identity"` (Bedrock,
+  Vertex AI, Azure OpenAI) or a routed plan spending an operator key
+  (llm-redact-pro routing, brokered keys), the page spends it: invocations,
+  async jobs, stored objects, realtime sessions.
+- **Network access.** A keyless upstream only the proxy should reach (a
+  local Ollama, a vLLM or LM Studio server). The proxy also rewrites
+  `Host` when forwarding, which defeats Ollama's own DNS-rebinding check.
+
+An access gate with *ambient* credentials (client certificates, Basic
+auth, an access proxy's cookie) does not stop any of this: the browser
+attaches them to the page's requests by itself.
+
+The defense (`proxy.request_origin_refusal`, applied to every HTTP request
+and WebSocket upgrade bound for an upstream, before any credential fetch
+or upstream contact):
+
+- A request carrying **browser markers** — `Origin` or any Fetch Metadata
+  (`Sec-Fetch-*`) header; page script can neither set nor remove either —
+  must be addressed to a host name the proxy answers to (127.0.0.1,
+  localhost, ::1, its bind host, `allowed_hosts`, the access gate's public
+  origin), carry only its own origin (exact scheme, host and port — API
+  routes have no CSRF token to cover a same-host page on another port),
+  and a `Sec-Fetch-Site` of `same-origin` or `none`.
+- A request that would spend a credential the proxy holds must name such
+  a host even without browser markers (a browser lacking Fetch Metadata
+  sends none on a same-origin GET) — unless it arrived over **TLS**: a
+  browser verifies the proxy's certificate against the name it resolved,
+  so a rebound page never reaches a TLS listener, and a team server's
+  clients may use any name its certificate covers.
+- Refusals are a recorded, provider-shaped **403** over HTTP and an
+  accept-then-close **1008** on a WebSocket, counted by kind in `/status`
+  `request_origin_refusals_total`; the answer and the log line name the
+  kind only, never the Host or Origin the request carried. The WebSocket
+  check runs first, so a page learns nothing about the routes behind it.
+
+CLI tools and SDKs send no browser markers, so they are unaffected —
+including when they reach the proxy by an alias (a compose service, a
+Kubernetes Service, `host.docker.internal`) on their own credential. An
+alias that spends a credential the proxy holds over plain HTTP is listed in
+`allowed_hosts` ([deployment.md](deployment.md#host-names-the-proxy-answers-to-allowed_hosts)).
+By design, a browser-based client served from another origin (a web chat
+UI, a browser extension, an Electron renderer) cannot use the proxy: it is
+indistinguishable from the attacker above.
 
 ### Realtime WebSocket connections
 
@@ -69,6 +139,9 @@ because breaking the tool teaches users to bypass the proxy).
   WS upstream), disabled providers are refused, and without the
   `realtime` extra the server cannot accept upgrades at all — realtime
   traffic can never silently bypass redaction.
+- A web page's handshake (browsers send `Origin` on every WebSocket
+  upgrade and apply no CORS to it) is refused with close code 1008 before
+  anything else — see "Requests from web pages" above.
 - Text modality only. Voice audio is base64 media and is never decoded
   or scanned (the standing media non-goal): what a user SAYS on a
   realtime connection reaches the provider unredacted. The docs say so
@@ -284,6 +357,7 @@ row, is [resilience.md](resilience.md).
 | History compaction rewrites the session anchor | Fails safe: fresh session, no cross-session restore — verified by the dogfood compaction probe. The fork never issues a token its summary carries: the summary is the fork's anchor, so every request of it carries the summary's tokens and the token floor numbers new values past them |
 | A request carries tokens its session did not issue (a pasted answer, a foreign proxy's token) | The token floor keeps the request (and a realtime connection) that carries them from issuing those names. Residual, documented in [compaction-relink.md](compaction-relink.md): a number the session had already issued before the foreign token arrived, another request sharing the session that does not carry the token, and provider-side history (a `previous_response_id` chain, a realtime model's own output) no request of the session carries — the last is what llm-redact-pro's sealed sessions cover |
 | Values pre-escaped inside JSON-source strings | Captured in escaped form; documented limitation |
+| A web page in a browser without Fetch Metadata (older than Chrome 76, Firefox 90, Safari 16.4), after DNS rebinding, reads back a Response or file it stored with its own key through a plain-HTTP route that forwards the client's credential | Such a same-origin GET carries no browser marker, so its foreign Host is not checked (an alias host must keep working for CLI tools); every current browser sends `Sec-Fetch-Site`, which subjects it to the Host check. A request spending a credential the proxy holds is Host-checked with or without markers — over TLS the certificate does that, so a wildcard certificate covering a name the attacker controls would reopen it for such a browser |
 | A drifted provider event shape bypasses a rehydration channel | Drift detectors in live tests; unknown shapes pass through rather than corrupt |
 | License enforcement circumvented by patching the source | Accepted: signed keys prevent forgery and the single chokepoint makes tampering auditable, but source-available checks are deterrence, not DRM — the license is a legal instrument, never a security boundary (the `llm-redact-pro` repo's `docs/licensing.md`) |
 | Vault rows leave the machine on an RDBMS backend | Fail-closed: a non-local DSN (including recognized managed-DBMS hosts and Cloud SQL sockets) refuses startup unless the vault is Fernet-encrypted — only the HMAC index and ciphertext travel. `LLM_REDACT_VAULT_REMOTE_PLAINTEXT=1` is the explicit, surfaced opt-out; the database server and its operator join the trust boundary either way, and `backend = "dbapi"` DSNs are opaque (doctor WARNs that locality is unverifiable). Encryption mode is fixed at schema creation — server-side MVCC keeps old row versions, so an after-the-fact encrypt would be dishonest (the `llm-redact-pro` repo's `docs/vault-rdbms.md`) |

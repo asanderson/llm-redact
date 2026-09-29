@@ -61,6 +61,23 @@ The generated proxy config file (mounted read-only, LLM_REDACT_CONFIG points her
 Secrets (vault key, DSN, license) come from env/Secrets — never this ConfigMap.
 */}}
 {{- define "llm-redact.configToml" -}}
+{{- /*
+allowed_hosts: the host names the proxy answers to besides loopback and its
+bind host. A request that spends a credential the proxy holds (auth =
+"identity" via IRSA / Workload Identity, a routed operator key) must be
+addressed to one of them — the DNS-rebinding defense — so standalone mode
+lists the in-cluster names of the Service its clients dial; allowedHosts adds
+more (an Ingress host, a custom cluster domain).
+*/ -}}
+{{- $hosts := .Values.allowedHosts | default list -}}
+{{- if eq .Values.mode "standalone" -}}
+{{- $svc := include "llm-redact.fullname" . -}}
+{{- $ns := .Release.Namespace -}}
+{{- $hosts = concat (list $svc (printf "%s.%s" $svc $ns) (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns)) $hosts -}}
+{{- end -}}
+{{- if $hosts -}}
+allowed_hosts = {{ toJson $hosts }}
+{{ end -}}
 [vault]
 backend = {{ .Values.vault.backend | quote }}
 {{- if ne .Values.vault.encryption "none" }}

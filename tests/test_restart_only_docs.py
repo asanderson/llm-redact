@@ -16,9 +16,9 @@ from llm_redact.config import RESTART_ONLY_KEYS
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# "vault, audit, host, port, log, TLS, OTel, users, and email changes …
+# "vault, audit, host, port, allowed_hosts, log, TLS, OTel, users, and email changes …
 #  "require restart" …" — capture the comma list immediately before "changes".
-_LIST_RE = re.compile(r"((?:[A-Za-z]+,\s*)+and\s+[A-Za-z]+)\s+changes\b[^.]*?require restart")
+_LIST_RE = re.compile(r"((?:[A-Za-z_]+,\s*)+and\s+[A-Za-z_]+)\s+changes\b[^.]*?require restart")
 
 
 @pytest.mark.parametrize("doc", ["README.md", "docs/deployment.md"])

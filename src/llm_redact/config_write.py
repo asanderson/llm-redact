@@ -270,6 +270,10 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
     lines: list[str] = [_HEADER] if banner else []
     lines.append(f"host = {_toml_str(config.host)}")
     lines.append(f"port = {config.port}")
+    if config.allowed_hosts:
+        # Omitted when empty: the proxy then answers to its loopback names
+        # and bind host only.
+        lines.append(f"allowed_hosts = {_toml_list(config.allowed_hosts)}")
     lines.append(f"inject_system_note = {_toml_value(config.inject_system_note)}")
     lines.append(f"max_body_bytes = {config.max_body_bytes}")
 

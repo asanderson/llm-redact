@@ -73,6 +73,16 @@ log:
 # hatch for a TRUSTED in-cluster network only — pair it with networkPolicy.
 insecureBind: true
 
+# More host names the proxy answers to (its top-level `allowed_hosts`). A
+# request that spends a credential the proxy holds — an `auth = "identity"`
+# provider (IRSA / Workload Identity), a routed operator key — is refused
+# (403) unless it is addressed to one of them: the DNS-rebinding defense.
+# Standalone mode lists the Service's in-cluster names automatically; add any
+# other name clients use (an Ingress host, a custom cluster domain). Set it
+# here, never in extraConfig (appended after the TOML tables, where a
+# top-level key cannot go).
+allowedHosts: []
+
 service:
   type: ClusterIP
   port: 8787

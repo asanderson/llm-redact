@@ -863,12 +863,13 @@ def _close_reason(reason: str) -> str:
     return reason.encode("utf-8")[:_MAX_CLOSE_REASON_BYTES].decode("utf-8", errors="ignore")
 
 
-async def _reject(websocket: WebSocket, reason: str) -> None:
+async def _reject(websocket: WebSocket, reason: str, *, code: int = 1011) -> None:
     """Accept-then-close: unlike a handshake 403, the close reason reaches
-    the client library where a user can read it."""
+    the client library where a user can read it. 1011 for a connection the
+    proxy cannot serve; 1008 (policy violation) for one it refuses to."""
     with contextlib.suppress(Exception):
         await websocket.accept()
-        await websocket.close(code=1011, reason=_close_reason(reason))
+        await websocket.close(code=code, reason=_close_reason(reason))
 
 
 def _record_ws_refusal(
@@ -1022,6 +1023,26 @@ async def ws_handle(websocket: WebSocket) -> None:
     _REQUEST_USER.set(admission.subject)
     started = time.perf_counter()
     adapter = ws_adapter_for(path, state.ws_adapters)
+    provider_config = state.config.providers.get(adapter.provider) if adapter is not None else None
+    # Cross-site WebSocket hijacking (the HTTP rule, proxy.request_origin_
+    # refusal): browsers apply no CORS to a handshake and always send Origin,
+    # so a web page's connection is refused before anything is dialled —
+    # first, so a page learns nothing about the routes behind it. A
+    # connection that would spend the proxy's own identity also needs a host
+    # name the proxy answers to.
+    from llm_redact.proxy import REQUEST_ORIGIN_REFUSALS, request_origin_refusal
+
+    origin_refusal = request_origin_refusal(
+        websocket,
+        state,
+        lends_credential=provider_config is not None and provider_config.auth != "passthrough",
+    )
+    if origin_refusal is not None:
+        state.request_origin_refusals[origin_refusal] += 1
+        logger.info("WS %s -> refused (request origin: %s)", path, origin_refusal)
+        _record_ws_refusal(state, adapter, path, 403, started)
+        await _reject(websocket, REQUEST_ORIGIN_REFUSALS[origin_refusal], code=1008)
+        return
     if admission.refusal is not None:
         logger.info("WS %s -> refused by the access gate", path)
         _record_ws_refusal(state, adapter, path, 403, started)
@@ -1032,7 +1053,6 @@ async def ws_handle(websocket: WebSocket) -> None:
         # forward an unknown WS path to; refusing is the only safe answer.
         await _reject(websocket, "no realtime route for this path")
         return
-    provider_config = state.config.providers.get(adapter.provider)
     if provider_config is None or not provider_config.upstream_base_url:
         _record_ws_refusal(state, adapter, path, 502, started)
         await _reject(websocket, f"[providers.{adapter.provider}] upstream not configured")

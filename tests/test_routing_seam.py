@@ -167,7 +167,7 @@ def _app(
 ) -> tuple[ProxyState, httpx.AsyncClient]:
     install(monkeypatch, router, audit=audit)
     app = create_app(config or routed_config(), upstream_transport=transport)
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy.test")
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
     state: ProxyState = app.state.proxy
     assert state.router is router
     return state, client
@@ -954,7 +954,7 @@ async def test_unrouted_path_never_consults_router(monkeypatch: pytest.MonkeyPat
     # Baseline: the default registry, routing absent.
     upstream = _fixture_upstream()
     app = create_app(Config(), upstream_transport=upstream)
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy.test")
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
     baseline = await _fixture_traffic(app.state.proxy, client, upstream)
     assert all(snapshot["row"]["route"] is None for snapshot in baseline)
 
@@ -971,7 +971,7 @@ async def test_unrouted_path_never_consults_router(monkeypatch: pytest.MonkeyPat
     state: ProxyState = app.state.proxy
     assert state.router is None and len(calls) == 1
     assert calls[0][0].routing.enabled is False
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy.test")
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
     assert await _fixture_traffic(state, client, upstream) == baseline
     # /status reads the router attribute only.
     assert (await client.get("/__llm-redact/status")).json()["routing"] == {"enabled": False}
@@ -980,7 +980,7 @@ async def test_unrouted_path_never_consults_router(monkeypatch: pytest.MonkeyPat
 async def test_plan_none_takes_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     upstream = _fixture_upstream()
     app = create_app(Config(), upstream_transport=upstream)
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy.test")
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
     baseline = await _fixture_traffic(app.state.proxy, client, upstream)
 
     # A router is held, but plan() returns None for every request without
@@ -1053,7 +1053,7 @@ async def test_status_carries_router_block(monkeypatch: pytest.MonkeyPatch) -> N
 
 async def test_status_reports_enabled_false_without_router() -> None:
     app = create_app(Config())
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy.test")
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
     payload = (await client.get("/__llm-redact/status")).json()
     assert payload["routing"] == {"enabled": False}
     assert list(payload)[-1] == "routing"

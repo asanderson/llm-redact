@@ -11,14 +11,186 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+Hardening of the request path. Web pages can no longer use the proxy; a request
+goes only to a provider it is positively attributed to; a recognized route forwards
+only a body the proxy read; a placeholder can no longer be given a second meaning;
+and a config reload reaches open realtime connections. llm-redact-pro 0.14 requires
+this release: without the new request-path seams its paid tiers and identity
+providers refuse to start.
+
+**Upgrading** (a request 1.8 forwarded may now be refused):
+- There is no Anthropic default any more. A request no route matches is forwarded
+  only to a provider it can be attributed to (a path family, or headers only one
+  provider's clients send); anything else is a recorded `404`. `OPENAI_BASE_URL`
+  must end in `/v1` (`http://127.0.0.1:8787/v1`); without it OpenAI-shaped requests
+  get a `404` that names the fix. `llm-redact run`, `init` and the deploy manifests
+  now export it with `/v1`.
+- A path with an empty segment (`//`, often a base URL ending in `/`) is refused
+  `400`. Another spelling of a recognized route (a trailing `/`, other case) is a
+  recorded `400`; a recognized route without its `/v1`, or under an extra prefix
+  such as `/v1/v1/…`, is a recorded `404`.
+- Requests from web pages are refused. A browser request (one carrying `Origin` or
+  a `Sec-Fetch-*` header) from another origin or site, or addressed to a host name
+  the proxy does not answer to, gets a recorded `403` (WebSocket: close `1008`).
+  List a browser app you trust with your restored values in the new
+  `allowed_origins`. A request that spends a credential the proxy holds (`auth =
+  "identity"`, a routed operator key) over plain HTTP must name a host the proxy
+  answers to; list aliases such as a compose service or a Kubernetes Service in the
+  new `allowed_hosts`.
+- Where redaction applies (`detection` on, the default; the client's own key
+  included), a recognized route refuses a body it cannot read with a recorded `400`
+  instead of forwarding it unredacted: non-JSON bytes, invalid UTF-8, bytes after
+  the JSON value, a top-level JSON array or scalar, whitespace only, multipart on a
+  route that does not redact multipart or outside the canonical form, and a
+  repeated `Content-Type`. A `Content-Encoding` other than `identity` gets `415`
+  with `Accept-Encoding: identity`: send request bodies uncompressed.
+- Uploads must be readable in full: a `/v1/files` upload (OpenAI, Azure, custom
+  providers) of a file that is not JSONL, such as a PDF, text, CSV or image file,
+  is refused `400`, and so is a form field that is not UTF-8, a multipart preamble
+  or epilogue, a part header with more than one reading, a
+  `Content-Transfer-Encoding` other than 7bit/8bit/binary, or a declared charset
+  other than UTF-8/US-ASCII. Image-edit and video media parts are still sent as
+  they are. `[providers.NAME] detection = false` restores verbatim forwarding for
+  that provider (with the client's own key).
+- New `max_body_strings` (default 100,000): a redactable request with more strings
+  to redact (JSON strings, form fields, file names, uploaded JSONL lines) or more
+  multipart parts gets the same `413` as `max_body_bytes`; a realtime client frame
+  over it closes `1009`. Raise it together with `max_body_bytes` for large batch
+  uploads.
+- An upstream redirect (a 3xx with `Location`) is relayed only for an unrouted
+  request that is pass-through or has no body, is not signed with the proxy's
+  identity, carries no credential for the proxy itself and is not addressed to a
+  custom upstream; anything else gets a recorded `502` naming the status.
+- With llm-redact-pro routing, a route llm-redact does not recognize is refused
+  `403` before its body is read when the plan would send it with an operator key
+  (or none): vector stores, fine-tuning, moderations, assistants/threads, uploads,
+  Anthropic and Gemini Files, stored-completion list/update/delete and Ollama model
+  management need the client's own key.
+- A config reload that changes an open realtime connection's provider settings,
+  its authorizer or `[detection]` closes it with `1012` (reconnect).
+- The `realtime` extra requires websockets 15.0 or newer.
+- A server RDBMS vault creates the `llm_redact_retired` table at startup; a
+  database user that may not create it gets a startup error naming the table and
+  its DDL.
+
 ### Security
 
-- Tool results and documents nested under keys named like protocol fields (`data`,
-  `name`, `id`, `status`, …) are now redacted; their whole subtree used to be
-  skipped. Only scalar values of structural keys are skipped now, and tool-call
-  arguments, tool results and documents are walked with no skips at all. This
-  affected Gemini/Vertex `functionResponse`, Vertex Live `toolResponse`, Bedrock
-  Converse `toolResult`, Cohere `documents` and realtime events.
+- **Web pages could read the vault back and spend the proxy's credentials.** A page
+  in the operator's browser could send requests through the local proxy. With its
+  own provider key it could have the model repeat a placeholder and read the real
+  value the proxy restored, because the CORS preflight was forwarded and the
+  provider's CORS answer relayed; realtime WebSockets get no CORS check at all, and
+  a DNS-rebound page is same-origin. A cross-site "simple" POST, a rebound page or a
+  WebSocket could also spend the proxy's own cloud identity or a routed operator
+  key. Every HTTP request and WebSocket upgrade bound for an upstream is now checked
+  before any credential fetch or upstream contact: browser markers (`Origin`, any
+  `Sec-Fetch-*`) require a host name the proxy answers to (its loopback names, the
+  bind host, `allowed_hosts`, the access gate's public origin), the request's own
+  origin (port-exact) and a `Sec-Fetch-Site` of `same-origin` or `none`, or an
+  `Origin` listed in `allowed_origins`; a request that would spend a credential the
+  proxy holds needs such a host name even without browser markers, unless it
+  arrived over TLS. Refusals are a recorded, provider-shaped `403` (WebSocket:
+  close `1008`, checked first), counted by kind in `/status`
+  `request_origin_refusals_total` and logged by kind only.
+- **Requests went to the wrong provider.** An unrecognized request was forwarded to
+  the Anthropic upstream by default: with the documented
+  `OPENAI_BASE_URL=http://127.0.0.1:8787`, an OpenAI client's API key and
+  unredacted prompt went to api.anthropic.com, and an Anthropic SDK's
+  `GET /v1/models` went to OpenAI with its `x-api-key`. Requests are now attributed
+  positively: an explicit path family first (`/v1beta/`, `/v1/projects/`,
+  `/v1/publishers/`, `/openai/`, `/model/`, `/api/`, `/v2/`, `/v1/messages`, …),
+  then headers only one provider's clients send (`anthropic-version`, a Google API
+  key or any `x-goog-*` header, `openai-*` headers, the Cohere SDK's
+  `x-fern-sdk-name`), then OpenAI for a non-Anthropic `Bearer sk-` key or an OpenAI
+  resource path (`/v1/containers`, `/v1/evals`, `/v1/chatkit` and
+  `/v1/organization` added). Anything else, or markers of two providers, is a
+  recorded `404`.
+- **Misaddressed routes were forwarded unredacted.** Trailing-slash, doubled-slash
+  and case spellings of recognized routes, a recognized route missing `/v1` or
+  under an extra prefix, and OpenAI-compatible endpoints under a base path without
+  `/v1` (custom upstreams such as `/custom/NAME/inference/…` or `…/api/paas/v4/…`,
+  and the Gemini API's `/v1beta/openai/` surface) all reached their upstream
+  unredacted. They are now refused as above, or matched on the endpoint's tail and
+  redacted.
+- **Recognized routes forward only a body the proxy read.** Wherever redaction
+  applies, and whatever `detection` says when a request spends a credential the
+  proxy holds, the bodies listed under Upgrading are refused before the
+  stored-object check, the session, redaction, any credential fetch, the routing
+  plan's first hop, the audit START row and any upstream contact. They used to be
+  forwarded verbatim, and lenient upstreams (Ollama, Express, Jackson) decoded them
+  unredacted; under `auth = "identity"` or a routed operator key they were signed
+  with the proxy's credential. On an identity realtime connection a non-JSON frame
+  closes the connection `1008`, unsent (recorded as `400`).
+- **A repeated JSON key bypassed redaction.** The parser keeps the last occurrence
+  of a repeated key, so earlier ones were never scanned, and a body with nothing
+  else to redact was forwarded as its original bytes, earlier occurrences
+  included; an upstream that keeps the first occurrence received the unredacted
+  value. A body or uploaded JSONL line that repeats a key at any depth is now
+  always re-serialized from the scanned object (with `detection = false` too), and
+  a Bedrock `count-tokens` blob that repeats a key is refused `400`.
+- **Upload filenames and form fields are redacted.** A multipart part's `filename`
+  and RFC 8187 `filename*` are redacted on every auth mode (only the value bytes
+  change) and restored where the provider echoes them: the upload response, the
+  file list and a file's metadata (OpenAI `/v1/files`, Azure `/openai/files` and
+  `/openai/v1/files`, custom providers). Plain form fields are scanned as text, so a
+  `user` field holding an email is redacted like its JSON twin. A part carrying
+  only `filename*` is treated as a file, so its JSONL lines are redacted.
+- **Batch `metadata` was forwarded unredacted** (OpenAI and Azure) and echoed on
+  every batch read. Batch create, retrieve and cancel now redact it, and every batch
+  echo, the batch list included, restores it in the request's own session (OpenAI,
+  Azure and custom providers). With llm-redact-pro's named users only the reader's
+  own batches are restored.
+- **Values under caller-chosen keys named like protocol fields** (`id`, `name`,
+  `type`, `data`, …) are redacted and restored: `metadata` and `requestMetadata`
+  anywhere, Responses/Realtime `prompt.variables`, and a `:predict` body's
+  `instances`/`parameters`. Tool results and documents nested under such keys
+  (Gemini/Vertex `functionResponse`, Vertex Live `toolResponse`, Bedrock Converse
+  `toolResult`, Cohere `documents`, realtime events) are redacted too; only scalar
+  values of structural keys are skipped now.
+- **Values written with non-ASCII digits were not redacted.** The prefilters tested
+  ASCII literals, so nine rules (My Number, SSN, SIN, TFN, NINO, CPF, Belgian NN,
+  personnummer, phone) skipped values written with full-width, Arabic-Indic or
+  Devanagari digits, and case-insensitive rules missed `İ`, `ı` and `ſ`. The
+  prefilters now see text as the patterns do.
+- **A new value could reuse a placeholder its own request already carried.** A
+  session numbers its tokens from 001, so a compacted history forked into a fresh
+  session, an answer pasted from another conversation or a token from another proxy
+  could be issued again for a different value, and the echo restored the wrong
+  one. New values are now numbered above every placeholder the request carries
+  (canonical, fuzzy-mangled and JSON-escaped forms; the whole upload; the Bedrock
+  `count-tokens` blob; a running floor per realtime connection). Numbers stop at
+  999999999: past that the request is refused `400`.
+- **A deleted session's numbers could be issued again.** After a whole-session
+  delete (the TTL prune, `POST /__llm-redact/sessions/prune`, `llm-redact sessions
+  prune`, an access gate's purge), a re-created session could issue a deleted
+  value's number again for a new value, and another instance's cache or an open
+  realtime connection then restored one value where the other was meant. Every
+  delete now retires the session's highest number
+  (`retired_numbers`, RDBMS `llm_redact_retired`), new values are numbered above it,
+  and views re-check at most once a second. The prune's idle check and its delete
+  are one transaction.
+- **A config reload did not reach open realtime connections.** A reload that
+  withdrew the proxy's identity (`auth` back to `passthrough`, the provider
+  disabled, its upstream moved) kept spending it on the live upstream session, and
+  a reload that tightened redaction never applied to new frames. Such a reload now
+  closes the connection on both sides (`1012`, reconnect) in the same step that
+  swaps the configuration in; a connection still being authorized is never dialled
+  (recorded `503`).
+- **A reload during a body read changed the request's authorization.** `handle()`
+  reads the provider's authorizer and upstream once, before the body, so a request
+  admitted as pass-through is never signed.
+- **Redirects are never followed with protected data.** The realtime relay no
+  longer follows a WebSocket handshake redirect (a failed dial: `1011`). An HTTP
+  upstream redirect is a recorded `502` naming only the status (the `Location` is
+  never relayed or logged) wherever a following client would re-send a redacted
+  body or a credential; a routed hop's redirect is a hop fault the router can fail
+  over from.
+- **A routed operator key is treated like the proxy's own identity.** A route
+  llm-redact does not recognize is refused `403` before its body is read when a
+  plan would send it with an operator key (or none), and the stored-object check
+  runs after the routing plan and applies its identity policy to such requests
+  (`RoutePlan.proxy_credential`; a plan without it counts as the proxy's). An upload
+  or body the check cannot read is refused under a proxy-held credential.
 - Request paths with `.`/`..` segments (including `%2E` and backslash forms) are
   refused with 400 (WebSocket: 1011) before any upstream contact.
 - Under `auth = "identity"`:
@@ -27,13 +199,68 @@ and tags `vX.Y.Z`.
     matching headers);
   - only the `realtime` and `openai-beta.*` WebSocket subprotocols are forwarded;
   - the signed URL must be exactly the base URL plus the request path;
-  - an `http://` upstream on a non-loopback host is a ConfigError;
-  - a multipart body the proxy cannot parse is refused with 400 instead of being
-    forwarded;
-  - WebSocket refusals are recorded like HTTP ones.
+  - an `http://` upstream on a non-loopback host is a ConfigError.
 
 ### Added
 
+- `allowed_origins` (top-level, restart-only, default empty): exact browser origins
+  the proxy serves across origins, over HTTP and realtime WebSockets. A listed page
+  can read restored values back and spend the proxy's credentials, so `doctor` warns
+  with the list, `/status` counts it and `llm-redact status` shows it. Only http(s)
+  origins, plain http only on this machine, never `null`; the host rule still holds,
+  reserved `/__llm-redact/*` paths never consult the list, and CORS answers come
+  from the provider (proxy-generated errors carry no CORS headers).
+- `allowed_hosts` (top-level, restart-only, default empty): alias host names clients
+  use to reach the proxy. The Helm chart's standalone mode lists its Service names;
+  `doctor` reports the names and warns when a plain-HTTP non-loopback bind lends a
+  credential without them.
+- `max_body_strings` (top-level, hot, default 100,000; see Upgrading), in `/status`,
+  `doctor`'s body-cap line, `config show` and the config-edit command.
+- Session-router seams for stored-object ownership (llm-redact-pro), optional and
+  read via `getattr`, so older routers keep today's behavior:
+  - `object_access_refusal(adapter_name, method, path, body, *, identity)` is asked
+    for every forwarded HTTP request, routed or not, after the routing plan and
+    before the audit START row, redaction, any credential and any upstream contact.
+    `identity` is true whenever the request spends a credential the proxy holds. A
+    reason, a non-string answer or an exception becomes a recorded,
+    provider-shaped `403`. An upload's JSONL lines and form fields are read for it
+    before redaction, whether or not the route redacts.
+  - `listing_item_session(object_id)` and the batched `listing_item_sessions`: each
+    item of a 2xx OpenAI-shaped listing (files, batches, video jobs, stored chat
+    completions; OpenAI, Azure and custom prefixes) that the router names is
+    restored, from the provider's own bytes, in that existing session (on a vault
+    with a durable map, only while the map still records the object there). A
+    session that is empty or gone restores nothing; items the router's lookup fails
+    for are delivered as the provider sent them (counted); listings never record
+    ownership.
+  - `sealed(session_id)`: a sealed session is read for rehydration but never
+    written. A request that would redact a value into it gets a recorded `403` (a
+    string answer is the reason) before any upstream contact, and a realtime
+    connection to it is refused.
+  - `RoutePlan.proxy_credential`; the vault managers' optional
+    `lookup_response_sessions` and `record_object_session` (and the in-memory
+    manager's `has_session`); the adapter hooks `redacts_multipart`,
+    `lists_objects`/`listing_items` and `object_ids_from_event`/
+    `reports_object_ids_once`.
+- More stored objects reported to an ownership-tracking router, with their creator:
+  stored chat completions (`store: true`, streamed ones too), video create/remix
+  jobs, Anthropic Files uploads, completed OpenAI Uploads (not those of purpose
+  `batch` or none, whose parts are never read), OpenAI fine-tuning jobs and a job's
+  `result_files`, Gemini API files and a finished Gemini batch's output file, Gemini
+  batch and Veo operations, Vertex Veo operations and Bedrock async invocations.
+  Files a provider tool writes for a request (Anthropic code execution output,
+  OpenAI code interpreter container files, streamed or not) are reported as the
+  requester's; an id the request itself carries never is. Owner records are bounded
+  apart from Responses rows (a `kind` column, 10,000 each); an RDBMS user that may
+  not `ALTER` keeps the shared bound, surfaced as `/status`
+  `vault.owner_bound_shared`, a `status` posture line and a `doctor` WARN.
+- `[users] unrecorded_objects = "refuse" | "allow"`: the config shape of
+  llm-redact-pro's unknown-owner policy (restart-only; without the package any
+  non-default `[users]` refuses to start).
+- `llm_redact_bookkeeping_errors_total{stage}` and `/status`
+  `bookkeeping_errors_total`: faults in the proxy's own bookkeeping after the
+  upstream answered (`response_id`, `object_ids`, `listing`, `delivery`) and vault
+  write faults before it (`vault`).
 - Realtime: Azure OpenAI Realtime's GA path (`/openai/v1/realtime?model=…`) and the
   Vertex AI Live API (`/ws/google.cloud.aiplatform.{v1,v1beta1}.LlmBidiService/BidiGenerateContent`,
   `[providers.vertex]`) are relayed. With llm-redact-pro, `auth = "identity"` now
@@ -54,31 +281,86 @@ and tags `vX.Y.Z`.
     StartAsyncInvoke and the async-invoke list/get.
   - `docs/api-coverage.md` gains Vertex AI, Azure OpenAI, Bedrock and realtime
     WebSocket tables, pinned in both directions by `tests/test_api_coverage.py`.
-- Object tracking (the session-ownership seam used by llm-redact-pro) also reports
-  stored chat completions (`store: true`, including streamed ones) and video
-  create/remix jobs; `tracks_object_ids` takes the parsed request body.
+- Newly recognized (redact-only, so a credential the proxy holds may reach them,
+  and `/recent` and metrics no longer label them pass-through): `GET /v1/models`
+  and `/v1/models/{id}` (Anthropic's only with `anthropic-version`), Anthropic batch
+  list/poll/cancel/delete, OpenAI deletes of responses, conversations (and items),
+  files and videos, `GET /v1/videos/{id}/content`, Gemini `GET /v1beta/models`, and
+  Ollama `/api/tags`, `/api/ps`, `/api/version` and `/api/show`. The Gemini API's
+  `/v1beta/openai/` surface is redacted and restored like OpenAI's.
 
 ### Changed
 
+- File objects (the upload response, the file list, a file's metadata) and batch
+  routes are chat routes so their echoes are restored; they get no system note.
+- Stored objects are reported to a router that tracks ownership in every session
+  mode, static included (Response ids stay unrecorded in static mode).
+- The system note's example token is «EMAIL_000», a number the vault never issues.
+- `GET` and `HEAD /` are answered locally (the ollama CLI's heartbeat), after the
+  request-origin check.
+- Faster redaction of short strings: each string up to 1,024 characters runs only
+  the detectors that could match it, with identical detections. A 10 MiB body of
+  300,000 tiny messages took 32 s of event-loop time; it now takes 1.3 s (and is
+  over `max_body_strings`).
+- The sqlite vault writes a request's new values in one transaction, committed
+  before anything is forwarded; any refusal or fault rolls it all back and a retry
+  gets the same numbers. 10,000 new values: 2.5 s to 0.3 s.
+- `llm-redact vault verify` notes numbering gaps (token floors create them) instead
+  of failing, and fails a row whose token disagrees with its number or that reuses
+  a retired number.
+- The in-memory vault manager counts and lists only sessions holding mappings, and
+  a forgotten session keeps its numbering.
+- The `realtime` extra requires websockets 15.0 or newer: older clients send a
+  second User-Agent, and 13.0 cannot refuse handshake redirects.
 - Under `auth = "identity"`, any query parameter whose name contains
   `authorization` is stripped as a client credential (HTTP and WebSocket).
 
 ### Fixed
 
-- A failed upstream WebSocket dial is counted in `upstream_errors` and recorded; it
-  used to leave an `[audit] required` START row with no END row.
-- WebSocket close reasons are cut to the protocol's 123-byte limit, so a long refusal
-  reason no longer makes the close fail silently.
+- A vault that cannot record a request's placeholders (a failed sqlite write or
+  COMMIT, an RDBMS driver error, an RDBMS allocation that kept colliding, now
+  `RdbmsAllocationError`) refuses the request with a recorded, provider-shaped `503`
+  before any upstream contact, counted as `bookkeeping_errors{stage="vault"}` and
+  logged by exception type only; a realtime frame closes the connection `1011`. It
+  was an unrecorded bare `500`.
+- A lone UTF-16 surrogate escape in a body, an answer or a stream no longer causes a
+  bare `500`, a `502` or a cut stream: every re-serialization goes through one
+  serializer that re-escapes it. Unchanged bodies are still forwarded
+  byte-identical.
+- A codice fiscale or CURP containing a non-ASCII digit crashed the request with an
+  unrecorded `500`; it is now detected and redacted.
+- Faults in post-response bookkeeping (response ids, stored objects, the listing
+  restore) are contained and counted, and the answer is delivered; a fault restoring
+  a buffered answer is a recorded `502`, and a stream the proxy cuts is recorded as
+  `502`.
+- `llm-redact status`, `doctor`, `run`, the `plugin install` probe and `vault
+  rotate-key`'s liveness check dial a wildcard bind at loopback and bracket an IPv6
+  literal; an IPv6-bound proxy was unreachable (`status` and `run` crashed with
+  `InvalidURL`). `doctor` probes an IPv6 bind's port with an IPv6 socket, and the
+  `serve` banner shows the dialed status URL.
+- Gemini and Vertex streaming (SSE and the array form) and Live messages restore
+  function-call arguments, generated code and grounding exactly as the buffered
+  answer does.
+- Bedrock base64 media (`source.bytes`) is no longer scanned.
+- The multipart parser is linear; a body of many parts no longer freezes the event
+  loop.
+- Realtime policy closes (block mode, a refused frame) reach the client as `1008`:
+  the upstream's mirrored `1000` used to arrive first. Refusals before the upstream
+  dial (the access gate's `403`, a disabled or unconfigured provider's `502`, an
+  `[audit] required` START failure's `503`) and failed dials are recorded, and close
+  reasons are cut to the protocol's 123-byte limit.
+- A malformed `Origin` on the reserved endpoints' guard chain is a `403`, not a
+  `500`.
+- A routing `no_route` `502` is recorded with the configured static session.
+- An empty `XDG_DATA_HOME` or `XDG_CONFIG_HOME` counts as unset (it resolved to a
+  relative path).
 - Azure JSONL file uploads get the per-line system note on chat-shaped lines (parity
   with OpenAI `/v1/files`); Azure's note is otherwise confined to chat completions.
-- Vertex express-mode metadata GETs (`/v1/publishers/…`) reach the vertex upstream
-  instead of the anthropic default.
+- Vertex express-mode metadata GETs (`/v1/publishers/…`) reach the Vertex upstream,
+  and Gemini file downloads (`/download/v1beta/…`) the Gemini upstream.
 - The realtime relay keeps the `upstream_base_url` path (APIM and gateway bases).
-- The Azure batch list is no longer rehydrated (redact-only, like OpenAI's).
 - Bedrock `count-tokens` decodes, redacts and re-encodes `input.invokeModel.body`;
   a body that cannot be decoded is refused with 400.
-- A `/v1/…` request authenticated with a Google API key (`x-goog-api-key`, `?key=`)
-  goes to Gemini instead of OpenAI.
 - The `websockets` logger is pinned at WARNING, so it cannot log upgrade URLs.
 
 ## [1.8.0] - 2026-09-28

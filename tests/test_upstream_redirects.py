@@ -205,7 +205,7 @@ async def test_a_request_presenting_a_proxy_credential_is_refused_on_pass_throug
     following = Following(app)
     async with following as client:
         response = await client.get(
-            "/v1/fine_tuning/jobs",  # pass-through
+            "/v1/assistants",  # pass-through
             headers={"authorization": "Bearer sk-x", "x-llm-redact-user": "lrk_demo_user_key"},
         )
     _assert_refused(response, following, app, 302)

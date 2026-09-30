@@ -259,7 +259,7 @@ async def test_a_pass_through_answer_and_an_error_status_are_observed_too(
     app = _app(router, upstream, monkeypatch)
     async with _client(app) as client:
         response = await client.get(
-            "/v1/vector_stores/vs_1", headers={"authorization": "Bearer sk-proj-FAKE"}
+            "/v1/assistants/asst_1", headers={"authorization": "Bearer sk-proj-FAKE"}
         )
     assert response.status_code == 404
     (context,) = router.contexts

@@ -60,14 +60,14 @@ _OPENAI_RESOURCES = frozenset(
 )
 
 
-# The deepest endpoint the wrapped OpenAI adapters match has four segments
-# after /v1 (/v1/conversations/{id}/items/{item_id}): a longer tail is never
-# an endpoint, except one starting at an OpenAI resource name (the
+# The deepest endpoint the wrapped OpenAI adapters match has five segments
+# after /v1 (/v1/vector_stores/{id}/files/{file_id}/content): a longer tail
+# is never an endpoint, except one starting at an OpenAI resource name (the
 # conversations route reads everything below it). Tails are tried up to
 # this depth — twice the deepest, for headroom — plus the one at the first
 # resource name, so the search costs a bounded number of matches whatever
 # the path (tests/test_api_coverage.py pins the depth of every route).
-MAX_ENDPOINT_SEGMENTS = 8
+MAX_ENDPOINT_SEGMENTS = 10
 
 
 def custom_prefix(provider_key: str) -> str:
@@ -159,6 +159,11 @@ class _PrefixedOpenAIMixin:
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         canonical = self._canonical(path, kind=kind)
         return super().wants_system_note(kind, canonical)  # type: ignore[misc,no-any-return]
+
+    def restores_file_download(self, method: str, path: str) -> bool:
+        # The canonical path rehydrate_raw_body restores under.
+        canonical = self._canonical(path, kind=RouteKind.CHAT)
+        return super().restores_file_download(method, canonical)  # type: ignore[misc,no-any-return]
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
         # Consulted on CHAT routes only.

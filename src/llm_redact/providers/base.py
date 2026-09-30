@@ -1,10 +1,12 @@
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import Enum
-from typing import Any
+from itertools import count
+from typing import Any, NamedTuple
 
 from llm_redact.eventstream import EventStreamMessage
 from llm_redact.jsonwalk import loads_bounded
+from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
@@ -171,6 +173,213 @@ def restore_exempt_mcp_blocks(original: Any, redacted: Any, exempt: frozenset[st
     return restore(original, redacted)
 
 
+class VerbatimFieldRedacted(UnredactableRequest):
+    """A request field the provider uses EXACTLY as sent — an identifier or
+    a name it keeps (a fine-tuned model's name suffix, a file id, a W&B
+    project) — holds a value llm-redact redacts. Such a
+    field is scanned but never rewritten: a placeholder there would name a
+    model, file or project that does not exist (and the client, which gets
+    the real value back, would cite a name the provider never saw). So the
+    request is refused (400) instead of forwarded with the value. The
+    message names the field only, never its content."""
+
+
+# A verbatim field's position (``ProviderAdapter.verbatim_fields``): keys from
+# the body's root; "*" steps into every item of a list, "**" into every
+# object and list below (any depth, the current level included).
+VerbatimPosition = tuple[str, ...]
+_EVERY_ITEM = "*"
+_ANY_DEPTH = "**"
+
+
+class _Held(NamedTuple):
+    """A field at one slot of a ``_Slots`` trie: its place in the order
+    fields were held (``order``), the ``value`` it carries and the
+    ``position`` that named it."""
+
+    order: int
+    value: Any
+    position: VerbatimPosition
+
+
+# A trie of slots (the concrete keys and list indexes a position names): each
+# step maps to the trie below it, or to the _Held field at that slot (nothing
+# below a held field is kept: it goes back with it).
+_Slots = dict[str | int, "_Slots | _Held"]
+
+
+class _Cursor:
+    """Where a traversal of the body stands: one step below its parent's.
+    Its trie node is made (or found) only when a field is held at or below
+    it, and then kept — so holding a field costs O(1) beyond the traversal
+    that reached it, whatever its depth (a slot is never built as a tuple
+    of its steps and walked again). None inside a field already held."""
+
+    __slots__ = ("_node", "_parent", "_resolved", "_step")
+
+    def __init__(self, parent: "_Cursor | None", step: str | int, node: _Slots | None) -> None:
+        self._parent = parent
+        self._step = step
+        self._node = node
+        self._resolved = parent is None  # the root is the trie itself
+
+    def child(self, step: str | int) -> "_Cursor":
+        return _Cursor(self, step, None)
+
+    def node(self) -> _Slots | None:
+        if not self._resolved:
+            self._resolved = True
+            parent = self._parent.node() if self._parent is not None else None
+            child = None if parent is None else parent.setdefault(self._step, {})
+            self._node = child if isinstance(child, dict) else None
+        return self._node
+
+    def hold(self, held: _Held) -> None:
+        """Hold ``held`` here unless a field at or around this slot is held
+        already; a field held inside it goes back with it (dropped)."""
+        parent = self._parent.node() if self._parent is not None else None
+        if parent is not None and not isinstance(parent.get(self._step), _Held):
+            parent[self._step] = held
+            self._resolved, self._node = True, None
+
+
+def _each_slot(
+    node: Any,
+    position: VerbatimPosition,
+    cursor: _Cursor,
+    found: Callable[[Any, _Cursor], None],
+) -> None:
+    """Call ``found(value, cursor)`` for every slot ``position`` names in
+    ``node``, in document order: one visit per node the position reaches."""
+    if not position:
+        found(node, cursor)
+        return
+    head, rest = position[0], position[1:]
+    if head == _ANY_DEPTH:
+        _each_slot(node, rest, cursor, found)
+        children: Any = (
+            node.items()
+            if isinstance(node, dict)
+            else enumerate(node)
+            if isinstance(node, list)
+            else ()
+        )
+        for key, child in children:
+            _each_slot(child, position, cursor.child(key), found)
+    elif head == _EVERY_ITEM:
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                _each_slot(item, rest, cursor.child(index), found)
+    elif isinstance(node, dict) and head in node:
+        _each_slot(node[head], rest, cursor.child(head), found)
+
+
+def _held_fields(trie: _Slots) -> list[_Held]:
+    """Every field held in ``trie``, in the order it was held."""
+    fields: list[_Held] = []
+    pending = [trie]
+    while pending:
+        for child in pending.pop().values():
+            if isinstance(child, _Held):
+                fields.append(child)
+            else:
+                pending.append(child)
+    return sorted(fields)
+
+
+def _rebuilt(node: Any, trie: _Slots, replace: Callable[[_Held], Any]) -> Any:
+    """``node`` with each held slot's value replaced by ``replace(held)`` —
+    one pass, copying only the containers along the held paths (the
+    caller's body is never changed)."""
+    copy: Any = dict(node) if isinstance(node, dict) else list(node)
+    for step, below in trie.items():
+        copy[step] = (
+            replace(below) if isinstance(below, _Held) else _rebuilt(node[step], below, replace)
+        )
+    return copy
+
+
+def _strings_in(value: Any) -> list[str]:
+    """Every string value in ``value`` (keys are never read)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        value = list(value.values())
+    if not isinstance(value, list):
+        return []
+    return [text for item in value for text in _strings_in(item)]
+
+
+def prepare_route_request(
+    adapter: "ProviderAdapter",
+    method: str,
+    path: str,
+    body: dict[str, Any],
+    redactor: Redactor,
+    *,
+    inject_note: bool,
+    mcp_exempt: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """``adapter.prepare_request`` for a request to ``path`` — the proxy's
+    entry point, with the route in view. The route's VERBATIM fields
+    (``verbatim_fields``) are held out of the walk and scanned on their own:
+    a value llm-redact would redact there refuses the request
+    (``VerbatimFieldRedacted``; a block-mode value raises BlockedRequest, a
+    warn-mode one is counted and forwarded, as anywhere), and otherwise they
+    go back exactly as sent. The route's LABEL fields (``label_fields``) are
+    redacted after the walk, which skips them as structural. Linear in the
+    body: the fields are held in a trie of their slots, built as each
+    traversal reaches them (``_Cursor``: no field costs its depth), taken
+    out in one copy and put back in another; each field found is counted
+    against the redactor's string budget at once (a verbatim field when
+    found, a label when redacted), so a body of too many is refused before
+    they are all collected."""
+    held: _Slots = {}
+    order = count()
+    for position in adapter.verbatim_fields(method, path):
+
+        def hold(value: Any, cursor: _Cursor, position: VerbatimPosition = position) -> None:
+            # Counted as found (max_body_strings): a body of more fields than
+            # the budget is refused before they are all collected. Each is
+            # counted again per string when scanned below.
+            redactor.charge(1)
+            cursor.hold(_Held(next(order), value, position))
+
+        _each_slot(body, position, _Cursor(None, "", held), hold)
+    fields = _held_fields(held)
+    for field in fields:
+        for text in _strings_in(field.value):
+            if redactor.redact_text(text) != text:
+                label = ".".join(
+                    key for key in field.position if key not in (_EVERY_ITEM, _ANY_DEPTH)
+                )
+                raise VerbatimFieldRedacted(
+                    f"llm-redact: the request field `{label}` holds a value llm-redact redacts,"
+                    " but the provider uses that field exactly as sent (an identifier or a"
+                    " name it keeps), so it cannot carry a placeholder; the request was not"
+                    " forwarded"
+                )
+    target = _rebuilt(body, held, lambda field: None) if fields else body
+    prepared = adapter.prepare_request(
+        target, redactor, inject_note=inject_note, mcp_exempt=mcp_exempt
+    )
+    if fields:
+        prepared = _rebuilt(prepared, held, lambda field: field.value)
+    # LABELS: user text under a key the walk skips as structural (a vector
+    # store's `name`), redacted here like any other text — in slot order.
+    labels: _Slots = {}
+    for position in adapter.label_fields(method, path):
+
+        def redact_label(
+            value: Any, cursor: _Cursor, position: VerbatimPosition = position
+        ) -> None:
+            if isinstance(value, str):
+                cursor.hold(_Held(0, redactor.redact_text(value), position))
+
+        _each_slot(prepared, position, _Cursor(None, "", labels), redact_label)
+    return _rebuilt(prepared, labels, lambda field: field.value) if labels else prepared
+
+
 class RouteKind(Enum):
     CHAT = "chat"  # redact request + rehydrate response (incl. streaming)
     REDACT_ONLY = "redact_only"  # redact request, pass response through
@@ -251,6 +460,24 @@ class ProviderAdapter(ABC):
             redacted = self.inject_system_note(redacted)
         return redacted  # type: ignore[no-any-return]
 
+    def verbatim_fields(self, method: str, path: str) -> tuple[VerbatimPosition, ...]:
+        """The request fields of this route the provider uses EXACTLY as sent
+        (identifiers and names it keeps: a file id, a fine-tuned model's
+        suffix, a W&B project), as positions (``VerbatimPosition``).
+        They are scanned but never rewritten: ``prepare_route_request``
+        refuses a request whose verbatim field holds a value it would redact.
+        None by default."""
+        return ()
+
+    def label_fields(self, method: str, path: str) -> tuple[VerbatimPosition, ...]:
+        """The request fields of this route that are user text although
+        their key is one the walk treats as structural (a vector store's
+        `name`: a label, the object is addressed by id), as positions. They
+        are redacted like any other text (``prepare_route_request``); the
+        adapter restores them wherever an answer echoes them. None by
+        default."""
+        return ()
+
     def rehydrate_body(self, body: Any, rehydrator: Rehydrator) -> Any:
         return rehydrator.rehydrate_json(body)
 
@@ -315,6 +542,15 @@ class ProviderAdapter(ABC):
         replaces items in it by position."""
         return None
 
+    def listing_item_id(self, item: Any) -> str | None:
+        """The stored-object id one listed item names — as this adapter's
+        ``object_ids_from_body`` reports the object when it is created — or
+        None (the item then stays as the listing's own session delivers
+        it). OpenAI-shaped listings name it ``id``; the Gemini API's name
+        it ``name`` (``files/<id>``, ``batches/<id>``)."""
+        value = item.get("id") if isinstance(item, dict) else None
+        return value if isinstance(value, str) else None
+
     @abstractmethod
     def rehydrate_event(self, event: SSEEvent, pool: RehydratorPool) -> list[SSEEvent]:
         """Rewrite one SSE event; may inject synthetic flush events."""
@@ -340,8 +576,10 @@ class ProviderAdapter(ABC):
         *,
         inject_note: bool,
         require_scanned: bool = False,
+        forward_binary: Callable[[int], None] | None = None,
     ) -> bytes | None:
-        """Rewrite a multipart/form-data request body for ``path``.
+        """Rewrite a multipart request body for ``path`` (delimited by the
+        ``boundary`` ``multipart_boundary`` read).
 
         None means "nothing changed" — the proxy forwards the original
         bytes. Raising BlockedRequest rejects the whole request: one
@@ -350,7 +588,13 @@ class ProviderAdapter(ABC):
         ``UnredactableRequest`` naming its kind; the proxy always passes it
         (the scanned-body rule: a recognized route forwards only what the
         proxy read — under its own identity, and under the client's own key
-        wherever redaction applies). This base scans nothing. (What an
+        wherever redaction applies). The one exception is
+        ``forward_binary``: when given, a BINARY file part
+        (``upload_content.classify_file``) is forwarded unscanned, byte
+        for byte, and the callable is told how many were once the whole
+        upload was read — the proxy passes it only when the request goes
+        out with the client's own credential and ``[detection]
+        binary_uploads`` is "forward". This base scans nothing. (What an
         upload cites for the stored-object check is read separately, before
         redaction: ``upload_view.read_upload``.)
 
@@ -369,11 +613,47 @@ class ProviderAdapter(ABC):
         other route is refused rather than forwarded unscanned."""
         return False
 
-    def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
-        """Rehydrate a buffered non-JSON response body (None = untouched).
+    def multipart_boundary(self, path: str, content_type: str) -> bytes | None:
+        """The multipart boundary of a request body on ``path`` with this
+        ``content_type``, or None when the body is not multipart as this
+        route reads it. multipart/form-data everywhere; an adapter whose
+        upload route speaks another multipart type (the Gemini API's
+        multipart/related upload) accepts it on that route only."""
+        return parse_multipart_boundary(content_type)
 
-        Consulted on CHAT routes whose response is not application/json —
-        e.g. an OpenAI batch output file download, which is JSONL served
-        as a file.
-        """
+    def proxy_credential_refusal(
+        self,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str]",
+        query: str,
+    ) -> str | None:
+        """Why this RECOGNIZED request must not be sent with a credential
+        the PROXY holds (its cloud identity, a routed operator key), or
+        None. The proxy answers such a request with a recorded 403 before
+        it redacts or sends anything — for a protocol whose answer would
+        hand the client a capability minted under the proxy's credential
+        (the Gemini API's resumable upload URL, whose data chunks go
+        straight to the provider, unread). The message names the protocol,
+        never a value."""
         return None
+
+    # Response headers carrying a capability the provider minted for the
+    # request's credential (an upload session URL): never relayed to a
+    # client when that credential is the proxy's.
+    capability_response_headers: frozenset[str] = frozenset()
+
+    def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
+        """Restore a downloaded FILE's bytes (None = untouched): consulted,
+        buffered, for every CHAT answer ``restores_file_download`` names —
+        whatever its Content-Type (a file is served with its own: JSON Lines,
+        CSV, even ``application/json``)."""
+        return None
+
+    def restores_file_download(self, method: str, path: str) -> bool:
+        """Whether a CHAT answer to ``method path`` is a downloaded FILE
+        (an OpenAI file's or container file's content, Anthropic Files
+        content, a Gemini ``:download``): restored by ``rehydrate_raw_body``
+        — per file, as it was redacted on upload — never by the whole-body
+        JSON walk or a streaming reading its Content-Type would pick."""
+        return False

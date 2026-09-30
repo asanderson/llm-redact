@@ -108,8 +108,10 @@ OPAQUE_POSITIONS = frozenset(
 # strings) is grounding content, never protocol; `metadata` (OpenAI chat,
 # Responses, batches, conversations and Realtime `response.metadata` /
 # `tracing.metadata`, on OpenAI and Azure; Anthropic Messages) and Bedrock
-# Converse `requestMetadata` are string maps keyed by the caller.
-OPAQUE_ANYWHERE = frozenset({"documents", "metadata", "requestMetadata"})
+# Converse `requestMetadata` are string maps keyed by the caller, and so are
+# OpenAI vector-store file `attributes` (and the search results and
+# file_search results that echo them).
+OPAQUE_ANYWHERE = frozenset({"attributes", "documents", "metadata", "requestMetadata"})
 _OPAQUE_KEYS = frozenset(key for _, key in OPAQUE_POSITIONS) | OPAQUE_ANYWHERE
 
 # Enum ARRAYS at their known schema positions, (parent key, key): skipped
@@ -168,6 +170,14 @@ def _walk_opaque(obj: Any, fn: Callable[[str], str]) -> Any:
     if isinstance(obj, dict):
         return {key: _walk_opaque(value, fn) for key, value in obj.items()}
     return obj
+
+
+def transform_all_strings(obj: Any, fn: Callable[[str], str]) -> Any:
+    """Apply ``fn`` to every string value in a JSON tree with NO skip set:
+    the reading of a document that is the caller's DATA, not a request (an
+    uploaded JSONL data file's lines), where a key named ``id``, ``name``,
+    ``type`` or ``data`` is content. Keys are never touched."""
+    return _walk_opaque(obj, fn)
 
 
 def transform_strings(

@@ -30,6 +30,7 @@ from llm_redact.providers.anthropic import AnthropicAdapter
 from llm_redact.providers.azure_openai import AzureOpenAIAdapter
 from llm_redact.providers.base import ProviderAdapter
 from llm_redact.providers.custom import CustomOpenAIAdapter
+from llm_redact.providers.ollama import OllamaAdapter
 from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
@@ -182,7 +183,7 @@ def _client(app: Any) -> httpx.AsyncClient:
 @pytest.mark.parametrize(
     ("method", "path", "adapter_name", "body"),
     [
-        ("DELETE", "/v1/vector_stores/vs_1", None, None),  # pass-through: no adapter, no body
+        ("DELETE", "/v1/threads/thread_1", None, None),  # pass-through: no adapter, no body
         ("DELETE", "/v1/files/file-1", "openai", None),  # recognized: an id-only route
         ("GET", "/v1/files/file-1/content", "openai", None),
         ("POST", "/v1/batches/batch_1/cancel", "openai", None),
@@ -236,7 +237,7 @@ async def test_a_non_reason_answer_refuses_with_the_fixed_text(
     upstream = Upstream()
     app = _app(monkeypatch, ScriptedRouter(verdict=verdict), upstream)
     async with _client(app) as client:
-        response = await client.delete("/v1/vector_stores/vs_1")  # pass-through
+        response = await client.delete("/v1/assistants/asst_1")  # pass-through
     assert response.status_code == 403
     assert "ownership check failed" in response.json()["error"]
     assert upstream.requests == []
@@ -350,7 +351,7 @@ async def test_an_unrouted_request_is_checked_with_the_clients_credential(
 def _routed_pass_through(
     monkeypatch: pytest.MonkeyPatch, router: Any, *, proxy_credential: bool | None = None
 ) -> tuple[Any, FakeRouter]:
-    hop = Hop("x", "http://x.example/v1/vector_stores")
+    hop = Hop("x", "http://x.example/v1/assistants")
     kwargs = {} if proxy_credential is None else {"proxy_credential": proxy_credential}
     fake = FakeRouter({"r": [hop, Stop()]}, plan_kwargs={"r": kwargs})
     reg, _ = install(monkeypatch, fake)
@@ -370,7 +371,7 @@ async def test_a_routed_pass_through_under_the_proxys_credential_is_refused_unre
     app, fake = _routed_pass_through(monkeypatch, router, proxy_credential=lends)
     raw = b'{"name": "mine",   "file_ids": ["file-a"]}'
     async with _client(app) as client:
-        response = await client.post("/v1/vector_stores", content=raw, headers={ROUTE_HEADER: "r"})
+        response = await client.post("/v1/assistants", content=raw, headers={ROUTE_HEADER: "r"})
     assert response.status_code == 403
     assert "credential the proxy holds" in response.json()["error"]
     assert router.checks == []
@@ -397,13 +398,13 @@ async def test_other_pass_through_bodies_are_never_parsed(
     headers = {ROUTE_HEADER: "r"} if routed else {}
     async with _client(app) as client:
         response = await client.post(
-            "/v1/vector_stores",
+            "/v1/assistants",
             content=b'{"file_ids": ["file-a"], "file_ids": ["file-b"]}',
             headers={**headers, "content-encoding": "gzip"},  # never inspected here
         )
     assert response.status_code == 200
     if checks_ownership:
-        assert router.checks == [(None, "POST", "/v1/vector_stores", None, False)]
+        assert router.checks == [(None, "POST", "/v1/assistants", None, False)]
 
 
 @pytest.mark.parametrize(
@@ -432,7 +433,7 @@ async def test_no_pass_through_body_is_read_under_the_proxys_credential(
     — an unrecognized route under the proxy's credential is refused before
     the (unbounded) body read: the same recorded 403 for every body."""
     router = ScriptedRouter()
-    hop = Hop("x", "http://x.example/v1/vector_stores")
+    hop = Hop("x", "http://x.example/v1/assistants")
     fake = FakeRouter({"r": [hop, Stop()]})
     reg, _ = install(monkeypatch, fake)
     _registry(monkeypatch, router, reg)
@@ -443,7 +444,7 @@ async def test_no_pass_through_body_is_read_under_the_proxys_credential(
     request_headers = httpx.Headers(headers)
     request_headers[ROUTE_HEADER] = "r"
     async with _client(app) as client:
-        response = await client.post("/v1/vector_stores", content=raw, headers=request_headers)
+        response = await client.post("/v1/assistants", content=raw, headers=request_headers)
     assert response.status_code == 403
     assert "credential the proxy holds" in response.json()["error"]
     assert router.checks == [] and upstream.requests == []
@@ -518,7 +519,8 @@ def test_listing_items_is_the_openai_list_envelope_only() -> None:
     assert adapter.listing_items({"object": "file", "data": items}) is None
     assert adapter.listing_items({"object": "list", "data": {"id": "x"}}) is None
     assert adapter.listing_items([items]) is None
-    assert AnthropicAdapter().listing_items(body) is None  # the base default
+    assert OllamaAdapter().listing_items(body) is None  # the base default
+    assert AnthropicAdapter().listing_items(body) is items  # its Files API list
 
 
 def test_the_memory_manager_answers_without_creating_a_session() -> None:
@@ -980,9 +982,9 @@ async def test_an_upload_is_checked_once_with_what_it_cites(
     detection: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The check reads the upload whether or not the route redacts; a CSV
-    # file has no JSON line to cite. Where redaction applies, its lines —
-    # not JSONL — are then refused by the scanned-body rule; detection =
-    # false forwards the upload as sent.
+    # file has no JSON line to cite. Where redaction applies it is then
+    # redacted as the text it is; detection = false forwards the upload as
+    # sent.
     router = LineRouter()
     upstream = Upstream()
     app = _app(
@@ -997,8 +999,8 @@ async def test_an_upload_is_checked_once_with_what_it_cites(
             files={"file": ("contacts.csv", b"name,email\nada,x\n", "text/csv")},
             data={"purpose": "assistants"},
         )
-    assert response.status_code == (400 if detection else 200)
-    assert len(upstream.requests) == (0 if detection else 1)
+    assert response.status_code == 200
+    assert len(upstream.requests) == 1
     assert router.checks == [("openai", "POST", "/v1/files", [{"purpose": "assistants"}], False)]
 
 

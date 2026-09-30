@@ -265,14 +265,18 @@ while the vault row is the secret store and is never exported.
   the metadata-only create and `files:register`; and a finished Gemini
   batch's output file, named on the status its creator reads), video jobs
   (OpenAI/Azure `/videos`), stored chat completions, OpenAI fine-tuning
-  jobs (and a job's `result_files`, named when the job is read), the files
+  jobs (and a job's `result_files`, named when the job is read), vector
+  stores, code interpreter containers (created directly, or by a
+  Response's code interpreter call: its `container_id`) and the files
+  uploaded into one, the files
   a provider tool WROTE for a request — an Anthropic code execution run's
   output files (Files API ids, from a Messages answer, streamed ones read
   from the `content_block_start` that carries the result) and the files
   OpenAI's code interpreter wrote into its container
   (`container_file_citation` annotations and a code interpreter call's
   output files, streamed ones from whichever event names them first) —
-  and the long-running jobs read back by name: Gemini API batches and Veo
+  and the long-running jobs read back by name: Gemini API batches
+  (generation and async embeddings) and Veo
   operations, Vertex Veo operations (`:predictLongRunning`, polled through
   `:fetchPredictOperation`) and Bedrock async invocations (`POST
   /async-invoke`, polled by ARN) — with the session that created them.

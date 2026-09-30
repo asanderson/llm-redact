@@ -481,6 +481,8 @@ async def test_a_reload_while_the_upstream_is_dialled_relays_no_frame(
     caplog.set_level(logging.INFO, logger="llm_redact")
     async with Upstream() as fake:
         fake.hold = asyncio.Event()
+        # The upstream greets at once (session.created): never relayed.
+        fake.greeting = '{"type": "session.created"}'
         opened = {"openai": {"upstream_base_url": fake.url(), "detection": False}}
         with _serve(_cfg(opened)) as proxy:
             connecting = asyncio.ensure_future(_connect(f"ws://{proxy.host}/v1/realtime"))
@@ -489,15 +491,24 @@ async def test_a_reload_while_the_upstream_is_dialled_relays_no_frame(
             fake.hold.set()
             client = await connecting
             await _send(client, _frame("openai", f"mail {EMAIL}"))
-            closed = await _closed(client)
+            relayed: list[Any] = []
+            try:
+                while True:
+                    relayed.append(await asyncio.wait_for(client.recv(), 5))
+            except websockets.exceptions.ConnectionClosed as ended:
+                closed = ended.rcvd
             await _upstream_closed(fake)
             row = await _recent(proxy.host, lambda r: r["method"] == "WS")
-    # The upgrade already in flight completes (the HTTP in-flight rule), and
-    # the connection is closed before it relays a single frame.
-    _reload_close_while_writing(closed, caplog)
+    # The upgrade already in flight completes (the HTTP in-flight rule) and
+    # closes; the client is never served on it: no frame either way, the
+    # upstream's greeting included, recorded as the reload's 503.
+    assert relayed == []
+    assert closed is None or closed.code == 1012
+    assert "refused after dialling (a config reload changed its" in caplog.text
     assert fake.paths == ["/v1/realtime"]
     assert fake.received == []
-    assert row["status"] == 101
+    assert fake.close_codes == [1000]
+    assert row["status"] == 503
 
 
 # --- after the reload ------------------------------------------------------------------

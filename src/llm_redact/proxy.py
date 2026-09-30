@@ -70,6 +70,8 @@ from llm_redact.config import (
     resolve_credentials,
     unsupported_plugin_capabilities,
 )
+from llm_redact.connections import CAUSES as CONNECTION_CLOSE_CAUSES
+from llm_redact.connections import EventStream, LiveConnections, recheck_interval
 from llm_redact.detection.engine import (
     active_rule_names,
     build_allowlist,
@@ -118,6 +120,7 @@ from llm_redact.providers.attribution import (
     unattributed_reason,
     under,
 )
+from llm_redact.providers.base import VerbatimFieldRedacted, prepare_route_request
 from llm_redact.providers.custom import build_custom_adapters, custom_prefix
 from llm_redact.realtime import (
     ALL_WS_ADAPTERS,
@@ -136,6 +139,7 @@ from llm_redact.redactor import (
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent, SSEParser, serialize
+from llm_redact.upload_content import classify_file
 from llm_redact.upload_view import read_upload
 from llm_redact.vault import Vault, VaultManager, run_batched
 from llm_redact.vault_crypto import key_source as vault_key_source
@@ -272,6 +276,42 @@ _SKIP_REQUEST_HEADERS = frozenset({"host", "content-length", "connection", "acce
 # it (a named-user key sent to a proxy without an access gate must still
 # never leave the machine).
 OWN_HEADER_PREFIX = "x-llm-redact-"
+# METHOD OVERRIDES: a header or query parameter asking the upstream to run a
+# method other than the request line's (Google's front end honors
+# X-HTTP-Method-Override, OData services X-HTTP-Method, web frameworks a
+# `_method` parameter). A matched route is redacted, restored, tracked and
+# ownership-checked by the request line's method — a create overridden into
+# a listing would be restored in the caller's session and its items claimed —
+# so a matched route carrying one is refused (``method_override``) and the
+# headers never leave on a matched route. Pass-through traffic (the
+# client's own key, nothing read) forwards them as sent.
+METHOD_OVERRIDE_HEADERS = frozenset(
+    {"x-http-method-override", "x-http-method", "x-method-override"}
+)
+_METHOD_OVERRIDE_PARAMS = frozenset(
+    {
+        "_method",
+        "$method",
+        "httpmethod",
+        "$httpmethod",
+        *METHOD_OVERRIDE_HEADERS,
+        *(f"${name}" for name in METHOD_OVERRIDE_HEADERS),
+    }
+)
+
+
+def method_override(headers: Mapping[str, str], query: str) -> str | None:
+    """Which KIND of method override the request carries ("header" or
+    "query parameter"), or None. Names compare case-insensitively; query
+    names are read decoded (``+`` and percent escapes)."""
+    if any(name.lower() in METHOD_OVERRIDE_HEADERS for name in headers):
+        return "header"
+    names = (name for name, _ in urllib.parse.parse_qsl(query, keep_blank_values=True))
+    if any(name.lower() in _METHOD_OVERRIDE_PARAMS for name in names):
+        return "query parameter"
+    return None
+
+
 # The named-user base-path prefix. Only an access gate (llm-redact-pro)
 # can accept it; a path still carrying it after admission is answered
 # locally and never forwarded or recorded (its next segment is a key).
@@ -459,7 +499,9 @@ class ProxyState:
         # placeholders (a vault write or its COMMIT failed: rolled back, a
         # recorded 503 — a realtime frame closes 1011); "vault_check" is a
         # vault view's staleness check that could not read its database
-        # (contained: the view keeps serving its cache, never a wrong value).
+        # (contained: the view keeps serving its cache, never a wrong value);
+        # "recheck" is an open connection's access re-check that failed or
+        # timed out (the connection is closed: connections.LiveConnections).
         self.bookkeeping_errors: Counter[str] = Counter()
         bind_fault_counter = getattr(self.vault_manager, "bind_fault_counter", None)
         if callable(bind_fault_counter):
@@ -468,6 +510,10 @@ class ProxyState:
         # "host" (a name the proxy does not answer to — DNS rebinding, or an
         # alias not in allowed_hosts), "origin", "fetch_site". Kinds only.
         self.request_origin_refusals: Counter[str] = Counter()
+        # Binary file parts of uploads forwarded UNSCANNED ([detection]
+        # binary_uploads = "forward", the client's own credential), by
+        # provider: an honesty counter — those bytes left unread.
+        self.unscanned_uploads: Counter[str] = Counter()
         self.redactor = Redactor(
             self.detectors,
             self.vault,
@@ -588,6 +634,21 @@ class ProxyState:
         bind_sessions = getattr(self.access_gate, "bind_sessions", None)
         if callable(bind_sessions):
             bind_sessions(_LiveSessions(self))
+        # Open long-lived connections (realtime relays, live-events streams)
+        # and the admission each opened under (plugin_api.ConnectionControl):
+        # the gate may close them the moment it revokes a user or a
+        # credential, and the lifespan's backstop re-checks them every
+        # recheck_interval (an optional gate member, read once; the backstop
+        # starts at once when the gate declares one, else with the first
+        # connection whose admission carries a recheck).
+        self.connections = LiveConnections(
+            self.bookkeeping_errors,
+            interval=recheck_interval(self.access_gate),
+            eager=getattr(self.access_gate, "recheck_interval", None) is not None,
+        )
+        bind_connections = getattr(self.access_gate, "bind_connections", None)
+        if callable(bind_connections):
+            bind_connections(self.connections)
         for warning in config.routing.warnings:  # parser-owned (inert upstreams, metered
             logger.warning("routing: %s", warning)  # defaults, dead chains) — always logged
         self.router: Router | None = registry.build_router(config, self.license.tier)
@@ -1391,12 +1452,16 @@ class ProxyState:
         return attribute(path, headers, query)
 
 
-def _request_headers(request: Request) -> list[tuple[str, str]]:
+def _request_headers(request: Request, *, matched: bool) -> list[tuple[str, str]]:
+    """The client's headers as forwarded: hop-by-hop ones and the proxy's own
+    namespace dropped — and, on a ``matched`` route, every method override
+    (refused before this; dropped again here as a second layer)."""
     headers = [
         (name, value)
         for name, value in request.headers.items()
         if name.lower() not in _SKIP_REQUEST_HEADERS
         and not name.lower().startswith(OWN_HEADER_PREFIX)
+        and not (matched and name.lower() in METHOD_OVERRIDE_HEADERS)
     ]
     # Compressed upstream bodies would force re-encoding bookkeeping on the
     # streaming path; identity keeps the byte stream directly rewritable.
@@ -1863,12 +1928,16 @@ def _dashboard_unavailable(state: ProxyState) -> str:
     )
 
 
-async def _handle_local(request: Request, state: ProxyState) -> Response:
+async def _handle_local(
+    request: Request, state: ProxyState, admission: Admission | None = None
+) -> Response:
     """Answer reserved /__llm-redact endpoints locally. Metadata only —
     never values; allowlists reported as counts. The dashboard paths are
     delegated to the llm-redact-pro Dashboard (its config editor is the one
     exception on both fronts: it accepts POST behind the guard chain and
-    returns allowlist values)."""
+    returns allowlist values). ``admission`` is the dashboard admission
+    (``_admit_reserved``), recorded with a live-events stream."""
+    admission = admission or Admission()
     path = request.url.path
 
     # The browser dashboard (page, config editor, redaction preview) is the
@@ -1967,11 +2036,27 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 "blocked_total": dict(state.blocked_counts),
                 "upstream_errors_total": dict(state.upstream_errors),
                 "bookkeeping_errors_total": dict(state.bookkeeping_errors),
+                # Open long-lived connections (realtime relays, live-events
+                # streams) by kind, and those closed because their admission
+                # ended, by cause: the access gate revoked them ("revoked"),
+                # their re-check refused them ("recheck") or failed
+                # ("recheck_error"). Counts only — never a user or a grant.
+                "connections": {
+                    "open": state.connections.open_counts(),
+                    "closed_total": {
+                        cause: state.connections.closed[cause] for cause in CONNECTION_CLOSE_CAUSES
+                    },
+                    "recheck_interval_seconds": state.connections.interval,
+                },
                 # Requests refused before any upstream contact as a web page's
                 # (CSRF, DNS rebinding, cross-site WebSocket) or, when they
                 # would spend a credential the proxy holds, as addressed to a
                 # host name it does not answer to — by kind, never a value.
                 "request_origin_refusals_total": dict(state.request_origin_refusals),
+                # Binary upload file parts forwarded UNSCANNED with the
+                # client's own key ([detection] binary_uploads = "forward"),
+                # by provider — never a name or a byte of them.
+                "unscanned_uploads_total": dict(state.unscanned_uploads),
                 # How many browser origins the operator listed in
                 # allowed_origins (the count, not the list): pages there can
                 # read restored values back through the proxy — opt-in.
@@ -2113,6 +2198,8 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 compaction_forks=state.compaction_forks,
                 upstream_errors=state.upstream_errors,
                 bookkeeping_errors=state.bookkeeping_errors,
+                connections_closed=state.connections.closed,
+                unscanned_uploads=state.unscanned_uploads,
             ),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
@@ -2125,19 +2212,34 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
         if not _host_allowed(request, state):
             return JSONResponse({"error": "host not allowed"}, status_code=403)
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
+        # A long-lived connection: tracked with the dashboard admission it
+        # opened under, so the access gate (or its re-check) can end it.
+        stream = EventStream(
+            queue,
+            subject=admission.subject,
+            grant=getattr(admission, "grant", None),
+            recheck=getattr(admission, "recheck", None),
+        )
         state.event_subscribers.add(queue)
+        state.connections.track(stream)
 
         async def event_stream() -> AsyncIterator[bytes]:
             try:
                 yield b": connected\n\n"
-                while True:
+                while not stream.closed:
                     try:
                         row = await asyncio.wait_for(queue.get(), timeout=15.0)
                     except TimeoutError:
                         yield b": keepalive\n\n"
                         continue
+                    if stream.closed:
+                        # Its admission ended: the stream ends here (the
+                        # dashboard reconnects, and the gate decides again).
+                        logger.info("events stream closed (its access was revoked)")
+                        return
                     yield b"data: " + json_bytes(row) + b"\n\n"
             finally:
+                state.connections.untrack(stream)
                 state.event_subscribers.discard(queue)
 
         return StreamingResponse(
@@ -2228,15 +2330,18 @@ def _parse_public_origin(gate: object) -> tuple[str, str, str] | None:
     return parsed.scheme, host, f"{parsed.scheme}://{display_host}{port}"
 
 
-async def _admit_reserved(request: Request, state: ProxyState) -> Response | None:
+async def _admit_reserved(
+    request: Request, state: ProxyState
+) -> tuple[Response | None, Admission | None]:
     """Dashboard admission for the reserved endpoints (only when the gate
     opts in with ``guards_dashboard``): every reserved path except the
     monitoring probes and the gate's own paths (sign-in and SCIM
-    authenticate themselves). None admits; otherwise the refusal —
-    a 303 to the gate's same-proxy sign-in page for a browser GET, else a
-    403. Nothing here is forwarded."""
+    authenticate themselves). A None response admits (with the admission,
+    when the gate was asked); otherwise the refusal — a 303 to the gate's
+    same-proxy sign-in page for a browser GET, else a 403. Nothing here is
+    forwarded."""
     if not state.guards_dashboard:
-        return None
+        return None, None
     path = request.url.path
     if (
         path in PROBE_PATHS
@@ -2244,10 +2349,10 @@ async def _admit_reserved(request: Request, state: ProxyState) -> Response | Non
         or path == SCIM_PREFIX
         or path.startswith(SCIM_PREFIX + "/")
     ):
-        return None
+        return None, None
     admission = await state.admit(request, "dashboard")
     if admission.refusal is None:
-        return None
+        return None, admission
     redirect = admission.redirect
     if (
         request.method == "GET"
@@ -2256,8 +2361,8 @@ async def _admit_reserved(request: Request, state: ProxyState) -> Response | Non
         and "\\" not in redirect
         and "//" not in redirect
     ):
-        return RedirectResponse(redirect, status_code=303)
-    return JSONResponse({"error": admission.refusal}, status_code=403)
+        return RedirectResponse(redirect, status_code=303), admission
+    return JSONResponse({"error": admission.refusal}, status_code=403), admission
 
 
 def _host_allowed(request: HTTPConnection, state: ProxyState) -> bool:
@@ -2676,13 +2781,25 @@ def _body_too_large(
     )
 
 
-def _multipart_parts_over(headers: Headers, body: bytes, limit: int) -> bool:
+def _multipart_parts_over(
+    headers: Headers,
+    body: bytes,
+    limit: int,
+    adapter: ProviderAdapter | None = None,
+    path: str = "",
+) -> bool:
     """Whether a multipart body may hold more than ``limit`` parts, decided
     without parsing it: every part multipart.parse finds ends at a
     ``CRLF--boundary`` delimiter of its own, so their count bounds the
     parts (bytes.count: no allocation per part). A body that is not
-    multipart/form-data has no parts."""
-    boundary = parse_multipart_boundary(headers.get("content-type", ""))
+    multipart — multipart/form-data, or the multipart type ``adapter``
+    reads on ``path`` (``multipart_boundary``) — has no parts."""
+    content_type = headers.get("content-type", "")
+    boundary = (
+        adapter.multipart_boundary(path, content_type)
+        if adapter is not None
+        else parse_multipart_boundary(content_type)
+    )
     return boundary is not None and body.count(b"\r\n--" + boundary) > limit
 
 
@@ -2718,6 +2835,9 @@ class _Unreadable(NamedTuple):
 
     status: int
     message: str
+    # False: refused whatever credential the request spends (the message
+    # then names no credential).
+    credential_bound: bool = True
 
 
 _CONTENT_ENCODED = (
@@ -2770,7 +2890,9 @@ def _unscanned_body(
     if isinstance(parsed, dict):
         return None
     boundary = (
-        parse_multipart_boundary(content_types[0]) if parsed is None and content_types else None
+        adapter.multipart_boundary(path, content_types[0])
+        if parsed is None and content_types
+        else None
     )
     if boundary is None:
         return _Unreadable(400, "the request body is not a JSON object llm-redact can redact")
@@ -2853,11 +2975,18 @@ def _ownership_body(
             413, f"the upload has more parts than llm-redact max_body_strings ({max_parts})"
         )
         return None, None, too_many if proxy_credential else None
-    view = read_upload(body, boundary, max_json_bytes=max_body_bytes)
+    view = read_upload(body, boundary, max_json_bytes=max_body_bytes, max_lines=max_parts)
     unreadable = None
     if view.oversized:
         unreadable = _Unreadable(
             413, f"the upload carries more than llm-redact max_body_bytes ({max_body_bytes})"
+        )
+    elif view.too_many_lines:
+        # Counted before each is parsed: the check never parses more lines
+        # than max_body_strings allows (redaction's own line charge).
+        unreadable = _Unreadable(
+            413,
+            f"the upload has more JSON lines than llm-redact max_body_strings ({max_parts})",
         )
     elif view.problem is not None:
         unreadable = _Unreadable(400, view.problem)
@@ -2865,7 +2994,35 @@ def _ownership_body(
         # With the client's own credential the upload goes out as the route
         # sends it, unread (the provider authorizes the client).
         return None, None, unreadable if proxy_credential else None
+    if view.normalized is not None and _reclassified(body, view.normalized, boundary):
+        # The re-serialized body is what redaction then reads: a part it
+        # would read as something else (a text file turned "binary" goes out
+        # unscanned) is refused whatever the credential. upload_view never
+        # rewrites such a part; this holds even if it did.
+        return None, None, _Unreadable(400, _RECLASSIFIED, credential_bound=False)
     return view.cited, view.normalized, None
+
+
+_RECLASSIFIED = "re-reading the upload for the stored-object check changed what a file part is"
+
+
+def _reclassified(body: bytes, normalized: bytes, boundary: bytes) -> bool:
+    """Whether a part the re-serialized upload ``normalized`` rewrote reads
+    as another kind of file than it was (``classify_file``). Only rewritten
+    parts are classified — their object lines were each counted by the
+    check, and the JSONL test stops at a part's first line that is not one
+    — so this costs no more than the check's own bounded reading. A
+    different part count, or a body outside the grammar, counts as
+    reclassified."""
+    before = parse_multipart(body, boundary)
+    after = parse_multipart(normalized, boundary)
+    if before is None or after is None or len(before.parts) != len(after.parts):
+        return True
+    return any(
+        classify_file(old.content).kind != classify_file(new.content).kind
+        for old, new in zip(before.parts, after.parts, strict=True)
+        if old.content != new.content
+    )
 
 
 class _Misaddressed(NamedTuple):
@@ -2898,6 +3055,11 @@ _EXTRA_PREFIX = (
     " (a base URL that repeats the API version, such as .../v1/v1/...), so it was not"
     " forwarded; check the tool's base URL"
 )
+# The Gemini API's media families: its upload and download endpoints are
+# the API's own routes under a leading /upload or /download by design (a
+# resumable upload's data chunk, unrecognized, goes to /upload/v1beta/files
+# like the recognized upload), never a sign of a misplaced base URL.
+_MEDIA_FAMILIES = ("/upload/v1beta/", "/download/v1beta/")
 # The longest extra prefix looked for, in segments. A base URL mistake adds
 # one or two (/v1/v1/…, /api/v1/…); each candidate tail costs a match of up
 # to the whole path, so trying every tail was quadratic in its length.
@@ -2968,7 +3130,8 @@ def _misaddressed(
       segments (404: a base URL repeating the version). Azure's ``/openai/…``
       and custom ``/custom/NAME/…`` paths embed OpenAI routes by design, and
       their adapters read their own tails; an Azure tail is never taken as a
-      sign of an extra prefix.
+      sign of an extra prefix. Nor are the Gemini API's ``/upload/v1beta/…``
+      and ``/download/v1beta/…`` media families (``_MEDIA_FAMILIES``).
 
     Only a path one of whose spellings matches a route is refused: a Gemini
     ``:method`` or a Bedrock ARN is matched as sent, and a spelling of a
@@ -2995,7 +3158,7 @@ def _misaddressed(
                 )
             if any(under(versioned, prefix) for prefix in OPENAI_PREFIXES):
                 return _Misaddressed(404, "openai", None, _MISSING_VERSION, "path without /v1")
-    if path.startswith((CUSTOM_ROUTE_PREFIX, "/openai/")):
+    if path.startswith((CUSTOM_ROUTE_PREFIX, "/openai/", *_MEDIA_FAMILIES)):
         return None
     for candidate in spellings:
         segments = candidate.split("/")
@@ -3045,6 +3208,39 @@ def _misaddressed_refused(
         }
     )
     return JSONResponse(body, status_code=misaddressed.status)
+
+
+def _method_override_refused(
+    state: ProxyState,
+    adapter: ProviderAdapter,
+    kind: str,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A matched route carrying a method override (``method_override``): a
+    recorded, provider-shaped 400 — never forwarded, no upstream contact."""
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=400,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info("%s %s -> 400 refused (method override %s)", request.method, path, kind)
+    message = (
+        f"llm-redact: the request carries an HTTP method override {kind}; llm-redact reads"
+        f" a {adapter.name} API request by its own method, so it refuses one asking the"
+        " provider to run another. Send the request with the method it means; the request"
+        " was not forwarded"
+    )
+    return JSONResponse(adapter.error_body(message, status=400), status_code=400)
 
 
 def _unattributed_refused(
@@ -3112,6 +3308,41 @@ def _unrecognized_route_refused(
     return JSONResponse({"error": message}, status_code=403)
 
 
+def _credential_protocol_refused(
+    state: ProxyState,
+    adapter: ProviderAdapter,
+    reason: str,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A recognized route the adapter will not serve with a credential the
+    PROXY holds (``ProviderAdapter.proxy_credential_refusal``): a recorded,
+    provider-shaped 403 before redaction, the audit START row, a plan's
+    begin() and any upstream contact. ``reason`` names the protocol only."""
+    message = (
+        f"llm-redact: {reason}; this request would be sent with a credential the proxy holds,"
+        " so it was not forwarded"
+    )
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=403,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info(
+        "%s %s -> 403 protocol not served with a credential the proxy holds", request.method, path
+    )
+    return JSONResponse(adapter.error_body(message, status=403), status_code=403)
+
+
 def _plan_request(
     router: Router,
     request: Request,
@@ -3165,9 +3396,9 @@ async def handle(request: Request) -> Response:
     # Reserved local endpoints are answered here, before any routing or
     # upstream code runs — this early return is the non-forwarding guarantee.
     if path.startswith(RESERVED_PREFIX):
-        response = await _admit_reserved(request, state)
+        response, admission = await _admit_reserved(request, state)
         if response is None:
-            response = await _handle_local(request, state)
+            response = await _handle_local(request, state, admission)
         # Stamp browser-hardening headers on every reserved reply in one place
         # (setdefault so a handler that set its own header still wins).
         for header, value in _SECURITY_HEADERS.items():
@@ -3330,6 +3561,22 @@ async def handle(request: Request) -> Response:
         logger.info("%s %s -> 403 refused by the access gate", request.method, path)
         return JSONResponse(error, status_code=403)
 
+    override = method_override(request.headers, query) if adapter is not None else None
+    if adapter is not None and override is not None:
+        # A matched route is read by the request line's method; an upstream
+        # that honors the override would run another (a create turned into a
+        # listing). Refused before the body is read, any credential or
+        # upstream contact; the message names the KIND only.
+        return _method_override_refused(
+            state,
+            adapter,
+            override,
+            provider_name=provider_name,
+            request=request,
+            path=path,
+            started=started,
+        )
+
     if adapter is None and upstream_auth is not None:
         # The proxy lends its own cloud identity only to the API routes it
         # recognizes (and redacts). Signing pass-through traffic would hand
@@ -3490,6 +3737,24 @@ async def handle(request: Request) -> Response:
                 path=path,
                 started=started,
             )
+    if proxy_credential and adapter is not None:
+        credential_refusal = adapter.proxy_credential_refusal(
+            request.method, path, request.headers, query
+        )
+        if credential_refusal is not None:
+            # A recognized route whose protocol cannot be served with the
+            # proxy's credential (its answer would hand the client a
+            # capability minted under it): refused before redaction, the
+            # plan's begin() and any upstream contact.
+            return _credential_protocol_refused(
+                state,
+                adapter,
+                credential_refusal,
+                provider_name=provider_name,
+                request=request,
+                path=path,
+                started=started,
+            )
     detection_off = provider_conf is not None and not provider_conf.detection
     if adapter is not None and body_bytes and (proxy_credential or not detection_off):
         # The scanned-body rule: a matched route forwards only a body the
@@ -3505,7 +3770,9 @@ async def handle(request: Request) -> Response:
         # key, and unmatched pass-through (only ever sent with the client's
         # own credential: refused above under one the proxy holds), still
         # forward such bodies verbatim.
-        if parsed is None and _multipart_parts_over(request.headers, body_bytes, max_body_strings):
+        if parsed is None and _multipart_parts_over(
+            request.headers, body_bytes, max_body_strings, adapter, path
+        ):
             # More parts than max_body_strings allows: refused before any
             # parse — a body of many empty parts costs the event loop per
             # part, not per byte. Like max_body_bytes, the cap holds on every
@@ -3739,7 +4006,10 @@ async def handle(request: Request) -> Response:
             prepared = run_batched(
                 ctx.vault,
                 functools.partial(
-                    adapter.prepare_request,
+                    prepare_route_request,
+                    adapter,
+                    request.method,
+                    path,
                     parsed,
                     redactor,
                     inject_note=note_wanted and adapter.wants_system_note(kind, path),
@@ -3752,6 +4022,8 @@ async def handle(request: Request) -> Response:
             return too_many_strings(adapter)
         except PlaceholderLimitReached as exc:
             return refused_response(str(exc), adapter, "no placeholder number left")
+        except VerbatimFieldRedacted as exc:
+            return refused_response(str(exc), adapter, "verbatim field")
         except UnredactableRequest as exc:
             return refused_response(str(exc), adapter, "undecodable field")
         except SealedSessionError:
@@ -3781,8 +4053,19 @@ async def handle(request: Request) -> Response:
         # request (require_scanned). What the upload cites (its lines and
         # form fields) was checked above, before anything was redacted
         # (_ownership_body).
-        boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
+        boundary = adapter.multipart_boundary(path, request.headers.get("content-type", ""))
         if boundary is not None:
+            # A binary file part (a PDF, an image) cannot be redacted: with
+            # the client's own credential it is forwarded unscanned unless
+            # [detection] binary_uploads = "refuse"; under a credential the
+            # proxy holds it is never sent (the proxy vouches only for what
+            # it read). Counted once the upload was read in full.
+            binary_forwarded: list[int] = []
+            forward_binary = (
+                binary_forwarded.append
+                if not proxy_credential and state.config.detection.binary_uploads == "forward"
+                else None
+            )
             try:
                 # One vault transaction for the whole upload (run_batched).
                 rewritten = run_batched(
@@ -3790,7 +4073,11 @@ async def handle(request: Request) -> Response:
                     functools.partial(
                         adapter.redact_multipart,
                         path,
-                        body_bytes,
+                        # The body the stored-object check read, when it
+                        # re-serialized a line repeating a key: every part —
+                        # a text or binary file's too — then goes out as
+                        # the check read it.
+                        checked_upload if checked_upload is not None else body_bytes,
                         boundary,
                         # This body's own copy, counting its strings (form
                         # fields, file names, JSONL lines) against
@@ -3798,8 +4085,10 @@ async def handle(request: Request) -> Response:
                         ctx.redactor.with_budget(max_body_strings),
                         inject_note=note_wanted and adapter.wants_system_note(kind, path),
                         # The scanned-body rule, part by part: an unscanned
-                        # piece refuses the whole request.
+                        # piece refuses the whole request — a binary file
+                        # part only when forward_binary is None.
                         require_scanned=True,
+                        forward_binary=forward_binary,
                     ),
                 )
             except BlockedRequest as exc:
@@ -3833,6 +4122,19 @@ async def handle(request: Request) -> Response:
                 )
             if rewritten is not None:
                 outbound = rewritten
+            elif checked_upload is not None:
+                outbound = checked_upload
+            if binary_forwarded:
+                # Honesty: these bytes leave the machine unread (a count and
+                # the path only — never a file name or content).
+                state.unscanned_uploads[provider_name] += binary_forwarded[0]
+                logger.info(
+                    "%s %s forwarded %d binary upload file part(s) unscanned"
+                    ' ([detection] binary_uploads = "forward")',
+                    request.method,
+                    path,
+                    binary_forwarded[0],
+                )
 
     new_counts = _count_delta(state.detection_counts, detection_counts_before)
     # Same diff trick for warn-mode hits: attribute forwarded-unredacted
@@ -3896,7 +4198,7 @@ async def handle(request: Request) -> Response:
         # Belt and braces behind origin_form_target: whatever the path
         # holds, the request goes to the configured upstream or nowhere.
         return JSONResponse({"error": "the request target must be a path"}, status_code=400)
-    headers = _request_headers(request)
+    headers = _request_headers(request, matched=adapter is not None)
     if upstream_auth is not None:
         # The proxy's own cloud identity: strip every client credential, then
         # authorize the FINAL request — the on-the-wire URL and the bytes
@@ -4324,9 +4626,27 @@ async def _deliver(
         )
     content_type = upstream.headers.get("content-type", "")
     headers = _response_headers(upstream)
+    if identity and adapter is not None and adapter.capability_response_headers:
+        # A capability the provider minted for the PROXY's credential (an
+        # upload session URL) never reaches a client: whatever it grants
+        # would be spent unread, as the proxy's principal.
+        headers = {
+            name: value
+            for name, value in headers.items()
+            if name.lower() not in adapter.capability_response_headers
+        }
     if route is not None:
         headers.update(route.headers)
     request_meta = RequestMeta(request.method, path, started, new_counts, new_warned, audit_token)
+    # A downloaded FILE is restored buffered, per file, whatever its
+    # Content-Type names (JSON, JSON Lines, an event stream): never by a
+    # streaming or whole-body JSON reading (``restores_file_download``).
+    file_download = (
+        kind is RouteKind.CHAT
+        and adapter is not None
+        and adapter.restores_file_download(request.method, path)
+    )
+    streamed = kind is RouteKind.CHAT and adapter is not None and not file_download
     observe = (
         state.response_observer(
             ResponseContext(
@@ -4344,7 +4664,7 @@ async def _deliver(
         else None
     )
 
-    if kind is RouteKind.CHAT and adapter is not None and "text/event-stream" in content_type:
+    if streamed and adapter is not None and "text/event-stream" in content_type:
         return StreamingResponse(
             _stream_rehydrated(
                 upstream,
@@ -4374,7 +4694,7 @@ async def _deliver(
         )
 
     if (
-        kind is RouteKind.CHAT
+        streamed
         and adapter is not None
         and adapter.handles_eventstream
         and "application/vnd.amazon.eventstream" in content_type
@@ -4390,7 +4710,7 @@ async def _deliver(
         )
 
     if (
-        kind is RouteKind.CHAT
+        streamed
         and adapter is not None
         and adapter.handles_ndjson
         and any(t in content_type for t in _JSONL_CONTENT_TYPES)
@@ -4576,11 +4896,23 @@ def _restore_buffered(
     received = raw  # the provider's own bytes (a listing restores items from these)
     rehydration_counts_before = dict(state.rehydration_counts)
     payload: Any = None
-    if kind is RouteKind.CHAT and adapter is not None and "application/json" in content_type:
+    if (
+        kind is RouteKind.CHAT
+        and adapter is not None
+        and adapter.restores_file_download(request.method, path)
+    ):
+        # A downloaded file, whatever its Content-Type (a JSON file served
+        # as application/json included): restored per file, as it was
+        # redacted on upload — never walked as one JSON body, which would
+        # skip its keys and structural names and re-serialize the file.
+        raw_rehydrated = adapter.rehydrate_raw_body(path, raw, ctx.rehydrator) if raw else None
+        if raw_rehydrated is not None:
+            raw = raw_rehydrated
+    elif kind is RouteKind.CHAT and adapter is not None and "application/json" in content_type:
         try:
             payload = loads_bounded(raw)
         except ValueError:
-            payload = None
+            payload = None  # not one JSON value: forwarded as sent
         if payload is not None:
             response_id = adapter.response_id_from_body(payload)
             if response_id is not None:
@@ -4605,13 +4937,6 @@ def _restore_buffered(
                 changed = True
             if changed:
                 raw = json_bytes(rehydrated)
-    elif kind is RouteKind.CHAT and adapter is not None and raw:
-        # Non-JSON buffered CHAT responses: file downloads whose contents
-        # can carry placeholders (OpenAI batch output JSONL). The adapter
-        # decides; None leaves the bytes untouched.
-        raw_rehydrated = adapter.rehydrate_raw_body(path, raw, ctx.rehydrator)
-        if raw_rehydrated is not None:
-            raw = raw_rehydrated
     elif (
         route is not None
         and raw
@@ -4857,9 +5182,10 @@ def _unchecked_body_refused(
 ) -> JSONResponse:
     """A request the proxy would send with its own credential — its cloud
     identity (``identity``), or a routed plan's — whose body the
-    stored-object check cannot read: refused, recorded, before any upstream
-    contact (provider-shaped on a matched route, the pass-through shape
-    otherwise)."""
+    stored-object check cannot read (or, not ``credential_bound``, any
+    request whose upload the check's re-reading would change): refused,
+    recorded, before any upstream contact (provider-shaped on a matched
+    route, the pass-through shape otherwise)."""
     credential = (
         "this provider is authorized with the proxy's own identity"
         if identity
@@ -4868,6 +5194,8 @@ def _unchecked_body_refused(
     message = (
         f"llm-redact: {unreadable.message}, and {credential}, so the stored objects it"
         " cites must be checked; the request was not forwarded"
+        if unreadable.credential_bound
+        else f"llm-redact: {unreadable.message}; the request was not forwarded"
     )
     state.record_request(
         session=state.config.vault.session,
@@ -4881,10 +5209,13 @@ def _unchecked_body_refused(
         rehydrations={},
     )
     logger.info(
-        "%s %s -> %d refused (unchecked body under the proxy's credential)",
+        "%s %s -> %d refused (%s)",
         request.method,
         path,
         unreadable.status,
+        "unchecked body under the proxy's credential"
+        if unreadable.credential_bound
+        else "upload changed by the stored-object check's re-reading",
     )
     error = (
         adapter.error_body(message, status=unreadable.status)
@@ -4961,9 +5292,9 @@ def _restore_listing(
     if not items:
         return None
     listed = {
-        index: item["id"]
-        for index, item in enumerate(items)
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
+        index: object_id
+        for index, object_id in enumerate(map(lister.listing_item_id, items))
+        if object_id is not None
     }
     by_id = state.listing_restorers(list(dict.fromkeys(listed.values())))
     restorers = {
@@ -5233,7 +5564,9 @@ async def _handle_routed(
         return audit_refusal
     # The budget 402 (an attempt that was refused locally, so it carries the
     # audit token) or the first hop (hop 1, or hop 2 of the budget chain).
-    first = plan.begin(outbound, outbound_obj, _request_headers(request))
+    first = plan.begin(
+        outbound, outbound_obj, _request_headers(request, matched=adapter is not None)
+    )
     if isinstance(first, RouteRefusal):
         return _route_refusal(
             state,
@@ -5362,8 +5695,9 @@ def create_app(
             try:
                 loop.add_signal_handler(signal.SIGHUP, state.reload)
                 sighup_registered = True
-            except (NotImplementedError, RuntimeError):
-                # Windows event loops / non-main threads: reload unavailable.
+            except (NotImplementedError, RuntimeError, ValueError):
+                # Windows event loops / non-main threads (uvloop raises
+                # ValueError there, asyncio RuntimeError): reload unavailable.
                 logger.debug("SIGHUP reload unavailable on this platform")
         # Each active off-machine audit sink gets a flush-loop task; both are
         # cancelled and given a final flush at shutdown so no tail is lost.
@@ -5379,9 +5713,14 @@ def create_app(
         background_tasks.append(
             asyncio.create_task(license_refresh_loop(_LICENSE_REFRESH_INTERVAL_SECONDS))
         )
+        # The open-connection re-check backstop (connections.LiveConnections):
+        # started now, or with the first connection whose admission carries
+        # a recheck; stopped before the gate closes.
+        state.connections.start()
         try:
             yield
         finally:
+            await state.connections.stop()
             if sighup_registered:
                 loop.remove_signal_handler(signal.SIGHUP)
             await state.client.aclose()

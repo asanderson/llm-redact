@@ -29,7 +29,7 @@ from llm_redact.placeholders import (
     token_floors,
 )
 from llm_redact.providers.bedrock import BedrockAdapter
-from llm_redact.providers.openai import OpenAIAdapter, _multipart_floors, _part_kind
+from llm_redact.providers.openai import OpenAIAdapter, _multipart_floors, _part_kind, _read_part
 from llm_redact.redactor import PlaceholderLimitReached, Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator
 from llm_redact.vault import EncryptedInMemoryVault, InMemoryVault
@@ -361,14 +361,40 @@ def test_multipart_floors_read_text_fields_and_skip_media() -> None:
         BOUNDARY,
     )
     assert parsed is not None
+
+    def floors(media: bool) -> dict[str, int]:
+        readings = [
+            _read_part(part, media=media, require_scanned=True, charge=lambda n: None)
+            for part in parsed.parts
+        ]
+        return _multipart_floors(parsed, readings)
+
     # Media route: the image file part is never read; the prompt field is.
-    assert _multipart_floors(parsed, media=True) == {"EMAIL": 3, "PURPOSE": 2}
-    # Upload route: every file part is JSONL (lines parsed, else text).
-    assert _multipart_floors(parsed, media=False) == {
-        "EMAIL": 50,
-        "PURPOSE": 2,
-        "PHONE": 4,
-    }
+    assert floors(media=True) == {"EMAIL": 3, "PURPOSE": 2}
+    # Upload route: a binary file part is read as UTF-8 (the upstream may
+    # read it as text), a text file (here: prose, then a JSON line) as the
+    # text it decodes to.
+    assert floors(media=False) == {"EMAIL": 50, "PURPOSE": 2, "PHONE": 4}
+
+
+def test_multipart_floors_read_each_file_as_the_text_it_is() -> None:
+    utf16 = "history «EMAIL_021»\n".encode("utf-16-le")
+    escaped = json.dumps(_line("«PHONE_033»"), ensure_ascii=True).encode()
+    parsed = multipart.parse(
+        _upload(
+            _file_part(b"\xff\xfe" + utf16),  # a UTF-16 text file
+            _file_part(escaped + b"\n"),  # JSONL: the line's decoded JSON
+            _file_part(b"prose\n" + escaped),  # text: read as text
+        ),
+        BOUNDARY,
+    )
+    assert parsed is not None
+    readings = [
+        _read_part(part, media=False, require_scanned=True, charge=lambda n: None)
+        for part in parsed.parts
+    ]
+    assert [reading.kind for reading in readings] == ["document", "jsonl", "document"]
+    assert _multipart_floors(parsed, readings) == {"EMAIL": 21, "PHONE": 33}
 
 
 def test_part_kind() -> None:
@@ -383,7 +409,7 @@ def test_part_kind() -> None:
     assert parsed is not None
     prompt, image, purpose = parsed.parts
     assert _part_kind(prompt, media=True, require_scanned=False) == "text"
-    assert _part_kind(prompt, media=False, require_scanned=False) == "jsonl"
+    assert _part_kind(prompt, media=False, require_scanned=False) == "file"
     assert _part_kind(image, media=True, require_scanned=False) == "media"
     assert _part_kind(purpose, media=False, require_scanned=False) == "field"
     assert _part_kind(purpose, media=False, require_scanned=True) == "text"

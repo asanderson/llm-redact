@@ -53,6 +53,7 @@ import asyncio
 import contextlib
 import functools
 import logging
+import threading
 import time
 import urllib.parse
 from collections import Counter
@@ -62,6 +63,7 @@ from typing import TYPE_CHECKING, Any
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from llm_redact.audit import AuditWriteError
+from llm_redact.connections import ACCESS_CLOSE_CODE
 from llm_redact.jsonwalk import (
     MAX_JSON_DEPTH,
     STRUCTURAL_KEYS,
@@ -83,7 +85,7 @@ if TYPE_CHECKING:
     from llm_redact.config import ProviderConfig
     from llm_redact.detection.base import Detector
     from llm_redact.detection.engine import Allowlist
-    from llm_redact.plugin_api import UpstreamAuth
+    from llm_redact.plugin_api import ConnectionRecheck, UpstreamAuth
     from llm_redact.proxy import ProxyState, RequestContext
 
 logger = logging.getLogger("llm_redact")
@@ -856,11 +858,17 @@ def identity_subprotocols(offered: Sequence[str]) -> list[str]:
 
 def _filtered_headers(websocket: WebSocket) -> list[tuple[str, str]]:
     # The proxy's own x-llm-redact-* namespace never reaches the upstream,
-    # whether or not an access gate consumed it (same rule as HTTP).
+    # whether or not an access gate consumed it (same rule as HTTP), and
+    # neither does a method override (every relay is a matched route, read
+    # as the GET upgrade it is; proxy.METHOD_OVERRIDE_HEADERS).
+    from llm_redact.proxy import METHOD_OVERRIDE_HEADERS
+
     return [
         (name, value)
         for name, value in websocket.headers.items()
-        if name.lower() not in _HOP_HEADERS and not name.lower().startswith("x-llm-redact-")
+        if name.lower() not in _HOP_HEADERS
+        and not name.lower().startswith("x-llm-redact-")
+        and name.lower() not in METHOD_OVERRIDE_HEADERS
     ]
 
 
@@ -924,15 +932,18 @@ def _record_refused(
     started: float,
     *,
     audit_token: object | None = None,
+    status: int = 502,
 ) -> None:
-    """The recorded 502 for a connection the upstream never got (no
-    credential, or the dial failed): one metadata-only row, like HTTP."""
+    """The recorded row for a connection whose client the upstream never
+    served — no credential, the dial failed (502), or it was revoked while
+    dialled (``status``): one metadata-only row, like HTTP, ending the audit
+    START row if there is one."""
     state.record_request(
         session=ctx.session_id,
         provider=adapter.provider,
         method="WS",
         path=path,
-        status=502,
+        status=status,
         started=started,
         streamed=False,
         detections={},
@@ -955,6 +966,12 @@ def _reload_reason(changed: str) -> str:
     return f"llm-redact config reload changed this connection's {changed}; reconnect"
 
 
+# ``RealtimeRelay.revoked`` of a relay closed because its admission ended (the
+# access gate revoked its user or credential, or its re-check refused it) —
+# not a configuration phrase, so never mistaken for what a reload changed.
+ACCESS_REVOKED = "access"
+
+
 class RealtimeRelay:
     """One open realtime connection's admission, as a reload sees it.
 
@@ -968,6 +985,12 @@ class RealtimeRelay:
     each relay whose admission its swap changed (``stale``) in the same
     synchronous step as the swap.
 
+    The access gate's admission rides along (``subject``, ``grant``,
+    ``recheck``; ``plugin_api.Admission``): ProxyState's ``connections``
+    (``connections.LiveConnections``) closes the relay through
+    ``close_for_access`` when the gate revokes it or its re-check refuses
+    it — the same revocation, with the client closed 1008 instead of 1012.
+
     A revoked relay never dials an upstream it has not dialled yet, never
     redacts or forwards a client frame it reads after the swap, and closes
     both sides (the client with 1012: reconnect). The relay checks
@@ -976,17 +999,26 @@ class RealtimeRelay:
     the config editor's request), so a frame read after the swap is always
     seen as revoked: the only frame that can still leave under the old
     admission is one the relay had already read, redacted and handed to
-    the upstream socket when the swap ran."""
+    the upstream socket when the swap ran. An access revocation may come
+    from another thread: a frame the relay read just before it is still
+    sent."""
 
+    kind = "realtime"
     __slots__ = (
+        "_lock",
         "_loop",
         "_revoked_event",
         "allowlist",
+        "close_code",
+        "close_reason",
         "detectors",
+        "grant",
         "modes",
         "provider",
         "provider_config",
+        "recheck",
         "revoked",
+        "subject",
         "upstream_auth",
     )
 
@@ -998,6 +1030,10 @@ class RealtimeRelay:
         detectors: "Sequence[Detector]",
         allowlist: "Allowlist",
         modes: Mapping[str, str],
+        *,
+        subject: str | None = None,
+        grant: str | None = None,
+        recheck: "ConnectionRecheck | None" = None,
     ) -> None:
         self.provider = provider
         self.provider_config = provider_config
@@ -1005,8 +1041,16 @@ class RealtimeRelay:
         self.detectors = detectors
         self.allowlist = allowlist
         self.modes = modes
-        # Once revoked: what the reload changed (a fixed phrase, value-free).
+        self.subject = subject
+        self.grant = grant
+        self.recheck = recheck
+        # Once revoked: what the reload changed (a fixed phrase, value-free)
+        # or ACCESS_REVOKED; the client's close code and reason are set
+        # before it.
         self.revoked: str | None = None
+        self.close_code = RELOAD_CLOSE_CODE
+        self.close_reason = ""
+        self._lock = threading.Lock()
         self._loop = asyncio.get_running_loop()
         self._revoked_event = asyncio.Event()
 
@@ -1031,17 +1075,43 @@ class RealtimeRelay:
             return "[detection] policy"
         return None
 
+    @property
+    def closing(self) -> bool:
+        """Revoked (a reload, or its access): closing, whenever the relay's
+        handler ends (``connections.TrackedConnection``)."""
+        return self.revoked is not None
+
     def revoke(self, changed: str) -> None:
         """Mark the relay revoked — at once, for its per-frame check — and
         wake it to close both sides. Never raises: a reload revokes every
         relay it changed."""
-        if self.revoked is not None:
-            return
-        self.revoked = changed
+        self._revoke(changed, RELOAD_CLOSE_CODE, _reload_reason(changed))
+
+    def close_for_access(self, reason: str) -> bool:
+        """The access gate ended this connection's admission (``connections.
+        TrackedConnection``): revoke it, the client to be closed 1008 with
+        ``reason``. Thread-safe; True when this call revoked it."""
+        return self._revoke(ACCESS_REVOKED, ACCESS_CLOSE_CODE, reason)
+
+    def _revoke(self, changed: str, code: int, reason: str) -> bool:
+        with self._lock:  # first wins, whichever thread revokes
+            if self.revoked is not None:
+                return False
+            self.close_code = code
+            self.close_reason = reason
+            self.revoked = changed
         # Thread-safe, and fine from the loop's own thread (where reloads
         # run). A closed loop has no connection left to close.
         with contextlib.suppress(RuntimeError):
             self._loop.call_soon_threadsafe(self._revoked_event.set)
+        return True
+
+    def revocation_log(self) -> str:
+        """Why the relay was revoked, for the proxy's log: a fixed phrase
+        (never the gate's reason, which only the client is told)."""
+        if self.revoked == ACCESS_REVOKED:
+            return "its access was revoked"
+        return f"a config reload changed its {self.revoked}"
 
     async def wait_revoked(self) -> None:
         await self._revoked_event.wait()
@@ -1238,8 +1308,9 @@ async def ws_handle(websocket: WebSocket) -> None:
         return
     # The connection's admission: its provider's settings and authorizer
     # (read above) and the detection policy, all read since admission with
-    # no await in between. Held by ProxyState while the connection is open,
-    # so a reload that changes it revokes the relay (RealtimeRelay).
+    # no await in between, and the access gate's verdict. Held by ProxyState
+    # while the connection is open, so a reload that changes it, or the gate
+    # ending it, revokes the relay (RealtimeRelay).
     relay = RealtimeRelay(
         adapter.provider,
         provider_config,
@@ -1247,11 +1318,16 @@ async def ws_handle(websocket: WebSocket) -> None:
         state.detectors,
         state.allowlist,
         state.modes,
+        subject=admission.subject,
+        grant=getattr(admission, "grant", None),
+        recheck=getattr(admission, "recheck", None),
     )
     state.realtime_relays.add(relay)
+    state.connections.track(relay)
     try:
         await _relay(state, websocket, adapter, relay, static_ctx, path, started)
     finally:
+        state.connections.untrack(relay)
         state.realtime_relays.discard(relay)
 
 
@@ -1324,12 +1400,15 @@ async def _relay(
             return
         http_url, headers, subprotocols = authorized
         if relay.revoked is not None:
-            # A reload changed the connection's admission while the proxy
-            # was obtaining its credential: the upstream is never dialled
-            # under it (the only await between admission and the dial).
-            logger.info("WS %s -> refused (a config reload changed its %s)", path, relay.revoked)
-            _record_ws_refusal(state, adapter, path, 503, started)
-            await _reject(websocket, _reload_reason(relay.revoked), code=RELOAD_CLOSE_CODE)
+            # A reload changed the connection's admission (or the access gate
+            # revoked it) while the proxy was obtaining its credential: the
+            # upstream is never dialled under it (the only await between
+            # admission and the dial). Recorded as the reload's 503 or the
+            # gate's 403.
+            logger.info("WS %s -> refused (%s)", path, relay.revocation_log())
+            refused = 403 if relay.revoked == ACCESS_REVOKED else 503
+            _record_ws_refusal(state, adapter, path, refused, started)
+            await _reject(websocket, relay.close_reason, code=relay.close_code)
             return
     url = _ws_form(http_url)
 
@@ -1375,6 +1454,17 @@ async def _relay(
         await _reject(websocket, "upstream websocket connect failed")
         return
 
+    if relay.revoked is not None:
+        # Revoked while the upstream was dialled (a reload, or the access
+        # gate): the dial completes and closes; the client is never accepted
+        # onto it, and no upstream frame (its greeting) reaches it.
+        logger.info("WS %s -> refused after dialling (%s)", path, relay.revocation_log())
+        with contextlib.suppress(Exception):
+            await upstream.close(code=1000)
+        refused = 403 if relay.revoked == ACCESS_REVOKED else 503
+        _record_refused(state, ctx, adapter, path, started, audit_token=audit_token, status=refused)
+        await _reject(websocket, relay.close_reason, code=relay.close_code)
+        return
     await websocket.accept(subprotocol=upstream.subprotocol)
     logger.info("WS %s -> connected (provider %s)", path, adapter.provider)
     if not provider_config.detection:
@@ -1397,7 +1487,7 @@ async def _relay(
             await websocket.close(code=code, reason=_close_reason(reason))
         await upstream.close(code=1000)
 
-    async def close_on_reload(changed: str) -> None:
+    async def close_on_revoke() -> None:
         # Only a connection still open on both sides: one that a policy
         # close, the client or the upstream ended first keeps that close.
         if (
@@ -1405,11 +1495,9 @@ async def _relay(
             or websocket.client_state is not WebSocketState.CONNECTED
         ):
             return
-        logger.info(
-            "WS %s -> closed %d (a config reload changed its %s)", path, RELOAD_CLOSE_CODE, changed
-        )
+        logger.info("WS %s -> closed %d (%s)", path, relay.close_code, relay.revocation_log())
         with contextlib.suppress(Exception):  # the client may vanish meanwhile
-            await close_on_policy(_reload_reason(changed), code=RELOAD_CLOSE_CODE)
+            await close_on_policy(relay.close_reason, code=relay.close_code)
 
     async def client_to_upstream() -> None:
         nonlocal status
@@ -1420,9 +1508,10 @@ async def _relay(
                 await upstream.close(code=code)
                 return
             if relay.revoked is not None:
-                # A reload changed this connection's admission: the frame is
-                # neither redacted under the policy it was opened with nor
-                # sent on its upstream session. The relay closes (1012).
+                # A reload changed this connection's admission (or the access
+                # gate ended it): the frame is neither redacted under the
+                # policy it was opened with nor sent on its upstream session.
+                # The relay closes (1012, or 1008).
                 return
             data: str | bytes
             if message.get("text") is not None:
@@ -1512,7 +1601,14 @@ async def _relay(
     async def upstream_to_client() -> None:
         try:
             async for frame in upstream:
+                if relay.revoked is not None:
+                    # Revoked (a reload, or the access gate — perhaps from
+                    # another thread): no upstream frame is restored or sent
+                    # to the client after it; the relay closes.
+                    return
                 for out in adapter.rehydrate_message(frame, pool):
+                    if relay.revoked is not None:
+                        return
                     if isinstance(out, str):
                         await websocket.send_text(out)
                     else:
@@ -1530,8 +1626,8 @@ async def _relay(
         tasks = {
             asyncio.create_task(client_to_upstream()),
             asyncio.create_task(upstream_to_client()),
-            # A reload that revokes the relay wakes it here, whichever way
-            # frames are (or are not) flowing.
+            # A reload or the access gate revoking the relay wakes it here,
+            # whichever way frames are (or are not) flowing.
             asyncio.create_task(relay.wait_revoked()),
         }
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -1540,7 +1636,7 @@ async def _relay(
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         if relay.revoked is not None:
-            await close_on_reload(relay.revoked)
+            await close_on_revoke()
         for task in done:
             exc = task.exception()
             if exc is not None and not isinstance(

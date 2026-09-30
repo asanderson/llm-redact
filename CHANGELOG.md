@@ -11,7 +11,24 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+- File uploads (OpenAI/Azure/custom `…/files`) are read by CONTENT
+  (`upload_content.classify_file`): JSONL is redacted per line as before, any other
+  text file (UTF-8, or UTF-16/32 with a BOM) is redacted as one text and re-encoded as
+  it came, and a BINARY file (a PDF, image or archive — a known signature or a NUL
+  byte means binary even when the bytes decode) is no longer refused under the
+  client's own key: it is forwarded UNSCANNED, its file name still redacted, and
+  counted. Under a credential the proxy holds (cloud identity, a routed operator key)
+  a binary file is still refused 400. Downloads of text files
+  (`GET …/files/{id}/content`) are restored line by line; binary downloads are
+  untouched.
+
 ### Added
+- `[detection] binary_uploads = "forward" | "refuse"` (default `"forward"`, hot):
+  `"refuse"` keeps refusing binary uploads under the client's own key too. Forwarded
+  binaries are surfaced: /status `unscanned_uploads_total`,
+  `llm_redact_unscanned_uploads_total{provider}` (Grafana panel), a `llm-redact
+  status` posture line when nonzero, and a doctor line stating the setting.
 - Optional `SessionRouter.response_observer(context) -> ResponseObserver | None`
   (`plugin_api.ResponseContext`, `plugin_api.ResponseObserver`): a plugin observes
   upstream answers read-only and provider-neutrally. Told the adapter, method, path,
@@ -22,6 +39,187 @@ and tags `vX.Y.Z`.
   is not observed). Faults are contained as bookkeeping stage `response_observer`
   (type-only log, the answer delivered unchanged); a router without the member costs
   one attribute test per answer.
+- Open realtime relays and dashboard live-events streams now end when their admission
+  ends. An access gate may close them at once through the optional
+  `AccessGate.bind_connections(control)` (`plugin_api.ConnectionControl`:
+  `close(subject=, grant=, reason=)`, thread-safe), and the core re-checks each open
+  connection's optional `Admission.recheck` every `recheck_interval` seconds (gate
+  member, 5..3600, default 30), failing closed: a check that raises, times out or
+  answers anything but a bool, None or a string closes the connection. A WebSocket
+  closes 1008 with the gate's reason (upstream 1000); an events stream ends.
+  `Admission.grant` is an opaque key the core never logs or reports. New `/status`
+  `connections` block, `llm_redact_connections_closed_total{cause}`, bookkeeping
+  stage `recheck`. Streaming HTTP answers are not cut (each answers a request that
+  was admitted).
+- The Gemini API's Batch Mode beyond the create is recognized, so a credential the
+  proxy holds (a routed operator key) may reach it: a batch's status
+  (`GET /v1beta/batches/{id}`, the name the create answers with) and the batch list
+  restore the display name and a finished batch's INLINED responses; cancel and
+  delete are redact-only; `models/{m}:asyncBatchEmbedContent` is redact-only and
+  tracked like `:batchGenerateContent`. No batch route carries the system note.
+- The Gemini API's Files API is recognized: the single-request upload
+  (`X-Goog-Upload-Protocol: multipart`, a `multipart/related` body) and the
+  metadata-only create are redacted part by part with the OpenAI Files upload's
+  content policy (every part read as a file by its content; a binary file forwarded
+  unscanned only with the client's own key under `binary_uploads = "forward"`,
+  counted in `unscanned_uploads`); a file's metadata and the file list restore each
+  `displayName`; the download (`…:download`, `/download/v1beta/…:download`) is
+  restored like an OpenAI file download; delete is redact-only. A RESUMABLE upload's
+  start is refused (403) under a credential the proxy holds — its upload URL would
+  carry the file's data to Google unread, as the proxy's principal — and an
+  `X-Goog-Upload-URL` answer header is never relayed there; data chunks and the raw
+  protocol stay pass-through (the client's own key only).
+- Anthropic's Files API (beta, a request carrying `anthropic-version` alone) is
+  recognized: the upload uses the OpenAI Files upload unchanged, every file object's
+  echoed filename is restored (upload answer, list, metadata), a file's content is
+  restored like an OpenAI file download, delete is redact-only.
+- Optional adapter hooks: `listing_item_id` (a listed item's id: `id`, Gemini
+  `name`), `multipart_boundary` (a route reading another multipart type),
+  `proxy_credential_refusal` (a recognized protocol never served with a proxy-held
+  credential: recorded 403) and `capability_response_headers` (never relayed under
+  one). `openai.rehydrate_text_file` is the one file-download restoration.
+- OpenAI fine-tuning jobs, vector stores and code interpreter containers are
+  recognized (OpenAI, both Azure families — containers on the v1 API only — and
+  custom providers), so a routed operator key or cloud identity may reach them.
+  Fine-tuning: job `metadata` redacted and restored in every echo, event messages
+  restored, checkpoints recognized. Vector stores: `name`, `description`,
+  `metadata`, file `attributes` (a caller-keyed map, now walked like `metadata`),
+  search queries and filter values redacted; echoes, search results and a file's
+  parsed content restored. Containers: `name` redacted and restored, container
+  file uploads read by content like `/v1/files` uploads, downloads restored like a
+  Files API download. New adapter hooks `verbatim_fields` and `label_fields` with
+  `providers.base.prepare_route_request` as the proxy's redaction entry point:
+  identifier fields the provider uses exactly as sent (a fine-tune `suffix`, which
+  becomes part of the model name; training/validation file ids; W&B
+  `integrations`; the file ids of a store, attach, file batch or container; a
+  search filter's attribute `key`) are scanned but never rewritten — a value that
+  would be redacted there refuses the request (400); label fields under a
+  structural key (a store's or container's `name`) are redacted and restored.
+  Created stores, containers and container files are reported to a session router
+  (so is the container a Responses code interpreter call ran in), and the job,
+  store and container lists are listings it attributes per item. Checkpoint
+  permissions stay pass-through, and the Uploads API stays unrecognized (a part is
+  an opaque byte range; documented in docs/api-coverage.md).
+
+### Changed
+- Recognized upload routes are capped by `max_body_bytes` (default 10 MiB):
+  Anthropic Files and Gemini Files uploads over the cap sent with the client's own
+  key used to pass through unscanned and are now refused 413 — raise
+  `max_body_bytes` for larger files.
+
+### Fixed
+- An upload refused part way through no longer records its text parts in the bounded
+  memory of text uploads whose downloads are restored byte-exact, so refused requests
+  cannot evict what accepted uploads recorded. That memory is per process: a JSON text
+  upload downloaded through another replica, another `llm-redact run` proxy or after a
+  restart is restored as valid JSON with every value, but a value whose source held an
+  escape comes back escaped once more (documented in docs/providers.md).
+- A downloaded JSONL file restores EVERY value of its lines, under `id`, `name`,
+  `type`, `data` and the other request-body structural names too, as the upload now
+  redacts them (the download kept the request-body skip set, so a data file came back
+  with placeholders under those keys). A batch output's tool-call `arguments` is still
+  restored as JSON source.
+- A downloaded text file that is one JSON document (a JSON file a model or code wrote
+  around a placeholder, served as `application/json` or not) stays valid JSON: each
+  restored value is JSON-escaped where it lands, keys included and formatting kept (a
+  PEM key's newlines once landed raw inside a string). Raw restoration is kept for the
+  files it is right for: every text upload this process redacted as one text is now
+  remembered (by digest, newest 1024) and comes back byte-exact. A JSON text upload
+  no longer remembered (a restart) is read like a model-written file.
+- A connection re-check that swallows its own cancellation can no longer hold the
+  periodic re-check pass open (and so stop every later re-check): the pass stops
+  waiting at the timeout, closes the connection and abandons the check, instead of
+  waiting for it to finish cancelling as `asyncio.wait_for` does.
+- A buffered file download served as JSON Lines under a JSON content type
+  (`application/jsonl` contains `application/json`) is restored through the
+  adapter's file-download restoration instead of being left unrestored.
+- The app lifespan tolerates `add_signal_handler` raising `ValueError` (uvloop off the
+  main thread) alongside `NotImplementedError` and `RuntimeError`; SIGHUP reload is
+  then unavailable, as on Windows.
+- An uploaded text file whose first bytes happen to spell a media format's name
+  (a CSV row opening `ID3,`, a note opening `RIFF` or `GIF89a`, a word `ftyp` at
+  byte 4) is redacted as text again instead of being classified binary and
+  forwarded unscanned. Only `%PDF-` and control-byte signatures still mark
+  decodable bytes as binary; real files of the other formats fail the strict
+  text decode on their own.
+- With a session router that checks stored-object access, a UTF-16/32 text upload
+  whose first line parsed as JSON repeating a key was rewritten in mixed encodings
+  by the check's re-reading, then read as binary and forwarded unscanned. The
+  check now reads file lines only as UTF-8 text and rewrites a line only in a
+  UTF-8 file; an upload whose re-reading would change what a file part is gets a
+  400.
+- A downloaded text file (not JSON Lines) is restored as one text, the way it was
+  redacted on upload: a line that parses as JSON only once it holds a placeholder
+  no longer gets its restored value JSON-escaped, so the file round-trips byte for
+  byte. JSON Lines files are still restored line by line as JSON.
+- Holding a route's verbatim fields out of redaction (vector store search filter
+  keys, file batch file ids) costs time linear in the body: a request with many
+  such fields used to block the proxy's event loop for tens of seconds.
+- A fine-tuning job create's reinforcement grader names (nested multi-grader
+  names included) are redacted like other user-written labels and restored in
+  every echo of the job; they were forwarded as sent, now under a credential the
+  proxy holds too.
+- A request on a recognized route that carries an HTTP method override (the
+  `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override` header, or a
+  `_method`/`$httpMethod`-style query parameter) is refused (400) before its body
+  is read, and those headers are never forwarded on a recognized route or a
+  realtime relay: an upstream honoring one ran another method than the one the
+  request was redacted, restored and checked as (a file create served as the file
+  list). Unrecognized pass-through traffic forwards them as sent. A Gemini file
+  create's answer reports only its own file, never a `files` array.
+- An access gate's awaitable re-check that ends in a cancellation (a shared lookup
+  another path cancelled) now closes its connection like any failed check; it used
+  to end the re-check backstop for good, leaving later revocations only a re-check
+  could see unapplied. A backstop task that ended anyway is started again.
+- An Anthropic Messages answer's code execution container (buffered, and streamed
+  in `message_start` / `message_delta`) is reported to a session router as the
+  requester's, like the files the run wrote, so a later request reusing the
+  container can be checked against its creator; a container the request itself
+  named is never reported.
+- An uploaded JSON Lines data file (OpenAI Files of a purpose other than batch or
+  fine-tuning, container files, Anthropic Files, Gemini uploads) has every value
+  redacted, including values under keys such as `id`, `name`, `type` or `data`,
+  which were skipped as request protocol fields and forwarded as sent. Only a
+  batch line's request body and a fine-tuning example's conversation keep the
+  request reading, and only those get the system note.
+- With a session router that checks stored-object access, reading an upload for
+  the check no longer parses every line: blank lines, prose and other lines that
+  cannot hold a JSON object cost one scan, and the lines it does parse are
+  counted against `max_body_strings` (an upload over it is refused 413 under a
+  credential the proxy holds). A 10 MiB upload of blank lines used to block the
+  proxy for about a minute.
+- A downloaded file (OpenAI, Azure and custom-provider files and container files,
+  Anthropic Files, Gemini downloads) is restored per file whatever Content-Type the
+  provider serves it with. A JSON file served as `application/json` used to be
+  walked as one JSON body, leaving placeholders in its keys and under names such
+  as `id` or `data` and re-serializing the whole file; JSON Lines and event-stream
+  media types took the streaming readings.
+- A text file uploaded redacted as one text that reads as JSON Lines only once
+  redacted (a line holding the secret was not valid JSON before, such as an
+  unescaped backslash in a Windows account name) is restored on download exactly
+  as it was uploaded, instead of line by line as JSON with the restored value
+  JSON-escaped and the line re-spaced. The proxy remembers such uploads by a
+  digest of the bytes it sent, for the newest 1024 in the running process.
+- Holding a route's verbatim fields out of redaction no longer costs time per
+  level of nesting for each field, and each field found counts against
+  `max_body_strings` at once: a deeply nested vector store search with too many
+  filter keys is refused as fast as any over-budget body, instead of blocking the
+  proxy for tens of seconds first.
+- Stopping the connection re-check backstop while an access re-check is pending no
+  longer lets that check's later exception be logged at shutdown as an
+  unretrieved task exception (with its message); its outcome is discarded, as a
+  timed-out check's already was.
+- A connection already closed for access (an events stream whose client stopped
+  reading stays open until its socket closes) is no longer re-checked every
+  interval, logging and counting a failed re-check each time, nor reported as
+  open. A connection whose earlier re-check is still running after being
+  abandoned is not asked again, and at most 64 abandoned re-checks may run at
+  once (further awaitable re-checks count as failed without being started).
+- A realtime relay revoked (by a config reload or the access gate) while the proxy
+  was dialling its upstream is closed without being served: the client no longer
+  receives the upstream's opening frame, and the refusal is recorded (503 for a
+  reload, 403 for an access revocation). An open relay revoked by the gate no
+  longer sends the client upstream frames that arrive after the revocation.
 
 ## [1.9.0] - 2026-09-29
 

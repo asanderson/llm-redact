@@ -159,25 +159,70 @@ objects, so only clients that were already sending malformed bodies see
 the refusal instead of a silent leak.
 
 Inside an accepted multipart upload every piece must be scanned too, or
-the whole request is refused the same way: each non-blank line of an
-uploaded file must be a JSON object (a batch input or fine-tuning file),
-so a text, PDF, image or other non-JSONL file is refused — llm-redact
-cannot scan it; plain form fields (`purpose`, `user`, `size`, …) are
-scanned as UTF-8 text (a field that is not UTF-8 is refused), and bytes
-outside every part (a multipart preamble or epilogue) are refused. So is
+the whole request is refused the same way. An uploaded file is read by
+its CONTENT (the declared type and file name are only the client's
+guess): a JSONL file (every non-blank line a JSON object — a batch input
+or fine-tuning file) is redacted line by line as JSON — every value of
+every line, whatever its key (a data file's `id`, `name`, `type` or
+`data` is content), except in what a provider runs as a request: the
+`body` of a line in an OpenAI Files upload of purpose `batch`, and the
+conversation of a `fine-tune` example, keep a request's protocol fields
+(`role`, `model`, a tool call's `id` and `name`) as sent; any other text
+file — strict UTF-8 (a byte-order mark kept), or UTF-16/UTF-32 opened by
+its byte-order mark — is redacted as one text and re-encoded exactly as it
+came (a CSV, a log, notes; a file mixing JSON lines with other lines is
+text); a BINARY file — bytes that do not decode, text holding a NUL, or a
+known binary signature even when the bytes would decode (an all-ASCII PDF:
+rewriting it would break its byte offsets) — cannot be redacted at all. A
+binary file part is the one piece that may leave unscanned, and only with
+the tool's own key: `[detection] binary_uploads = "forward"` (the default)
+forwards it byte-identical — its file NAME still redacted — counts it
+(`/status` `unscanned_uploads_total`, `llm_redact_unscanned_uploads_total`,
+an INFO log line with the path and count, the `llm-redact status` posture
+block) and says so in `doctor`; `"refuse"` answers 400 instead. **What is
+inside a forwarded PDF, image or archive reaches the provider as-is** —
+exactly like base64 media in a chat body. Under a credential the proxy
+holds (its cloud identity, or a routing rule's operator key) a binary file
+is always refused: the proxy vouches only for what it read. A JSONL line
+nesting JSON deeper than 128 levels is refused (a JSONL reader would
+decode what no walk can read). Plain form fields (`purpose`, `user`,
+`size`, …) are scanned as UTF-8 text (a field that is not UTF-8 is
+refused), and bytes outside every part (a multipart preamble or epilogue)
+are refused. So is
 a part header without a single reading — a folded or repeated header
 line, a filename holding a backslash that is not a `\"` or `\\` escape, a
 malformed `filename*` or one in a charset other than UTF-8 — and a part
 the proxy could not read as its plain bytes: a Content-Transfer-Encoding
 other than `7bit`/`8bit`/`binary` on any part (RFC 7578 deprecates them),
 or, on a part whose content is scanned, a declared charset other than
-UTF-8/US-ASCII (its Content-Type `charset`, or the RFC 7578 `_charset_`
-field). The image and mask parts of an image edit (and a video job's
+the one its content decoded as — UTF-8/US-ASCII, or a UTF-16/32 text
+file's own (its Content-Type `charset`, or the RFC 7578 `_charset_`
+field). `GET /v1/files/{id}/content` reads a download the same way: a
+text file this proxy uploaded redacted as one text is remembered by a
+digest of the bytes sent — the newest 1024, in the running process — and
+restored as the text it was (a value lands exactly as it was redacted,
+never JSON-escaped, even when the file now reads as JSON); a JSONL file is
+restored line by line as JSON, every value of every line; any other text
+file that is ONE JSON document (a JSON file a model or code wrote around a
+placeholder) is restored over its source text with each restored value
+JSON-escaped, keys included and formatting kept, so it stays valid JSON;
+any other text file as one text; each re-encoded as it came; a binary file
+is left untouched. A download is read this way whatever Content-Type the
+provider serves it with (a JSON file served as `application/json`
+included). One residual: the memory is per process and shared by
+every caller, so a JSON text upload downloaded through a process that does
+not remember it (another replica of a multi-replica deployment, a separate
+`llm-redact run` proxy, a restart, or after 1024 newer accepted text
+uploads — a refused upload records nothing) is read like a file a model
+wrote: valid JSON, every value restored, but a value whose source form held
+an escape (`\\`, `\n` — a PEM key in a service-account JSON file, for
+one) comes back escaped once more. Download such a file through the
+proxy process that uploaded it when its exact bytes matter. The image and mask parts of an image edit (and a video job's
 reference image) are media — the documented non-goal, as base64 media in
 a JSON body — and are sent as they came (their filenames redacted).
 
 `[providers.NAME] detection = false` with the tool's own key is the
-explicit opt-out: nothing is scanned and such bodies — a PDF upload
+explicit opt-out: nothing is scanned and such bodies — any upload
 included — are forwarded verbatim, surfaced like every other opt-out
 (`/status` `providers_detection_off`, `llm-redact status`, `doctor`).
 Traffic on a route llm-redact does not recognize is forwarded verbatim
@@ -226,8 +271,8 @@ proxy's own identity holds whatever `detection` says: `detection = false`
 turns redaction off, not this rule (the ownership check of
 llm-redact-pro's named users reads the parsed body too, so a gzip or
 non-JSON body it could not read is refused either way). With `detection`
-on, an upload whose files are not JSONL (a text file, a PDF) cannot be
-sent with the proxy's identity. Realtime
+on, an upload holding a binary file (a PDF, an image) cannot be sent
+with the proxy's identity; a text file is redacted and sent. Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with
@@ -337,6 +382,66 @@ MCP connector configuration (Anthropic `mcp_servers`, OpenAI
 `tools type=mcp`) passes through unredacted by design — the provider
 must hold the real credential to call your MCP server — while MCP call
 arguments and output are redacted and restored like any other content.
+
+## Stored-object APIs: fine-tuning, vector stores, containers
+
+OpenAI's fine-tuning jobs (`/v1/fine_tuning/jobs`: create, the list, one
+job, its cancel/pause/resume, events and checkpoints — on Azure's
+`/openai/v1` and api-version `/openai` families and custom providers too)
+are recognized, so a credential the proxy holds (a routed operator key,
+Azure's identity auth) may reach them. The caller's free-form `metadata`
+is redacted and restored in every echo of the job, and the provider's
+event messages are restored; the training data itself is the file,
+redacted at its upload. Some fields the provider keeps exactly as sent:
+the `suffix` becomes part of the fine-tuned model's name — the name
+every later request cites in its `model`, which is never rewritten — and
+the file ids and the Weights & Biases `integrations` name things that
+exist elsewhere. Those VERBATIM fields are scanned but never rewritten:
+a value llm-redact would redact there refuses the request with a 400
+naming the field (a placeholder would name a model, file or project that
+does not exist). Choose a suffix that holds nothing private. The created
+job, and the files a finished job wrote (`result_files`), are reported
+to a session router that tracks stored objects (llm-redact-pro's named
+users). Checkpoint permissions (an admin key sharing a checkpoint across
+projects) stay pass-through.
+
+Vector stores (`/v1/vector_stores`: the store, its search, its files and
+file batches — OpenAI, both Azure families, custom providers) are
+recognized the same way. A store's `description` and `metadata`, a file's
+`attributes` (a map keyed by the caller, walked like `metadata`: a key
+named `name` or `id` is data), the store's `name` (a label: the store is
+addressed by its id), a search's `query` and its attribute-filter values
+are redacted; every answer echoing them, and the stored files'
+content a search or a file's content read returns, is restored. Vector
+store traffic uses the static vault session (with llm-redact-pro's named
+users, the user's own copy of it) — the session the files were uploaded
+and the attributes redacted in — so a filter value's placeholder is the
+stored attribute's and the filter still matches (the vault is
+deterministic). The file ids a store, attach or file batch names, and a
+filter's attribute `key`, are verbatim, as above. The
+created store is reported to a session router, and the store list is a
+listing it attributes per item; a store's own files are read as the
+store's.
+
+Code interpreter containers (`/v1/containers`: the container and its
+files — OpenAI, Azure's v1 API, custom providers) are recognized too. A
+container file upload is redacted exactly as a `/v1/files` upload is (the
+file part read by its content, its filename and every form field; a
+binary file goes out unscanned only with the client's own key), a JSON
+container-file create names a stored file (verbatim), the container file
+object's `path` (the filename) is restored, and a download is restored
+like a Files API download — a text file line by line, a binary file
+untouched. A container's `name` is redacted and restored like a store's;
+its starting `file_ids` are verbatim. Created containers — and the container a
+Response's code interpreter call ran in (or a file it cites was written
+in), unless the request named it — and container files are reported to a
+session router.
+
+The Uploads API (`/v1/uploads`: a large file sent in parts) stays
+unrecognized — a part is an opaque byte range whose boundaries can split
+a line or a value, and the total size is declared before the first part —
+so a credential the proxy holds is never lent to it; upload through
+`/v1/files` instead (docs/api-coverage.md, honest gaps).
 
 ## Realtime WebSocket APIs
 

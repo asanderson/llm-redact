@@ -19,8 +19,9 @@ from typing import Any
 from llm_redact.jsonwalk import json_bytes, json_text, loads_bounded, transform_strings
 from llm_redact.providers.attribution import provider_markers
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
+from llm_redact.providers.documents import redact_files_upload, rehydrate_download
 from llm_redact.redactor import Redactor
-from llm_redact.rehydrate import RehydratorPool
+from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
 
 _PASSTHROUGH_EVENTS = frozenset(
@@ -35,6 +36,18 @@ _BATCH_CANCEL_RE = re.compile(r"/v1/messages/batches/[^/]+/cancel")
 # The model listing and one model, shared with OpenAI (and the Gemini API's
 # v1 surface): Anthropic's only when the request carries its marker alone.
 _MODELS_RE = re.compile(r"/v1/models(?:/[^/]+)?")
+# The Files API (beta), whose paths are OpenAI's too: Anthropic's only when
+# the request carries its marker alone (like the model listing). The upload
+# is a multipart/form-data document (a PDF, a text file, an image) — a TEXT
+# file redacted as text, a binary one forwarded as sent only with the
+# client's own key (``providers.documents``, the OpenAI Files upload's
+# policy) — and every file object echoes the uploaded ``filename``: the
+# upload's answer, the list and a file's metadata restore it. A file's
+# content (downloadable only for files a tool created) is restored when it
+# is text; delete carries the id only.
+_FILES = "/v1/files"
+_FILE_RE = re.compile(r"/v1/files/[^/]+")
+_FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
 # The routes whose bodies carry the Messages `system` field the note joins.
 _NOTE_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens", "/v1/messages/batches"})
 
@@ -51,6 +64,14 @@ _OUTPUT_SUFFIX = "_output"
 # A key every event naming a generated file carries (never inside a JSON
 # string: a quote there is escaped), so an event without it is never parsed.
 _FILE_ID_KEY = '"file_id"'
+# The code execution CONTAINER a message ran in: the answer names it
+# (``container: {"id", "expires_at"}``; streamed in ``message_start``'s
+# message or ``message_delta``'s delta), and a later request reuses it by
+# that id (its top-level ``container``) — files earlier runs wrote live
+# there. Reported like a generated file; a container the request itself
+# named is dropped by the proxy (``_uncited``), so only a new one is the
+# requester's. The key gates event parsing like ``_FILE_ID_KEY``.
+_CONTAINER_KEY = '"container"'
 
 
 def generated_file_ids(blocks: Any) -> tuple[str, ...]:
@@ -75,6 +96,26 @@ def generated_file_ids(blocks: Any) -> tuple[str, ...]:
             ):
                 found.append(file_id)
     return tuple(dict.fromkeys(found))
+
+
+def container_ids(container: Any) -> tuple[str, ...]:
+    """The code execution container a Messages answer names (its
+    ``container`` object's ``id``), if any."""
+    container_id = container.get("id") if isinstance(container, dict) else None
+    return (container_id,) if isinstance(container_id, str) and container_id else ()
+
+
+def _files_route(method: str, path: str) -> RouteKind:
+    """How the Files API route ``method`` ``path`` is handled (for a request
+    carrying the Anthropic marker alone): the upload, the list, a file's
+    metadata and its content are CHAT, delete redact-only."""
+    if (method in ("POST", "GET") and path == _FILES) or (
+        method == "GET" and (_FILE_RE.fullmatch(path) or _FILE_CONTENT_RE.fullmatch(path))
+    ):
+        return RouteKind.CHAT
+    if method == "DELETE" and _FILE_RE.fullmatch(path):
+        return RouteKind.REDACT_ONLY
+    return RouteKind.NONE
 
 
 def _creates_message(path: str) -> bool:
@@ -200,20 +241,61 @@ class AnthropicAdapter(ProviderAdapter):
         # GET /v1/models is shared with OpenAI: Anthropic's when the request
         # carries anthropic-version (every Anthropic SDK request does) and no
         # other provider's marker. Metadata only — recognized, redact-only.
-        if (
-            method == "GET"
-            and _MODELS_RE.fullmatch(path)
-            and provider_markers(headers, query) == {"anthropic"}
-        ):
-            return RouteKind.REDACT_ONLY
+        if provider_markers(headers, query) == {"anthropic"}:
+            if method == "GET" and _MODELS_RE.fullmatch(path):
+                return RouteKind.REDACT_ONLY
+            files = _files_route(method, path)
+            if files is not RouteKind.NONE:
+                return files
         return self.matches(method, path)
+
+    def redacts_multipart(self, path: str) -> bool:
+        return path == _FILES
+
+    def redact_multipart(
+        self,
+        path: str,
+        body: bytes,
+        boundary: bytes,
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        require_scanned: bool = False,
+        forward_binary: Callable[[int], None] | None = None,
+    ) -> bytes | None:
+        # The Files upload: the document part (and any form field) to the
+        # shared document policy, every part's file name redacted.
+        return redact_files_upload(
+            body,
+            boundary,
+            redactor,
+            require_scanned=require_scanned,
+            forward_binary=forward_binary,
+        )
+
+    def restores_file_download(self, method: str, path: str) -> bool:
+        return method == "GET" and _FILE_CONTENT_RE.fullmatch(path) is not None
+
+    def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
+        if _FILE_CONTENT_RE.fullmatch(path) is None:
+            return None
+        return rehydrate_download(raw, rehydrator)
+
+    def lists_objects(self, method: str, path: str) -> bool:
+        return method == "GET" and path == _FILES
+
+    def listing_items(self, body: Any) -> list[Any] | None:
+        # ``{"data": [...], "has_more", "first_id", "last_id"}``.
+        items = body.get("data") if isinstance(body, dict) else None
+        return items if isinstance(items, list) else None
 
     def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
         # A message batch (its later results are read by id), a Files API
-        # upload (POST /v1/files with anthropic-version — pass-through, the
-        # document is media — read back by id and cited by later messages as
-        # a document or container_upload `file_id`), and a message: the
-        # files its code execution runs wrote (generated_file_ids).
+        # upload (POST /v1/files with anthropic-version, read back by id and
+        # cited by later messages as a document or container_upload
+        # `file_id`), and a message: the
+        # files its code execution runs wrote (generated_file_ids) and the
+        # container they ran in (container_ids).
         tail = path.rstrip("/")
         return method == "POST" and (
             tail.endswith("/messages/batches") or tail in ("/v1/files", "/v1/messages")
@@ -221,8 +303,12 @@ class AnthropicAdapter(ProviderAdapter):
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
         if _creates_message(path):
-            # The message id names no stored object; its generated files do.
-            return generated_file_ids(body.get("content") if isinstance(body, dict) else None)
+            # The message id names no stored object; its generated files and
+            # the container its code ran in do.
+            if not isinstance(body, dict):
+                return ()
+            found = generated_file_ids(body.get("content")) + container_ids(body.get("container"))
+            return tuple(dict.fromkeys(found))
         if isinstance(body, dict) and isinstance(body.get("id"), str) and body["id"]:
             return (str(body["id"]),)
         return ()
@@ -231,9 +317,10 @@ class AnthropicAdapter(ProviderAdapter):
         # A streamed message: a code execution result arrives WHOLE in its
         # content_block_start (server tool results are never streamed as
         # deltas); message_start's content is read too, for completeness.
+        # The container: message_start's message, or message_delta's delta.
         if not _creates_message(path):
             return super().object_ids_from_event(method, path, event)
-        if _FILE_ID_KEY not in event.data:
+        if _FILE_ID_KEY not in event.data and _CONTAINER_KEY not in event.data:
             return ()
         try:
             payload = loads_bounded(event.data)
@@ -241,10 +328,17 @@ class AnthropicAdapter(ProviderAdapter):
             return ()
         if not isinstance(payload, dict):
             return ()
-        if payload.get("type") == "content_block_start":
+        kind = payload.get("type")
+        if kind == "content_block_start":
             return generated_file_ids([payload.get("content_block")])
-        message = payload.get("message") if payload.get("type") == "message_start" else None
-        return generated_file_ids(message.get("content") if isinstance(message, dict) else None)
+        if kind == "message_delta":
+            delta = payload.get("delta")
+            return container_ids(delta.get("container") if isinstance(delta, dict) else None)
+        message = payload.get("message") if kind == "message_start" else None
+        if not isinstance(message, dict):
+            return ()
+        found = generated_file_ids(message.get("content")) + container_ids(message.get("container"))
+        return tuple(dict.fromkeys(found))
 
     def reports_object_ids_once(self, method: str, path: str) -> bool:
         # A message's files are named block by block: every event is read.

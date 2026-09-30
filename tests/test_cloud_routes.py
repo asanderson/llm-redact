@@ -98,6 +98,25 @@ NEW_ROUTES: list[tuple[str, str, str, RouteKind]] = [
     ("GET", "/openai/v1/conversations/conv_1", "azure", CHAT),
     ("GET", "/openai/v1/conversations/conv_1/items/item_1", "azure", CHAT),
     ("DELETE", "/openai/v1/conversations/conv_1", "azure", REDACT),
+    ("POST", "/openai/fine_tuning/jobs", "azure", CHAT),
+    ("POST", "/openai/v1/fine_tuning/jobs", "azure", CHAT),
+    ("GET", "/openai/v1/fine_tuning/jobs", "azure", CHAT),
+    ("GET", "/openai/fine_tuning/jobs/ftjob-1", "azure", CHAT),
+    ("POST", "/openai/v1/fine_tuning/jobs/ftjob-1/pause", "azure", CHAT),
+    ("GET", "/openai/fine_tuning/jobs/ftjob-1/events", "azure", CHAT),
+    ("GET", "/openai/v1/fine_tuning/jobs/ftjob-1/checkpoints", "azure", REDACT),
+    ("POST", "/openai/vector_stores", "azure", CHAT),
+    ("GET", "/openai/v1/vector_stores/vs_1", "azure", CHAT),
+    ("POST", "/openai/v1/vector_stores/vs_1/search", "azure", CHAT),
+    ("POST", "/openai/vector_stores/vs_1/files", "azure", CHAT),
+    ("GET", "/openai/v1/vector_stores/vs_1/files/file-1/content", "azure", CHAT),
+    ("POST", "/openai/v1/vector_stores/vs_1/file_batches/vsfb_1/cancel", "azure", CHAT),
+    ("DELETE", "/openai/v1/vector_stores/vs_1/files/file-1", "azure", REDACT),
+    ("POST", "/openai/v1/containers", "azure", CHAT),
+    ("GET", "/openai/v1/containers", "azure", CHAT),
+    ("POST", "/openai/v1/containers/cntr_1/files", "azure", CHAT),
+    ("GET", "/openai/v1/containers/cntr_1/files/cfile_1/content", "azure", CHAT),
+    ("DELETE", "/openai/v1/containers/cntr_1", "azure", REDACT),
     ("DELETE", "/openai/v1/conversations/conv_1/items/item_1", "azure", REDACT),
     ("POST", "/openai/responses/resp_1/cancel", "azure", CHAT),
     ("DELETE", "/openai/v1/responses/resp_1", "azure", REDACT),
@@ -138,7 +157,11 @@ STILL_UNMATCHED: list[tuple[str, str]] = [
     ("GET", "/openai/v1/deployments"),
     ("POST", "/openai/deployments/d/audio/transcriptions"),
     ("POST", "/openai/v1/threads"),
-    ("POST", "/openai/v1/vector_stores/vs_1/search"),
+    ("PATCH", "/openai/v1/vector_stores/vs_1"),
+    ("DELETE", "/openai/v1/fine_tuning/jobs/ftjob-1"),
+    ("POST", "/openai/containers"),  # the api-version family has no containers
+    ("POST", "/openai/v1/containers/cntr_1"),
+    ("POST", "/openai/v1/fine_tuning/checkpoints/c/permissions"),
     ("POST", "/openai/v1/files/file-1"),
     ("PUT", "/openai/v1/conversations/conv_1"),
     ("GET", "/guardrail/gr1/version/1"),
@@ -229,7 +252,7 @@ def test_the_system_note_never_touches_the_new_bodies() -> None:
         adapter = adapters[provider]
         if provider == "azure" and "/responses" in path:
             continue  # the Responses adapter: cancel carries no body
-        if provider == "azure" and path.endswith("/files"):
+        if provider == "azure" and path in ("/openai/files", "/openai/v1/files"):
             # Uploads inject per chat-shaped JSONL line, as on /v1/files.
             assert adapter.wants_system_note(kind, path)
             continue
@@ -287,6 +310,21 @@ IDENTITY_CASES: list[tuple[str, str, str, str, Any]] = [
     ("azure", AZURE, "GET", "/openai/files", None),
     ("azure", AZURE, "GET", "/openai/batches/batch_1", None),
     ("azure", AZURE, "DELETE", "/openai/responses/resp_1", None),
+    (
+        "azure",
+        AZURE,
+        "POST",
+        "/openai/v1/fine_tuning/jobs",
+        {"model": "gpt-4o-mini", "training_file": "file-1", "metadata": {"team": EMAIL}},
+    ),
+    ("azure", AZURE, "GET", "/openai/fine_tuning/jobs/ftjob-1/events", None),
+    (
+        "azure",
+        AZURE,
+        "POST",
+        "/openai/v1/vector_stores/vs_1/search",
+        {"query": f"mail {EMAIL}", "filters": {"type": "eq", "key": "owner", "value": EMAIL}},
+    ),
     (
         "bedrock",
         BEDROCK,

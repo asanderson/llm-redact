@@ -396,22 +396,42 @@ def test_the_delimiter_count_bounds_the_parts() -> None:
 
 
 async def test_uploaded_jsonl_lines_count_before_they_are_split() -> None:
-    # One part, but far more lines (blank ones too) than the cap allows.
+    # One part, but far more lines (blank ones too) than the cap allows:
+    # a JSONL file (its first line an object) is walked line by line, so
+    # every line is charged before any is.
     upstream = _Upstream()
     app = _app(upstream, max_body_strings=50)
-    body = _form(_field("purpose", b"batch"), _jsonl([b""] * 60))
+    body = _form(_field("purpose", b"batch"), _jsonl([b"{}"] + [b""] * 60))
     async with _client(app) as client:
         response = await client.post("/v1/files", content=body, headers=_MP)
     assert response.status_code == 413 and upstream.requests == []
 
 
+async def test_a_text_file_costs_one_string_whatever_its_lines() -> None:
+    # Not JSONL (no object first): redacted as ONE text, never walked line
+    # by line — a large CSV or log is not refused for its line count.
+    upstream = _Upstream()
+    app = _app(upstream, max_body_strings=5)
+    for content in (b"\n" * 60, b"row\n" * 60 + b'{"a": 1}\n'):
+        file = (b'Content-Disposition: form-data; name="file"; filename="t.csv"', content)
+        async with _client(app) as client:
+            response = await client.post("/v1/files", content=_form(file), headers=_MP)
+        assert response.status_code == 200
+    assert len(upstream.requests) == 2
+
+
 async def test_jsonl_lines_and_their_strings_share_the_budget() -> None:
     upstream = _Upstream()
-    # The file name + 3 lines + (custom_id + content) x 3 = 10 strings.
-    body = _form(_jsonl([_line(f"to {EMAIL}"), _line("hi"), _line("yo")]))
-    async with _client(_app(upstream, max_body_strings=10)) as client:
+    # The purpose field + the file name + 3 lines + (custom_id + content)
+    # x 3 = 11 strings (a batch line's `body` is read as a request: its
+    # `role` is structural).
+    body = _form(
+        _field("purpose", b"batch"),
+        _jsonl([_line(f"to {EMAIL}"), _line("hi"), _line("yo")]),
+    )
+    async with _client(_app(upstream, max_body_strings=11)) as client:
         assert (await client.post("/v1/files", content=body, headers=_MP)).status_code == 200
-    async with _client(_app(upstream, max_body_strings=9)) as client:
+    async with _client(_app(upstream, max_body_strings=10)) as client:
         assert (await client.post("/v1/files", content=body, headers=_MP)).status_code == 413
     assert len(upstream.requests) == 1
     assert EMAIL.encode() not in upstream.requests[0].content

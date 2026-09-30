@@ -864,6 +864,13 @@ def _print_posture(payload: dict[str, Any]) -> None:
     exempt = payload.get("mcp_exempt_servers") or 0
     if exempt:
         lines.append(f"MCP exempt servers: {exempt} (their blocks forwarded unredacted)")
+    unscanned = payload.get("unscanned_uploads_total") or {}
+    if unscanned:
+        seen = " ".join(f"{k}×{v}" for k, v in sorted(unscanned.items()))
+        lines.append(
+            f"binary uploads: {seen} file part(s) forwarded UNSCANNED"
+            ' ([detection] binary_uploads = "forward")'
+        )
     inactive = payload.get("detection", {}).get("language_inactive_rules") or []
     if inactive:
         lines.append(f"language-inactive rules: {', '.join(inactive)} (not detected)")

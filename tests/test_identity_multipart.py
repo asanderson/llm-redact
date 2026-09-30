@@ -90,6 +90,21 @@ REFUSED: dict[str, tuple[str, bytes]] = {
         AZURE_FILES,
         _form(PURPOSE, _jsonl(CLEAN_LINE, b'{"a": ' * 200 + b"1" + b"}" * 200)),
     ),
+    # A reader accepting a bare LF as a line break ends this part's header
+    # block after its Content-Type: the rest is a JSONL line there, never
+    # scanned here (it is a header value to the canonical grammar).
+    "bare-lf-in-a-header": (
+        AZURE_FILES,
+        _form(
+            PURPOSE,
+            (
+                b'Content-Disposition: form-data; name="file"; filename="in.jsonl"\r\n'
+                b"Content-Type: application/jsonl\n\n"
+                b'{"custom_id": "a", "body": {"input": "' + EMAIL.encode() + b'"}}',
+                b"",
+            ),
+        ),
+    ),
 }
 KINDS = {
     "non-utf8-field": "form field",
@@ -98,6 +113,7 @@ KINDS = {
     "non-utf8-prompt": "form field",
     "non-utf8-media-field": "form field",
     "too-deep-jsonl-line": "JSONL line",
+    "bare-lf-in-a-header": "part header",
 }
 
 # Text files that are not JSONL: redacted as one text and sent, under every

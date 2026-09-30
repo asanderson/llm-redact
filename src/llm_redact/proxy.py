@@ -140,7 +140,7 @@ from llm_redact.registry import get_registry, loaded_plugins, pro_package_instal
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent, SSEParser, serialize
 from llm_redact.upload_content import classify_file
-from llm_redact.upload_view import read_upload
+from llm_redact.upload_view import read_upload, read_upload_metadata
 from llm_redact.vault import Vault, VaultManager, run_batched
 from llm_redact.vault_crypto import key_source as vault_key_source
 from llm_redact.vault_crypto import require_vault_key_source
@@ -2928,11 +2928,14 @@ def _content_encoded(headers: Headers) -> bool:
 
 
 def _ownership_body(
+    adapter: ProviderAdapter,
+    path: str,
     headers: Headers,
     body: bytes,
     parsed: Any,
     *,
     proxy_credential: bool,
+    scanned: bool,
     max_body_bytes: int,
     max_parts: int,
 ) -> tuple[Any, bytes | None, _Unreadable | None]:
@@ -2949,9 +2952,17 @@ def _ownership_body(
     credential — the lines of an uploaded batch file are requests the
     provider runs later, with the credential the upload is sent with, and a
     form field can name a file; whether the route redacts (``detection``)
-    changes nothing here. (A pass-through route is never sent with the
-    proxy's credential — refused before the body is read — so its body is
-    never read for the check.) Wherever such a body reaches this check the
+    changes nothing here. A single-request upload whose first part is the
+    created file's JSON metadata (``adapter.upload_metadata_boundary``: the
+    Gemini API's multipart/related upload) is read as the metadata object
+    — the create's body, which can choose the file's name — and, like a
+    JSON body, one it cannot read is refused wherever the scanned-body rule
+    holds (``scanned``: redaction applies, or the proxy's credential is
+    spent), not only under the proxy's credential; with the client's own
+    key and ``detection = false`` it goes out unchecked, as such a JSON
+    body does. (A pass-through route is never sent with the proxy's
+    credential — refused before the body is read — so its body is never
+    read for the check.) Wherever such a body reaches this check the
     scanned-body rule (``_unscanned_body``) has already refused a content
     coding, a repeated Content-Type and an upload over the parts cap under
     the proxy's credential; the check keeps those refusals of its own, so
@@ -2963,7 +2974,9 @@ def _ownership_body(
             return None, None, _Unreadable(400, "the request carries more than one Content-Type")
     if parsed is not None:
         return parsed, None, None
-    boundary = parse_multipart_boundary(headers.get("content-type", ""))
+    content_type = headers.get("content-type", "")
+    metadata_boundary = adapter.upload_metadata_boundary(path, content_type)
+    boundary = metadata_boundary or parse_multipart_boundary(content_type)
     if boundary is None:
         return None, None, None
     if body.count(b"\r\n--" + boundary) > max_parts:
@@ -2975,7 +2988,11 @@ def _ownership_body(
             413, f"the upload has more parts than llm-redact max_body_strings ({max_parts})"
         )
         return None, None, too_many if proxy_credential else None
-    view = read_upload(body, boundary, max_json_bytes=max_body_bytes, max_lines=max_parts)
+    view = (
+        read_upload_metadata(body, boundary)
+        if metadata_boundary is not None
+        else read_upload(body, boundary, max_json_bytes=max_body_bytes, max_lines=max_parts)
+    )
     unreadable = None
     if view.oversized:
         unreadable = _Unreadable(
@@ -2991,9 +3008,25 @@ def _ownership_body(
     elif view.problem is not None:
         unreadable = _Unreadable(400, view.problem)
     if unreadable is not None:
+        if proxy_credential:
+            return None, None, unreadable
+        if metadata_boundary is not None and scanned:
+            # The client's own key where redaction applies: a file create's
+            # metadata is refused unread exactly as a JSON body the proxy
+            # cannot read is (the scanned-body rule) — a provider reading it
+            # leniently could otherwise choose a file name nobody checked.
+            return (
+                None,
+                None,
+                unreadable._replace(
+                    message=f"{unreadable.message}, and the stored objects a file create"
+                    " names must be checked",
+                    credential_bound=False,
+                ),
+            )
         # With the client's own credential the upload goes out as the route
         # sends it, unread (the provider authorizes the client).
-        return None, None, unreadable if proxy_credential else None
+        return None, None, None
     if view.normalized is not None and _reclassified(body, view.normalized, boundary):
         # The re-serialized body is what redaction then reads: a part it
         # would read as something else (a text file turned "binary" goes out
@@ -3814,10 +3847,13 @@ async def handle(request: Request) -> Response:
         # credential. (A pass-through body is never read: under the proxy's
         # credential an unrecognized route was refused above.)
         check_body, checked_upload, unreadable = _ownership_body(
+            adapter,
+            path,
             request.headers,
             body_bytes,
             parsed,
             proxy_credential=proxy_credential,
+            scanned=proxy_credential or not detection_off,
             max_body_bytes=max_body_bytes,
             max_parts=max_body_strings,
         )
@@ -5215,7 +5251,7 @@ def _unchecked_body_refused(
         unreadable.status,
         "unchecked body under the proxy's credential"
         if unreadable.credential_bound
-        else "upload changed by the stored-object check's re-reading",
+        else "an upload the stored-object check cannot read as sent",
     )
     error = (
         adapter.error_body(message, status=unreadable.status)

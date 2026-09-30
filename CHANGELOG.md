@@ -12,6 +12,45 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Changed
+- The stored-object check (`SessionRouter.object_access_refusal`, llm-redact-pro's named
+  users) now sees the METADATA part of the Gemini API's single-request upload
+  (`POST /upload/v1beta/files`, a `multipart/related` body): it is handed that part's
+  JSON object — what Google reads as the create's body, a chosen `file.name` included —
+  exactly as it is handed the metadata-only JSON create's body, before anything is
+  sent, under the client's own key and a credential the proxy holds alike. It is read
+  like a JSON body (strict UTF-8, repeated keys last-wins, at most 128 levels deep); a
+  metadata part repeating a key is sent re-serialized, exactly as checked (only its JSON
+  text is rewritten: an empty header block's CRLF, whitespace and a byte-order mark
+  around it stay, so the part keeps its shape). Metadata the
+  check cannot read (lenient or non-UTF-8 JSON, a transfer encoding, a foreign charset,
+  no JSON metadata first) is refused 400 under a credential the proxy holds and, with
+  the client's own key, wherever redaction applies; only with `detection = false` and
+  the client's own key does it go out unchecked, as an unparseable JSON body does.
+  New adapter hook `ProviderAdapter.upload_metadata_boundary`.
+- Multipart part headers are read with one reading only: a header line carrying a
+  bare CR or LF (or any other control but a tab) is refused like any other ambiguous
+  header, since a reader accepting a bare LF as a line break ends the header block
+  there and reads what follows as the part's content — a Gemini upload's metadata (a
+  chosen file name) the stored-object check never saw, or file lines redaction never
+  scanned. Such an upload is refused 400 wherever redaction applies and under a
+  credential the proxy holds, on every multipart route. So is, for the stored-object
+  check, a part with no header block that does not open with an empty one.
+- A multipart request's boundary is read only when its Content-Type has one reading:
+  a repeated `boundary` parameter (`boundary=a; boundary=b`, which a reader taking
+  the last one parses with `b`), a quoted value holding `;` or an escape (which a
+  naive split reads differently), a control, or a boundary outside the RFC 2046
+  characters now leaves the body unreadable, so it is refused 400 wherever redaction
+  applies and under a credential the proxy holds, like any other multipart body the
+  proxy cannot parse. A non-ASCII boundary used to be read with its non-ASCII
+  characters dropped. Applies to form uploads and the Gemini API's multipart/related
+  upload alike.
+- The Gemini API upload's metadata part is read as JSON only when it declares
+  `application/json` (parameters allowed) or no type at all: a first part declaring
+  another type is metadata the check cannot read (a server parsing by the declared type
+  could read a form-encoded `file.name=…` out of a strict-JSON string), and a
+  `multipart/related` naming its root part with `start` (the metadata then need not be
+  the first part) is a body llm-redact cannot read. Both are refused 400 wherever
+  redaction applies and under a credential the proxy holds.
 - File uploads (OpenAI/Azure/custom `…/files`) are read by CONTENT
   (`upload_content.classify_file`): JSONL is redacted per line as before, any other
   text file (UTF-8, or UTF-16/32 with a BOM) is redacted as one text and re-encoded as

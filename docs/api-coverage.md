@@ -82,7 +82,7 @@ is never lent to one (above).
 | `POST /v1/files` (with `anthropic-version`) | chat | beta Files API upload (multipart/form-data): read by content exactly as the OpenAI Files upload (the same code): a JSONL file's lines redacted as JSON, any other text file as one text re-encoded as it came, every part's file name redacted; a BINARY document (a PDF — even an all-ASCII one —, an image) is forwarded unscanned with the client's own key (`binary_uploads = "forward"`, counted) and refuses the upload (400) under `"refuse"` or a credential the proxy holds, as does anything it cannot read; the file object answering it echoes the filename, restored, and is reported to a session router as its creator's |
 | `GET /v1/files` (with `anthropic-version`) | chat | the file list (`{"data": [...]}`): each echoed filename restored in the request's own session, or — with a session router attributing listed items — each file in its creator's |
 | `GET /v1/files/{id}` (with `anthropic-version`) | chat | the file's metadata: its filename restored |
-| `GET /v1/files/{id}/content` (with `anthropic-version`) | chat | the file back (downloadable for files a tool created), restored like an OpenAI file download: a text file line by line, a binary file never read |
+| `GET /v1/files/{id}/content` (with `anthropic-version`) | chat | the file back (downloadable for files a tool created), restored like an OpenAI file download: a JSONL file line by line as JSON, any other text file as one text, a binary file never read |
 | `DELETE /v1/files/{id}` (with `anthropic-version`) | redact-only | the id only |
 | `GET /v1/organizations/...` (Admin API) | pass-through | org metadata |
 | WebSocket realtime | websocket | not offered by Anthropic today |
@@ -139,7 +139,7 @@ matches](#requests-no-route-matches).
 | `POST /v1/files` | chat | multipart upload, each file part decided by its CONTENT: a JSONL file's lines (batch + fine-tune) redacted as JSON, any other text file (UTF-8, or UTF-16/32 with a byte-order mark) redacted as one text and re-encoded as it came; every part's `filename` / `filename*` and every plain form field (the structural `purpose`, `expires_after[…]` too, scanned as text) redacted, all other bytes preserved; a BINARY file (a PDF — even an all-ASCII one —, an image, an archive, text that is not UTF-8) is forwarded byte-identical and UNSCANNED with the client's own key (`[detection] binary_uploads = "forward"`, the default, counted) and refuses the upload otherwise (400: `"refuse"`, or a credential the proxy holds); a JSONL line nesting JSON too deep, a form field that is not UTF-8, a preamble or epilogue, a part header without one reading, a Content-Transfer-Encoding or a declared charset other than the content's own refuses the upload (400 — `detection = false` forwards it as sent); the file object answering it echoes the filename, restored |
 | `GET /v1/files` | chat | the file list: each echoed filename restored in the request's own session |
 | `GET /v1/files/{id}` | chat | the file object: its echoed filename restored |
-| `GET /v1/files/{id}/content` | chat | a text file restored line by line (a JSON line as JSON — batch output JSONL —, any other line as text: a fine-tune results CSV, a text file uploaded redacted), re-encoded as it came; a binary file untouched |
+| `GET /v1/files/{id}/content` | chat | a JSONL file (batch output) restored line by line as JSON, any other text file (a fine-tune results CSV, a text file uploaded redacted) as one text — a value lands exactly as it was redacted, never JSON-escaped —, re-encoded as it came; a binary file untouched |
 | `DELETE /v1/files/{id}` | redact-only | id only |
 | `POST /v1/batches` | chat | the caller's free-form `metadata` values are redacted out and restored in the echoed batch object; structural fields (`input_file_id`, `endpoint`, `completion_window`) carry nothing a detector matches and are forwarded byte-identical; no system note |
 | `GET /v1/batches` | chat | the LIST is restored in the request's own session, like a single batch: one shared namespace holds every batch's tokens. With llm-redact-pro named users a listing resolves to an EMPTY session, and the session router's `listing_item_session` restores only the batches the READER created, each in the session it was created in; every other item keeps its placeholders. No system note |
@@ -197,7 +197,7 @@ matches](#requests-no-route-matches).
 | `POST /v1/containers/{id}/files` | chat | multipart: read and redacted as a `/v1/files` upload is (by content: a JSONL or text file redacted, a binary file forwarded unscanned with the client's own key and refused under a credential the proxy holds or `binary_uploads = "refuse"`; its filename and every form field redacted); JSON: the stored `file_id` it copies in is verbatim. The container file object (its `path` echoes the filename) restored; the new container file is reported to a session router |
 | `GET /v1/containers/{id}/files` | chat | the container's files (paths restored), read as the container's: not a listing attributed per item |
 | `GET /v1/containers/{id}/files/{file_id}` | chat | restored |
-| `GET /v1/containers/{id}/files/{file_id}/content` | chat | the file, uploaded or written by the code, restored as a `/v1/files` download is: a text file line by line (a JSON line as JSON), a binary file untouched |
+| `GET /v1/containers/{id}/files/{file_id}/content` | chat | the file, uploaded or written by the code, restored as a `/v1/files` download is: a JSONL file line by line as JSON, any other text file as one text, a binary file untouched |
 | `DELETE /v1/containers/{id}/files/{file_id}` | redact-only | ids only |
 | `GET /v1/evals` | pass-through | |
 | `POST /v1/realtime/client_secrets` | pass-through | an ephemeral Realtime key for a browser client; the WebSocket session itself is covered below |
@@ -243,7 +243,7 @@ the user's own copy of it — and no route here but the generate verbs and
 | `POST /v1beta/files:register` | pass-through | registers Cloud Storage objects the provider reads as the caller: never sent with a credential the proxy holds |
 | `GET /v1beta/files` | chat | the file list (`{"files": [...]}`): each `displayName` restored in the request's own session, or — with a session router attributing listed items — each file, by its `name`, in its creator's |
 | `GET /v1beta/files/{id}` | chat | a file's metadata: `displayName` restored |
-| `GET /v1beta/files/{id}:download` | chat | the file back, restored like an OpenAI file download: a text file line by line (a JSON line as JSON, re-escaped), a binary file never read |
+| `GET /v1beta/files/{id}:download` | chat | the file back, restored like an OpenAI file download: a JSONL file line by line as JSON (re-escaped), any other text file as one text, a binary file never read |
 | `GET /download/v1beta/files/{id}:download` | chat | the media download a batch's output file (JSONL: model output carrying placeholders) is fetched from: as above |
 | `DELETE /v1beta/files/{id}` | redact-only | the name only |
 
@@ -329,7 +329,7 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/files` | chat | |
 | `GET /openai/v1/files/{id}` | chat | |
 | `DELETE /openai/files/{id}` | redact-only | |
-| `GET /openai/files/{id}/content` | chat | a text file restored line by line (JSON lines as JSON), a binary file untouched |
+| `GET /openai/files/{id}/content` | chat | a JSONL file restored line by line as JSON, any other text file as one text, a binary file untouched |
 | `GET /openai/v1/files/{id}/content` | chat | |
 | `POST /openai/batches` | chat | file ids + user `metadata` (redacted out, restored in the echo) |
 | `GET /openai/batches` | chat | the LIST is restored in the request's own session (both path families); with llm-redact-pro named users only the reader's own batches are restored (an empty listing session + `listing_item_session`), every other item keeps its placeholders |

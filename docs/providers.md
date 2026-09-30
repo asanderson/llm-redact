@@ -193,8 +193,9 @@ or, on a part whose content is scanned, a declared charset other than
 the one its content decoded as — UTF-8/US-ASCII, or a UTF-16/32 text
 file's own (its Content-Type `charset`, or the RFC 7578 `_charset_`
 field). `GET /v1/files/{id}/content` reads a download the same way: a
-text file is restored line by line (a JSON line as JSON, any other line
-as text) and re-encoded as it came; a binary file is left untouched. The image and mask parts of an image edit (and a video job's
+JSONL file is restored line by line as JSON, any other text file as one
+text (a value lands exactly as it was redacted, never JSON-escaped), and
+re-encoded as it came; a binary file is left untouched. The image and mask parts of an image edit (and a video job's
 reference image) are media — the documented non-goal, as base64 media in
 a JSON body — and are sent as they came (their filenames redacted).
 

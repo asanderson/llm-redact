@@ -251,11 +251,13 @@ def test_a_container_file_download_is_restored_like_a_files_download(
 ) -> None:
     vault = InMemoryVault()
     token = vault.placeholder_for("EMAIL", EMAIL)
-    raw = json.dumps({"to": token}).encode() + b"\nraw " + token.encode()
+    raw = json.dumps({"to": token}).encode() + b"\n" + json.dumps({"cc": token}).encode()
     out = adapter.rehydrate_raw_body(path, raw, Rehydrator(vault))
     assert out is not None
     first, second = out.split(b"\n")
-    assert json.loads(first) == {"to": EMAIL} and second == b"raw " + EMAIL.encode()
+    assert json.loads(first) == {"to": EMAIL} and json.loads(second) == {"cc": EMAIL}
+    text = b"raw " + token.encode()
+    assert adapter.rehydrate_raw_body(path, text, Rehydrator(vault)) == b"raw " + EMAIL.encode()
     binary = b"\x89PNG\r\n\x1a\n" + token.encode()
     assert adapter.rehydrate_raw_body(path, binary, Rehydrator(vault)) is None
     assert adapter.rehydrate_raw_body(path.replace("/content", ""), raw, Rehydrator(vault)) is None

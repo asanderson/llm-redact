@@ -23,7 +23,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from llm_redact.config import Config, ProviderConfig
+from llm_redact.config import Config, ProviderConfig, parse_config
 from llm_redact.detection.engine import Allowlist, DetectionConfig, build_detectors
 from llm_redact.multipart import parse, parse_boundary
 from llm_redact.providers.base import SYSTEM_NOTE, RouteKind
@@ -172,12 +172,18 @@ def test_output_file_rehydrated() -> None:
             },
         }
     ).encode()
-    raw = output_line + b"\nnot json\n"
+    raw = output_line + b"\n" + json.dumps({"id": "batch_req_2", "note": token}).encode() + b"\n"
     out = adapter.rehydrate_raw_body("/v1/files/file_abc/content", raw, rehydrator)
     assert out is not None
     restored = json.loads(out.split(b"\n")[0])
     assert restored["response"]["body"]["choices"][0]["message"]["content"] == f"sent to {EMAIL}"
-    assert out.split(b"\n")[1] == b"not json"
+    assert json.loads(out.split(b"\n")[1]) == {"id": "batch_req_2", "note": EMAIL}
+    # A file mixing JSON lines with other lines is TEXT, restored as one
+    # text: a token the provider wrote escaped stays a placeholder (never a
+    # wrong value); a raw one is restored.
+    mixed = output_line + b"\nnot json " + token.encode() + b"\n"
+    out = adapter.rehydrate_raw_body("/v1/files/file_abc/content", mixed, rehydrator)
+    assert out == output_line + b"\nnot json " + EMAIL.encode() + b"\n"
     # Non-file-content paths and token-free bodies stay untouched.
     assert adapter.rehydrate_raw_body("/v1/other", raw, rehydrator) is None
     assert (
@@ -332,13 +338,18 @@ def test_a_downloaded_text_file_is_restored() -> None:
     assert adapter.rehydrate_raw_body(path, utf16, rehydrator) == b"\xff\xfe" + (
         f"to {EMAIL}".encode("utf-16-le")
     )
-    # A JSON line among text lines is restored as JSON: the value escaped
-    # where it lands, the line's own CR kept.
-    vault.placeholder_for("DENY", 'say "hi"')
+    # A text file is restored as ONE text, the way it was redacted: a JSON
+    # line among its text lines gets the value exactly as it was sent, never
+    # JSON-escaped (the upload redacted the raw characters).
     quoted = vault.placeholder_for("DENY", 'say "hi"')
     mixed = f'prose {token}\r\n  {{"q": "{quoted}"}}\r\nend'.encode()
     restored = adapter.rehydrate_raw_body(path, mixed, rehydrator)
-    assert restored == f'prose {EMAIL}\r\n  {{"q": "say \\"hi\\""}}\r\nend'.encode()
+    assert restored == f'prose {EMAIL}\r\n  {{"q": "say "hi""}}\r\nend'.encode()
+    # A JSONL file is restored line by line as JSON: the value escaped where
+    # it lands, a line's own CR kept.
+    jsonl = f'{{"p": "{token}"}}\r\n  {{"q": "{quoted}"}}\r\n'.encode()
+    restored = adapter.rehydrate_raw_body(path, jsonl, rehydrator)
+    assert restored == f'{{"p": "{EMAIL}"}}\r\n  {{"q": "say \\"hi\\""}}\r\n'.encode()
     # A binary file is never touched, whatever it carries.
     pdf = b"%PDF-1.7 " + token.encode()
     assert adapter.rehydrate_raw_body(path, pdf, rehydrator) is None
@@ -466,3 +477,51 @@ def test_pass_through_provider_inference_covers_uploads(tmp_path):
     # Anthropic's beta Files API (same paths, anthropic-version header)
     # still wins over the OpenAI inference.
     assert state.provider_for(None, "/v1/files", {"anthropic-version": "2023-06-01"}) == "anthropic"
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        # A quoted CSV cell: not JSON as sent (``\j``), a JSON string once
+        # redacted; restored as the text it was, never JSON-escaped.
+        b'account\n"CORP\\jdoe"\nnote: CORP\\jdoe\n',
+        # An object line in a text file, likewise.
+        b'prose\n{"path": "CORP\\jdoe"}\n',
+    ],
+    ids=["quoted-cell", "object-line"],
+)
+async def test_a_text_file_round_trips_byte_for_byte(original: bytes) -> None:
+    # Upload through the proxy, the provider stores what it received, the
+    # download through the proxy returns exactly the uploaded bytes.
+    stored: dict[str, bytes] = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            boundary = parse_boundary(request.headers["content-type"])
+            assert boundary is not None
+            parsed = parse(request.content, boundary)
+            assert parsed is not None
+            stored["file"] = parsed.parts[1].content
+            return httpx.Response(200, json={"id": "file-1", "object": "file"})
+        return httpx.Response(
+            200, content=stored["file"], headers={"content-type": "application/octet-stream"}
+        )
+
+    config = parse_config({"detection": {"deny": ["CORP\\jdoe"]}}, "t")
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    headers = {"authorization": "Bearer sk-own"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        upload = await client.post(
+            "/v1/files",
+            content=_file_upload(original, filename="accounts.csv"),
+            headers={
+                **headers,
+                "content-type": f"multipart/form-data; boundary={BOUNDARY.decode()}",
+            },
+        )
+        download = await client.get("/v1/files/file-1/content", headers=headers)
+    assert upload.status_code == 200 and download.status_code == 200
+    assert b"CORP" not in stored["file"] and "«DENY_001»".encode() in stored["file"]
+    assert download.content == original

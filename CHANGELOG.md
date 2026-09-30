@@ -126,6 +126,10 @@ and tags `vX.Y.Z`.
   check now reads file lines only as UTF-8 text and rewrites a line only in a
   UTF-8 file; an upload whose re-reading would change what a file part is gets a
   400.
+- A downloaded text file (not JSON Lines) is restored as one text, the way it was
+  redacted on upload: a line that parses as JSON only once it holds a placeholder
+  no longer gets its restored value JSON-escaped, so the file round-trips byte for
+  byte. JSON Lines files are still restored line by line as JSON.
 
 ## [1.9.0] - 2026-09-29
 

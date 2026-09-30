@@ -364,23 +364,29 @@ def rehydrate_text_file(
     raw: bytes, rehydrator: Rehydrator, restore: Callable[[Any], Any]
 ) -> bytes | None:
     """A downloaded file restored (None: left untouched), read the way an
-    uploaded one is (``upload_content.classify_file``): a binary file stays
-    untouched; a text file — JSONL (batch OUTPUT files) or any other text
-    (a results CSV, a text file uploaded redacted) — is restored line by
-    line and re-encoded as it came. ``restore`` restores one parsed JSON
-    value (the adapter's non-streaming transform). Shared by every
+    uploaded one is (``upload_content.classify_file``), per FILE: a binary
+    file stays untouched; a JSONL file (batch OUTPUT files, a JSONL upload
+    redacted line by line) is restored line by line as JSON; any other text
+    (a results CSV, a text file uploaded redacted as ONE text) is restored
+    as one text — a value lands exactly as it was redacted, never
+    JSON-escaped because a line happens to parse as JSON once it holds a
+    placeholder. Re-encoded as it came. ``restore`` restores one parsed
+    JSON value (the adapter's non-streaming transform). Shared by every
     provider's file download (OpenAI/Azure/custom, the Gemini API's,
     Anthropic's)."""
     content = classify_file(raw)
     if content.kind == "binary" or not may_carry_tokens(content.text):
         return None
+    if content.kind == "text":
+        text = rehydrator.rehydrate_text(content.text)
+        return content.encode(text) if text != content.text else None
     lines = content.text.split("\n")
     restored = [_rehydrate_file_line(line, rehydrator, restore) for line in lines]
     return content.encode("\n".join(restored)) if restored != lines else None
 
 
 def _rehydrate_file_line(line: str, rehydrator: Rehydrator, restore: Callable[[Any], Any]) -> str:
-    """One line of a downloaded text file, restored: a line holding a JSON
+    """One line of a downloaded JSONL file, restored: a line holding a JSON
     value as JSON (a restored value is escaped where it lands; a token the
     provider wrote escaped is found), any other line as text (tokens never
     span lines), a line nesting JSON too deep untouched. The line's own

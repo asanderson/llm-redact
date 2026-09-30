@@ -875,25 +875,49 @@ def test_a_repeated_key_line_is_rewritten_in_place_among_other_lines() -> None:
     assert view.normalized == _form(_file(b'prose\r\n{"a": 2}\n{"b": 1}\n\n{"c": 3}'))
 
 
+def _count_parses(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    import llm_redact.upload_view as upload_view
+
+    parsed: list[str] = []
+    loads = upload_view.loads_request
+
+    def counting(text: str) -> Any:
+        parsed.append(text)
+        return loads(text)
+
+    monkeypatch.setattr(upload_view, "loads_request", counting)
+    return parsed
+
+
 @pytest.mark.parametrize(
-    "content",
+    ("content", "parses"),
     [
-        b"\n" * (10 * 2**20),  # blank lines: never parsed
-        b"a\n" * (5 * 2**20),  # prose
-        b" " * (10 * 2**20),  # one line of whitespace: no backtracking
-        b"{\n" * (5 * 2**20),  # candidates: refused at the line budget
+        (b"\n" * (10 * 2**20), 0),  # blank lines: never parsed
+        (b"a\n" * (5 * 2**20), 0),  # prose
+        (b"x {\n" * (2 * 2**20), 0),  # a brace past the line's start
+        (b"{\n" * (5 * 2**20), 1_000),  # candidates: no more than the budget
     ],
-    ids=["blank", "prose", "whitespace", "braces"],
+    ids=["blank", "prose", "brace-later", "braces"],
 )
-def test_a_huge_line_count_is_read_in_bounded_time(content: bytes) -> None:
+def test_a_huge_line_count_costs_no_more_parses_than_the_budget(
+    monkeypatch: pytest.MonkeyPatch, content: bytes, parses: int
+) -> None:
     # 10 MiB of blank lines once took about a minute (a JSON parse per line).
-    started = time.perf_counter()
-    view = read_upload(
-        _form(_file(content)), BOUNDARY, max_json_bytes=10 * 2**20, max_lines=100_000
-    )
-    assert time.perf_counter() - started < 5
+    parsed = _count_parses(monkeypatch)
+    view = read_upload(_form(_file(content)), BOUNDARY, max_json_bytes=10 * 2**20, max_lines=1_000)
+    assert len(parsed) == parses
     assert view.cited == []
-    assert view.too_many_lines is content.startswith(b"{")
+    assert view.too_many_lines is (parses > 0)
+
+
+def test_a_long_run_of_whitespace_is_scanned_in_linear_time() -> None:
+    # The candidate scan never backtracks into a run of whitespace (possessive
+    # runs): quadratic, one 1 MiB line would take hours.
+    started = time.perf_counter()
+    for line in (b" " * 2**20, b" " * 2**20 + b"\xef\xbb\xbf" + b" " * 2**20 + b"x"):
+        view = read_upload(_form(_file(line)), BOUNDARY, max_json_bytes=100, max_lines=10)
+        assert view == UploadView([])
+    assert time.perf_counter() - started < 5
 
 
 async def test_an_upload_with_more_json_lines_than_the_budget_is_refused_unread(
@@ -920,18 +944,18 @@ async def test_an_upload_with_more_json_lines_than_the_budget_is_refused_unread(
     assert router.checks == [] and fake.plans[0].begun == [] and upstream.requests == []
 
 
-async def test_a_huge_blank_upload_is_checked_in_bounded_time(
+async def test_a_huge_blank_upload_is_checked_without_a_parse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # End to end with the stored-object check on: 10 MiB of newlines once
     # blocked the event loop for about a minute.
+    parsed = _count_parses(monkeypatch)
     router = LineRouter()
     upstream = Upstream()
     app = _app(monkeypatch, router, upstream, providers=OFF)
     upload = _form(_file(b"\n" * (10 * 2**20 - 200)))
-    started = time.perf_counter()
     async with _client(app) as client:
         response = await client.post("/v1/files", content=upload, headers=HEADERS)
-    assert time.perf_counter() - started < 10
+    assert parsed == []
     assert response.status_code == 200
     assert router.checks == [("openai", "POST", "/v1/files", [], False)]

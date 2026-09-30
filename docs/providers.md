@@ -171,7 +171,15 @@ conversation of a `fine-tune` example, keep a request's protocol fields
 file — strict UTF-8 (a byte-order mark kept), or UTF-16/UTF-32 opened by
 its byte-order mark — is redacted as one text and re-encoded exactly as it
 came (a CSV, a log, notes; a file mixing JSON lines with other lines is
-text); a BINARY file — bytes that do not decode, text holding a NUL, or a
+text), except that a text file which is ONE JSON document (a pretty-printed
+service-account key) is redacted escape-aware: each string literal, keys
+included, is decoded, redacted and written back only when it changed, and
+what a raw reading of the result still finds inside a literal holding no
+escape (a `private_key_id` known by its key) is redacted in place — the
+vault holds each value as it decodes; a document where a raw reading finds
+anything else (a card number written as a JSON number, a value spanning
+literals, one only the escaped source spells) is redacted as one raw text
+instead; a BINARY file — bytes that do not decode, text holding a NUL, or a
 known binary signature even when the bytes would decode (an all-ASCII PDF:
 rewriting it would break its byte offsets) — cannot be redacted at all. A
 binary file part is the one piece that may leave unscanned, and only with
@@ -198,10 +206,13 @@ or, on a part whose content is scanned, a declared charset other than
 the one its content decoded as — UTF-8/US-ASCII, or a UTF-16/32 text
 file's own (its Content-Type `charset`, or the RFC 7578 `_charset_`
 field). `GET /v1/files/{id}/content` reads a download the same way: a
-text file this proxy uploaded redacted as one text is remembered by a
-digest of the bytes sent — the newest 1024, in the running process — and
-restored as the text it was (a value lands exactly as it was redacted,
-never JSON-escaped, even when the file now reads as JSON); a JSONL file is
+text file this proxy uploaded redacted as one raw text that a download
+would read as JSON (JSON Lines only once redacted, or a JSON document the
+escape-aware reading gave way on) is remembered by a digest of the bytes
+sent — once the whole upload was redacted (a refused request records
+nothing), the newest 1024, in the running process — and restored as the
+text it was (a value lands exactly as it was redacted, never
+JSON-escaped); a JSONL file is
 restored line by line as JSON, every value of every line; any other text
 file that is ONE JSON document (a JSON file a model or code wrote around a
 placeholder) is restored over its source text with each restored value
@@ -209,10 +220,14 @@ JSON-escaped, keys included and formatting kept, so it stays valid JSON;
 any other text file as one text; each re-encoded as it came; a binary file
 is left untouched. A download is read this way whatever Content-Type the
 provider serves it with (a JSON file served as `application/json`
-included). One residual: a JSON text upload the process no longer
-remembers (after a restart, or 1024 newer text uploads) is read like a
-file a model wrote — valid JSON, but a value whose source form held an
-escape (`\\`, `\n`) comes back escaped once more. The image and mask parts of an image edit (and a video job's
+included). A JSON document uploaded escape-aware needs no remembering: its
+JSON-escaped restoration is the exact inverse in any process — another
+replica over a shared vault, another `llm-redact run` proxy, a restart.
+One residual, for the remembered kind only: the record is per process and
+shared by every caller, so a download through another process, or after
+1024 newer such uploads (any caller's), reads the file like one a model
+wrote — valid JSON, but a value whose source form held an escape (`\\`,
+`\n`) comes back escaped once more. The image and mask parts of an image edit (and a video job's
 reference image) are media — the documented non-goal, as base64 media in
 a JSON body — and are sent as they came (their filenames redacted).
 

@@ -229,5 +229,15 @@ class Redactor:
         parts.append(text[cursor:])
         return "".join(parts)
 
+    def detections(self, text: str) -> list[Detection]:
+        """What ``redact_text`` would replace or refuse in ``text``: the
+        winning detections (overlaps resolved) not in warn mode, read
+        without issuing, counting or charging anything."""
+        return [
+            d
+            for d in _resolve_overlaps(self._plan.detect(text, self._allowlist))
+            if d.tier == 0 or self._modes.get(d.detector_type) != "warn"
+        ]
+
     def redact_json(self, obj: Any) -> Any:
         return transform_strings(obj, self.redact_text)

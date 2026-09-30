@@ -201,8 +201,8 @@ class _Reader:
         # Each rewritten line, and the bytes since the previous one's end.
         ends = [0, *(end for _, end, _ in repeated)]
         pieces: list[bytes] = []
-        for (start, _, obj), previous in zip(repeated, ends, strict=False):
-            pieces += (content[previous:start], json_bytes(obj))
+        for index, (start, _, obj) in enumerate(repeated):
+            pieces += (content[ends[index] : start], json_bytes(obj))
         pieces.append(content[ends[-1] :])
         part.content = b"".join(pieces)
         return True

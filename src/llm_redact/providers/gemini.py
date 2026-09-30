@@ -38,11 +38,28 @@ from llm_redact.sse import SSEEvent
 _GEMINI_PATH = re.compile(
     r"/(?:v1|v1beta)/(?:models|tunedModels)/[^/:]+:"
     r"(generateContent|streamGenerateContent|countTokens|embedContent"
-    r"|batchEmbedContents|batchGenerateContent|predict|predictLongRunning)"
+    r"|batchEmbedContents|batchGenerateContent|asyncBatchEmbedContent|predict"
+    r"|predictLongRunning)"
 )
 # Verbs that answer with a long-running operation whose results are read
-# back by its name later (the Gemini API's batch mode and Veo).
-_OPERATION_VERBS = frozenset({"batchGenerateContent", "predictLongRunning"})
+# back by its name later (the Gemini API's batch mode — generation and
+# async embeddings — and Veo).
+_OPERATION_VERBS = frozenset(
+    {"batchGenerateContent", "asyncBatchEmbedContent", "predictLongRunning"}
+)
+# Verbs whose answer carries nothing to restore (a count, vectors, image
+# bytes, an operation name).
+_REDACT_ONLY_VERBS = frozenset(
+    {
+        "countTokens",
+        "embedContent",
+        "batchEmbedContents",
+        "batchGenerateContent",
+        "asyncBatchEmbedContent",
+        "predict",
+        "predictLongRunning",
+    }
+)
 # Context caching: only the create (POST /…/cachedContents) carries content to
 # redact. The per-cache GET/PATCH/DELETE and list return metadata (name, model,
 # token counts, expiry) — never the cached content — so they pass through.
@@ -55,10 +72,16 @@ _GEMINI_CACHED_CREATE = re.compile(r"/(?:v1|v1beta)/cachedContents")
 # each answer names the file(s) as ``files/<id>``, which later bodies cite
 # (``fileData.fileUri``, a batch's input ``fileName``) and paths read.
 _GEMINI_FILE_CREATE = re.compile(r"(?:/upload)?/v1beta/files(?::register)?")
-# A batch's status (the operation read back by name): once it finished it
-# names the batch's output FILE — the creator's (only the creator's own read
-# of the batch reaches the provider and gets here unsealed).
+# Batch Mode's jobs, by the name the create answers with (``batches/<id>``:
+# what the SDKs poll). A batch's status (the operation read back by name)
+# echoes its display name and, once it finished, its INLINED responses —
+# model output carrying placeholders — or names its output FILE (the
+# creator's: only the creator's own read of the batch reaches the provider
+# and gets here unsealed). The list (``{"operations": [...]}``) echoes every
+# batch; cancel and delete carry the name only.
+_GEMINI_BATCHES = "/v1beta/batches"
 _GEMINI_BATCH_STATUS = re.compile(r"/v1beta/batches/[^/:]+")
+_GEMINI_BATCH_CANCEL = re.compile(r"/v1beta/batches/[^/:]+:cancel")
 # The model listing and one model's metadata (no :verb): recognized,
 # redact-only — a body-less no-op, like Vertex's model metadata.
 _GEMINI_MODELS = re.compile(r"/v1beta/models(?:/[^/:]+)?")
@@ -163,6 +186,15 @@ class GeminiAdapter(ProviderAdapter):
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "GET" and _GEMINI_MODELS.fullmatch(path):
             return RouteKind.REDACT_ONLY
+        if method == "GET" and (path == _GEMINI_BATCHES or _GEMINI_BATCH_STATUS.fullmatch(path)):
+            # A batch's status and the list: display names and inlined
+            # responses restored (the static session batches use).
+            return RouteKind.CHAT
+        if (method == "DELETE" and _GEMINI_BATCH_STATUS.fullmatch(path)) or (
+            method == "POST" and _GEMINI_BATCH_CANCEL.fullmatch(path)
+        ):
+            # The name only, either way: recognized, redact-only.
+            return RouteKind.REDACT_ONLY
         if method != "POST":
             return RouteKind.NONE
         # Cache-create carries contents + systemInstruction to redact; the
@@ -173,19 +205,13 @@ class GeminiAdapter(ProviderAdapter):
         if match is None:
             return RouteKind.NONE
         # countTokens sees full message content but returns only a count;
-        # embeddings responses are vectors; batchGenerateContent returns a
-        # long-running operation NAME (the generated content is fetched later
-        # via the operation) — none has content to rehydrate on this response.
-        # predict (Imagen) and predictLongRunning (Veo) carry the prompt in
-        # instances[] but answer with image bytes / an operation name.
-        if match.group(1) in (
-            "countTokens",
-            "embedContent",
-            "batchEmbedContents",
-            "batchGenerateContent",
-            "predict",
-            "predictLongRunning",
-        ):
+        # embeddings responses are vectors; batchGenerateContent and
+        # asyncBatchEmbedContent return a long-running operation NAME (the
+        # results are read later through the batch's status) — none has
+        # content to rehydrate on this response. predict (Imagen) and
+        # predictLongRunning (Veo) carry the prompt in instances[] but
+        # answer with image bytes / an operation name.
+        if match.group(1) in _REDACT_ONLY_VERBS:
             return RouteKind.REDACT_ONLY
         return RouteKind.CHAT
 
@@ -212,11 +238,27 @@ class GeminiAdapter(ProviderAdapter):
             return batch_output_file_ids(body)
         return cache_object_ids(body)
 
+    def lists_objects(self, method: str, path: str) -> bool:
+        return method == "GET" and path == _GEMINI_BATCHES
+
+    def listing_items(self, body: Any) -> list[Any] | None:
+        # The batch list answers ``{"operations": [...], "nextPageToken"}``.
+        items = body.get("operations") if isinstance(body, dict) else None
+        return items if isinstance(items, list) else None
+
+    def listing_item_id(self, item: Any) -> str | None:
+        # Listed by name (``batches/<id>``), as the create reported it.
+        value = item.get("name") if isinstance(item, dict) else None
+        return value if isinstance(value, str) else None
+
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         # countTokens bodies carry the same systemInstruction schema as the
         # chat request they mirror, so the note belongs in the count;
-        # embed* bodies have no such field and must stay untouched.
-        return kind is RouteKind.CHAT or path.endswith(":countTokens")
+        # embed* bodies have no such field and must stay untouched, and
+        # neither has a batch's status or list (no generate body at all).
+        return (
+            kind is RouteKind.CHAT and _GEMINI_PATH.fullmatch(path) is not None
+        ) or path.endswith(":countTokens")
 
     def error_body(self, message: str, *, status: int = 413) -> dict[str, Any]:
         grpc_status = "FAILED_PRECONDITION" if status == 502 else "INVALID_ARGUMENT"

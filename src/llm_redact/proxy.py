@@ -4961,9 +4961,9 @@ def _restore_listing(
     if not items:
         return None
     listed = {
-        index: item["id"]
-        for index, item in enumerate(items)
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
+        index: object_id
+        for index, object_id in enumerate(map(lister.listing_item_id, items))
+        if object_id is not None
     }
     by_id = state.listing_restorers(list(dict.fromkeys(listed.values())))
     restorers = {

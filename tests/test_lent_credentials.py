@@ -158,6 +158,9 @@ async def test_a_no_route_refusal_for_an_unrecognized_route_precedes_the_body_re
         ("GET", "/api/tags", {}),
         ("POST", "/api/show", {}),
         ("GET", "/v1beta/models", {"x-goog-api-key": "AIza"}),
+        ("GET", "/v1beta/batches/b1", {"x-goog-api-key": "AIza"}),
+        ("GET", "/v1beta/batches", {"x-goog-api-key": "AIza"}),
+        ("DELETE", "/v1beta/batches/b1", {"x-goog-api-key": "AIza"}),
     ],
 )
 async def test_recognized_metadata_routes_keep_working_under_a_proxy_held_credential(

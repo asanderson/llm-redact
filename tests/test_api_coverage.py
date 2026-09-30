@@ -98,6 +98,36 @@ OPENAI_ROWS: list[tuple[str, str, str]] = [
     ("POST", "/v1/realtime/client_secrets", PASS),
     ("GET", "/v1/organization/probe", PASS),
 ]
+_GM = "/v1beta/models/{m}"  # a Gemini API model
+GEMINI_ROWS: list[tuple[str, str, str]] = [
+    *[
+        ("POST", f"{_GM}:{verb}", kind)
+        for verb, kind in (
+            ("generateContent", CHAT),
+            ("streamGenerateContent", CHAT),
+            ("countTokens", REDACT_ONLY),
+            ("embedContent", REDACT_ONLY),
+            ("batchEmbedContents", REDACT_ONLY),
+            ("predict", REDACT_ONLY),
+            ("predictLongRunning", REDACT_ONLY),
+            ("batchGenerateContent", REDACT_ONLY),
+            ("asyncBatchEmbedContent", REDACT_ONLY),
+        )
+    ],
+    ("GET", f"{_GM}/operations/{{id}}", PASS),
+    ("GET", "/v1beta/models", REDACT_ONLY),
+    ("GET", _GM, REDACT_ONLY),
+    ("POST", "/v1beta/cachedContents", REDACT_ONLY),
+    ("GET", "/v1beta/cachedContents", PASS),
+    ("GET", "/v1beta/cachedContents/{id}", PASS),
+    ("PATCH", "/v1beta/cachedContents/{id}", PASS),
+    ("DELETE", "/v1beta/cachedContents/{id}", PASS),
+    ("GET", "/v1beta/batches", CHAT),
+    ("GET", "/v1beta/batches/{id}", CHAT),
+    ("POST", "/v1beta/batches/{id}:cancel", REDACT_ONLY),
+    ("DELETE", "/v1beta/batches/{id}", REDACT_ONLY),
+    ("PATCH", "/v1beta/batches/{id}:updateGenerateContentBatch", PASS),
+]
 VERTEX_ROWS: list[tuple[str, str, str]] = [
     *[
         ("POST", f"{_VX}/publishers/google/models/{{m}}:{verb}", kind)
@@ -197,6 +227,12 @@ SECTIONS: list[tuple[str, str, dict[str, str], list[tuple[str, str, str]]]] = [
         ANTHROPIC_ROWS,
     ),
     ("openai", "https://api.openai.com", {"authorization": "Bearer sk-proj-test"}, OPENAI_ROWS),
+    (
+        "gemini",
+        "https://generativelanguage.googleapis.com",
+        {"x-goog-api-key": "AIza-test"},
+        GEMINI_ROWS,
+    ),
     (
         "vertex",
         "https://us-central1-aiplatform.googleapis.com",

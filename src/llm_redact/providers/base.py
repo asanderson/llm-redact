@@ -315,6 +315,15 @@ class ProviderAdapter(ABC):
         replaces items in it by position."""
         return None
 
+    def listing_item_id(self, item: Any) -> str | None:
+        """The stored-object id one listed item names — as this adapter's
+        ``object_ids_from_body`` reports the object when it is created — or
+        None (the item then stays as the listing's own session delivers
+        it). OpenAI-shaped listings name it ``id``; the Gemini API's name
+        it ``name`` (``files/<id>``, ``batches/<id>``)."""
+        value = item.get("id") if isinstance(item, dict) else None
+        return value if isinstance(value, str) else None
+
     @abstractmethod
     def rehydrate_event(self, event: SSEEvent, pool: RehydratorPool) -> list[SSEEvent]:
         """Rewrite one SSE event; may inject synthetic flush events."""

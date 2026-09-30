@@ -1,7 +1,7 @@
 # API coverage matrix
 
 Every documented Anthropic and OpenAI endpoint, and the commonly used
-Vertex AI, Azure OpenAI and Bedrock runtime endpoints, with the
+Gemini API, Vertex AI, Azure OpenAI and Bedrock runtime endpoints, with the
 classification the proxy applies. Enumerated against docs.anthropic.com and
 platform.openai.com as of **2026-07**, and against the Vertex AI v1 REST
 reference, the Azure OpenAI REST reference (2024-10-21 GA + the `OpenAI.v1`
@@ -167,6 +167,41 @@ matches](#requests-no-route-matches).
 | `GET /v1/organization/...` (Admin API) | pass-through | org metadata (singular: `/v1/organizations/` is Anthropic's) |
 | WebSocket `/v1/realtime` | websocket | beta + GA event vocabularies; MCP tool config preserved, MCP arguments rehydrated |
 
+## Google Gemini API
+
+The Gemini API (`generativelanguage.googleapis.com`, `[providers.gemini]`);
+every `/v1beta/models/…` verb row also matches under `/v1/` and
+`/v1beta/tunedModels/{t}`. Batch Mode and context caches are stored or
+async (read back later with no first-message anchor), so they use the
+STATIC vault session — the batch stance; with llm-redact-pro's named users,
+the user's own copy of it — and no route here but the generate verbs and
+`countTokens` ever carries the system note.
+
+| Endpoint | Classification | Notes |
+|---|---|---|
+| `POST /v1beta/models/{m}:generateContent` | chat | text, thoughts, function-call args, code and grounding restored |
+| `POST /v1beta/models/{m}:streamGenerateContent` | chat | the SSE stream (`alt=sse`) and the buffered JSON-array form, per-candidate channels |
+| `POST /v1beta/models/{m}:countTokens` | redact-only | note counted too, keeping counts honest |
+| `POST /v1beta/models/{m}:embedContent` | redact-only | vectors back |
+| `POST /v1beta/models/{m}:batchEmbedContents` | redact-only | vectors back |
+| `POST /v1beta/models/{m}:predict` | redact-only | Imagen: `instances[].prompt` redacted, image bytes back |
+| `POST /v1beta/models/{m}:predictLongRunning` | redact-only | Veo: prompt redacted; the operation is reported to a session router as its creator's |
+| `GET /v1beta/models/{m}/operations/{id}` | pass-through | the Veo job's status |
+| `GET /v1beta/models` | redact-only | the model listing, metadata only (a body-less no-op: recognized) |
+| `GET /v1beta/models/{m}` | redact-only | one model's metadata |
+| `POST /v1beta/cachedContents` | redact-only | the cached prompt redacted; the cache (`cachedContents/<id>`, which later bodies cite as `cachedContent`) is reported to a session router |
+| `GET /v1beta/cachedContents` | pass-through | metadata only (the cached content is never returned) |
+| `GET /v1beta/cachedContents/{id}` | pass-through | |
+| `PATCH /v1beta/cachedContents/{id}` | pass-through | the expiry |
+| `DELETE /v1beta/cachedContents/{id}` | pass-through | |
+| `POST /v1beta/models/{m}:batchGenerateContent` | redact-only | Batch Mode: the inlined requests (and the display name) redacted, no note; the answer is the batch operation (`batches/<id>`), reported to a session router as its creator's — its echo keeps the placeholders (restored on the status read) |
+| `POST /v1beta/models/{m}:asyncBatchEmbedContent` | redact-only | async batch embeddings: as `:batchGenerateContent` |
+| `GET /v1beta/batches` | chat | the batch list (`{"operations": [...]}`): every batch's echo restored in the request's own session, or — with a session router attributing listed items (llm-redact-pro's named users) — each item, by its `name`, in its creator's |
+| `GET /v1beta/batches/{id}` | chat | a batch's status: the display name and a finished batch's INLINED responses (model output carrying placeholders) restored; a file-output batch names its output file, reported to a session router |
+| `POST /v1beta/batches/{id}:cancel` | redact-only | the name only |
+| `DELETE /v1beta/batches/{id}` | redact-only | the name only |
+| `PATCH /v1beta/batches/{id}:updateGenerateContentBatch` | pass-through | a pending batch's update: never sent with a credential the proxy holds |
+
 ## Google Vertex AI
 
 `{p}`/`{l}` are the project and location; every `/v1/` row also matches
@@ -325,14 +360,16 @@ and rehydrated inbound like any other content, on Messages, Responses
 ## Other providers
 
 Gemini **context caching** (`POST /v1beta/cachedContents`) and **Batch
-Mode** (`models/{m}:batchGenerateContent`) are redact-only: the cached
-prompt and the inlined batch requests are content that must not reach the
-provider in the clear, while their responses carry only a cache/operation
-name (nothing to rehydrate). Both are stored/async — the cache is reused
-and batch results are fetched later through the operations API with no
-first-message anchor — so they use the STATIC vault session (the batch
-stance; with llm-redact-pro's named users, the user's own copy of it),
-keeping redact/rehydrate always in agreement. The per-cache
+Mode** (`models/{m}:batchGenerateContent`, `:asyncBatchEmbedContent`) are
+redact-only: the cached prompt and the inlined batch requests are content
+that must not reach the provider in the clear, while their responses carry
+only a cache/operation name. Both are stored/async — the cache is reused
+and batch results are read later through the batch's status
+(`GET /v1beta/batches/{id}`) with no first-message anchor — so they use the
+STATIC vault session (the batch stance; with llm-redact-pro's named users,
+the user's own copy of it), keeping redact/rehydrate always in agreement:
+the status restores a finished batch's inlined responses in that session
+(see the [Gemini API table](#google-gemini-api)). The per-cache
 GET/PATCH/DELETE and list return metadata only and pass through.
 
 The Gemini **Files API** passes through — files are media, the documented
@@ -387,7 +424,8 @@ fixtures + a live drift test; an unrecognized event forwards verbatim.
 
 Vertex AI, Azure OpenAI, and Bedrock routes are pinned by the tables above
 (and `tests/test_cloud_routes.py`, which also proves the matchers disjoint
-and that identity auth signs every recognized route); Gemini, Cohere, and
+and that identity auth signs every recognized route); the Gemini API table
+is pinned by `tests/test_api_coverage.py` like the others; Cohere and
 Ollama route coverage is pinned by their adapter test suites
 (`tests/test_provider_*.py`); their matched routes appear in the README's
 provider section. **Claude models

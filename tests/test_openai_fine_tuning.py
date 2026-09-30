@@ -58,6 +58,7 @@ class JobStore:
                 "result_files": [],
                 "integrations": body.get("integrations", []),
                 "metadata": body.get("metadata"),
+                "method": body.get("method"),
             }
             self.jobs[JOB] = job
             return httpx.Response(200, json=job)
@@ -172,6 +173,82 @@ async def test_a_value_in_a_verbatim_field_refuses_the_job(
     assert routed.sessions.objects == []
     (row,) = routed.app.state.proxy.recent
     assert row["status"] == 400
+
+
+GRADER = {
+    "type": "multi",
+    "name": f"grader for {EMAIL}",
+    "graders": {
+        "exact": {
+            "type": "string_check",
+            "name": f"matches {EMAIL}",
+            "input": "{{sample.output_text}}",
+            "reference": "{{item.reference}}",
+            "operation": "eq",
+        },
+        "nested": {
+            "type": "multi",
+            "name": "plain",
+            "graders": {"py": {"type": "python", "name": f"py {EMAIL}", "source": "x"}},
+            "calculate_output": "py",
+        },
+    },
+    "calculate_output": "exact + nested",
+}
+REINFORCEMENT = {
+    **CREATE,
+    "model": "o4-mini-2025-04-16",
+    "method": {
+        "type": "reinforcement",
+        "reinforcement": {"grader": GRADER, "hyperparameters": {"n_epochs": 1}},
+    },
+}
+
+
+async def test_grader_names_are_labels_redacted_and_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Reinforcement grader names are user-written labels under a key the
+    # walk skips as structural: redacted on the create (a credential the
+    # proxy holds forwards it), restored in every echo of the job.
+    store = JobStore()
+    routed = Routed(monkeypatch, store, ["/v1/fine_tuning/jobs", f"/v1/fine_tuning/jobs/{JOB}"])
+    created = await routed.send("POST", "/v1/fine_tuning/jobs", REINFORCEMENT)
+    assert created.status_code == 200, created.text
+    assert EMAIL not in routed.provider.requests[-1].content.decode()
+    grader = routed.provider.last_json()["method"]["reinforcement"]["grader"]
+    assert grader["name"] == f"grader for {TOKEN}"
+    assert grader["graders"]["exact"]["name"] == f"matches {TOKEN}"
+    assert grader["graders"]["nested"]["graders"]["py"]["name"] == f"py {TOKEN}"
+    # Everything else in the grader went as sent.
+    assert grader["graders"]["exact"]["input"] == "{{sample.output_text}}"
+    assert grader["graders"]["nested"]["name"] == "plain"
+    assert created.json()["method"] == REINFORCEMENT["method"]
+    listing = await routed.send("GET", "/v1/fine_tuning/jobs")
+    assert listing.json()["data"][0]["method"] == REINFORCEMENT["method"]
+    read = await routed.send("GET", f"/v1/fine_tuning/jobs/{JOB}")
+    assert read.json()["method"] == REINFORCEMENT["method"]
+
+
+def test_grader_names_are_labels_on_every_prefix_and_only_on_the_create() -> None:
+    adapter = OpenAIAdapter()
+    for path in ("/v1/fine_tuning/jobs", "/openai/v1/fine_tuning/jobs/"):
+        assert adapter.label_fields("POST", path) == (("method", "**", "name"),)
+    assert adapter.label_fields("GET", "/v1/fine_tuning/jobs") == ()
+    assert adapter.label_fields("POST", "/v1/fine_tuning/jobs/j/cancel") == ()
+    assert adapter.label_fields("POST", "/v1/chat/completions") == ()
+    # Restored only on a job object (alone or listed), and only under `method`.
+    vault = InMemoryVault()
+    token = vault.placeholder_for("EMAIL", EMAIL)
+    from llm_redact.rehydrate import Rehydrator
+
+    job = {"object": "fine_tuning.job", "method": {"g": [{"name": token}, {"name": 3}]}}
+    restored = adapter.rehydrate_body(job, Rehydrator(vault))
+    assert restored["method"] == {"g": [{"name": EMAIL}, {"name": 3}]}
+    other = {"object": "fine_tuning.job.event", "method": {"name": token}, "name": token}
+    assert adapter.rehydrate_body(other, Rehydrator(vault)) == other
+    bare = {"object": "fine_tuning.job", "name": token}
+    assert adapter.rehydrate_body(bare, Rehydrator(vault)) == bare
 
 
 # --- prepare_route_request, unit --------------------------------------------------------

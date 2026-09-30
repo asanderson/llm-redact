@@ -314,10 +314,11 @@ def test_labels_are_redacted_and_restored_only_where_they_are_labels() -> None:
     for method, path in (
         ("GET", "/v1/vector_stores"),
         ("POST", "/v1/vector_stores/vs_1/search"),
-        ("POST", "/v1/fine_tuning/jobs"),
         ("POST", "/v1/chat/completions"),
     ):
         assert adapter.label_fields(method, path) == ()
+    # A fine-tuning job's labels are its grader names (test_openai_fine_tuning).
+    assert adapter.label_fields("POST", "/v1/fine_tuning/jobs") == (("method", "**", "name"),)
     vault = InMemoryVault()
     token = vault.placeholder_for("EMAIL", EMAIL)
     rehydrator = Rehydrator(vault)

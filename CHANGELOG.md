@@ -133,6 +133,10 @@ and tags `vX.Y.Z`.
 - Holding a route's verbatim fields out of redaction (vector store search filter
   keys, file batch file ids) costs time linear in the body: a request with many
   such fields used to block the proxy's event loop for tens of seconds.
+- A fine-tuning job create's reinforcement grader names (nested multi-grader
+  names included) are redacted like other user-written labels and restored in
+  every echo of the job; they were forwarded as sent, now under a credential the
+  proxy holds too.
 
 ## [1.9.0] - 2026-09-29
 

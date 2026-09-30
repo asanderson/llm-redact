@@ -179,20 +179,43 @@ _STORED_OBJECT_VERBATIM: tuple[tuple[re.Pattern[str], tuple[tuple[str, ...], ...
 # is covered too).
 _LABEL_POSTS = re.compile(r"(?:^|/)(?:vector_stores(?:/[^/]+)?|containers)$")
 _LABELLED_OBJECTS = frozenset({"vector_store", "container"})
+# A fine-tuning job's reinforcement GRADERS carry a `name` each — a label the
+# user writes (a multi-grader nests named graders under `graders`, at any
+# depth): redacted on the job create (``label_fields``) and restored in
+# every echo of the job — a `fine_tuning.job` object, alone or listed.
+_GRADER_NAMES = ("method", "**", "name")
+_FINE_TUNING_JOB = "fine_tuning.job"
 
 
 def _restore_labels(node: Any, rehydrator: Rehydrator) -> Any:
-    """``node`` with the `name` of a vector store or container object (the
-    node itself, or each item of a list envelope) restored."""
+    """``node`` with the `name` of a vector store or container object, and
+    every `name` under a fine-tuning job's `method` (its graders'), restored
+    (the node itself, or each item of a list envelope)."""
     if not isinstance(node, dict):
         return node
     name = node.get("name")
     if node.get("object") in _LABELLED_OBJECTS and isinstance(name, str):
         node = {**node, "name": rehydrator.rehydrate_text(name)}
+    if node.get("object") == _FINE_TUNING_JOB and "method" in node:
+        node = {**node, "method": _restore_names(node["method"], rehydrator)}
     data = node.get("data")
     if node.get("object") == "list" and isinstance(data, list):
         node = {**node, "data": [_restore_labels(item, rehydrator) for item in data]}
     return node
+
+
+def _restore_names(node: Any, rehydrator: Rehydrator) -> Any:
+    """``node`` with every string `name` in it, at any depth, restored."""
+    if isinstance(node, list):
+        return [_restore_names(item, rehydrator) for item in node]
+    if not isinstance(node, dict):
+        return node
+    return {
+        key: rehydrator.rehydrate_text(value)
+        if key == "name" and isinstance(value, str)
+        else _restore_names(value, rehydrator)
+        for key, value in node.items()
+    }
 
 
 # Batches whose request or response carries the caller's `metadata`:
@@ -771,8 +794,13 @@ class OpenAIAdapter(ProviderAdapter):
         return ()
 
     def label_fields(self, method: str, path: str) -> tuple[tuple[str, ...], ...]:
-        if method == "POST" and _LABEL_POSTS.search(path.rstrip("/")) is not None:
+        if method != "POST":
+            return ()
+        tail = path.rstrip("/")
+        if _LABEL_POSTS.search(tail) is not None:
             return (("name",),)
+        if _FINE_TUNING_CREATE_RE.search(tail) is not None:
+            return (_GRADER_NAMES,)
         return ()
 
     def lists_objects(self, method: str, path: str) -> bool:
@@ -837,8 +865,9 @@ class OpenAIAdapter(ProviderAdapter):
             rehydrator.rehydrate_text,
             key_overrides={"arguments": rehydrator.rehydrate_json_source_text},
         )
-        # A vector store's or container's `name` is a label the request
-        # redacted (``label_fields``), under a key the walk skips.
+        # A vector store's or container's `name`, and a fine-tuning job's
+        # grader names, are labels the request redacted (``label_fields``),
+        # under a key the walk skips.
         return _restore_labels(restored, rehydrator)
 
     def redacts_multipart(self, path: str) -> bool:

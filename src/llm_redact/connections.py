@@ -153,6 +153,32 @@ def _being_cancelled() -> bool:
     return task is not None and task.cancelling() > 0
 
 
+async def _bounded(awaitable: Any, timeout: float) -> Any:
+    """``awaitable``'s result within ``timeout`` seconds, else TimeoutError.
+    Unlike ``asyncio.wait_for`` this never waits for the cancelled check to
+    finish: one that swallows its cancellation cannot hold the pass (and so
+    every later re-check) open. A check left running is cancelled and its
+    outcome discarded."""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except BaseException:
+        task.cancel()  # this pass is being cancelled: take the check with it
+        raise
+    if not done:
+        task.cancel()
+        task.add_done_callback(_discard)
+        raise TimeoutError("the access re-check did not answer in time")
+    return task.result()
+
+
+def _discard(task: asyncio.Future[Any]) -> None:
+    """Retrieve an abandoned check's outcome so it is never reported as an
+    unretrieved exception."""
+    if not task.cancelled():
+        task.exception()
+
+
 class LiveConnections:
     """Every open realtime relay and events stream, with the admission each
     was opened under; the core's ``plugin_api.ConnectionControl``.
@@ -237,7 +263,7 @@ class LiveConnections:
         try:
             verdict = recheck()
             if inspect.isawaitable(verdict):
-                verdict = await asyncio.wait_for(verdict, self.timeout)
+                verdict = await _bounded(verdict, self.timeout)
             if not (verdict is None or isinstance(verdict, bool | str)):
                 raise TypeError("a recheck answered neither a bool, None nor a string")
         except asyncio.CancelledError as problem:

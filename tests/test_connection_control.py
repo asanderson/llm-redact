@@ -186,6 +186,78 @@ async def test_recheck_verdicts(
     assert errors == (Counter({"recheck": 1}) if cause == "recheck_error" else Counter())
 
 
+async def test_a_recheck_that_swallows_its_cancellation_cannot_hold_the_pass() -> None:
+    # asyncio.wait_for waits for a timed-out awaitable to finish cancelling;
+    # a check that swallows the cancellation held the pass — and every later
+    # re-check — open indefinitely (fail open). The pass now ends at the
+    # timeout and closes the connection.
+    live = LiveConnections(Counter())
+    live.timeout = 0.05
+    release = asyncio.Event()
+
+    async def stubborn() -> bool:
+        while not release.is_set():
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                continue  # swallowed
+        return True
+
+    conn = FakeConn(recheck=stubborn)
+    live.track(conn)
+    await asyncio.wait_for(live.recheck_all(), 2)
+    assert conn.reasons == [RECHECK_FAILED_REASON]
+    assert live.closed == Counter({"recheck_error": 1})
+    release.set()
+    await asyncio.sleep(0.01)
+
+
+async def test_a_cancelled_pass_cancels_the_check_it_was_waiting_on() -> None:
+    live = LiveConnections(Counter())
+    live.timeout = 30
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def held() -> bool:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return True
+
+    live.track(FakeConn(recheck=held))
+    pass_ = asyncio.ensure_future(live.recheck_all())
+    await started.wait()
+    pass_.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pass_
+    await asyncio.wait_for(cancelled.wait(), 1)
+
+
+async def test_an_abandoned_check_that_later_fails_is_not_reported() -> None:
+    live = LiveConnections(Counter())
+    live.timeout = 0.01
+    release = asyncio.Event()
+
+    async def late_failure() -> bool:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await release.wait()
+            raise RuntimeError(SECRET) from None
+        return True
+
+    conn = FakeConn(recheck=late_failure)
+    live.track(conn)
+    await live.recheck_all()
+    assert conn.reasons == [RECHECK_FAILED_REASON]
+    release.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
 async def test_a_failing_recheck_closes_and_logs_its_type_only(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

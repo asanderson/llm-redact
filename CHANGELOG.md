@@ -108,6 +108,10 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- A connection re-check that swallows its own cancellation can no longer hold the
+  periodic re-check pass open (and so stop every later re-check): the pass stops
+  waiting at the timeout, closes the connection and abandons the check, instead of
+  waiting for it to finish cancelling as `asyncio.wait_for` does.
 - A buffered file download served as JSON Lines under a JSON content type
   (`application/jsonl` contains `application/json`) is restored through the
   adapter's file-download restoration instead of being left unrestored.

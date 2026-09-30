@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gc
+import json
 import logging
 import threading
 from collections import Counter
@@ -787,6 +788,99 @@ async def test_a_relay_revoked_while_authorizing_is_never_dialled(
     assert closed is not None and (closed.code, closed.reason) == (1008, "revoked meanwhile")
     assert row["status"] == 403
     assert fake.paths == []
+
+
+async def test_a_relay_revoked_while_dialled_is_never_served(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The gate closes the connection while the upstream is dialled: the dial
+    # completes and closes (1000), the client is closed 1008 with the gate's
+    # reason and never receives the upstream's greeting; recorded 403.
+    gate = ConnGate()
+    _install(monkeypatch, gate)
+    async with Upstream() as fake:
+        fake.hold = asyncio.Event()
+        fake.greeting = '{"type": "session.created"}'
+        with _serve(_openai(fake)) as proxy:
+            dialling = asyncio.ensure_future(_connect(f"ws://{proxy.host}/v1/realtime"))
+            await asyncio.wait_for(fake.dialled.wait(), 10)
+            assert gate.control is not None
+            assert gate.control.close(subject="ada", reason=GATE_REASON) == 1
+            fake.hold.set()
+            client = await dialling
+            relayed: list[Any] = []
+            try:
+                while True:
+                    relayed.append(await asyncio.wait_for(client.recv(), 5))
+            except websockets.exceptions.ConnectionClosed as ended:
+                closed = ended.rcvd
+            await _upstream_closed(fake)
+            row = await _recent(proxy.host, lambda r: r["method"] == "WS")
+    assert relayed == []
+    assert closed is not None and (closed.code, closed.reason) == (1008, GATE_REASON)
+    assert fake.close_codes == [1000] and fake.received == []
+    assert row["status"] == 403
+
+
+class _Burst(Upstream):
+    """Answers a "burst" frame with 12 deltas (within the relay's upstream
+    queue, so its close handshake is never stuck behind unread frames),
+    echoes anything else."""
+
+    async def _handler(self, connection: Any) -> None:
+        try:
+            async for message in connection:
+                if "burst" in message:
+                    for index in range(12):
+                        delta = {"type": "response.output_text.delta", "i": index, "delta": "x"}
+                        await connection.send(json.dumps(delta))
+                else:
+                    await connection.send(message)
+        finally:
+            self.close_codes.append(connection.close_code)
+
+
+async def test_no_upstream_frame_reaches_the_client_once_its_access_is_revoked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The gate revokes the relay while it is restoring upstream frame 5 (on
+    # the relay's own loop, as a re-check or an in-loop revocation would):
+    # nothing is sent to the client after it (frame 5 included, restored
+    # but checked before its send), and no later frame is restored.
+    from llm_redact import realtime
+
+    gate = ConnGate()
+    _install(monkeypatch, gate)
+    restored_after: list[int] = []
+    revoked: list[int] = []
+    rehydrate = realtime.OpenAIRealtimeWs.rehydrate_message
+
+    def revoking(self: Any, data: Any, pool: Any) -> Any:
+        index = json.loads(data).get("i")
+        if revoked:
+            restored_after.append(index)
+        elif index == 5:
+            assert gate.control is not None
+            revoked.append(gate.control.close(subject="ada", reason=GATE_REASON))
+        return rehydrate(self, data, pool)
+
+    monkeypatch.setattr(realtime.OpenAIRealtimeWs, "rehydrate_message", revoking)
+    async with _Burst() as fake:
+        with _serve(_openai(fake)) as proxy:
+            client = await websockets.connect(f"ws://{proxy.host}/v1/realtime", max_queue=None)
+            await client.send('{"type": "noop"}')
+            await client.recv()
+            await client.send('{"type": "burst"}')
+            received: list[int] = []
+            try:
+                while True:
+                    received.append(json.loads(await asyncio.wait_for(client.recv(), 5))["i"])
+            except websockets.exceptions.ConnectionClosed as ended:
+                closed = ended.rcvd
+    assert revoked == [1]
+    assert restored_after == []
+    assert received == [0, 1, 2, 3, 4]
+    assert closed is not None and (closed.code, closed.reason) == (1008, GATE_REASON)
 
 
 async def test_a_gate_without_the_members_keeps_working(monkeypatch: pytest.MonkeyPatch) -> None:

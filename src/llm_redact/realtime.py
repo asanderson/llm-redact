@@ -932,15 +932,18 @@ def _record_refused(
     started: float,
     *,
     audit_token: object | None = None,
+    status: int = 502,
 ) -> None:
-    """The recorded 502 for a connection the upstream never got (no
-    credential, or the dial failed): one metadata-only row, like HTTP."""
+    """The recorded row for a connection whose client the upstream never
+    served — no credential, the dial failed (502), or it was revoked while
+    dialled (``status``): one metadata-only row, like HTTP, ending the audit
+    START row if there is one."""
     state.record_request(
         session=ctx.session_id,
         provider=adapter.provider,
         method="WS",
         path=path,
-        status=502,
+        status=status,
         started=started,
         streamed=False,
         detections={},
@@ -1451,6 +1454,17 @@ async def _relay(
         await _reject(websocket, "upstream websocket connect failed")
         return
 
+    if relay.revoked is not None:
+        # Revoked while the upstream was dialled (a reload, or the access
+        # gate): the dial completes and closes; the client is never accepted
+        # onto it, and no upstream frame (its greeting) reaches it.
+        logger.info("WS %s -> refused after dialling (%s)", path, relay.revocation_log())
+        with contextlib.suppress(Exception):
+            await upstream.close(code=1000)
+        refused = 403 if relay.revoked == ACCESS_REVOKED else 503
+        _record_refused(state, ctx, adapter, path, started, audit_token=audit_token, status=refused)
+        await _reject(websocket, relay.close_reason, code=relay.close_code)
+        return
     await websocket.accept(subprotocol=upstream.subprotocol)
     logger.info("WS %s -> connected (provider %s)", path, adapter.provider)
     if not provider_config.detection:
@@ -1587,7 +1601,14 @@ async def _relay(
     async def upstream_to_client() -> None:
         try:
             async for frame in upstream:
+                if relay.revoked is not None:
+                    # Revoked (a reload, or the access gate — perhaps from
+                    # another thread): no upstream frame is restored or sent
+                    # to the client after it; the relay closes.
+                    return
                 for out in adapter.rehydrate_message(frame, pool):
+                    if relay.revoked is not None:
+                        return
                     if isinstance(out, str):
                         await websocket.send_text(out)
                     else:

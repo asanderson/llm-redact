@@ -197,6 +197,11 @@ and tags `vX.Y.Z`.
   open. A connection whose earlier re-check is still running after being
   abandoned is not asked again, and at most 64 abandoned re-checks may run at
   once (further awaitable re-checks count as failed without being started).
+- A realtime relay revoked (by a config reload or the access gate) while the proxy
+  was dialling its upstream is closed without being served: the client no longer
+  receives the upstream's opening frame, and the refusal is recorded (503 for a
+  reload, 403 for an access revocation). An open relay revoked by the gate no
+  longer sends the client upstream frames that arrive after the revocation.
 
 ## [1.9.0] - 2026-09-29
 

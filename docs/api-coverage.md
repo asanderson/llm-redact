@@ -58,7 +58,10 @@ except a BINARY file part (a PDF, an image, an archive, text that is not
 UTF-8): it cannot be redacted, so with the client's own key it is forwarded
 UNSCANNED (`[detection] binary_uploads = "forward"`, the default; counted in
 `/status` `unscanned_uploads_total`) or refused 400 (`"refuse"`), and under a
-credential the proxy holds it is always refused 400. `[providers.NAME] detection =
+credential the proxy holds it is always refused 400 — unless an upload
+inspector (llm-redact-pro) read it completely as text that scanned clean
+(the file then goes out byte-identical; a value found in the text refuses
+the upload 400). `[providers.NAME] detection =
 false` with the client's own key forwards such a body as sent, and so does
 every pass-through route (a route this table does not claim) — reached
 only with the client's own credential, since a credential the proxy holds

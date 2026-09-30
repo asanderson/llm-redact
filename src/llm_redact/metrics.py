@@ -92,6 +92,7 @@ class Metrics:
         bookkeeping_errors: "Counter[str] | None" = None,
         connections_closed: "Counter[str] | None" = None,
         unscanned_uploads: "Counter[str] | None" = None,
+        inspected_uploads: "Counter[tuple[str, str]] | None" = None,
     ) -> str:
         lines: list[str] = []
         lines.append("# HELP llm_redact_info Build information.")
@@ -189,6 +190,19 @@ class Metrics:
         for provider, count in sorted((unscanned_uploads or Counter()).items()):
             lines.append(
                 f'llm_redact_unscanned_uploads_total{{provider="{_escape_label(provider)}"}}'
+                f" {count}"
+            )
+
+        lines.append(
+            "# HELP llm_redact_inspected_uploads_total Binary file parts of uploads read as text"
+            " by an upload inspector, by provider and outcome (clean: forwarded after a clean"
+            " scan of the EXTRACTED text only)."
+        )
+        lines.append("# TYPE llm_redact_inspected_uploads_total counter")
+        for (provider, outcome), count in sorted((inspected_uploads or Counter()).items()):
+            lines.append(
+                "llm_redact_inspected_uploads_total{"
+                f'provider="{_escape_label(provider)}",outcome="{_escape_label(outcome)}"}}'
                 f" {count}"
             )
 

@@ -18,8 +18,13 @@ from typing import Any
 
 from llm_redact.jsonwalk import json_bytes, json_text, loads_bounded, transform_strings
 from llm_redact.providers.attribution import provider_markers
-from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
-from llm_redact.providers.documents import redact_files_upload, rehydrate_download
+from llm_redact.providers.base import SYSTEM_NOTE, InspectedUpload, ProviderAdapter, RouteKind
+from llm_redact.providers.documents import (
+    read_files_upload,
+    redact_files_upload,
+    rehydrate_download,
+)
+from llm_redact.providers.openai import PartsReading
 from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
@@ -252,6 +257,11 @@ class AnthropicAdapter(ProviderAdapter):
     def redacts_multipart(self, path: str) -> bool:
         return path == _FILES
 
+    def read_multipart(
+        self, path: str, body: bytes, boundary: bytes, charge: Callable[[int], None]
+    ) -> PartsReading | None:
+        return read_files_upload(body, boundary, charge)
+
     def redact_multipart(
         self,
         path: str,
@@ -262,6 +272,7 @@ class AnthropicAdapter(ProviderAdapter):
         inject_note: bool,
         require_scanned: bool = False,
         forward_binary: Callable[[int], None] | None = None,
+        inspected: InspectedUpload | None = None,
     ) -> bytes | None:
         # The Files upload: the document part (and any form field) to the
         # shared document policy, every part's file name redacted.
@@ -271,6 +282,7 @@ class AnthropicAdapter(ProviderAdapter):
             redactor,
             require_scanned=require_scanned,
             forward_binary=forward_binary,
+            inspected=inspected,
         )
 
     def restores_file_download(self, method: str, path: str) -> bool:

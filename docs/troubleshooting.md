@@ -113,6 +113,19 @@ key), or when `[detection] binary_uploads = "refuse"`. With your own key
 and the default `binary_uploads = "forward"` such a file is forwarded
 unscanned instead (counted in `/status` `unscanned_uploads_total`).
 Convert a Latin-1/Windows-1252 text file to UTF-8 to have it redacted.
+With llm-redact-pro's document extraction a PDF or Office file read
+completely as clean text is sent instead; one it could not read completely
+(a scanned page, an embedded image) keeps this refusal — `/status`
+`inspected_uploads_total` counts each part's outcome.
+
+## "an uploaded binary file holds values it must redact (…, found in the file's extracted text)"
+
+A 400 on a file upload with an upload inspector (llm-redact-pro's document
+extraction): the text read out of a PDF or Office file holds values of the
+named types that llm-redact would redact — and it cannot redact inside the
+file. Remove them from the document (or send its text instead, which is
+redacted), allowlist a value that is not sensitive, or set that rule's
+mode to `warn` if forwarding it is acceptable.
 
 ## "request body exceeds llm-redact max_body_bytes"
 

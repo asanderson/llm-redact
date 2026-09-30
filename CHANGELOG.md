@@ -12,6 +12,22 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Changed
+- An upload whose binary parts go to the upload inspector is now refused BEFORE the
+  inspection — never after it — for what refuses it whatever the redaction finds: a
+  provider with no upstream configured (the 502), a routing layer's local refusal, and
+  a `[audit] required` write-ahead START row that cannot be committed (the 503). For
+  such an upload the START row is written right before the inspection (with no
+  detections; the END row carries the request's own). When the redaction then finds
+  values — warn-mode values are forwarded — a second START row carrying the counts is
+  committed before any upstream contact and the early row is ended (status none, no
+  detections), so the record durable before contact always says what leaves (its
+  failure refuses 503); such a request has two START rows. Every refusal after the
+  inspection — a value found in the file, a block, the upstream authorizer, a routing
+  budget, a send that fails — is its END row; a way out that records nothing still
+  closes it, so START and END rows stay paired. The upstream authorizer stays after
+  the inspection (it signs the final, redacted bytes). Requests without an inspector,
+  and uploads with no binary part to inspect, keep the previous order. These refusals
+  no longer count an inspected part as `clean_refused`: nothing is inspected.
 - The stored-object check (`SessionRouter.object_access_refusal`, llm-redact-pro's named
   users) now sees the METADATA part of the Gemini API's single-request upload
   (`POST /upload/v1beta/files`, a `multipart/related` body): it is handed that part's
@@ -94,11 +110,10 @@ and tags `vX.Y.Z`.
   redaction will scan (file names, form fields, text and JSONL files, the Gemini
   metadata) for a block-mode value, read-only and under its own `max_body_strings`
   count. What needs the redaction itself — `max_body_strings` without a block-mode
-  rule, a sealed session, placeholder exhaustion, a vault fault — and a local refusal
-  after redaction (no upstream configured, the upstream authorizer) can still follow
-  the inspection, and the `[audit] required` START row is written after it: that
-  guarantee covers upstream contact, and the inspector is not the upstream. A clean
-  scan covers the extracted text only.
+  rule, a sealed session, placeholder exhaustion, a vault fault — the upstream
+  authorizer and a routing budget refusal can still follow the inspection; no upstream
+  configured, a routing layer's local refusal and the `[audit] required` START row come
+  before it (see Changed). A clean scan covers the extracted text only.
 - `[detection] binary_uploads = "forward" | "refuse"` (default `"forward"`, hot):
   `"refuse"` keeps refusing binary uploads under the client's own key too. Forwarded
   binaries are surfaced: /status `unscanned_uploads_total`,

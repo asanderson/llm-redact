@@ -43,7 +43,7 @@ handed to the upstream or refused (``/status`` ``inspected_uploads_total``,
 byte-identical after a clean scan), ``clean_refused`` (scanned clean, but
 the upload was refused before any upstream contact: a value in another
 part, a block, a header rule, a credential the proxy holds that the
-inspection did not allow, no upstream configured, the audit START row, the
+inspection did not allow, a routing budget, the counted audit START row, the
 upstream authorizer), ``detected``, ``blocked``, ``incomplete`` (no text,
 a partial reading, or more text than the request's scan budgets — the
 characters, or the strings of ``max_body_strings``), ``not_inspected``

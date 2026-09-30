@@ -189,6 +189,85 @@ _INBOUND_TRACEPARENT: ContextVar[str | None] = ContextVar("llm_redact_traceparen
 # by record_request — the same task-context trick as the traceparent, so the
 # streaming finalizers attribute without threading a parameter through.
 _REQUEST_USER: ContextVar[str | None] = ContextVar("llm_redact_user", default=None)
+
+
+class _EarlyAudit:
+    """The ``[audit] required`` START row an upload wrote BEFORE its binary
+    parts were handed to the upload inspector (``_handle``'s
+    ``before_inspection``), held for the request until its END row: the
+    request's own ``record_request`` finalizes it — every refusal after the
+    inspection included, since they record without a token — and
+    ``handle()`` closes one still held on a way out that recorded nothing,
+    so every START row gets exactly one END row. ``started``: the local
+    refusals and the START row were already applied (the later sites skip
+    them); the token is None when required mode is off."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self._token: object | None = None
+        self._row: dict[str, Any] = {}
+
+    def hold(self, token: object | None, **row: Any) -> None:
+        self.started = True
+        self._token = token
+        self._row = row
+
+    @property
+    def holds_token(self) -> bool:
+        return self._token is not None
+
+    def take(self) -> object | None:
+        token, self._token = self._token, None
+        return token
+
+    def supersede(self, state: "ProxyState") -> None:
+        """End the held START row now, before upstream contact: a START row
+        written after redaction (carrying the request's detections and
+        warned counts) replaces it as the request's write-ahead record.
+        Its END row goes straight to the write-ahead log (``status`` None,
+        no detections) — never through ``record_request``, so metrics, the
+        recent buffer and the sinks count the request once. A fault is
+        logged CRITICAL by type only: the counted START row is committed,
+        and the START row left open is adopted as interrupted later."""
+        token, log = self.take(), state.write_ahead_audit
+        # Called only while a token is held, which only that log mints.
+        assert token is not None and log is not None
+        entry = state._audit_entry(
+            session=self._row["session"],
+            provider=self._row["provider"],
+            method=self._row["method"],
+            path=self._row["path"],
+            detections={},
+            warned=None,
+            duration_ms=(time.perf_counter() - self._row["started"]) * 1000.0,
+        )
+        try:
+            log.finalize(token, entry)
+        except AuditWriteError as exc:
+            logger.critical(
+                "audit write failed ending a superseded START row (%s %s): %s",
+                self._row["method"],
+                self._row["path"],
+                type(exc).__name__,
+            )
+
+    def close(self, state: "ProxyState", status: int | None) -> None:
+        token = self.take()
+        if token is not None:
+            state.record_request(
+                **self._row,
+                status=status,
+                streamed=False,
+                detections={},
+                rehydrations={},
+                audit_token=token,
+            )
+
+
+# The current request's early START row (``_EarlyAudit``), set by handle()
+# and read by record_request, which finalizes it with the request's own row
+# — the task-context trick again, so no refusal site threads a token.
+_EARLY_AUDIT: ContextVar[_EarlyAudit | None] = ContextVar("llm_redact_early_audit", default=None)
 # The 403 text when the session router's ownership check fails or answers
 # something other than a reason (never an id or a user name).
 _OBJECT_ACCESS_FAULT = (
@@ -1410,7 +1489,12 @@ class ProxyState:
     ) -> None:
         """Always update in-memory metrics and the recent buffer; write an
         audit row when enabled (finalizing the write-ahead START row when
-        ``begin_audit`` issued a token for this request)."""
+        ``begin_audit`` issued a token for this request — or an upload wrote
+        its START row before its inspection: ``_EarlyAudit``)."""
+        if audit_token is None:
+            early = _EARLY_AUDIT.get()
+            if early is not None:
+                audit_token = early.take()
         duration_seconds = time.perf_counter() - started
         self.metrics.observe_request(provider, status, duration_seconds, streamed)
         row = {
@@ -3513,6 +3597,7 @@ async def _inspect_upload(
     max_body_strings: int,
     outcomes: Counter[str],
     window: _CountWindow,
+    before_inspection: Callable[[], None],
 ) -> tuple[InspectedUpload | None, dict[str, int]]:
     """An upload's binary file parts read as text by the upload inspector
     and judged (``upload_inspection``): the adapter's reading of ``body``
@@ -3522,7 +3607,10 @@ async def _inspect_upload(
     a file carries inside a compressed stream bounds this request's new
     numbers). With a rule in block mode, every string the redaction will
     scan is checked for one first (``_block_check``): an upload it refuses
-    is never handed to the inspector. Each part's outcome is added to
+    is never handed to the inspector — nor one ``before_inspection`` refuses
+    (it raises ``_RefusedBeforeInspection``: the local refusals that do not
+    need the redacted bytes and the ``[audit] required`` START row, applied
+    only for an upload with a binary part to inspect). Each part's outcome is added to
     ``outcomes`` — counted by the caller once it knows whether the upload
     went out (``_count_inspections``). The inspection is the one await inside the
     request's count ``window``: it restarts once the inspector returns,
@@ -3544,6 +3632,10 @@ async def _inspect_upload(
         # The inspector may send a file to a service: a block-mode value in
         # another part or a file name refuses the request before that.
         reading.require_unblocked(_block_check(redactor, max_body_strings))
+    # A request refused anyway never sends a file to the inspector (which may
+    # send it off the machine): no upstream configured, a routed local
+    # refusal, a START row [audit] required cannot commit.
+    before_inspection()
     results = await inspect_parts(
         inspector, parts, provider=provider_name, identity=identity, limits=limits
     )
@@ -3566,6 +3658,15 @@ async def _inspect_upload(
     if verdict.detected:
         raise BinaryValuesDetected(verdict.detected)
     return InspectedUpload(reading, verdict.cleared), verdict.floors
+
+
+class _RefusedBeforeInspection(Exception):
+    """``before_inspection`` refused the upload: ``response`` (already
+    recorded) is the answer, and no part was handed to the inspector."""
+
+    def __init__(self, response: Response) -> None:
+        super().__init__("refused before inspection")
+        self.response = response
 
 
 def _block_check(redactor: Redactor, limit: int) -> Callable[[str], str]:
@@ -3595,9 +3696,10 @@ def _count_inspections(
     upstream (``sent``) — a part that scanned clean in an upload the proxy
     refused (a value in another part, a block, a header rule, a credential
     the proxy holds that the inspection did not allow, or any refusal after
-    redaction: no upstream configured, the ``[audit] required`` START row,
-    the upstream authorizer, a routed budget) is ``clean_refused``, never
-    reported as forwarded."""
+    redaction: the upstream authorizer, a routed budget) is
+    ``clean_refused``, never reported as forwarded. (No upstream configured
+    and a failed ``[audit] required`` START row refuse before the inspection:
+    nothing is inspected, so nothing is counted.)"""
     for outcome, count in outcomes.items():
         if outcome == "clean" and not sent:
             outcome = "clean_refused"
@@ -3683,12 +3785,22 @@ def _plan_request(
 async def handle(request: Request) -> Response:
     """The catch-all route (``_handle``). An upload's honesty counts are
     settled once its fate is known: sent when handed to the upstream, else
-    refused — here, on every other way out (``_UploadFate``)."""
+    refused — here, on every other way out (``_UploadFate``). A START row an
+    upload wrote before its inspection (``_EarlyAudit``) that no recorded
+    row finalized is closed here with the answer's status (None: an
+    exception), so it never stays without its END row."""
     upload = _UploadFate()
+    early_audit = _EarlyAudit()
+    reset = _EARLY_AUDIT.set(early_audit)
+    status: int | None = None
     try:
-        return await _handle(request, upload)
+        response = await _handle(request, upload)
+        status = response.status_code
+        return response
     finally:
+        _EARLY_AUDIT.reset(reset)
         upload.settle(sent=False)
+        early_audit.close(request.app.state.proxy, status)
 
 
 async def _handle(request: Request, upload: _UploadFate) -> Response:
@@ -3862,6 +3974,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         )
         logger.info("%s %s -> 502 provider %s disabled", request.method, path, provider_name)
         return JSONResponse(error, status_code=502)
+
+    # The admitted config's upstream, not a reload's (the legacy path's).
+    upstream_base = provider_conf.upstream_base_url
 
     if admission.refusal is not None:
         # The access gate's refusal (llm-redact-pro), applied after the
@@ -4423,6 +4538,72 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                     raw_texts,
                 )
             )
+
+            def before_inspection() -> None:
+                # What refuses this request whatever the redaction finds,
+                # applied BEFORE its binary parts go to the inspector (which
+                # may send them off the machine) instead of after: the legacy
+                # path's missing upstream and target, a routed plan's local
+                # refusal, then the [audit] required START row — held for
+                # the request (_EarlyAudit): every later refusal's row, the
+                # authorizer's and a routed budget's included, is its END
+                # row. The authorizer itself needs the final bytes: after.
+                if plan is None:
+                    if not upstream_base:
+                        raise _RefusedBeforeInspection(
+                            _upstream_unconfigured(
+                                state, ctx, adapter, request=request, path=path, started=started
+                            )
+                        )
+                    if (
+                        _legacy_target(
+                            request,
+                            path,
+                            provider_name,
+                            upstream_base,
+                            upstream_auth,
+                            matched=adapter is not None,
+                        )
+                        is None
+                    ):
+                        raise _RefusedBeforeInspection(_target_refused())
+                else:
+                    local = plan.local_refusal()
+                    if local is not None:
+                        raise _RefusedBeforeInspection(
+                            _route_refusal(
+                                state,
+                                ctx.session_id,
+                                adapter,
+                                local,
+                                request=request,
+                                path=path,
+                                started=started,
+                            )
+                        )
+                token, audit_refusal = _begin_audit_guarded(
+                    state,
+                    ctx,
+                    adapter,
+                    request=request,
+                    path=path,
+                    started=started,
+                    new_counts={},
+                    new_warned={},
+                )
+                if audit_refusal is not None:
+                    raise _RefusedBeforeInspection(audit_refusal)
+                early = _EARLY_AUDIT.get()
+                assert early is not None  # set by handle() for every request
+                early.hold(
+                    token,
+                    session=ctx.session_id,
+                    provider=adapter.name,
+                    method=request.method,
+                    path=path,
+                    started=started,
+                )
+
             try:
                 inspected: InspectedUpload | None = None
                 if state.upload_inspector is not None:
@@ -4444,6 +4625,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                         max_body_strings=max_body_strings,
                         outcomes=inspection_outcomes,
                         window=window,
+                        before_inspection=before_inspection,
                     )
                     upload_redactor = upload_redactor.with_floors(floors)
                 # One vault transaction for the whole upload (run_batched).
@@ -4466,6 +4648,8 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                         remember_text=raw_texts.append,
                     ),
                 )
+            except _RefusedBeforeInspection as exc:
+                return exc.response
             except BinaryValuesDetected as exc:
                 # Values the proxy would redact, inside a file it cannot
                 # rewrite: refused, naming their types only.
@@ -4527,58 +4711,24 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             upload=upload,
         )
 
-    upstream_base = provider_conf.upstream_base_url  # the admitted config's, not a reload's
     if not upstream_base:
         # Providers without a default upstream (azure) answer 502 until
-        # configured — proxy-generated, never forwarded.
-        provider_name = adapter.name if adapter is not None else "unknown"
-        error = (
-            adapter.error_body(
-                f"configure [providers.{provider_name}] upstream_base_url", status=502
-            )
-            if adapter is not None
-            else {"error": f"no upstream configured for {path}"}
+        # configured — proxy-generated, never forwarded. (An upload with a
+        # binary part to inspect was answered this before its inspection.)
+        return _upstream_unconfigured(
+            state, ctx, adapter, request=request, path=path, started=started
         )
-        state.record_request(
-            session=ctx.session_id,
-            provider=provider_name,
-            method=request.method,
-            path=path,
-            status=502,
-            started=started,
-            streamed=False,
-            detections={},
-            rehydrations={},
-        )
-        logger.info("%s %s -> 502 upstream not configured", request.method, path)
-        return JSONResponse(error, status_code=502)
-    upstream_path = _upstream_path(request, path)
-    if provider_name.startswith("custom:"):
-        # The /custom/NAME prefix is proxy-local routing, not part of the
-        # upstream's namespace (names are plain [a-z0-9-], so the byte
-        # prefix is unambiguous even in a percent-encoded raw path).
-        route_prefix = custom_prefix(provider_name)
-        if upstream_path.startswith(route_prefix):
-            upstream_path = upstream_path[len(route_prefix) :] or "/"
-    url = upstream_base + upstream_path
-    if request.url.query:
-        url += "?" + request.url.query
-    if not _same_upstream(url, upstream_base):
-        # Belt and braces behind origin_form_target: whatever the path
-        # holds, the request goes to the configured upstream or nowhere.
-        return JSONResponse({"error": "the request target must be a path"}, status_code=400)
-    headers = _request_headers(request, matched=adapter is not None)
+    target = _legacy_target(
+        request, path, provider_name, upstream_base, upstream_auth, matched=adapter is not None
+    )
+    if target is None:
+        return _target_refused()
+    url, headers = target
     if upstream_auth is not None:
-        # The proxy's own cloud identity: strip every client credential, then
-        # authorize the FINAL request — the on-the-wire URL and the bytes
-        # below, after redaction and note injection — and send exactly that.
-        url, headers = strip_client_credentials(url, headers)
-        if not _same_upstream(
-            url, upstream_base, exact_path=upstream_base_path(upstream_base) + upstream_path
-        ):
-            # The URL the authorizer would sign must address exactly the
-            # path the route was matched on (httpx normalizes before send).
-            return JSONResponse({"error": "the request target must be a path"}, status_code=400)
+        # The proxy's own cloud identity (the client's credentials stripped
+        # by _legacy_target): authorize the FINAL request — the on-the-wire
+        # URL and the bytes below, after redaction and note injection — and
+        # send exactly that.
         try:
             headers = await upstream_auth.authorize(request.method, url, headers, outbound)
         except Exception as exc:
@@ -4599,16 +4749,31 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         request.method, url, headers=headers, content=outbound
     )
 
-    audit_token, audit_refusal = _begin_audit_guarded(
-        state,
-        ctx,
-        adapter,
-        request=request,
-        path=path,
-        started=started,
-        new_counts=new_counts,
-        new_warned=new_warned,
-    )
+    early = _EARLY_AUDIT.get()
+    if early is not None and early.started:
+        # An upload whose START row was written before its inspection.
+        audit_token, audit_refusal = _start_after_early(
+            state,
+            early,
+            ctx,
+            adapter,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
+    else:
+        audit_token, audit_refusal = _begin_audit_guarded(
+            state,
+            ctx,
+            adapter,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
     if audit_refusal is not None:
         return audit_refusal
 
@@ -4788,6 +4953,122 @@ def _upstream_path(request: Request, path: str) -> str:
         return path
 
 
+def _upstream_unconfigured(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A provider without an upstream (azure has no default): the
+    proxy-generated, recorded 502 — never forwarded."""
+    provider_name = adapter.name if adapter is not None else "unknown"
+    error = (
+        adapter.error_body(f"configure [providers.{provider_name}] upstream_base_url", status=502)
+        if adapter is not None
+        else {"error": f"no upstream configured for {path}"}
+    )
+    state.record_request(
+        session=ctx.session_id,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=502,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info("%s %s -> 502 upstream not configured", request.method, path)
+    return JSONResponse(error, status_code=502)
+
+
+def _target_refused() -> JSONResponse:
+    return JSONResponse({"error": "the request target must be a path"}, status_code=400)
+
+
+def _legacy_target(
+    request: Request,
+    path: str,
+    provider_name: str,
+    upstream_base: str,
+    upstream_auth: UpstreamAuth | None,
+    *,
+    matched: bool,
+) -> tuple[str, list[tuple[str, str]]] | None:
+    """The legacy path's upstream URL and forwarded headers — under the
+    proxy's own identity (``upstream_auth``) with every client credential
+    stripped — or None when the URL would not address the configured
+    upstream (the caller's 400). Read from the request line and headers
+    only, never the body: checked again before an upload's inspection."""
+    upstream_path = _upstream_path(request, path)
+    if provider_name.startswith("custom:"):
+        # The /custom/NAME prefix is proxy-local routing, not part of the
+        # upstream's namespace (names are plain [a-z0-9-], so the byte
+        # prefix is unambiguous even in a percent-encoded raw path).
+        route_prefix = custom_prefix(provider_name)
+        if upstream_path.startswith(route_prefix):
+            upstream_path = upstream_path[len(route_prefix) :] or "/"
+    url = upstream_base + upstream_path
+    if request.url.query:
+        url += "?" + request.url.query
+    if not _same_upstream(url, upstream_base):
+        # Belt and braces behind origin_form_target: whatever the path
+        # holds, the request goes to the configured upstream or nowhere.
+        return None
+    headers = _request_headers(request, matched=matched)
+    if upstream_auth is None:
+        return url, headers
+    url, headers = strip_client_credentials(url, headers)
+    if not _same_upstream(
+        url, upstream_base, exact_path=upstream_base_path(upstream_base) + upstream_path
+    ):
+        # The URL the authorizer would sign must address exactly the path
+        # the route was matched on (httpx normalizes before send).
+        return None
+    return url, headers
+
+
+def _start_after_early(
+    state: ProxyState,
+    early: _EarlyAudit,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+) -> tuple[object | None, JSONResponse | None]:
+    """The write-ahead token for an upload whose START row was written
+    before its inspection (``_EarlyAudit``), at the send: that row carries
+    no detections (the redaction had not run), so when the redaction found
+    values — warn-mode ones are FORWARDED — a second START row carrying
+    them commits here, before any upstream contact, and the early row is
+    ended (``_EarlyAudit.supersede``): what is durable before contact says
+    what leaves. A second START row that cannot commit is the 503 refusal,
+    whose row ends the early one. Nothing found: the early row is the
+    request's."""
+    if early.holds_token and (new_counts or new_warned):
+        token, refusal = _begin_audit_guarded(
+            state,
+            ctx,
+            adapter,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
+        if refusal is None:
+            early.supersede(state)
+        return token, refusal
+    return early.take(), None
+
+
 def _begin_audit_guarded(
     state: ProxyState,
     ctx: RequestContext,
@@ -4801,7 +5082,10 @@ def _begin_audit_guarded(
 ) -> tuple[object | None, JSONResponse | None]:
     """[audit] required: no durably committed audit row, no upstream contact.
     The write-ahead START row commits HERE — after redaction (detections
-    known), before any byte leaves for the provider. A None token means
+    known), before any byte leaves for the provider; an upload with a binary
+    part to inspect also commits one BEFORE its inspection (no detections
+    yet: ``before_inspection``), superseded at the send by one carrying the
+    counts when the redaction found values (``_start_after_early``). A None token means
     required mode is off and nothing downstream changes; a refusal is the
     provider-shaped 503 the caller returns instead of contacting anyone."""
     try:
@@ -5908,33 +6192,51 @@ async def _handle_routed(
     core's. An upload's counts settle as sent at the first hop actually
     issued (``upload``; a refusal before one leaves them to the caller)."""
     method = request.method
-    # The count_tokens 404 (decision 7): a refusal that never counts as an
-    # attempt, so it precedes the write-ahead START row.
-    refused = plan.local_refusal()
-    if refused is not None:
-        return _route_refusal(
+    early = _EARLY_AUDIT.get()
+    if early is not None and early.started:
+        # An upload with a binary part to inspect: its local refusal was
+        # asked and its START row written before the inspection.
+        audit_token, audit_refusal = _start_after_early(
             state,
-            ctx.session_id,
+            early,
+            ctx,
             adapter,
-            refused,
             request=request,
             path=path,
             started=started,
             new_counts=new_counts,
             new_warned=new_warned,
         )
-    audit_token, audit_refusal = _begin_audit_guarded(
-        state,
-        ctx,
-        adapter,
-        request=request,
-        path=path,
-        started=started,
-        new_counts=new_counts,
-        new_warned=new_warned,
-    )
-    if audit_refusal is not None:
-        return audit_refusal
+        if audit_refusal is not None:
+            return audit_refusal
+    else:
+        # The count_tokens 404 (decision 7): a refusal that never counts as
+        # an attempt, so it precedes the write-ahead START row.
+        refused = plan.local_refusal()
+        if refused is not None:
+            return _route_refusal(
+                state,
+                ctx.session_id,
+                adapter,
+                refused,
+                request=request,
+                path=path,
+                started=started,
+                new_counts=new_counts,
+                new_warned=new_warned,
+            )
+        audit_token, audit_refusal = _begin_audit_guarded(
+            state,
+            ctx,
+            adapter,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
+        if audit_refusal is not None:
+            return audit_refusal
     # The budget 402 (an attempt that was refused locally, so it carries the
     # audit token) or the first hop (hop 1, or hop 2 of the budget chain).
     first = plan.begin(

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from enum import Enum
-from typing import Any
+from typing import Any, NamedTuple
 
 from llm_redact.eventstream import EventStreamMessage
 from llm_redact.jsonwalk import loads_bounded
@@ -192,15 +192,21 @@ _ANY_DEPTH = "**"
 _Slot = tuple[str | int, ...]
 
 
-def _verbatim_slots(node: Any, position: VerbatimPosition, at: _Slot = ()) -> list[_Slot]:
+def _verbatim_slots(node: Any, position: VerbatimPosition) -> list[_Slot]:
     """The concrete paths (keys and list indexes) ``position`` names in
-    ``node``."""
-    if not position:
-        return [at]
-    head, rest = position[0], position[1:]
+    ``node``, in document order."""
     found: list[_Slot] = []
+    _collect_slots(node, position, (), found)
+    return found
+
+
+def _collect_slots(node: Any, position: VerbatimPosition, at: _Slot, found: list[_Slot]) -> None:
+    if not position:
+        found.append(at)
+        return
+    head, rest = position[0], position[1:]
     if head == _ANY_DEPTH:
-        found.extend(_verbatim_slots(node, rest, at))
+        _collect_slots(node, rest, at, found)
         children: Any = (
             node.items()
             if isinstance(node, dict)
@@ -209,14 +215,13 @@ def _verbatim_slots(node: Any, position: VerbatimPosition, at: _Slot = ()) -> li
             else ()
         )
         for key, child in children:
-            found.extend(_verbatim_slots(child, position, (*at, key)))
+            _collect_slots(child, position, (*at, key), found)
     elif head == _EVERY_ITEM:
         if isinstance(node, list):
             for index, item in enumerate(node):
-                found.extend(_verbatim_slots(item, rest, (*at, index)))
+                _collect_slots(item, rest, (*at, index), found)
     elif isinstance(node, dict) and head in node:
-        found.extend(_verbatim_slots(node[head], rest, (*at, head)))
-    return found
+        _collect_slots(node[head], rest, (*at, head), found)
 
 
 def _get_at(node: Any, slot: _Slot) -> Any:
@@ -225,14 +230,57 @@ def _get_at(node: Any, slot: _Slot) -> Any:
     return node
 
 
-def _replaced_at(node: Any, slot: _Slot, value: Any) -> Any:
-    """``node`` with the value at ``slot`` replaced — only the containers
-    along the path are copied (the caller's body is never changed)."""
-    if not slot:
-        return value
-    step, rest = slot[0], slot[1:]
+class _Held(NamedTuple):
+    """A field at one slot of a ``_Slots`` trie: its place in the order
+    fields were held (``order``), the ``value`` it carries and the
+    ``position`` that named it."""
+
+    order: int
+    value: Any
+    position: VerbatimPosition
+
+
+# A trie of slots: each step maps to the trie below it, or to the _Held field
+# at that slot (nothing below a held field is kept: it goes back with it).
+_Slots = dict[str | int, "_Slots | _Held"]
+
+
+def _hold(trie: _Slots, slot: _Slot, held: _Held) -> None:
+    """Hold ``held`` at ``slot`` unless a field at or around it is held
+    already; a field held inside it goes back with it (dropped). Costs the
+    slot's length, whatever was held before."""
+    node = trie
+    for step in slot[:-1]:
+        child = node.setdefault(step, {})
+        if isinstance(child, _Held):
+            return  # inside a field already held out
+        node = child
+    if not isinstance(node.get(slot[-1]), _Held):
+        node[slot[-1]] = held
+
+
+def _held_fields(trie: _Slots) -> list[_Held]:
+    """Every field held in ``trie``, in the order it was held."""
+    fields: list[_Held] = []
+    pending = [trie]
+    while pending:
+        for child in pending.pop().values():
+            if isinstance(child, _Held):
+                fields.append(child)
+            else:
+                pending.append(child)
+    return sorted(fields)
+
+
+def _rebuilt(node: Any, trie: _Slots, replace: Callable[[_Held], Any]) -> Any:
+    """``node`` with each held slot's value replaced by ``replace(held)`` —
+    one pass, copying only the containers along the held paths (the
+    caller's body is never changed)."""
     copy: Any = dict(node) if isinstance(node, dict) else list(node)
-    copy[step] = _replaced_at(node[step], rest, value)
+    for step, below in trie.items():
+        copy[step] = (
+            replace(below) if isinstance(below, _Held) else _rebuilt(node[step], below, replace)
+        )
     return copy
 
 
@@ -264,40 +312,43 @@ def prepare_route_request(
     (``VerbatimFieldRedacted``; a block-mode value raises BlockedRequest, a
     warn-mode one is counted and forwarded, as anywhere), and otherwise they
     go back exactly as sent. The route's LABEL fields (``label_fields``) are
-    redacted after the walk, which skips them as structural."""
-    held: list[tuple[_Slot, Any, VerbatimPosition]] = []
-    target: dict[str, Any] = body
+    redacted after the walk, which skips them as structural. Linear in the
+    body: the fields are held in a trie of their slots, taken out in one
+    copy and put back in another."""
+    held: _Slots = {}
+    order = 0
     for position in adapter.verbatim_fields(method, path):
         for slot in _verbatim_slots(body, position):
-            if any(slot[: len(other)] == other for other, _, _ in held):
-                continue  # inside a field already held out
-            # A field held out earlier inside this one goes back with it.
-            held = [entry for entry in held if entry[0][: len(slot)] != slot]
-            held.append((slot, _get_at(body, slot), position))
-            target = _replaced_at(target, slot, None)
-    for _, value, position in held:
-        for text in _strings_in(value):
+            _hold(held, slot, _Held(order, _get_at(body, slot), position))
+            order += 1
+    fields = _held_fields(held)
+    for field in fields:
+        for text in _strings_in(field.value):
             if redactor.redact_text(text) != text:
-                label = ".".join(key for key in position if key not in (_EVERY_ITEM, _ANY_DEPTH))
+                label = ".".join(
+                    key for key in field.position if key not in (_EVERY_ITEM, _ANY_DEPTH)
+                )
                 raise VerbatimFieldRedacted(
                     f"llm-redact: the request field `{label}` holds a value llm-redact redacts,"
                     " but the provider uses that field exactly as sent (an identifier or a"
                     " name it keeps), so it cannot carry a placeholder; the request was not"
                     " forwarded"
                 )
+    target = _rebuilt(body, held, lambda field: None) if fields else body
     prepared = adapter.prepare_request(
         target, redactor, inject_note=inject_note, mcp_exempt=mcp_exempt
     )
-    for slot, value, _ in held:
-        prepared = _replaced_at(prepared, slot, value)
+    if fields:
+        prepared = _rebuilt(prepared, held, lambda field: field.value)
     # LABELS: user text under a key the walk skips as structural (a vector
-    # store's `name`), redacted here like any other text.
+    # store's `name`), redacted here like any other text — in slot order.
+    labels: _Slots = {}
     for position in adapter.label_fields(method, path):
         for slot in _verbatim_slots(prepared, position):
             value = _get_at(prepared, slot)
             if isinstance(value, str):
-                prepared = _replaced_at(prepared, slot, redactor.redact_text(value))
-    return prepared
+                _hold(labels, slot, _Held(0, redactor.redact_text(value), position))
+    return _rebuilt(prepared, labels, lambda field: field.value) if labels else prepared
 
 
 class RouteKind(Enum):

@@ -130,6 +130,9 @@ and tags `vX.Y.Z`.
   redacted on upload: a line that parses as JSON only once it holds a placeholder
   no longer gets its restored value JSON-escaped, so the file round-trips byte for
   byte. JSON Lines files are still restored line by line as JSON.
+- Holding a route's verbatim fields out of redaction (vector store search filter
+  keys, file batch file ids) costs time linear in the body: a request with many
+  such fields used to block the proxy's event loop for tens of seconds.
 
 ## [1.9.0] - 2026-09-29
 

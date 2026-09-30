@@ -323,6 +323,10 @@ def judge(
             text = result.convert_text or ""
             remaining -= len(text)
             converted[index] = text
+            # The text sent is not the text scanned (a display reading
+            # joins what the full one keeps apart): its placeholders bound
+            # the request's new numbers too.
+            merge_floors(floors, token_floors(text))
             outcomes["converted"] += 1
         elif found:
             detected.update(found)

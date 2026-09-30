@@ -418,3 +418,43 @@ def test_the_display_reading_is_bounded() -> None:
     assert reading.display() is None and reading.shown == []
     reading.show("more")
     assert reading.display() is None
+
+
+# --- token floors of the text sent in the file's place ------------------------------------------
+
+
+def test_the_floors_cover_the_convert_text() -> None:
+    # The display reading joins what the full reading keeps apart: the
+    # placeholder it carries must still bound the request's new numbers.
+    inspection = Inspection(f"«EMAIL_x001» {EMAIL}", True, "x", convert_text=f"«EMAIL_001» {EMAIL}")
+    verdict = judge(
+        {0: inspection},
+        _Scan(),  # type: ignore[arg-type]
+        identity=False,
+        text_budget=1000,
+        convertible=True,
+    )
+    assert verdict.outcomes == Counter({"converted": 1}) and verdict.floors == {"EMAIL": 1}
+
+
+async def test_a_converted_file_never_carries_one_number_for_two_values() -> None:
+    # Windows-1252 markup (a binary upload) whose shown text holds
+    # «EMAIL_001» only once a script is left out: the value it holds must
+    # not be numbered 001 too, or the download (and any echo) would
+    # restore the address in place of the token the file carried.
+    upstream = Upstream()
+    app = _app(upstream)
+    page = (
+        '<html><head><meta charset="windows-1252"></head><body><p>caf\xe9 '
+        f"\xabEMAIL_<script>x</script>001\xbb {EMAIL}</p></body></html>"
+    ).encode("cp1252")
+    async with _client(app) as client:
+        reply = await client.post(
+            "/v1/files", content=_upload(page, "page.html", "text/html"), headers=FORM
+        )
+        download = await client.get("/v1/files/file-1/content", headers=FORM)
+    assert reply.status_code == 200
+    headers, sent = _file_part(upstream.requests[0])
+    assert b"text/plain" in headers and EMAIL.encode() not in sent
+    assert "«EMAIL_001»".encode() in sent and "«EMAIL_002»".encode() in sent
+    assert download.text == f"café «EMAIL_001» {EMAIL}"

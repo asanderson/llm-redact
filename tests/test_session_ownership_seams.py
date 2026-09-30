@@ -688,7 +688,8 @@ def test_gemini_file_downloads_reach_the_gemini_upstream() -> None:
 async def test_an_anthropic_files_upload_is_reported_with_its_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # Anthropic's Files API is pass-through (the document is media); the
+    # Anthropic's Files API upload (a text document is redacted, a binary
+    # one forwarded as sent with the client's own key); the
     # anthropic-version header names the provider whose adapter tracks it.
     router = OwnershipRouter()
     _registry(monkeypatch, build_session_router=lambda config, **kw: router)

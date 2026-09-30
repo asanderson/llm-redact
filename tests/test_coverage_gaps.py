@@ -141,7 +141,7 @@ async def test_files_routing_by_header() -> None:
     )
     app = create_app(config, upstream_transport=httpx.ASGITransport(app=_fake_upstreams()))
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
-    # Anthropic-flavored files traffic passes through to the anthropic host.
+    # Anthropic-flavored files traffic reaches the anthropic host.
     a = await client.get("/v1/files/f1", headers={"anthropic-version": "2023-06-01"})
     assert a.status_code == 200
     assert received["up-anthropic"] == ["/v1/files/f1"]

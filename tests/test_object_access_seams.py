@@ -30,6 +30,7 @@ from llm_redact.providers.anthropic import AnthropicAdapter
 from llm_redact.providers.azure_openai import AzureOpenAIAdapter
 from llm_redact.providers.base import ProviderAdapter
 from llm_redact.providers.custom import CustomOpenAIAdapter
+from llm_redact.providers.ollama import OllamaAdapter
 from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
@@ -518,7 +519,8 @@ def test_listing_items_is_the_openai_list_envelope_only() -> None:
     assert adapter.listing_items({"object": "file", "data": items}) is None
     assert adapter.listing_items({"object": "list", "data": {"id": "x"}}) is None
     assert adapter.listing_items([items]) is None
-    assert AnthropicAdapter().listing_items(body) is None  # the base default
+    assert OllamaAdapter().listing_items(body) is None  # the base default
+    assert AnthropicAdapter().listing_items(body) is items  # its Files API list
 
 
 def test_the_memory_manager_answers_without_creating_a_session() -> None:

@@ -19,8 +19,9 @@ from typing import Any
 from llm_redact.jsonwalk import json_bytes, json_text, loads_bounded, transform_strings
 from llm_redact.providers.attribution import provider_markers
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
+from llm_redact.providers.documents import redact_document_upload, rehydrate_document
 from llm_redact.redactor import Redactor
-from llm_redact.rehydrate import RehydratorPool
+from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
 
 _PASSTHROUGH_EVENTS = frozenset(
@@ -35,6 +36,18 @@ _BATCH_CANCEL_RE = re.compile(r"/v1/messages/batches/[^/]+/cancel")
 # The model listing and one model, shared with OpenAI (and the Gemini API's
 # v1 surface): Anthropic's only when the request carries its marker alone.
 _MODELS_RE = re.compile(r"/v1/models(?:/[^/]+)?")
+# The Files API (beta), whose paths are OpenAI's too: Anthropic's only when
+# the request carries its marker alone (like the model listing). The upload
+# is a multipart/form-data document (a PDF, a text file, an image) — a TEXT
+# file redacted as text, a binary one forwarded as sent only with the
+# client's own key (``providers.documents``, the OpenAI Files upload's
+# policy) — and every file object echoes the uploaded ``filename``: the
+# upload's answer, the list and a file's metadata restore it. A file's
+# content (downloadable only for files a tool created) is restored when it
+# is text; delete carries the id only.
+_FILES = "/v1/files"
+_FILE_RE = re.compile(r"/v1/files/[^/]+")
+_FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
 # The routes whose bodies carry the Messages `system` field the note joins.
 _NOTE_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens", "/v1/messages/batches"})
 
@@ -75,6 +88,19 @@ def generated_file_ids(blocks: Any) -> tuple[str, ...]:
             ):
                 found.append(file_id)
     return tuple(dict.fromkeys(found))
+
+
+def _files_route(method: str, path: str) -> RouteKind:
+    """How the Files API route ``method`` ``path`` is handled (for a request
+    carrying the Anthropic marker alone): the upload, the list, a file's
+    metadata and its content are CHAT, delete redact-only."""
+    if (method in ("POST", "GET") and path == _FILES) or (
+        method == "GET" and (_FILE_RE.fullmatch(path) or _FILE_CONTENT_RE.fullmatch(path))
+    ):
+        return RouteKind.CHAT
+    if method == "DELETE" and _FILE_RE.fullmatch(path):
+        return RouteKind.REDACT_ONLY
+    return RouteKind.NONE
 
 
 def _creates_message(path: str) -> bool:
@@ -200,19 +226,56 @@ class AnthropicAdapter(ProviderAdapter):
         # GET /v1/models is shared with OpenAI: Anthropic's when the request
         # carries anthropic-version (every Anthropic SDK request does) and no
         # other provider's marker. Metadata only — recognized, redact-only.
-        if (
-            method == "GET"
-            and _MODELS_RE.fullmatch(path)
-            and provider_markers(headers, query) == {"anthropic"}
-        ):
-            return RouteKind.REDACT_ONLY
+        if provider_markers(headers, query) == {"anthropic"}:
+            if method == "GET" and _MODELS_RE.fullmatch(path):
+                return RouteKind.REDACT_ONLY
+            files = _files_route(method, path)
+            if files is not RouteKind.NONE:
+                return files
         return self.matches(method, path)
+
+    def redacts_multipart(self, path: str) -> bool:
+        return path == _FILES
+
+    def redact_multipart(
+        self,
+        path: str,
+        body: bytes,
+        boundary: bytes,
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        require_scanned: bool = False,
+        forward_binary: bool = False,
+    ) -> bytes | None:
+        # The Files upload: the document part (and any form field) to the
+        # shared document policy, every part's file name redacted.
+        return redact_document_upload(
+            body,
+            boundary,
+            redactor,
+            require_scanned=require_scanned,
+            forward_binary=forward_binary,
+        )
+
+    def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
+        if _FILE_CONTENT_RE.fullmatch(path) is None:
+            return None
+        return rehydrate_document(raw, rehydrator)
+
+    def lists_objects(self, method: str, path: str) -> bool:
+        return method == "GET" and path == _FILES
+
+    def listing_items(self, body: Any) -> list[Any] | None:
+        # ``{"data": [...], "has_more", "first_id", "last_id"}``.
+        items = body.get("data") if isinstance(body, dict) else None
+        return items if isinstance(items, list) else None
 
     def tracks_object_ids(self, method: str, path: str, body: Any = None) -> bool:
         # A message batch (its later results are read by id), a Files API
-        # upload (POST /v1/files with anthropic-version — pass-through, the
-        # document is media — read back by id and cited by later messages as
-        # a document or container_upload `file_id`), and a message: the
+        # upload (POST /v1/files with anthropic-version, read back by id and
+        # cited by later messages as a document or container_upload
+        # `file_id`), and a message: the
         # files its code execution runs wrote (generated_file_ids).
         tail = path.rstrip("/")
         return method == "POST" and (

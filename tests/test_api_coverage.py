@@ -39,8 +39,11 @@ ANTHROPIC_ROWS: list[tuple[str, str, str]] = [
     ("GET", "/v1/models", REDACT_ONLY),
     ("GET", "/v1/models/{id}", REDACT_ONLY),
     ("POST", "/v1/complete", CHAT),
-    ("POST", "/v1/files", PASS),
-    ("GET", "/v1/files/{id}/content", PASS),
+    ("POST", "/v1/files", CHAT),
+    ("GET", "/v1/files", CHAT),
+    ("GET", "/v1/files/{id}", CHAT),
+    ("GET", "/v1/files/{id}/content", CHAT),
+    ("DELETE", "/v1/files/{id}", REDACT_ONLY),
     ("POST", "/v1/organizations/probe", PASS),
 ]
 OPENAI_ROWS: list[tuple[str, str, str]] = [

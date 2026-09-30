@@ -74,8 +74,11 @@ is never lent to one (above).
 | `GET /v1/models` | redact-only | with `anthropic-version` (every Anthropic SDK request carries it): the model listing, metadata only |
 | `GET /v1/models/{id}` | redact-only | with `anthropic-version` |
 | `POST /v1/complete` | chat | legacy Text Completions: prompt redacted, completion restored (streaming included); no system note (the body has no system field) |
-| `POST /v1/files` (with `anthropic-version`) | pass-through | beta Files API: the uploaded document is media (the non-goal) |
-| `GET /v1/files/{id}/content` (with `anthropic-version`) | pass-through | the document back, verbatim |
+| `POST /v1/files` (with `anthropic-version`) | chat | beta Files API upload (multipart/form-data): a TEXT document redacted as text (a JSON or JSONL file as JSON), every part's file name redacted; a BINARY document (a PDF, an image) is forwarded as sent only with the client's own key and refuses the upload (400) under a credential the proxy holds, as does anything it cannot read (the OpenAI Files upload's policy); the file object answering it echoes the filename, restored, and is reported to a session router as its creator's |
+| `GET /v1/files` (with `anthropic-version`) | chat | the file list (`{"data": [...]}`): each echoed filename restored in the request's own session, or — with a session router attributing listed items — each file in its creator's |
+| `GET /v1/files/{id}` (with `anthropic-version`) | chat | the file's metadata: its filename restored |
+| `GET /v1/files/{id}/content` (with `anthropic-version`) | chat | the file back (downloadable for files a tool created): restored when it is text (a JSON or JSONL file as JSON source), a binary file never read |
+| `DELETE /v1/files/{id}` (with `anthropic-version`) | redact-only | the id only |
 | `GET /v1/organizations/...` (Admin API) | pass-through | org metadata |
 | WebSocket realtime | websocket | not offered by Anthropic today |
 
@@ -99,11 +102,11 @@ so they take the protocol's `default_upstream` unless a path-matched
 rule names another; their classification is unchanged.
 
 Anthropic's beta Files API shares its paths (`/v1/files...`) with
-OpenAI's. Routing is header-aware here: requests carrying an
-`anthropic-version` header pass through to the ANTHROPIC upstream
-(their uploads are documents — the media non-goal — so pass-through is
-the correct handling, but they must reach the right host); everything
-else takes the OpenAI files handling below. Any other request with
+OpenAI's. Routing is header-aware here: a request carrying the
+`anthropic-version` header (and no other provider's marker) takes the
+Anthropic rows above and reaches the ANTHROPIC upstream; everything else
+takes the OpenAI files handling below (a request carrying the markers of
+both providers is neither's: a recorded 404). Any other request with
 `anthropic-version` that no route matches is Anthropic's too (a newer
 Anthropic API such as `/v1/skills`) — see [requests no route
 matches](#requests-no-route-matches).

@@ -182,7 +182,7 @@ async def test_unmatched_pass_through_still_forwards_verbatim(kind: str) -> None
     app = create_app(_config(), upstream_transport=httpx.MockTransport(upstream))
     body, headers, _ = REFUSED[kind]
     async with _client(app) as client:
-        response = await client.post("/v1/vector_stores", content=body, headers=headers)
+        response = await client.post("/v1/assistants", content=body, headers=headers)
     assert response.status_code == 200
     [sent] = upstream.requests
     assert sent.content == body

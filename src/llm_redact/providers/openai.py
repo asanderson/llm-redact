@@ -142,11 +142,12 @@ _VECTOR_STORE_DELETES = re.compile(r"/v1/vector_stores/[^/]+(?:/files/[^/]+)?")
 _CONTAINER_POSTS = re.compile(r"/v1/containers(?:/[^/]+/files)?")
 _CONTAINER_GETS = re.compile(r"/v1/containers(?:/[^/]+(?:/files(?:/[^/]+(?:/content)?)?)?)?")
 _CONTAINER_DELETES = re.compile(r"/v1/containers/[^/]+(?:/files/[^/]+)?")
-# Their verbatim fields (``verbatim_fields``), by the POST's tail: a store's
-# `name` (a label the provider keeps and every read shows), and the FILE ids
-# a store, an attach or a file batch names; a search's attribute filters
-# name attribute KEYS (JSON keys, never rewritten where they were set).
-_VECTOR_STORE_VERBATIM: tuple[tuple[re.Pattern[str], tuple[tuple[str, ...], ...]], ...] = (
+# Vector store and container verbatim fields (``verbatim_fields``), by the
+# POST's tail: a store's or container's `name` (a label the provider keeps
+# and every read shows), and the FILE ids a store, an attach, a file batch
+# or a container names; a search's attribute filters name attribute KEYS
+# (JSON keys, never rewritten where they were set).
+_STORED_OBJECT_VERBATIM: tuple[tuple[re.Pattern[str], tuple[tuple[str, ...], ...]], ...] = (
     (re.compile(r"(?:^|/)vector_stores$"), (("name",), ("file_ids",))),
     (re.compile(r"(?:^|/)vector_stores/[^/]+$"), (("name",),)),
     (re.compile(r"(?:^|/)vector_stores/[^/]+/files$"), (("file_id",),)),
@@ -451,7 +452,7 @@ def _match_vector_stores(method: str, path: str) -> RouteKind:
     session: the static one, where the files were uploaded and the
     attributes redacted, so a filter value's placeholder is the stored
     attribute's (the vault is deterministic). Names and file ids are
-    verbatim (``_VECTOR_STORE_VERBATIM``). A delete carries ids only."""
+    verbatim (``_STORED_OBJECT_VERBATIM``). A delete carries ids only."""
     if method == "POST" and _VECTOR_STORE_POSTS.fullmatch(path):
         return RouteKind.CHAT
     if method == "GET" and _VECTOR_STORE_GETS.fullmatch(path):
@@ -646,7 +647,7 @@ class OpenAIAdapter(ProviderAdapter):
             return ()
         if _FINE_TUNING_CREATE_RE.search(tail) is not None:
             return _FINE_TUNING_VERBATIM
-        for pattern, positions in _VECTOR_STORE_VERBATIM:
+        for pattern, positions in _STORED_OBJECT_VERBATIM:
             if pattern.search(tail) is not None:
                 return positions
         return ()

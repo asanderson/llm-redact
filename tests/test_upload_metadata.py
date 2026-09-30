@@ -43,6 +43,7 @@ from llm_redact.providers.gemini import GeminiAdapter
 from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
+from llm_redact.multipart import MultipartPart
 from llm_redact.upload_view import (
     AMBIGUOUS,
     CHARSET,
@@ -52,7 +53,9 @@ from llm_redact.upload_view import (
     OUTSIDE_GRAMMAR,
     TOO_DEEP,
     TRANSFER_ENCODED,
+    MetadataPart,
     UploadView,
+    read_metadata_part,
     read_upload_metadata,
 )
 from test_object_access_seams import _registry
@@ -174,6 +177,30 @@ def test_the_first_part_is_read_as_the_metadata_object() -> None:
 def test_what_the_metadata_part_holds(body: bytes, metadata: dict[str, Any]) -> None:
     # Declared JSON, or no type at all: the provider finds it by position.
     assert _read(body) == UploadView(metadata)
+
+
+@pytest.mark.parametrize(
+    ("content", "read"),
+    [
+        pytest.param(
+            b' \r\n\xef\xbb\xbf{"file": {}} \n', MetadataPart({"file": {}}, 6, 18, False), id="span"
+        ),
+        pytest.param(b'{"a": 1, "a": 2}', MetadataPart({"a": 2}, 0, 16, True), id="repeated"),
+        pytest.param(b" \r\n\t", MetadataPart({}, 0, 4, False), id="blank"),
+        pytest.param(b"", MetadataPart({}, 0, 0, False), id="empty"),
+        pytest.param(b"[1]", METADATA_NOT_OBJECT, id="unreadable"),
+    ],
+)
+def test_the_metadata_part_as_redaction_reads_it(content: bytes, read: Any) -> None:
+    # The one reading the check and the redaction share: the object, the
+    # span of its JSON text (spliced when a value changes or a key repeats)
+    # — the whole part when blank — or the problem.
+    assert read_metadata_part(MultipartPart(JSON_HEAD, content)) == read
+    span = read_metadata_part(MultipartPart(JSON_HEAD, content))
+    if isinstance(span, MetadataPart):
+        assert span.splice(content, {"x": "«"}) == (
+            content[: span.start] + '{"x": "«"}'.encode() + content[span.end :]
+        )
 
 
 def test_a_repeated_key_is_read_as_its_last_occurrence_and_sent_so() -> None:

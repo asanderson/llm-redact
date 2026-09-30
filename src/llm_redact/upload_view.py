@@ -192,8 +192,8 @@ def read_upload_metadata(body: bytes, boundary: bytes) -> UploadView:
 class MetadataPart(NamedTuple):
     """A single-request upload's metadata part as the check reads it
     (``read_metadata_part``): the object (``{}`` when the part is blank),
-    the span of its JSON text in the part's content, and whether it
-    repeats a key."""
+    the span of its JSON text in the part's content (the whole content
+    when it is blank), and whether it repeats a key."""
 
     metadata: dict[str, Any]
     start: int
@@ -249,7 +249,7 @@ def _read_metadata(part: multipart.MultipartPart) -> MetadataPart:
     end = len(raw.rstrip())
     content = raw[start:end]
     if not content:
-        return MetadataPart({}, start, end, False)
+        return MetadataPart({}, 0, len(raw), False)  # blank: its span is the whole part
     try:
         text = content.decode()  # strict UTF-8
     except UnicodeDecodeError:

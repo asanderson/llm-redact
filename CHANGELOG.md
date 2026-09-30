@@ -51,6 +51,20 @@ and tags `vX.Y.Z`.
   `connections` block, `llm_redact_connections_closed_total{cause}`, bookkeeping
   stage `recheck`. Streaming HTTP answers are not cut (each answers a request that
   was admitted).
+- Optional `SessionRouter.realtime_frame_refusal(adapter_name, path, frame, *,
+  identity, session_id) -> str | None`: the realtime twin of `object_access_refusal`.
+  A router with it is asked, synchronously, for every client frame of a realtime
+  connection that parses as JSON (text or binary; OpenAI Realtime, Azure, Gemini
+  Live, Vertex Live; every mode; `detection = false` included) before the frame is
+  redacted, numbered or sent, in the connection's own context. A string closes the
+  connection 1008 with that fixed reason (cut to 123 bytes), recorded as a 403 —
+  nothing of the frame reaches the upstream or the vault; an exception or a malformed
+  answer closes it 1008 with the core's reason, counted as bookkeeping stage
+  `realtime_frame` (type-only log). While a router checks frames, a frame nesting
+  JSON too deep is refused on every connection, a non-JSON one under the proxy's own
+  identity even with `detection = false`, and `detection = false` sends the checked
+  value re-serialized. Each frame is still parsed once. A router without the member
+  costs one attribute test per connection.
 - The Gemini API's Batch Mode beyond the create is recognized, so a credential the
   proxy holds (a routed operator key) may reach it: a batch's status
   (`GET /v1beta/batches/{id}`, the name the create answers with) and the batch list

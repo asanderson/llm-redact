@@ -336,6 +336,8 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``sealed(session_id) -> bool | str``",
         "``listing_item_session(object_id) -> str | None``",
         "``response_observer(context) -> ResponseObserver | None``",
+        "``realtime_frame_refusal(adapter_name, path, frame, *, identity, session_id)"
+        " -> str | None``",
     ),
 }
 

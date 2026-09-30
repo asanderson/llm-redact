@@ -180,6 +180,11 @@ _REQUEST_USER: ContextVar[str | None] = ContextVar("llm_redact_user", default=No
 _OBJECT_ACCESS_FAULT = (
     "llm-redact: the stored-object ownership check failed; the request was not forwarded"
 )
+# The realtime twin: the close reason when the session router's per-frame
+# check fails or answers something other than a reason (fits a close frame's
+# 123 bytes), and the bookkeeping stage that counts it.
+REALTIME_FRAME_FAULT = "llm-redact: the realtime frame check failed; the frame was not forwarded"
+REALTIME_FRAME_STAGE = "realtime_frame"
 # A listed item the session router failed to answer for (its call raised):
 # delivered exactly as the provider sent it, never restored in a session.
 _UNANSWERED = object()
@@ -549,6 +554,9 @@ class ProxyState:
         # test of this flag and no observation code runs.
         self._response_observer = getattr(self.session_router, "response_observer", None)
         self.observes_responses = self._response_observer is not None
+        # Optional per-frame realtime check (plugin_api.SessionRouter), read
+        # ONCE: a relay reads `checks_realtime_frames` once per connection.
+        self._realtime_frame_refusal = getattr(self.session_router, "realtime_frame_refusal", None)
         self._static_context = RequestContext(
             config.vault.session, self.vault, self.redactor, self.rehydrator
         )
@@ -858,6 +866,38 @@ class ProxyState:
         # Any other non-None answer refuses; only a non-empty string is
         # the router's own (fixed) reason.
         return verdict if isinstance(verdict, str) and verdict else _OBJECT_ACCESS_FAULT
+
+    @property
+    def checks_realtime_frames(self) -> bool:
+        """Whether the session router checks realtime client frames at all
+        (the optional ``realtime_frame_refusal``)."""
+        return self._realtime_frame_refusal is not None
+
+    def realtime_frame_refusal(
+        self, adapter_name: str, path: str, frame: Any, *, identity: bool, session_id: str
+    ) -> str | None:
+        """The session router's refusal of one parsed realtime client frame
+        (optional ``realtime_frame_refusal``), or None. A router that raises
+        or answers anything but None or a non-empty string refuses — the
+        frame check's fault is counted (bookkeeping stage
+        ``realtime_frame``) and logged by exception or answer TYPE only: a
+        check that cannot answer must not wave the frame through."""
+        check = self._realtime_frame_refusal
+        if check is None:
+            return None
+        try:
+            verdict = check(adapter_name, path, frame, identity=identity, session_id=session_id)
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            fault = type(exc).__name__
+        else:
+            if verdict is None or (isinstance(verdict, str) and verdict):
+                return verdict
+            fault = f"answered {type(verdict).__name__}"
+        self.bookkeeping_errors[REALTIME_FRAME_STAGE] += 1
+        logger.warning(
+            "WS %s -> session router realtime_frame_refusal failed (%s); closing", path, fault
+        )
+        return REALTIME_FRAME_FAULT
 
     def object_lister(
         self,

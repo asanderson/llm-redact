@@ -96,7 +96,16 @@ the detector type only; headers, `?key=` queries, and subprotocols pass
 through unlogged; and gate ⑤ walks **every** client event, skipping only
 the scalar values of structural keys (enums, ids) and base64 audio —
 objects under those names, and tool responses, `metadata` maps and
-prompt `variables` in full, are walked.
+prompt `variables` in full, are walked. Before gate ⑤, a session router
+with the optional `realtime_frame_refusal` (gate ④½'s realtime twin —
+**llm-redact-pro** applies its stored-object and cloud-storage policy for
+the connection's user) is asked about **every** client frame that parses
+as JSON, text or binary, `detection = false` included: a refusal closes
+**1008** with its fixed reason, recorded as a 403, and nothing of that
+frame is redacted, numbered or sent; a check that fails closes the same
+way (fail closed). While it checks frames, a frame nesting JSON too deep
+is refused on every connection, and one that is not JSON under the
+proxy's own identity.
 The gates' inputs are the ones in force. A connection is admitted under
 its provider's settings, the authorizer that opened it and the
 `[detection]` policy. A reload that changes any of them revokes the relay

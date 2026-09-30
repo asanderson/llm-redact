@@ -183,11 +183,12 @@ async def test_a_binary_document_needs_the_clients_own_key(
         if proxy_credential:
             assert uploaded.status_code == 400, uploaded.text
             assert uploaded.json()["error"]["type"] == "invalid_request_error"
-            assert "not UTF-8 text" in uploaded.text and EMAIL not in uploaded.text
+            assert "is binary" in uploaded.text and EMAIL not in uploaded.text
             assert files.received == []
             continue
         assert uploaded.status_code == 200, uploaded.text
         assert files.content["file_1"] == PDF  # as sent
+        assert app.state.proxy.unscanned_uploads == {"anthropic": 1}  # counted
         assert files.files["file_1"]["filename"] == f"{TOKEN} scan.pdf"  # its name redacted
         assert uploaded.json()["filename"] == f"{EMAIL} scan.pdf"
 

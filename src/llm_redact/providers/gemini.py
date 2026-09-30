@@ -33,7 +33,7 @@ from typing import Any
 
 from llm_redact.jsonwalk import json_text, loads_bounded, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
-from llm_redact.providers.documents import redact_document_upload, rehydrate_document
+from llm_redact.providers.documents import redact_related_upload, rehydrate_download
 from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import Rehydrator, RehydratorPool, StreamingRehydrator
 from llm_redact.sse import SSEEvent
@@ -400,13 +400,14 @@ class GeminiAdapter(ProviderAdapter):
         *,
         inject_note: bool,
         require_scanned: bool = False,
-        forward_binary: bool = False,
+        forward_binary: Callable[[int], None] | None = None,
     ) -> bytes | None:
         # The single-request upload: the metadata part (JSON: the display
-        # name) and the media part, each a document to the shared policy
-        # (text redacted — JSON as JSON —, binary only as sent under the
-        # client's own key).
-        return redact_document_upload(
+        # name) and the media part, each read as a FILE by the shared upload
+        # policy (JSONL/text redacted; binary forwarded only when the proxy
+        # passes forward_binary — the client's own key, binary_uploads =
+        # "forward" — else refused).
+        return redact_related_upload(
             body,
             boundary,
             redactor,
@@ -417,7 +418,7 @@ class GeminiAdapter(ProviderAdapter):
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
         if _GEMINI_FILE_DOWNLOAD.fullmatch(path) is None:
             return None
-        return rehydrate_document(raw, rehydrator)
+        return rehydrate_download(raw, rehydrator)
 
     def lists_objects(self, method: str, path: str) -> bool:
         return method == "GET" and path in (_GEMINI_BATCHES, _GEMINI_FILES)

@@ -102,6 +102,18 @@ reset instead of this close frame. A reload that changes nothing a
 connection depends on leaves it open
 ([deployment.md](deployment.md#reloads-and-open-realtime-connections)).
 
+## "an uploaded file is binary (not text llm-redact can redact)"
+
+A 400 on a file upload (`/v1/files` and its Azure/custom twins): the file
+is not text — a PDF, an image, an archive, or text in an encoding other
+than UTF-8 (UTF-16/32 with a byte-order mark is fine) — so llm-redact
+cannot scan it. It is refused when the request would be sent with a
+credential the proxy holds (`auth = "identity"`, a routing rule's operator
+key), or when `[detection] binary_uploads = "refuse"`. With your own key
+and the default `binary_uploads = "forward"` such a file is forwarded
+unscanned instead (counted in `/status` `unscanned_uploads_total`).
+Convert a Latin-1/Windows-1252 text file to UTF-8 to have it redacted.
+
 ## "request body exceeds llm-redact max_body_bytes"
 
 A 413: the redactable body is bigger than the cap (default ~10 MiB), and

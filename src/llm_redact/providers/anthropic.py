@@ -19,7 +19,7 @@ from typing import Any
 from llm_redact.jsonwalk import json_bytes, json_text, loads_bounded, transform_strings
 from llm_redact.providers.attribution import provider_markers
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
-from llm_redact.providers.documents import redact_document_upload, rehydrate_document
+from llm_redact.providers.documents import redact_files_upload, rehydrate_download
 from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
@@ -246,11 +246,11 @@ class AnthropicAdapter(ProviderAdapter):
         *,
         inject_note: bool,
         require_scanned: bool = False,
-        forward_binary: bool = False,
+        forward_binary: Callable[[int], None] | None = None,
     ) -> bytes | None:
         # The Files upload: the document part (and any form field) to the
         # shared document policy, every part's file name redacted.
-        return redact_document_upload(
+        return redact_files_upload(
             body,
             boundary,
             redactor,
@@ -261,7 +261,7 @@ class AnthropicAdapter(ProviderAdapter):
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
         if _FILE_CONTENT_RE.fullmatch(path) is None:
             return None
-        return rehydrate_document(raw, rehydrator)
+        return rehydrate_download(raw, rehydrator)
 
     def lists_objects(self, method: str, path: str) -> bool:
         return method == "GET" and path == _FILES

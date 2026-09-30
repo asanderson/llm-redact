@@ -2,23 +2,31 @@
 
 Also covers the Files + Batches surfaces (verified against
 platform.openai.com docs, 2026-07): ``POST /v1/files`` is
-multipart/form-data whose file part is JSONL — batch input lines
+multipart/form-data whose file part is read BY ITS CONTENT
+(``upload_content.classify_file``): a JSONL file — batch input lines
 ({custom_id, method, url, body}) and fine-tuning lines ({messages: [...]})
-both carry user content, so every line that parses as a JSON object is
-redacted (and chat-shaped ones get the system note). Every part's
-``filename`` is redacted too, and the file object the provider echoes (the
-upload response, the file list, one file's metadata) is restored. Plain
-form fields are scanned as UTF-8 text like the JSON strings they mirror (a
-``user`` field as a chat body's ``user``). The proxy requires every piece
-of an upload scanned (``require_scanned``, the scanned-body rule: under the
-proxy's own identity, and under the client's own key wherever redaction
-applies): anything it cannot read — a binary or text document, an
-unparseable line, a field that is not UTF-8 — refuses the upload. A caller
-that does not require it (``require_scanned=False``) gets the lenient
-reading: the structural fields — enums, sizes, counts, the model — as
-sent, and what cannot be read preserved byte-identically.
-``GET /v1/files/{id}/content`` rehydrates batch OUTPUT files the same way,
-line by line. ``/v1/batches`` carries file ids,
+both carry user content — has every line redacted as JSON (and chat-shaped
+ones get the system note); any other text file (UTF-8, or UTF-16/32 with a
+byte-order mark) is redacted as one text and re-encoded as it came; a
+binary file (a PDF, an image, an archive, text that does not decode) is
+never read. Every part's ``filename`` is redacted too, and the file object
+the provider echoes (the upload response, the file list, one file's
+metadata) is restored. Plain form fields are scanned as UTF-8 text like the
+JSON strings they mirror (a ``user`` field as a chat body's ``user``). The
+proxy requires every piece of an upload scanned (``require_scanned``, the
+scanned-body rule): anything it cannot read — a field that is not UTF-8, a
+JSONL line nesting too deep, a transfer encoding — refuses the upload. A
+binary file part is the one piece that may go out unscanned, and only when
+the caller says so (``forward_binary``: the proxy's choice when the request
+is sent with the client's own credential and ``[detection] binary_uploads``
+is "forward"); otherwise it refuses the upload too. A caller that does not
+require scanning (``require_scanned=False``) gets the lenient reading: the
+structural fields — enums, sizes, counts, the model — as sent, and what
+cannot be read preserved byte-identically.
+``GET /v1/files/{id}/content`` restores a downloaded file by the same
+reading: a text file (batch OUTPUT JSONL, a results CSV) line by line — a
+JSON line as JSON, any other line as text — and a binary file untouched.
+``/v1/batches`` carries file ids,
 processing state and the caller's own ``metadata`` (free-form strings the
 batch object echoes on every read): create is redacted and every echo —
 a batch's GET, its cancel, and the LIST — restored in the request's own
@@ -31,11 +39,12 @@ router (llm-redact-pro's named users) makes that the user's own copy.
 """
 
 import re
-from collections.abc import Hashable, Mapping
-from typing import Any
+from collections.abc import Callable, Hashable, Mapping
+from typing import Any, NamedTuple
 
 from llm_redact import multipart
 from llm_redact.jsonwalk import (
+    JsonTooDeep,
     json_bytes,
     json_text,
     loads_bounded,
@@ -48,6 +57,7 @@ from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
+from llm_redact.upload_content import BINARY, FileContent, classify_file
 from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS
 
 _FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
@@ -110,21 +120,10 @@ _BATCH_POST_RE = re.compile(r"/v1/batches|/v1/batches/[^/]+/cancel")
 _BATCH_GET_RE = re.compile(r"/v1/batches(?:/[^/]+)?")
 
 
-def _parse_object_line(line: bytes) -> dict[str, Any] | None:
-    """The line's JSON object, or None for blank/unparseable/non-object."""
-    stripped = line.strip()
-    if not stripped:
-        return None
-    try:
-        obj = loads_bounded(stripped)
-    except ValueError:
-        return None
-    return obj if isinstance(obj, dict) else None
-
-
 def _parse_request_line(line: bytes) -> tuple[dict[str, Any] | None, bool]:
-    """``_parse_object_line`` for an uploaded REQUEST line, plus whether an
-    object in it repeats a key (then the line must be re-serialized)."""
+    """An uploaded REQUEST line's JSON object (None for a blank, unparseable
+    or non-object line, or one nesting too deep), plus whether an object in
+    it repeats a key (then the line must be re-serialized)."""
     stripped = line.strip()
     if not stripped:
         return None, False
@@ -157,10 +156,10 @@ def _redact_text_part(
 
 
 def _part_kind(part: multipart.MultipartPart, *, media: bool, require_scanned: bool) -> str:
-    """How the upload's part loop reads a part: "jsonl" (a file part of a
-    JSONL upload, line by line), "text" (UTF-8 text), "media" (a media file
-    part, never read) or "field" (a structural form field, forwarded
-    as-is)."""
+    """How the upload's part loop reads a part: "file" (a file part of an
+    upload route, read by its content: ``_read_part``), "text" (UTF-8
+    text), "media" (a media file part, never read) or "field" (a structural
+    form field, forwarded as-is)."""
     if media and part.name in _PROMPT_FIELDS:
         # Matched by NAME regardless of a filename attribute: a prompt
         # part dressed up as a file upload must not slip past the scan
@@ -168,7 +167,7 @@ def _part_kind(part: multipart.MultipartPart, *, media: bool, require_scanned: b
         # under identity).
         return "text"
     if part.filename is not None:
-        return "media" if media else "jsonl"  # media: never scanned
+        return "media" if media else "file"  # media: never scanned
     # A plain form field is user content (`user`, anything unknown — a part
     # with no name included) unless structural (`purpose`, `model`, `size`
     # ...); the proxy's own identity signs even those only once scanned.
@@ -177,26 +176,51 @@ def _part_kind(part: multipart.MultipartPart, *, media: bool, require_scanned: b
     return "field"
 
 
-def _multipart_floors(parsed: multipart.Multipart, *, media: bool) -> dict[str, int]:
-    """The token floors of an upload, read the way its part loop reads it:
-    every file name (decoded, ``filename*`` included), every JSONL line as
-    the JSON it parses to (escapes resolved) or else as UTF-8 text, and
-    every other part except media files as UTF-8 text — plain form fields
-    too, since the upstream reads them. Media file parts are never read
-    (the documented non-goal)."""
+class _Reading(NamedTuple):
+    """How the upload's part loop reads one part: ``_part_kind``'s kind,
+    with a "file" part replaced by what its content is — "jsonl", "document"
+    (any other text file) or "binary" — and that ``content``."""
+
+    kind: str
+    content: FileContent = BINARY  # read only for "document"/"jsonl"
+
+
+def _read_part(
+    part: multipart.MultipartPart,
+    *,
+    media: bool,
+    require_scanned: bool,
+    charge: Callable[[int], None],
+) -> _Reading:
+    """``part`` as the part loop, the floor scan and the refusals all read
+    it: one decision per part (``charge`` bounds the JSONL check's
+    per-line work)."""
+    kind = _part_kind(part, media=media, require_scanned=require_scanned)
+    if kind != "file":
+        return _Reading(kind)
+    content = classify_file(part.content, charge=charge)
+    return _Reading("document" if content.kind == "text" else content.kind, content)
+
+
+def _multipart_floors(parsed: multipart.Multipart, readings: list[_Reading]) -> dict[str, int]:
+    """The token floors of an upload, read the way its part loop reads it
+    (``readings``): every file name (decoded, ``filename*`` included), every
+    JSONL line as the JSON it parses to (escapes resolved) or else as UTF-8
+    text, a text file as the text it decodes to, and every other part
+    except media files as UTF-8 text — plain form fields too, since the
+    upstream reads them, and binary files, which the upstream may read as
+    text. Media file parts are never read (the documented non-goal)."""
     floors: dict[str, int] = {}
 
     def observe(text: str) -> str:
         merge_floors(floors, token_floors(text))
         return text
 
-    for part in parsed.parts:
+    for part, reading in zip(parsed.parts, readings, strict=True):
         part.redact_filenames(observe, strict=False)  # returns every name unchanged
-        # require_scanned=True: a plain form field reads as "text" here.
-        kind = _part_kind(part, media=media, require_scanned=True)
-        if kind == "text":
-            observe(part.content.decode("utf-8", "replace"))
-        elif kind == "jsonl":
+        if reading.kind == "document":
+            observe(reading.content.text)
+        elif reading.kind == "jsonl":
             for line in part.content.split(b"\n"):
                 if may_carry_tokens(line):
                     obj, _ = _parse_request_line(line)
@@ -206,16 +230,36 @@ def _multipart_floors(parsed: multipart.Multipart, *, media: bool) -> dict[str, 
                         if obj is not None
                         else token_floors(line.decode("utf-8", "replace")),
                     )
+        elif reading.kind != "media":
+            # A form field ("text"/"field": a structural field is read too,
+            # the upstream reads it) or a binary file.
+            observe(part.content.decode("utf-8", "replace"))
     return floors
 
 
-def _require_plain_encoding(part: multipart.MultipartPart, *, scanned: bool) -> None:
+# The charsets a text file part may declare: the ones naming what its
+# content decoded as (a UTF-16/32 file by its byte-order mark).
+_DECLARABLE_CHARSETS = {
+    "utf-8": PLAIN_CHARSETS,
+    "utf-16-le": frozenset({"utf-16", "utf-16le"}),
+    "utf-16-be": frozenset({"utf-16", "utf-16be"}),
+    "utf-32-le": frozenset({"utf-32", "utf-32le"}),
+    "utf-32-be": frozenset({"utf-32", "utf-32be"}),
+}
+
+
+def _require_plain_encoding(
+    part: multipart.MultipartPart, *, scanned: bool, codec: str = "utf-8"
+) -> None:
     """Identity auth: refuse a part the proxy could not read as plain bytes
     (the body-part twin of the request Content-Encoding rule): any
     Content-Transfer-Encoding but 7bit/8bit/binary (RFC 7578 deprecates
-    them), and — on a part whose content is scanned — a declared charset
-    other than UTF-8/US-ASCII, whether its own Content-Type parameter or
-    the RFC 7578 §4.6 ``_charset_`` field. AmbiguousHeaders propagates."""
+    them) — on EVERY part, a forwarded binary file included: the upstream
+    would decode bytes the proxy never read or classified — and, on a part
+    whose content is scanned, a declared charset other than the one it
+    decoded as (``codec``: UTF-8/US-ASCII, or a text file's UTF-16/32),
+    whether its own Content-Type parameter or the RFC 7578 §4.6
+    ``_charset_`` field. AmbiguousHeaders propagates."""
     encoding = part.header("content-transfer-encoding")
     if encoding is not None and encoding.lower() not in PLAIN_TRANSFER_ENCODINGS:
         raise UnredactableRequest(
@@ -227,8 +271,51 @@ def _require_plain_encoding(part: multipart.MultipartPart, *, scanned: bool) -> 
     declared = [] if charset is None else [charset.value]
     if part.name == "_charset_":
         declared.append(part.content.decode("latin-1").strip())
-    if any(name.lower() not in PLAIN_CHARSETS for name in declared):
+    if any(name.lower() not in _DECLARABLE_CHARSETS[codec] for name in declared):
         raise UnredactableRequest("a multipart part declares a charset llm-redact does not decode")
+
+
+BINARY_FILE = "an uploaded file is binary (not text llm-redact can redact)"
+
+
+def rehydrate_text_file(
+    raw: bytes, rehydrator: Rehydrator, restore: Callable[[Any], Any]
+) -> bytes | None:
+    """A downloaded file restored (None: left untouched), read the way an
+    uploaded one is (``upload_content.classify_file``): a binary file stays
+    untouched; a text file — JSONL (batch OUTPUT files) or any other text
+    (a results CSV, a text file uploaded redacted) — is restored line by
+    line and re-encoded as it came. ``restore`` restores one parsed JSON
+    value (the adapter's non-streaming transform). Shared by every
+    provider's file download (OpenAI/Azure/custom, the Gemini API's,
+    Anthropic's)."""
+    content = classify_file(raw)
+    if content.kind == "binary" or not may_carry_tokens(content.text):
+        return None
+    lines = content.text.split("\n")
+    restored = [_rehydrate_file_line(line, rehydrator, restore) for line in lines]
+    return content.encode("\n".join(restored)) if restored != lines else None
+
+
+def _rehydrate_file_line(line: str, rehydrator: Rehydrator, restore: Callable[[Any], Any]) -> str:
+    """One line of a downloaded text file, restored: a line holding a JSON
+    value as JSON (a restored value is escaped where it lands; a token the
+    provider wrote escaped is found), any other line as text (tokens never
+    span lines), a line nesting JSON too deep untouched. The line's own
+    surrounding whitespace (a CRLF's CR) is kept."""
+    if not may_carry_tokens(line):
+        return line
+    try:
+        value = loads_bounded(line)
+    except JsonTooDeep:
+        return line
+    except ValueError:
+        return rehydrator.rehydrate_text(line)
+    hydrated = restore(value)
+    if hydrated == value:
+        return line
+    start, end = len(line) - len(line.lstrip()), len(line.rstrip())
+    return line[:start] + json_text(hydrated) + line[end:]
 
 
 # Delta fields that carry reasoning-model chain-of-thought as a string,
@@ -575,7 +662,7 @@ class OpenAIAdapter(ProviderAdapter):
         *,
         inject_note: bool,
         require_scanned: bool = False,
-        forward_binary: bool = False,
+        forward_binary: Callable[[int], None] | None = None,
     ) -> bytes | None:
         parsed = multipart.parse(body, boundary)
         if parsed is None:
@@ -590,50 +677,63 @@ class OpenAIAdapter(ProviderAdapter):
         # non-goal); the user text rides named form fields. Suffix match so
         # the Azure subclass's /openai/... path shapes reuse this unchanged.
         media = path.endswith(_PROMPT_FIELD_PATH_SUFFIXES)
-        for part in parsed.parts:
-            if not media and part.filename is not None:
-                # Every line of an uploaded JSONL file is a string to redact:
-                # counted against max_body_strings BEFORE anything splits the
-                # file (the floor scan below does) — millions of empty lines
-                # cost per line, not per byte.
-                redactor.charge(part.content.count(b"\n") + 1)
+        # One reading per part, shared by the floor scan, the part loop and
+        # its refusals. A JSONL file's lines are strings to redact: counted
+        # against max_body_strings BEFORE anything walks them (the JSONL
+        # check, then the floor scan) — millions of empty lines cost per
+        # line, not per byte. A text file is one string (redact_text counts
+        # it), a binary file none.
+        readings = [
+            _read_part(part, media=media, require_scanned=require_scanned, charge=redactor.charge)
+            for part in parsed.parts
+        ]
         if may_carry_tokens(body):
             # Token floors from the WHOLE upload before any part is redacted:
             # a token in a later line bounds the numbers an earlier line's
             # values take (one batch file, one session, one output file).
-            redactor = redactor.with_floors(_multipart_floors(parsed, media=media))
+            redactor = redactor.with_floors(_multipart_floors(parsed, readings))
         changed = False
         try:
-            for part in parsed.parts:
+            for part, reading in zip(parsed.parts, readings, strict=True):
                 changed |= self._redact_part(
                     part,
+                    reading,
                     redactor,
-                    media=media,
                     inject_note=inject_note,
                     require_scanned=require_scanned,
+                    forward_binary=forward_binary is not None,
                 )
         except multipart.AmbiguousHeaders as exc:
             # Only reachable with require_scanned (strict header reads): a part
             # header without a single reading is never signed.
             raise UnredactableRequest(str(exc)) from None
+        binary = sum(reading.kind == "binary" for reading in readings)
+        if binary and forward_binary is not None:
+            # Every piece was read or allowed: these go out unscanned.
+            forward_binary(binary)
         return parsed.serialize() if changed else None
 
     def _redact_part(
         self,
         part: multipart.MultipartPart,
+        reading: _Reading,
         redactor: Redactor,
         *,
-        media: bool,
         inject_note: bool,
         require_scanned: bool,
+        forward_binary: bool,
     ) -> bool:
         # The upload's file name is user content on every route (the part
-        # name is structural, like a JSON key). Strict with require_scanned,
-        # so the routing reads below always see the one reading.
+        # name is structural, like a JSON key) — a binary file's too. Strict
+        # with require_scanned, so the routing reads always see one reading.
         changed = part.redact_filenames(redactor.redact_text, strict=require_scanned)
-        kind = _part_kind(part, media=media, require_scanned=require_scanned)
+        kind = reading.kind
         if require_scanned:
-            _require_plain_encoding(part, scanned=kind != "media")
+            _require_plain_encoding(
+                part,
+                scanned=kind not in ("media", "binary"),
+                codec=reading.content.codec or "utf-8",
+            )
         if kind == "jsonl":
             new_content = self._redact_jsonl(
                 part.content,
@@ -644,8 +744,18 @@ class OpenAIAdapter(ProviderAdapter):
             if new_content != part.content:
                 part.content = new_content
                 changed = True
+        elif kind == "document":
+            # A text file: ONE text (a value may span its lines), re-encoded
+            # exactly as it came — its own encoding, its own byte-order mark.
+            text = reading.content.text
+            redacted = redactor.redact_text(text)
+            if redacted != text:
+                part.content = reading.content.encode(redacted)
+                changed = True
         elif kind == "text":
             changed |= _redact_text_part(part, redactor, require_scanned=require_scanned)
+        elif kind == "binary" and require_scanned and not forward_binary:
+            raise UnredactableRequest(BINARY_FILE)
         return changed
 
     def _redact_jsonl(
@@ -687,20 +797,9 @@ class OpenAIAdapter(ProviderAdapter):
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
         if not _FILE_CONTENT_RE.fullmatch(path):
             return None
-        out: list[bytes] = []
-        changed = False
-        for line in raw.split(b"\n"):
-            obj = _parse_object_line(line)
-            if obj is None:
-                out.append(line)  # non-JSONL file contents stay untouched
-                continue
-            hydrated = self.rehydrate_body(obj, rehydrator)
-            if hydrated == obj:
-                out.append(line)
-            else:
-                out.append(json_bytes(hydrated))
-                changed = True
-        return b"\n".join(out) if changed else None
+        return rehydrate_text_file(
+            raw, rehydrator, lambda value: self.rehydrate_body(value, rehydrator)
+        )
 
     def rehydrate_event(self, event: SSEEvent, pool: RehydratorPool) -> list[SSEEvent]:
         if not event.data:

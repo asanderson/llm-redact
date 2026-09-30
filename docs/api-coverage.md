@@ -53,7 +53,12 @@ in any of the request's Content-Encoding headers, is refused **415** with
 send it uncompressed. Inside an accepted upload every piece must be
 scanned too wherever redaction applies (the `/v1/files` rows below; with
 `detection = false` an upload's file parts go out as sent, a proxy-held
-credential included, once the stored-object check has read the upload). `[providers.NAME] detection =
+credential included, once the stored-object check has read the upload) —
+except a BINARY file part (a PDF, an image, an archive, text that is not
+UTF-8): it cannot be redacted, so with the client's own key it is forwarded
+UNSCANNED (`[detection] binary_uploads = "forward"`, the default; counted in
+`/status` `unscanned_uploads_total`) or refused 400 (`"refuse"`), and under a
+credential the proxy holds it is always refused 400. `[providers.NAME] detection =
 false` with the client's own key forwards such a body as sent, and so does
 every pass-through route (a route this table does not claim) — reached
 only with the client's own credential, since a credential the proxy holds
@@ -74,10 +79,10 @@ is never lent to one (above).
 | `GET /v1/models` | redact-only | with `anthropic-version` (every Anthropic SDK request carries it): the model listing, metadata only |
 | `GET /v1/models/{id}` | redact-only | with `anthropic-version` |
 | `POST /v1/complete` | chat | legacy Text Completions: prompt redacted, completion restored (streaming included); no system note (the body has no system field) |
-| `POST /v1/files` (with `anthropic-version`) | chat | beta Files API upload (multipart/form-data): a TEXT document redacted as text (a JSON or JSONL file as JSON), every part's file name redacted; a BINARY document (a PDF, an image) is forwarded as sent only with the client's own key and refuses the upload (400) under a credential the proxy holds, as does anything it cannot read (the OpenAI Files upload's policy); the file object answering it echoes the filename, restored, and is reported to a session router as its creator's |
+| `POST /v1/files` (with `anthropic-version`) | chat | beta Files API upload (multipart/form-data): read by content exactly as the OpenAI Files upload (the same code): a JSONL file's lines redacted as JSON, any other text file as one text re-encoded as it came, every part's file name redacted; a BINARY document (a PDF — even an all-ASCII one —, an image) is forwarded unscanned with the client's own key (`binary_uploads = "forward"`, counted) and refuses the upload (400) under `"refuse"` or a credential the proxy holds, as does anything it cannot read; the file object answering it echoes the filename, restored, and is reported to a session router as its creator's |
 | `GET /v1/files` (with `anthropic-version`) | chat | the file list (`{"data": [...]}`): each echoed filename restored in the request's own session, or — with a session router attributing listed items — each file in its creator's |
 | `GET /v1/files/{id}` (with `anthropic-version`) | chat | the file's metadata: its filename restored |
-| `GET /v1/files/{id}/content` (with `anthropic-version`) | chat | the file back (downloadable for files a tool created): restored when it is text (a JSON or JSONL file as JSON source), a binary file never read |
+| `GET /v1/files/{id}/content` (with `anthropic-version`) | chat | the file back (downloadable for files a tool created), restored like an OpenAI file download: a text file line by line, a binary file never read |
 | `DELETE /v1/files/{id}` (with `anthropic-version`) | redact-only | the id only |
 | `GET /v1/organizations/...` (Admin API) | pass-through | org metadata |
 | WebSocket realtime | websocket | not offered by Anthropic today |
@@ -131,10 +136,10 @@ matches](#requests-no-route-matches).
 | `DELETE /v1/conversations/{id}` | redact-only | ids only |
 | `DELETE /v1/conversations/{id}/items/{item_id}` | redact-only | ids only |
 | `POST /v1/embeddings` | redact-only | vectors come back verbatim |
-| `POST /v1/files` | chat | multipart upload; JSONL file-part lines (batch + fine-tune), every part's `filename` / `filename*` and every plain form field (the structural `purpose`, `expires_after[…]` too, scanned as text) redacted, all other bytes preserved; a file that is not JSONL (a PDF, an image, a text file), a line that is not a JSON object, a form field that is not UTF-8, a preamble or epilogue, a part header without one reading, a Content-Transfer-Encoding or a declared charset other than UTF-8/US-ASCII refuses the upload (400: llm-redact cannot scan it — `detection = false` forwards it as sent); the file object answering it echoes the filename, restored |
+| `POST /v1/files` | chat | multipart upload, each file part decided by its CONTENT: a JSONL file's lines (batch + fine-tune) redacted as JSON, any other text file (UTF-8, or UTF-16/32 with a byte-order mark) redacted as one text and re-encoded as it came; every part's `filename` / `filename*` and every plain form field (the structural `purpose`, `expires_after[…]` too, scanned as text) redacted, all other bytes preserved; a BINARY file (a PDF — even an all-ASCII one —, an image, an archive, text that is not UTF-8) is forwarded byte-identical and UNSCANNED with the client's own key (`[detection] binary_uploads = "forward"`, the default, counted) and refuses the upload otherwise (400: `"refuse"`, or a credential the proxy holds); a JSONL line nesting JSON too deep, a form field that is not UTF-8, a preamble or epilogue, a part header without one reading, a Content-Transfer-Encoding or a declared charset other than the content's own refuses the upload (400 — `detection = false` forwards it as sent); the file object answering it echoes the filename, restored |
 | `GET /v1/files` | chat | the file list: each echoed filename restored in the request's own session |
 | `GET /v1/files/{id}` | chat | the file object: its echoed filename restored |
-| `GET /v1/files/{id}/content` | chat | batch output JSONL restored line by line |
+| `GET /v1/files/{id}/content` | chat | a text file restored line by line (a JSON line as JSON — batch output JSONL —, any other line as text: a fine-tune results CSV, a text file uploaded redacted), re-encoded as it came; a binary file untouched |
 | `DELETE /v1/files/{id}` | redact-only | id only |
 | `POST /v1/batches` | chat | the caller's free-form `metadata` values are redacted out and restored in the echoed batch object; structural fields (`input_file_id`, `endpoint`, `completion_window`) carry nothing a detector matches and are forwarded byte-identical; no system note |
 | `GET /v1/batches` | chat | the LIST is restored in the request's own session, like a single batch: one shared namespace holds every batch's tokens. With llm-redact-pro named users a listing resolves to an EMPTY session, and the session router's `listing_item_session` restores only the batches the READER created, each in the session it was created in; every other item keeps its placeholders. No system note |
@@ -204,12 +209,12 @@ the user's own copy of it — and no route here but the generate verbs and
 | `POST /v1beta/batches/{id}:cancel` | redact-only | the name only |
 | `DELETE /v1beta/batches/{id}` | redact-only | the name only |
 | `PATCH /v1beta/batches/{id}:updateGenerateContentBatch` | pass-through | a pending batch's update: never sent with a credential the proxy holds |
-| `POST /upload/v1beta/files` | chat | the Files upload. The SINGLE-REQUEST protocol (`X-Goog-Upload-Protocol: multipart`, a `multipart/related` body: the JSON metadata, then the media) is redacted part by part — the metadata's `displayName`, a TEXT file as text (a JSON or JSONL file as JSON: a batch input file's requests), every part's file name; a BINARY file is forwarded as sent only with the client's own key and refuses the upload (400) under a credential the proxy holds, as does anything it cannot read. The RESUMABLE protocol's start (JSON metadata) is redacted with the client's own key, and its upload URL (Google's; the data chunks go there directly, never through llm-redact — the media gap below) relayed; under a credential the proxy holds the start is REFUSED (403) — that URL would let the client store unread bytes as the proxy's principal — and an `X-Goog-Upload-URL` answer header is never relayed. A data chunk sent to the proxy (`upload_id`, an `X-Goog-Upload-Command` other than `start`) and the raw protocol are pass-through. The File answering it: `displayName` restored, reported to a session router as its creator's |
+| `POST /upload/v1beta/files` | chat | the Files upload. The SINGLE-REQUEST protocol (`X-Goog-Upload-Protocol: multipart`, a `multipart/related` body: the JSON metadata, then the media) is redacted part by part, EVERY part read as a file by its content with the OpenAI Files upload's part loop — the metadata (one JSON line: its `displayName`), a JSONL file (a batch input file's requests) line by line as JSON, any other text file as one text re-encoded as it came, every part's file name; a BINARY file is forwarded unscanned with the client's own key (`binary_uploads = "forward"`, counted) and refuses the upload (400) under `"refuse"` or a credential the proxy holds, as does anything it cannot read. The RESUMABLE protocol's start (JSON metadata) is redacted with the client's own key, and its upload URL (Google's; the data chunks go there directly, never through llm-redact — the media gap below) relayed; under a credential the proxy holds the start is REFUSED (403) — that URL would let the client store unread bytes as the proxy's principal — and an `X-Goog-Upload-URL` answer header is never relayed. A data chunk sent to the proxy (`upload_id`, an `X-Goog-Upload-Command` other than `start`) and the raw protocol are pass-through. The File answering it: `displayName` restored, reported to a session router as its creator's |
 | `POST /v1beta/files` | chat | the metadata-only create: `displayName` redacted and restored; reported as the creator's |
 | `POST /v1beta/files:register` | pass-through | registers Cloud Storage objects the provider reads as the caller: never sent with a credential the proxy holds |
 | `GET /v1beta/files` | chat | the file list (`{"files": [...]}`): each `displayName` restored in the request's own session, or — with a session router attributing listed items — each file, by its `name`, in its creator's |
 | `GET /v1beta/files/{id}` | chat | a file's metadata: `displayName` restored |
-| `GET /v1beta/files/{id}:download` | chat | the file back: a text file restored (a JSON or JSONL file as JSON source, re-escaped), a binary file never read |
+| `GET /v1beta/files/{id}:download` | chat | the file back, restored like an OpenAI file download: a text file line by line (a JSON line as JSON, re-escaped), a binary file never read |
 | `GET /download/v1beta/files/{id}:download` | chat | the media download a batch's output file (JSONL: model output carrying placeholders) is fetched from: as above |
 | `DELETE /v1beta/files/{id}` | redact-only | the name only |
 
@@ -288,14 +293,14 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/conversations/{id}` | chat | |
 | `GET /openai/v1/conversations/{id}/items` | chat | list-envelope walk |
 | `DELETE /openai/v1/conversations/{id}` | redact-only | ids only |
-| `POST /openai/files` | chat | multipart JSONL upload, lines and filenames redacted (+ note on chat-shaped lines), the echoed filename restored; a non-JSON-object line, a non-JSONL file, a non-UTF-8 form field, a part header without one reading (a `filename*` outside UTF-8 included), a Content-Transfer-Encoding, or a declared charset other than UTF-8/US-ASCII refuses the upload (400) — under identity auth, and under key auth wherever redaction applies — and every form field is scanned as text |
+| `POST /openai/files` | chat | multipart upload read by content like OpenAI's: JSONL lines, text files and filenames redacted (+ note on chat-shaped lines), the echoed filename restored; a binary file is forwarded unscanned with the client's own key (`binary_uploads = "forward"`, counted) and refused (400) under identity auth or `"refuse"`; a too-deep JSONL line, a non-UTF-8 form field, a part header without one reading (a `filename*` outside UTF-8 included), a Content-Transfer-Encoding, or a declared charset other than the content's own refuses the upload (400) — under identity auth, and under key auth wherever redaction applies — and every form field is scanned as text |
 | `POST /openai/v1/files` | chat | |
 | `GET /openai/files` | chat | the file list: echoed filenames restored |
 | `GET /openai/files/{id}` | chat | the file object: echoed filename restored |
 | `GET /openai/v1/files` | chat | |
 | `GET /openai/v1/files/{id}` | chat | |
 | `DELETE /openai/files/{id}` | redact-only | |
-| `GET /openai/files/{id}/content` | chat | batch output JSONL restored line by line |
+| `GET /openai/files/{id}/content` | chat | a text file restored line by line (JSON lines as JSON), a binary file untouched |
 | `GET /openai/v1/files/{id}/content` | chat | |
 | `POST /openai/batches` | chat | file ids + user `metadata` (redacted out, restored in the echo) |
 | `GET /openai/batches` | chat | the LIST is restored in the request's own session (both path families); with llm-redact-pro named users only the reader's own batches are restored (an empty listing session + `listing_item_session`), every other item keeps its placeholders |
@@ -451,7 +456,7 @@ upstream; its matcher is proven disjoint from the Gemini Vertex adapter's
 (`rawPredict` vs `generateContent` verbs), and other publishers' rawPredict
 traffic (Llama, etc.) is deliberately not matched. Azure files
 uploads (`POST /openai/files`, `/openai/v1/files`) and content downloads
-reuse the OpenAI multipart/JSONL/filename handling on Azure's path shapes;
+reuse the OpenAI multipart/content-classified file/filename handling on Azure's path shapes;
 batches are recognized and file objects restored (see the Azure table). **Azure OpenAI Responses**
 (`POST /openai/responses` and the `/openai/v1/responses` preview, plus the
 stored-response and input-item GETs, compaction and the input-token count)

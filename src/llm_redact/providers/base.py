@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import Enum
 from typing import Any
 
@@ -350,7 +350,7 @@ class ProviderAdapter(ABC):
         *,
         inject_note: bool,
         require_scanned: bool = False,
-        forward_binary: bool = False,
+        forward_binary: Callable[[int], None] | None = None,
     ) -> bytes | None:
         """Rewrite a multipart request body for ``path`` (delimited by the
         ``boundary`` ``multipart_boundary`` read).
@@ -362,14 +362,15 @@ class ProviderAdapter(ABC):
         ``UnredactableRequest`` naming its kind; the proxy always passes it
         (the scanned-body rule: a recognized route forwards only what the
         proxy read — under its own identity, and under the client's own key
-        wherever redaction applies). This base scans nothing. (What an
+        wherever redaction applies). The one exception is
+        ``forward_binary``: when given, a BINARY file part
+        (``upload_content.classify_file``) is forwarded unscanned, byte
+        for byte, and the callable is told how many were once the whole
+        upload was read — the proxy passes it only when the request goes
+        out with the client's own credential and ``[detection]
+        binary_uploads`` is "forward". This base scans nothing. (What an
         upload cites for the stored-object check is read separately, before
-        redaction: ``upload_view.read_upload``.) ``forward_binary``: the
-        request is sent with the client's OWN provider key, so an uploaded
-        file that is not text (binary content no detector could read) may
-        go out as sent even with ``require_scanned``; under a credential
-        the proxy holds it is False, and such a file refuses the upload.
-        Adapters that upload only text ignore it.
+        redaction: ``upload_view.read_upload``.)
 
         The proxy cannot see inside the parts, so an adapter that redacts
         them first raises ``redactor``'s token floors (``with_floors``) to

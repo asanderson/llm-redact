@@ -326,6 +326,16 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append(f"languages = {_toml_list(detection.languages)}")
     lines.append(f"allowlist = {_toml_list(detection.allowlist)}")
     lines.append(f"allowlist_patterns = {_toml_list(detection.allowlist_patterns)}")
+    # Always written, and annotated at the default: a binary upload sent
+    # with the client's own key then leaves the machine UNSCANNED.
+    lines.append(
+        f"binary_uploads = {_toml_str(detection.binary_uploads)}"
+        + (
+            " # binary file uploads (client's own key) go upstream UNSCANNED"
+            if detection.binary_uploads == "forward"
+            else ""
+        )
+    )
 
     if detection.mcp_exempt_servers:
         # Skipped when empty: absence means every MCP server's content is

@@ -36,12 +36,7 @@ import pytest
 from lent_routes import SESSION, Owners, client, lent_app
 from llm_redact.detection.engine import Allowlist, DetectionConfig, build_detectors
 from llm_redact.providers.base import RouteKind
-from llm_redact.providers.documents import (
-    redact_document_upload,
-    redact_text_document,
-    rehydrate_document,
-    text_of,
-)
+from llm_redact.providers.documents import redact_related_upload, rehydrate_download
 from llm_redact.providers.gemini import GeminiAdapter
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator
@@ -165,79 +160,39 @@ def test_file_listing_hooks() -> None:
     assert adapter.listing_items({"files": {}}) is None
 
 
-# --- the document policy ---------------------------------------------------------------
+# --- the upload policy (the OpenAI Files upload's, every part a file) ----------------
 
 
-def test_a_text_document_is_redacted_json_as_json() -> None:
-    vault = InMemoryVault()
-    redactor = _redactor(vault)
-    assert redact_text_document(f"write to {EMAIL}\n", redactor) == f"write to {TOKEN}\n"
-    request = {"key": "1", "request": {"text": f'a "q" {EMAIL}'}}
-    jsonl = json.dumps(request) + '\n\n{"key": "2"}'
-    out = redact_text_document(jsonl, redactor)
-    first, blank, second = out.split("\n")
-    assert json.loads(first)["request"]["text"] == f'a "q" {TOKEN}'
-    assert blank == "" and second == '{"key": "2"}'  # unchanged lines kept as sent
-    pretty = '{\n  "to": "' + EMAIL + '"\n}'
-    assert json.loads(redact_text_document(pretty, redactor)) == {"to": TOKEN}
-    clean = '{\n  "to": "nobody"\n}'
-    assert redact_text_document(clean, redactor) == clean
-    # A repeated key is re-serialized as the provider reads it (the last).
-    assert redact_text_document('{"a": 1, "a": 2}', redactor) == '{"a": 2}'
-    assert redact_text_document('{"a": 1, "a": 2}\n{"b": 1}', redactor) == '{"a": 2}\n{"b": 1}'
-    # A line that is not an object: the whole file is text.
-    mixed = f'{{"a": 1}}\n[1]\n{EMAIL}'
-    assert redact_text_document(mixed, redactor) == f'{{"a": 1}}\n[1]\n{TOKEN}'
-    assert text_of(b"a\x00b") is None and text_of(b"\xff") is None and text_of(b"ok") == "ok"
+def _related_upload(body: bytes, **kwargs: object) -> bytes | None:
+    options: dict = {"require_scanned": True, "forward_binary": None, **kwargs}
+    return redact_related_upload(body, b"b", _redactor(InMemoryVault()), **options)
 
 
-def test_a_downloaded_document_is_restored_binary_never_read() -> None:
-    vault = InMemoryVault()
-    token = vault.placeholder_for("EMAIL", 'jane "j" doe@corp.example')
-    rehydrator = Rehydrator(vault)
-    # JSON Lines and JSON documents as JSON source: re-escaped, format kept.
-    jsonl = ('{"text": "to ' + token + '"}\n{"text": "\\u00ab EMAIL_001 \\u00bb"}\n').encode()
-    restored = rehydrate_document(jsonl, rehydrator)
-    assert restored is not None
-    lines = restored.decode().split("\n")
-    assert json.loads(lines[0]) == {"text": 'to jane "j" doe@corp.example'}
-    pretty = ('{\n  "to": "' + token + '"\n}').encode()
-    assert rehydrate_document(pretty, rehydrator) == (
-        b'{\n  "to": "jane \\"j\\" doe@corp.example"\n}'
-    )
-    # Plain text as text.
-    assert rehydrate_document(f"to {token}".encode(), rehydrator) == (
-        b'to jane "j" doe@corp.example'
-    )
-    assert rehydrate_document(b"nothing here", rehydrator) is None
-    assert rehydrate_document(PNG + token.encode(), rehydrator) is None
-
-
-def test_the_upload_is_redacted_part_by_part() -> None:
+def test_the_upload_is_redacted_part_by_part_every_part_a_file() -> None:
     vault = InMemoryVault()
     body = _related(
         ("application/json; charset=UTF-8", _metadata(EMAIL)),
         ("text/plain", f"call {OTHER}".encode()),
     )
-    out = redact_document_upload(
-        body, b"b", _redactor(vault), require_scanned=True, forward_binary=False
+    out = redact_related_upload(
+        body, b"b", _redactor(vault), require_scanned=True, forward_binary=None
     )
     assert out is not None and b"@corp.example" not in out
+    # The metadata part is JSONL (one object line): redacted as JSON.
     assert b'"display_name": "notes of \xc2\xabEMAIL_001\xc2\xbb"' in out
     assert out.endswith(b"call \xc2\xabEMAIL_002\xc2\xbb\r\n--b--\r\n")
-    clean = _related(("text/plain", b"nothing"))
-    assert (
-        redact_document_upload(
-            clean, b"b", _redactor(vault), require_scanned=True, forward_binary=False
-        )
-        is None
-    )
+    assert _related_upload(_related(("text/plain", b"nothing"))) is None
+    # A UTF-16 text file (byte-order mark) is redacted and re-encoded as it came.
+    utf16 = "\ufeffmail " + EMAIL
+    out = _related_upload(_related(("text/plain", utf16.encode("utf-16-le"))))
+    assert out is not None and "mail «EMAIL_001»".encode("utf-16-le") in out
 
 
 @pytest.mark.parametrize(
     ("body", "message"),
     [
-        (_related(("image/png", PNG)), "not UTF-8 text"),
+        (_related(("image/png", PNG)), "is binary"),
+        (_related(("application/pdf", b"%PDF-1.7 all ascii")), "is binary"),
         (b"pre\r\n" + _related(("text/plain", b"x")), "preamble or epilogue"),
         (_related(("text/plain", b"x")) + b"tail", "preamble or epilogue"),
         (b"--b\r\nno closing", "outside the canonical form"),
@@ -256,46 +211,47 @@ def test_the_upload_is_redacted_part_by_part() -> None:
 )
 def test_an_upload_it_cannot_read_is_refused(body: bytes, message: str) -> None:
     with pytest.raises(UnredactableRequest, match=message):
-        redact_document_upload(
-            body, b"b", _redactor(InMemoryVault()), require_scanned=True, forward_binary=False
-        )
+        _related_upload(body)
 
 
 def test_a_binary_file_goes_as_sent_only_when_allowed() -> None:
-    body = _related(("application/json", _metadata(EMAIL)), ("image/png", PNG))
-    out = redact_document_upload(
-        body, b"b", _redactor(InMemoryVault()), require_scanned=True, forward_binary=True
-    )
+    body = _related(("application/json", _metadata(EMAIL)), ("image/png", PNG), ("x/y", PNG))
+    counted: list[int] = []
+    out = _related_upload(body, forward_binary=counted.append)
     assert out is not None and PNG in out and b"@corp.example" not in out
+    assert counted == [2]  # told once, with the count
+    assert _related_upload(_related(("text/plain", b"hi")), forward_binary=counted.append) is None
+    assert counted == [2]  # no binary part: never told
     # Lenient (never the proxy): nothing unreadable refuses.
-    assert (
-        redact_document_upload(
-            _related(("image/png", PNG)),
-            b"b",
-            _redactor(InMemoryVault()),
-            require_scanned=False,
-            forward_binary=False,
-        )
-        is None
-    )
-    assert (
-        redact_document_upload(
-            b"junk", b"b", _redactor(InMemoryVault()), require_scanned=False, forward_binary=False
-        )
-        is None
-    )
+    assert _related_upload(_related(("image/png", PNG)), require_scanned=False) is None
+    assert _related_upload(b"junk", require_scanned=False) is None
 
 
 def test_the_upload_floors_every_token_it_carries() -> None:
-    vault = InMemoryVault()
     body = _related(
         ("application/json", _metadata(EMAIL)),
         ("text/plain", "keep «EMAIL_007» as is".encode()),
     )
-    out = redact_document_upload(
-        body, b"b", _redactor(vault), require_scanned=True, forward_binary=False
-    )
+    out = _related_upload(body)
     assert out is not None and "«EMAIL_008»".encode() in out  # never onto 007
+
+
+def test_a_download_is_restored_like_an_openai_file_download() -> None:
+    vault = InMemoryVault()
+    token = vault.placeholder_for("EMAIL", 'jane "j" doe@corp.example')
+    rehydrator = Rehydrator(vault)
+    jsonl = ('{"text": "to ' + token + '"}\n{"args": {"arguments": "' + token + '"}}\n').encode()
+    restored = rehydrate_download(jsonl, rehydrator)
+    assert restored is not None
+    first, second, _ = restored.decode().split("\n")
+    assert json.loads(first) == {"text": 'to jane "j" doe@corp.example'}
+    # The plain JSON walk: no OpenAI ``arguments`` source override.
+    assert json.loads(second) == {"args": {"arguments": 'jane "j" doe@corp.example'}}
+    assert rehydrate_download(f"to {token}".encode(), rehydrator) == (
+        b'to jane "j" doe@corp.example'
+    )
+    assert rehydrate_download(b"nothing here", rehydrator) is None
+    assert rehydrate_download(PNG + token.encode(), rehydrator) is None
 
 
 # --- end to end ------------------------------------------------------------------------
@@ -413,7 +369,7 @@ async def test_a_binary_file_needs_the_clients_own_key(monkeypatch: pytest.Monke
             uploaded = await _upload(http, EMAIL, ("image/png", PNG))
             if proxy_credential:
                 assert uploaded.status_code == 400, uploaded.text
-                assert "not UTF-8 text" in uploaded.text and files.received == []
+                assert "is binary" in uploaded.text and files.received == []
                 assert app.state.proxy.recent[0]["status"] == 400
                 continue
             assert uploaded.status_code == 200, uploaded.text
@@ -421,6 +377,25 @@ async def test_a_binary_file_needs_the_clients_own_key(monkeypatch: pytest.Monke
         assert files.content["files/f1"][0] == PNG  # as sent
         assert b"@corp.example" not in files.received[0].content  # metadata redacted
         assert downloaded.content == PNG  # never read
+        assert app.state.proxy.unscanned_uploads == {"gemini": 1}  # counted
+
+
+async def test_binary_uploads_refuse_holds_for_the_clients_own_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = FilesAPI()
+    app, _ = lent_app(
+        monkeypatch,
+        "gemini",
+        GEMINI,
+        files,
+        proxy_credential=False,
+        detection=DetectionConfig(binary_uploads="refuse"),
+    )
+    async with client(app) as http:
+        uploaded = await _upload(http, EMAIL, ("image/png", PNG))
+    assert uploaded.status_code == 400 and "is binary" in uploaded.text
+    assert files.received == [] and not app.state.proxy.unscanned_uploads
 
 
 async def test_a_resumable_upload_is_never_started_with_the_proxys_credential(

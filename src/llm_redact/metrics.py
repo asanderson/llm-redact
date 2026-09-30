@@ -90,6 +90,8 @@ class Metrics:
         compaction_forks: int = 0,
         upstream_errors: "Counter[str] | None" = None,
         bookkeeping_errors: "Counter[str] | None" = None,
+        connections_closed: "Counter[str] | None" = None,
+        unscanned_uploads: "Counter[str] | None" = None,
     ) -> str:
         lines: list[str] = []
         lines.append("# HELP llm_redact_info Build information.")
@@ -157,12 +159,37 @@ class Metrics:
             " (restoring the answer — a recorded 502); before any upstream contact, vault"
             " (issuing a request's placeholders failed — a recorded 503, a realtime frame"
             " closes 1011); vault_check (a vault view's staleness check could not read its"
-            " database — contained, the cache kept)."
+            " database — contained, the cache kept); recheck (an open connection's access"
+            " re-check failed — the connection closed)."
         )
         lines.append("# TYPE llm_redact_bookkeeping_errors_total counter")
         for stage, count in sorted((bookkeeping_errors or Counter()).items()):
             lines.append(
                 f'llm_redact_bookkeeping_errors_total{{stage="{_escape_label(stage)}"}} {count}'
+            )
+
+        lines.append(
+            "# HELP llm_redact_connections_closed_total Open long-lived connections (realtime"
+            " relays, live-events streams) closed because their admission ended, by cause:"
+            " revoked (the access gate revoked the user or credential), recheck (a periodic"
+            " re-check refused it), recheck_error (a re-check failed or timed out — fail closed)."
+        )
+        lines.append("# TYPE llm_redact_connections_closed_total counter")
+        for cause, count in sorted((connections_closed or Counter()).items()):
+            lines.append(
+                f'llm_redact_connections_closed_total{{cause="{_escape_label(cause)}"}} {count}'
+            )
+
+        lines.append(
+            "# HELP llm_redact_unscanned_uploads_total Binary file parts of uploads forwarded"
+            " UNSCANNED with the client's own credential ([detection] binary_uploads ="
+            ' "forward"), by provider.'
+        )
+        lines.append("# TYPE llm_redact_unscanned_uploads_total counter")
+        for provider, count in sorted((unscanned_uploads or Counter()).items()):
+            lines.append(
+                f'llm_redact_unscanned_uploads_total{{provider="{_escape_label(provider)}"}}'
+                f" {count}"
             )
 
         lines.append(

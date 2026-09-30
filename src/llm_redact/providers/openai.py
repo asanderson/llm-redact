@@ -103,6 +103,26 @@ _MODELS_RE = re.compile(r"/v1/models(?:/[^/]+)?")
 # Deleting a stored object carries its id only.
 _DELETE_RE = re.compile(r"/v1/files/[^/]+|/v1/conversations/[^/]+(?:/items/[^/]+)?")
 
+# Fine-tuning jobs: create and the list, one job, its cancel/pause/resume
+# (each answering with the job, which echoes the caller's `metadata`), its
+# events (provider messages) and its checkpoints (metadata only).
+_FINE_TUNING_JOBS = re.compile(r"/v1/fine_tuning/jobs(?:/[^/]+)?")
+_FINE_TUNING_ACTION = re.compile(r"/v1/fine_tuning/jobs/[^/]+/(?:cancel|pause|resume)")
+_FINE_TUNING_EVENTS = re.compile(r"/v1/fine_tuning/jobs/[^/]+/events")
+_FINE_TUNING_CHECKPOINTS = re.compile(r"/v1/fine_tuning/jobs/[^/]+/checkpoints")
+# A job create's fields the provider uses exactly as sent (``verbatim_fields``):
+# the training and validation FILE ids; the `suffix`, which becomes part of
+# the fine-tuned model's name — the name every later request cites in its
+# `model`, structural and forwarded as sent, so a placeholder in it would name
+# a model the client can never address; and the `integrations` (a Weights &
+# Biases project, entity, run name and tags the provider logs to).
+_FINE_TUNING_VERBATIM = (
+    ("suffix",),
+    ("training_file",),
+    ("validation_file",),
+    ("integrations",),
+)
+
 # Batches whose request or response carries the caller's `metadata`:
 # create (POST /v1/batches) and cancel, a batch's GET and the list (every
 # answer is a batch object, or a list of them, echoing that metadata).
@@ -301,14 +321,14 @@ def _stored_completion_create(path: str, body: Any) -> bool:
 # stored objects by id: files, batches, video jobs and stored chat
 # completions. Tail-anchored, so the Azure and custom-provider prefixes
 # need no override.
-_LISTING_RE = re.compile(r"(?:^|/)(?:files|batches|videos|chat/completions)$")
+_LISTING_RE = re.compile(r"(?:^|/)(?:files|batches|videos|chat/completions|fine_tuning/jobs)$")
 
 
 # The Uploads API (large files in parts): completing an upload creates the
 # stored FILE, named in the answer's nested `file` object.
 _UPLOAD_COMPLETE_RE = re.compile(r"(?:^|/)uploads/[^/]+/complete$")
 
-# Fine-tuning jobs (pass-through routes): the create answers with the job,
+# Fine-tuning jobs: the create answers with the job,
 # later read by id; a job read (and its cancel/pause/resume, each answering
 # with the job) names the files the job WROTE once it finished
 # (`result_files`) — reported like a batch's output files on its status, as
@@ -351,6 +371,27 @@ def _tail_is_create(path: str) -> bool:
     ``…/conversations``), not to a member or sub-resource."""
     tail = path.rstrip("/").rsplit("/", 1)[-1]
     return tail in ("files", "batches", "conversations")
+
+
+def _match_fine_tuning(method: str, path: str) -> RouteKind:
+    """Fine-tuning jobs (``/v1/fine_tuning/...``). A job create carries the
+    caller's free-form `metadata` (redacted out, like a batch's) and the
+    fields the provider keeps as sent (``_FINE_TUNING_VERBATIM``: scanned,
+    never rewritten); the training data itself is the FILE, redacted at its
+    upload (``/v1/files``). Every answer naming a job (the create, the list,
+    a job, its cancel/pause/resume) echoes that metadata, and a job's events
+    are the provider's messages about it: all restored (CHAT). Checkpoints
+    carry metadata only. Checkpoint PERMISSIONS (an admin key's sharing of a
+    checkpoint across projects) and the alpha graders stay pass-through."""
+    if method == "POST" and (path == "/v1/fine_tuning/jobs" or _FINE_TUNING_ACTION.fullmatch(path)):
+        return RouteKind.CHAT
+    if method == "GET" and (
+        _FINE_TUNING_JOBS.fullmatch(path) or _FINE_TUNING_EVENTS.fullmatch(path)
+    ):
+        return RouteKind.CHAT
+    if method == "GET" and _FINE_TUNING_CHECKPOINTS.fullmatch(path):
+        return RouteKind.REDACT_ONLY
+    return RouteKind.NONE
 
 
 class OpenAIAdapter(ProviderAdapter):
@@ -443,6 +484,8 @@ class OpenAIAdapter(ProviderAdapter):
         if method == "DELETE" and _DELETE_RE.fullmatch(path):
             # A file's delete: its id only.
             return RouteKind.REDACT_ONLY
+        if path.startswith("/v1/fine_tuning/"):
+            return _match_fine_tuning(method, path)
         if (method == "POST" and _BATCH_POST_RE.fullmatch(path)) or (
             method == "GET" and _BATCH_GET_RE.fullmatch(path)
         ):
@@ -468,9 +511,9 @@ class OpenAIAdapter(ProviderAdapter):
             # Item bodies carry `items`, not `messages`; injecting the note
             # would graft a spurious `messages` field and corrupt the request.
             return False
-        if path.startswith(("/v1/videos", "/v1/batches")):
-            # Video job and batch bodies have no messages field either — a
-            # note would graft one and corrupt the request.
+        if path.startswith(("/v1/videos", "/v1/batches", "/v1/fine_tuning/")):
+            # Video job, batch and fine-tuning job bodies have no messages
+            # field either — a note would graft one and corrupt the request.
             return False
         return kind is RouteKind.CHAT or path == "/v1/files"
 
@@ -502,6 +545,16 @@ class OpenAIAdapter(ProviderAdapter):
         if _FINE_TUNING_CREATE_RE.search(tail) is not None:
             return (*_string_ids(body, ("id",)), *_result_files(body))
         return _string_ids(body, ("id",))
+
+    def verbatim_fields(self, method: str, path: str) -> tuple[tuple[str, ...], ...]:
+        # Tail-anchored like the tracking patterns: the Azure and
+        # custom-provider prefixes need no override.
+        tail = path.rstrip("/")
+        if method != "POST":
+            return ()
+        if _FINE_TUNING_CREATE_RE.search(tail) is not None:
+            return _FINE_TUNING_VERBATIM
+        return ()
 
     def lists_objects(self, method: str, path: str) -> bool:
         return method == "GET" and _LISTING_RE.search(path.rstrip("/")) is not None

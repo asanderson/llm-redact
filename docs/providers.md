@@ -338,6 +338,28 @@ MCP connector configuration (Anthropic `mcp_servers`, OpenAI
 must hold the real credential to call your MCP server — while MCP call
 arguments and output are redacted and restored like any other content.
 
+## Stored-object APIs: fine-tuning
+
+OpenAI's fine-tuning jobs (`/v1/fine_tuning/jobs`: create, the list, one
+job, its cancel/pause/resume, events and checkpoints — on Azure's
+`/openai/v1` and api-version `/openai` families and custom providers too)
+are recognized, so a credential the proxy holds (a routed operator key,
+Azure's identity auth) may reach them. The caller's free-form `metadata`
+is redacted and restored in every echo of the job, and the provider's
+event messages are restored; the training data itself is the file,
+redacted at its upload. Some fields the provider keeps exactly as sent:
+the `suffix` becomes part of the fine-tuned model's name — the name
+every later request cites in its `model`, which is never rewritten — and
+the file ids and the Weights & Biases `integrations` name things that
+exist elsewhere. Those VERBATIM fields are scanned but never rewritten:
+a value llm-redact would redact there refuses the request with a 400
+naming the field (a placeholder would name a model, file or project that
+does not exist). Choose a suffix that holds nothing private. The created
+job, and the files a finished job wrote (`result_files`), are reported
+to a session router that tracks stored objects (llm-redact-pro's named
+users). Checkpoint permissions (an admin key sharing a checkpoint across
+projects) stay pass-through.
+
 ## Realtime WebSocket APIs
 
 With `pip install 'llm-redact-proxy[realtime]'`: OpenAI Realtime

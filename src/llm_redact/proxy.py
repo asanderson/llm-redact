@@ -118,6 +118,7 @@ from llm_redact.providers.attribution import (
     unattributed_reason,
     under,
 )
+from llm_redact.providers.base import VerbatimFieldRedacted, prepare_route_request
 from llm_redact.providers.custom import build_custom_adapters, custom_prefix
 from llm_redact.realtime import (
     ALL_WS_ADAPTERS,
@@ -3739,7 +3740,10 @@ async def handle(request: Request) -> Response:
             prepared = run_batched(
                 ctx.vault,
                 functools.partial(
-                    adapter.prepare_request,
+                    prepare_route_request,
+                    adapter,
+                    request.method,
+                    path,
                     parsed,
                     redactor,
                     inject_note=note_wanted and adapter.wants_system_note(kind, path),
@@ -3752,6 +3756,8 @@ async def handle(request: Request) -> Response:
             return too_many_strings(adapter)
         except PlaceholderLimitReached as exc:
             return refused_response(str(exc), adapter, "no placeholder number left")
+        except VerbatimFieldRedacted as exc:
+            return refused_response(str(exc), adapter, "verbatim field")
         except UnredactableRequest as exc:
             return refused_response(str(exc), adapter, "undecodable field")
         except SealedSessionError:

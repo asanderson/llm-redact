@@ -153,9 +153,15 @@ matches](#requests-no-route-matches).
 | `POST /v1/videos/{id}/remix` | chat | remix prompt redacted; echo restored |
 | `GET /v1/videos/{id}/content` | redact-only | the rendered video: media bytes verbatim (a body-less no-op) |
 | `DELETE /v1/videos/{id}` | redact-only | id only |
-| `POST /v1/fine_tuning/jobs` | pass-through | file ids only; the training FILE is covered at upload via `/v1/files`; the created job is reported to a session router as its creator's |
-| `GET /v1/fine_tuning/jobs` | pass-through | |
-| `GET /v1/fine_tuning/jobs/{id}` | pass-through | the job's `result_files` are reported to a session router (like a batch's output files on its status; also on the job's `cancel`, `pause` and `resume`) |
+| `POST /v1/fine_tuning/jobs` | chat | the caller's free-form `metadata` redacted out and restored in the echoed job; the training data is the FILE, redacted at its upload (`/v1/files`). VERBATIM fields — `suffix` (it becomes part of the fine-tuned model's name, which later requests cite in their structural `model`), `training_file` / `validation_file` (file ids) and `integrations` (a W&B project, entity, run name and tags) — are scanned but never rewritten: a value llm-redact would redact there refuses the request (400) instead of forwarding it or naming a model, file or project that does not exist. `hyperparameters` / `method` go through the walk (numbers and enums). The created job is reported to a session router as its creator's; no system note |
+| `GET /v1/fine_tuning/jobs` | chat | the job list: each job's echoed `metadata` restored in the request's own session; a listing a session router attributes per item (`listing_item_session`) |
+| `GET /v1/fine_tuning/jobs/{id}` | chat | the job object, restored; its `result_files` are reported to a session router (like a batch's output files on its status; also on the job's `cancel`, `pause` and `resume`) |
+| `POST /v1/fine_tuning/jobs/{id}/cancel` | chat | answers the job object, restored |
+| `POST /v1/fine_tuning/jobs/{id}/pause` | chat | answers the job object, restored |
+| `POST /v1/fine_tuning/jobs/{id}/resume` | chat | answers the job object, restored |
+| `GET /v1/fine_tuning/jobs/{id}/events` | chat | the provider's messages about the job, restored |
+| `GET /v1/fine_tuning/jobs/{id}/checkpoints` | redact-only | checkpoint metadata (a body-less no-op: recognized) |
+| `POST /v1/fine_tuning/checkpoints/{id}/permissions` | pass-through | an admin key sharing a checkpoint across projects (org administration, like the Admin API) |
 | `POST /v1/uploads` | pass-through | DOCUMENTED GAP: the Uploads API (see the honest gaps below) |
 | `POST /v1/uploads/{id}/parts` | pass-through | an opaque byte range of the file |
 | `POST /v1/vector_stores` | pass-through | DOCUMENTED GAP: names and attributes are forwarded as sent |
@@ -260,7 +266,13 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/models/{id}` | redact-only | |
 | `GET /openai/deployments` | redact-only | deployment listing |
 | `GET /openai/deployments/{d}` | redact-only | |
-| `POST /openai/v1/fine_tuning/jobs` | pass-through | file ids only; the training FILE is covered at upload; the job, and later its `result_files`, are reported like OpenAI's |
+| `POST /openai/v1/fine_tuning/jobs` | chat | as on OpenAI: `metadata` redacted and restored, the verbatim fields scanned but never rewritten; the job, and later its `result_files`, are reported like OpenAI's |
+| `POST /openai/fine_tuning/jobs` | chat | the api-version form |
+| `GET /openai/fine_tuning/jobs` | chat | |
+| `GET /openai/v1/fine_tuning/jobs/{id}` | chat | |
+| `POST /openai/fine_tuning/jobs/{id}/cancel` | chat | also `pause` / `resume` |
+| `GET /openai/v1/fine_tuning/jobs/{id}/events` | chat | |
+| `GET /openai/fine_tuning/jobs/{id}/checkpoints` | redact-only | |
 
 ## AWS Bedrock (runtime)
 

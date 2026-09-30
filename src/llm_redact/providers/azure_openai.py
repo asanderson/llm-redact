@@ -15,10 +15,10 @@ would route Azure traffic to api.openai.com.
 Covered beyond chat: legacy completions, embeddings, image generation/edit
 prompts and text-to-speech input on both path families; Files (multipart
 JSONL upload with its filename, batch-output download, and the file list and
-objects that echo the filename) and Batches; the v1 Conversations item
-store; and the model/deployment listings — recognized (REDACT_ONLY, a no-op
-on a body-less GET) so that ``[providers.azure] auth = "identity"``, which
-forwards only recognized routes, does not refuse them.
+objects that echo the filename) and Batches; fine-tuning jobs; the v1
+Conversations item store; and the model/deployment listings — recognized
+(REDACT_ONLY, a no-op on a body-less GET) so that ``[providers.azure] auth
+= "identity"``, which forwards only recognized routes, does not refuse them.
 """
 
 import re
@@ -47,6 +47,10 @@ _AZURE_FILE_CONTENT = re.compile(r"/openai/(?:v1/)?files/[^/]+/content")
 _AZURE_BATCH_COLLECTION = re.compile(r"/openai/(?:v1/)?batches")
 _AZURE_BATCHES = re.compile(r"/openai/(?:v1/)?batches(?:/[^/]+)?")
 _AZURE_BATCH_CANCEL = re.compile(r"/openai/(?:v1/)?batches/[^/]+/cancel")
+# OpenAI's stored-object APIs on Azure's path families, classified exactly
+# as the OpenAI adapter classifies their /v1 form: fine-tuning jobs (both
+# families).
+_AZURE_STORED = re.compile(r"/openai/(?:v1/)?(fine_tuning/.*)")
 # Model/deployment listings: metadata only.
 _AZURE_METADATA = re.compile(r"/openai/(?:(?:v1/)?models|deployments)(?:/[^/]+)?")
 # The Conversations item store (v1 API only), paired with Responses.
@@ -85,6 +89,9 @@ class AzureOpenAIAdapter(OpenAIAdapter):
         # user's listing to an EMPTY session, then restores only the items
         # that user created (`listing_item_session`) — never another
         # user's placeholder in the reader's namespace.
+        stored = _AZURE_STORED.fullmatch(path)
+        if stored is not None:
+            return super().matches(method, "/v1/" + stored.group(1))
         if method == "POST":
             return self._match_post(path)
         if method == "GET":

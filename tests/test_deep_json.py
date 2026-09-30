@@ -437,7 +437,9 @@ def test_the_ownership_check_cannot_read_an_upload_nested_too_deep() -> None:
         + b"\r\n--XyZ--\r\n"
     )
     for body in (_multipart(deep)[0], field):
-        assert read_upload(body, b"XyZ", max_json_bytes=10**7) == UploadView([], problem=TOO_DEEP)
+        assert read_upload(body, b"XyZ", max_json_bytes=10**7, max_lines=10_000) == UploadView(
+            [], problem=TOO_DEEP
+        )
     assert f"a multipart part nests JSON deeper than {MAX_JSON_DEPTH} levels" == TOO_DEEP
 
 

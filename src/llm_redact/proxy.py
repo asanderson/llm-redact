@@ -2975,11 +2975,18 @@ def _ownership_body(
             413, f"the upload has more parts than llm-redact max_body_strings ({max_parts})"
         )
         return None, None, too_many if proxy_credential else None
-    view = read_upload(body, boundary, max_json_bytes=max_body_bytes)
+    view = read_upload(body, boundary, max_json_bytes=max_body_bytes, max_lines=max_parts)
     unreadable = None
     if view.oversized:
         unreadable = _Unreadable(
             413, f"the upload carries more than llm-redact max_body_bytes ({max_body_bytes})"
+        )
+    elif view.too_many_lines:
+        # Counted before each is parsed: the check never parses more lines
+        # than max_body_strings allows (redaction's own line charge).
+        unreadable = _Unreadable(
+            413,
+            f"the upload has more JSON lines than llm-redact max_body_strings ({max_parts})",
         )
     elif view.problem is not None:
         unreadable = _Unreadable(400, view.problem)
@@ -2987,9 +2994,7 @@ def _ownership_body(
         # With the client's own credential the upload goes out as the route
         # sends it, unread (the provider authorizes the client).
         return None, None, unreadable if proxy_credential else None
-    if view.normalized is not None and _part_kinds(view.normalized, boundary) != _part_kinds(
-        body, boundary
-    ):
+    if view.normalized is not None and _reclassified(body, view.normalized, boundary):
         # The re-serialized body is what redaction then reads: a part it
         # would read as something else (a text file turned "binary" goes out
         # unscanned) is refused whatever the credential. upload_view never
@@ -3001,13 +3006,23 @@ def _ownership_body(
 _RECLASSIFIED = "re-reading the upload for the stored-object check changed what a file part is"
 
 
-def _part_kinds(body: bytes, boundary: bytes) -> list[str] | None:
-    """What each part of the upload ``body`` is (``classify_file``), in
-    order — None outside the canonical grammar."""
-    parsed = parse_multipart(body, boundary)
-    if parsed is None:
-        return None
-    return [classify_file(part.content).kind for part in parsed.parts]
+def _reclassified(body: bytes, normalized: bytes, boundary: bytes) -> bool:
+    """Whether a part the re-serialized upload ``normalized`` rewrote reads
+    as another kind of file than it was (``classify_file``). Only rewritten
+    parts are classified — their object lines were each counted by the
+    check, and the JSONL test stops at a part's first line that is not one
+    — so this costs no more than the check's own bounded reading. A
+    different part count, or a body outside the grammar, counts as
+    reclassified."""
+    before = parse_multipart(body, boundary)
+    after = parse_multipart(normalized, boundary)
+    if before is None or after is None or len(before.parts) != len(after.parts):
+        return True
+    return any(
+        classify_file(old.content).kind != classify_file(new.content).kind
+        for old, new in zip(before.parts, after.parts, strict=True)
+        if old.content != new.content
+    )
 
 
 class _Misaddressed(NamedTuple):

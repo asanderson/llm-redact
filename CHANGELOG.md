@@ -164,6 +164,12 @@ and tags `vX.Y.Z`.
   which were skipped as request protocol fields and forwarded as sent. Only a
   batch line's request body and a fine-tuning example's conversation keep the
   request reading, and only those get the system note.
+- With a session router that checks stored-object access, reading an upload for
+  the check no longer parses every line: blank lines, prose and other lines that
+  cannot hold a JSON object cost one scan, and the lines it does parse are
+  counted against `max_body_strings` (an upload over it is refused 413 under a
+  credential the proxy holds). A 10 MiB upload of blank lines used to block the
+  proxy for about a minute.
 
 ## [1.9.0] - 2026-09-29
 

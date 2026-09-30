@@ -26,6 +26,7 @@ Keyless: scripted fakes on a bare Registry stand in for llm-redact-pro.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import httpx
@@ -100,7 +101,7 @@ def test_an_upload_cites_its_json_lines_and_its_form_fields() -> None:
         _file(b"\x89PNG\r\n\x1a\n\x00binary", filename=b"image.png"),
         _part(b"Content-Type: text/plain", b"a part without a name"),
     )
-    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=10_000)
     assert view == UploadView(
         [
             {"purpose": "batch"},
@@ -116,14 +117,14 @@ def test_an_upload_cites_its_json_lines_and_its_form_fields() -> None:
 
 def test_a_part_with_no_header_block_is_no_field() -> None:
     body = b"--XyZ\r\nno header block at all\r\n--XyZ--"
-    assert read_upload(body, BOUNDARY, max_json_bytes=100) == UploadView([])
+    assert read_upload(body, BOUNDARY, max_json_bytes=100, max_lines=10_000) == UploadView([])
 
 
 def test_a_line_repeating_a_key_is_read_as_the_provider_reads_it() -> None:
     first = _lines({"custom_id": "1", "body": {"file_id": "file-own"}})
     repeated = b'{"body": {"file_id": "file-a"}, "body": {"file_id": "file-own"}}\n'
     body = _form(_field("purpose", b"batch"), _file(first + repeated))
-    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=10_000)
     assert view.cited[-1] == {"body": {"file_id": "file-own"}}  # the LAST occurrence
     assert view.normalized is not None and b"file-a" not in view.normalized
     # Only the repeating line changed; every other byte is the upload's own.
@@ -137,7 +138,7 @@ def test_a_rewritten_file_before_other_parts_is_still_normalized() -> None:
     # is the rewritten one.
     repeated = b'{"body": {"file_id": "file-a"}, "body": {"file_id": "file-own"}}\n'
     body = _form(_file(repeated), _field("purpose", b"batch"), _file(b"plain text\n"))
-    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=10_000)
     assert view.normalized == body.replace(
         repeated, json.dumps({"body": {"file_id": "file-own"}}).encode() + b"\n"
     )
@@ -150,7 +151,7 @@ def test_a_rewritten_line_keeps_a_lone_surrogate_as_the_same_json_value() -> Non
     # JSON value) instead of failing the upload.
     repeated = b'{"body": {"file_id": "file-a"}, "body": {"input": "\\ud800 \xc2\xab"}}\n'
     body = _form(_file(repeated))
-    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=10_000)
     assert view.cited == [{"body": {"input": "\ud800 «"}}]
     assert view.normalized == body.replace(repeated, b'{"body": {"input": "\\ud800 \xc2\xab"}}\n')
 
@@ -195,7 +196,9 @@ def test_a_rewritten_line_keeps_a_lone_surrogate_as_the_same_json_value() -> Non
     ],
 )
 def test_what_the_check_cannot_read_is_named(body: bytes, problem: str) -> None:
-    assert read_upload(body, BOUNDARY, max_json_bytes=10_000) == UploadView([], problem=problem)
+    assert read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=10_000) == UploadView(
+        [], problem=problem
+    )
 
 
 def test_plain_encodings_and_charsets_are_read() -> None:
@@ -204,22 +207,24 @@ def test_plain_encodings_and_charsets_are_read() -> None:
         _field("file_id", b"file-a", b"\r\nContent-Type: text/plain; charset=US-ASCII"),
         _file(_lines({"a": 1}), b"\r\nContent-Transfer-Encoding: 8bit"),
     )
-    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=10_000)
     assert view == UploadView([{"_charset_": "UTF-8"}, {"file_id": "file-a"}, {"a": 1}])
 
 
 def test_more_json_than_the_check_reads_is_oversized() -> None:
     line = _lines({"custom_id": "x" * 40})
     body = _form(_file(line * 3))
-    assert read_upload(body, BOUNDARY, max_json_bytes=len(line) * 3).cited
-    assert read_upload(body, BOUNDARY, max_json_bytes=len(line) * 3 - 4) == UploadView(
+    assert read_upload(body, BOUNDARY, max_json_bytes=len(line) * 3, max_lines=10_000).cited
+    assert read_upload(
+        body, BOUNDARY, max_json_bytes=len(line) * 3 - 4, max_lines=10_000
+    ) == UploadView([], oversized=True)
+    fields = _form(_field("prompt", b"p" * 64))
+    assert read_upload(fields, BOUNDARY, max_json_bytes=63, max_lines=10_000) == UploadView(
         [], oversized=True
     )
-    fields = _form(_field("prompt", b"p" * 64))
-    assert read_upload(fields, BOUNDARY, max_json_bytes=63) == UploadView([], oversized=True)
     # Media files carry no JSON: never counted, whatever their size.
     media = _form(_file(b"\x00" * 10_000, filename=b"a.mp3"))
-    assert read_upload(media, BOUNDARY, max_json_bytes=16) == UploadView([])
+    assert read_upload(media, BOUNDARY, max_json_bytes=16, max_lines=10_000) == UploadView([])
 
 
 def test_the_budget_may_be_spent_to_the_last_byte() -> None:
@@ -228,19 +233,21 @@ def test_the_budget_may_be_spent_to_the_last_byte() -> None:
     line = json.dumps({"custom_id": "x" * 40}).encode()
     body = _form(_file(line + b"\n" + line + b"\n"))
     assert (
-        read_upload(body, BOUNDARY, max_json_bytes=2 * len(line)).cited
+        read_upload(body, BOUNDARY, max_json_bytes=2 * len(line), max_lines=10_000).cited
         == [{"custom_id": "x" * 40}] * 2
     )
-    assert read_upload(body, BOUNDARY, max_json_bytes=2 * len(line) - 1).oversized
+    assert read_upload(body, BOUNDARY, max_json_bytes=2 * len(line) - 1, max_lines=10_000).oversized
     fields = _form(_field("prompt", b"p" * 64))
-    assert read_upload(fields, BOUNDARY, max_json_bytes=64) == UploadView([{"prompt": "p" * 64}])
+    assert read_upload(fields, BOUNDARY, max_json_bytes=64, max_lines=10_000) == UploadView(
+        [{"prompt": "p" * 64}]
+    )
 
 
 def test_every_object_line_is_read_whatever_precedes_it() -> None:
     # Blank lines, lines that are not JSON and JSON lines that are not
     # objects are skipped — never the end of the reading.
     content = b"\n   \nnot json\n[1, 2]\n" + json.dumps(_batch_line("file-9")).encode() + b"\n"
-    view = read_upload(_form(_file(content)), BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(_form(_file(content)), BOUNDARY, max_json_bytes=10_000, max_lines=10_000)
     assert view == UploadView([_batch_line("file-9")])
 
 
@@ -251,20 +258,20 @@ def test_a_file_named_only_by_its_extended_filename_is_read_as_a_file() -> None:
             _lines(_batch_line("file-7")),
         )
     )
-    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=10_000)
     assert view == UploadView([_batch_line("file-7")])
 
 
 def test_a_json_array_form_field_is_read_as_json() -> None:
     body = _form(_field("file_ids", b' ["file-1", "file-2"] '))
-    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=10_000)
     assert view == UploadView([{"file_ids": ["file-1", "file-2"]}])
 
 
 def test_a_rewritten_line_keeps_its_non_ascii_text_as_utf8() -> None:
     repeated = '{"body": {"input": "a"}, "body": {"input": "«é»"}}\n'.encode()
     body = _form(_file(repeated))
-    view = read_upload(body, BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=10_000)
     assert view.cited == [{"body": {"input": "«é»"}}]
     assert view.normalized == body.replace(repeated, '{"body": {"input": "«é»"}}\n'.encode())
 
@@ -692,7 +699,9 @@ def test_only_a_utf8_files_repeated_key_line_is_rewritten(content: bytes, cited:
     from llm_redact.upload_content import classify_file
 
     assert classify_file(content).codec != "utf-8"
-    view = read_upload(_form(_file(content, filename=b"n.txt")), BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(
+        _form(_file(content, filename=b"n.txt")), BOUNDARY, max_json_bytes=10_000, max_lines=10_000
+    )
     assert view == UploadView(cited)
 
 
@@ -714,7 +723,9 @@ def test_only_a_utf8_files_repeated_key_line_is_rewritten(content: bytes, cited:
 def test_a_utf8_files_repeated_key_line_is_rewritten(
     content: bytes, cited: Any, rewritten: bytes
 ) -> None:
-    view = read_upload(_form(_file(content, filename=b"n.txt")), BOUNDARY, max_json_bytes=10_000)
+    view = read_upload(
+        _form(_file(content, filename=b"n.txt")), BOUNDARY, max_json_bytes=10_000, max_lines=10_000
+    )
     assert view == UploadView(cited, normalized=_form(_file(rewritten, filename=b"n.txt")))
 
 
@@ -781,6 +792,38 @@ async def test_a_reading_that_changes_a_parts_kind_is_refused(
     assert recent[0]["status"] == 400
 
 
+@pytest.mark.parametrize(
+    "normalized",
+    [
+        _form(_file(b"mail\n", filename=b"n.txt"), _field("purpose", b"batch")),
+        b"not multipart at all",
+    ],
+    ids=["another-part", "outside-grammar"],
+)
+async def test_a_reading_that_changes_the_parts_is_refused(
+    monkeypatch: pytest.MonkeyPatch, normalized: bytes
+) -> None:
+    # A re-serialized upload with another part count, or none the grammar
+    # reads, counts as a changed reading: refused, whatever the credential.
+    import llm_redact.proxy as proxy_module
+
+    monkeypatch.setattr(
+        proxy_module,
+        "read_upload",
+        lambda body, boundary, **kw: UploadView([], normalized=normalized),
+    )
+    upstream = Upstream()
+    app = _app(monkeypatch, LineRouter(), upstream)
+    text = _form(_file(b"mail\n", filename=b"n.txt"))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/files", content=text, headers={**HEADERS, "authorization": "Bearer sk-own"}
+        )
+    assert response.status_code == 400
+    assert "changed what a file part is" in response.json()["error"]["message"]
+    assert upstream.requests == []
+
+
 async def test_a_reading_that_keeps_every_parts_kind_is_forwarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -795,3 +838,100 @@ async def test_a_reading_that_keeps_every_parts_kind_is_forwarded(
     assert response.status_code == 200
     (sent,) = upstream.requests
     assert b'{"a": 2}' in sent.content and b'"a": 1' not in sent.content
+
+
+# --- the check parses only lines that can be objects, each counted first ------------------
+
+
+def test_only_lines_that_can_be_objects_are_parsed_and_counted() -> None:
+    # Blank lines, prose, arrays and strings are never parsed nor counted; a
+    # line whose first byte past whitespace and one byte-order mark is "{"
+    # is counted before it is parsed, whether it parses or not.
+    line = json.dumps(_batch_line("file-9")).encode()
+    content = (
+        b'\n  \nprose { brace\n[1]\n"s"\n\t\xef\xbb\xbf ' + line + b"\n{not json\n" + line + b"\n"
+    )
+    body = _form(_file(content))
+    view = read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=3)
+    assert view == UploadView([_batch_line("file-9")] * 2)
+    assert read_upload(body, BOUNDARY, max_json_bytes=10_000, max_lines=2) == UploadView(
+        [], too_many_lines=True
+    )
+    # One count across the upload's file parts.
+    two = _form(_file(_lines({"a": 1})), _file(_lines({"b": 2}), filename=b"b.jsonl"))
+    assert read_upload(two, BOUNDARY, max_json_bytes=10_000, max_lines=2).cited == [
+        {"a": 1},
+        {"b": 2},
+    ]
+    assert read_upload(two, BOUNDARY, max_json_bytes=10_000, max_lines=1).too_many_lines
+
+
+def test_a_repeated_key_line_is_rewritten_in_place_among_other_lines() -> None:
+    # The rewrite splices exactly the repeated-key lines (their own
+    # surrounding whitespace included), every other byte kept.
+    content = b'prose\r\n {"a": 1, "a": 2}\r\n{"b": 1}\n\n{"c": 1, "c": 3}'
+    view = read_upload(_form(_file(content)), BOUNDARY, max_json_bytes=10_000, max_lines=10)
+    assert view.cited == [{"a": 2}, {"b": 1}, {"c": 3}]
+    assert view.normalized == _form(_file(b'prose\r\n{"a": 2}\n{"b": 1}\n\n{"c": 3}'))
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\n" * (10 * 2**20),  # blank lines: never parsed
+        b"a\n" * (5 * 2**20),  # prose
+        b" " * (10 * 2**20),  # one line of whitespace: no backtracking
+        b"{\n" * (5 * 2**20),  # candidates: refused at the line budget
+    ],
+    ids=["blank", "prose", "whitespace", "braces"],
+)
+def test_a_huge_line_count_is_read_in_bounded_time(content: bytes) -> None:
+    # 10 MiB of blank lines once took about a minute (a JSON parse per line).
+    started = time.perf_counter()
+    view = read_upload(
+        _form(_file(content)), BOUNDARY, max_json_bytes=10 * 2**20, max_lines=100_000
+    )
+    assert time.perf_counter() - started < 5
+    assert view.cited == []
+    assert view.too_many_lines is content.startswith(b"{")
+
+
+async def test_an_upload_with_more_json_lines_than_the_budget_is_refused_unread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Under the proxy's credential an upload whose file holds more lines to
+    # parse than max_body_strings is refused 413 before the check is asked
+    # and before anything is sent.
+    upload = _form(_file(_lines(*[{"q": index} for index in range(5)])))
+    router = LineRouter()
+    app, fake, upstream = _routed(
+        monkeypatch,
+        router,
+        "/v1/files",
+        max_body_strings=4,
+        providers={**Config().providers, "openai": ProviderConfig(UPSTREAM, detection=False)},
+    )
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/files", content=upload, headers={**HEADERS, ROUTE_HEADER: "r"}
+        )
+    assert response.status_code == 413
+    assert "more JSON lines than llm-redact max_body_strings (4)" in response.text
+    assert router.checks == [] and fake.plans[0].begun == [] and upstream.requests == []
+
+
+async def test_a_huge_blank_upload_is_checked_in_bounded_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # End to end with the stored-object check on: 10 MiB of newlines once
+    # blocked the event loop for about a minute.
+    router = LineRouter()
+    upstream = Upstream()
+    app = _app(monkeypatch, router, upstream, providers=OFF)
+    upload = _form(_file(b"\n" * (10 * 2**20 - 200)))
+    started = time.perf_counter()
+    async with _client(app) as client:
+        response = await client.post("/v1/files", content=upload, headers=HEADERS)
+    assert time.perf_counter() - started < 10
+    assert response.status_code == 200
+    assert router.checks == [("openai", "POST", "/v1/files", [], False)]

@@ -266,7 +266,10 @@ def test_deleting_twice_keeps_every_number_retired(open_manager: Factory) -> Non
 def test_a_delete_by_another_instance_never_makes_a_token_mean_two_values(
     open_instance: Factory, how: str
 ) -> None:
-    a, b = open_instance(), open_instance()
+    # B's clock is frozen: the assertions below are about the window before
+    # B's next staleness check (CACHE_CHECK_SECONDS), which a slow runner
+    # could otherwise cross between two lines and rebuild B's caches.
+    a, b = open_instance(), open_instance(Clock())
     b_view = b.get("s")
     jane = b_view.placeholder_for("EMAIL", "jane.doe@corp.example")  # B's cache is warm
     assert _delete(a, how) == 1

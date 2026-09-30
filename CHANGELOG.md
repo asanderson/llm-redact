@@ -140,6 +140,18 @@ and tags `vX.Y.Z`.
   identity even with `detection = false`, and `detection = false` sends the checked
   value re-serialized. Each frame is still parsed once. A router without the member
   costs one attribute test per connection.
+- Optional `SessionRouter.realtime_server_frame(adapter_name, path, frame, *,
+  identity, session_id) -> None`: the server-side twin of `realtime_frame_refusal`.
+  A router with it is handed, synchronously, every UPSTREAM frame of a realtime
+  connection that parses as JSON within the proxy's JSON bound (all four realtime
+  adapters, text or binary, every mode, `detection = false` included) as its own
+  parse of the provider's bytes — placeholders, never a restored value — BEFORE the
+  frame is restored or sent to the client, in the connection's own context. It is
+  read-only: the return value is ignored and nothing it does to its parse reaches
+  the client; an exception is contained (bookkeeping stage `realtime_server_frame`,
+  type-only log) and the frame delivered. llm-redact-pro uses it to record whose
+  Gemini/Vertex Live session a `sessionResumptionUpdate` handle belongs to. A router
+  without the member costs one attribute test per connection and no parse.
 - The Gemini API's Batch Mode beyond the create is recognized, so a credential the
   proxy holds (a routed operator key) may reach it: a batch's status
   (`GET /v1beta/batches/{id}`, the name the create answers with) and the batch list

@@ -110,7 +110,13 @@ as JSON, text or binary, `detection = false` included: a refusal closes
 frame is redacted, numbered or sent; a check that fails closes the same
 way (fail closed). While it checks frames, a frame nesting JSON too deep
 is refused on every connection, and one that is not JSON under the
-proxy's own identity.
+proxy's own identity. In the other direction a router with the optional
+`realtime_server_frame` is handed every UPSTREAM frame that parses as
+JSON — its own parse of the provider's bytes, before the frame is
+restored or sent — read-only: it cannot change or refuse the frame, and a
+fault is contained (the frame is delivered). **llm-redact-pro** records
+there whose Live session a `sessionResumptionUpdate` handle belongs to,
+so a later `setup` resuming it is judged on its owner.
 The gates' inputs are the ones in force. A connection is admitted under
 its provider's settings, the authorizer that opened it and the
 `[detection]` policy. A reload that changes any of them revokes the relay

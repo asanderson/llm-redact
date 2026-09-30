@@ -355,6 +355,11 @@ while the vault row is the secret store and is never exported.
   whether the connection spends the proxy's own identity and its
   session — and a refusal closes the connection 1008 with the router's
   fixed reason (recorded 403); a check that fails closes it too.
+  The router may also observe what the provider sends back on the
+  connection (`realtime_server_frame`): every upstream frame that parses
+  as JSON, as the provider sent it and before it is restored or sent —
+  read-only, a fault contained — so it can record whose Live session a
+  resumption handle belongs to before the client can present it.
   On an OpenAI-shaped listing
   (`GET` files, batches, video jobs, stored chat completions — OpenAI,
   Azure and `/custom/<name>/` alike) the router may name the session

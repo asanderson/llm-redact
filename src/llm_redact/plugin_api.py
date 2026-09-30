@@ -216,8 +216,9 @@ class SessionRouter(Protocol):
     …}`` wrapper, not the decoded inner event). What is not JSON (an SSE
     ``[DONE]``, a comment, a line that does not parse, a document deeper
     than the proxy's JSON bound) is skipped. Realtime WebSocket frames are
-    not observed. The return value is ignored. An exception — from the
-    factory or the callable — is contained like the other bookkeeping
+    not observed here (``realtime_server_frame`` below). The return value
+    is ignored. An exception — from the factory or the callable — is
+    contained like the other bookkeeping
     after the answer (counted as the ``response_observer`` stage, logged
     by exception type only, the answer delivered unchanged) and ends the
     observation of that answer. Both run on the event loop between the
@@ -257,6 +258,29 @@ class SessionRouter(Protocol):
     between the client's bytes and the upstream's: it must not block (no
     network I/O). A router without the member is never asked (one
     attribute test per connection).
+
+    OPTIONAL ``realtime_server_frame(adapter_name, path, frame, *,
+    identity, session_id) -> None``: the SERVER-side twin of
+    ``realtime_frame_refusal`` — lets a router OBSERVE what the provider
+    tells a realtime connection (llm-redact-pro records which namespace a
+    Gemini Live ``sessionResumptionUpdate.newHandle`` was issued to, so a
+    later ``setup`` resuming it is judged on its owner). Asked
+    synchronously for EVERY upstream frame of a realtime connection (all
+    four realtime adapters, text or binary, whatever the router's ``mode``
+    and ``[providers.NAME] detection``) that parses as JSON within the
+    proxy's JSON bound, BEFORE the frame is restored or sent to the client
+    — so whatever the router records from it is recorded before the client
+    can see (and present) it. ``frame`` is the router's OWN parse of the
+    provider's bytes: it carries placeholders, never a restored value, and
+    nothing the router does to it changes what the client receives. The
+    other arguments are ``realtime_frame_refusal``'s, and it runs in the
+    connection's own context likewise. The return value is ignored: an
+    observer cannot refuse or rewrite a frame. An exception is contained
+    (counted as the ``realtime_server_frame`` bookkeeping stage, logged by
+    exception type only) and the frame is delivered as usual. It runs on
+    the event loop between the upstream's bytes and the client's: it must
+    not block (no network I/O). A router without the member is never asked
+    and no frame is parsed for it (one attribute test per connection).
 
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the

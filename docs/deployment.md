@@ -69,8 +69,9 @@ docker run -d --name llm-redact \
 
 `-p 127.0.0.1:8787:8787` — never `-p 8787:8787`, which would expose the
 proxy on every interface with client auth disabled. The image ships the
-`perf` (uvloop) and `realtime` (WebSocket) extras, so it runs on uvloop
-and can relay OpenAI Realtime / Gemini Live. `XDG_DATA_HOME=/data` holds
+`perf` (uvloop), `realtime` (WebSocket) and `extract` (pypdf) extras, so it
+runs on uvloop, can relay OpenAI Realtime / Gemini Live, and can read PDFs
+for `[extraction]` (docs/extraction.md). `XDG_DATA_HOME=/data` holds
 the vault and audit DB — mount a volume there for persistence. Released
 images are multi-arch (amd64 + arm64).
 

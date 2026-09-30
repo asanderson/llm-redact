@@ -32,7 +32,8 @@ an unscanned binary. Placeholders are never placed inside a file.
 
 Install the `extract` extra for PDFs (`pip install
 "llm-redact-proxy[extract]"`: pypdf, imported only by the isolated worker
-process); the OOXML/ODF, markup and RTF readers are standard library.
+process; the container image ships it); the OOXML/ODF, markup and RTF
+readers are standard library.
 
 ## Configuration
 

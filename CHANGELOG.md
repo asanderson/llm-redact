@@ -38,6 +38,8 @@ and tags `vX.Y.Z`.
   with purpose `assistants` or `user_data`, container files, Anthropic Files), under a
   credential the proxy holds only with `proxy_credential`. The model sees text, not the
   original file. New outcomes `converted`/`converted_refused`; a `status` posture line.
+- The container image ships the `extract` extra, so `[extraction]` with its default
+  formats (pdf included) runs in it.
 - `plugin_api.UploadPart.extension` (the file name's lower-cased extension, `""` when
   the part's names disagree) and `plugin_api.Inspection.convert_text`; the extractors
   treat an extension naming another format than the file's bytes as incomplete.

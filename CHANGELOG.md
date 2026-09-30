@@ -84,10 +84,17 @@ and tags `vX.Y.Z`.
   `inspected_uploads_total` and `upload_inspector`,
   `llm_redact_inspected_uploads_total{provider,outcome}` (`clean` counts only parts
   of an upload handed to the upstream; a clean part of an upload refused before that
-  is `clean_refused`), a `llm-redact status` posture line for clean forwards. Every part's headers are checked (file
-  names, transfer encodings, charsets) before any part is inspected, so an upload the
-  redaction would refuse is never handed to the inspector. A clean scan covers the
-  extracted text only.
+  is `clean_refused`), a `llm-redact status` posture line for clean forwards. Every
+  part's headers (file names, transfer encodings, charsets, a header block every
+  reader finds) and every scanned part's format (a form field that is not UTF-8 text,
+  a JSONL line nesting too deep, the Gemini upload's metadata) are checked before any
+  part is inspected, so an upload the redaction would refuse for its form is never
+  handed to the inspector. A refusal that needs the scan itself — a block-mode value
+  in another part or a file name, `max_body_strings`, a sealed session, a vault fault
+  — and a local refusal after redaction (no upstream configured, the upstream
+  authorizer) can still follow the inspection, and the `[audit] required` START row is
+  written after it: that guarantee covers upstream contact, and the inspector is not
+  the upstream. A clean scan covers the extracted text only.
 - `[detection] binary_uploads = "forward" | "refuse"` (default `"forward"`, hot):
   `"refuse"` keeps refusing binary uploads under the client's own key too. Forwarded
   binaries are surfaced: /status `unscanned_uploads_total`,
@@ -186,6 +193,11 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- An upload refused for a form field that is not UTF-8 text or a JSONL line nesting
+  too deep had its binary parts handed to the upload inspector first (which may send
+  them to an extraction service): those format checks now run before the inspection,
+  with the header checks. The CHANGELOG and docs claimed more than that: they now state
+  which refusals can still follow an inspection (see Added).
 - An inspected upload part that scanned clean was counted `clean` ("forwarded after a
   clean scan") as soon as redaction returned, even when the proxy then refused the
   request without contacting the upstream (no upstream configured, the upstream

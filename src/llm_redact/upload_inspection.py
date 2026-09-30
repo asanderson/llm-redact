@@ -4,7 +4,11 @@ A BINARY file part of an upload (``upload_content.classify_file``: a PDF,
 an Office document, an image) cannot be redacted. An ``UploadInspector``
 (``plugin_api``; llm-redact-pro's document extractors) may read it as text
 — the core never trusts it with more than that. Per request, before
-redaction and before any upstream contact:
+redaction and before any upstream contact — once the upload was read and
+every check the redaction applies before looking at a value passed (part
+headers and formats: ``ProviderAdapter.read_multipart``); a refusal that
+needs the scan itself, a local refusal after redaction and the ``[audit]
+required`` START row come after it:
 
 1. ``inspect_parts`` hands each binary file part (at most
    ``MAX_INSPECTED_PARTS``, none larger than the inspector's ``max_bytes``)

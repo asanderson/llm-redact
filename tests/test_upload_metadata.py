@@ -39,11 +39,11 @@ from fake_router import install, routed_config
 from lent_routes import LentRouter
 from llm_redact.config import Config, ProviderConfig
 from llm_redact.jsonwalk import MAX_JSON_DEPTH
+from llm_redact.multipart import MultipartPart
 from llm_redact.providers.gemini import GeminiAdapter
 from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
-from llm_redact.multipart import MultipartPart
 from llm_redact.upload_view import (
     AMBIGUOUS,
     CHARSET,

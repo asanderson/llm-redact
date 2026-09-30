@@ -331,6 +331,10 @@ def _restore_file_value(value: Any, rehydrator: Rehydrator) -> Any:
     return value
 
 
+_FIELD_NOT_TEXT = "a multipart form field is not UTF-8 text llm-redact can redact"
+_LINE_NOT_OBJECT = "an uploaded JSONL line is not a JSON object llm-redact can redact"
+
+
 def _redact_text_part(
     part: multipart.MultipartPart, redactor: Redactor, *, require_scanned: bool
 ) -> bool:
@@ -341,9 +345,7 @@ def _redact_text_part(
         text = part.content.decode("utf-8")
     except UnicodeDecodeError:
         if require_scanned:
-            raise UnredactableRequest(
-                "a multipart form field is not UTF-8 text llm-redact can redact"
-            ) from None
+            raise UnredactableRequest(_FIELD_NOT_TEXT) from None
         return False
     redacted = redactor.redact_text(text)
     if redacted == text:
@@ -431,16 +433,43 @@ class PartsReading(NamedTuple):
         except multipart.AmbiguousHeaders as exc:
             raise UnredactableRequest(str(exc)) from None
 
+    def require_readable(self) -> None:
+        """What the part loop refuses of a scanned part's CONTENT before
+        any value is looked at, when every piece must be scanned: a form
+        field that is not UTF-8 text (``_redact_text_part``) and a JSONL
+        line that is no JSON object the walk reads — one nesting too deep
+        (``_redact_jsonl``). A refusal that needs the scan itself (a
+        block-mode value, the string budget, a sealed session, the vault)
+        still comes with the redaction, after any inspection. Raises
+        UnredactableRequest."""
+        for part, reading in zip(self.parsed.parts, self.readings, strict=True):
+            if reading.kind == "text":
+                try:
+                    part.content.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise UnredactableRequest(_FIELD_NOT_TEXT) from None
+            elif reading.kind == "jsonl" and any(
+                line.strip() and _parse_request_line(line)[0] is None
+                for line in part.content.split(b"\n")
+            ):
+                raise UnredactableRequest(_LINE_NOT_OBJECT)
+
 
 def _as_is(text: str) -> str:
     return text
 
 
 def checked_reading(reading: PartsReading | None) -> PartsReading | None:
-    """``reading`` (``ProviderAdapter.read_multipart``) once its part
-    headers passed ``PartsReading.require_plain_headers``."""
+    """``reading`` (``ProviderAdapter.read_multipart``) once what the part
+    loop refuses before any value is looked at passed: every part's headers
+    (``PartsReading.require_plain_headers``) and — when a binary part is to
+    be handed to an upload inspector, which may send the file to a service
+    — every scanned part's format (``PartsReading.require_readable``; it
+    parses a JSONL file's lines a second time, so only then)."""
     if reading is not None:
         reading.require_plain_headers()
+        if reading.binary_parts():
+            reading.require_readable()
     return reading
 
 
@@ -1314,9 +1343,7 @@ class OpenAIAdapter(ProviderAdapter):
             obj, duplicate_keys = _parse_request_line(line)
             if obj is None:
                 if require_scanned and line.strip():
-                    raise UnredactableRequest(
-                        "an uploaded JSONL line is not a JSON object llm-redact can redact"
-                    )
+                    raise UnredactableRequest(_LINE_NOT_OBJECT)
                 out.append(line)  # blank/binary/unparseable: byte-identical
                 continue
             redacted = _redact_line(obj, redactor, request_keys)

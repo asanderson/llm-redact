@@ -597,7 +597,9 @@ class ProviderAdapter(ABC):
         every piece required scanned — parsed once, each part classified
         once (``charge`` bounds the per-line JSONL check, as in
         redaction), every part's headers checked as the redaction would
-        check them — so the proxy can inspect its BINARY file parts
+        check them and, when it has a binary part, every scanned part's
+        format (what the redaction refuses before looking at a value) —
+        so the proxy can inspect its BINARY file parts
         (``plugin_api.UploadInspector``) before redaction and hand the same
         reading back (``redact_multipart(inspected=...)``). None when the
         route reads no file parts by their content (this base) or the body

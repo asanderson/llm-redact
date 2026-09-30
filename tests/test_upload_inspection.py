@@ -583,8 +583,21 @@ _CTE = b"Content-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\n"
             b"--b--",
             b"--b\r\nContent-Type: text/plain\nContent-Transfer-Encoding: base64\n\nx\r\n--b--",
         ),
+        # A form field the part loop cannot read as UTF-8 text, and a JSONL
+        # line nesting deeper than the walk reads: refused for their format
+        # before any binary part is handed over.
+        _form(_pdf("a")).replace(b"user_data", b"\xff\xfe"),
+        _form(b'{"a": ' * 200 + b"1" + b"}" * 200, _pdf("a")),
     ],
-    ids=["transfer-encoding", "charset", "filename-charset", "repeated-disposition", "headerless"],
+    ids=[
+        "transfer-encoding",
+        "charset",
+        "filename-charset",
+        "repeated-disposition",
+        "headerless",
+        "non-utf8-field",
+        "too-deep-jsonl-line",
+    ],
 )
 async def test_a_part_the_redaction_refuses_is_never_inspected(
     monkeypatch: pytest.MonkeyPatch, body: bytes
@@ -598,6 +611,20 @@ async def test_a_part_the_redaction_refuses_is_never_inspected(
     assert reply.status_code == 400, reply.text
     assert inspector.parts == [] and upstream.requests == []
     assert app.state.proxy.inspected_uploads == {}
+
+
+async def test_readable_parts_beside_a_binary_one_are_inspected_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream, inspector = Upstream(), FakeInspector(reads("clean"))
+    app = _app(monkeypatch, inspector, upstream)
+    jsonl = b'{"note": "' + EMAIL.encode() + b'"}\n\n{"a": 1}'
+    async with _client(app) as client:
+        reply = await client.post("/v1/files", content=_form(jsonl, _pdf("a")), headers=FORM)
+    assert reply.status_code == 200, reply.text
+    assert len(inspector.parts) == 1
+    (sent,) = upstream.requests
+    assert EMAIL.encode() not in sent.content and _pdf("a") in sent.content
 
 
 # --- every other upload route ----------------------------------------------------------

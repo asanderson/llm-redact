@@ -273,6 +273,50 @@ async def test_block_mode_blocks_and_warn_mode_counts_and_forwards(
     assert app.state.proxy.inspected_uploads == {("openai", "clean"): 1}
 
 
+async def test_each_row_counts_only_its_own_request_across_the_inspection(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The inspection is awaited inside the upload's count window: a request
+    # redacting (and warn-forwarding) meanwhile was once counted on the
+    # upload's row too — its log line, recent/events and audit rows.
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(part: UploadPart) -> Inspection:
+        started.set()
+        await release.wait()
+        return Inspection(f"call {PHONE}", True, "fake")  # the file's own warn value
+
+    upstream = Upstream()
+    app = _app(
+        monkeypatch,
+        FakeInspector(slow),
+        upstream,
+        detection=DetectionConfig(modes=(("phone_number", "warn"),)),
+    )
+    caplog.set_level(logging.INFO, logger="llm_redact")
+    async with _client(app) as client:
+        upload = asyncio.create_task(
+            client.post("/v1/files", content=_form(_pdf("a")), headers=FORM)
+        )
+        await started.wait()
+        chat = await client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": f"{EMAIL} {PHONE}"}]},
+            headers=KEY,
+        )
+        release.set()
+        reply = await upload
+    assert chat.status_code == 200 and reply.status_code == 200
+    rows = {row["path"]: row for row in app.state.proxy.recent}
+    assert rows["/v1/chat/completions"]["detections"] == {"EMAIL": 1}
+    assert rows["/v1/chat/completions"]["warned"] == {"PHONE": 1}
+    assert rows["/v1/files"]["detections"] == {}
+    assert rows["/v1/files"]["warned"] == {"PHONE": 1}  # its extracted text's own
+    (line,) = [r.getMessage() for r in caplog.records if "/v1/files -> 200" in r.getMessage()]
+    assert "redacted" not in line
+    assert app.state.proxy.warn_counts == {"PHONE": 2}
+
+
 async def test_allowlists_and_deny_strings_apply_to_the_extracted_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

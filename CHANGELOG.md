@@ -186,6 +186,12 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- An upload's request row (log line, `/recent`, `/events`, audit rows and sinks, OTel)
+  counted the redactions and warn-mode forwards of every OTHER request that ran while
+  the upload inspector read its binary parts: the per-request count diff spanned that
+  await. The window now restarts once the inspector returns, so a row counts only its
+  own request (the extracted texts' warn-mode values included). Process-wide totals
+  were never affected.
 - The Gemini API upload's metadata part (`POST /upload/v1beta/files`, the first part of
   the `multipart/related` body) was shown to the stored-object check as a JSON body but
   redacted as a FILE: on one line it was parsed as JSON, pretty-printed it was redacted

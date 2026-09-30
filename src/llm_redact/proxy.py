@@ -3477,6 +3477,25 @@ def _credential_protocol_refused(
     return JSONResponse(adapter.error_body(message, status=403), status_code=403)
 
 
+class _CountWindow:
+    """One request's share of the process-wide detection and warn-mode
+    counts: the totals as its redaction starts (``detections``,
+    ``warned``), diffed when it ends (``_count_delta``). Redaction is
+    synchronous, so nothing else counts inside the window — except across
+    an await: an upload's inspection may take minutes while other requests
+    redact, so it ``restart``s the window once it returns (the diff trick
+    corrupts across awaits; realtime counts per connection for that
+    reason)."""
+
+    def __init__(self, state: ProxyState) -> None:
+        self._state = state
+        self.restart()
+
+    def restart(self) -> None:
+        self.detections = dict(self._state.detection_counts)
+        self.warned = dict(self._state.warn_counts)
+
+
 async def _inspect_upload(
     state: ProxyState,
     request: Request,
@@ -3490,6 +3509,7 @@ async def _inspect_upload(
     identity: bool,
     max_body_bytes: int,
     outcomes: Counter[str],
+    window: _CountWindow,
 ) -> tuple[InspectedUpload | None, dict[str, int]]:
     """An upload's binary file parts read as text by the upload inspector
     and judged (``upload_inspection``): the adapter's reading of ``body``
@@ -3499,7 +3519,10 @@ async def _inspect_upload(
     a file carries inside a compressed stream bounds this request's new
     numbers). Each part's outcome is added to ``outcomes`` — counted by the
     caller once it knows whether the upload went out
-    (``_count_inspections``). Raises BlockedRequest or BinaryValuesDetected
+    (``_count_inspections``). The inspection is the one await inside the
+    request's count ``window``: it restarts once the inspector returns,
+    before the extracted texts are scanned (their warn-mode values are this
+    request's). Raises BlockedRequest or BinaryValuesDetected
     for a value found in an extracted text, and what reading the upload
     raises (UnredactableRequest, TooManyStrings) — all before anything is
     written or sent."""
@@ -3515,6 +3538,8 @@ async def _inspect_upload(
     results = await inspect_parts(
         inspector, parts, provider=provider_name, identity=identity, limits=limits
     )
+    # Other requests redacted while this one waited: their counts are theirs.
+    window.restart()
     verdict = judge(results, redactor, identity=identity, text_budget=max_body_bytes)
     outcomes.update(verdict.outcomes)
     # Counts and outcomes only — never a file name, a type found or content.
@@ -4083,8 +4108,8 @@ async def handle(request: Request) -> Response:
             opening=True,
         )
 
-    detection_counts_before = dict(state.detection_counts)
-    warn_counts_before = dict(state.warn_counts)
+    # This request's share of the process-wide counts (the diff trick).
+    window = _CountWindow(state)
 
     def blocked_response(exc: BlockedRequest, blocked_adapter: ProviderAdapter) -> JSONResponse:
         # A block-mode rule matched: fail closed before any upstream
@@ -4248,7 +4273,7 @@ async def handle(request: Request) -> Response:
         # Never with a repeated key: the raw bytes still hold the earlier
         # occurrences the walk never saw (an upstream may keep the first).
         if duplicate_keys or sum(state.detection_counts.values()) != sum(
-            detection_counts_before.values()
+            window.detections.values()
         ):
             outbound = json_bytes(prepared)
     elif adapter is not None and parsed is None and body_bytes:
@@ -4305,6 +4330,7 @@ async def handle(request: Request) -> Response:
                         identity=proxy_credential,
                         max_body_bytes=max_body_bytes,
                         outcomes=inspection_outcomes,
+                        window=window,
                     )
                     upload_redactor = upload_redactor.with_floors(floors)
                 # One vault transaction for the whole upload (run_batched).
@@ -4378,10 +4404,10 @@ async def handle(request: Request) -> Response:
                     binary_forwarded[0],
                 )
 
-    new_counts = _count_delta(state.detection_counts, detection_counts_before)
+    new_counts = _count_delta(state.detection_counts, window.detections)
     # Same diff trick for warn-mode hits: attribute forwarded-unredacted
     # values to THIS request, not just the process-lifetime aggregate.
-    new_warned = _count_delta(state.warn_counts, warn_counts_before)
+    new_warned = _count_delta(state.warn_counts, window.warned)
 
     if plan is not None:
         return await _handle_routed(

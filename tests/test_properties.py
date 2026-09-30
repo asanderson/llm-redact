@@ -879,7 +879,7 @@ def test_a_repeated_key_is_always_flagged_and_never_leaks_from_a_jsonl_line(
     assert loads_request(injected) == (obj, True)
     config = DetectionConfig()
     redactor = Redactor(build_detectors(config), InMemoryVault(), build_allowlist(config))
-    out = OpenAIAdapter()._redact_jsonl(injected.encode(), redactor, inject_note=False)
+    out = OpenAIAdapter()._redact_jsonl(injected.encode(), redactor, frozenset(), inject_note=False)
     assert _DUP_SECRET.encode() not in out
 
 

@@ -45,13 +45,12 @@ def _redactor(vault: InMemoryVault) -> Redactor:
     )
 
 
-def _upload_body(*lines: str) -> bytes:
+def _upload_body(*lines: str, purpose: bytes = b"batch") -> bytes:
     jsonl = "".join(f"{line}\n" for line in lines).encode()
     return (
         b"--testboundary123\r\n"
         b'Content-Disposition: form-data; name="purpose"\r\n'
-        b"\r\n"
-        b"batch\r\n"
+        b"\r\n" + purpose + b"\r\n"
         b"--testboundary123\r\n"
         b'Content-Disposition: form-data; name="file"; filename="input.jsonl"\r\n'
         b"Content-Type: application/jsonl\r\n"
@@ -121,7 +120,11 @@ def test_upload_fine_tune_lines() -> None:
     vault = InMemoryVault()
     ft_line = json.dumps({"messages": [{"role": "user", "content": f"contact {EMAIL}"}]})
     out = adapter.redact_multipart(
-        "/v1/files", _upload_body(ft_line), BOUNDARY, _redactor(vault), inject_note=True
+        "/v1/files",
+        _upload_body(ft_line, purpose=b"fine-tune"),
+        BOUNDARY,
+        _redactor(vault),
+        inject_note=True,
     )
     assert out is not None
     parsed = parse(out, BOUNDARY)

@@ -49,6 +49,7 @@ from llm_redact.jsonwalk import (
     json_text,
     loads_bounded,
     loads_request,
+    transform_all_strings,
     transform_strings,
 )
 from llm_redact.placeholders import json_floors, may_carry_tokens, merge_floors, token_floors
@@ -237,6 +238,63 @@ def _parse_request_line(line: bytes) -> tuple[dict[str, Any] | None, bool]:
     except ValueError:
         return None, False
     return (obj, duplicate_keys) if isinstance(obj, dict) else (None, False)
+
+
+# The Files upload purposes whose JSONL lines the provider RUNS as requests,
+# with the top-level keys of a line that ARE a request body — read with the
+# request-body structural keys (a message's `role`, a tool call's `id` and
+# function `name`, a content part's `type` must reach the provider as sent):
+# a batch input line's `body` ({custom_id, method, url, body}), and a
+# fine-tuning example's conversation (chat, preference and reinforcement
+# formats). Everything else in such a line (the batch envelope, a
+# reinforcement example's grader fields) and EVERY line of any other upload
+# — another purpose, a container's file, Anthropic's Files, the Gemini
+# upload — is the caller's DATA, every string of it redacted with no skip
+# set: a data file's `id`, `name`, `type` or `data` is content.
+_REQUEST_LINE_KEYS: Mapping[str, frozenset[str]] = {
+    "batch": frozenset({"body"}),
+    "fine-tune": frozenset(
+        {
+            "messages",
+            "tools",
+            "functions",
+            "parallel_tool_calls",
+            "input",
+            "preferred_output",
+            "non_preferred_output",
+        }
+    ),
+}
+# A Files upload names its purpose in a form field; a container's file
+# upload (``/containers/{id}/files``) has none that makes its lines requests.
+_CONTAINER_FILES_RE = re.compile(r"/containers/[^/]+/files$")
+
+
+def _request_line_keys(path: str, parsed: multipart.Multipart) -> frozenset[str]:
+    """The top-level keys an upload's JSONL lines hold requests under
+    (``_REQUEST_LINE_KEYS``): by its ``purpose`` form field, exactly as
+    sent, when every one the upload carries names the same request purpose
+    on a Files upload route; else none (every line is data)."""
+    if _CONTAINER_FILES_RE.search(path):
+        return frozenset()
+    purposes = {
+        part.content for part in parsed.parts if part.name == "purpose" and part.filename is None
+    }
+    if len(purposes) != 1:
+        return frozenset()
+    return _REQUEST_LINE_KEYS.get(purposes.pop().decode("latin-1"), frozenset())
+
+
+def _redact_line(obj: dict[str, Any], redactor: Redactor, request_keys: frozenset[str]) -> Any:
+    """One uploaded JSONL line redacted: the values under ``request_keys``
+    as the request bodies they are, every other value as data (no skip
+    set). Keys are never touched."""
+    return {
+        key: redactor.redact_json({key: value})[key]
+        if key in request_keys
+        else transform_all_strings(value, redactor.redact_text)
+        for key, value in obj.items()
+    }
 
 
 def _redact_text_part(
@@ -886,6 +944,33 @@ class OpenAIAdapter(ProviderAdapter):
         require_scanned: bool = False,
         forward_binary: Callable[[int], None] | None = None,
     ) -> bytes | None:
+        return self.redact_form_upload(
+            path,
+            body,
+            boundary,
+            redactor,
+            inject_note=inject_note,
+            require_scanned=require_scanned,
+            forward_binary=forward_binary,
+            request_purposes=True,
+        )
+
+    def redact_form_upload(
+        self,
+        path: str,
+        body: bytes,
+        boundary: bytes,
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        require_scanned: bool,
+        forward_binary: Callable[[int], None] | None,
+        request_purposes: bool,
+    ) -> bytes | None:
+        """``redact_multipart``'s form upload, shared with the other
+        providers' multipart/form-data Files upload: ``request_purposes``
+        says whether a ``purpose`` field can make JSONL lines requests
+        (``_REQUEST_LINE_KEYS``: the OpenAI Files API's only)."""
         parsed = multipart.parse(body, boundary)
         if parsed is None:
             return None  # outside the canonical grammar: forward verbatim
@@ -914,6 +999,7 @@ class OpenAIAdapter(ProviderAdapter):
             # a token in a later line bounds the numbers an earlier line's
             # values take (one batch file, one session, one output file).
             redactor = redactor.with_floors(_multipart_floors(parsed, readings))
+        request_keys = _request_line_keys(path, parsed) if request_purposes else frozenset()
         changed = False
         try:
             for part, reading in zip(parsed.parts, readings, strict=True):
@@ -924,6 +1010,7 @@ class OpenAIAdapter(ProviderAdapter):
                     inject_note=inject_note,
                     require_scanned=require_scanned,
                     forward_binary=forward_binary is not None,
+                    request_keys=request_keys,
                 )
         except multipart.AmbiguousHeaders as exc:
             # Only reachable with require_scanned (strict header reads): a part
@@ -944,6 +1031,7 @@ class OpenAIAdapter(ProviderAdapter):
         inject_note: bool,
         require_scanned: bool,
         forward_binary: bool,
+        request_keys: frozenset[str] = frozenset(),
     ) -> bool:
         # The upload's file name is user content on every route (the part
         # name is structural, like a JSON key) — a binary file's too. Strict
@@ -960,6 +1048,7 @@ class OpenAIAdapter(ProviderAdapter):
             new_content = self._redact_jsonl(
                 part.content,
                 redactor,
+                request_keys,
                 inject_note=inject_note,
                 require_scanned=require_scanned,
             )
@@ -984,6 +1073,7 @@ class OpenAIAdapter(ProviderAdapter):
         self,
         data: bytes,
         redactor: Redactor,
+        request_keys: frozenset[str],
         *,
         inject_note: bool,
         require_scanned: bool = False,
@@ -998,7 +1088,7 @@ class OpenAIAdapter(ProviderAdapter):
                     )
                 out.append(line)  # blank/binary/unparseable: byte-identical
                 continue
-            redacted = redactor.redact_json(obj)
+            redacted = _redact_line(obj, redactor, request_keys)
             changed = redacted != obj
             if not changed and not duplicate_keys:
                 # Unchanged — and no repeated key whose earlier occurrence
@@ -1006,11 +1096,17 @@ class OpenAIAdapter(ProviderAdapter):
                 out.append(line)
                 continue
             if inject_note and changed:
+                # Only a request the provider runs carries the note; a data
+                # line is the caller's file, never rewritten beyond redaction.
                 body_obj = redacted.get("body")
-                if isinstance(body_obj, dict) and isinstance(body_obj.get("messages"), list):
+                if (
+                    "body" in request_keys
+                    and isinstance(body_obj, dict)
+                    and isinstance(body_obj.get("messages"), list)
+                ):
                     # Batch input line: {custom_id, method, url, body}.
                     redacted = {**redacted, "body": self.inject_system_note(body_obj)}
-                elif isinstance(redacted.get("messages"), list):
+                elif "messages" in request_keys and isinstance(redacted.get("messages"), list):
                     # Fine-tuning line: a bare chat example.
                     redacted = self.inject_system_note(redacted)
             out.append(json_bytes(redacted))

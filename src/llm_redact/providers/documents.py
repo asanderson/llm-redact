@@ -51,8 +51,9 @@ def redact_files_upload(
     forward_binary: Callable[[int], None] | None,
 ) -> bytes | None:
     """A multipart/form-data file upload (Anthropic's Files API) redacted
-    exactly as the OpenAI Files upload is."""
-    return _FILES.redact_multipart(
+    exactly as the OpenAI Files upload is — every JSONL line as data: no
+    field of this upload makes its lines requests the provider runs."""
+    return _FILES.redact_form_upload(
         _FILES_PATH,
         body,
         boundary,
@@ -60,6 +61,7 @@ def redact_files_upload(
         inject_note=False,
         require_scanned=require_scanned,
         forward_binary=forward_binary,
+        request_purposes=False,
     )
 
 

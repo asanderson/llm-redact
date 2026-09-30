@@ -158,6 +158,12 @@ and tags `vX.Y.Z`.
   requester's, like the files the run wrote, so a later request reusing the
   container can be checked against its creator; a container the request itself
   named is never reported.
+- An uploaded JSON Lines data file (OpenAI Files of a purpose other than batch or
+  fine-tuning, container files, Anthropic Files, Gemini uploads) has every value
+  redacted, including values under keys such as `id`, `name`, `type` or `data`,
+  which were skipped as request protocol fields and forwarded as sent. Only a
+  batch line's request body and a fine-tuning example's conversation keep the
+  request reading, and only those get the system note.
 
 ## [1.9.0] - 2026-09-29
 

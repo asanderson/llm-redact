@@ -172,6 +172,14 @@ def _walk_opaque(obj: Any, fn: Callable[[str], str]) -> Any:
     return obj
 
 
+def transform_all_strings(obj: Any, fn: Callable[[str], str]) -> Any:
+    """Apply ``fn`` to every string value in a JSON tree with NO skip set:
+    the reading of a document that is the caller's DATA, not a request (an
+    uploaded JSONL data file's lines), where a key named ``id``, ``name``,
+    ``type`` or ``data`` is content. Keys are never touched."""
+    return _walk_opaque(obj, fn)
+
+
 def transform_strings(
     obj: Any,
     fn: Callable[[str], str],

@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 import pytest
 
+from document_fixtures import pdf
 from llm_redact import extraction
 from llm_redact.config import ConfigError, ExtractionConfig, ExtractionService, parse_extraction
 from llm_redact.extraction import (
@@ -414,7 +415,7 @@ async def test_document_intelligence_analyzes_then_polls_its_operation() -> None
         _accepted(),
         _status("notStarted"),
         _status("running"),
-        _status("succeeded", analyzeResult={"content": f"page one\n{EMAIL}"}),
+        _status("succeeded", analyzeResult={"content": f"page one\n{EMAIL}", "pages": [{}]}),
     )
     sleeps: list[float] = []
     reading = await _azure(service, sleeps, complete=True).read(PNG)
@@ -496,3 +497,84 @@ async def test_status_never_carries_a_credential() -> None:
     inspector = _azure(Recorder(_accepted()))
     assert "di-secret-key" not in json.dumps(inspector.status())
     assert inspector.status()["services"][0]["host"] == "di.cognitiveservices.azure.com"
+
+
+# --- page coverage: a cloud reading vouches only for every page ---------------------------------
+
+
+def _azure_pages(pages: int) -> Recorder:
+    """Azure's answer covering ``pages`` pages and reporting no warning —
+    the free tier's shape for a longer file (it reads the first two)."""
+    analyzed = {"content": "page one\npage two", "pages": [{}] * pages}
+    return Recorder(_accepted(), _status("succeeded", analyzeResult=analyzed))
+
+
+@pytest.mark.parametrize(("analyzed", "complete"), [(2, False), (3, True)])
+async def test_a_cloud_reading_of_fewer_pages_than_the_pdf_is_incomplete(
+    analyzed: int, complete: bool
+) -> None:
+    service = _service(kind="azure_docintel", url=DI, token_env="DI_KEY", complete=True)
+    config = ExtractionConfig(enabled=True, formats=("pdf",), services=(service,))
+
+    async def sleep(seconds: float) -> None:
+        await asyncio.sleep(0)
+
+    inspector = ExtractionInspector(
+        config,
+        transport=httpx.MockTransport(_azure_pages(analyzed)),
+        environ={"DI_KEY": "k"},
+        sleep=sleep,
+    )
+    # Three pages, one only an image: the local reading is incomplete.
+    reading = await inspector.read(pdf([None, None], image_page=True))
+    assert reading.complete is complete
+    assert "page two" in (reading.text or "")  # read either way: still scanned
+    counted = inspector.status()["readings_total"]["azure_docintel"]
+    assert ("pages_unverified" in counted) is not complete
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"II*\x00" + bytes(64),  # a TIFF may hold several pages
+        b"GIF89a" + bytes(64),
+        b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x08acTL" + bytes(64),  # an animated PNG
+        b"%PDF-1.7\n",  # a PDF the local extractors do not read: its pages unknown
+    ],
+    ids=["tiff", "gif", "apng", "pdf-unread"],
+)
+async def test_a_cloud_reading_of_a_file_of_unknown_pages_is_incomplete(data: bytes) -> None:
+    service = Recorder(
+        _accepted(), _status("succeeded", analyzeResult={"content": "t", "pages": [{}]})
+    )
+    reading = await _azure(service, complete=True).read(data)
+    assert reading.complete is False and reading.text == "t"
+
+
+@pytest.mark.parametrize(
+    ("answer", "complete"),
+    [
+        ({"Blocks": [], "DocumentMetadata": {"Pages": 1}}, True),
+        ({"Blocks": [], "DocumentMetadata": {"Pages": 2}}, False),
+        ({"Blocks": []}, False),
+        ({"Blocks": [], "DocumentMetadata": {"Pages": True}}, False),
+    ],
+)
+async def test_textract_must_report_the_images_one_page(
+    answer: dict[str, Any], complete: bool
+) -> None:
+    service = Recorder(httpx.Response(200, json=answer))
+    inspector = _inspector(
+        _service(kind="textract", region="us-east-1", complete=True), service, AWS_ENV
+    )
+    assert (await inspector.read(b"\xff\xd8\xff" + bytes(16))).complete is complete
+
+
+async def test_documentai_must_report_the_images_one_page() -> None:
+    service = Recorder(httpx.Response(200, json={"document": {"text": "t"}}))
+    inspector = _inspector(
+        _service(kind="documentai", processor=PROCESSOR, token_env="G", complete=True),
+        service,
+        {"G": "t"},
+    )
+    assert (await inspector.read(b"BM" + bytes(16))).complete is False

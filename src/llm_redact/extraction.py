@@ -140,12 +140,15 @@ class FileReading:
 
 @dataclass(frozen=True)
 class _Read:
-    """One reader's answer: its text, whether it counts as complete, and
-    its display text (the document's text once)."""
+    """One reader's answer: its text, whether it counts as complete, its
+    display text (the document's text once) and how many pages it covers
+    (the worker: the PDF's page count; a cloud OCR service: the pages it
+    analyzed; None when not known)."""
 
     text: str = field(repr=False)
     complete: bool
     display: str | None = field(default=None, repr=False)
+    pages: int | None = None
 
 
 def polyglot(data: bytes) -> bool:
@@ -409,13 +412,14 @@ class ExtractionInspector:
         names: list[str] = []
         complete = False
         display: str | None = None
+        pages = 1 if _one_image(data) else None
         if _local_class(coarse, self.config.formats):
             local = await self._local(data)
             if local is not None:
                 name, read = local
                 texts.append(read.text)
                 names.append(name)
-                complete, display = read.complete, read.display
+                complete, display, pages = read.complete, read.display, read.pages
         if not complete and services:
             for service in self.config.services:
                 if coarse not in service.formats:
@@ -425,6 +429,13 @@ class ExtractionInspector:
                     continue
                 texts.append(answer.text)
                 names.append(service.kind)
+                if service.kind in _PAGED and (pages is None or answer.pages != pages):
+                    # A cloud OCR service analyzes up to its tier's page
+                    # limit and says nothing of the pages past it (Azure's
+                    # free tier reads two): complete only when it covered
+                    # every page the file has, which must be known.
+                    self.readings[(service.kind, "pages_unverified")] += 1
+                    continue
                 if answer.complete:
                     # A service vouches for the format it opened; whether the
                     # file also holds another is a property of its bytes (the
@@ -509,12 +520,14 @@ class ExtractionInspector:
             return None
         name = f"local:{result.get('format')}"
         text, complete = result.get("text"), result.get("complete") is True
+        pages = result.get("pages")
+        pages = pages if type(pages) is int else None
         if not isinstance(text, str):
             self.readings[(name, str(result.get("reason")))] += 1
             return None
         self.readings[(name, "complete" if complete else "incomplete")] += 1
         display = result.get("display")
-        return name, _Read(text, complete, display if isinstance(display, str) else None)
+        return name, _Read(text, complete, display if isinstance(display, str) else None, pages)
 
     async def _run_worker(self, data: bytes) -> dict[str, Any]:
         """One worker process for ``data``, killed on any way out but its
@@ -723,7 +736,7 @@ class ExtractionInspector:
             if block.get("BlockType") == "LINE" and isinstance(block.get("Text"), str)
         ]
         text = "\n".join(lines)
-        return _Read(text, service.complete, text)
+        return _Read(text, service.complete, text, _count(answer.get("DocumentMetadata"), "Pages"))
 
     async def _documentai(self, service: ExtractionService, data: bytes, coarse: str) -> _Read:
         """Google Document AI (``POST /v1/{processor}:process``) with an
@@ -743,7 +756,8 @@ class ExtractionInspector:
         if not isinstance(document, dict) or not isinstance(document.get("text"), str):
             raise _Failed("malformed answer")
         text = document["text"]
-        return _Read(text, service.complete and not document.get("error"), text)
+        complete = service.complete and not document.get("error")
+        return _Read(text, complete, text, _count(document, "pages"))
 
     async def _azure_docintel(self, service: ExtractionService, data: bytes, coarse: str) -> _Read:
         """Azure AI Document Intelligence: ``:analyze`` (asynchronous — 202
@@ -780,7 +794,8 @@ class ExtractionInspector:
         if not isinstance(result, dict) or not isinstance(result.get("content"), str):
             raise _Failed("malformed answer")
         text = result["content"]
-        return _Read(text, service.complete and not result.get("warnings"), text)
+        complete = service.complete and not result.get("warnings")
+        return _Read(text, complete, text, _count(result, "pages"))
 
     # --- Google service-account tokens ---------------------------------------------------
 
@@ -822,6 +837,29 @@ _SERVICES: dict[str, Callable[..., Awaitable[_Read]]] = {
     "documentai": ExtractionInspector._documentai,
     "azure_docintel": ExtractionInspector._azure_docintel,
 }
+
+
+# The cloud OCR services: a reading of theirs vouches for a file only when
+# it covers as many pages as the file has (``ExtractionInspector.read``).
+_PAGED = frozenset({"textract", "documentai", "azure_docintel"})
+
+
+def _count(value: Any, key: str) -> int | None:
+    """The page count a service's answer reports under ``key`` (a number,
+    or a list of pages), or None when it reports none."""
+    count = value.get(key) if isinstance(value, dict) else None
+    if isinstance(count, list):
+        return len(count)
+    return count if type(count) is int else None
+
+
+def _one_image(data: bytes) -> bool:
+    """Whether ``data`` is an image format that holds exactly one picture:
+    a PNG that is not animated (no ``acTL`` chunk), a JPEG or a BMP. A
+    TIFF, GIF, WebP or HEIF may hold several: its page count is unknown."""
+    if data.startswith(b"\x89PNG"):
+        return b"acTL" not in data
+    return data.startswith((b"\xff\xd8\xff", b"BM"))
 
 
 def _documentai_body(data: bytes, mime: str) -> bytes:

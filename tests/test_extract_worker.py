@@ -69,6 +69,7 @@ def test_a_text_pdf_is_read_completely() -> None:
         )
     )
     assert result["format"] == "pdf" and result["complete"] is True
+    assert result["pages"] == 3  # what a cloud OCR reading must cover
     for expected in (EMAIL, "page three", "Ada Lovelace", "Payroll", "token=abc123"):
         assert expected in result["text"]
 
@@ -76,11 +77,13 @@ def test_a_text_pdf_is_read_completely() -> None:
 def test_a_page_drawing_an_image_is_incomplete() -> None:
     result = _read(pdf(["text page"], image_page=True))
     assert result["complete"] is False and "text page" in result["text"]
+    assert result["pages"] == 2
 
 
 def test_a_malformed_pdf_is_incomplete_with_what_was_read() -> None:
     result = _read(b"%PDF-1.7\nthis is not a pdf at all\n%%EOF\n")
     assert result["complete"] is False and result["reason"] == "error"
+    assert result["pages"] is None  # never opened: its pages unknown
 
 
 SECRET = b"contact alice.secret@example.com"

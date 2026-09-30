@@ -264,7 +264,21 @@ trusted = true
   service's own `https` origin; the key is never sent anywhere else.
 
 Whether a cloud reading counts as complete is still the operator's
-declaration (`complete = true`), as for the self-hosted services.
+declaration (`complete = true`), as for the self-hosted services — and,
+for a cloud service only, it must also cover EVERY page of the file. A
+cloud OCR service analyzes up to its tier's page limit and reports nothing
+about the pages past it: Azure Document Intelligence's free (F0) tier
+analyzes only the first two pages of a PDF or TIFF, its standard (S0) tier
+at most 2,000; Document AI and Textract have their own limits. So the page
+count the service answers with (`analyzeResult.pages`, `document.pages`,
+Textract's `DocumentMetadata.Pages`) must equal the file's own, and the
+reading is incomplete (counted `pages_unverified` in
+`readings_total`) when it does not or when the file's count is unknown.
+The file's count is known for a PDF the local PDF extractor opened (its
+page tree as pypdf reads it — keep `pdf` in `formats`), and is one for a
+PNG that is not animated, a JPEG or a BMP; a TIFF, GIF, WebP or HEIF image
+(which may hold several), an Office file, markup, or a PDF the local
+extractor did not open never counts as completely read by a cloud service.
 
 ## Convert mode
 
@@ -357,3 +371,6 @@ not happen.
   a service.
 - Textract is synchronous only (images and one-page PDFs); Document AI's
   `token_env` form cannot refresh its token (use `credentials_file`).
+- A cloud OCR reading vouches for a file only when it covers every page and
+  the file's page count is known (above): multi-page TIFFs, Office files and
+  PDFs the local extractor could not open are never cleared by one.

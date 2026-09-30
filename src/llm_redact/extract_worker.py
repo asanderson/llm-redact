@@ -5,7 +5,10 @@ upload inspector (``extraction.py``), one process per file: the file arrives on
 stdin, one JSON object leaves on stdout —
 ``{"format": ..., "text": str | null, "complete": bool, "reason": str}``,
 plus ``"display"`` (the file's text once, as a reader shows it: what
-``[extraction] convert`` sends in place of a file; null unless complete).
+``[extraction] convert`` sends in place of a file; null unless complete)
+and ``"pages"`` (a PDF's page count, null for other formats or when the
+file could not be opened: a cloud OCR reading is complete only when it
+covers that many pages).
 The process caps its own address space, CPU time, file writes, open files
 and child processes (``apply_limits``) BEFORE it reads a byte of the file,
 and the parent kills it at its wall-clock deadline, so a parser wedged or
@@ -286,6 +289,7 @@ class Reading:
         self.shown: list[str] = []
         self.shown_size = 0
         self.displayable = True
+        self.pages: int | None = None  # a PDF's page count, once known
 
     def add(self, text: str) -> None:
         if not text:
@@ -1085,6 +1089,8 @@ def read_pdf(data: bytes, reading: Reading) -> None:
     if reader.is_encrypted and not reader.decrypt(""):
         reading.complete = False
         return
+    # How many pages the file has (a cloud OCR reading must cover them all).
+    reading.pages = len(reader.pages)
     root: Any = reader.trailer["/Root"].get_object()
     names: Any = root.get("/Names")
     names = names.get_object() if names is not None else {}
@@ -2371,6 +2377,7 @@ def extract(data: bytes, *, formats: set[str], max_chars: int, max_inflated: int
             "text": reading.text() or None,
             "complete": False,
             "reason": "error",
+            "pages": reading.pages,
         }
     return {
         "format": kind,
@@ -2378,6 +2385,7 @@ def extract(data: bytes, *, formats: set[str], max_chars: int, max_inflated: int
         "complete": reading.complete,
         "reason": "ok",
         "display": reading.display() if reading.complete else None,
+        "pages": reading.pages,
     }
 
 

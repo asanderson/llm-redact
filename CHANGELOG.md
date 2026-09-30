@@ -27,7 +27,10 @@ and tags `vX.Y.Z`.
   (`documentai`: an access token from a named env var, or a service-account key file —
   RS256 JWT with the `crypto` extra), Azure AI Document Intelligence
   (`azure_docintel`: `:analyze` then its operation polled, bounded by the service's
-  timeout). Each requires `trusted = true` and https; any failure is no reading.
+  timeout). Each requires `trusted = true` and https; any failure is no reading. A
+  cloud reading counts as complete only when the pages it analyzed equal the file's
+  own page count (a PDF the local extractor opened; one for a single-image PNG, JPEG
+  or BMP) — Azure's free tier silently reads only the first two pages.
 - Convert mode, opt-in (`[extraction] convert = true` or a list of classes): an
   upload whose binary file holds values to redact, read completely, is sent as its
   REDACTED extracted text (`text/plain`, file name `.txt`) instead of being refused —

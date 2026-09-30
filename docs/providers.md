@@ -183,7 +183,8 @@ block) and says so in `doctor`; `"refuse"` answers 400 instead. **What is
 inside a forwarded PDF, image or archive reaches the provider as-is** —
 exactly like base64 media in a chat body. Under a credential the proxy
 holds (its cloud identity, or a routing rule's operator key) a binary file
-is always refused: the proxy vouches only for what it read. With an
+is refused: the proxy vouches only for what it read — unless an upload
+inspector read it (next). With an
 **upload inspector** (llm-redact-pro's document extractors,
 `plugin_api.UploadInspector`) each binary file part is first read as
 TEXT and scanned with the live detectors, no placeholder issued: a value
@@ -294,7 +295,10 @@ turns redaction off, not this rule (the ownership check of
 llm-redact-pro's named users reads the parsed body too, so a gzip or
 non-JSON body it could not read is refused either way). With `detection`
 on, an upload holding a binary file (a PDF, an image) cannot be sent
-with the proxy's identity; a text file is redacted and sent. Realtime
+with the proxy's identity — unless an upload inspector read it completely
+as clean text and allows that credential (llm-redact-pro `[extraction]
+proxy_credential = true`, off by default); a text file is redacted and
+sent. Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with
@@ -449,7 +453,8 @@ Code interpreter containers (`/v1/containers`: the container and its
 files — OpenAI, Azure's v1 API, custom providers) are recognized too. A
 container file upload is redacted exactly as a `/v1/files` upload is (the
 file part read by its content, its filename and every form field; a
-binary file goes out unscanned only with the client's own key), a JSON
+binary file goes out unscanned only with the client's own key, or once
+an upload inspector cleared it), a JSON
 container-file create names a stored file (verbatim), the container file
 object's `path` (the filename) is restored, and a download is restored
 like a Files API download — a text file line by line, a binary file

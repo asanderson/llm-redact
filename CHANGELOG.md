@@ -61,7 +61,8 @@ and tags `vX.Y.Z`.
   byte means binary even when the bytes decode) is no longer refused under the
   client's own key: it is forwarded UNSCANNED, its file name still redacted, and
   counted. Under a credential the proxy holds (cloud identity, a routed operator key)
-  a binary file is still refused 400. Downloads of text files
+  a binary file is still refused 400 — unless an upload inspector cleared it (see
+  Added: only when the inspection allows that credential). Downloads of text files
   (`GET …/files/{id}/content`) are restored line by line; binary downloads are
   untouched.
 

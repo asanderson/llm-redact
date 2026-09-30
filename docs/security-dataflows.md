@@ -57,11 +57,14 @@ deliberate scope decisions rather than gaps:
   scanned (gate ④¼) — a body it cannot read is refused 400/415 instead
   of forwarded unread, unless the provider has `detection = false` and
   the request carries the client's own key (the explicit, surfaced
-  opt-out). On an identity connection a non-JSON realtime frame closes
-  the connection 1008 unsent (other realtime connections relay non-JSON
-  frames as they came: the realtime APIs take JSON events only); a frame
-  that IS JSON but cannot be read — nesting too deep, or an integer past
-  the parser's digit limit — closes 1008 on every connection. The
+  opt-out). Wherever realtime frames are redacted, a non-JSON frame on
+  an identity connection closes the connection 1008 unsent (other
+  realtime connections relay non-JSON frames as they came: the realtime
+  APIs take JSON events only), and a frame that IS JSON but cannot be
+  read — nesting too deep, or an integer past the parser's digit limit —
+  closes 1008 on every connection. While a session router checks frames
+  (llm-redact-pro) both hold with `detection = false` too; without one,
+  `detection = false` relays frames untouched (the surfaced opt-out). The
   same fail-open principle degrades a corrupt Bedrock eventstream frame
   to verbatim pass-through: unrestored placeholders are safe; guessing at
   corrupt frames is not.

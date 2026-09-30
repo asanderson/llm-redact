@@ -334,9 +334,10 @@ while the vault row is the secret store and is never exported.
   refused under a proxy-held credential and, with the client's own key,
   wherever redaction applies (only `detection = false` with the client's
   own key sends it unchecked, as an unparseable JSON body).
-  llm-redact-pro refuses every such reference under a proxy-held
-  credential (and, for a named user, a reference to an object no user is
-  recorded creating), and in every mode anything but a pure read (a
+  llm-redact-pro refuses every reference to another namespace's stored
+  object (in a JSON body, an upload's lines and fields or its metadata)
+  under a proxy-held credential (and, for a named user, a reference to an
+  object no user is recorded creating), and in every mode anything but a pure read (a
   body-less `GET`/`HEAD`): writes, and requests that carry content of
   their own while citing the object (a chat's file part, a code
   interpreter's `file_ids`, a `previous_response_id` continuation, a

@@ -202,10 +202,14 @@ form field that is not UTF-8, a JSONL line nesting too deep) and, with a
 rule in block mode, a check of every string the redaction will scan (file
 names, form fields, text and JSONL files) for a block-mode value; what
 needs the redaction itself (`max_body_strings` when no rule is in block
-mode, a sealed session, a vault fault), a local refusal after redaction
-(no upstream configured, the upstream authorizer) and the `[audit]
-required` START row can still come after it — the inspector is an
-operator-configured reader, not the upstream. A JSONL line
+mode, a sealed session, a vault fault), the upstream authorizer (it signs
+the final, redacted bytes) and a routing budget refusal can still come
+after it. What refuses the request whatever the redaction finds comes
+before it: a provider with no upstream configured (502), a routing
+layer's local refusal, and, with `[audit] required`, the write-ahead START
+row — a START row that cannot be committed refuses the upload (503) before
+any file is read, and a refusal after the inspection is that START row's
+END row. A JSONL line
 nesting JSON deeper than 128 levels is refused (a JSONL reader would
 decode what no walk can read). Plain form fields (`purpose`, `user`,
 `size`, …) are scanned as UTF-8 text (a field that is not UTF-8 is

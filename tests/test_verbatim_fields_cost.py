@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 import llm_redact.providers.base as base
 from llm_redact.config import Config
@@ -23,7 +25,7 @@ from llm_redact.detection.engine import DetectionConfig, build_allowlist, build_
 from llm_redact.providers.base import VerbatimFieldRedacted, prepare_route_request
 from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.proxy import create_app
-from llm_redact.redactor import Redactor
+from llm_redact.redactor import Redactor, TooManyStrings
 from llm_redact.vault import InMemoryVault
 
 EMAIL = "jane.doe@corp.example"
@@ -187,3 +189,189 @@ def test_labels_are_redacted_in_slot_order_and_held_once() -> None:
         prepare_route_request(adapter, "POST", "/v1/x", unchanged, _redactor(), inject_note=False)
         == unchanged
     )
+
+
+# --- no field costs its depth; too many are refused as found ---------------------------
+
+
+def _deep_search(depth: int, count: int) -> bytes:
+    """A search body whose filters nest ``depth`` deep around ``count``
+    filter keys (the `("filters", "**", "key")` verbatim position)."""
+    text = "[" + ",".join(['{"key":"k"}'] * count) + "]"
+    for _ in range(depth):
+        text = '{"f":' + text + "}"
+    return ('{"query":"q","filters":' + text + "}").encode()
+
+
+async def _refusal_seconds(path: str, raw: bytes) -> float:
+    upstream: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        upstream.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(handler))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1", timeout=None
+    ) as client:
+        started = time.perf_counter()
+        reply = await client.post(
+            path,
+            content=raw,
+            headers={"authorization": "Bearer sk-own", "content-type": "application/json"},
+        )
+        elapsed = time.perf_counter() - started
+    assert reply.status_code == 413 and "max_body_strings" in reply.text
+    assert upstream == []
+    return elapsed
+
+
+async def test_a_deep_body_of_too_many_verbatim_fields_is_refused_as_fast_as_a_chat() -> None:
+    # About 10 MiB, 120 deep, 800,000 filter keys: over max_body_strings. The
+    # hold-out once collected every (depth-long) slot before the first
+    # charge: 22 s against 1.3 s for the same body on chat completions.
+    raw = _deep_search(120, 800_000)
+    chat = await _refusal_seconds("/v1/chat/completions", raw)
+    search = await _refusal_seconds("/v1/vector_stores/vs_1/search", raw)
+    assert search < max(3 * chat, FLOOR_SECONDS), f"{search:.2f}s / {chat:.2f}s"
+
+
+def test_verbatim_fields_are_counted_as_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The budget refuses before the fields are all collected: the collection
+    # stops at the first field over it.
+    body = {"filters": {"filters": [{"key": f"k{i}"} for i in range(100)]}}
+    found = 0
+    cursor_hold = base._Cursor.hold
+
+    def counting(self: Any, held: Any) -> None:
+        nonlocal found
+        found += 1
+        cursor_hold(self, held)
+
+    monkeypatch.setattr(base._Cursor, "hold", counting)
+    with pytest.raises(TooManyStrings):
+        prepare_route_request(
+            OpenAIAdapter(),
+            "POST",
+            "/v1/vector_stores/vs_1/search",
+            body,
+            _redactor().with_budget(10),
+            inject_note=False,
+        )
+    assert found == 10
+
+
+# --- the same fields held as the slot-by-slot reference -------------------------------
+#
+# The reference below is the earlier implementation (every slot built as a
+# tuple, held by walking the trie from the root, its value read by walking
+# the body again): the trie-as-you-go hold-out must hold exactly the same
+# fields, drop the same inner ones and name the same first refused field.
+
+
+def _reference_slots(node: Any, position: tuple[str, ...], at: tuple[Any, ...]) -> list[Any]:
+    if not position:
+        return [at]
+    head, rest = position[0], position[1:]
+    found: list[Any] = []
+    if head == "**":
+        found += _reference_slots(node, rest, at)
+        children: Any = (
+            node.items()
+            if isinstance(node, dict)
+            else enumerate(node)
+            if isinstance(node, list)
+            else ()
+        )
+        for key, child in children:
+            found += _reference_slots(child, position, (*at, key))
+    elif head == "*":
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                found += _reference_slots(item, rest, (*at, index))
+    elif isinstance(node, dict) and head in node:
+        found += _reference_slots(node[head], rest, (*at, head))
+    return found
+
+
+def _reference_hold(trie: dict[Any, Any], slot: tuple[Any, ...], held: Any) -> None:
+    node = trie
+    for step in slot[:-1]:
+        child = node.setdefault(step, {})
+        if isinstance(child, base._Held):
+            return
+        node = child
+    if not isinstance(node.get(slot[-1]), base._Held):
+        node[slot[-1]] = held
+
+
+def _reference_prepare(adapter: _Adapter, body: dict[str, Any], redactor: Redactor) -> Any:
+    held: dict[Any, Any] = {}
+    order = 0
+    for position in adapter.verbatim_fields("POST", "/v1/x"):
+        for slot in _reference_slots(body, position, ()):
+            value = body
+            for step in slot:
+                value = value[step]
+            _reference_hold(held, slot, base._Held(order, value, position))
+            order += 1
+    fields = base._held_fields(held)
+    for field in fields:
+        for text in base._strings_in(field.value):
+            if redactor.redact_text(text) != text:
+                label = ".".join(key for key in field.position if key not in ("*", "**"))
+                raise VerbatimFieldRedacted(label)
+    target = base._rebuilt(body, held, lambda field: None) if fields else body
+    prepared = adapter.prepare_request(target, redactor, inject_note=False)
+    if fields:
+        prepared = base._rebuilt(prepared, held, lambda field: field.value)
+    labels: dict[Any, Any] = {}
+    for position in adapter.label_fields("POST", "/v1/x"):
+        for slot in _reference_slots(prepared, position, ()):
+            value = prepared
+            for step in slot:
+                value = value[step]
+            if isinstance(value, str):
+                _reference_hold(labels, slot, base._Held(0, redactor.redact_text(value), position))
+    return base._rebuilt(prepared, labels, lambda field: field.value) if labels else prepared
+
+
+_KEYS = st.sampled_from(["a", "b", "name"])
+_LEAVES = st.sampled_from(["x", EMAIL, 1, None])
+_BODIES = st.recursive(
+    _LEAVES,
+    lambda inner: st.lists(inner, max_size=3) | st.dictionaries(_KEYS, inner, max_size=3),
+    max_leaves=12,
+)
+_POSITIONS = st.lists(
+    st.lists(st.sampled_from(["a", "b", "name", "*", "**"]), min_size=1, max_size=3)
+    .map(tuple)
+    .filter(lambda p: p[-1] not in ("*", "**") and p.count("**") <= 1),
+    max_size=3,
+).map(tuple)
+
+
+def _outcome(run: Any) -> Any:
+    try:
+        return ("ok", run())
+    except VerbatimFieldRedacted as exc:
+        return ("refused", str(exc))
+
+
+@settings(deadline=None, max_examples=300)
+@given(body=st.dictionaries(_KEYS, _BODIES, max_size=3), verbatim=_POSITIONS, labels=_POSITIONS)
+def test_the_hold_out_holds_what_the_reference_holds(
+    body: dict[str, Any], verbatim: Any, labels: Any
+) -> None:
+    adapter = _Adapter(verbatim, labels)
+    new = _outcome(
+        lambda: prepare_route_request(
+            adapter, "POST", "/v1/x", body, _redactor(), inject_note=False
+        )
+    )
+    old = _outcome(lambda: _reference_prepare(adapter, body, _redactor()))
+    if new[0] == "refused":
+        # The message names the same field.
+        assert old[0] == "refused" and f"`{old[1]}`" in new[1]
+    else:
+        assert new == old

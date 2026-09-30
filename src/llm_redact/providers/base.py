@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from enum import Enum
+from itertools import count
 from typing import Any, NamedTuple
 
 from llm_redact.eventstream import EventStreamMessage
@@ -189,45 +190,6 @@ class VerbatimFieldRedacted(UnredactableRequest):
 VerbatimPosition = tuple[str, ...]
 _EVERY_ITEM = "*"
 _ANY_DEPTH = "**"
-_Slot = tuple[str | int, ...]
-
-
-def _verbatim_slots(node: Any, position: VerbatimPosition) -> list[_Slot]:
-    """The concrete paths (keys and list indexes) ``position`` names in
-    ``node``, in document order."""
-    found: list[_Slot] = []
-    _collect_slots(node, position, (), found)
-    return found
-
-
-def _collect_slots(node: Any, position: VerbatimPosition, at: _Slot, found: list[_Slot]) -> None:
-    if not position:
-        found.append(at)
-        return
-    head, rest = position[0], position[1:]
-    if head == _ANY_DEPTH:
-        _collect_slots(node, rest, at, found)
-        children: Any = (
-            node.items()
-            if isinstance(node, dict)
-            else enumerate(node)
-            if isinstance(node, list)
-            else ()
-        )
-        for key, child in children:
-            _collect_slots(child, position, (*at, key), found)
-    elif head == _EVERY_ITEM:
-        if isinstance(node, list):
-            for index, item in enumerate(node):
-                _collect_slots(item, rest, (*at, index), found)
-    elif isinstance(node, dict) and head in node:
-        _collect_slots(node[head], rest, (*at, head), found)
-
-
-def _get_at(node: Any, slot: _Slot) -> Any:
-    for step in slot:
-        node = node[step]
-    return node
 
 
 class _Held(NamedTuple):
@@ -240,23 +202,76 @@ class _Held(NamedTuple):
     position: VerbatimPosition
 
 
-# A trie of slots: each step maps to the trie below it, or to the _Held field
-# at that slot (nothing below a held field is kept: it goes back with it).
+# A trie of slots (the concrete keys and list indexes a position names): each
+# step maps to the trie below it, or to the _Held field at that slot (nothing
+# below a held field is kept: it goes back with it).
 _Slots = dict[str | int, "_Slots | _Held"]
 
 
-def _hold(trie: _Slots, slot: _Slot, held: _Held) -> None:
-    """Hold ``held`` at ``slot`` unless a field at or around it is held
-    already; a field held inside it goes back with it (dropped). Costs the
-    slot's length, whatever was held before."""
-    node = trie
-    for step in slot[:-1]:
-        child = node.setdefault(step, {})
-        if isinstance(child, _Held):
-            return  # inside a field already held out
-        node = child
-    if not isinstance(node.get(slot[-1]), _Held):
-        node[slot[-1]] = held
+class _Cursor:
+    """Where a traversal of the body stands: one step below its parent's.
+    Its trie node is made (or found) only when a field is held at or below
+    it, and then kept — so holding a field costs O(1) beyond the traversal
+    that reached it, whatever its depth (a slot is never built as a tuple
+    of its steps and walked again). None inside a field already held."""
+
+    __slots__ = ("_node", "_parent", "_resolved", "_step")
+
+    def __init__(self, parent: "_Cursor | None", step: str | int, node: _Slots | None) -> None:
+        self._parent = parent
+        self._step = step
+        self._node = node
+        self._resolved = parent is None  # the root is the trie itself
+
+    def child(self, step: str | int) -> "_Cursor":
+        return _Cursor(self, step, None)
+
+    def node(self) -> _Slots | None:
+        if not self._resolved:
+            self._resolved = True
+            parent = self._parent.node() if self._parent is not None else None
+            child = None if parent is None else parent.setdefault(self._step, {})
+            self._node = child if isinstance(child, dict) else None
+        return self._node
+
+    def hold(self, held: _Held) -> None:
+        """Hold ``held`` here unless a field at or around this slot is held
+        already; a field held inside it goes back with it (dropped)."""
+        parent = self._parent.node() if self._parent is not None else None
+        if parent is not None and not isinstance(parent.get(self._step), _Held):
+            parent[self._step] = held
+            self._resolved, self._node = True, None
+
+
+def _each_slot(
+    node: Any,
+    position: VerbatimPosition,
+    cursor: _Cursor,
+    found: Callable[[Any, _Cursor], None],
+) -> None:
+    """Call ``found(value, cursor)`` for every slot ``position`` names in
+    ``node``, in document order: one visit per node the position reaches."""
+    if not position:
+        found(node, cursor)
+        return
+    head, rest = position[0], position[1:]
+    if head == _ANY_DEPTH:
+        _each_slot(node, rest, cursor, found)
+        children: Any = (
+            node.items()
+            if isinstance(node, dict)
+            else enumerate(node)
+            if isinstance(node, list)
+            else ()
+        )
+        for key, child in children:
+            _each_slot(child, position, cursor.child(key), found)
+    elif head == _EVERY_ITEM:
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                _each_slot(item, rest, cursor.child(index), found)
+    elif isinstance(node, dict) and head in node:
+        _each_slot(node[head], rest, cursor.child(head), found)
 
 
 def _held_fields(trie: _Slots) -> list[_Held]:
@@ -313,14 +328,24 @@ def prepare_route_request(
     warn-mode one is counted and forwarded, as anywhere), and otherwise they
     go back exactly as sent. The route's LABEL fields (``label_fields``) are
     redacted after the walk, which skips them as structural. Linear in the
-    body: the fields are held in a trie of their slots, taken out in one
-    copy and put back in another."""
+    body: the fields are held in a trie of their slots, built as each
+    traversal reaches them (``_Cursor``: no field costs its depth), taken
+    out in one copy and put back in another; each field found is counted
+    against the redactor's string budget at once (a verbatim field when
+    found, a label when redacted), so a body of too many is refused before
+    they are all collected."""
     held: _Slots = {}
-    order = 0
+    order = count()
     for position in adapter.verbatim_fields(method, path):
-        for slot in _verbatim_slots(body, position):
-            _hold(held, slot, _Held(order, _get_at(body, slot), position))
-            order += 1
+
+        def hold(value: Any, cursor: _Cursor, position: VerbatimPosition = position) -> None:
+            # Counted as found (max_body_strings): a body of more fields than
+            # the budget is refused before they are all collected. Each is
+            # counted again per string when scanned below.
+            redactor.charge(1)
+            cursor.hold(_Held(next(order), value, position))
+
+        _each_slot(body, position, _Cursor(None, "", held), hold)
     fields = _held_fields(held)
     for field in fields:
         for text in _strings_in(field.value):
@@ -344,10 +369,14 @@ def prepare_route_request(
     # store's `name`), redacted here like any other text — in slot order.
     labels: _Slots = {}
     for position in adapter.label_fields(method, path):
-        for slot in _verbatim_slots(prepared, position):
-            value = _get_at(prepared, slot)
+
+        def redact_label(
+            value: Any, cursor: _Cursor, position: VerbatimPosition = position
+        ) -> None:
             if isinstance(value, str):
-                _hold(labels, slot, _Held(0, redactor.redact_text(value), position))
+                cursor.hold(_Held(0, redactor.redact_text(value), position))
+
+        _each_slot(prepared, position, _Cursor(None, "", labels), redact_label)
     return _rebuilt(prepared, labels, lambda field: field.value) if labels else prepared
 
 

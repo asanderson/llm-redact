@@ -182,6 +182,11 @@ and tags `vX.Y.Z`.
   as it was uploaded, instead of line by line as JSON with the restored value
   JSON-escaped and the line re-spaced. The proxy remembers such uploads by a
   digest of the bytes it sent, for the newest 1024 in the running process.
+- Holding a route's verbatim fields out of redaction no longer costs time per
+  level of nesting for each field, and each field found counts against
+  `max_body_strings` at once: a deeply nested vector store search with too many
+  filter keys is refused as fast as any over-budget body, instead of blocking the
+  proxy for tens of seconds first.
 
 ## [1.9.0] - 2026-09-29
 

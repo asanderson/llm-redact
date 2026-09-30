@@ -101,3 +101,48 @@ def test_doctor_prints_the_rows(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert code == 1
     assert [row["level"] for row in rows] == ["FAIL", "PASS", "WARN", "PASS"]
     assert "LLM_REDACT_TEST_UNSET_TOKEN is not set" in rows[0]["message"]
+
+
+class _Plugged:
+    """A plugin's upload inspector (only what the doctor row reads)."""
+
+    closed = False
+
+    async def aclose(self) -> None:
+        _Plugged.closed = True
+
+
+@pytest.mark.parametrize("built", ["none", "raises", "plugged"])
+def test_a_plugin_factory_the_proxy_would_refuse_is_a_fail(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    built: str,
+) -> None:
+    # An older llm-redact-pro still replaces the factory and, reading the
+    # section from its own config, builds none for the core's [extraction]:
+    # the proxy refuses to start, so doctor must not pass it.
+    from llm_redact import registry as registry_mod
+    from llm_redact.config import ConfigError
+    from llm_redact.registry import Registry
+
+    def build(config: Any, tier: str) -> Any:
+        if built == "raises":
+            raise ConfigError("the plugin's own setting")
+        return _Plugged() if built == "plugged" else None
+
+    reg = Registry()
+    reg.build_upload_inspector = build
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    config = tmp_path / "config.toml"
+    config.write_text("[extraction]\nenabled = true\n")
+    run_doctor(argparse.Namespace(config=config, json=True, offline=True))
+    checks = json.loads(capsys.readouterr().out)["checks"]
+    rows = [(row["level"], row["message"]) for row in checks if row["area"] == "extraction"]
+    level, message = rows[0]
+    if built == "plugged":
+        assert level == "PASS" and "a plugin's upload inspector (_Plugged)" in message
+        assert _Plugged.closed
+    else:
+        assert level == "FAIL" and "will refuse to start" in message
+        assert ("the plugin's own setting" in message) is (built == "raises")

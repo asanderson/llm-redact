@@ -851,8 +851,52 @@ def _check_extraction(report: _Report, config: Config) -> None:
     scan lets through."""
     from llm_redact.extraction import extraction_checks
 
+    if config.extraction.enabled:
+        _check_inspector_factory(report, config)
     for level, message in extraction_checks(config.extraction, os.environ):
         report.line(level, "extraction", message)
+
+
+def _check_inspector_factory(report: _Report, config: Config) -> None:
+    """When a plugin replaces the upload inspector factory, build it as
+    serve would (then close it): one that builds none for an enabled
+    [extraction] — a plugin predating the core's extraction, which reads
+    the section from its own config — makes the proxy refuse to start."""
+    import asyncio
+
+    from llm_redact import free_defaults
+    from llm_redact.licensing import resolve_license
+    from llm_redact.registry import get_registry
+
+    factory = get_registry().build_upload_inspector
+    if factory is free_defaults.build_upload_inspector:
+        return
+    tier = resolve_license(
+        env=dict(os.environ),
+        config_key=config.license.key,
+        config_key_file=config.license.key_file,
+    ).tier
+    refusal = "the proxy will refuse to start: upgrade the plugin (llm-redact-pro)"
+    try:
+        inspector = factory(config, tier)
+    except ConfigError as exc:
+        report.line("FAIL", "extraction", f"{exc} — {refusal}")
+        return
+    if inspector is None:
+        report.line(
+            "FAIL",
+            "extraction",
+            f"enabled, but the plugin's upload inspector factory builds none — {refusal}"
+            " to a version that leaves [extraction] to the core",
+        )
+        return
+    report.line(
+        "PASS",
+        "extraction",
+        f"a plugin's upload inspector ({type(inspector).__name__}) replaces the core's"
+        " extractors",
+    )
+    asyncio.run(inspector.aclose())
 
 
 def _check_access(report: _Report, config: Config) -> None:

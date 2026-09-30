@@ -349,7 +349,10 @@ not happen.
 - `llm-redact doctor`: `extraction` rows, offline and value-free — what keeps
   it from starting (the `extract` extra, each credential variable by name, a
   key file), each service and whether it sees files off this machine (a
-  WARN), convert mode (a WARN), and what a clean scan lets through.
+  WARN), convert mode (a WARN), and what a clean scan lets through. When a
+  plugin replaces the upload inspector, doctor builds it as `serve` would: one
+  that builds none for the enabled section (an llm-redact-pro older than the
+  core's extraction) is a FAIL, as the proxy refuses to start with it.
 - Logs: per request, the count of binary parts and their outcomes; the
   extractor, a service's host and an exception's TYPE on a failure — never a
   file name, content, a value found, a token or a service's answer.

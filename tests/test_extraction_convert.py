@@ -333,6 +333,9 @@ class _Scan:
     """A Redactor stand-in for ``judge``: finds EMAIL in any text holding
     the address, blocks on BLOCK."""
 
+    def __init__(self) -> None:
+        self.warn_counts: Counter[str] = Counter()
+
     def scan_text(self, text: str) -> Counter[str]:
         if "BLOCK" in text:
             raise BlockedRequest("EMAIL")
@@ -478,3 +481,18 @@ async def test_a_value_a_browser_shows_joined_is_found(between: bytes) -> None:
         )
     assert reply.status_code == 400 and "SSN" in reply.text and upstream.requests == []
     assert app.state.proxy.inspected_uploads == {("openai", "detected"): 1}
+
+
+async def test_a_warn_mode_value_of_a_converted_file_counts_once() -> None:
+    # The scan of the full reading and the redaction of the text sent both
+    # meet the warn-mode value: it is forwarded once, so counted once.
+    upstream = Upstream()
+    app = _app(upstream, detection={"modes": {"us_ssn": "warn"}})
+    document = pdf([f"contact {EMAIL} SSN 123-45-6789"])
+    async with _client(app) as client:
+        reply = await client.post("/v1/files", content=_upload(document), headers=FORM)
+        status = (await client.get("/__llm-redact/status")).json()
+    assert reply.status_code == 200
+    assert "123-45-6789" in _file_part(upstream.requests[0])[1].decode()
+    assert status["inspected_uploads_total"] == {"openai": {"converted": 1}}
+    assert status["warnings_total"] == {"SSN": 1}

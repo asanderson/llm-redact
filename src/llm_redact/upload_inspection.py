@@ -305,6 +305,7 @@ def judge(
             continue
         remaining -= len(text)
         merge_floors(floors, token_floors(text))
+        warned = Counter(redactor.warn_counts)
         try:
             found = redactor.scan_text(text)
         except BlockedRequest as exc:
@@ -327,6 +328,9 @@ def judge(
             # joins what the full one keeps apart): its placeholders bound
             # the request's new numbers too.
             merge_floors(floors, token_floors(text))
+            # Its redaction counts the warn-mode values it forwards: the
+            # scan's count of them would be a second one.
+            _uncount(redactor.warn_counts, Counter(redactor.warn_counts) - warned)
             outcomes["converted"] += 1
         elif found:
             detected.update(found)
@@ -340,6 +344,14 @@ def judge(
     return Judgement(
         frozenset(cleared), outcomes, detected, blocked, floors, over_budget, converted
     )
+
+
+def _uncount(counts: Counter[str], extra: Counter[str]) -> None:
+    """``extra`` taken back out of ``counts`` (no type left at zero)."""
+    for key, n in extra.items():
+        counts[key] -= n
+        if counts[key] <= 0:
+            del counts[key]
 
 
 def _converts(result: Inspection, *, convertible: bool, allowed: bool) -> bool:

@@ -26,8 +26,11 @@ The view (``UploadView.cited``) is a list of JSON values:
   [v]}}``), its value parsed when it is a JSON object or array.
 
 ``problem`` names why an upload cannot be checked (the construct only, never
-content): outside the canonical grammar, a part header without one reading,
-a Content-Transfer-Encoding, a form field that is not UTF-8 text or declares
+content): outside the canonical grammar, a part header without one reading
+(a header line carrying a bare CR or LF or another control included: a
+lenient reader ends the header block there), a part with neither a header
+block nor an empty one (``_require_header_block``), a
+Content-Transfer-Encoding, a form field that is not UTF-8 text or declares
 another charset (its own, or the RFC 7578 ``_charset_`` field), a JSON form
 field repeating a key, a line or JSON form field nesting deeper than
 ``MAX_JSON_DEPTH`` (JSON the provider may read, but no walk can).
@@ -39,6 +42,28 @@ check parses) than it parses (``max_lines``; the proxy's
 ``max_body_strings``) — every other line costs a split and a byte test,
 never a parse. What each means is the caller's decision (the proxy
 refuses them when its own credential is spent).
+
+A SINGLE-REQUEST upload whose first part is the created file's JSON
+metadata (the Gemini API's ``multipart/related`` upload: the metadata,
+then the media; its parts carry no Content-Disposition, so none is a form
+field) is read by ``read_upload_metadata`` instead: ``cited`` is that
+metadata object — exactly what the provider reads as the create's body
+(``{"file": {"name": …, "displayName": …}}``), the file's own name
+included — ``{}`` when the part is blank or the body has no part. It is
+read like a JSON request body: the part's content when it declares
+``application/json`` or no type at all (the provider finds the metadata by
+position; a multipart/related naming another root part with ``start`` is
+no body llm-redact reads), strict UTF-8 (one
+leading byte-order mark dropped), ``jsonwalk.loads_request`` (a repeated
+key's LAST occurrence, with ``normalized`` holding the body with the part
+re-serialized, for a caller that must forward exactly what was checked),
+nesting at most ``MAX_JSON_DEPTH``. ``problem`` names why it cannot be:
+outside the canonical grammar, a part header without one reading or a part
+without a header block (as for a form upload), a
+Content-Transfer-Encoding or a charset the proxy does not decode, another
+declared type, content that is not UTF-8 text or not a JSON object, or
+JSON nested too deep. The
+media part is not read here (a file's content is not a request body).
 """
 
 from __future__ import annotations
@@ -64,6 +89,17 @@ CHARSET = "a multipart part declares a charset llm-redact does not decode"
 NOT_TEXT = "a multipart form field is not UTF-8 text"
 REPEATED_KEY = "a multipart form field repeats a JSON key"
 TOO_DEEP = f"a multipart part nests JSON deeper than {MAX_JSON_DEPTH} levels"
+METADATA_NOT_TEXT = "the upload's first part, the file's metadata, is not UTF-8 text"
+METADATA_NOT_OBJECT = (
+    "the upload's first part, the file's metadata, is not a JSON object llm-redact can read"
+)
+METADATA_TYPE = "the upload's first part, the file's metadata, is not declared application/json"
+# The part headers the check reads (MultipartPart matches names
+# case-insensitively).
+_TRANSFER_ENCODING = "content-transfer-encoding"
+_CONTENT_DISPOSITION = "content-disposition"
+_CONTENT_TYPE = "content-type"
+_JSON = b"application/json"
 
 # What json.loads drops from the head of a UTF-8 document it is given as bytes.
 _UTF8_BOM = b"\xef\xbb\xbf"
@@ -80,9 +116,11 @@ _SEGMENT = re.compile(r"\[([^\[\]]*)\]")
 
 
 class UploadView(NamedTuple):
-    """One upload as the stored-object check reads it (see the module)."""
+    """One upload as the stored-object check reads it (see the module):
+    ``cited`` is the list of what a form upload cites, or the metadata
+    object of a metadata-first upload (``read_upload_metadata``)."""
 
-    cited: list[Any]
+    cited: Any
     problem: str | None = None
     oversized: bool = False
     normalized: bytes | None = None
@@ -121,6 +159,93 @@ def read_upload(body: bytes, boundary: bytes, *, max_json_bytes: int, max_lines:
     return UploadView(reader.cited, normalized=parsed.serialize() if rewrote else None)
 
 
+def read_upload_metadata(body: bytes, boundary: bytes) -> UploadView:
+    """The single-request upload ``body`` (delimited by ``boundary``) as the
+    stored-object check reads it: its FIRST part's JSON metadata object,
+    read like a JSON request body (see the module)."""
+    parsed = multipart.parse(body, boundary)
+    if parsed is None:
+        return UploadView(None, problem=OUTSIDE_GRAMMAR)
+    if not parsed.parts:
+        return UploadView({})  # no part at all: no metadata
+    part = parsed.parts[0]
+    try:
+        metadata, repeated = _read_metadata(part)
+    except _Unreadable as exc:
+        return UploadView(None, problem=str(exc))
+    if repeated is None:
+        return UploadView(metadata)
+    # A repeated key: the part is sent as it was read (its LAST occurrence),
+    # never with an earlier one a first-wins provider would act on. Only the
+    # JSON text changes: the bytes around it (an empty header block's CRLF,
+    # whitespace, a byte-order mark) stay, so the part keeps its shape.
+    start, end = repeated
+    part.content = part.content[:start] + json_bytes(metadata) + part.content[end:]
+    return UploadView(metadata, normalized=parsed.serialize())
+
+
+def _read_metadata(
+    part: multipart.MultipartPart,
+) -> tuple[dict[str, Any], tuple[int, int] | None]:
+    """The metadata object ``part`` holds (``{}`` when it is blank) and,
+    when it repeats a key, the span of its JSON text in the part's content
+    (else None). Raises _Unreadable for what the check cannot read. A part
+    with an empty header block is read too (see ``_require_header_block``)."""
+    _require_header_block(part)
+    if part.headers is not None:
+        try:
+            encoding = part.header(_TRANSFER_ENCODING)
+            media = part.header(_CONTENT_TYPE)
+            content_type = part.params(_CONTENT_TYPE) or {}
+        except multipart.AmbiguousHeaders:
+            raise _Unreadable(AMBIGUOUS) from None
+        if encoding is not None and encoding.lower() not in PLAIN_TRANSFER_ENCODINGS:
+            raise _Unreadable(TRANSFER_ENCODED)
+        if media is not None and media.partition(b";")[0].strip().lower() != _JSON:
+            # Read as JSON only when it says so (or says nothing): a server
+            # parsing by the declared type reads other text another way
+            # (a form-encoded "x&file.name=…&y" inside a JSON string).
+            raise _Unreadable(METADATA_TYPE)
+        charset = content_type.get("charset")
+        if charset is not None and charset.value.lower() not in PLAIN_CHARSETS:
+            raise _Unreadable(CHARSET)
+    # The JSON text: past the whitespace ``bytes.strip`` drops and at most
+    # one byte-order mark.
+    raw = part.content
+    start = len(raw) - len(raw.lstrip())
+    if raw.startswith(_UTF8_BOM, start):
+        start += len(_UTF8_BOM)
+    end = len(raw.rstrip())
+    content = raw[start:end]
+    if not content:
+        return {}, None
+    try:
+        text = content.decode()  # strict UTF-8
+    except UnicodeDecodeError:
+        raise _Unreadable(METADATA_NOT_TEXT) from None
+    try:
+        metadata, duplicate_keys = loads_request(text)
+    except JsonTooDeep:
+        raise _Unreadable(TOO_DEEP) from None
+    except ValueError:
+        raise _Unreadable(METADATA_NOT_OBJECT) from None
+    if not isinstance(metadata, dict):
+        raise _Unreadable(METADATA_NOT_OBJECT)
+    return metadata, (start, end) if duplicate_keys else None
+
+
+def _require_header_block(part: multipart.MultipartPart) -> None:
+    """Raise _Unreadable when every reader may not find ``part``'s header
+    block where the check does: a part without a header/body separator
+    has one reading only when it is empty or opens with CRLF (an empty
+    header block). Otherwise a strict reader takes its first lines for
+    headers, and one accepting a bare LF as a line break ends them at a
+    bare-LF blank line, reading what follows as the part's content — none
+    of it where the check reads it."""
+    if part.headers is None and part.content and not part.content.startswith(b"\r\n"):
+        raise _Unreadable(AMBIGUOUS)
+
+
 class _Reader:
     """Reads parts one by one into ``cited``, within a byte budget and a
     budget of lines to parse."""
@@ -145,12 +270,13 @@ class _Reader:
         """Read one part into ``cited``; True when its content was rewritten
         (a file line repeating a key, re-serialized as the provider reads
         it)."""
+        _require_header_block(part)
         if part.headers is None:
-            return False  # no header block: nothing a server reads as a named part
+            return False  # an empty header block: nothing a server reads as a named part
         try:
-            encoding = part.header("content-transfer-encoding")
-            disposition = part.params("content-disposition") or {}
-            content_type = part.params("content-type") or {}
+            encoding = part.header(_TRANSFER_ENCODING)
+            disposition = part.params(_CONTENT_DISPOSITION) or {}
+            content_type = part.params(_CONTENT_TYPE) or {}
         except multipart.AmbiguousHeaders:
             raise _Unreadable(AMBIGUOUS) from None
         if encoding is not None and encoding.lower() not in PLAIN_TRANSFER_ENCODINGS:

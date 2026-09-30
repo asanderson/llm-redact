@@ -89,6 +89,36 @@ def test_header_blocks_without_one_reading(block: bytes) -> None:
     _ambiguous(lambda: _part(block).header("content-type"))
 
 
+@pytest.mark.parametrize(
+    "block",
+    [
+        b'Content-Type: application/json\n\n{"file": {"name": "files/a"}}',
+        b"Content-Type: text/plain\nX-Other: 1",
+        b"Content-Type: text/plain\rX-Other: 1",
+        b"Content-Type: text/plain\x00",
+        b"Content-Type: text/\x0bplain",
+        b"Content-Type: text/plain\x7f",
+        b'Content-Type: text/plain; charset="utf-8\n"',
+        b"X-Other: \x1f\r\nContent-Type: text/plain",
+    ],
+    ids=["lf-blank-line", "bare-lf", "bare-cr", "nul", "vt", "del", "lf-quoted", "other-line"],
+)
+def test_a_control_in_any_header_line_has_no_single_reading(block: bytes) -> None:
+    # A reader accepting a bare LF (or CR) as a line break ends the header
+    # block where this one does not: what follows would be the part's
+    # content there, never read as such here.
+    part = _part(block)
+    _ambiguous(lambda: part.header("content-type"))
+    _ambiguous(lambda: part.params("content-type"))
+
+
+def test_a_tab_is_the_one_control_a_header_line_carries() -> None:
+    part = _part(b'Content-Type:\ttext/plain;\tcharset="utf-8\t"')
+    assert part.header("content-type") == b'text/plain;\tcharset="utf-8\t"'
+    params = part.params("content-type")
+    assert params is not None and params["charset"].value == "utf-8\t"
+
+
 def test_a_malformed_line_anywhere_poisons_every_lookup() -> None:
     part = _part(b"Content-Type: text/plain\r\ngarbage")
     _ambiguous(lambda: part.header("content-type"))

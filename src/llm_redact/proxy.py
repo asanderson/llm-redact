@@ -108,6 +108,7 @@ from llm_redact.plugin_api import (
     Router,
     RouteRefusal,
     Telemetry,
+    UploadInspector,
     UpstreamAuth,
     UpstreamAuthError,
 )
@@ -120,7 +121,11 @@ from llm_redact.providers.attribution import (
     unattributed_reason,
     under,
 )
-from llm_redact.providers.base import VerbatimFieldRedacted, prepare_route_request
+from llm_redact.providers.base import (
+    InspectedUpload,
+    VerbatimFieldRedacted,
+    prepare_route_request,
+)
 from llm_redact.providers.custom import build_custom_adapters, custom_prefix
 from llm_redact.realtime import (
     ALL_WS_ADAPTERS,
@@ -140,7 +145,14 @@ from llm_redact.registry import get_registry, loaded_plugins, pro_package_instal
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent, SSEParser, serialize
 from llm_redact.upload_content import classify_file
-from llm_redact.upload_view import read_upload
+from llm_redact.upload_inspection import (
+    BinaryValuesDetected,
+    Limits,
+    inspect_parts,
+    inspector_limits,
+    judge,
+)
+from llm_redact.upload_view import read_upload, read_upload_metadata
 from llm_redact.vault import Vault, VaultManager, run_batched
 from llm_redact.vault_crypto import key_source as vault_key_source
 from llm_redact.vault_crypto import require_vault_key_source
@@ -180,6 +192,11 @@ _REQUEST_USER: ContextVar[str | None] = ContextVar("llm_redact_user", default=No
 _OBJECT_ACCESS_FAULT = (
     "llm-redact: the stored-object ownership check failed; the request was not forwarded"
 )
+# The realtime twin: the close reason when the session router's per-frame
+# check fails or answers something other than a reason (fits a close frame's
+# 123 bytes), and the bookkeeping stage that counts it.
+REALTIME_FRAME_FAULT = "llm-redact: the realtime frame check failed; the frame was not forwarded"
+REALTIME_FRAME_STAGE = "realtime_frame"
 # A listed item the session router failed to answer for (its call raised):
 # delivered exactly as the provider sent it, never restored in a session.
 _UNANSWERED = object()
@@ -549,6 +566,9 @@ class ProxyState:
         # test of this flag and no observation code runs.
         self._response_observer = getattr(self.session_router, "response_observer", None)
         self.observes_responses = self._response_observer is not None
+        # Optional per-frame realtime check (plugin_api.SessionRouter), read
+        # ONCE: a relay reads `checks_realtime_frames` once per connection.
+        self._realtime_frame_refusal = getattr(self.session_router, "realtime_frame_refusal", None)
         self._static_context = RequestContext(
             config.vault.session, self.vault, self.redactor, self.rehydrator
         )
@@ -660,6 +680,20 @@ class ProxyState:
         # the authorizer that signs its requests with the proxy's own cloud
         # identity. Empty unless configured; the Free default fails closed.
         self.upstream_auth: dict[str, UpstreamAuth] = _build_upstream_auths(config.providers)
+        # Binary upload parts (PDFs, Office documents) read as text for the
+        # core to scan (plugin_api.UploadInspector, llm-redact-pro): None
+        # keeps the unscanned-binary rules. Restart-only (its config section
+        # is the plugin's): built once with the resolved tier, its declared
+        # bounds read once (upload_inspection.inspector_limits).
+        self.upload_inspector: UploadInspector | None = registry.build_upload_inspector(
+            config, self.license.tier
+        )
+        self.inspection_limits: Limits | None = (
+            inspector_limits(self.upload_inspector) if self.upload_inspector is not None else None
+        )
+        # Inspected binary upload parts by (provider, outcome) — an honesty
+        # counter like unscanned_uploads (upload_inspection.OUTCOMES).
+        self.inspected_uploads: Counter[tuple[str, str]] = Counter()
 
     async def admit(self, conn: HTTPConnection, surface: str) -> Admission:
         """The access gate's verdict (it scrubs its own credentials from the
@@ -858,6 +892,38 @@ class ProxyState:
         # Any other non-None answer refuses; only a non-empty string is
         # the router's own (fixed) reason.
         return verdict if isinstance(verdict, str) and verdict else _OBJECT_ACCESS_FAULT
+
+    @property
+    def checks_realtime_frames(self) -> bool:
+        """Whether the session router checks realtime client frames at all
+        (the optional ``realtime_frame_refusal``)."""
+        return self._realtime_frame_refusal is not None
+
+    def realtime_frame_refusal(
+        self, adapter_name: str, path: str, frame: Any, *, identity: bool, session_id: str
+    ) -> str | None:
+        """The session router's refusal of one parsed realtime client frame
+        (optional ``realtime_frame_refusal``), or None. A router that raises
+        or answers anything but None or a non-empty string refuses — the
+        frame check's fault is counted (bookkeeping stage
+        ``realtime_frame``) and logged by exception or answer TYPE only: a
+        check that cannot answer must not wave the frame through."""
+        check = self._realtime_frame_refusal
+        if check is None:
+            return None
+        try:
+            verdict = check(adapter_name, path, frame, identity=identity, session_id=session_id)
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            fault = type(exc).__name__
+        else:
+            if verdict is None or (isinstance(verdict, str) and verdict):
+                return verdict
+            fault = f"answered {type(verdict).__name__}"
+        self.bookkeeping_errors[REALTIME_FRAME_STAGE] += 1
+        logger.warning(
+            "WS %s -> session router realtime_frame_refusal failed (%s); closing", path, fault
+        )
+        return REALTIME_FRAME_FAULT
 
     def object_lister(
         self,
@@ -2057,6 +2123,13 @@ async def _handle_local(
                 # client's own key ([detection] binary_uploads = "forward"),
                 # by provider — never a name or a byte of them.
                 "unscanned_uploads_total": dict(state.unscanned_uploads),
+                # Binary upload file parts an upload inspector read as text,
+                # by provider and outcome (upload_inspection.OUTCOMES):
+                # "clean" ones went out after a clean scan of their
+                # EXTRACTED text only ("clean_refused": scanned clean, but
+                # the upload was refused). Counts only.
+                "inspected_uploads_total": _inspected_by_provider(state.inspected_uploads),
+                "upload_inspector": _inspector_status(state),
                 # How many browser origins the operator listed in
                 # allowed_origins (the count, not the list): pages there can
                 # read restored values back through the proxy — opt-in.
@@ -2200,6 +2273,7 @@ async def _handle_local(
                 bookkeeping_errors=state.bookkeeping_errors,
                 connections_closed=state.connections.closed,
                 unscanned_uploads=state.unscanned_uploads,
+                inspected_uploads=state.inspected_uploads,
             ),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
@@ -2288,6 +2362,33 @@ async def _handle_local(
 # and the pro dashboard's config editor and preview).
 _CONFIG_BODY_LIMIT = 1024 * 1024
 CSRF_HEADER = "x-llm-redact-csrf"
+
+
+def _inspected_by_provider(counts: Counter[tuple[str, str]]) -> dict[str, dict[str, int]]:
+    """``inspected_uploads`` as /status reports it: provider -> outcome -> count."""
+    nested: dict[str, dict[str, int]] = {}
+    for (provider, outcome), count in sorted(counts.items()):
+        nested.setdefault(provider, {})[outcome] = count
+    return nested
+
+
+def _inspector_status(state: ProxyState) -> dict[str, Any]:
+    """The /status ``upload_inspector`` block: off, or the core's bounds
+    and the inspector's own metadata (a fault there is reported by type,
+    never raised into /status)."""
+    inspector, limits = state.upload_inspector, state.inspection_limits
+    if inspector is None or limits is None:
+        return {"enabled": False}
+    block: dict[str, Any] = {
+        "enabled": True,
+        "timeout_seconds": limits.timeout,
+        "max_part_bytes": limits.max_bytes,
+    }
+    try:
+        block["inspector"] = inspector.status()
+    except Exception as exc:  # noqa: BLE001 — metadata only, never fatal
+        block["inspector"] = {"status_error": type(exc).__name__}
+    return block
 
 
 def _allowed_hostnames(state: ProxyState) -> set[str]:
@@ -2928,11 +3029,14 @@ def _content_encoded(headers: Headers) -> bool:
 
 
 def _ownership_body(
+    adapter: ProviderAdapter,
+    path: str,
     headers: Headers,
     body: bytes,
     parsed: Any,
     *,
     proxy_credential: bool,
+    scanned: bool,
     max_body_bytes: int,
     max_parts: int,
 ) -> tuple[Any, bytes | None, _Unreadable | None]:
@@ -2949,9 +3053,17 @@ def _ownership_body(
     credential — the lines of an uploaded batch file are requests the
     provider runs later, with the credential the upload is sent with, and a
     form field can name a file; whether the route redacts (``detection``)
-    changes nothing here. (A pass-through route is never sent with the
-    proxy's credential — refused before the body is read — so its body is
-    never read for the check.) Wherever such a body reaches this check the
+    changes nothing here. A single-request upload whose first part is the
+    created file's JSON metadata (``adapter.upload_metadata_boundary``: the
+    Gemini API's multipart/related upload) is read as the metadata object
+    — the create's body, which can choose the file's name — and, like a
+    JSON body, one it cannot read is refused wherever the scanned-body rule
+    holds (``scanned``: redaction applies, or the proxy's credential is
+    spent), not only under the proxy's credential; with the client's own
+    key and ``detection = false`` it goes out unchecked, as such a JSON
+    body does. (A pass-through route is never sent with the proxy's
+    credential — refused before the body is read — so its body is never
+    read for the check.) Wherever such a body reaches this check the
     scanned-body rule (``_unscanned_body``) has already refused a content
     coding, a repeated Content-Type and an upload over the parts cap under
     the proxy's credential; the check keeps those refusals of its own, so
@@ -2963,7 +3075,9 @@ def _ownership_body(
             return None, None, _Unreadable(400, "the request carries more than one Content-Type")
     if parsed is not None:
         return parsed, None, None
-    boundary = parse_multipart_boundary(headers.get("content-type", ""))
+    content_type = headers.get("content-type", "")
+    metadata_boundary = adapter.upload_metadata_boundary(path, content_type)
+    boundary = metadata_boundary or parse_multipart_boundary(content_type)
     if boundary is None:
         return None, None, None
     if body.count(b"\r\n--" + boundary) > max_parts:
@@ -2975,7 +3089,11 @@ def _ownership_body(
             413, f"the upload has more parts than llm-redact max_body_strings ({max_parts})"
         )
         return None, None, too_many if proxy_credential else None
-    view = read_upload(body, boundary, max_json_bytes=max_body_bytes, max_lines=max_parts)
+    view = (
+        read_upload_metadata(body, boundary)
+        if metadata_boundary is not None
+        else read_upload(body, boundary, max_json_bytes=max_body_bytes, max_lines=max_parts)
+    )
     unreadable = None
     if view.oversized:
         unreadable = _Unreadable(
@@ -2991,9 +3109,25 @@ def _ownership_body(
     elif view.problem is not None:
         unreadable = _Unreadable(400, view.problem)
     if unreadable is not None:
+        if proxy_credential:
+            return None, None, unreadable
+        if metadata_boundary is not None and scanned:
+            # The client's own key where redaction applies: a file create's
+            # metadata is refused unread exactly as a JSON body the proxy
+            # cannot read is (the scanned-body rule) — a provider reading it
+            # leniently could otherwise choose a file name nobody checked.
+            return (
+                None,
+                None,
+                unreadable._replace(
+                    message=f"{unreadable.message}, and the stored objects a file create"
+                    " names must be checked",
+                    credential_bound=False,
+                ),
+            )
         # With the client's own credential the upload goes out as the route
         # sends it, unread (the provider authorizes the client).
-        return None, None, unreadable if proxy_credential else None
+        return None, None, None
     if view.normalized is not None and _reclassified(body, view.normalized, boundary):
         # The re-serialized body is what redaction then reads: a part it
         # would read as something else (a text file turned "binary" goes out
@@ -3341,6 +3475,76 @@ def _credential_protocol_refused(
         "%s %s -> 403 protocol not served with a credential the proxy holds", request.method, path
     )
     return JSONResponse(adapter.error_body(message, status=403), status_code=403)
+
+
+async def _inspect_upload(
+    state: ProxyState,
+    request: Request,
+    adapter: ProviderAdapter,
+    path: str,
+    body: bytes,
+    boundary: bytes,
+    redactor: Redactor,
+    *,
+    provider_name: str,
+    identity: bool,
+    max_body_bytes: int,
+    outcomes: Counter[str],
+) -> tuple[InspectedUpload | None, dict[str, int]]:
+    """An upload's binary file parts read as text by the upload inspector
+    and judged (``upload_inspection``): the adapter's reading of ``body``
+    (parsed and classified once, every part's headers checked) with the
+    parts cleared to go out byte-identical — None when the route reads no
+    file parts — and the token floors of the extracted texts (a placeholder
+    a file carries inside a compressed stream bounds this request's new
+    numbers). Each part's outcome is added to ``outcomes`` — counted by the
+    caller once it knows whether the upload went out
+    (``_count_inspections``). Raises BlockedRequest or BinaryValuesDetected
+    for a value found in an extracted text, and what reading the upload
+    raises (UnredactableRequest, TooManyStrings) — all before anything is
+    written or sent."""
+    inspector = state.upload_inspector
+    limits = state.inspection_limits
+    assert inspector is not None and limits is not None
+    reading = adapter.read_multipart(path, body, boundary, redactor.charge)
+    if reading is None:
+        return None, {}
+    parts = reading.binary_parts()
+    if not parts:
+        return InspectedUpload(reading), {}
+    results = await inspect_parts(
+        inspector, parts, provider=provider_name, identity=identity, limits=limits
+    )
+    verdict = judge(results, redactor, identity=identity, text_budget=max_body_bytes)
+    outcomes.update(verdict.outcomes)
+    # Counts and outcomes only — never a file name, a type found or content.
+    logger.info(
+        "%s %s inspected %d binary upload file part(s): %s",
+        request.method,
+        path,
+        len(parts),
+        " ".join(f"{outcome}={count}" for outcome, count in sorted(verdict.outcomes.items())),
+    )
+    if verdict.blocked is not None:
+        raise BlockedRequest(verdict.blocked)
+    if verdict.detected:
+        raise BinaryValuesDetected(verdict.detected)
+    return InspectedUpload(reading, verdict.cleared), verdict.floors
+
+
+def _count_inspections(
+    state: ProxyState, provider_name: str, outcomes: Counter[str], *, sent: bool
+) -> None:
+    """One upload's inspected binary parts into ``inspected_uploads``, once
+    its fate is known: ``clean`` only when the upload went out (``sent``) —
+    a part that scanned clean in an upload the proxy refused (a value in
+    another part, a block, a header rule, a credential the proxy holds that
+    the inspection did not allow) is ``clean_refused``, never reported as
+    forwarded."""
+    for outcome, count in outcomes.items():
+        if outcome == "clean" and not sent:
+            outcome = "clean_refused"
+        state.inspected_uploads[(provider_name, outcome)] += count
 
 
 def _plan_request(
@@ -3814,10 +4018,13 @@ async def handle(request: Request) -> Response:
         # credential. (A pass-through body is never read: under the proxy's
         # credential an unrecognized route was refused above.)
         check_body, checked_upload, unreadable = _ownership_body(
+            adapter,
+            path,
             request.headers,
             body_bytes,
             parsed,
             proxy_credential=proxy_credential,
+            scanned=proxy_credential or not detection_off,
             max_body_bytes=max_body_bytes,
             max_parts=max_body_strings,
         )
@@ -4059,38 +4266,71 @@ async def handle(request: Request) -> Response:
             # the client's own credential it is forwarded unscanned unless
             # [detection] binary_uploads = "refuse"; under a credential the
             # proxy holds it is never sent (the proxy vouches only for what
-            # it read). Counted once the upload was read in full.
+            # it read) — unless an upload inspector read it as text that
+            # scanned clean (below). Counted once the upload was read in
+            # full.
             binary_forwarded: list[int] = []
             forward_binary = (
                 binary_forwarded.append
                 if not proxy_credential and state.config.detection.binary_uploads == "forward"
                 else None
             )
+            # The body the stored-object check read, when it re-serialized a
+            # line repeating a key: every part — a text or binary file's too
+            # — then goes out as the check read it.
+            upload_body = checked_upload if checked_upload is not None else body_bytes
+            # This body's own copy, counting its strings (form fields, file
+            # names, JSONL lines, extracted texts) against max_body_strings.
+            upload_redactor = ctx.redactor.with_budget(max_body_strings)
+            # The inspected binary parts' outcomes, counted once the upload
+            # went out or was refused (finally, below).
+            inspection_outcomes: Counter[str] = Counter()
+            upload_sent = False
             try:
+                inspected: InspectedUpload | None = None
+                if state.upload_inspector is not None:
+                    # Before redaction, and awaited HERE — never inside the
+                    # vault batch below: the upload read once, its binary
+                    # parts read as text by the plugin and scanned (no
+                    # placeholder issued), the reading handed back.
+                    inspected, floors = await _inspect_upload(
+                        state,
+                        request,
+                        adapter,
+                        path,
+                        upload_body,
+                        boundary,
+                        upload_redactor,
+                        provider_name=provider_name,
+                        identity=proxy_credential,
+                        max_body_bytes=max_body_bytes,
+                        outcomes=inspection_outcomes,
+                    )
+                    upload_redactor = upload_redactor.with_floors(floors)
                 # One vault transaction for the whole upload (run_batched).
                 rewritten = run_batched(
                     ctx.vault,
                     functools.partial(
                         adapter.redact_multipart,
                         path,
-                        # The body the stored-object check read, when it
-                        # re-serialized a line repeating a key: every part —
-                        # a text or binary file's too — then goes out as
-                        # the check read it.
-                        checked_upload if checked_upload is not None else body_bytes,
+                        upload_body,
                         boundary,
-                        # This body's own copy, counting its strings (form
-                        # fields, file names, JSONL lines) against
-                        # max_body_strings.
-                        ctx.redactor.with_budget(max_body_strings),
+                        upload_redactor,
                         inject_note=note_wanted and adapter.wants_system_note(kind, path),
                         # The scanned-body rule, part by part: an unscanned
                         # piece refuses the whole request — a binary file
-                        # part only when forward_binary is None.
+                        # part only when forward_binary is None and the
+                        # inspection did not clear it.
                         require_scanned=True,
                         forward_binary=forward_binary,
+                        inspected=inspected,
                     ),
                 )
+                upload_sent = True
+            except BinaryValuesDetected as exc:
+                # Values the proxy would redact, inside a file it cannot
+                # rewrite: refused, naming their types only.
+                return refused_response(str(exc), adapter, "values in a binary upload")
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the
                 # whole request is rejected.
@@ -4120,6 +4360,8 @@ async def handle(request: Request) -> Response:
                     path=path,
                     started=started,
                 )
+            finally:
+                _count_inspections(state, provider_name, inspection_outcomes, sent=upload_sent)
             if rewritten is not None:
                 outbound = rewritten
             elif checked_upload is not None:
@@ -5215,7 +5457,7 @@ def _unchecked_body_refused(
         unreadable.status,
         "unchecked body under the proxy's credential"
         if unreadable.credential_bound
-        else "upload changed by the stored-object check's re-reading",
+        else "an upload the stored-object check cannot read as sent",
     )
     error = (
         adapter.error_body(message, status=unreadable.status)
@@ -5730,6 +5972,13 @@ def create_app(
             _close_upstream_auths(state.upstream_auth)
             if state.access_gate is not None:
                 state.access_gate.close()
+            if state.upload_inspector is not None:
+                # Its worker processes and HTTP clients; a fault closing them
+                # never stops the rest of the shutdown.
+                try:
+                    await state.upload_inspector.aclose()
+                except Exception:
+                    logger.exception("closing the upload inspector failed")
             if state.audit is not None:
                 state.audit.close()
             for task in background_tasks:

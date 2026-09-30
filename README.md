@@ -123,7 +123,9 @@ that cannot cover:
   are read by content: text files are redacted, but a binary file (a PDF,
   an image, an archive) sent with your own key is forwarded unscanned by
   default — counted in `/status`; `[detection] binary_uploads = "refuse"`
-  refuses it instead.
+  refuses it instead (llm-redact-pro can read PDFs and Office documents as
+  text first: a value found refuses the upload, a complete clean reading
+  sends the file).
 - **Anything you opt out of.** Warn-mode rules observe and *forward*
   the matched value; `[providers.NAME] detection = false`, MCP server
   exemptions, and language scoping likewise forward what they exempt.

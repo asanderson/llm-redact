@@ -392,7 +392,19 @@ silent:
   per request (path and count), in the `llm-redact status` posture block,
   and stated by `doctor`. `"refuse"` answers 400 instead. Under a
   credential the proxy holds a binary file part is always refused — the
-  proxy vouches only for what it read.
+  proxy vouches only for what it read. With an upload inspector
+  (`plugin_api.UploadInspector`, llm-redact-pro's document extractors) a
+  binary part is first read as text and scanned with the live detectors
+  (no placeholder issued): a value that would be redacted, or a block-mode
+  one, refuses the upload (400, types only); a COMPLETE reading that
+  scans clean sends the file byte-identical (with the client's own key
+  always, under a credential the proxy holds only when the inspector's
+  configuration allows it), counted `clean` in `inspected_uploads_total`
+  and a posture line. A clean scan covers the EXTRACTED text only: the
+  file goes out as sent, and what the extractor did not read — it must
+  report its reading incomplete then — was never scanned; the inspector
+  (and any extraction service it uses) sees the file. Anything not read
+  completely keeps the rules above.
 - `[detection.mcp] exempt_servers` exempts MCP content blocks addressed
   to named servers. Result blocks that cannot be correlated to an exempt
   server stay redacted (fail-closed).
@@ -444,7 +456,7 @@ row, is [resilience.md](resilience.md).
 | Provider-side inference | The provider can guess redacted content from context; only omission fixes that |
 | Length/timing side channels | Placeholder lengths differ from originals; smoothing them would break streaming |
 | Base64 media contents | Images can't leak through text regexes; PDF parsing would need heavy deps. Media blobs at their known positions (base64 `data`, Bedrock `source.bytes`) are not even scanned — scanning base64 finds nothing real, costs event-loop CPU, and could rewrite a token-shaped run inside an image |
-| Binary file uploads | The same non-goal for multipart uploads: a file part that is not text (by its content — a PDF, even an all-ASCII one, an image, an archive, a Latin-1 text) is never read or rewritten. With the client's own key it is forwarded unscanned by default (`[detection] binary_uploads`, counted and surfaced) or refused; under a credential the proxy holds it is refused |
+| Binary file uploads | The same non-goal for multipart uploads: a file part that is not text (by its content — a PDF, even an all-ASCII one, an image, an archive, a Latin-1 text) is never rewritten. With the client's own key it is forwarded unscanned by default (`[detection] binary_uploads`, counted and surfaced) or refused; under a credential the proxy holds it is refused. An upload inspector (llm-redact-pro) may read it as text first: a value found refuses the upload, a complete clean reading lets the file go out byte-identical — the scan covers the extracted text only |
 | Values a client deliberately encodes | base64 inside a JSON string: the proxy scans the bytes it receives. What the proxy could not read as its plain bytes is refused instead of forwarded wherever redaction applies (and under any credential the proxy holds): a `Content-Encoding` other than identity (415), a declared multipart Content-Transfer-Encoding or charset (400) |
 | Structural names | JSON object keys, header names and a multipart part's `name` are protocol, not content; values are scanned — string values, and an upload's `filename` / `filename*` |
 | Shapes the rules exclude | Bare-digit phones, street addresses, passport/DL numbers: collision-prone with no reliable grammar |

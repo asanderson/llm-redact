@@ -115,9 +115,36 @@ def test_an_upload_cites_its_json_lines_and_its_form_fields() -> None:
     )
 
 
-def test_a_part_with_no_header_block_is_no_field() -> None:
-    body = b"--XyZ\r\nno header block at all\r\n--XyZ--"
+@pytest.mark.parametrize(
+    "part",
+    [
+        pytest.param(b"\r\nan empty header block", id="empty-header-block"),
+        pytest.param(b"", id="empty"),
+    ],
+)
+def test_a_part_with_an_empty_header_block_is_no_field(part: bytes) -> None:
+    body = b"--XyZ\r\n" + part + b"\r\n--XyZ--"
     assert read_upload(body, BOUNDARY, max_json_bytes=100, max_lines=10_000) == UploadView([])
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        pytest.param(b"no header block at all", id="no-header-block"),
+        pytest.param(
+            b'Content-Disposition: form-data; name="file"; filename="in.jsonl"\n\n'
+            + json.dumps(_batch_line("file-a")).encode(),
+            id="lf-headers",
+        ),
+    ],
+)
+def test_a_part_without_a_header_block_or_an_empty_one_cannot_be_read(part: bytes) -> None:
+    # A reader accepting a bare LF as a line break may find a named file
+    # part in it (the lines of a batch file the check never read).
+    body = b"--XyZ\r\n" + part + b"\r\n--XyZ--"
+    assert read_upload(body, BOUNDARY, max_json_bytes=100, max_lines=10_000) == UploadView(
+        [], problem=AMBIGUOUS
+    )
 
 
 def test_a_line_repeating_a_key_is_read_as_the_provider_reads_it() -> None:
@@ -164,6 +191,20 @@ def test_a_rewritten_line_keeps_a_lone_surrogate_as_the_same_json_value() -> Non
             _form(_part(b'Content-Disposition: form-data; name="a"; name="b"', b"x")),
             AMBIGUOUS,
             id="ambiguous-disposition",
+        ),
+        pytest.param(
+            # A reader accepting a bare LF ends this header block after its
+            # first line: the rest would be a batch file's lines.
+            _form(
+                _part(
+                    b'Content-Disposition: form-data; name="file"; filename="in.jsonl"\r\n'
+                    b"Content-Type: application/jsonl\n\n"
+                    + json.dumps(_batch_line("file-a")).encode(),
+                    b"",
+                )
+            ),
+            AMBIGUOUS,
+            id="bare-lf-in-a-header-line",
         ),
         pytest.param(
             _form(_file(b"e30=", b"\r\nContent-Transfer-Encoding: base64")),

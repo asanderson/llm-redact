@@ -686,9 +686,6 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
     "llm_redact.eventstream.xǁEventStreamParserǁfeed__mutmut_49": (
         "error-msg-text: 'message CRC mismatch' XX-wrapped; match='message CRC' still matches."
     ),
-    "llm_redact.multipart.x_parse_boundary__mutmut_28": (
-        "codec-case: encode('ascii') to 'ASCII'; codec name normalized."
-    ),
     "llm_redact.placeholders.x_viable_prefix_start__mutmut_10": (
         "redundant-guard: disabling the early guillemet-close return; a closing "
         "guillemet in tail is in body and matches neither the body-char class nor "
@@ -741,21 +738,6 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "EventStreamError just as the original length-check would. Both paths "
         "raise the SAME exception type -> identical verbatim-degrade downstream; "
         "only the never-asserted message text differs."
-    ),
-    "llm_redact.upload_view.xǁ_Readerǁread__mutmut_11": (
-        "header name 'content-disposition' upper-cased: "
-        "MultipartPart.header/params look the name up lower-cased (name.lower()), "
-        "as header names are case-insensitive - the same header is found."
-    ),
-    "llm_redact.upload_view.xǁ_Readerǁread__mutmut_16": (
-        "header name 'content-type' upper-cased: MultipartPart.header/params look "
-        "the name up lower-cased (name.lower()), as header names are "
-        "case-insensitive - the same header is found."
-    ),
-    "llm_redact.upload_view.xǁ_Readerǁread__mutmut_6": (
-        "header name 'content-transfer-encoding' upper-cased: "
-        "MultipartPart.header/params look the name up lower-cased (name.lower()), "
-        "as header names are case-insensitive - the same header is found."
     ),
     "llm_redact.vault.x__retired_number__mutmut_7": (
         "SQL case change only: SQLite keywords, identifiers, and function names "

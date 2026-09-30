@@ -56,7 +56,12 @@ from llm_redact.jsonwalk import (
 )
 from llm_redact.placeholders import json_floors, may_carry_tokens, merge_floors, token_floors
 from llm_redact.providers.attribution import provider_markers
-from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
+from llm_redact.providers.base import (
+    SYSTEM_NOTE,
+    InspectedUpload,
+    ProviderAdapter,
+    RouteKind,
+)
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
@@ -376,6 +381,70 @@ def read_file_part(content: bytes, charge: Callable[[int], None]) -> _Reading:
     the JSONL check's per-line work)."""
     read = classify_file(content, charge=charge)
     return _Reading("document" if read.kind == "text" else read.kind, read)
+
+
+class PartsReading(NamedTuple):
+    """An upload as the part loop reads it (``ProviderAdapter.read_multipart``):
+    the parse and one ``_Reading`` per part, made once and shared by the
+    proxy's inspection of the binary file parts and the redaction."""
+
+    parsed: multipart.Multipart
+    readings: list[_Reading]
+
+    def binary_parts(self) -> list[tuple[int, multipart.MultipartPart]]:
+        return [
+            (index, part)
+            for index, (part, reading) in enumerate(
+                zip(self.parsed.parts, self.readings, strict=True)
+            )
+            if reading.kind == "binary"
+        ]
+
+    def require_plain_headers(self) -> None:
+        """Every part's headers as the part loop requires them when every
+        piece must be scanned (``_redact_part``): one reading of its file
+        names (the strict grammar) and plain encodings
+        (``_require_plain_encoding``). Checked before the proxy hands any
+        binary part to an upload inspector — which may send the file to a
+        service — so a request the redaction would refuse anyway sends
+        nothing anywhere. Raises UnredactableRequest."""
+        try:
+            for part, reading in zip(self.parsed.parts, self.readings, strict=True):
+                part.redact_filenames(_as_is, strict=True)
+                _require_plain_encoding(
+                    part,
+                    scanned=reading.kind not in ("media", "binary"),
+                    codec=reading.content.codec or "utf-8",
+                )
+        except multipart.AmbiguousHeaders as exc:
+            raise UnredactableRequest(str(exc)) from None
+
+
+def _as_is(text: str) -> str:
+    return text
+
+
+def checked_reading(reading: PartsReading | None) -> PartsReading | None:
+    """``reading`` (``ProviderAdapter.read_multipart``) once its part
+    headers passed ``PartsReading.require_plain_headers``."""
+    if reading is not None:
+        reading.require_plain_headers()
+    return reading
+
+
+def reading_of(inspected: InspectedUpload | None) -> PartsReading | None:
+    """The reading the proxy handed back with ``inspected`` — None when it
+    handed none (the body is then read afresh)."""
+    reading = None if inspected is None else inspected.reading
+    return reading if isinstance(reading, PartsReading) else None
+
+
+def uncleared_binaries(readings: Sequence[_Reading], cleared: frozenset[int]) -> int:
+    """How many binary file parts go out unscanned: every one the proxy did
+    not clear through its extracted text."""
+    return sum(
+        reading.kind == "binary" and index not in cleared for index, reading in enumerate(readings)
+    )
 
 
 def _read_part(
@@ -1042,6 +1111,7 @@ class OpenAIAdapter(ProviderAdapter):
         inject_note: bool,
         require_scanned: bool = False,
         forward_binary: Callable[[int], None] | None = None,
+        inspected: InspectedUpload | None = None,
     ) -> bytes | None:
         return self.redact_form_upload(
             path,
@@ -1052,24 +1122,27 @@ class OpenAIAdapter(ProviderAdapter):
             require_scanned=require_scanned,
             forward_binary=forward_binary,
             request_purposes=True,
+            inspected=inspected,
         )
 
-    def redact_form_upload(
+    def read_multipart(
+        self, path: str, body: bytes, boundary: bytes, charge: Callable[[int], None]
+    ) -> PartsReading | None:
+        return checked_reading(
+            self.read_form_upload(path, body, boundary, charge, require_scanned=True)
+        )
+
+    def read_form_upload(
         self,
         path: str,
         body: bytes,
         boundary: bytes,
-        redactor: Redactor,
+        charge: Callable[[int], None],
         *,
-        inject_note: bool,
         require_scanned: bool,
-        forward_binary: Callable[[int], None] | None,
-        request_purposes: bool,
-    ) -> bytes | None:
-        """``redact_multipart``'s form upload, shared with the other
-        providers' multipart/form-data Files upload: ``request_purposes``
-        says whether a ``purpose`` field can make JSONL lines requests
-        (``_REQUEST_LINE_KEYS``: the OpenAI Files API's only)."""
+    ) -> PartsReading | None:
+        """A multipart/form-data upload read for ``redact_form_upload``:
+        None outside the canonical grammar (forwarded verbatim)."""
         parsed = multipart.parse(body, boundary)
         if parsed is None:
             return None  # outside the canonical grammar: forward verbatim
@@ -1090,9 +1163,37 @@ class OpenAIAdapter(ProviderAdapter):
         # line, not per byte. A text file is one string (redact_text counts
         # it), a binary file none.
         readings = [
-            _read_part(part, media=media, require_scanned=require_scanned, charge=redactor.charge)
+            _read_part(part, media=media, require_scanned=require_scanned, charge=charge)
             for part in parsed.parts
         ]
+        return PartsReading(parsed, readings)
+
+    def redact_form_upload(
+        self,
+        path: str,
+        body: bytes,
+        boundary: bytes,
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        require_scanned: bool,
+        forward_binary: Callable[[int], None] | None,
+        request_purposes: bool,
+        inspected: InspectedUpload | None = None,
+    ) -> bytes | None:
+        """``redact_multipart``'s form upload, shared with the other
+        providers' multipart/form-data Files upload: ``request_purposes``
+        says whether a ``purpose`` field can make JSONL lines requests
+        (``_REQUEST_LINE_KEYS``: the OpenAI Files API's only)."""
+        # The proxy's reading of this same body when it inspected the
+        # upload's binary parts first (read_multipart), else read now.
+        upload = reading_of(inspected) or self.read_form_upload(
+            path, body, boundary, redactor.charge, require_scanned=require_scanned
+        )
+        if upload is None:
+            return None
+        parsed, readings = upload
+        cleared = inspected.cleared if inspected is not None else frozenset()
         if may_carry_tokens(body):
             # Token floors from the WHOLE upload before any part is redacted:
             # a token in a later line bounds the numbers an earlier line's
@@ -1102,14 +1203,14 @@ class OpenAIAdapter(ProviderAdapter):
         changed = False
         originals = [part.content for part in parsed.parts]
         try:
-            for part, reading in zip(parsed.parts, readings, strict=True):
+            for index, (part, reading) in enumerate(zip(parsed.parts, readings, strict=True)):
                 changed |= self._redact_part(
                     part,
                     reading,
                     redactor,
                     inject_note=inject_note,
                     require_scanned=require_scanned,
-                    forward_binary=forward_binary is not None,
+                    forward_binary=forward_binary is not None or index in cleared,
                     request_keys=request_keys,
                 )
         except multipart.AmbiguousHeaders as exc:
@@ -1117,9 +1218,10 @@ class OpenAIAdapter(ProviderAdapter):
             # header without a single reading is never signed.
             raise UnredactableRequest(str(exc)) from None
         record_raw_texts(parsed.parts, originals, readings)
-        binary = sum(reading.kind == "binary" for reading in readings)
+        binary = uncleared_binaries(readings, cleared)
         if binary and forward_binary is not None:
-            # Every piece was read or allowed: these go out unscanned.
+            # Every piece was read or allowed: these go out unscanned (a
+            # cleared one was read, through its extracted text).
             forward_binary(binary)
         return parsed.serialize() if changed else None
 

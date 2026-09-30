@@ -322,7 +322,18 @@ while the vault row is the secret store and is never exported.
   encoding, a form field that is not UTF-8 text, more JSON than
   `max_body_bytes`, more parts than `max_body_strings`) is refused under
   a proxy-held credential; with `detection = false` a line repeating a
-  key is sent re-serialized, exactly as checked.
+  key is sent re-serialized, exactly as checked. The Gemini API's
+  single-request upload (`multipart/related`: the file's JSON metadata,
+  then its media) is shown to the router as its metadata OBJECT — what
+  Google reads as the create's body, so a file name the upload CHOOSES is
+  judged before anything is sent, as the metadata-only JSON create's is.
+  The first part (declared `application/json`, or undeclared) is read
+  like a JSON body (strict UTF-8, the last
+  occurrence of a repeated key — the part then sent re-serialized, exactly
+  as checked — at most 128 levels deep); metadata it cannot read is
+  refused under a proxy-held credential and, with the client's own key,
+  wherever redaction applies (only `detection = false` with the client's
+  own key sends it unchecked, as an unparseable JSON body).
   llm-redact-pro refuses every such reference under a proxy-held
   credential (and, for a named user, a reference to an object no user is
   recorded creating), and in every mode anything but a pure read (a
@@ -336,6 +347,13 @@ while the vault row is the secret store and is never exported.
   that would redact a value there gets a recorded 403 before any upstream
   contact (a realtime connection is refused), so an empty session a
   router hands out for an object of unconfirmed ownership stays empty.
+  A realtime connection is one long request whose client frames can
+  cite the same objects: a router may check each of them
+  (`realtime_frame_refusal`) — every client frame that parses as JSON,
+  before it is redacted, numbered or sent, told the adapter, the path,
+  whether the connection spends the proxy's own identity and its
+  session — and a refusal closes the connection 1008 with the router's
+  fixed reason (recorded 403); a check that fails closes it too.
   On an OpenAI-shaped listing
   (`GET` files, batches, video jobs, stored chat completions — OpenAI,
   Azure and `/custom/<name>/` alike) the router may name the session

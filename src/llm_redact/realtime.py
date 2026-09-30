@@ -41,6 +41,12 @@ floor (``frame_floors`` of every client frame, raised before the frame is
 redacted): a new value is never numbered onto a token the conversation
 already holds — the per-request floor of the HTTP path, per connection.
 
+Frame checks: a session router with the optional ``realtime_frame_refusal``
+(llm-redact-pro: another user's stored object, a cloud storage location) is
+asked for every client frame that parses as JSON, before it is redacted or
+sent — the realtime twin of the HTTP ``object_access_refusal``. A refusal (or
+a failed check) closes the connection 1008, nothing of the frame sent.
+
 Reloads: a connection is served under the admission it was opened with
 (``RealtimeRelay``). A reload that changes it — the provider's settings, the
 authorizer that opened its upstream session, the detection policy — revokes
@@ -52,6 +58,7 @@ it reads after the swap under the configuration it was opened with.
 import asyncio
 import contextlib
 import functools
+import json
 import logging
 import threading
 import time
@@ -187,11 +194,14 @@ class WsAdapter:
         *,
         inject_note: bool = False,
         require_json: bool = False,
+        parsed: tuple[Any, bool] | None = None,
     ) -> str | bytes:
         """Rewrite one client frame. ``require_json`` (identity auth) turns
         the verbatim forward of a frame the adapter cannot walk into
         ``UnredactableRequest``: the proxy's own identity never carries an
-        unscanned frame."""
+        unscanned frame. ``parsed``: the frame's ``parse_client_frame``
+        result when the relay already has it (the session router's frame
+        check read it), so it is walked without a second parse."""
         return _unparsed_frame(data, require_json)
 
     def rehydrate_message(self, data: str | bytes, pool: RehydratorPool) -> list[str | bytes]:
@@ -346,8 +356,10 @@ class OpenAIRealtimeWs(WsAdapter):
         *,
         inject_note: bool = False,
         require_json: bool = False,
+        parsed: tuple[Any, bool] | None = None,
     ) -> str | bytes:
-        parsed = parse_client_frame(data)
+        if parsed is None:
+            parsed = parse_client_frame(data)
         if parsed is None:
             return _unparsed_frame(data, require_json)
         payload, was_binary = parsed
@@ -583,8 +595,10 @@ class GeminiLiveWs(WsAdapter):
         *,
         inject_note: bool = False,
         require_json: bool = False,
+        parsed: tuple[Any, bool] | None = None,
     ) -> str | bytes:
-        parsed = parse_client_frame(data)
+        if parsed is None:
+            parsed = parse_client_frame(data)
         if parsed is None:
             return _unparsed_frame(data, require_json)
         payload, was_binary = parsed
@@ -1476,9 +1490,13 @@ async def _relay(
     status: int | None = 101
     # Under the proxy's own identity a frame the adapter cannot walk is
     # refused, never relayed verbatim (the HTTP body rule). detection = false
-    # relays frames untouched: unlike an HTTP body, no ownership check reads
-    # a realtime frame, so there is nothing the opt-out could desynchronize.
+    # relays frames untouched — unless the session router checks frames
+    # (below): then what its check read is what is sent.
     require_json = upstream_auth is not None
+    # The session router's per-frame check (the optional
+    # realtime_frame_refusal, llm-redact-pro's stored-object and storage
+    # policy): asked for every client frame, read once per connection.
+    check_frames = state.checks_realtime_frames
 
     async def close_on_policy(reason: str, code: int = 1008) -> None:
         # The client FIRST: closing the upstream first lets upstream_to_client
@@ -1518,33 +1536,52 @@ async def _relay(
                 data = message["text"]
             else:
                 data = message.get("bytes") or b""
-            # The connection's running token floor, raised BEFORE this
-            # frame's values are numbered: the provider holds the whole
-            # conversation, so a token any earlier client frame carried is
-            # still in it (the client never resends history, as on HTTP).
-            # Upstream frames are not read: model output is provider-side
-            # history, as on HTTP (and a session echo carries the proxy's
-            # own note, whose «EMAIL_000» example is never issued anyway).
-            ctx.redactor = ctx.redactor.with_floors(frame_floors(data))
-            # Each client frame is a body of its own: redacted through a copy
-            # that counts its strings against max_body_strings (the frame
-            # cap, MAX_FRAME_BYTES, bounds bytes only).
-            frame_ctx = RequestContext(
-                ctx.session_id,
-                ctx.vault,
-                ctx.redactor.with_budget(state.config.max_body_strings),
-                ctx.rehydrator,
-            )
             try:
-                # [providers.NAME] detection = false applies to realtime
-                # frames too: forwarded untouched (rehydration inbound
-                # stays active), the same off-switch as the HTTP path.
-                outbound = (
-                    data
-                    if not provider_config.detection
-                    # One vault transaction per frame, committed before
-                    # the frame is sent (run_batched).
-                    else run_batched(
+                # The session router's frame check, FIRST and synchronously
+                # (still no await since the revoked check above): the frame
+                # as parsed — handed on to redaction, never parsed twice.
+                parsed = (
+                    _checked_frame(
+                        state,
+                        adapter,
+                        path,
+                        data,
+                        identity=require_json,
+                        session_id=ctx.session_id,
+                    )
+                    if check_frames
+                    else None
+                )
+                # The connection's running token floor, raised BEFORE this
+                # frame's values are numbered: the provider holds the whole
+                # conversation, so a token any earlier client frame carried
+                # is still in it (the client never resends history, as on
+                # HTTP). Upstream frames are not read: model output is
+                # provider-side history, as on HTTP (and a session echo
+                # carries the proxy's own note, whose «EMAIL_000» example is
+                # never issued anyway).
+                ctx.redactor = ctx.redactor.with_floors(frame_floors(data))
+                # Each client frame is a body of its own: redacted through a
+                # copy that counts its strings against max_body_strings (the
+                # frame cap, MAX_FRAME_BYTES, bounds bytes only).
+                frame_ctx = RequestContext(
+                    ctx.session_id,
+                    ctx.vault,
+                    ctx.redactor.with_budget(state.config.max_body_strings),
+                    ctx.rehydrator,
+                )
+                outbound: str | bytes
+                if not provider_config.detection:
+                    # [providers.NAME] detection = false applies to realtime
+                    # frames too: forwarded unredacted (rehydration inbound
+                    # stays active), the same off-switch as the HTTP path —
+                    # as the frame check read it when it read it (a repeated
+                    # key's earlier occurrence never leaves), else untouched.
+                    outbound = data if parsed is None else _dump_frame(*parsed)
+                else:
+                    # One vault transaction per frame, committed before the
+                    # frame is sent (run_batched).
+                    outbound = run_batched(
                         ctx.vault,
                         functools.partial(
                             adapter.redact_message,
@@ -1552,10 +1589,20 @@ async def _relay(
                             frame_ctx,
                             inject_note=state.config.inject_system_note,
                             require_json=require_json,
+                            parsed=parsed,
                         ),
                     )
-                )
                 await upstream.send(outbound)
+            except _FrameRefused as refused:
+                # The session router refused the frame (another user's stored
+                # object, a storage location, …) or its check failed: never
+                # redacted or sent, and the conversation cannot continue
+                # without it — closed 1008 with the router's fixed reason
+                # (never logged here); the row records the HTTP 403.
+                logger.info("WS %s -> refused (the session router's frame check)", path)
+                status = 403
+                await close_on_policy(refused.reason)
+                return
             except TooManyStrings as refused:
                 # Too many strings to redact in one frame: never relayed
                 # (1009, message too big); the row records the HTTP 413.
@@ -1666,6 +1713,44 @@ async def _relay(
         )
 
 
+class _FrameRefused(Exception):
+    """The session router's frame check refused a client frame (or failed):
+    ``reason`` is the close reason — the router's fixed text, or the core's
+    fault text — and is never logged."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("refused by the session router's frame check")
+        self.reason = reason
+
+
+def _checked_frame(
+    state: "ProxyState",
+    adapter: WsAdapter,
+    path: str,
+    data: str | bytes,
+    *,
+    identity: bool,
+    session_id: str,
+) -> tuple[Any, bool] | None:
+    """One client frame parsed and put to the session router's frame check
+    (``ProxyState.realtime_frame_refusal``): the parse (payload, was_binary)
+    it passed, or None for a frame that is not JSON — which the check cannot
+    read, so it is refused under the proxy's own identity
+    (``UnredactableRequest``, like a frame no adapter can walk) and relayed
+    as it came under the client's own key. A frame nesting too deep is
+    refused whatever the credential; a refusal raises ``_FrameRefused``."""
+    parsed = parse_client_frame(data)
+    if parsed is None:
+        _unparsed_frame(data, identity)
+        return None
+    refusal = state.realtime_frame_refusal(
+        adapter.name, path, parsed[0], identity=identity, session_id=session_id
+    )
+    if refusal is not None:
+        raise _FrameRefused(refusal)
+    return parsed
+
+
 def _unparsed_frame(data: str | bytes, require_json: bool) -> str | bytes:
     """A frame that is not JSON: forwarded byte-identically, or — under the
     proxy's own identity — refused (the frame KIND only, never its bytes)."""
@@ -1674,18 +1759,29 @@ def _unparsed_frame(data: str | bytes, require_json: bool) -> str | bytes:
     return data
 
 
+class _UnreadableJson(Exception):
+    """A frame the JSON parser refuses for a reason other than its syntax
+    (an integer past Python's int-digit limit): it may well be JSON, so it
+    is never treated as "not JSON" (which a client frame under the client's
+    own key is forwarded as, unread)."""
+
+
 def _parse_frame(data: str | bytes) -> tuple[Any, bool] | None:
     """(parsed, was_binary) when ``data`` is a JSON text/binary frame, None
-    when it is not JSON; JsonTooDeep when it nests deeper than
-    MAX_JSON_DEPTH (no walk could read it)."""
+    when it is not JSON (a syntax error, or a binary frame that is not
+    UTF-8); JsonTooDeep when it nests deeper than MAX_JSON_DEPTH and
+    _UnreadableJson when the parser refuses it otherwise (no walk could
+    read either)."""
     try:
         if isinstance(data, bytes):
             return loads_bounded(data.decode("utf-8")), True
         return loads_bounded(data), False
     except JsonTooDeep:
         raise
-    except (ValueError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+    except ValueError:
+        raise _UnreadableJson from None
 
 
 def parse_json_text(data: str | bytes) -> tuple[Any, bool] | None:
@@ -1696,23 +1792,27 @@ def parse_json_text(data: str | bytes) -> tuple[Any, bool] | None:
     goes through ``parse_client_frame``."""
     try:
         return _parse_frame(data)
-    except JsonTooDeep:
+    except (JsonTooDeep, _UnreadableJson):
         return None
 
 
 def parse_client_frame(data: str | bytes) -> tuple[Any, bool] | None:
     """``parse_json_text`` for a CLIENT frame: one nesting JSON too deep to
-    walk is refused (UnredactableRequest: closed 1008, recorded 400), never
-    forwarded unredacted as if it were not JSON. A parsed client frame is
-    ALWAYS re-serialized (``_dump_frame``), never forwarded as its original
-    bytes, so a repeated key's earlier occurrence (dropped by the parse,
-    never walked) cannot leave."""
+    walk, or one the parser refuses otherwise (an integer past the
+    int-digit limit), is refused (UnredactableRequest: closed 1008,
+    recorded 400 — the HTTP twin's answer), never forwarded unredacted as
+    if it were not JSON. A parsed client frame is ALWAYS re-serialized
+    (``_dump_frame``), never forwarded as its original bytes, so a repeated
+    key's earlier occurrence (dropped by the parse, never walked) cannot
+    leave."""
     try:
         return _parse_frame(data)
     except JsonTooDeep:
         raise UnredactableRequest(
             f"realtime frame nests JSON deeper than {MAX_JSON_DEPTH} levels"
         ) from None
+    except _UnreadableJson:
+        raise UnredactableRequest("realtime frame holds JSON llm-redact cannot read") from None
 
 
 def frame_floors(data: str | bytes) -> dict[str, int]:

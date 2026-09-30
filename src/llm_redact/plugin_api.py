@@ -224,6 +224,40 @@ class SessionRouter(Protocol):
     upstream's bytes and the client's: they must not block (no network
     I/O). A router without the member costs one attribute test per answer.
 
+    OPTIONAL ``realtime_frame_refusal(adapter_name, path, frame, *,
+    identity, session_id) -> str | None``: the realtime twin of
+    ``object_access_refusal``, asked synchronously for EVERY client frame
+    of a realtime connection (OpenAI Realtime, Azure OpenAI Realtime,
+    Gemini Live, Vertex AI Live) that parses as JSON — a text or a binary
+    frame — before anything of it is redacted or sent, whatever the
+    router's ``mode`` and whatever ``[providers.NAME] detection`` says. It
+    runs in the connection's own context, after the access gate admitted
+    it (what the gate set for the connection is visible). ``adapter_name``
+    is the realtime adapter's name (``openai-realtime``,
+    ``azure-realtime``, ``gemini-live``, ``vertex-live``), ``path`` the
+    connection's decoded path, ``frame`` the parsed JSON — exactly the
+    value then redacted and sent (never mutate it) — ``identity`` True when
+    the connection's upstream is authorized with the proxy's own cloud
+    identity (``[providers.NAME] auth = "identity"``), and ``session_id``
+    the vault session every frame of the connection is redacted into and
+    every answer restored from. A string closes the connection with 1008
+    and that text as the close reason (cut to 123 bytes: a FIXED, short
+    reason chosen by the router, never an id, a user name or content),
+    nothing of the frame sent, recorded as a 403; None lets the frame
+    through. An exception, or any answer but None or a non-empty string,
+    closes the connection 1008 with the core's own reason (fail closed:
+    counted as the ``realtime_frame`` bookkeeping stage, logged by
+    exception type only). While a router has the member, a frame the check
+    cannot read is refused (1008, recorded 400) even with ``detection =
+    false``: one nesting JSON too deep on every connection, one that is not
+    JSON on a connection under the proxy's own identity (a connection under
+    the client's own key relays it as it came, unchecked); and every checked
+    frame is sent re-serialized from the value the check read (a repeated
+    key's earlier occurrence never leaves). It runs on the event loop
+    between the client's bytes and the upstream's: it must not block (no
+    network I/O). A router without the member is never asked (one
+    attribute test per connection).
+
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the
     router refused it (a response must never move to another namespace) or
@@ -782,6 +816,97 @@ class UpstreamAuth(Protocol):
     def close(self) -> None: ...
 
 
+# --- upload inspection seam -----------------------------------------------------
+# A BINARY file part of an upload (a PDF, an Office document, an image —
+# ``upload_content.classify_file``) cannot be redacted: without an inspector
+# it is forwarded unscanned with the client's own key ([detection]
+# binary_uploads = "forward", counted) or refused. An ``UploadInspector``
+# (``Registry.build_upload_inspector``; llm-redact-pro's document extractors)
+# reads such a part as TEXT for the core to scan; the core alone decides
+# what happens to the part, with the request's live detectors.
+
+
+@dataclass(frozen=True)
+class UploadPart:
+    """One BINARY file part of an upload, as handed to
+    ``UploadInspector.inspect``: its bytes exactly as they would be
+    forwarded (never rewritten), the part's DECLARED media type (the
+    client's guess — a hint, never a verdict; None when absent or not a
+    plain ``type/subtype``), the provider adapter's name, and whether the
+    request would spend a credential the PROXY holds (``identity``, as for
+    ``SessionRouter.object_access_refusal``). The file name is never
+    passed. ``content`` is user data: an inspector must never log it or
+    put any of it in an exception message."""
+
+    content: bytes = field(repr=False)
+    content_type: str | None
+    provider: str
+    identity: bool
+
+
+@dataclass(frozen=True)
+class Inspection:
+    """An inspector's reading of one ``UploadPart``.
+
+    ``text`` is the text extracted from the file (None: nothing could be
+    extracted). ``complete`` claims that EVERY text-bearing element of the
+    file was read into ``text`` — each page's text layer, annotations,
+    form fields, metadata, every part of a document package — and that
+    nothing the provider could read as text was left unread: a page
+    without a text layer, an embedded image or an embedded document makes
+    a reading incomplete unless it was read (OCR) too. ``extractor`` names
+    the extractor(s) (metrics and logs only: a fixed name, never content).
+    ``proxy_credential``: whether a COMPLETE reading that scans clean may
+    also go out under a credential the proxy holds (the inspector's
+    configuration decides; the core never assumes it).
+
+    What the core does with it: any ``text`` is scanned with the request's
+    live detectors, placing NO placeholder (the file cannot be rewritten):
+    a block-mode value refuses the request (400, like any block), and so
+    does any value that would be redacted (400, naming its TYPES only); a
+    warn-mode value is counted and stays in the file. A complete reading
+    that scans clean lets the part go out byte-identical — with the
+    client's own key whatever ``[detection] binary_uploads`` says, under a
+    credential the proxy holds only with ``proxy_credential``. Anything
+    else (no text, incomplete, a clean incomplete reading) keeps the
+    core's rules for an unscanned binary part."""
+
+    text: str | None = field(repr=False)
+    complete: bool
+    extractor: str
+    proxy_credential: bool = False
+
+
+class UploadInspector(Protocol):
+    """Reads binary upload parts as text (``Registry.build_upload_inspector``).
+
+    ``inspect`` is awaited for each binary file part of an upload on a
+    route whose uploads the core redacts, BEFORE the request's redaction
+    and before any upstream contact, several parts of one request
+    concurrently (a bounded number at a time). It must never block the
+    event loop (parse hostile files in another process; reach an external
+    service asynchronously) and must honor cancellation: the core waits at
+    most ``timeout`` seconds (capped by the core) for ALL the parts of one
+    request, then cancels what is still running and treats those parts
+    as not read. An exception, or an answer that is not an ``Inspection``,
+    counts as not read too — nothing fails open. Parts larger than
+    ``max_bytes`` are never handed over.
+
+    ``status`` is the ``upload_inspector`` block of ``/status`` (metadata
+    only: formats, services, counters — never content or a credential).
+    ``aclose`` runs at shutdown (worker processes, HTTP clients).
+    """
+
+    timeout: float
+    max_bytes: int
+
+    async def inspect(self, part: UploadPart) -> Inspection: ...
+
+    def status(self) -> dict[str, Any]: ...
+
+    async def aclose(self) -> None: ...
+
+
 # --- vault database credential seam ---------------------------------------------
 # ``Registry.build_db_password(vault_config)`` returns one of these (or None
 # for the static password). The RDBMS vault store calls it synchronously at
@@ -857,6 +982,7 @@ __all__ = [
     "HopDecision",
     "HopRequest",
     "HopResult",
+    "Inspection",
     "LocalAnswer",
     "MAX_RESPONSE_ROWS",
     "RESPONSE_PRUNE_EVERY",
@@ -871,6 +997,8 @@ __all__ = [
     "SSEEvent",
     "SessionRouter",
     "Telemetry",
+    "UploadInspector",
+    "UploadPart",
     "UpstreamAuth",
     "UpstreamAuthError",
     "Vault",

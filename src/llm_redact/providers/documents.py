@@ -33,6 +33,7 @@ from llm_redact.providers.openai import (
     OpenAIAdapter,
     PartsReading,
     _multipart_floors,
+    checked_reading,
     read_file_part,
     reading_of,
     record_raw_texts,
@@ -54,8 +55,11 @@ def read_files_upload(
     body: bytes, boundary: bytes, charge: Callable[[int], None]
 ) -> PartsReading | None:
     """A multipart/form-data file upload read as ``redact_files_upload``
-    reads it, every piece required scanned (``read_multipart``)."""
-    return _FILES.read_form_upload(_FILES_PATH, body, boundary, charge, require_scanned=True)
+    reads it, every piece required scanned, its part headers checked
+    (``read_multipart``)."""
+    return checked_reading(
+        _FILES.read_form_upload(_FILES_PATH, body, boundary, charge, require_scanned=True)
+    )
 
 
 def redact_files_upload(

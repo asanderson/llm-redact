@@ -2086,7 +2086,8 @@ async def _handle_local(
                 # Binary upload file parts an upload inspector read as text,
                 # by provider and outcome (upload_inspection.OUTCOMES):
                 # "clean" ones went out after a clean scan of their
-                # EXTRACTED text only. Counts only.
+                # EXTRACTED text only ("clean_refused": scanned clean, but
+                # the upload was refused). Counts only.
                 "inspected_uploads_total": _inspected_by_provider(state.inspected_uploads),
                 "upload_inspector": _inspector_status(state),
                 # How many browser origins the operator listed in
@@ -3415,16 +3416,20 @@ async def _inspect_upload(
     provider_name: str,
     identity: bool,
     max_body_bytes: int,
+    outcomes: Counter[str],
 ) -> tuple[InspectedUpload | None, dict[str, int]]:
     """An upload's binary file parts read as text by the upload inspector
     and judged (``upload_inspection``): the adapter's reading of ``body``
-    (parsed and classified once) with the parts cleared to go out
-    byte-identical — None when the route reads no file parts — and the
-    token floors of the extracted texts (a placeholder a file carries
-    inside a compressed stream bounds this request's new numbers). Raises
-    BlockedRequest or BinaryValuesDetected for a value found in an
-    extracted text, and what reading the upload raises (UnredactableRequest,
-    TooManyStrings) — all before anything is written or sent."""
+    (parsed and classified once, every part's headers checked) with the
+    parts cleared to go out byte-identical — None when the route reads no
+    file parts — and the token floors of the extracted texts (a placeholder
+    a file carries inside a compressed stream bounds this request's new
+    numbers). Each part's outcome is added to ``outcomes`` — counted by the
+    caller once it knows whether the upload went out
+    (``_count_inspections``). Raises BlockedRequest or BinaryValuesDetected
+    for a value found in an extracted text, and what reading the upload
+    raises (UnredactableRequest, TooManyStrings) — all before anything is
+    written or sent."""
     inspector = state.upload_inspector
     limits = state.inspection_limits
     assert inspector is not None and limits is not None
@@ -3438,8 +3443,7 @@ async def _inspect_upload(
         inspector, parts, provider=provider_name, identity=identity, limits=limits
     )
     verdict = judge(results, redactor, identity=identity, text_budget=max_body_bytes)
-    for outcome, count in verdict.outcomes.items():
-        state.inspected_uploads[(provider_name, outcome)] += count
+    outcomes.update(verdict.outcomes)
     # Counts and outcomes only — never a file name, a type found or content.
     logger.info(
         "%s %s inspected %d binary upload file part(s): %s",
@@ -3453,6 +3457,21 @@ async def _inspect_upload(
     if verdict.detected:
         raise BinaryValuesDetected(verdict.detected)
     return InspectedUpload(reading, verdict.cleared), verdict.floors
+
+
+def _count_inspections(
+    state: ProxyState, provider_name: str, outcomes: Counter[str], *, sent: bool
+) -> None:
+    """One upload's inspected binary parts into ``inspected_uploads``, once
+    its fate is known: ``clean`` only when the upload went out (``sent``) —
+    a part that scanned clean in an upload the proxy refused (a value in
+    another part, a block, a header rule, a credential the proxy holds that
+    the inspection did not allow) is ``clean_refused``, never reported as
+    forwarded."""
+    for outcome, count in outcomes.items():
+        if outcome == "clean" and not sent:
+            outcome = "clean_refused"
+        state.inspected_uploads[(provider_name, outcome)] += count
 
 
 def _plan_request(
@@ -4187,6 +4206,10 @@ async def handle(request: Request) -> Response:
             # This body's own copy, counting its strings (form fields, file
             # names, JSONL lines, extracted texts) against max_body_strings.
             upload_redactor = ctx.redactor.with_budget(max_body_strings)
+            # The inspected binary parts' outcomes, counted once the upload
+            # went out or was refused (finally, below).
+            inspection_outcomes: Counter[str] = Counter()
+            upload_sent = False
             try:
                 inspected: InspectedUpload | None = None
                 if state.upload_inspector is not None:
@@ -4205,6 +4228,7 @@ async def handle(request: Request) -> Response:
                         provider_name=provider_name,
                         identity=proxy_credential,
                         max_body_bytes=max_body_bytes,
+                        outcomes=inspection_outcomes,
                     )
                     upload_redactor = upload_redactor.with_floors(floors)
                 # One vault transaction for the whole upload (run_batched).
@@ -4226,6 +4250,7 @@ async def handle(request: Request) -> Response:
                         inspected=inspected,
                     ),
                 )
+                upload_sent = True
             except BinaryValuesDetected as exc:
                 # Values the proxy would redact, inside a file it cannot
                 # rewrite: refused, naming their types only.
@@ -4259,6 +4284,8 @@ async def handle(request: Request) -> Response:
                     path=path,
                     started=started,
                 )
+            finally:
+                _count_inspections(state, provider_name, inspection_outcomes, sent=upload_sent)
             if rewritten is not None:
                 outbound = rewritten
             elif checked_upload is not None:

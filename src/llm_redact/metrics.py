@@ -196,7 +196,8 @@ class Metrics:
         lines.append(
             "# HELP llm_redact_inspected_uploads_total Binary file parts of uploads read as text"
             " by an upload inspector, by provider and outcome (clean: forwarded after a clean"
-            " scan of the EXTRACTED text only)."
+            " scan of the EXTRACTED text only; clean_refused: scanned clean, the upload"
+            " refused)."
         )
         lines.append("# TYPE llm_redact_inspected_uploads_total counter")
         for (provider, outcome), count in sorted((inspected_uploads or Counter()).items()):

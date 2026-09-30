@@ -31,9 +31,12 @@ What a clean scan covers is the EXTRACTED text only: the file itself is
 forwarded as sent, and whatever the extractor did not read (it says so
 through ``complete``) was never scanned.
 
-Outcomes, one per binary part, counted per provider
-(``/status`` ``inspected_uploads_total``,
-``llm_redact_inspected_uploads_total{provider,outcome}``): ``clean``,
+Outcomes, one per binary part, counted per provider once the upload went
+out or was refused (``/status`` ``inspected_uploads_total``,
+``llm_redact_inspected_uploads_total{provider,outcome}``): ``clean`` (sent
+byte-identical after a clean scan), ``clean_refused`` (scanned clean, but
+the upload was refused: a value in another part, a block, a header rule,
+a credential the proxy holds that the inspection did not allow),
 ``detected``, ``blocked``, ``incomplete`` (no text, a partial reading, or
 more text than the request's scan budget), ``not_inspected`` (larger than
 ``max_bytes`` or past ``MAX_INSPECTED_PARTS``), ``timeout``, ``error``.
@@ -64,7 +67,16 @@ MAX_INSPECT_SECONDS = 300.0
 INSPECT_CONCURRENCY = 4
 MAX_INSPECTED_PARTS = 16
 
-OUTCOMES = ("clean", "detected", "blocked", "incomplete", "not_inspected", "timeout", "error")
+OUTCOMES = (
+    "clean",
+    "clean_refused",
+    "detected",
+    "blocked",
+    "incomplete",
+    "not_inspected",
+    "timeout",
+    "error",
+)
 
 # A declared media type handed to the inspector: ``type/subtype`` tokens
 # only (RFC 6838 restricted names), lower-cased; anything else is None.

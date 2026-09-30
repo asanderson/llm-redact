@@ -40,8 +40,12 @@ and tags `vX.Y.Z`.
   inspection allows it; anything else (no text, an incomplete clean reading, a
   timeout, a fault) keeps the unscanned-binary rules. New `/status`
   `inspected_uploads_total` and `upload_inspector`,
-  `llm_redact_inspected_uploads_total{provider,outcome}`, a `llm-redact status`
-  posture line for clean forwards. A clean scan covers the extracted text only.
+  `llm_redact_inspected_uploads_total{provider,outcome}` (`clean` counts only parts
+  that went out; a clean part of a refused upload is `clean_refused`), a `llm-redact
+  status` posture line for clean forwards. Every part's headers are checked (file
+  names, transfer encodings, charsets) before any part is inspected, so an upload the
+  redaction would refuse is never handed to the inspector. A clean scan covers the
+  extracted text only.
 - `[detection] binary_uploads = "forward" | "refuse"` (default `"forward"`, hot):
   `"refuse"` keeps refusing binary uploads under the client's own key too. Forwarded
   binaries are surfaced: /status `unscanned_uploads_total`,

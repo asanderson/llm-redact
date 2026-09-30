@@ -406,7 +406,9 @@ async def test_bounded_concurrency_and_part_count(monkeypatch: pytest.MonkeyPatc
     assert app.state.proxy.unscanned_uploads == {"openai": 2}
 
 
-async def test_one_dirty_part_refuses_the_whole_upload(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_one_dirty_part_refuses_the_whole_upload(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     upstream = Upstream()
     inspector = FakeInspector(reads("clean"), scripts={_pdf("b"): reads(f"to {EMAIL}")})
     app = _app(monkeypatch, inspector, upstream)
@@ -415,10 +417,17 @@ async def test_one_dirty_part_refuses_the_whole_upload(monkeypatch: pytest.Monke
             "/v1/files", content=_form(_pdf("a"), _pdf("b"), _pdf("c")), headers=FORM
         )
     assert reply.status_code == 400 and upstream.requests == []
+    # The clean parts were not sent: never counted (nor reported) as
+    # forwarded after a clean scan.
     assert app.state.proxy.inspected_uploads == {
-        ("openai", "clean"): 2,
+        ("openai", "clean_refused"): 2,
         ("openai", "detected"): 1,
     }
+    from llm_redact.cli import _print_posture
+
+    async with _client(app) as client:
+        _print_posture((await client.get("/__llm-redact/status")).json())
+    assert "forwarded after a clean scan" not in capsys.readouterr().out
 
 
 async def test_the_extracted_text_is_bounded_by_the_body_caps(
@@ -496,6 +505,41 @@ async def test_an_unreadable_upload_is_refused_before_any_inspection(
     assert inspector.parts == [] and upstream.requests == []
 
 
+_CTE = b"Content-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\n"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A file part in an encoding the upstream would decode, unread.
+        _form(_pdf("a")).replace(b"Content-Type: application/pdf\r\n", _CTE),
+        # A scanned field declaring a charset the proxy does not decode.
+        _form(_pdf("a")).replace(
+            b'name="purpose"\r\n', b'name="purpose"\r\nContent-Type: text/plain; charset=koi8-r\r\n'
+        ),
+        # A file name without a single reading.
+        _form(_pdf("a")).replace(b'filename="report.pdf"', b"filename*=iso-8859-1''r%E9port.pdf"),
+        _form(_pdf("a")).replace(
+            b"Content-Type: application/pdf\r\n",
+            b'Content-Type: application/pdf\r\nContent-Disposition: form-data; name="x"\r\n',
+        ),
+    ],
+    ids=["transfer-encoding", "charset", "filename-charset", "repeated-disposition"],
+)
+async def test_a_part_the_redaction_refuses_is_never_inspected(
+    monkeypatch: pytest.MonkeyPatch, body: bytes
+) -> None:
+    # Checked before any part is handed over: an inspector may send a file
+    # to a service, and a request refused anyway must send nothing anywhere.
+    upstream, inspector = Upstream(), FakeInspector(reads("clean"))
+    app = _app(monkeypatch, inspector, upstream)
+    async with _client(app) as client:
+        reply = await client.post("/v1/files", content=body, headers=FORM)
+    assert reply.status_code == 400, reply.text
+    assert inspector.parts == [] and upstream.requests == []
+    assert app.state.proxy.inspected_uploads == {}
+
+
 # --- every other upload route ----------------------------------------------------------
 
 
@@ -563,6 +607,20 @@ async def test_every_upload_route_inspects_its_binary_parts(
     assert app.state.proxy.inspected_uploads == {(provider, "clean"): 1, (provider, "detected"): 1}
 
 
+@pytest.mark.parametrize("route", sorted(ROUTES))
+async def test_every_upload_route_checks_part_headers_before_inspection(
+    monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    path, headers, body, _ = ROUTES[route]
+    upstream, inspector = Upstream(), FakeInspector(reads("clean"))
+    app = _app(monkeypatch, inspector, upstream)
+    encoded = body(_pdf("a")).replace(b"Content-Type: application/pdf\r\n", _CTE)
+    async with _client(app) as client:
+        reply = await client.post(path, content=encoded, headers=headers)
+    assert reply.status_code == 400 and "Content-Transfer-Encoding" in reply.text
+    assert inspector.parts == [] and upstream.requests == []
+
+
 # --- under a credential the proxy holds ---------------------------------------------------
 
 
@@ -589,7 +647,8 @@ async def test_identity_forwards_a_clean_file_only_when_the_inspection_allows_it
         )
     (part,) = inspector.parts
     assert part.identity is True and part.provider == "azure"
-    assert app.state.proxy.inspected_uploads == {("azure", "clean"): 1}
+    outcome = "clean" if allowed else "clean_refused"
+    assert app.state.proxy.inspected_uploads == {("azure", outcome): 1}
     if allowed:
         assert reply.status_code == 200
         (sent,) = upstream.requests

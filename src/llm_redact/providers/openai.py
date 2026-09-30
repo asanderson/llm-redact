@@ -400,6 +400,37 @@ class PartsReading(NamedTuple):
             if reading.kind == "binary"
         ]
 
+    def require_plain_headers(self) -> None:
+        """Every part's headers as the part loop requires them when every
+        piece must be scanned (``_redact_part``): one reading of its file
+        names (the strict grammar) and plain encodings
+        (``_require_plain_encoding``). Checked before the proxy hands any
+        binary part to an upload inspector — which may send the file to a
+        service — so a request the redaction would refuse anyway sends
+        nothing anywhere. Raises UnredactableRequest."""
+        try:
+            for part, reading in zip(self.parsed.parts, self.readings, strict=True):
+                part.redact_filenames(_as_is, strict=True)
+                _require_plain_encoding(
+                    part,
+                    scanned=reading.kind not in ("media", "binary"),
+                    codec=reading.content.codec or "utf-8",
+                )
+        except multipart.AmbiguousHeaders as exc:
+            raise UnredactableRequest(str(exc)) from None
+
+
+def _as_is(text: str) -> str:
+    return text
+
+
+def checked_reading(reading: PartsReading | None) -> PartsReading | None:
+    """``reading`` (``ProviderAdapter.read_multipart``) once its part
+    headers passed ``PartsReading.require_plain_headers``."""
+    if reading is not None:
+        reading.require_plain_headers()
+    return reading
+
 
 def reading_of(inspected: InspectedUpload | None) -> PartsReading | None:
     """The reading the proxy handed back with ``inspected`` — None when it
@@ -1097,7 +1128,9 @@ class OpenAIAdapter(ProviderAdapter):
     def read_multipart(
         self, path: str, body: bytes, boundary: bytes, charge: Callable[[int], None]
     ) -> PartsReading | None:
-        return self.read_form_upload(path, body, boundary, charge, require_scanned=True)
+        return checked_reading(
+            self.read_form_upload(path, body, boundary, charge, require_scanned=True)
+        )
 
     def read_form_upload(
         self,

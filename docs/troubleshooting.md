@@ -116,7 +116,9 @@ Convert a Latin-1/Windows-1252 text file to UTF-8 to have it redacted.
 With llm-redact-pro's document extraction a PDF or Office file read
 completely as clean text is sent instead; one it could not read completely
 (a scanned page, an embedded image) keeps this refusal — `/status`
-`inspected_uploads_total` counts each part's outcome.
+`inspected_uploads_total` counts each part's outcome (`clean` only for a
+part that went out; `clean_refused` for one that read clean in an upload
+refused for another reason).
 
 ## "an uploaded binary file holds values it must redact (…, found in the file's extracted text)"
 

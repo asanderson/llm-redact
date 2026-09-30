@@ -38,7 +38,7 @@ from llm_redact.providers.documents import (
     redact_related_upload,
     rehydrate_download,
 )
-from llm_redact.providers.openai import PartsReading
+from llm_redact.providers.openai import PartsReading, checked_reading
 from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import Rehydrator, RehydratorPool, StreamingRehydrator
 from llm_redact.sse import SSEEvent
@@ -404,7 +404,7 @@ class GeminiAdapter(ProviderAdapter):
     def read_multipart(
         self, path: str, body: bytes, boundary: bytes, charge: Callable[[int], None]
     ) -> PartsReading | None:
-        return read_related_upload(body, boundary, charge)
+        return checked_reading(read_related_upload(body, boundary, charge))
 
     def redact_multipart(
         self,

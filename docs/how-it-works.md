@@ -359,7 +359,9 @@ while the vault row is the secret store and is never exported.
   connection (`realtime_server_frame`): every upstream frame that parses
   as JSON, as the provider sent it and before it is restored or sent —
   read-only, a fault contained — so it can record whose Live session a
-  resumption handle belongs to before the client can present it.
+  resumption handle belongs to before the client can present it. With
+  such a router every upstream frame (audio chunks included) is parsed
+  once more for it, CPU on the event loop only.
   On an OpenAI-shaped listing
   (`GET` files, batches, video jobs, stored chat completions — OpenAI,
   Azure and `/custom/<name>/` alike) the router may name the session

@@ -279,8 +279,12 @@ class SessionRouter(Protocol):
     (counted as the ``realtime_server_frame`` bookkeeping stage, logged by
     exception type only) and the frame is delivered as usual. It runs on
     the event loop between the upstream's bytes and the client's: it must
-    not block (no network I/O). A router without the member is never asked
-    and no frame is parsed for it (one attribute test per connection).
+    not block (no network I/O). The cost is one more JSON parse of every
+    upstream frame (audio chunks included) on the event loop — the
+    restoration parses the frame on its own — so an observer should return
+    at once for frames it does not care about. A router without the member
+    is never asked and no frame is parsed for it (one attribute test per
+    connection).
 
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the

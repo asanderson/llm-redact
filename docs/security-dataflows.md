@@ -59,7 +59,9 @@ deliberate scope decisions rather than gaps:
   the request carries the client's own key (the explicit, surfaced
   opt-out). On an identity connection a non-JSON realtime frame closes
   the connection 1008 unsent (other realtime connections relay non-JSON
-  frames as they came: the realtime APIs take JSON events only). The
+  frames as they came: the realtime APIs take JSON events only); a frame
+  that IS JSON but cannot be read — nesting too deep, or an integer past
+  the parser's digit limit — closes 1008 on every connection. The
   same fail-open principle degrades a corrupt Bedrock eventstream frame
   to verbatim pass-through: unrestored placeholders are safe; guessing at
   corrupt frames is not.

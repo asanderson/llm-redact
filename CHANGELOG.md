@@ -122,6 +122,12 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- A realtime client frame holding JSON the parser refuses for anything but its syntax
+  (an integer longer than Python's 4300-digit limit) counted as "not JSON", so under
+  the client's own key it was relayed as sent — neither redacted nor put to the session
+  router's frame check. It is now refused like a frame nesting too deep: closed 1008,
+  recorded 400 (the HTTP twin's answer). Upstream frames the proxy cannot read are
+  still forwarded as they came.
 - An upload refused part way through no longer records its text parts in the bounded
   memory of text uploads whose downloads are restored byte-exact, so refused requests
   cannot evict what accepted uploads recorded. That memory is per process: a JSON text

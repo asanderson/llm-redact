@@ -58,6 +58,7 @@ it reads after the swap under the configuration it was opened with.
 import asyncio
 import contextlib
 import functools
+import json
 import logging
 import threading
 import time
@@ -1758,18 +1759,29 @@ def _unparsed_frame(data: str | bytes, require_json: bool) -> str | bytes:
     return data
 
 
+class _UnreadableJson(Exception):
+    """A frame the JSON parser refuses for a reason other than its syntax
+    (an integer past Python's int-digit limit): it may well be JSON, so it
+    is never treated as "not JSON" (which a client frame under the client's
+    own key is forwarded as, unread)."""
+
+
 def _parse_frame(data: str | bytes) -> tuple[Any, bool] | None:
     """(parsed, was_binary) when ``data`` is a JSON text/binary frame, None
-    when it is not JSON; JsonTooDeep when it nests deeper than
-    MAX_JSON_DEPTH (no walk could read it)."""
+    when it is not JSON (a syntax error, or a binary frame that is not
+    UTF-8); JsonTooDeep when it nests deeper than MAX_JSON_DEPTH and
+    _UnreadableJson when the parser refuses it otherwise (no walk could
+    read either)."""
     try:
         if isinstance(data, bytes):
             return loads_bounded(data.decode("utf-8")), True
         return loads_bounded(data), False
     except JsonTooDeep:
         raise
-    except (ValueError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+    except ValueError:
+        raise _UnreadableJson from None
 
 
 def parse_json_text(data: str | bytes) -> tuple[Any, bool] | None:
@@ -1780,23 +1792,27 @@ def parse_json_text(data: str | bytes) -> tuple[Any, bool] | None:
     goes through ``parse_client_frame``."""
     try:
         return _parse_frame(data)
-    except JsonTooDeep:
+    except (JsonTooDeep, _UnreadableJson):
         return None
 
 
 def parse_client_frame(data: str | bytes) -> tuple[Any, bool] | None:
     """``parse_json_text`` for a CLIENT frame: one nesting JSON too deep to
-    walk is refused (UnredactableRequest: closed 1008, recorded 400), never
-    forwarded unredacted as if it were not JSON. A parsed client frame is
-    ALWAYS re-serialized (``_dump_frame``), never forwarded as its original
-    bytes, so a repeated key's earlier occurrence (dropped by the parse,
-    never walked) cannot leave."""
+    walk, or one the parser refuses otherwise (an integer past the
+    int-digit limit), is refused (UnredactableRequest: closed 1008,
+    recorded 400 — the HTTP twin's answer), never forwarded unredacted as
+    if it were not JSON. A parsed client frame is ALWAYS re-serialized
+    (``_dump_frame``), never forwarded as its original bytes, so a repeated
+    key's earlier occurrence (dropped by the parse, never walked) cannot
+    leave."""
     try:
         return _parse_frame(data)
     except JsonTooDeep:
         raise UnredactableRequest(
             f"realtime frame nests JSON deeper than {MAX_JSON_DEPTH} levels"
         ) from None
+    except _UnreadableJson:
+        raise UnredactableRequest("realtime frame holds JSON llm-redact cannot read") from None
 
 
 def frame_floors(data: str | bytes) -> dict[str, int]:

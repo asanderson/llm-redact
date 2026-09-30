@@ -350,3 +350,45 @@ async def test_a_router_without_the_member_is_never_asked(
         )
         is None
     )
+
+
+# JSON the parser refuses although it is JSON: an integer past Python's
+# int-digit limit (4300) raises a ValueError that is no JSONDecodeError.
+_BIG_INT = "1" * 4301
+
+
+@pytest.mark.parametrize("checked", [True, False], ids=["frame-check", "no-frame-check"])
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+async def test_a_frame_the_parser_refuses_is_refused_not_relayed_unread(
+    monkeypatch: pytest.MonkeyPatch, checked: bool, provider: str
+) -> None:
+    # Under the client's own key a frame that is NOT JSON is relayed as it
+    # came; this one is JSON no walk can read, so — like the HTTP body (400)
+    # and a frame nesting too deep — it is refused: it once went upstream
+    # neither checked nor redacted.
+    router = FrameRouter()
+    if checked:
+        _install(monkeypatch, router)
+    text = f'{{"type": "session.update", "note": "mail {EMAIL} {MARK}", "n": {_BIG_INT}}}'
+    frame = text.encode() if provider == "gemini" else text
+    async with Upstream() as fake:
+        with _serve(_config(provider, fake.url())) as proxy:
+            async with websockets.connect(f"ws://{proxy.host}{PATHS[provider]}") as client:
+                await client.send(frame)
+                closed = await _closed(client)
+            row = await _recent(proxy.host, lambda r: r["method"] == "WS")
+    assert closed is not None and closed.code == 1008 and "cannot read" in closed.reason
+    assert fake.received == [] and router.calls == []
+    assert row["status"] == 400
+
+
+async def test_an_upstream_frame_the_parser_refuses_is_forwarded_as_it_came() -> None:
+    # The upstream side keeps its rule: what the proxy cannot read goes to
+    # the client as it came (placeholders left in place), never an error.
+    text = f'{{"type": "response.done", "n": {_BIG_INT}, "note": "«EMAIL_001»"}}'
+    assert realtime.parse_json_text(text) is None
+    assert realtime.parse_json_text(text.encode()) is None
+    assert realtime.frame_floors(text) == {"EMAIL": 1}
+    # Not JSON at all is still "not JSON" (None), not a refusal.
+    assert realtime.parse_client_frame("not json") is None
+    assert realtime.parse_client_frame(b"\xff\xfe") is None

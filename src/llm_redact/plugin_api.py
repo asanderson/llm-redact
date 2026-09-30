@@ -224,6 +224,40 @@ class SessionRouter(Protocol):
     upstream's bytes and the client's: they must not block (no network
     I/O). A router without the member costs one attribute test per answer.
 
+    OPTIONAL ``realtime_frame_refusal(adapter_name, path, frame, *,
+    identity, session_id) -> str | None``: the realtime twin of
+    ``object_access_refusal``, asked synchronously for EVERY client frame
+    of a realtime connection (OpenAI Realtime, Azure OpenAI Realtime,
+    Gemini Live, Vertex AI Live) that parses as JSON — a text or a binary
+    frame — before anything of it is redacted or sent, whatever the
+    router's ``mode`` and whatever ``[providers.NAME] detection`` says. It
+    runs in the connection's own context, after the access gate admitted
+    it (what the gate set for the connection is visible). ``adapter_name``
+    is the realtime adapter's name (``openai-realtime``,
+    ``azure-realtime``, ``gemini-live``, ``vertex-live``), ``path`` the
+    connection's decoded path, ``frame`` the parsed JSON — exactly the
+    value then redacted and sent (never mutate it) — ``identity`` True when
+    the connection's upstream is authorized with the proxy's own cloud
+    identity (``[providers.NAME] auth = "identity"``), and ``session_id``
+    the vault session every frame of the connection is redacted into and
+    every answer restored from. A string closes the connection with 1008
+    and that text as the close reason (cut to 123 bytes: a FIXED, short
+    reason chosen by the router, never an id, a user name or content),
+    nothing of the frame sent, recorded as a 403; None lets the frame
+    through. An exception, or any answer but None or a non-empty string,
+    closes the connection 1008 with the core's own reason (fail closed:
+    counted as the ``realtime_frame`` bookkeeping stage, logged by
+    exception type only). While a router has the member, a frame the check
+    cannot read is refused (1008, recorded 400) even with ``detection =
+    false``: one nesting JSON too deep on every connection, one that is not
+    JSON on a connection under the proxy's own identity (a connection under
+    the client's own key relays it as it came, unchecked); and every checked
+    frame is sent re-serialized from the value the check read (a repeated
+    key's earlier occurrence never leaves). It runs on the event loop
+    between the client's bytes and the upstream's: it must not block (no
+    network I/O). A router without the member is never asked (one
+    attribute test per connection).
+
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the
     router refused it (a response must never move to another namespace) or

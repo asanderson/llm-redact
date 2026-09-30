@@ -347,6 +347,13 @@ while the vault row is the secret store and is never exported.
   that would redact a value there gets a recorded 403 before any upstream
   contact (a realtime connection is refused), so an empty session a
   router hands out for an object of unconfirmed ownership stays empty.
+  A realtime connection is one long request whose client frames can
+  cite the same objects: a router may check each of them
+  (`realtime_frame_refusal`) — every client frame that parses as JSON,
+  before it is redacted, numbered or sent, told the adapter, the path,
+  whether the connection spends the proxy's own identity and its
+  session — and a refusal closes the connection 1008 with the router's
+  fixed reason (recorded 403); a check that fails closes it too.
   On an OpenAI-shaped listing
   (`GET` files, batches, video jobs, stored chat completions — OpenAI,
   Azure and `/custom/<name>/` alike) the router may name the session

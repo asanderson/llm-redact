@@ -2145,7 +2145,7 @@ def decode_markup(data: bytes) -> tuple[str, bool]:
 def read_markup(data: bytes, reading: Reading) -> None:
     """Markup (see ``decode_markup``): its decoded source — tags,
     attributes, comments, scripts — its text with character references
-    resolved, and, as the RTF reader does, its raw bytes as Latin-1 (every
+    resolved, that text as a browser shows it, and, as the RTF reader does, its raw bytes as Latin-1 (every
     ASCII byte where it stands, whatever a multi-byte charset made of the
     bytes around it). Incomplete when not decoded exactly or when it
     inlines binary data."""
@@ -2157,8 +2157,14 @@ def read_markup(data: bytes, reading: Reading) -> None:
     parser = _MarkupText()
     parser.feed(text)
     parser.close()
-    reading.add("".join(parser.pieces))
-    reading.show(_SPACE_RUNS.sub("\n", "".join(parser.shown)).strip())
+    pieces = "".join(parser.pieces)
+    reading.add(pieces)
+    # The text as a browser shows it: a value split by a script, a style or
+    # a comment is whole only here (the scan covers every reading).
+    shown = "".join(parser.shown)
+    if shown not in pieces:
+        reading.add(shown)
+    reading.show(_SPACE_RUNS.sub("\n", shown).strip())
     if raw != text:
         reading.add(raw)
 

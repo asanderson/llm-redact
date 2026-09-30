@@ -458,3 +458,23 @@ async def test_a_converted_file_never_carries_one_number_for_two_values() -> Non
     assert b"text/plain" in headers and EMAIL.encode() not in sent
     assert "«EMAIL_001»".encode() in sent and "«EMAIL_002»".encode() in sent
     assert download.text == f"café «EMAIL_001» {EMAIL}"
+
+
+@pytest.mark.parametrize("between", [b"<script>x</script>", b"<style>x</style>", b"<!-- c -->"])
+async def test_a_value_a_browser_shows_joined_is_found(between: bytes) -> None:
+    # A browser shows "SSN 123-45-6789" (no script, style or comment in the
+    # line); the full reading alone once read "123-45-x6789", scanned clean
+    # and sent the file under binary_uploads = "refuse".
+    upstream = Upstream()
+    app = _app(upstream, convert=False, detection={"binary_uploads": "refuse"})
+    page = (
+        b'<html><head><meta charset="windows-1252"></head><body><p>caf\xe9 SSN 123-45-'
+        + between
+        + b"6789</p></body></html>"
+    )
+    async with _client(app) as client:
+        reply = await client.post(
+            "/v1/files", content=_upload(page, "page.html", "text/html"), headers=FORM
+        )
+    assert reply.status_code == 400 and "SSN" in reply.text and upstream.requests == []
+    assert app.state.proxy.inspected_uploads == {("openai", "detected"): 1}

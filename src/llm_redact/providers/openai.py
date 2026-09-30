@@ -298,14 +298,18 @@ def _request_line_keys(path: str, parsed: multipart.Multipart) -> frozenset[str]
     return _REQUEST_LINE_KEYS.get(purposes.pop().decode("latin-1"), frozenset())
 
 
-def _redact_line(obj: dict[str, Any], redactor: Redactor, request_keys: frozenset[str]) -> Any:
-    """One uploaded JSONL line redacted: the values under ``request_keys``
-    as the request bodies they are, every other value as data (no skip
-    set). Keys are never touched."""
+def _redact_line(
+    obj: dict[str, Any], redact: Callable[[str], str], request_keys: frozenset[str]
+) -> Any:
+    """One uploaded JSONL line redacted string by string (``redact``: the
+    redactor's ``redact_text``, or the proxy's block check ahead of it):
+    the values under ``request_keys`` as the request bodies they are (the
+    request walk, ``Redactor.redact_json``), every other value as data (no
+    skip set). Keys are never touched."""
     return {
-        key: redactor.redact_json({key: value})[key]
+        key: transform_strings({key: value}, redact)[key]
         if key in request_keys
-        else transform_all_strings(value, redactor.redact_text)
+        else transform_all_strings(value, redact)
         for key, value in obj.items()
     }
 
@@ -397,11 +401,14 @@ def read_file_part(content: bytes, charge: Callable[[int], None]) -> _Reading:
 
 class PartsReading(NamedTuple):
     """An upload as the part loop reads it (``ProviderAdapter.read_multipart``):
-    the parse and one ``_Reading`` per part, made once and shared by the
-    proxy's inspection of the binary file parts and the redaction."""
+    the parse, one ``_Reading`` per part and the top-level keys its JSONL
+    lines hold requests under (``_request_line_keys``; none: every line is
+    data), made once and shared by the proxy's inspection of the binary
+    file parts and the redaction."""
 
     parsed: multipart.Multipart
     readings: list[_Reading]
+    request_keys: frozenset[str] = frozenset()
 
     def binary_parts(self) -> list[tuple[int, multipart.MultipartPart]]:
         return [
@@ -438,10 +445,10 @@ class PartsReading(NamedTuple):
         any value is looked at, when every piece must be scanned: a form
         field that is not UTF-8 text (``_redact_text_part``) and a JSONL
         line that is no JSON object the walk reads — one nesting too deep
-        (``_redact_jsonl``). A refusal that needs the scan itself (a
-        block-mode value, the string budget, a sealed session, the vault)
-        still comes with the redaction, after any inspection. Raises
-        UnredactableRequest."""
+        (``_redact_jsonl``). A block-mode value is the proxy's check
+        (``require_unblocked``); what needs the redaction itself (the string
+        budget, a sealed session, the vault) still comes with it, after any
+        inspection. Raises UnredactableRequest."""
         for part, reading in zip(self.parsed.parts, self.readings, strict=True):
             if reading.kind == "text":
                 try:
@@ -453,6 +460,31 @@ class PartsReading(NamedTuple):
                 for line in part.content.split(b"\n")
             ):
                 raise UnredactableRequest(_LINE_NOT_OBJECT)
+
+    def require_unblocked(self, check: Callable[[str], str]) -> None:
+        """``check`` — the proxy's: it raises BlockedRequest for what a
+        block-mode rule refuses, or TooManyStrings — run over every string
+        the part loop will redact, as it reads them: each part's file names,
+        a form field, a text file as one text, a JSONL line's values (the
+        request walk under ``request_keys``, the rest as data), the
+        metadata's values. Run before any binary part is handed to an upload
+        inspector, so an upload a block-mode rule refuses is never handed to
+        one; read-only (the redaction issues and counts). The reading passed
+        ``require_plain_headers`` and ``require_readable``: one reading of
+        every file name, every form field UTF-8 text."""
+        for part, reading in zip(self.parsed.parts, self.readings, strict=True):
+            part.redact_filenames(check, strict=True)
+            if reading.kind == "text":
+                check(part.content.decode("utf-8"))
+            elif reading.kind == "document":
+                check(reading.content.text)
+            elif reading.kind == "jsonl":
+                for line in part.content.split(b"\n"):
+                    obj = _parse_request_line(line)[0]
+                    if obj is not None:
+                        _redact_line(obj, check, self.request_keys)
+            elif reading.metadata is not None:
+                transform_all_strings(reading.metadata.metadata, check)
 
 
 def _as_is(text: str) -> str:
@@ -1202,7 +1234,9 @@ class OpenAIAdapter(ProviderAdapter):
         self, path: str, body: bytes, boundary: bytes, charge: Callable[[int], None]
     ) -> PartsReading | None:
         return checked_reading(
-            self.read_form_upload(path, body, boundary, charge, require_scanned=True)
+            self.read_form_upload(
+                path, body, boundary, charge, require_scanned=True, request_purposes=True
+            )
         )
 
     def read_form_upload(
@@ -1213,9 +1247,12 @@ class OpenAIAdapter(ProviderAdapter):
         charge: Callable[[int], None],
         *,
         require_scanned: bool,
+        request_purposes: bool = False,
     ) -> PartsReading | None:
         """A multipart/form-data upload read for ``redact_form_upload``:
-        None outside the canonical grammar (forwarded verbatim)."""
+        None outside the canonical grammar (forwarded verbatim).
+        ``request_purposes``: whether a ``purpose`` field can make its JSONL
+        lines requests (``PartsReading.request_keys``)."""
         parsed = multipart.parse(body, boundary)
         if parsed is None:
             return None  # outside the canonical grammar: forward verbatim
@@ -1239,7 +1276,8 @@ class OpenAIAdapter(ProviderAdapter):
             _read_part(part, media=media, require_scanned=require_scanned, charge=charge)
             for part in parsed.parts
         ]
-        return PartsReading(parsed, readings)
+        request_keys = _request_line_keys(path, parsed) if request_purposes else frozenset()
+        return PartsReading(parsed, readings, request_keys)
 
     def redact_form_upload(
         self,
@@ -1258,22 +1296,29 @@ class OpenAIAdapter(ProviderAdapter):
         """``redact_multipart``'s form upload, shared with the other
         providers' multipart/form-data Files upload: ``request_purposes``
         says whether a ``purpose`` field can make JSONL lines requests
-        (``_REQUEST_LINE_KEYS``: the OpenAI Files API's only)."""
+        (``_REQUEST_LINE_KEYS``: the OpenAI Files API's only) — read with the
+        upload (``PartsReading.request_keys``), so the reading the proxy
+        hands back (``inspected``, from ``read_multipart``) carries the one
+        this adapter's redaction uses."""
         # The proxy's reading of this same body when it inspected the
         # upload's binary parts first (read_multipart), else read now.
         upload = reading_of(inspected) or self.read_form_upload(
-            path, body, boundary, redactor.charge, require_scanned=require_scanned
+            path,
+            body,
+            boundary,
+            redactor.charge,
+            require_scanned=require_scanned,
+            request_purposes=request_purposes,
         )
         if upload is None:
             return None
-        parsed, readings = upload
+        parsed, readings, request_keys = upload
         cleared = inspected.cleared if inspected is not None else frozenset()
         if may_carry_tokens(body):
             # Token floors from the WHOLE upload before any part is redacted:
             # a token in a later line bounds the numbers an earlier line's
             # values take (one batch file, one session, one output file).
             redactor = redactor.with_floors(_multipart_floors(parsed, readings))
-        request_keys = _request_line_keys(path, parsed) if request_purposes else frozenset()
         changed = False
         originals = [part.content for part in parsed.parts]
         try:
@@ -1364,7 +1409,7 @@ class OpenAIAdapter(ProviderAdapter):
                     raise UnredactableRequest(_LINE_NOT_OBJECT)
                 out.append(line)  # blank/binary/unparseable: byte-identical
                 continue
-            redacted = _redact_line(obj, redactor, request_keys)
+            redacted = _redact_line(obj, redactor.redact_text, request_keys)
             changed = redacted != obj
             if not changed and not duplicate_keys:
                 # Unchanged — and no repeated key whose earlier occurrence

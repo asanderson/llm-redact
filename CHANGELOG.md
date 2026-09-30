@@ -90,12 +90,15 @@ and tags `vX.Y.Z`.
   reader finds) and every scanned part's format (a form field that is not UTF-8 text,
   a JSONL line nesting too deep, the Gemini upload's metadata) are checked before any
   part is inspected, so an upload the redaction would refuse for its form is never
-  handed to the inspector. A refusal that needs the scan itself — a block-mode value
-  in another part or a file name, `max_body_strings`, a sealed session, a vault fault
-  — and a local refusal after redaction (no upstream configured, the upstream
-  authorizer) can still follow the inspection, and the `[audit] required` START row is
-  written after it: that guarantee covers upstream contact, and the inspector is not
-  the upstream. A clean scan covers the extracted text only.
+  handed to the inspector; with a rule in block mode, so is every string the
+  redaction will scan (file names, form fields, text and JSONL files, the Gemini
+  metadata) for a block-mode value, read-only and under its own `max_body_strings`
+  count. What needs the redaction itself — `max_body_strings` without a block-mode
+  rule, a sealed session, placeholder exhaustion, a vault fault — and a local refusal
+  after redaction (no upstream configured, the upstream authorizer) can still follow
+  the inspection, and the `[audit] required` START row is written after it: that
+  guarantee covers upstream contact, and the inspector is not the upstream. A clean
+  scan covers the extracted text only.
 - `[detection] binary_uploads = "forward" | "refuse"` (default `"forward"`, hot):
   `"refuse"` keeps refusing binary uploads under the client's own key too. Forwarded
   binaries are surfaced: /status `unscanned_uploads_total`,
@@ -200,6 +203,13 @@ and tags `vX.Y.Z`.
   them to an extraction service): those format checks now run before the inspection,
   with the header checks. The CHANGELOG and docs claimed more than that: they now state
   which refusals can still follow an inspection (see Added).
+- An upload refused for a block-mode value in another part or in a file name (an
+  address in a PDF's name, a text file or form field beside it) had its binary parts
+  handed to the upload inspector first. With a rule in block mode, every string the
+  redaction will scan is now checked for one before any part is inspected, exactly as
+  the redaction reads it (a batch line's request walk included), with nothing issued or
+  counted and its own `max_body_strings` count (`Redactor.blocked_type`,
+  `PartsReading.require_unblocked`).
 - An inspected upload part that scanned clean was counted `clean` ("forwarded after a
   clean scan") as soon as redaction returned, even when the proxy then refused the
   request without contacting the upstream (no upstream configured, the upstream

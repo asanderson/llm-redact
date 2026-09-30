@@ -198,12 +198,14 @@ covers the extracted text only; a part the inspector could not read
 completely (a scanned page, an embedded image), a timeout or a fault keeps
 the binary rules above. The inspector is handed a file only once the
 upload passed every refusal below that concerns its form (part headers, a
-form field that is not UTF-8, a JSONL line nesting too deep); a refusal
-that needs the scan itself (a block-mode value in another part or in a
-file name, `max_body_strings`, a sealed session), a local refusal after
-redaction (no upstream configured, the upstream authorizer) and the
-`[audit] required` START row can still come after it — the inspector is
-an operator-configured reader, not the upstream. A JSONL line
+form field that is not UTF-8, a JSONL line nesting too deep) and, with a
+rule in block mode, a check of every string the redaction will scan (file
+names, form fields, text and JSONL files) for a block-mode value; what
+needs the redaction itself (`max_body_strings` when no rule is in block
+mode, a sealed session, a vault fault), a local refusal after redaction
+(no upstream configured, the upstream authorizer) and the `[audit]
+required` START row can still come after it — the inspector is an
+operator-configured reader, not the upstream. A JSONL line
 nesting JSON deeper than 128 levels is refused (a JSONL reader would
 decode what no walk can read). Plain form fields (`purpose`, `user`,
 `size`, …) are scanned as UTF-8 text (a field that is not UTF-8 is

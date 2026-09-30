@@ -179,7 +179,7 @@ def redact_related_upload(
     if reading is None:
         return None
     # One reading per part, shared by the floor scan and the part loop.
-    parsed, readings = reading
+    parsed, readings, _ = reading  # its lines are data: no request keys
     cleared = inspected.cleared if inspected is not None else frozenset()
     if may_carry_tokens(body):
         redactor = redactor.with_floors(_multipart_floors(parsed, readings))

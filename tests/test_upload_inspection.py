@@ -627,6 +627,109 @@ async def test_readable_parts_beside_a_binary_one_are_inspected_and_redacted(
     assert EMAIL.encode() not in sent.content and _pdf("a") in sent.content
 
 
+BLOCK_EMAIL = DetectionConfig(modes=(("email", "block"),))
+
+
+def _field(name: str, value: bytes) -> bytes:
+    """A plain form field, to put ahead of a ``_form`` body."""
+    return (
+        b'--b\r\nContent-Disposition: form-data; name="'
+        + name.encode()
+        + b'"\r\n\r\n'
+        + value
+        + b"\r\n"
+    )
+
+
+def _batch_line(model: str) -> bytes:
+    body = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+    return json.dumps({"custom_id": "1", "method": "POST", "url": "/v1/x", "body": body}).encode()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _form(_pdf("a"), filename=f"from {EMAIL}"),
+        _form(f"contact {EMAIL}".encode(), _pdf("a")),
+        _field("user", EMAIL.encode()) + _form(_pdf("a")),
+        _form(b'{"note": "' + EMAIL.encode() + b'"}\n\n{"a": 1}', _pdf("a")),
+        # purpose user_data: a line is DATA, every value of it scanned.
+        _form(_batch_line(EMAIL), _pdf("a")),
+    ],
+    ids=["file-name", "text-file", "form-field", "jsonl-line", "data-line-model"],
+)
+async def test_a_block_mode_value_anywhere_refuses_before_inspection(
+    monkeypatch: pytest.MonkeyPatch, body: bytes
+) -> None:
+    # The inspector may send a file to a service: an upload a block-mode
+    # rule refuses — for a value in another part or in a file name — is
+    # refused before any binary part is handed over (it once was after).
+    upstream, inspector = Upstream(), FakeInspector(reads("clean"))
+    app = _app(monkeypatch, inspector, upstream, detection=BLOCK_EMAIL)
+    async with _client(app) as client:
+        reply = await client.post("/v1/files", content=body, headers=FORM)
+    assert reply.status_code == 400 and 'mode = "block"' in reply.json()["error"]["message"]
+    assert inspector.parts == [] and upstream.requests == []
+    state = app.state.proxy
+    assert state.inspected_uploads == {} and state.blocked_counts == {"EMAIL": 1}
+    assert state.detection_counts == {}  # nothing redacted, nothing issued
+
+
+async def test_the_block_check_reads_a_request_line_as_the_redaction_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # purpose batch: a line's body is a REQUEST, walked with the request
+    # walk's structural skips — a value the redaction never scans (the
+    # model name) refuses nothing before the inspection either.
+    upstream, inspector = Upstream(), FakeInspector(reads("clean"))
+    app = _app(monkeypatch, inspector, upstream, detection=BLOCK_EMAIL)
+    body = _form(_batch_line(EMAIL), _pdf("a")).replace(b"user_data", b"batch")
+    async with _client(app) as client:
+        reply = await client.post("/v1/files", content=body, headers=FORM)
+    assert reply.status_code == 200, reply.text
+    assert len(inspector.parts) == 1
+    (sent,) = upstream.requests
+    assert EMAIL.encode() in sent.content  # the structural model, as sent
+
+
+async def test_the_block_check_counts_nothing_the_redaction_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A rule in block mode makes the check run; a warn-mode value it reads
+    # is counted once — by the redaction — and nothing is issued twice.
+    upstream, inspector = Upstream(), FakeInspector(reads("clean"))
+    modes = (("email", "warn"), ("phone_number", "block"))
+    app = _app(monkeypatch, inspector, upstream, detection=DetectionConfig(modes=modes))
+    body = _form(f"mail {EMAIL} ssn 123-45-6789".encode(), _pdf("a"), filename=f"from {EMAIL}")
+    async with _client(app) as client:
+        reply = await client.post("/v1/files", content=body, headers=FORM)
+    assert reply.status_code == 200, reply.text
+    state = app.state.proxy
+    assert state.warn_counts == {"EMAIL": 3}  # two file names and the text, once each
+    assert state.recent[0]["warned"] == {"EMAIL": 3}
+    assert state.detection_counts == {"SSN": 1} and state.recent[0]["detections"] == {"SSN": 1}
+    assert b"\xc2\xabSSN_001\xc2\xbb" in upstream.requests[0].content
+
+
+async def test_the_block_check_walks_no_more_strings_than_the_redaction_may(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Its own budget of max_body_strings: over it, 413 before inspection
+    # (the redaction, charging the same strings, would refuse it too).
+    upstream, inspector = Upstream(), FakeInspector(reads("clean"))
+    many = json.dumps({"v": ["x"] * 20}).encode()
+    app = _app(monkeypatch, inspector, upstream, detection=BLOCK_EMAIL, max_body_strings=10)
+    async with _client(app) as client:
+        reply = await client.post("/v1/files", content=_form(many, _pdf("a")), headers=FORM)
+    assert reply.status_code == 413 and inspector.parts == [] and upstream.requests == []
+    # Without a rule in block mode there is no check: the redaction refuses,
+    # after the inspection.
+    app = _app(monkeypatch, inspector, upstream, max_body_strings=10)
+    async with _client(app) as client:
+        reply = await client.post("/v1/files", content=_form(many, _pdf("a")), headers=FORM)
+    assert reply.status_code == 413 and len(inspector.parts) == 1 and upstream.requests == []
+
+
 # --- every other upload route ----------------------------------------------------------
 
 
@@ -720,6 +823,22 @@ async def test_gemini_metadata_redaction_cannot_read_is_never_inspected(
     async with _client(app) as client:
         reply = await client.post(path, content=declared_text, headers=headers)
     assert reply.status_code == 400 and "application/json" in reply.text
+    assert inspector.parts == [] and upstream.requests == []
+
+
+@pytest.mark.parametrize("route", sorted(ROUTES))
+async def test_every_upload_route_checks_block_mode_before_inspection(
+    monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    # The address in the PDF's file name, or the Gemini upload's metadata.
+    path, headers, body, _ = ROUTES[route]
+    upstream, inspector = Upstream(), FakeInspector(reads("clean"))
+    app = _app(monkeypatch, inspector, upstream, detection=BLOCK_EMAIL)
+    named = body(_pdf("a")).replace(b'.pdf"', b" from " + EMAIL.encode() + b'"')
+    assert EMAIL.encode() in named
+    async with _client(app) as client:
+        reply = await client.post(path, content=named, headers=headers)
+    assert reply.status_code == 400 and "configured with mode" in reply.text
     assert inspector.parts == [] and upstream.requests == []
 
 

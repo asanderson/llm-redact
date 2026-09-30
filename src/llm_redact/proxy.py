@@ -139,6 +139,7 @@ from llm_redact.redactor import (
     BlockedRequest,
     PlaceholderLimitReached,
     Redactor,
+    StringBudget,
     TooManyStrings,
     UnredactableRequest,
 )
@@ -3509,6 +3510,7 @@ async def _inspect_upload(
     provider_name: str,
     identity: bool,
     max_body_bytes: int,
+    max_body_strings: int,
     outcomes: Counter[str],
     window: _CountWindow,
 ) -> tuple[InspectedUpload | None, dict[str, int]]:
@@ -3518,9 +3520,11 @@ async def _inspect_upload(
     parts cleared to go out byte-identical — None when the route reads no
     file parts — and the token floors of the extracted texts (a placeholder
     a file carries inside a compressed stream bounds this request's new
-    numbers). Each part's outcome is added to ``outcomes`` — counted by the
-    caller once it knows whether the upload went out
-    (``_count_inspections``). The inspection is the one await inside the
+    numbers). With a rule in block mode, every string the redaction will
+    scan is checked for one first (``_block_check``): an upload it refuses
+    is never handed to the inspector. Each part's outcome is added to
+    ``outcomes`` — counted by the caller once it knows whether the upload
+    went out (``_count_inspections``). The inspection is the one await inside the
     request's count ``window``: it restarts once the inspector returns,
     before the extracted texts are scanned (their warn-mode values are this
     request's). Raises BlockedRequest or BinaryValuesDetected
@@ -3536,6 +3540,10 @@ async def _inspect_upload(
     parts = reading.binary_parts()
     if not parts:
         return InspectedUpload(reading), {}
+    if redactor.blocks:
+        # The inspector may send a file to a service: a block-mode value in
+        # another part or a file name refuses the request before that.
+        reading.require_unblocked(_block_check(redactor, max_body_strings))
     results = await inspect_parts(
         inspector, parts, provider=provider_name, identity=identity, limits=limits
     )
@@ -3558,6 +3566,25 @@ async def _inspect_upload(
     if verdict.detected:
         raise BinaryValuesDetected(verdict.detected)
     return InspectedUpload(reading, verdict.cleared), verdict.floors
+
+
+def _block_check(redactor: Redactor, limit: int) -> Callable[[str], str]:
+    """``redactor``'s block-mode rules as a read-only check of one string
+    (``UploadReading.require_unblocked``): BlockedRequest (the type only)
+    for a string ``redact_text`` would refuse, nothing issued or counted.
+    Counted against a budget of its own of ``limit`` strings
+    (TooManyStrings, as the redaction — which charges the same strings
+    again — would refuse), so it never walks more than the redaction may."""
+    budget = StringBudget(limit)
+
+    def check(text: str) -> str:
+        budget.charge(1)
+        blocked = redactor.blocked_type(text)
+        if blocked is not None:
+            raise BlockedRequest(blocked)
+        return text
+
+    return check
 
 
 def _count_inspections(
@@ -4414,6 +4441,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                         provider_name=provider_name,
                         identity=proxy_credential,
                         max_body_bytes=max_body_bytes,
+                        max_body_strings=max_body_strings,
                         outcomes=inspection_outcomes,
                         window=window,
                     )

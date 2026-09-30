@@ -893,8 +893,7 @@ def _check_inspector_factory(report: _Report, config: Config) -> None:
     report.line(
         "PASS",
         "extraction",
-        f"a plugin's upload inspector ({type(inspector).__name__}) replaces the core's"
-        " extractors",
+        f"a plugin's upload inspector ({type(inspector).__name__}) replaces the core's extractors",
     )
     asyncio.run(inspector.aclose())
 

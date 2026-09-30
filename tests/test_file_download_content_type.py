@@ -14,6 +14,7 @@ the real app, per provider path.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 import httpx
@@ -145,3 +146,99 @@ async def test_a_downloaded_file_round_trips_whatever_its_content_type(
         download = await client.get(download_path, headers=headers)
     assert download.status_code == 200
     assert download.content == ORIGINAL
+
+
+PEM = (
+    "-----BEGIN PRIVATE KEY-----\n"
+    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n"
+    "-----END PRIVATE KEY-----"
+)
+
+
+@pytest.mark.parametrize("media_type", ["application/json", "application/octet-stream"])
+async def test_a_json_file_the_model_wrote_stays_valid_json(media_type: str) -> None:
+    # A pretty-printed JSON file a model wrote around a placeholder (not an
+    # upload this proxy redacted): a restored value that needs escaping (a
+    # PEM key's newlines) is JSON-escaped where it lands, formatting kept.
+    state: dict[str, str] = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/messages":
+            state["token"] = json.loads(request.content)["messages"][0]["content"]
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "model": "m",
+                    "stop_reason": "end_turn",
+                },
+            )
+        written = {"service": "x", state["token"]: "key", "private_key": state["token"]}
+        content = json.dumps(written, indent=2, ensure_ascii=False).encode()
+        return httpx.Response(200, content=content, headers={"content-type": media_type})
+
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        sent = await client.post(
+            "/v1/messages",
+            json={"model": "m", "max_tokens": 5, "messages": [{"role": "user", "content": PEM}]},
+            headers=_ANTHROPIC,
+        )
+        assert sent.status_code == 200 and state["token"] != PEM
+        download = await client.get("/v1/files/file_1/content", headers=_ANTHROPIC)
+    assert download.status_code == 200
+    restored = json.loads(download.content)
+    # Values and keys restored exactly; the indentation kept.
+    assert restored == {"service": "x", PEM: "key", "private_key": PEM}
+    assert download.content.startswith(b'{\n  "service": "x",\n')
+
+
+async def test_a_json_text_upload_is_byte_exact_while_remembered() -> None:
+    # A user's pretty-printed JSON text file, redacted as ONE text (the
+    # value as it appears in the source, escapes included): restored raw,
+    # byte for byte, while this process remembers the upload. Once
+    # forgotten (a restart), its download reads as JSON a model could have
+    # written: restored JSON-escaped — still valid JSON, the documented
+    # residual.
+    from llm_redact.providers import openai
+
+    original = b'{\n  "user": "CORP\\\\jdoe",\n  "n": 1.50\n}\n'
+    stored: dict[str, bytes] = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            boundary = request.headers["content-type"].split("boundary=")[1].encode()
+            parsed = parse(request.content, boundary)
+            assert parsed is not None
+            stored["file"] = parsed.parts[-1].content
+            return httpx.Response(200, json={"id": "file-1"})
+        return httpx.Response(
+            200, content=stored["file"], headers={"content-type": "application/json"}
+        )
+
+    config = parse_config({"detection": {"deny": ["CORP\\\\jdoe"]}}, "t")
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    body, content_type = _form(original)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        upload = await client.post(
+            "/v1/files", content=body, headers={**_OPENAI, "content-type": content_type}
+        )
+        assert upload.status_code == 200, upload.text
+        assert b"CORP" not in stored["file"]
+        remembered = await client.get("/v1/files/file-1/content", headers=_OPENAI)
+        saved = openai.RAW_TEXT_FILES
+        openai.RAW_TEXT_FILES = openai._RawTextFiles()
+        try:
+            forgotten = await client.get("/v1/files/file-1/content", headers=_OPENAI)
+        finally:
+            openai.RAW_TEXT_FILES = saved
+    assert remembered.content == original
+    assert json.loads(forgotten.content) == {"user": "CORP\\\\jdoe", "n": 1.5}
+    assert forgotten.content.endswith(b'\n  "n": 1.50\n}\n')

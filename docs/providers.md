@@ -198,14 +198,21 @@ or, on a part whose content is scanned, a declared charset other than
 the one its content decoded as — UTF-8/US-ASCII, or a UTF-16/32 text
 file's own (its Content-Type `charset`, or the RFC 7578 `_charset_`
 field). `GET /v1/files/{id}/content` reads a download the same way: a
-JSONL file is restored line by line as JSON, any other text file as one
-text (a value lands exactly as it was redacted, never JSON-escaped), and
-re-encoded as it came; a binary file is left untouched. A download is
-read this way whatever Content-Type the provider serves it with (a JSON
-file served as `application/json` included). A text upload that reads as
-JSON Lines only once redacted (a line was not valid JSON until its secret
-became a placeholder) is remembered by a digest of the bytes sent — the
-newest 1024, in the running process — and restored as the text it was. The image and mask parts of an image edit (and a video job's
+text file this proxy uploaded redacted as one text is remembered by a
+digest of the bytes sent — the newest 1024, in the running process — and
+restored as the text it was (a value lands exactly as it was redacted,
+never JSON-escaped, even when the file now reads as JSON); a JSONL file is
+restored line by line as JSON, every value of every line; any other text
+file that is ONE JSON document (a JSON file a model or code wrote around a
+placeholder) is restored over its source text with each restored value
+JSON-escaped, keys included and formatting kept, so it stays valid JSON;
+any other text file as one text; each re-encoded as it came; a binary file
+is left untouched. A download is read this way whatever Content-Type the
+provider serves it with (a JSON file served as `application/json`
+included). One residual: a JSON text upload the process no longer
+remembers (after a restart, or 1024 newer text uploads) is read like a
+file a model wrote — valid JSON, but a value whose source form held an
+escape (`\\`, `\n`) comes back escaped once more. The image and mask parts of an image edit (and a video job's
 reference image) are media — the documented non-goal, as base64 media in
 a JSON body — and are sent as they came (their filenames redacted).
 

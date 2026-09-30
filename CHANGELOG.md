@@ -113,6 +113,13 @@ and tags `vX.Y.Z`.
   redacts them (the download kept the request-body skip set, so a data file came back
   with placeholders under those keys). A batch output's tool-call `arguments` is still
   restored as JSON source.
+- A downloaded text file that is one JSON document (a JSON file a model or code wrote
+  around a placeholder, served as `application/json` or not) stays valid JSON: each
+  restored value is JSON-escaped where it lands, keys included and formatting kept (a
+  PEM key's newlines once landed raw inside a string). Raw restoration is kept for the
+  files it is right for: every text upload this process redacted as one text is now
+  remembered (by digest, newest 1024) and comes back byte-exact. A JSON text upload
+  no longer remembered (a restart) is read like a model-written file.
 - A connection re-check that swallows its own cancellation can no longer hold the
   periodic re-check pass open (and so stop every later re-check): the pass stops
   waiting at the timeout, closes the connection and abandons the check, instead of

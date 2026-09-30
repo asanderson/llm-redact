@@ -369,21 +369,13 @@ class _Reading(NamedTuple):
 
     kind: str
     content: FileContent = BINARY  # read only for "document"/"jsonl"
-    # Whether reading the file charged its line count (the JSONL check ran).
-    lines_charged: bool = False
 
 
 def read_file_part(content: bytes, charge: Callable[[int], None]) -> _Reading:
     """A file part read by its content (``classify_file``; ``charge`` bounds
     the JSONL check's per-line work)."""
-    charged: list[int] = []
-
-    def counted(lines: int) -> None:
-        charge(lines)
-        charged.append(lines)
-
-    read = classify_file(content, charge=counted)
-    return _Reading("document" if read.kind == "text" else read.kind, read, bool(charged))
+    read = classify_file(content, charge=charge)
+    return _Reading("document" if read.kind == "text" else read.kind, read)
 
 
 def _read_part(
@@ -484,16 +476,18 @@ BINARY_FILE = "an uploaded file is binary (not text llm-redact can redact)"
 
 
 class _RawTextFiles:
-    """The redacted bytes of the text files uploaded (redacted as ONE text)
-    that read as JSON Lines only once redacted — a line that was not a JSON
-    object (``{"user":"CORP\\jdoe"}``: an invalid escape) became one around
-    its placeholder. From its bytes alone such a download is a JSON Lines
-    file, whose restored values a provider-written file (a batch output)
-    needs JSON-escaped; this one needs them as they were redacted. Known by
-    the SHA-256 of the exact bytes sent (a provider returns a stored file as
-    it received it), the newest ``_MAX`` kept, in this process only: a
-    download the proxy no longer knows (a restart, older uploads) is read
-    by its bytes, JSON-escaping its restored values."""
+    """The redacted bytes of every text file uploaded redacted as ONE text,
+    its values replaced raw. From its bytes alone such a download may read
+    as JSON — a JSON Lines file (a line that was not a JSON object,
+    ``{"user":"CORP\\jdoe"}``: an invalid escape, became one around its
+    placeholder) or one JSON document — whose restored values a
+    provider-written file (a batch output, a JSON file a model wrote) needs
+    JSON-escaped; this one needs them exactly as they were redacted. Known
+    by the SHA-256 of the exact bytes sent (a provider returns a stored
+    file as it received it), the newest ``_MAX`` kept, in this process
+    only: a download the proxy no longer knows (a restart, older uploads)
+    is read by its bytes, JSON-escaping its restored values when it reads
+    as JSON."""
 
     _MAX = 1024
 
@@ -519,25 +513,43 @@ def rehydrate_text_file(
 ) -> bytes | None:
     """A downloaded file restored (None: left untouched), read the way an
     uploaded one is (``upload_content.classify_file``), per FILE: a binary
-    file stays untouched; a JSONL file (batch OUTPUT files, a JSONL upload
-    redacted line by line) is restored line by line as JSON; any other text
-    (a results CSV, a text file uploaded redacted as ONE text) is restored
-    as one text — a value lands exactly as it was redacted, never
-    JSON-escaped because a line happens to parse as JSON once it holds a
-    placeholder (a text upload that reads as JSON Lines once redacted is
-    known by its bytes: ``RAW_TEXT_FILES``). Re-encoded as it came. ``restore`` restores one parsed
-    JSON value (the adapter's non-streaming transform). Shared by every
-    provider's file download (OpenAI/Azure/custom, the Gemini API's,
-    Anthropic's)."""
+    file stays untouched; a text file this process uploaded redacted as ONE
+    text (known by its bytes: ``RAW_TEXT_FILES``) is restored as one text —
+    a value lands exactly as it was redacted, never JSON-escaped because
+    the file parses as JSON once it holds a placeholder; a JSONL file
+    (batch OUTPUT files, a JSONL upload redacted line by line) is restored
+    line by line as JSON; any other text that is ONE JSON document (a JSON
+    file a model or the provider wrote) is restored over its JSON source
+    text — formatting kept, keys included, a restored value JSON-escaped —
+    and any other text (a results CSV) as one text. Re-encoded as it came.
+    ``restore`` restores one parsed JSON value (the adapter's non-streaming
+    transform). Shared by every provider's file download
+    (OpenAI/Azure/custom, the Gemini API's, Anthropic's)."""
     content = classify_file(raw)
     if content.kind == "binary" or not may_carry_tokens(content.text):
         return None
-    if content.kind == "text" or raw in RAW_TEXT_FILES:
+    if raw in RAW_TEXT_FILES:
         text = rehydrator.rehydrate_text(content.text)
+        return content.encode(text) if text != content.text else None
+    if content.kind == "text":
+        text = (
+            rehydrator.rehydrate_json_source_text(content.text)
+            if _is_json_document(content.text)
+            else rehydrator.rehydrate_text(content.text)
+        )
         return content.encode(text) if text != content.text else None
     lines = content.text.split("\n")
     restored = [_rehydrate_file_line(line, rehydrator, restore) for line in lines]
     return content.encode("\n".join(restored)) if restored != lines else None
+
+
+def _is_json_document(text: str) -> bool:
+    """Whether ``text`` is ONE JSON document (nesting too deep is not read)."""
+    try:
+        loads_bounded(text)
+    except ValueError:
+        return False
+    return True
 
 
 def _rehydrate_file_line(line: str, rehydrator: Rehydrator, restore: Callable[[Any], Any]) -> str:
@@ -1137,13 +1149,9 @@ class OpenAIAdapter(ProviderAdapter):
             if redacted != text:
                 part.content = reading.content.encode(redacted)
                 changed = True
-                # Its lines are charged once: the check of the redacted
-                # file never parses more lines than the file has.
-                charge = None if reading.lines_charged else redactor.charge
-                if classify_file(part.content, charge=charge).kind == "jsonl":
-                    # Redacted as ONE text, yet it reads as JSON Lines now:
-                    # its download must be restored as the text it was.
-                    RAW_TEXT_FILES.record(part.content)
+                # Redacted as ONE text, values landing raw: its download
+                # is restored as the text it was (``rehydrate_text_file``).
+                RAW_TEXT_FILES.record(part.content)
         elif kind == "text":
             changed |= _redact_text_part(part, redactor, require_scanned=require_scanned)
         elif kind == "binary" and require_scanned and not forward_binary:

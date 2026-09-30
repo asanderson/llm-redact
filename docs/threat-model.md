@@ -295,6 +295,20 @@ own answer decides whether the page may read a response).
   and Origin checks to its one public origin, so a wider Host is never
   accepted without authentication. SCIM requests skip the Origin check
   (identity providers are not browsers) but keep the Host check.
+- An access gate admits a connection once, when it opens. A request lives
+  for one response, but a realtime WebSocket relay and the `/events` live
+  feed can stay open for hours, so the core keeps a record of each open one
+  along with the admission it was opened under. The gate can close the
+  ones belonging to a user, or opened by a credential or sign-in session
+  (an opaque grant the core only compares), the moment it revokes them. On
+  top of that, the core re-asks every open connection's admission every
+  `recheck_interval` seconds (30 by default) and closes each one that is no
+  longer admitted. A check that raises, times out or gives an answer that
+  makes no sense closes the connection too (fail closed). A closed relay
+  closes the client with 1008 and never forwards a frame it reads after the
+  revocation, and a closed feed simply ends. Streaming HTTP responses are
+  not cut: each is one answer to a request that was admitted when it was
+  made, and the next request is refused.
 - Status/metrics/audit — and the `/events` live feed, which streams the
   same rows `/recent` serves — expose **types and counts only**: never
   values, never placeholder ids, never allowlist contents (the

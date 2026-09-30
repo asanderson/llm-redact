@@ -12,7 +12,7 @@ plugin API contract — change it deliberately, never incidentally.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .providers.base import RouteKind
@@ -584,6 +584,13 @@ class Dashboard(Protocol):
 # unclaimed /u/... path is answered locally, never forwarded).
 
 
+# ``Admission.recheck``: asked again while a long-lived connection stays open
+# (see ``Admission``). True or None: still admitted; False, or a string (the
+# value-free reason the client is told), closes it. It may return an
+# awaitable of that verdict instead.
+ConnectionRecheck = Callable[[], "bool | str | None | Awaitable[bool | str | None]"]
+
+
 @dataclass(frozen=True)
 class Admission:
     """A gate's verdict on one connection.
@@ -592,6 +599,29 @@ class Admission:
     audit rows); ``refusal``, when set, makes the core refuse the request
     — a provider-shaped 403 on HTTP, an accept-then-close on WebSocket —
     with that message. Messages must never echo a presented credential.
+
+    Two fields matter only for the LONG-LIVED connections an admission
+    opens — a realtime WebSocket relay (surface ``"websocket"``) and the
+    dashboard's live-events stream (surface ``"dashboard"``) — which the
+    core records, with the admission's ``subject``, ``grant`` and
+    ``recheck``, for as long as they stay open (a request lives for one
+    response and is never re-checked):
+
+    - ``grant``: an opaque key naming the credential or sign-in session
+      that admitted the connection (for instance a digest of a per-user
+      key, or a web-session id — never the credential itself), so the gate
+      can later close exactly that credential's connections
+      (``ConnectionControl.close(grant=...)``). The core only compares it
+      for equality: it never interprets, logs, records or reports it.
+    - ``recheck``: asked again every ``recheck_interval`` seconds while the
+      connection is open (a ``ConnectionRecheck``). True or None keeps the
+      connection; False, or a string (a value-free reason for the client),
+      closes it. It may return an awaitable, which gets at most
+      min(recheck_interval, 10) seconds; an exception, a timeout or any
+      other answer CLOSES the connection (fail closed). It runs on the
+      event loop and must not block it: read cheap, current state (the
+      registry another process may have changed), never a network round
+      trip outside an awaitable.
     """
 
     subject: str | None = None
@@ -601,6 +631,11 @@ class Admission:
     # the gate's sign-in page. Ignored on every other surface and method,
     # and any other value is ignored (never an open redirect).
     redirect: str | None = None
+    # Connection bookkeeping, not part of the verdict: an admission compares
+    # (and prints) by subject, refusal and redirect alone — a recheck is a
+    # fresh closure each time, and a grant is never shown.
+    grant: str | None = field(default=None, compare=False, repr=False)
+    recheck: ConnectionRecheck | None = field(default=None, compare=False, repr=False)
 
 
 class AccessGate(Protocol):
@@ -624,24 +659,37 @@ class AccessGate(Protocol):
     upstream; the core stamps the security headers on its reply. ``close``
     runs at shutdown.
 
-    Three OPTIONAL members, read with ``getattr`` so a gate written before
-    them keeps working unchanged:
+    OPTIONAL members, read with ``getattr`` so a gate written before them
+    keeps working unchanged:
 
     - ``guards_dashboard: bool`` — when true, the core also calls
       ``admit(conn, "dashboard")`` for every reserved path except the
       monitoring probes (healthz, readyz, metrics) and the gate paths
       themselves, and refuses with a 403 — or, for a browser GET, a 303 to
       ``Admission.redirect`` — before answering it.
-    - ``public_origin() -> str | None`` — the ``scheme://host[:port]`` the
-      proxy is reached at from other machines (read once at startup). Its
-      host joins the loopback names the reserved endpoints' DNS-rebinding
-      check accepts, and exactly that origin passes the Origin check. Only
-      meaningful together with ``guards_dashboard``: the core ignores it
-      otherwise, so a wider Host is never accepted unauthenticated.
-    - ``bind_sessions(store: SessionStore) -> None`` — called once at
-      startup with the live vault's sessions, so a gate can drop the
+    - OPTIONAL ``public_origin() -> str | None`` — the
+      ``scheme://host[:port]`` the proxy is reached at from other machines
+      (read once at startup). Its host joins the loopback names the
+      reserved endpoints' DNS-rebinding check accepts, and exactly that
+      origin passes the Origin check. Only meaningful together with
+      ``guards_dashboard``: the core ignores it otherwise, so a wider Host
+      is never accepted unauthenticated.
+    - OPTIONAL ``bind_sessions(store: SessionStore) -> None`` — called once
+      at startup with the live vault's sessions, so a gate can drop the
       sessions of a user it deletes (whole sessions, through the running
       proxy's own vault manager, never a second connection).
+    - OPTIONAL ``bind_connections(control: ConnectionControl) -> None`` —
+      called once at startup with the handle to the proxy's open
+      long-lived connections (realtime relays, live-events streams), so the
+      gate can close a user's or a credential's connections the moment it
+      revokes them or signs them out (``Admission.grant``).
+    - ``recheck_interval: float`` — seconds between the core's re-checks
+      of every open long-lived connection's ``Admission.recheck`` (read
+      once at startup; default 30; anything but a number from 5 to 3600 is
+      a startup ConfigError). The re-check is the backstop for what the
+      gate cannot see happen in this process: a revocation another process
+      made in a shared registry, an identity provider deactivating a user,
+      a token or certificate expiring.
     """
 
     def admit(self, conn: HTTPConnection, surface: str) -> Admission | Awaitable[Admission]: ...
@@ -668,6 +716,30 @@ class SessionStore(Protocol):
     def session_ids(self) -> list[str]: ...
 
     def forget(self, session_ids: Iterable[str]) -> int: ...
+
+
+class ConnectionControl(Protocol):
+    """The proxy's open long-lived connections, as handed to
+    ``AccessGate.bind_connections``: realtime WebSocket relays and
+    dashboard live-events streams, each with the ``subject`` and ``grant``
+    of the admission that opened it.
+
+    ``close`` closes every open connection whose admission matches EVERY
+    selector given (at least one is required; a ValueError otherwise) and
+    returns how many it closed (none already closing are counted). A
+    realtime relay closes its client with 1008 and ``reason`` (cut to a
+    WebSocket close frame's 123 bytes; it must be value-free — never a
+    credential or a user's email) and its upstream with 1000; a
+    live-events stream ends (the dashboard reconnects and is admitted
+    again, or not). It is synchronous, never blocks, and is safe to call
+    from the event loop or from any other thread. A connection admitted
+    while the gate was revoking — between its own ``admit`` and the core
+    recording it — is caught by the next ``Admission.recheck``.
+    """
+
+    def close(
+        self, *, subject: str | None = None, grant: str | None = None, reason: str
+    ) -> int: ...
 
 
 # --- upstream authorization seam ----------------------------------------------
@@ -777,6 +849,8 @@ __all__ = [
     "Admission",
     "CliCommand",
     "ConfigSection",
+    "ConnectionControl",
+    "ConnectionRecheck",
     "Dashboard",
     "DashboardHost",
     "DbPasswordProvider",

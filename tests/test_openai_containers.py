@@ -3,13 +3,15 @@ holds may reach them (a routed operator key, Azure's identity auth on the
 v1 API).
 
 A container file upload rides the ``/v1/files`` multipart machinery
-(``redact_multipart``: the file part, its filename, every form field — what
-it cannot scan refuses the upload); a JSON create copies a stored file in
-(its ``file_id`` verbatim). The container file object echoes the filename
-in ``path`` (restored), and a download is restored like a Files API
-download: JSON-object lines only, every other byte as sent. A container's
-``name`` and starting ``file_ids`` are verbatim. Created containers and
-container files are reported to the session router.
+(``redact_multipart`` with ``upload_content.classify_file``: a JSONL or
+text file redacted, a binary one refused under a credential the proxy holds
+and forwarded unscanned with the client's own key); a JSON create copies a
+stored file in (its ``file_id`` verbatim). The container file object echoes
+the filename in ``path`` (restored), and a download is restored like a
+Files API download: a text file line by line, a binary file untouched. A
+container's ``name`` is a label, redacted and restored on every echo; its
+starting ``file_ids`` are verbatim. Created containers and container files
+are reported to the session router.
 """
 
 from __future__ import annotations
@@ -20,8 +22,10 @@ from typing import Any
 import httpx
 import pytest
 
+from llm_redact.config import Config, ProviderConfig
 from llm_redact.providers.azure_openai import AzureOpenAIAdapter
 from llm_redact.providers.openai import OpenAIAdapter
+from llm_redact.proxy import create_app
 from llm_redact.rehydrate import Rehydrator
 from llm_redact.vault import InMemoryVault
 from stored_objects import EMAIL, TOKEN, Routed
@@ -106,17 +110,20 @@ async def test_containers_are_served_under_an_operator_key(
         "/v1/containers/cntr_1/files",
         "/v1/containers/cntr_1/files/cfile_1",
         "/v1/containers/cntr_1/files/cfile_1/content",
+        "/v1/containers/cntr_1/files/cfile_9/content",
     ]
     routed = Routed(monkeypatch, host, paths)
     create = {
-        "name": "sandbox",
+        "name": f"box of {EMAIL}",
         "file_ids": [FILE],
         "expires_after": {"anchor": "last_active_at", "minutes": 20},
         "memory_limit": "4g",
     }
     created = await routed.send("POST", "/v1/containers", create)
     assert created.status_code == 200, created.text  # forwarded, not the 403
-    assert routed.provider.last_json() == create  # verbatim and structural as sent
+    # The name is a label: redacted (and restored below); the rest as sent.
+    assert routed.provider.last_json() == {**create, "name": f"box of {TOKEN}"}
+    assert created.json()["name"] == create["name"]
     assert routed.sessions.objects == [("cntr_1", "default")]
 
     line = json.dumps({"note": f"call {EMAIL}"}).encode()
@@ -144,16 +151,21 @@ async def test_containers_are_served_under_an_operator_key(
     one = await routed.send("GET", "/v1/containers/cntr_1/files/cfile_1")
     assert one.json()["path"] == f"/mnt/data/{EMAIL}.jsonl"
 
-    host.contents["cfile_1"] += b"\nplain text " + TOKEN.encode() + b"\n\x89PNG"
+    # A download is restored as a /v1/files download is: a text file line by
+    # line (a JSON line as JSON, any other line as text) ...
+    host.contents["cfile_1"] += b"\nplain text " + TOKEN.encode()
     content = await routed.send("GET", "/v1/containers/cntr_1/files/cfile_1/content")
     lines = content.content.split(b"\n")
-    assert json.loads(lines[0]) == {"note": f"call {EMAIL}"}  # a JSON line restored
-    # Every other byte as sent: text rehydration of non-JSON content comes
-    # with the uploads classifier; a placeholder left in place is safe.
-    assert lines[2] == b"plain text " + TOKEN.encode() and lines[3] == b"\x89PNG"
+    assert json.loads(lines[0]) == {"note": f"call {EMAIL}"}
+    assert lines[2] == b"plain text " + EMAIL.encode()
+    # ... and a binary file (one the code wrote: a PNG) left untouched.
+    png = b"\x89PNG\r\n\x1a\n" + TOKEN.encode() + b"\x00"
+    host.contents["cfile_9"] = png
+    image = await routed.send("GET", "/v1/containers/cntr_1/files/cfile_9/content")
+    assert image.content == png
 
     containers = await routed.send("GET", "/v1/containers")
-    assert containers.json()["data"][0]["name"] == "sandbox"
+    assert containers.json()["data"][0]["name"] == create["name"]
     assert routed.sessions.listed == ["cntr_1"]  # the container list is attributed
     assert (await routed.send("GET", "/v1/containers/cntr_1")).status_code == 200
     assert (await routed.send("DELETE", "/v1/containers/cntr_1/files/cfile_1")).status_code == 200
@@ -164,7 +176,6 @@ async def test_containers_are_served_under_an_operator_key(
 @pytest.mark.parametrize(
     ("path", "body", "field"),
     [
-        ("/v1/containers", {"name": f"box of {EMAIL}"}, "name"),
         ("/v1/containers", {"name": "box", "file_ids": [EMAIL]}, "file_ids"),
         ("/v1/containers/cntr_1/files", {"file_id": EMAIL}, "file_id"),
     ],
@@ -180,19 +191,52 @@ async def test_a_value_in_a_verbatim_field_refuses_the_request(
     assert routed.provider.requests == [] and routed.sessions.objects == []
 
 
-async def test_a_container_upload_llm_redact_cannot_scan_is_refused(
+PNG = b"\x89PNG\r\n\x1a\n" + EMAIL.encode() + b"\x00\x01"
+
+
+async def test_a_container_upload_follows_the_upload_content_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A container file upload is read like a /v1/files upload
+    (``upload_content.classify_file``): a text file is redacted as text,
+    and a binary file — never read — is refused under a credential the
+    proxy holds."""
     path = "/v1/containers/cntr_1/files"
     routed = Routed(monkeypatch, ContainerHost(), [path])
-    response = await routed.send(
-        "POST",
-        path,
-        content=_multipart("notes.txt", f"plain {EMAIL}\n".encode()),
-        headers={"content-type": f"multipart/form-data; boundary={BOUNDARY}"},
+    headers = {"content-type": f"multipart/form-data; boundary={BOUNDARY}"}
+    text = await routed.send(
+        "POST", path, content=_multipart("notes.txt", f"plain {EMAIL}\n".encode()), headers=headers
     )
-    assert response.status_code == 400
-    assert routed.provider.requests == [] and EMAIL not in response.text
+    assert text.status_code == 200, text.text
+    sent = routed.provider.requests[-1].content
+    assert EMAIL.encode() not in sent and b"plain " + TOKEN.encode() in sent
+    binary = await routed.send("POST", path, content=_multipart("plot.png", PNG), headers=headers)
+    assert binary.status_code == 400 and EMAIL not in binary.text
+    assert len(routed.provider.requests) == 1  # the binary upload never left
+
+
+async def test_a_binary_container_upload_with_the_clients_own_key_goes_unscanned() -> None:
+    """With the client's own key ([detection] binary_uploads = "forward",
+    the default) a binary container file goes out as sent, counted as an
+    unscanned upload."""
+    host = ContainerHost()
+    upstream = "https://api.openai.test"
+    config = Config(providers={**Config().providers, "openai": ProviderConfig(upstream)})
+    app = create_app(config, upstream_transport=httpx.MockTransport(host))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.post(
+            "/v1/containers/cntr_1/files",
+            content=_multipart("plot.png", PNG),
+            headers={
+                "authorization": "Bearer sk-client",
+                "content-type": f"multipart/form-data; boundary={BOUNDARY}",
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert host.contents["cfile_1"] == PNG
+    assert app.state.proxy.unscanned_uploads["openai"] == 1
 
 
 @pytest.mark.parametrize(
@@ -202,14 +246,18 @@ async def test_a_container_upload_llm_redact_cannot_scan_is_refused(
         (AzureOpenAIAdapter(), "/openai/v1/containers/cntr_1/files/cfile_1/content"),
     ],
 )
-def test_a_container_file_download_restores_json_lines(adapter: Any, path: str) -> None:
+def test_a_container_file_download_is_restored_like_a_files_download(
+    adapter: Any, path: str
+) -> None:
     vault = InMemoryVault()
     token = vault.placeholder_for("EMAIL", EMAIL)
     raw = json.dumps({"to": token}).encode() + b"\nraw " + token.encode()
     out = adapter.rehydrate_raw_body(path, raw, Rehydrator(vault))
     assert out is not None
     first, second = out.split(b"\n")
-    assert json.loads(first) == {"to": EMAIL} and second == b"raw " + token.encode()
+    assert json.loads(first) == {"to": EMAIL} and second == b"raw " + EMAIL.encode()
+    binary = b"\x89PNG\r\n\x1a\n" + token.encode()
+    assert adapter.rehydrate_raw_body(path, binary, Rehydrator(vault)) is None
     assert adapter.rehydrate_raw_body(path.replace("/content", ""), raw, Rehydrator(vault)) is None
     assert (
         AzureOpenAIAdapter().rehydrate_raw_body("/openai/v1/containers", raw, Rehydrator(vault))

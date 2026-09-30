@@ -173,8 +173,8 @@ def restore_exempt_mcp_blocks(original: Any, redacted: Any, exempt: frozenset[st
 
 class VerbatimFieldRedacted(UnredactableRequest):
     """A request field the provider uses EXACTLY as sent — an identifier or
-    a name it keeps (a fine-tuned model's name suffix, a file id, a vector
-    store's name, a W&B project) — holds a value llm-redact redacts. Such a
+    a name it keeps (a fine-tuned model's name suffix, a file id, a W&B
+    project) — holds a value llm-redact redacts. Such a
     field is scanned but never rewritten: a placeholder there would name a
     model, file or project that does not exist (and the client, which gets
     the real value back, would cite a name the provider never saw). So the
@@ -262,7 +262,8 @@ def prepare_route_request(
     a value llm-redact would redact there refuses the request
     (``VerbatimFieldRedacted``; a block-mode value raises BlockedRequest, a
     warn-mode one is counted and forwarded, as anywhere), and otherwise they
-    go back exactly as sent."""
+    go back exactly as sent. The route's LABEL fields (``label_fields``) are
+    redacted after the walk, which skips them as structural."""
     held: list[tuple[_Slot, Any, VerbatimPosition]] = []
     target: dict[str, Any] = body
     for position in adapter.verbatim_fields(method, path):
@@ -288,6 +289,13 @@ def prepare_route_request(
     )
     for slot, value, _ in held:
         prepared = _replaced_at(prepared, slot, value)
+    # LABELS: user text under a key the walk skips as structural (a vector
+    # store's `name`), redacted here like any other text.
+    for position in adapter.label_fields(method, path):
+        for slot in _verbatim_slots(prepared, position):
+            value = _get_at(prepared, slot)
+            if isinstance(value, str):
+                prepared = _replaced_at(prepared, slot, redactor.redact_text(value))
     return prepared
 
 
@@ -374,10 +382,19 @@ class ProviderAdapter(ABC):
     def verbatim_fields(self, method: str, path: str) -> tuple[VerbatimPosition, ...]:
         """The request fields of this route the provider uses EXACTLY as sent
         (identifiers and names it keeps: a file id, a fine-tuned model's
-        suffix, a vector store's name), as positions (``VerbatimPosition``).
+        suffix, a W&B project), as positions (``VerbatimPosition``).
         They are scanned but never rewritten: ``prepare_route_request``
         refuses a request whose verbatim field holds a value it would redact.
         None by default."""
+        return ()
+
+    def label_fields(self, method: str, path: str) -> tuple[VerbatimPosition, ...]:
+        """The request fields of this route that are user text although
+        their key is one the walk treats as structural (a vector store's
+        `name`: a label, the object is addressed by id), as positions. They
+        are redacted like any other text (``prepare_route_request``); the
+        adapter restores them wherever an answer echoes them. None by
+        default."""
         return ()
 
     def rehydrate_body(self, body: Any, rehydrator: Rehydrator) -> Any:

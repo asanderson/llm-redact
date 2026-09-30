@@ -169,10 +169,10 @@ matches](#requests-no-route-matches).
 | `POST /v1/fine_tuning/checkpoints/{id}/permissions` | pass-through | an admin key sharing a checkpoint across projects (org administration, like the Admin API) |
 | `POST /v1/uploads` | pass-through | DOCUMENTED GAP: the Uploads API cannot be redacted statelessly (see the honest gaps below); never lent a credential the proxy holds |
 | `POST /v1/uploads/{id}/parts` | pass-through | an opaque byte range of the file |
-| `POST /v1/vector_stores` | chat | create: `description` and the caller's `metadata` redacted, echoed back restored; VERBATIM (scanned, never rewritten — a value llm-redact would redact refuses the request, 400): the store's `name` (a label the provider keeps and shows) and its `file_ids`. The store is reported to a session router as its creator's; no system note on any vector store route |
+| `POST /v1/vector_stores` | chat | create: the store's `name` (a label — the store is addressed by id), `description` and the caller's `metadata` redacted, echoed back restored (the `name` of every vector store object, alone or listed); VERBATIM (scanned, never rewritten — a value llm-redact would redact refuses the request, 400): its `file_ids`. The store is reported to a session router as its creator's; no system note on any vector store route |
 | `GET /v1/vector_stores` | chat | the store list, restored in the request's own session; a listing a session router attributes per item |
 | `GET /v1/vector_stores/{id}` | chat | the store, restored |
-| `POST /v1/vector_stores/{id}` | chat | modify: `metadata` redacted, `name` verbatim; the echo restored |
+| `POST /v1/vector_stores/{id}` | chat | modify: `name` and `metadata` redacted; the echo restored |
 | `DELETE /v1/vector_stores/{id}` | redact-only | id only |
 | `POST /v1/vector_stores/{id}/search` | chat | the `query` redacted, and so are attribute-filter VALUES — in the same (static) session the files' `attributes` were redacted in, so a filter's placeholder is the stored attribute's (the vault is deterministic); a filter's `key` names an attribute KEY (never rewritten where it was set) and is verbatim. The results — file content chunks, filenames, attributes, the echoed query — are restored |
 | `POST /v1/vector_stores/{id}/files` | chat | attach a file: its `attributes` (values under keys the caller chooses — walked like `metadata`, a key named `id` or `name` included) redacted, `file_id` verbatim; the vector-store file object restored |
@@ -187,14 +187,14 @@ matches](#requests-no-route-matches).
 | `GET /v1/vector_stores/{id}/file_batches/{batch_id}/files` | chat | the batch's vector-store files, restored like the store's files |
 | `POST /v1/assistants` | pass-through | DOCUMENTED GAP: Assistants (deprecated) |
 | `POST /v1/threads/{id}/messages` | pass-through | DOCUMENTED GAP: Threads (deprecated) carry message content |
-| `POST /v1/containers` | chat | a code interpreter container: its `name` and starting `file_ids` are VERBATIM (scanned, never rewritten — a value llm-redact would redact refuses the request, 400); `expires_after` / `memory_limit` go through the walk. The container is reported to a session router as its creator's (so is one a Response's code interpreter call created, `container_id`); no system note on any container route |
+| `POST /v1/containers` | chat | a code interpreter container: its `name` (a label) redacted and restored on every container object, alone or listed; its starting `file_ids` are VERBATIM (scanned, never rewritten — a value llm-redact would redact refuses the request, 400); `expires_after` / `memory_limit` go through the walk. The container is reported to a session router as its creator's (so is one a Response's code interpreter call created, `container_id`); no system note on any container route |
 | `GET /v1/containers` | chat | the container list; a listing a session router attributes per item |
 | `GET /v1/containers/{id}` | chat | |
 | `DELETE /v1/containers/{id}` | redact-only | id only |
-| `POST /v1/containers/{id}/files` | chat | multipart: redacted as a `/v1/files` upload is (the file part, its filename, every form field — a file llm-redact cannot scan refuses the upload, 400); JSON: the stored `file_id` it copies in is verbatim. The container file object (its `path` echoes the filename) restored; the new container file is reported to a session router |
+| `POST /v1/containers/{id}/files` | chat | multipart: read and redacted as a `/v1/files` upload is (by content: a JSONL or text file redacted, a binary file forwarded unscanned with the client's own key and refused under a credential the proxy holds or `binary_uploads = "refuse"`; its filename and every form field redacted); JSON: the stored `file_id` it copies in is verbatim. The container file object (its `path` echoes the filename) restored; the new container file is reported to a session router |
 | `GET /v1/containers/{id}/files` | chat | the container's files (paths restored), read as the container's: not a listing attributed per item |
 | `GET /v1/containers/{id}/files/{file_id}` | chat | restored |
-| `GET /v1/containers/{id}/files/{file_id}/content` | chat | the file, uploaded or written by the code: JSON-object lines restored as a `/v1/files` download's are, every other byte verbatim |
+| `GET /v1/containers/{id}/files/{file_id}/content` | chat | the file, uploaded or written by the code, restored as a `/v1/files` download is: a text file line by line (a JSON line as JSON), a binary file untouched |
 | `DELETE /v1/containers/{id}/files/{file_id}` | redact-only | ids only |
 | `GET /v1/evals` | pass-through | |
 | `POST /v1/realtime/client_secrets` | pass-through | an ephemeral Realtime key for a browser client; the WebSocket session itself is covered below |

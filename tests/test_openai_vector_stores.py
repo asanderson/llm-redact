@@ -7,8 +7,9 @@ file's ``attributes`` (a map keyed by the caller: a key named ``name`` or
 redacted; every answer echoing it, or carrying the stored files' content
 (search results, a file's parsed content), is restored. A search's filter
 VALUE is redacted in the same (static) session the attributes were, so its
-placeholder is the stored attribute's and the filter still matches. Names,
-file ids and filter keys are verbatim (scanned, never rewritten).
+placeholder is the stored attribute's and the filter still matches. A
+store's ``name`` is a label: redacted, and restored on every echo. File ids
+and filter keys are verbatim (scanned, never rewritten).
 """
 
 from __future__ import annotations
@@ -158,7 +159,7 @@ async def test_vector_stores_are_served_under_an_operator_key(
     ]
     routed = Routed(monkeypatch, host, paths)
     create = {
-        "name": "support-kb",
+        "name": f"kb for {EMAIL}",
         "description": f"notes kept for {EMAIL}",
         "file_ids": [FILE],
         "chunking_strategy": {
@@ -173,9 +174,13 @@ async def test_vector_stores_are_served_under_an_operator_key(
     sent = routed.provider.last_json()
     assert sent["description"] == f"notes kept for {TOKEN}"
     assert sent["metadata"] == {"owner": TOKEN}
-    for key in ("name", "file_ids", "chunking_strategy", "expires_after"):
+    # The name is a label (the store is addressed by id): redacted like any
+    # text, although the walk skips `name` as structural elsewhere.
+    assert sent["name"] == f"kb for {TOKEN}"
+    for key in ("file_ids", "chunking_strategy", "expires_after"):
         assert sent[key] == create[key]
     assert created.json()["description"] == create["description"]
+    assert created.json()["name"] == create["name"]
     assert routed.sessions.objects == [(STORE, "default")]
 
     attached = await routed.send(
@@ -219,6 +224,9 @@ async def test_vector_stores_are_served_under_an_operator_key(
 
     listing = await routed.send("GET", "/v1/vector_stores")
     assert listing.json()["data"][0]["metadata"] == {"owner": EMAIL}
+    assert listing.json()["data"][0]["name"] == create["name"]  # restored in the list
+    one = await routed.send("GET", base)
+    assert one.json()["name"] == create["name"]
     assert routed.sessions.listed == [STORE]  # a listing the router attributes
     files = await routed.send("GET", f"{base}/files")
     assert files.json()["data"][0]["attributes"]["owner"] == EMAIL
@@ -239,9 +247,10 @@ async def test_vector_stores_are_served_under_an_operator_key(
     cancelled = await routed.send("POST", f"{base}/file_batches/vsfb_1/cancel")
     assert cancelled.json()["status"] == "cancelled"
 
-    renamed = await routed.send("POST", base, {"name": "kb-2", "metadata": {"owner": EMAIL}})
-    assert routed.provider.last_json() == {"name": "kb-2", "metadata": {"owner": TOKEN}}
+    renamed = await routed.send("POST", base, {"name": EMAIL, "metadata": {"owner": EMAIL}})
+    assert routed.provider.last_json() == {"name": TOKEN, "metadata": {"owner": TOKEN}}
     assert renamed.json()["metadata"] == {"owner": EMAIL}
+    assert renamed.json()["name"] == EMAIL
     assert (await routed.send("DELETE", f"{base}/files/{FILE}")).status_code == 200
     assert (await routed.send("DELETE", base)).status_code == 200
 
@@ -254,9 +263,7 @@ async def test_vector_stores_are_served_under_an_operator_key(
 @pytest.mark.parametrize(
     ("path", "body", "field"),
     [
-        ("/v1/vector_stores", {"name": f"kb for {EMAIL}"}, "name"),
         ("/v1/vector_stores", {"file_ids": [FILE, EMAIL]}, "file_ids"),
-        ("/v1/vector_stores/vs_1", {"name": EMAIL}, "name"),
         ("/v1/vector_stores/vs_1/files", {"file_id": EMAIL}, "file_id"),
         ("/v1/vector_stores/vs_1/file_batches", {"files": [{"file_id": EMAIL}]}, "files.file_id"),
         (
@@ -295,3 +302,34 @@ def test_a_vector_store_tracks_its_create_only() -> None:
     assert adapter.lists_objects("GET", "/openai/v1/vector_stores")
     assert not adapter.lists_objects("GET", f"/v1/vector_stores/{STORE}/files")
     assert not adapter.lists_objects("GET", f"/v1/vector_stores/{STORE}/file_batches/b/files")
+
+
+def test_labels_are_redacted_and_restored_only_where_they_are_labels() -> None:
+    from llm_redact.rehydrate import Rehydrator
+    from llm_redact.vault import InMemoryVault
+
+    adapter = OpenAIAdapter()
+    for path in ("/v1/vector_stores", "/v1/vector_stores/vs_1", "/openai/v1/containers"):
+        assert adapter.label_fields("POST", path) == (("name",),)
+    for method, path in (
+        ("GET", "/v1/vector_stores"),
+        ("POST", "/v1/vector_stores/vs_1/search"),
+        ("POST", "/v1/fine_tuning/jobs"),
+        ("POST", "/v1/chat/completions"),
+    ):
+        assert adapter.label_fields(method, path) == ()
+    vault = InMemoryVault()
+    token = vault.placeholder_for("EMAIL", EMAIL)
+    rehydrator = Rehydrator(vault)
+    listed = {
+        "object": "list",
+        "data": [
+            {"object": "vector_store", "name": token},
+            {"object": "container", "name": token},
+            {"object": "file", "name": token},  # another object's `name`: structural
+            "odd",
+        ],
+    }
+    out = adapter.rehydrate_body(listed, rehydrator)
+    assert [item["name"] for item in out["data"][:3]] == [EMAIL, EMAIL, token]
+    assert adapter.rehydrate_body({"object": "vector_store", "name": 3}, rehydrator)["name"] == 3

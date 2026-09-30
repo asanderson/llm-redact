@@ -386,15 +386,16 @@ Vector stores (`/v1/vector_stores`: the store, its search, its files and
 file batches — OpenAI, both Azure families, custom providers) are
 recognized the same way. A store's `description` and `metadata`, a file's
 `attributes` (a map keyed by the caller, walked like `metadata`: a key
-named `name` or `id` is data), a search's `query` and its attribute-filter
-values are redacted; every answer echoing them, and the stored files'
+named `name` or `id` is data), the store's `name` (a label: the store is
+addressed by its id), a search's `query` and its attribute-filter values
+are redacted; every answer echoing them, and the stored files'
 content a search or a file's content read returns, is restored. Vector
 store traffic uses the static vault session (with llm-redact-pro's named
 users, the user's own copy of it) — the session the files were uploaded
 and the attributes redacted in — so a filter value's placeholder is the
 stored attribute's and the filter still matches (the vault is
-deterministic). A store's `name`, the file ids a store, attach or file
-batch names, and a filter's attribute `key` are verbatim, as above. The
+deterministic). The file ids a store, attach or file batch names, and a
+filter's attribute `key`, are verbatim, as above. The
 created store is reported to a session router, and the store list is a
 listing it attributes per item; a store's own files are read as the
 store's.
@@ -402,12 +403,13 @@ store's.
 Code interpreter containers (`/v1/containers`: the container and its
 files — OpenAI, Azure's v1 API, custom providers) are recognized too. A
 container file upload is redacted exactly as a `/v1/files` upload is (the
-file part, its filename and every form field; what llm-redact cannot scan
-refuses the upload), a JSON container-file create names a stored file
-(verbatim), the container file object's `path` (the filename) is
-restored, and a download is restored like a Files API download — JSON
-object lines, every other byte as sent. A container's `name` and starting
-`file_ids` are verbatim. Created containers — and the container a
+file part read by its content, its filename and every form field; a
+binary file goes out unscanned only with the client's own key), a JSON
+container-file create names a stored file (verbatim), the container file
+object's `path` (the filename) is restored, and a download is restored
+like a Files API download — a text file line by line, a binary file
+untouched. A container's `name` is redacted and restored like a store's;
+its starting `file_ids` are verbatim. Created containers — and the container a
 Response's code interpreter call ran in (or a file it cites was written
 in), unless the request named it — and container files are reported to a
 session router.

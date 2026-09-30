@@ -62,7 +62,8 @@ from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS
 
 _FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
 # A code interpreter container's file, downloaded (uploaded, or written by
-# the code): restored like a Files API download, JSON-object lines only.
+# the code): restored like a Files API download (text line by line, a
+# binary file untouched).
 _CONTAINER_FILE_CONTENT_RE = re.compile(r"/v1/containers/[^/]+/files/[^/]+/content")
 # The file list and one file's object: both echo each upload's filename.
 _FILE_OBJECT_RE = re.compile(r"/v1/files(?:/[^/]+)?")
@@ -153,24 +154,46 @@ _CONTAINER_POSTS = re.compile(r"/v1/containers(?:/[^/]+/files)?")
 _CONTAINER_GETS = re.compile(r"/v1/containers(?:/[^/]+(?:/files(?:/[^/]+(?:/content)?)?)?)?")
 _CONTAINER_DELETES = re.compile(r"/v1/containers/[^/]+(?:/files/[^/]+)?")
 # Vector store and container verbatim fields (``verbatim_fields``), by the
-# POST's tail: a store's or container's `name` (a label the provider keeps
-# and every read shows), and the FILE ids a store, an attach, a file batch
-# or a container names; a search's attribute filters name attribute KEYS
-# (JSON keys, never rewritten where they were set).
+# POST's tail: the FILE ids a store, an attach, a file batch or a container
+# names; a search's attribute filters name attribute KEYS (JSON keys, never
+# rewritten where they were set).
 _STORED_OBJECT_VERBATIM: tuple[tuple[re.Pattern[str], tuple[tuple[str, ...], ...]], ...] = (
-    (re.compile(r"(?:^|/)vector_stores$"), (("name",), ("file_ids",))),
-    (re.compile(r"(?:^|/)vector_stores/[^/]+$"), (("name",),)),
+    (re.compile(r"(?:^|/)vector_stores$"), (("file_ids",),)),
     (re.compile(r"(?:^|/)vector_stores/[^/]+/files$"), (("file_id",),)),
     (
         re.compile(r"(?:^|/)vector_stores/[^/]+/file_batches$"),
         (("file_ids",), ("files", "*", "file_id")),
     ),
     (re.compile(r"(?:^|/)vector_stores/[^/]+/search$"), (("filters", "**", "key"),)),
-    # A container's `name` and the stored files it starts with, and the
-    # stored file a JSON container-file create copies in.
-    (re.compile(r"(?:^|/)containers$"), (("name",), ("file_ids",))),
+    # The stored files a container starts with, and the stored file a JSON
+    # container-file create copies in.
+    (re.compile(r"(?:^|/)containers$"), (("file_ids",),)),
     (re.compile(r"(?:^|/)containers/[^/]+/files$"), (("file_id",),)),
 )
+# A store's or container's `name` is a plain LABEL (the object is addressed
+# by its id): user text under a key the walk treats as structural, so it is
+# redacted explicitly (``label_fields``: a store's create and modify, a
+# container's create) and restored on every object that echoes it — a
+# vector store or container object, alone or listed (``_restore_labels``,
+# by the object's own `object` type, so a listing item restored on its own
+# is covered too).
+_LABEL_POSTS = re.compile(r"(?:^|/)(?:vector_stores(?:/[^/]+)?|containers)$")
+_LABELLED_OBJECTS = frozenset({"vector_store", "container"})
+
+
+def _restore_labels(node: Any, rehydrator: Rehydrator) -> Any:
+    """``node`` with the `name` of a vector store or container object (the
+    node itself, or each item of a list envelope) restored."""
+    if not isinstance(node, dict):
+        return node
+    name = node.get("name")
+    if node.get("object") in _LABELLED_OBJECTS and isinstance(name, str):
+        node = {**node, "name": rehydrator.rehydrate_text(name)}
+    data = node.get("data")
+    if node.get("object") == "list" and isinstance(data, list):
+        node = {**node, "data": [_restore_labels(item, rehydrator) for item in data]}
+    return node
+
 
 # Batches whose request or response carries the caller's `metadata`:
 # create (POST /v1/batches) and cancel, a batch's GET and the list (every
@@ -498,7 +521,8 @@ def _match_vector_stores(method: str, path: str) -> RouteKind:
     file's parsed content, filenames) is restored, in the request's own
     session: the static one, where the files were uploaded and the
     attributes redacted, so a filter value's placeholder is the stored
-    attribute's (the vault is deterministic). Names and file ids are
+    attribute's (the vault is deterministic). A store's `name` is a label,
+    redacted (``label_fields``) and restored on every echo; file ids are
     verbatim (``_STORED_OBJECT_VERBATIM``). A delete carries ids only."""
     if method == "POST" and _VECTOR_STORE_POSTS.fullmatch(path):
         return RouteKind.CHAT
@@ -515,8 +539,9 @@ def _match_containers(method: str, path: str) -> RouteKind:
     filename, as a ``/v1/files`` upload) or JSON naming a stored file
     (verbatim); a container file's object echoes its filename in `path`,
     and its content — uploaded, or written by the code — is restored like a
-    Files API download (``rehydrate_raw_body``). A container's `name` and
-    starting `file_ids` are verbatim. Deletes carry ids only."""
+    Files API download (``rehydrate_raw_body``). A container's `name` is a
+    label (redacted, restored on every echo); its starting `file_ids` are
+    verbatim. Deletes carry ids only."""
     if method == "POST" and _CONTAINER_POSTS.fullmatch(path):
         return RouteKind.CHAT
     if method == "GET" and _CONTAINER_GETS.fullmatch(path):
@@ -699,6 +724,11 @@ class OpenAIAdapter(ProviderAdapter):
                 return positions
         return ()
 
+    def label_fields(self, method: str, path: str) -> tuple[tuple[str, ...], ...]:
+        if method == "POST" and _LABEL_POSTS.search(path.rstrip("/")) is not None:
+            return (("name",),)
+        return ()
+
     def lists_objects(self, method: str, path: str) -> bool:
         tail = path.rstrip("/")
         return (
@@ -756,11 +786,14 @@ class OpenAIAdapter(ProviderAdapter):
         # `message.tool_calls[].function.arguments` is raw JSON *source*, not
         # a parsed object: restored originals must be re-escaped there or a
         # value containing quotes/newlines corrupts the arguments string.
-        return transform_strings(
+        restored = transform_strings(
             body,
             rehydrator.rehydrate_text,
             key_overrides={"arguments": rehydrator.rehydrate_json_source_text},
         )
+        # A vector store's or container's `name` is a label the request
+        # redacted (``label_fields``), under a key the walk skips.
+        return _restore_labels(restored, rehydrator)
 
     def redacts_multipart(self, path: str) -> bool:
         # The Files upload (JSONL file parts) and the prompt-field media

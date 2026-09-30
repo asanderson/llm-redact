@@ -27,12 +27,11 @@ from llm_redact.placeholders import may_carry_tokens
 from llm_redact.providers.openai import (
     OpenAIAdapter,
     _multipart_floors,
-    _Reading,
+    read_file_part,
     rehydrate_text_file,
 )
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator
-from llm_redact.upload_content import classify_file
 
 # The OpenAI Files upload: its part loop and whole-upload handling are the
 # one implementation of the upload content policy. Its system note is never
@@ -65,12 +64,6 @@ def redact_files_upload(
     )
 
 
-def _file_reading(part: multipart.MultipartPart, charge: Callable[[int], None]) -> _Reading:
-    """A related part read as a FILE, by its content."""
-    content = classify_file(part.content, charge=charge)
-    return _Reading("document" if content.kind == "text" else content.kind, content)
-
-
 def redact_related_upload(
     body: bytes,
     boundary: bytes,
@@ -95,7 +88,7 @@ def redact_related_upload(
     # One reading per part (a JSONL part's lines charged against
     # max_body_strings before anything walks them), shared by the floor
     # scan and the part loop.
-    readings = [_file_reading(part, redactor.charge) for part in parsed.parts]
+    readings = [read_file_part(part.content, redactor.charge) for part in parsed.parts]
     if may_carry_tokens(body):
         redactor = redactor.with_floors(_multipart_floors(parsed, readings))
     changed = False

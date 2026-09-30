@@ -176,6 +176,12 @@ and tags `vX.Y.Z`.
   walked as one JSON body, leaving placeholders in its keys and under names such
   as `id` or `data` and re-serializing the whole file; JSON Lines and event-stream
   media types took the streaming readings.
+- A text file uploaded redacted as one text that reads as JSON Lines only once
+  redacted (a line holding the secret was not valid JSON before, such as an
+  unescaped backslash in a Windows account name) is restored on download exactly
+  as it was uploaded, instead of line by line as JSON with the restored value
+  JSON-escaped and the line re-spaced. The proxy remembers such uploads by a
+  digest of the bytes it sent, for the newest 1024 in the running process.
 
 ## [1.9.0] - 2026-09-29
 

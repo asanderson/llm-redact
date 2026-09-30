@@ -38,7 +38,9 @@ conversation anchor — the realtime WS stance); a user-scoping session
 router (llm-redact-pro's named users) makes that the user's own copy.
 """
 
+import hashlib
 import re
+from collections import OrderedDict
 from collections.abc import Callable, Hashable, Mapping
 from typing import Any, NamedTuple
 
@@ -346,6 +348,21 @@ class _Reading(NamedTuple):
 
     kind: str
     content: FileContent = BINARY  # read only for "document"/"jsonl"
+    # Whether reading the file charged its line count (the JSONL check ran).
+    lines_charged: bool = False
+
+
+def read_file_part(content: bytes, charge: Callable[[int], None]) -> _Reading:
+    """A file part read by its content (``classify_file``; ``charge`` bounds
+    the JSONL check's per-line work)."""
+    charged: list[int] = []
+
+    def counted(lines: int) -> None:
+        charge(lines)
+        charged.append(lines)
+
+    read = classify_file(content, charge=counted)
+    return _Reading("document" if read.kind == "text" else read.kind, read, bool(charged))
 
 
 def _read_part(
@@ -361,8 +378,7 @@ def _read_part(
     kind = _part_kind(part, media=media, require_scanned=require_scanned)
     if kind != "file":
         return _Reading(kind)
-    content = classify_file(part.content, charge=charge)
-    return _Reading("document" if content.kind == "text" else content.kind, content)
+    return read_file_part(part.content, charge)
 
 
 def _multipart_floors(parsed: multipart.Multipart, readings: list[_Reading]) -> dict[str, int]:
@@ -446,6 +462,37 @@ def _is_file_download(path: str) -> bool:
 BINARY_FILE = "an uploaded file is binary (not text llm-redact can redact)"
 
 
+class _RawTextFiles:
+    """The redacted bytes of the text files uploaded (redacted as ONE text)
+    that read as JSON Lines only once redacted — a line that was not a JSON
+    object (``{"user":"CORP\\jdoe"}``: an invalid escape) became one around
+    its placeholder. From its bytes alone such a download is a JSON Lines
+    file, whose restored values a provider-written file (a batch output)
+    needs JSON-escaped; this one needs them as they were redacted. Known by
+    the SHA-256 of the exact bytes sent (a provider returns a stored file as
+    it received it), the newest ``_MAX`` kept, in this process only: a
+    download the proxy no longer knows (a restart, older uploads) is read
+    by its bytes, JSON-escaping its restored values."""
+
+    _MAX = 1024
+
+    def __init__(self) -> None:
+        self._digests: OrderedDict[bytes, None] = OrderedDict()
+
+    def record(self, content: bytes) -> None:
+        digest = hashlib.sha256(content).digest()
+        self._digests[digest] = None
+        self._digests.move_to_end(digest)
+        while len(self._digests) > self._MAX:
+            self._digests.popitem(last=False)
+
+    def __contains__(self, content: bytes) -> bool:
+        return bool(self._digests) and hashlib.sha256(content).digest() in self._digests
+
+
+RAW_TEXT_FILES = _RawTextFiles()
+
+
 def rehydrate_text_file(
     raw: bytes, rehydrator: Rehydrator, restore: Callable[[Any], Any]
 ) -> bytes | None:
@@ -456,14 +503,15 @@ def rehydrate_text_file(
     (a results CSV, a text file uploaded redacted as ONE text) is restored
     as one text — a value lands exactly as it was redacted, never
     JSON-escaped because a line happens to parse as JSON once it holds a
-    placeholder. Re-encoded as it came. ``restore`` restores one parsed
+    placeholder (a text upload that reads as JSON Lines once redacted is
+    known by its bytes: ``RAW_TEXT_FILES``). Re-encoded as it came. ``restore`` restores one parsed
     JSON value (the adapter's non-streaming transform). Shared by every
     provider's file download (OpenAI/Azure/custom, the Gemini API's,
     Anthropic's)."""
     content = classify_file(raw)
     if content.kind == "binary" or not may_carry_tokens(content.text):
         return None
-    if content.kind == "text":
+    if content.kind == "text" or raw in RAW_TEXT_FILES:
         text = rehydrator.rehydrate_text(content.text)
         return content.encode(text) if text != content.text else None
     lines = content.text.split("\n")
@@ -1068,6 +1116,13 @@ class OpenAIAdapter(ProviderAdapter):
             if redacted != text:
                 part.content = reading.content.encode(redacted)
                 changed = True
+                # Its lines are charged once: the check of the redacted
+                # file never parses more lines than the file has.
+                charge = None if reading.lines_charged else redactor.charge
+                if classify_file(part.content, charge=charge).kind == "jsonl":
+                    # Redacted as ONE text, yet it reads as JSON Lines now:
+                    # its download must be restored as the text it was.
+                    RAW_TEXT_FILES.record(part.content)
         elif kind == "text":
             changed |= _redact_text_part(part, redactor, require_scanned=require_scanned)
         elif kind == "binary" and require_scanned and not forward_binary:

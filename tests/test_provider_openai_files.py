@@ -490,8 +490,12 @@ def test_pass_through_provider_inference_covers_uploads(tmp_path):
         b'account\n"CORP\\jdoe"\nnote: CORP\\jdoe\n',
         # An object line in a text file, likewise.
         b'prose\n{"path": "CORP\\jdoe"}\n',
+        # A text file that reads as JSON Lines only once redacted (the
+        # invalid escape was the value): still restored as it was redacted.
+        b'{"user":"CORP\\jdoe"}\n',
+        b'{"a": 1}\n{"user":"CORP\\jdoe"}\n',
     ],
-    ids=["quoted-cell", "object-line"],
+    ids=["quoted-cell", "object-line", "jsonl-once-redacted", "jsonl-once-redacted-second-line"],
 )
 async def test_a_text_file_round_trips_byte_for_byte(original: bytes) -> None:
     # Upload through the proxy, the provider stores what it received, the
@@ -528,3 +532,58 @@ async def test_a_text_file_round_trips_byte_for_byte(original: bytes) -> None:
     assert upload.status_code == 200 and download.status_code == 200
     assert b"CORP" not in stored["file"] and "«DENY_001»".encode() in stored["file"]
     assert download.content == original
+
+
+async def test_a_provider_written_jsonl_file_still_escapes_its_restored_values() -> None:
+    # The same token in a file the provider wrote (a batch output) is inside
+    # a JSON string: restored JSON-escaped, whatever text uploads were seen.
+    stored: dict[str, bytes] = {}
+    output = b'{"custom_id": "1", "content": "\xc2\xabDENY_001\xc2\xbb"}\n'
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            boundary = parse_boundary(request.headers["content-type"])
+            assert boundary is not None
+            parsed = parse(request.content, boundary)
+            assert parsed is not None
+            stored["file"] = parsed.parts[1].content
+            return httpx.Response(200, json={"id": "file-1", "object": "file"})
+        content = stored["file"] if request.url.path.endswith("file-1/content") else output
+        return httpx.Response(
+            200, content=content, headers={"content-type": "application/octet-stream"}
+        )
+
+    config = parse_config({"detection": {"deny": ["CORP\\jdoe"]}}, "t")
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    headers = {"authorization": "Bearer sk-own"}
+    original = b'{"user":"CORP\\jdoe"}\n'
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        upload = await client.post(
+            "/v1/files",
+            content=_file_upload(original, filename="accounts.txt"),
+            headers={
+                **headers,
+                "content-type": f"multipart/form-data; boundary={BOUNDARY.decode()}",
+            },
+        )
+        own = await client.get("/v1/files/file-1/content", headers=headers)
+        written = await client.get("/v1/files/file-2/content", headers=headers)
+    assert upload.status_code == 200
+    assert own.content == original
+    assert json.loads(written.content) == {"custom_id": "1", "content": "CORP\\jdoe"}
+
+
+def test_raw_text_files_keeps_only_the_newest() -> None:
+    from llm_redact.providers.openai import _RawTextFiles
+
+    files = _RawTextFiles()
+    assert b"a" not in files  # empty: nothing hashed
+    files.record(b"a")
+    files.record(b"b")
+    files.record(b"a")  # seen again: now the newest
+    assert b"a" in files and b"b" in files and b"c" not in files
+    for index in range(_RawTextFiles._MAX - 1):
+        files.record(str(index).encode())
+    assert b"a" in files and b"b" not in files  # the oldest went first

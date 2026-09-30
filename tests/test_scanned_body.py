@@ -295,6 +295,33 @@ UNSCANNED_UPLOADS: dict[str, tuple[bytes, str]] = {
 }
 
 
+# A multipart content type with more than one reading: a reader taking the
+# LAST boundary (or splitting quoted parameters naively) parses the body
+# with "c" — here the form field "user" holds a whole "c"-delimited body
+# whose file part is a batch input file.
+_INNER = b"\r\n--c\r\n" + _file(_LINE) + b"\r\n--c\r\n" + _PURPOSE + b"\r\n--c--"
+_TWO_BOUNDARIES = _form(_PURPOSE, b'Content-Disposition: form-data; name="user"\r\n\r\nx' + _INNER)
+TWO_READINGS = [
+    pytest.param("multipart/form-data; boundary=b; boundary=c", id="repeated-boundary"),
+    pytest.param('multipart/form-data; x="; boundary=c"; boundary=b', id="naive-split"),
+]
+
+
+@pytest.mark.parametrize("content_type", TWO_READINGS)
+async def test_key_auth_refuses_a_multipart_content_type_with_two_readings(
+    content_type: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    upstream = Upstream()
+    app = create_app(_config(), upstream_transport=httpx.MockTransport(upstream))
+    caplog.set_level(logging.INFO, logger="llm_redact")
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/files", content=_TWO_BOUNDARIES, headers={"content-type": content_type}
+        )
+    _assert_refused(response, 400, "forwards only bodies it has redacted", app, caplog)
+    assert upstream.requests == []
+
+
 @pytest.mark.parametrize("kind", sorted(UNSCANNED_UPLOADS))
 async def test_key_auth_refuses_an_upload_part_it_cannot_scan(
     kind: str, caplog: pytest.LogCaptureFixture

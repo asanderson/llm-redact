@@ -561,6 +561,59 @@ async def test_without_an_ownership_check_a_part_without_a_header_block_is_redac
     assert EMAIL.encode() not in sent.content and "«EMAIL_001»".encode() in sent.content
 
 
+# A multipart/related content type with more than one reading: canonical
+# under "a" (benign metadata, then a text "media" part), while a reader
+# taking the LAST boundary parameter — or splitting quoted parameters
+# naively — parses it with "b" and finds metadata choosing TAKEN inside
+# that media.
+_INNER = (
+    b"\r\n--b\r\nContent-Type: application/json\r\n\r\n"
+    + _meta(name=TAKEN)
+    + b"\r\n--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b--"
+)
+TWO_BOUNDARIES = (
+    b"--a\r\nContent-Type: application/json\r\n\r\n"
+    + _meta(displayName="x")
+    + b"\r\n--a\r\nContent-Type: text/plain\r\n\r\nmedia"
+    + _INNER
+    + b"\r\n--a--\r\n"
+)
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        pytest.param("multipart/related; boundary=a; boundary=b", id="repeated-boundary"),
+        pytest.param('multipart/related; x="; boundary=b"; boundary=a', id="naive-split"),
+        pytest.param('multipart/related; boundary="a;b"', id="quoted-semicolon"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("operator", "detection"),
+    [
+        pytest.param(False, True, id="own-key"),
+        pytest.param(True, True, id="operator-key"),
+        pytest.param(True, False, id="operator-key-detection-off"),
+    ],
+)
+async def test_a_content_type_with_two_readings_is_never_sent(
+    content_type: str, operator: bool, detection: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    router = NameRouter()
+    upstream = FilesAPI()
+    app = _app(monkeypatch, router, upstream, operator=operator, detection=detection)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        response = await client.post(
+            UPLOAD,
+            content=TWO_BOUNDARIES,
+            headers={**KEY, **MULTIPART, "content-type": content_type},
+        )
+    assert response.status_code == 400, response.text
+    assert "ada-notes" not in response.text
+    assert upstream.requests == [] and router.checks == []
+
+
 async def test_with_the_clients_own_key_and_detection_off_it_goes_out_unchecked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -33,6 +33,15 @@ and tags `vX.Y.Z`.
   scanned. Such an upload is refused 400 wherever redaction applies and under a
   credential the proxy holds, on every multipart route. So is, for the stored-object
   check, a part with no header block that does not open with an empty one.
+- A multipart request's boundary is read only when its Content-Type has one reading:
+  a repeated `boundary` parameter (`boundary=a; boundary=b`, which a reader taking
+  the last one parses with `b`), a quoted value holding `;` or an escape (which a
+  naive split reads differently), a control, or a boundary outside the RFC 2046
+  characters now leaves the body unreadable, so it is refused 400 wherever redaction
+  applies and under a credential the proxy holds, like any other multipart body the
+  proxy cannot parse. A non-ASCII boundary used to be read with its non-ASCII
+  characters dropped. Applies to form uploads and the Gemini API's multipart/related
+  upload alike.
 - File uploads (OpenAI/Azure/custom `…/files`) are read by CONTENT
   (`upload_content.classify_file`): JSONL is redacted per line as before, any other
   text file (UTF-8, or UTF-16/32 with a BOM) is redacted as one text and re-encoded as

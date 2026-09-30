@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from llm_redact.jsonwalk import json_text, loads_bounded, transform_strings
+from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
 from llm_redact.providers.documents import redact_related_upload, rehydrate_download
 from llm_redact.redactor import Redactor
@@ -275,16 +276,10 @@ def _single_request_upload(headers: "Mapping[str, str] | None", query: str) -> b
 
 def _related_boundary(content_type: str) -> bytes | None:
     """The boundary of a multipart/related content type (the Gemini API's
-    single-request upload: the file's JSON metadata, then its media)."""
-    media, _, params = content_type.partition(";")
-    if media.strip().lower() != "multipart/related":
-        return None
-    for piece in params.split(";"):
-        key, _, value = piece.strip().partition("=")
-        if key.strip().lower() == "boundary":
-            boundary = value.strip().strip('"')
-            return boundary.encode("ascii", "ignore") or None
-    return None
+    single-request upload: the file's JSON metadata, then its media); None
+    also when the content type has more than one reading
+    (``multipart.parse_boundary``)."""
+    return parse_multipart_boundary(content_type, "multipart/related")
 
 
 class GeminiAdapter(ProviderAdapter):

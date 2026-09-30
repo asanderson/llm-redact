@@ -141,10 +141,12 @@ def test_parse_boundary_handles_multi_param_and_edge_values() -> None:
     assert parse_boundary("multipart/form-data; boundary=Xabc") == b"Xabc"
 
 
-def test_parse_boundary_ignores_non_ascii_bytes() -> None:
-    # parse_boundary_26/29/30 (encode errors arg dropped / case-flipped): a
-    # non-ASCII boundary must degrade via "ignore", never raise.
-    assert parse_boundary("multipart/form-data; boundary=abcé") == b"abc"
+def test_parse_boundary_refuses_non_ascii_bytes() -> None:
+    # A non-ASCII boundary is not RFC 2046 bchars: no boundary, never a
+    # shortened one (an "ignore" encode once read abcé as abc) and never
+    # an exception.
+    assert parse_boundary("multipart/form-data; boundary=abcé") is None
+    assert parse_boundary('multipart/form-data; boundary="é"') is None
 
 
 # --- K11/K12/K13/K14/K15: eventstream framing bounds --------------------------

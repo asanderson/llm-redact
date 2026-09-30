@@ -31,6 +31,12 @@ _TCHAR = frozenset(_ALNUM + b"!#$%&'*+-.^_`|~")
 # RFC 8187 attr-char: what a filename* value carries without percent-encoding.
 _ATTR_CHAR = frozenset(_ALNUM + b"!#$&+-.^_`|~")
 _HEX = frozenset(b"0123456789ABCDEFabcdef")
+# RFC 2046 bchars: what a boundary is made of (a space never last).
+_BCHARS = frozenset(_ALNUM + b"'()+_,-./:=? ")
+# What a reader splitting a content type's parameters naively (at every
+# ";", a quoted value's escapes kept as they are) reads another way when a
+# quoted value holds it.
+_NAIVE_BREAKS = frozenset(b";\\")
 _OWS = frozenset(b" \t")
 # Controls other than HTAB: never in a header line (a bare CR or LF ends a
 # line for a lenient reader, whose header block then ends elsewhere), so
@@ -218,17 +224,36 @@ class Multipart:
         return bytes(out)
 
 
-def parse_boundary(content_type: str) -> bytes | None:
-    """The boundary parameter of a multipart/form-data content type."""
-    media, _, params = content_type.partition(";")
-    if media.strip().lower() != "multipart/form-data":
+def parse_boundary(content_type: str, media_type: str = "multipart/form-data") -> bytes | None:
+    """The boundary parameter of a ``media_type`` content type
+    (multipart/form-data unless named), or None. None too when the content
+    type has more than one reading, since a reader splitting it another way
+    finds another boundary, and the body's parts elsewhere: a control
+    anywhere, parameters outside the strict grammar (``_parse_params``: a
+    repeated parameter — ``boundary=a; boundary=b`` is ``b`` to a reader
+    taking the last — or a malformed quoted-string, ``boundary="a;b``), a
+    quoted value holding a ";" or an escape (``x="; boundary=b";
+    boundary=a`` holds ``boundary=b`` for a naive split), or a boundary
+    that is not RFC 2046 bchars (a space never last)."""
+    raw = content_type.encode()
+    if not _CONTROLS.isdisjoint(raw):
         return None
-    for piece in params.split(";"):
-        key, _, value = piece.strip().partition("=")
-        if key.strip().lower() == "boundary":
-            boundary = value.strip().strip('"')
-            return boundary.encode("ascii", "ignore") or None
-    return None
+    media, _, _ = raw.partition(b";")
+    if media.strip().lower() != media_type.encode():
+        return None
+    try:
+        params = _parse_params(raw, len(media), len(raw))
+    except AmbiguousHeaders:
+        return None
+    if any(_NAIVE_BREAKS.intersection(raw[param.start : param.end]) for param in params.values()):
+        return None
+    boundary = params.get("boundary")
+    if boundary is None:
+        return None
+    value = boundary.value.encode()
+    if not value or not _BCHARS.issuperset(value) or value.endswith(b" "):
+        return None
+    return value
 
 
 def parse(body: bytes, boundary: bytes) -> Multipart | None:
@@ -319,7 +344,7 @@ def _parse_value(block: bytes, pos: int, end: int) -> tuple[Param, int]:
                 if i == end or block[i] not in b'"\\':
                     raise AmbiguousHeaders(_AMBIGUOUS)
                 byte = block[i]
-            out.append(byte)  # a control never gets here: _field refused it
+            out.append(byte)  # never a control: _field and parse_boundary refuse one
             i += 1
         if i == end:
             raise AmbiguousHeaders(_AMBIGUOUS)  # unterminated

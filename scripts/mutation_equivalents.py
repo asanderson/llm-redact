@@ -686,9 +686,6 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
     "llm_redact.eventstream.xǁEventStreamParserǁfeed__mutmut_49": (
         "error-msg-text: 'message CRC mismatch' XX-wrapped; match='message CRC' still matches."
     ),
-    "llm_redact.multipart.x_parse_boundary__mutmut_28": (
-        "codec-case: encode('ascii') to 'ASCII'; codec name normalized."
-    ),
     "llm_redact.placeholders.x_viable_prefix_start__mutmut_10": (
         "redundant-guard: disabling the early guillemet-close return; a closing "
         "guillemet in tail is in body and matches neither the body-char class nor "

@@ -5,6 +5,7 @@ serializer), mirroring the eventstream test convention.
 """
 
 import httpx
+import pytest
 
 from llm_redact.multipart import Multipart, MultipartPart, parse, parse_boundary
 
@@ -81,6 +82,49 @@ def test_parse_boundary_header() -> None:
     assert parse_boundary("multipart/form-data") is None
     assert parse_boundary("application/json") is None
     assert parse_boundary("") is None
+
+
+def test_parse_boundary_reads_the_named_media_type() -> None:
+    related = 'Multipart/Related ; type="application/json"; boundary = "a b"'
+    assert parse_boundary(related, "multipart/related") == b"a b"
+    assert parse_boundary(related) is None
+    assert parse_boundary("multipart/form-data; boundary=b", "multipart/related") is None
+    # Every RFC 2046 bchar; Python's email package quotes its "=" runs.
+    bchars = "0-9A-Za-z'()+_,-./:=? x"
+    assert parse_boundary(f'multipart/form-data; boundary="{bchars}"') == bchars.encode()
+    assert parse_boundary('multipart/form-data; boundary="===============1234=="') == (
+        b"===============1234=="
+    )
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        # A reader taking the LAST occurrence parses the body with "b".
+        "multipart/form-data; boundary=a; boundary=b",
+        "multipart/form-data; boundary=a; BOUNDARY=b",
+        # Quoted-string grammar: a naive split on ";" reads "a".
+        'multipart/form-data; boundary="a;b"',
+        'multipart/form-data; boundary="a',
+        # A naive split on ";" finds "boundary=b" inside x's quoted value;
+        # an escape is kept as it is by a naive reader.
+        'multipart/form-data; x="; boundary=b"; boundary=a',
+        'multipart/form-data; x="a\\\\b"; boundary=a',
+        "multipart/form-data; boundary=a b",
+        "multipart/form-data; boundary=a\\b",
+        # Not bchars, or a space last.
+        'multipart/form-data; boundary="a\\"b"',
+        'multipart/form-data; boundary="a;"',
+        'multipart/form-data; boundary="a "',
+        "multipart/form-data; boundary=a<b",
+        'multipart/form-data; boundary=""',
+        # A control anywhere, even in another parameter.
+        'multipart/form-data; x="\x0b"; boundary=a',
+        "multipart/form-data;\x00boundary=a",
+    ],
+)
+def test_parse_boundary_without_one_reading_is_none(content_type: str) -> None:
+    assert parse_boundary(content_type) is None
 
 
 def test_httpx_generated_body_round_trips() -> None:

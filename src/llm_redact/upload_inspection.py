@@ -31,15 +31,18 @@ What a clean scan covers is the EXTRACTED text only: the file itself is
 forwarded as sent, and whatever the extractor did not read (it says so
 through ``complete``) was never scanned.
 
-Outcomes, one per binary part, counted per provider once the upload went
-out or was refused (``/status`` ``inspected_uploads_total``,
+Outcomes, one per binary part, counted per provider once the upload was
+handed to the upstream or refused (``/status`` ``inspected_uploads_total``,
 ``llm_redact_inspected_uploads_total{provider,outcome}``): ``clean`` (sent
 byte-identical after a clean scan), ``clean_refused`` (scanned clean, but
-the upload was refused: a value in another part, a block, a header rule,
-a credential the proxy holds that the inspection did not allow),
-``detected``, ``blocked``, ``incomplete`` (no text, a partial reading, or
-more text than the request's scan budget), ``not_inspected`` (larger than
-``max_bytes`` or past ``MAX_INSPECTED_PARTS``), ``timeout``, ``error``.
+the upload was refused before any upstream contact: a value in another
+part, a block, a header rule, a credential the proxy holds that the
+inspection did not allow, no upstream configured, the audit START row, the
+upstream authorizer), ``detected``, ``blocked``, ``incomplete`` (no text,
+a partial reading, or more text than the request's scan budgets — the
+characters, or the strings of ``max_body_strings``), ``not_inspected``
+(larger than ``max_bytes`` or past ``MAX_INSPECTED_PARTS``), ``timeout``,
+``error``.
 """
 
 from __future__ import annotations
@@ -56,7 +59,7 @@ from llm_redact.config import ConfigError
 from llm_redact.multipart import AmbiguousHeaders, MultipartPart
 from llm_redact.placeholders import merge_floors, token_floors
 from llm_redact.plugin_api import Inspection, UploadInspector, UploadPart
-from llm_redact.redactor import BlockedRequest, Redactor, UnredactableRequest
+from llm_redact.redactor import BlockedRequest, Redactor, TooManyStrings, UnredactableRequest
 
 logger = logging.getLogger("llm_redact")
 
@@ -201,6 +204,9 @@ class Judgement(NamedTuple):
     # the raw bytes do not show them (a compressed PDF stream), which a new
     # value of this request must never be numbered onto.
     floors: dict[str, int]
+    # The request's string budget ran out while scanning (max_body_strings):
+    # the caller refuses it (413) once the outcomes are counted.
+    over_budget: TooManyStrings | None = None
 
 
 def judge(
@@ -212,13 +218,17 @@ def judge(
 ) -> Judgement:
     """Scan every extracted text (at most ``text_budget`` characters over
     the request: a text that would exceed it is not scanned, its part
-    ``incomplete``) and decide each part (see the module). Raises
-    TooManyStrings when the texts exceed the request's string budget."""
+    ``incomplete``) and decide each part (see the module). Every part gets
+    one outcome: when the texts exceed the request's string budget, the
+    part that ran it out and every later one read as text are
+    ``incomplete`` (not scanned) and ``over_budget`` holds the
+    TooManyStrings for the caller to raise."""
     cleared: set[int] = set()
     outcomes: Counter[str] = Counter()
     detected: Counter[str] = Counter()
     blocked: str | None = None
     floors: dict[str, int] = {}
+    over_budget: TooManyStrings | None = None
     remaining = text_budget
     for index in sorted(results):
         result = results[index]
@@ -226,7 +236,7 @@ def judge(
             outcomes[result] += 1
             continue
         text = result.text
-        if not isinstance(text, str) or len(text) > remaining:
+        if over_budget is not None or not isinstance(text, str) or len(text) > remaining:
             outcomes["incomplete"] += 1
             continue
         remaining -= len(text)
@@ -237,6 +247,10 @@ def judge(
             blocked = blocked or exc.detector_type
             outcomes["blocked"] += 1
             continue
+        except TooManyStrings as exc:
+            over_budget = exc
+            outcomes["incomplete"] += 1
+            continue
         if found:
             detected.update(found)
             outcomes["detected"] += 1
@@ -246,7 +260,7 @@ def judge(
             outcomes["clean"] += 1
             if not identity or result.proxy_credential is True:
                 cleared.add(index)
-    return Judgement(frozenset(cleared), outcomes, detected, blocked, floors)
+    return Judgement(frozenset(cleared), outcomes, detected, blocked, floors, over_budget)
 
 
 class BinaryValuesDetected(UnredactableRequest):

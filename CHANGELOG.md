@@ -83,8 +83,8 @@ and tags `vX.Y.Z`.
   timeout, a fault) keeps the unscanned-binary rules. New `/status`
   `inspected_uploads_total` and `upload_inspector`,
   `llm_redact_inspected_uploads_total{provider,outcome}` (`clean` counts only parts
-  that went out; a clean part of a refused upload is `clean_refused`), a `llm-redact
-  status` posture line for clean forwards. Every part's headers are checked (file
+  of an upload handed to the upstream; a clean part of an upload refused before that
+  is `clean_refused`), a `llm-redact status` posture line for clean forwards. Every part's headers are checked (file
   names, transfer encodings, charsets) before any part is inspected, so an upload the
   redaction would refuse is never handed to the inspector. A clean scan covers the
   extracted text only.
@@ -186,6 +186,16 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- An inspected upload part that scanned clean was counted `clean` ("forwarded after a
+  clean scan") as soon as redaction returned, even when the proxy then refused the
+  request without contacting the upstream (no upstream configured, the upstream
+  authorizer failing, the `[audit] required` START row failing, a routed budget
+  refusal); binary parts were likewise counted in `unscanned_uploads_total` and logged
+  as forwarded. Both now count only once the request is handed to the upstream (a
+  send that then fails in transit included); a refused upload's clean parts are
+  `clean_refused`. And a request whose extracted texts ran out of `max_body_strings`
+  no longer drops its parts' outcomes: the part that ran the budget out and every
+  later one count `incomplete`.
 - An upload's request row (log line, `/recent`, `/events`, audit rows and sinks, OTel)
   counted the redactions and warn-mode forwards of every OTHER request that ran while
   the upload inspector read its binary parts: the per-request count diff spanned that

@@ -3550,6 +3550,8 @@ async def _inspect_upload(
         len(parts),
         " ".join(f"{outcome}={count}" for outcome, count in sorted(verdict.outcomes.items())),
     )
+    if verdict.over_budget is not None:
+        raise verdict.over_budget  # every part's outcome counted first
     if verdict.blocked is not None:
         raise BlockedRequest(verdict.blocked)
     if verdict.detected:
@@ -3561,15 +3563,63 @@ def _count_inspections(
     state: ProxyState, provider_name: str, outcomes: Counter[str], *, sent: bool
 ) -> None:
     """One upload's inspected binary parts into ``inspected_uploads``, once
-    its fate is known: ``clean`` only when the upload went out (``sent``) —
-    a part that scanned clean in an upload the proxy refused (a value in
-    another part, a block, a header rule, a credential the proxy holds that
-    the inspection did not allow) is ``clean_refused``, never reported as
-    forwarded."""
+    its fate is known: ``clean`` only when the upload was handed to the
+    upstream (``sent``) — a part that scanned clean in an upload the proxy
+    refused (a value in another part, a block, a header rule, a credential
+    the proxy holds that the inspection did not allow, or any refusal after
+    redaction: no upstream configured, the ``[audit] required`` START row,
+    the upstream authorizer, a routed budget) is ``clean_refused``, never
+    reported as forwarded."""
     for outcome, count in outcomes.items():
         if outcome == "clean" and not sent:
             outcome = "clean_refused"
         state.inspected_uploads[(provider_name, outcome)] += count
+
+
+class _UploadFate:
+    """One request's upload honesty counts — its inspected binary parts'
+    outcomes and the binary parts it forwards unscanned — held until its
+    fate is known and settled ONCE: ``sent`` when the request is handed to
+    the upstream (a send that then fails in transit included: bytes may
+    have left), refused on every other way out of ``handle()`` (its
+    ``finally``), so a refusal after redaction never counts a part as
+    forwarded."""
+
+    def __init__(self) -> None:
+        self._pending: Callable[[bool], None] | None = None
+
+    def hold(self, settle: Callable[[bool], None]) -> None:
+        self._pending = settle
+
+    def settle(self, *, sent: bool) -> None:
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            pending(sent)
+
+
+def _settle_upload(
+    state: ProxyState,
+    method: str,
+    path: str,
+    provider_name: str,
+    outcomes: Counter[str],
+    unscanned: list[int],
+    sent: bool,
+) -> None:
+    """An upload's counts once its fate is known (``_UploadFate``): the
+    inspected parts (``_count_inspections``) and, only when it went out,
+    the binary parts forwarded unscanned — a count and the path only, never
+    a file name or content."""
+    _count_inspections(state, provider_name, outcomes, sent=sent)
+    if sent and unscanned:
+        state.unscanned_uploads[provider_name] += unscanned[0]
+        logger.info(
+            "%s %s forwarded %d binary upload file part(s) unscanned"
+            ' ([detection] binary_uploads = "forward")',
+            method,
+            path,
+            unscanned[0],
+        )
 
 
 def _plan_request(
@@ -3597,6 +3647,17 @@ def _plan_request(
 
 
 async def handle(request: Request) -> Response:
+    """The catch-all route (``_handle``). An upload's honesty counts are
+    settled once its fate is known: sent when handed to the upstream, else
+    refused — here, on every other way out (``_UploadFate``)."""
+    upload = _UploadFate()
+    try:
+        return await _handle(request, upload)
+    finally:
+        upload.settle(sent=False)
+
+
+async def _handle(request: Request, upload: _UploadFate) -> Response:
     state: ProxyState = request.app.state.proxy
     if not origin_form_target(request.scope):
         # Never routed, forwarded, recorded or logged with its target.
@@ -4307,10 +4368,23 @@ async def handle(request: Request) -> Response:
             # This body's own copy, counting its strings (form fields, file
             # names, JSONL lines, extracted texts) against max_body_strings.
             upload_redactor = ctx.redactor.with_budget(max_body_strings)
-            # The inspected binary parts' outcomes, counted once the upload
-            # went out or was refused (finally, below).
+            # The inspected binary parts' outcomes and the binary parts
+            # forwarded unscanned, counted once the upload is handed to the
+            # upstream or refused (_UploadFate: a refusal after redaction —
+            # no upstream, the audit START, the authorizer — counts nothing
+            # as forwarded).
             inspection_outcomes: Counter[str] = Counter()
-            upload_sent = False
+            upload.hold(
+                functools.partial(
+                    _settle_upload,
+                    state,
+                    request.method,
+                    path,
+                    provider_name,
+                    inspection_outcomes,
+                    binary_forwarded,
+                )
+            )
             try:
                 inspected: InspectedUpload | None = None
                 if state.upload_inspector is not None:
@@ -4352,7 +4426,6 @@ async def handle(request: Request) -> Response:
                         inspected=inspected,
                     ),
                 )
-                upload_sent = True
             except BinaryValuesDetected as exc:
                 # Values the proxy would redact, inside a file it cannot
                 # rewrite: refused, naming their types only.
@@ -4386,23 +4459,10 @@ async def handle(request: Request) -> Response:
                     path=path,
                     started=started,
                 )
-            finally:
-                _count_inspections(state, provider_name, inspection_outcomes, sent=upload_sent)
             if rewritten is not None:
                 outbound = rewritten
             elif checked_upload is not None:
                 outbound = checked_upload
-            if binary_forwarded:
-                # Honesty: these bytes leave the machine unread (a count and
-                # the path only — never a file name or content).
-                state.unscanned_uploads[provider_name] += binary_forwarded[0]
-                logger.info(
-                    "%s %s forwarded %d binary upload file part(s) unscanned"
-                    ' ([detection] binary_uploads = "forward")',
-                    request.method,
-                    path,
-                    binary_forwarded[0],
-                )
 
     new_counts = _count_delta(state.detection_counts, window.detections)
     # Same diff trick for warn-mode hits: attribute forwarded-unredacted
@@ -4424,6 +4484,7 @@ async def handle(request: Request) -> Response:
             new_counts=new_counts,
             new_warned=new_warned,
             identity=proxy_credential,
+            upload=upload,
         )
 
     upstream_base = provider_conf.upstream_base_url  # the admitted config's, not a reload's
@@ -4511,6 +4572,8 @@ async def handle(request: Request) -> Response:
     if audit_refusal is not None:
         return audit_refusal
 
+    # Handed to the upstream: an upload's parts now count as forwarded.
+    upload.settle(sent=True)
     try:
         upstream = await state.client.send(upstream_request, stream=True)
     except httpx.TransportError as exc:
@@ -5796,12 +5859,14 @@ async def _handle_routed(
     new_counts: dict[str, int],
     new_warned: dict[str, int],
     identity: bool = False,
+    upload: _UploadFate | None = None,
 ) -> Response:
     """The routed request path: the router's pre-audit refusal, the
     write-ahead audit START row, the first hop, then issue/decide until the
     router stops; delivery rides the shared branches with the router's
     delivery hooks. Every decision is the router's; every byte moved is the
-    core's."""
+    core's. An upload's counts settle as sent at the first hop actually
+    issued (``upload``; a refusal before one leaves them to the caller)."""
     method = request.method
     # The count_tokens 404 (decision 7): a refusal that never counts as an
     # attempt, so it precedes the write-ahead START row.
@@ -5853,6 +5918,8 @@ async def _handle_routed(
     while True:
         if hop.reissued_from is not None:
             state.metrics.reissues[(hop.reissued_from, hop.upstream)] += 1
+        if upload is not None and hop.unavailable is None:
+            upload.settle(sent=True)  # this hop is sent
         result, response = await _issue_hop(state, hop, plan.deadline, method=method, path=path)
         decision = plan.decide(result)
         if decision.next is None:

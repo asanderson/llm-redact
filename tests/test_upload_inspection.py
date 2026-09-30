@@ -478,7 +478,8 @@ async def test_the_extracted_text_is_bounded_by_the_body_caps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     upstream = Upstream()
-    body = _form(_pdf("a"), _pdf("b"))
+    body_parts = (_pdf("a"), _pdf("b"), _pdf("c"))
+    body = _form(*body_parts[:2])
     # More extracted text than max_body_bytes allows over the request: the
     # part that would exceed it is not scanned (incomplete).
     inspector = FakeInspector(reads("x" * 3000))
@@ -490,11 +491,20 @@ async def test_the_extracted_text_is_bounded_by_the_body_caps(
         ("openai", "clean"): 1,
         ("openai", "incomplete"): 1,
     }
-    # Each extracted text is one string against max_body_strings.
-    app = _app(monkeypatch, FakeInspector(reads("clean")), upstream, max_body_strings=1)
+    # Each extracted text is one string against max_body_strings: the
+    # request is refused (413), and every inspected part still counts once
+    # — the one that ran the budget out unscanned. Five parts (the parts
+    # cap holds) and a three-line JSONL file (three strings, charged as the
+    # upload is read): the third extracted text is the sixth string.
+    app = _app(monkeypatch, FakeInspector(reads("clean")), upstream, max_body_strings=5)
+    jsonl = b'{"a": 1}\n{"b": 2}\n{"c": 3}'
     async with _client(app) as client:
-        reply = await client.post("/v1/files", content=body, headers=FORM)
+        reply = await client.post("/v1/files", content=_form(jsonl, *body_parts), headers=FORM)
     assert reply.status_code == 413 and len(upstream.requests) == 1
+    assert app.state.proxy.inspected_uploads == {
+        ("openai", "clean_refused"): 2,
+        ("openai", "incomplete"): 1,
+    }
 
 
 async def test_a_token_inside_the_file_bounds_the_new_numbers(

@@ -389,6 +389,12 @@ object lines, every other byte as sent. A container's `name` and starting
 Response's code interpreter call ran in, unless the request named it —
 and container files are reported to a session router.
 
+The Uploads API (`/v1/uploads`: a large file sent in parts) stays
+unrecognized — a part is an opaque byte range whose boundaries can split
+a line or a value, and the total size is declared before the first part —
+so a credential the proxy holds is never lent to it; upload through
+`/v1/files` instead (docs/api-coverage.md, honest gaps).
+
 ## Realtime WebSocket APIs
 
 With `pip install 'llm-redact-proxy[realtime]'`: OpenAI Realtime

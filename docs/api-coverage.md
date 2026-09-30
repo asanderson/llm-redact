@@ -162,7 +162,7 @@ matches](#requests-no-route-matches).
 | `GET /v1/fine_tuning/jobs/{id}/events` | chat | the provider's messages about the job, restored |
 | `GET /v1/fine_tuning/jobs/{id}/checkpoints` | redact-only | checkpoint metadata (a body-less no-op: recognized) |
 | `POST /v1/fine_tuning/checkpoints/{id}/permissions` | pass-through | an admin key sharing a checkpoint across projects (org administration, like the Admin API) |
-| `POST /v1/uploads` | pass-through | DOCUMENTED GAP: the Uploads API (see the honest gaps below) |
+| `POST /v1/uploads` | pass-through | DOCUMENTED GAP: the Uploads API cannot be redacted statelessly (see the honest gaps below); never lent a credential the proxy holds |
 | `POST /v1/uploads/{id}/parts` | pass-through | an opaque byte range of the file |
 | `POST /v1/vector_stores` | chat | create: `description` and the caller's `metadata` redacted, echoed back restored; VERBATIM (scanned, never rewritten — a value llm-redact would redact refuses the request, 400): the store's `name` (a label the provider keeps and shows) and its `file_ids`. The store is reported to a session router as its creator's; no system note on any vector store route |
 | `GET /v1/vector_stores` | chat | the store list, restored in the request's own session; a listing a session router attributes per item |
@@ -575,17 +575,30 @@ is forwarded verbatim, the same honesty posture as warn mode and
 per-provider `detection = false`. Documented so nobody assumes protection
 that is not there:
 
-- **OpenAI Uploads API** (`POST /v1/uploads`, `/parts`, `/complete`) — the
-  large-file sibling of `/v1/files`. Each part is an opaque byte range and a
-  secret can straddle a part boundary, so per-line scanning cannot be applied
-  safely; real coverage would need stateful cross-part buffering. Pass-through,
-  routed to the OpenAI upstream with the client's own credential (pinned by
-  test — it previously fell through to the anthropic default; a credential
-  the proxy holds is never lent to it: a recorded 403). For the same reason
-  the File a completed Upload creates is reported to a session router as its
-  creator's only when its `purpose` is stated and is not `batch`: a batch
-  input file's requests would be run with the upload's credential, and the
-  stored objects they cite were never checked.
+- **OpenAI Uploads API** (`POST /v1/uploads`, `/parts`, `/complete`,
+  `/cancel`) — the large-file sibling of `/v1/files`, and deliberately NOT
+  recognized: it cannot be redacted without state the proxy does not keep.
+  The create declares the file's total `bytes` (and `mime_type`) before any
+  content is sent, and redaction changes lengths; each part is an opaque
+  byte range (up to 64 MB) whose boundaries can split a JSONL line, a
+  multi-byte character or a value in two; parts may be sent in parallel and
+  are put in order only by the `part_ids` list at `/complete` (with an
+  optional checksum of the whole file). Scanning each part alone would miss
+  a secret that straddles a boundary and could corrupt the file; redacting
+  it correctly would mean buffering every part of every Upload across
+  requests — the file's plaintext held by the proxy between requests, and
+  replayed to the provider only at `/complete` — which the proxy never
+  does. So it stays pass-through, routed to the OpenAI upstream with the
+  client's own credential (pinned by test — it previously fell through to
+  the anthropic default), and a credential the proxy holds (identity, a
+  routed operator key) is never lent to any Uploads route: a recorded 403
+  before the body is read (pinned by `tests/test_lent_credentials.py`).
+  Upload through `POST /v1/files` instead, whose file part is scanned.
+  For the same reason the File a completed Upload creates is reported to a
+  session router as its creator's only when its `purpose` is stated and is
+  not `batch`: a batch input file's requests would be run with the
+  upload's credential, and the stored objects they cite were never
+  checked.
 - **OpenAI Assistants / Threads** — on OpenAI's announced deprecation path
   (Responses/Conversations is the successor), so not built. The same holds
   for their Azure v1 twins (`/openai/v1/threads`), and Azure's

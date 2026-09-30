@@ -66,6 +66,7 @@ UNRECOGNIZED = [
     ("POST", "/v1/threads/thread_abc/messages", {"authorization": "Bearer sk-client"}),
     ("POST", "/v1/uploads", {"authorization": "Bearer sk-client"}),
     ("POST", "/v1/uploads/upload_1/parts", {"authorization": "Bearer sk-client"}),
+    ("POST", "/v1/uploads/upload_1/complete", {"authorization": "Bearer sk-client"}),
     ("POST", "/v1/fine_tuning/checkpoints/c1/permissions", {"authorization": "Bearer sk-x"}),
     ("POST", "/v1/moderations", {"authorization": "Bearer sk-client"}),
     ("GET", "/v1/organization/admin_api_keys", {"authorization": "Bearer sk-client"}),

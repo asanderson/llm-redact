@@ -14,8 +14,8 @@ the content policy itself is the OpenAI Files upload's, shared:
   many went out unscanned). Anthropic's Files upload is multipart/form-data
   and uses the OpenAI upload unchanged (``redact_files_upload``).
 - ``rehydrate_download``: a downloaded file restored like an OpenAI file
-  download (``openai.rehydrate_text_file``), each JSON line through the
-  plain JSON walk (no OpenAI ``arguments`` source override).
+  download (``openai.rehydrate_text_file``), every string of a JSON line
+  restored with no skip set (no OpenAI ``arguments`` source override).
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from llm_redact import multipart
+from llm_redact.jsonwalk import transform_all_strings
 from llm_redact.placeholders import may_carry_tokens
 from llm_redact.providers.openai import (
     OpenAIAdapter,
@@ -112,5 +113,8 @@ def redact_related_upload(
 
 def rehydrate_download(raw: bytes, rehydrator: Rehydrator) -> bytes | None:
     """A downloaded file restored (None: untouched): the OpenAI file
-    download's reading, JSON lines through the plain JSON walk."""
-    return rehydrate_text_file(raw, rehydrator, rehydrator.rehydrate_json)
+    download's reading, every string of a JSON line restored with NO skip
+    set (the upload redacts a data line's every value)."""
+    return rehydrate_text_file(
+        raw, rehydrator, lambda value: transform_all_strings(value, rehydrator.rehydrate_text)
+    )

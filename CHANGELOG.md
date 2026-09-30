@@ -108,6 +108,11 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- A downloaded JSONL file restores EVERY value of its lines, under `id`, `name`,
+  `type`, `data` and the other request-body structural names too, as the upload now
+  redacts them (the download kept the request-body skip set, so a data file came back
+  with placeholders under those keys). A batch output's tool-call `arguments` is still
+  restored as JSON source.
 - A connection re-check that swallows its own cancellation can no longer hold the
   periodic re-check pass open (and so stop every later re-check): the pass stops
   waiting at the timeout, closes the connection and abandons the check, instead of

@@ -182,3 +182,78 @@ async def test_a_fine_tune_line_reads_only_its_conversation_as_a_request() -> No
     messages = line["messages"]
     assert isinstance(messages, list)
     assert [message["role"] for message in messages] == ["system", "user", "assistant"]
+
+
+# route -> the download path serving that upload's file back.
+_DOWNLOADS = {
+    "openai-user-data": "/v1/files/file-1/content",
+    "openai-no-purpose": "/v1/files/file-1/content",
+    "openai-two-purposes": "/v1/files/file-1/content",
+    "anthropic-files": "/v1/files/file-1/content",
+    "openai-container-file": "/v1/containers/cntr_1/files/cfile_1/content",
+    "gemini-upload": "/download/v1beta/files/f1:download",
+}
+
+
+@pytest.mark.parametrize("media_type", ["application/octet-stream", "application/jsonl"])
+@pytest.mark.parametrize("route", sorted(_ROUTES))
+async def test_a_data_file_downloads_with_every_value_restored(route: str, media_type: str) -> None:
+    # The download restores what the upload redacted: every value of a data
+    # line, under a structural name too (the request-body skip set once left
+    # «EMAIL_001» under id/name/type/data in the user's own file).
+    path, build, headers, content_type = _ROUTES[route]
+    original = DATA_LINE.encode() + b"\n"
+    stored: dict[str, bytes] = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            stored["file"] = request.content.rsplit(b"\r\n\r\n", 1)[1].rsplit(b"\r\n--", 1)[0]
+            return httpx.Response(200, json={"id": "file-1", "file": {"name": "files/f1"}})
+        return httpx.Response(200, content=stored["file"], headers={"content-type": media_type})
+
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        upload = await client.post(
+            path, content=build(original), headers={**headers, "content-type": content_type}
+        )
+        assert upload.status_code == 200, upload.text
+        assert EMAIL.encode() not in stored["file"]
+        download = await client.get(_DOWNLOADS[route], headers=headers)
+    assert download.status_code == 200
+    assert download.content == original
+
+
+def test_a_batch_output_tool_call_is_still_restored_as_json_source() -> None:
+    # A batch output's tool call `arguments` is raw JSON source: a restored
+    # value is JSON-escaped there (and a structural name is restored too).
+    from llm_redact.providers.openai import OpenAIAdapter
+    from llm_redact.rehydrate import Rehydrator
+    from llm_redact.vault import InMemoryVault
+
+    vault = InMemoryVault()
+    quoted = 'say "hi" to jane.doe@corp.example'
+    token = vault.placeholder_for("DENY", quoted)
+    arguments = json.dumps({"to": token}, ensure_ascii=False)
+    line = json.dumps(
+        {
+            "id": token,
+            "response": {
+                "body": {
+                    "choices": [
+                        {"message": {"tool_calls": [{"function": {"arguments": arguments}}]}}
+                    ]
+                }
+            },
+        },
+        ensure_ascii=False,
+    )
+    restored = OpenAIAdapter().rehydrate_raw_body(
+        "/v1/files/file-1/content", line.encode() + b"\n", Rehydrator(vault)
+    )
+    assert restored is not None
+    value = json.loads(restored)
+    assert value["id"] == quoted
+    call = value["response"]["body"]["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"to": quoted}

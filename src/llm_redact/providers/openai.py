@@ -299,6 +299,27 @@ def _redact_line(obj: dict[str, Any], redactor: Redactor, request_keys: frozense
     }
 
 
+def _restore_file_value(value: Any, rehydrator: Rehydrator) -> Any:
+    """One downloaded JSONL line's JSON value restored with NO skip set —
+    the upload redacts a data line's every value (``_redact_line``), so a
+    token under ``id``/``name``/``type``/``data`` is restored too (a token
+    restores only to its own value, so restoring everywhere is safe) —
+    except that a string under ``arguments`` (a batch output's tool call:
+    raw JSON source) is restored JSON-escaped. Keys are never touched."""
+    if isinstance(value, str):
+        return rehydrator.rehydrate_text(value)
+    if isinstance(value, list):
+        return [_restore_file_value(item, rehydrator) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: rehydrator.rehydrate_json_source_text(item)
+            if key == "arguments" and isinstance(item, str)
+            else _restore_file_value(item, rehydrator)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _redact_text_part(
     part: multipart.MultipartPart, redactor: Redactor, *, require_scanned: bool
 ) -> bool:
@@ -1179,7 +1200,7 @@ class OpenAIAdapter(ProviderAdapter):
         if not _is_file_download(path):
             return None
         return rehydrate_text_file(
-            raw, rehydrator, lambda value: self.rehydrate_body(value, rehydrator)
+            raw, rehydrator, lambda value: _restore_file_value(value, rehydrator)
         )
 
     def rehydrate_event(self, event: SSEEvent, pool: RehydratorPool) -> list[SSEEvent]:

@@ -97,6 +97,16 @@ def test_parse_boundary_reads_the_named_media_type() -> None:
     )
 
 
+def test_parse_boundary_refuses_the_named_parameters() -> None:
+    related = 'multipart/related; boundary=a; Start="<m>"'
+    assert parse_boundary(related, "multipart/related") == b"a"
+    refuse = frozenset({"start"})
+    assert parse_boundary(related, "multipart/related", refuse=refuse) is None
+    assert parse_boundary("multipart/related; boundary=a", "multipart/related", refuse=refuse) == (
+        b"a"
+    )
+
+
 @pytest.mark.parametrize(
     "content_type",
     [

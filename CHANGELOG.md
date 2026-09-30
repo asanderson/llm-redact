@@ -44,6 +44,13 @@ and tags `vX.Y.Z`.
   proxy cannot parse. A non-ASCII boundary used to be read with its non-ASCII
   characters dropped. Applies to form uploads and the Gemini API's multipart/related
   upload alike.
+- The Gemini API upload's metadata part is read as JSON only when it declares
+  `application/json` (parameters allowed) or no type at all: a first part declaring
+  another type is metadata the check cannot read (a server parsing by the declared type
+  could read a form-encoded `file.name=…` out of a strict-JSON string), and a
+  `multipart/related` naming its root part with `start` (the metadata then need not be
+  the first part) is a body llm-redact cannot read. Both are refused 400 wherever
+  redaction applies and under a credential the proxy holds.
 - File uploads (OpenAI/Azure/custom `…/files`) are read by CONTENT
   (`upload_content.classify_file`): JSONL is redacted per line as before, any other
   text file (UTF-8, or UTF-16/32 with a BOM) is redacted as one text and re-encoded as

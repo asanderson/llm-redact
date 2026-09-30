@@ -224,9 +224,15 @@ class Multipart:
         return bytes(out)
 
 
-def parse_boundary(content_type: str, media_type: str = "multipart/form-data") -> bytes | None:
+def parse_boundary(
+    content_type: str,
+    media_type: str = "multipart/form-data",
+    *,
+    refuse: frozenset[str] = frozenset(),
+) -> bytes | None:
     """The boundary parameter of a ``media_type`` content type
-    (multipart/form-data unless named), or None. None too when the content
+    (multipart/form-data unless named), or None — None too when it carries
+    a parameter named in ``refuse`` (lower-case), and when the content
     type has more than one reading, since a reader splitting it another way
     finds another boundary, and the body's parts elsewhere: a control
     anywhere, parameters outside the strict grammar (``_parse_params``: a
@@ -246,6 +252,8 @@ def parse_boundary(content_type: str, media_type: str = "multipart/form-data") -
     except AmbiguousHeaders:
         return None
     if any(_NAIVE_BREAKS.intersection(raw[param.start : param.end]) for param in params.values()):
+        return None
+    if not refuse.isdisjoint(params):
         return None
     boundary = params.get("boundary")
     if boundary is None:

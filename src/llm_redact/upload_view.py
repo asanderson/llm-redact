@@ -50,16 +50,19 @@ field) is read by ``read_upload_metadata`` instead: ``cited`` is that
 metadata object — exactly what the provider reads as the create's body
 (``{"file": {"name": …, "displayName": …}}``), the file's own name
 included — ``{}`` when the part is blank or the body has no part. It is
-read like a JSON request body: the part's content whatever its declared
-type (the provider finds the metadata by position), strict UTF-8 (one
+read like a JSON request body: the part's content when it declares
+``application/json`` or no type at all (the provider finds the metadata by
+position; a multipart/related naming another root part with ``start`` is
+no body llm-redact reads), strict UTF-8 (one
 leading byte-order mark dropped), ``jsonwalk.loads_request`` (a repeated
 key's LAST occurrence, with ``normalized`` holding the body with the part
 re-serialized, for a caller that must forward exactly what was checked),
 nesting at most ``MAX_JSON_DEPTH``. ``problem`` names why it cannot be:
 outside the canonical grammar, a part header without one reading or a part
 without a header block (as for a form upload), a
-Content-Transfer-Encoding or a charset the proxy does not decode, content
-that is not UTF-8 text or not a JSON object, or JSON nested too deep. The
+Content-Transfer-Encoding or a charset the proxy does not decode, another
+declared type, content that is not UTF-8 text or not a JSON object, or
+JSON nested too deep. The
 media part is not read here (a file's content is not a request body).
 """
 
@@ -90,10 +93,12 @@ METADATA_NOT_TEXT = "the upload's first part, the file's metadata, is not UTF-8 
 METADATA_NOT_OBJECT = (
     "the upload's first part, the file's metadata, is not a JSON object llm-redact can read"
 )
+METADATA_TYPE = "the upload's first part, the file's metadata, is not declared application/json"
 # The metadata part's headers, read under the names a server matches
 # case-insensitively.
 _TRANSFER_ENCODING = "content-transfer-encoding"
 _CONTENT_TYPE = "content-type"
+_JSON = b"application/json"
 
 # What json.loads drops from the head of a UTF-8 document it is given as bytes.
 _UTF8_BOM = b"\xef\xbb\xbf"
@@ -189,11 +194,17 @@ def _read_metadata(
     if part.headers is not None:
         try:
             encoding = part.header(_TRANSFER_ENCODING)
+            media = part.header(_CONTENT_TYPE)
             content_type = part.params(_CONTENT_TYPE) or {}
         except multipart.AmbiguousHeaders:
             raise _Unreadable(AMBIGUOUS) from None
         if encoding is not None and encoding.lower() not in PLAIN_TRANSFER_ENCODINGS:
             raise _Unreadable(TRANSFER_ENCODED)
+        if media is not None and media.partition(b";")[0].strip().lower() != _JSON:
+            # Read as JSON only when it says so (or says nothing): a server
+            # parsing by the declared type reads other text another way
+            # (a form-encoded "x&file.name=…&y" inside a JSON string).
+            raise _Unreadable(METADATA_TYPE)
         charset = content_type.get("charset")
         if charset is not None and charset.value.lower() not in PLAIN_CHARSETS:
             raise _Unreadable(CHARSET)

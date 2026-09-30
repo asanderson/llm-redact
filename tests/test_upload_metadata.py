@@ -48,6 +48,7 @@ from llm_redact.upload_view import (
     CHARSET,
     METADATA_NOT_OBJECT,
     METADATA_NOT_TEXT,
+    METADATA_TYPE,
     OUTSIDE_GRAMMAR,
     TOO_DEEP,
     TRANSFER_ENCODED,
@@ -97,6 +98,8 @@ def test_only_the_gemini_upload_route_reads_a_metadata_part() -> None:
     gemini = GeminiAdapter()
     related = 'multipart/related; boundary="b"'
     assert gemini.upload_metadata_boundary(UPLOAD, related) == b"b"
+    typed = 'multipart/related; type="application/json"; boundary=b'
+    assert gemini.upload_metadata_boundary(UPLOAD, typed) == b"b"
     assert gemini.upload_metadata_boundary(UPLOAD, "multipart/form-data; boundary=b") is None
     assert gemini.upload_metadata_boundary("/v1beta/files", related) is None
     assert OpenAIAdapter().upload_metadata_boundary("/v1/files", related) is None
@@ -148,9 +151,14 @@ def test_the_first_part_is_read_as_the_metadata_object() -> None:
             id="empty-part",
         ),
         pytest.param(
-            _upload(_meta(name=TAKEN), b"Content-Type: text/plain"),
+            _upload(_meta(name=TAKEN), b"X-Other: 1"),
             {"file": {"name": TAKEN}},
-            id="declared-as-text",
+            id="no-declared-type",
+        ),
+        pytest.param(
+            _upload(_meta(name=TAKEN), b"Content-Type: Application/JSON ; charset=UTF-8; x=y"),
+            {"file": {"name": TAKEN}},
+            id="declared-json-with-parameters",
         ),
         pytest.param(
             _upload(
@@ -164,7 +172,7 @@ def test_the_first_part_is_read_as_the_metadata_object() -> None:
     ],
 )
 def test_what_the_metadata_part_holds(body: bytes, metadata: dict[str, Any]) -> None:
-    # Whatever type the part declares: the provider finds it by position.
+    # Declared JSON, or no type at all: the provider finds it by position.
     assert _read(body) == UploadView(metadata)
 
 
@@ -233,7 +241,32 @@ def test_only_the_json_text_of_a_repeated_key_part_is_rewritten(
         pytest.param(
             _upload(b"{file: {name: 'files/ada-notes'}}"), METADATA_NOT_OBJECT, id="lenient-json"
         ),
-        pytest.param(_upload(b"hello"), METADATA_NOT_OBJECT, id="media-first"),
+        pytest.param(_upload(b"hello", b"X-Other: 1"), METADATA_NOT_OBJECT, id="not-json"),
+        pytest.param(
+            _upload(_meta(name=TAKEN), b"Content-Type: text/plain"),
+            METADATA_TYPE,
+            id="declared-as-text",
+        ),
+        pytest.param(
+            # Strict JSON AND a form-encoded body naming file.name: a server
+            # parsing by the declared type reads the name.
+            _upload(
+                _meta(displayName=f"x&file.name={TAKEN}&y"),
+                b"Content-Type: application/x-www-form-urlencoded",
+            ),
+            METADATA_TYPE,
+            id="declared-form-encoded",
+        ),
+        pytest.param(
+            _upload(b'{"file": {}}', b"Content-Type: application/x-protobuf"),
+            METADATA_TYPE,
+            id="declared-protobuf",
+        ),
+        pytest.param(
+            _upload(b'{"file": {}}', b"Content-Type: application/jsonl"),
+            METADATA_TYPE,
+            id="declared-jsonl",
+        ),
         pytest.param(_upload(b'[{"file": {}}]'), METADATA_NOT_OBJECT, id="array"),
         pytest.param(_upload(b'{"file": {}} {}'), METADATA_NOT_OBJECT, id="trailing-bytes"),
         pytest.param(
@@ -500,8 +533,15 @@ UNREADABLE = [
         id="too-deep",
     ),
     # The media first, no metadata part: the provider reads the first part
-    # as the metadata whatever it declares.
-    pytest.param(b"hello", b"Content-Type: text/plain", METADATA_NOT_OBJECT, id="media-first"),
+    # as the metadata.
+    pytest.param(b"hello", b"Content-Type: text/plain", METADATA_TYPE, id="media-first"),
+    pytest.param(b"hello", b"X-Other: 1", METADATA_NOT_OBJECT, id="untyped-media-first"),
+    pytest.param(
+        _meta(displayName=f"x&file.name={TAKEN}&y"),
+        b"Content-Type: application/x-www-form-urlencoded",
+        METADATA_TYPE,
+        id="form-encoded",
+    ),
 ]
 
 
@@ -630,6 +670,10 @@ TWO_BOUNDARIES = (
         pytest.param("multipart/related; boundary=a; boundary=b", id="repeated-boundary"),
         pytest.param('multipart/related; x="; boundary=b"; boundary=a', id="naive-split"),
         pytest.param('multipart/related; boundary="a;b"', id="quoted-semicolon"),
+        # RFC 2387 "start" names the root part: the metadata need not be the
+        # first part, the one the check reads.
+        pytest.param('multipart/related; boundary=a; start="<meta@x>"', id="start"),
+        pytest.param('multipart/related; START="<meta@x>"; boundary=a', id="start-upper"),
     ],
 )
 @pytest.mark.parametrize(

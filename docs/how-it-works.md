@@ -327,7 +327,8 @@ while the vault row is the secret store and is never exported.
   then its media) is shown to the router as its metadata OBJECT — what
   Google reads as the create's body, so a file name the upload CHOOSES is
   judged before anything is sent, as the metadata-only JSON create's is.
-  The first part is read like a JSON body (strict UTF-8, the last
+  The first part (declared `application/json`, or undeclared) is read
+  like a JSON body (strict UTF-8, the last
   occurrence of a repeated key — the part then sent re-serialized, exactly
   as checked — at most 128 levels deep); metadata it cannot read is
   refused under a proxy-held credential and, with the client's own key,

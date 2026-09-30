@@ -274,12 +274,18 @@ def _single_request_upload(headers: "Mapping[str, str] | None", query: str) -> b
     )
 
 
+# RFC 2387's "start" names the ROOT part by its Content-ID: with it the
+# file's metadata need not be the FIRST part — the one llm-redact reads as
+# the metadata (upload_view.read_upload_metadata).
+_ROOT_ELSEWHERE = frozenset({"start"})
+
+
 def _related_boundary(content_type: str) -> bytes | None:
     """The boundary of a multipart/related content type (the Gemini API's
     single-request upload: the file's JSON metadata, then its media); None
     also when the content type has more than one reading
-    (``multipart.parse_boundary``)."""
-    return parse_multipart_boundary(content_type, "multipart/related")
+    (``multipart.parse_boundary``) or names a root part (``start``)."""
+    return parse_multipart_boundary(content_type, "multipart/related", refuse=_ROOT_ELSEWHERE)
 
 
 class GeminiAdapter(ProviderAdapter):

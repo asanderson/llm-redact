@@ -45,7 +45,11 @@ Frame checks: a session router with the optional ``realtime_frame_refusal``
 (llm-redact-pro: another user's stored object, a cloud storage location) is
 asked for every client frame that parses as JSON, before it is redacted or
 sent — the realtime twin of the HTTP ``object_access_refusal``. A refusal (or
-a failed check) closes the connection 1008, nothing of the frame sent.
+a failed check) closes the connection 1008, nothing of the frame sent. A
+router with the optional ``realtime_server_frame`` is handed every UPSTREAM
+frame that parses as JSON (its own parse, before the frame is restored or
+sent; read-only, a failure contained): llm-redact-pro records whose Live
+session a resumption handle belongs to.
 
 Reloads: a connection is served under the admission it was opened with
 (``RealtimeRelay``). A reload that changes it — the provider's settings, the
@@ -1497,6 +1501,11 @@ async def _relay(
     # realtime_frame_refusal, llm-redact-pro's stored-object and storage
     # policy): asked for every client frame, read once per connection.
     check_frames = state.checks_realtime_frames
+    # The session router's observation of upstream frames (the optional
+    # realtime_server_frame, llm-redact-pro's Live resumption-handle
+    # records): read once per connection; without it no upstream frame is
+    # parsed for the router.
+    observe_frames = state.observes_realtime_server_frames
 
     async def close_on_policy(reason: str, code: int = 1008) -> None:
         # The client FIRST: closing the upstream first lets upstream_to_client
@@ -1653,6 +1662,20 @@ async def _relay(
                     # another thread): no upstream frame is restored or sent
                     # to the client after it; the relay closes.
                     return
+                if observe_frames:
+                    # BEFORE the frame is restored or sent (synchronously, no
+                    # await since the revoked check): what the router
+                    # records from it is on record before the client can
+                    # present it back. Its own parse — it never changes the
+                    # frame — and a failure is contained (the frame is sent).
+                    _observe_server_frame(
+                        state,
+                        adapter,
+                        path,
+                        frame,
+                        identity=require_json,
+                        session_id=ctx.session_id,
+                    )
                 for out in adapter.rehydrate_message(frame, pool):
                     if relay.revoked is not None:
                         return
@@ -1749,6 +1772,27 @@ def _checked_frame(
     if refusal is not None:
         raise _FrameRefused(refusal)
     return parsed
+
+
+def _observe_server_frame(
+    state: "ProxyState",
+    adapter: WsAdapter,
+    path: str,
+    data: str | bytes,
+    *,
+    identity: bool,
+    session_id: str,
+) -> None:
+    """Hand one upstream frame to the session router's observer
+    (``ProxyState.realtime_server_frame``) as a fresh parse of the
+    provider's bytes — placeholders, never a restored value. A frame that is
+    not JSON, or nests deeper than the proxy's JSON bound, is not observed
+    (it is forwarded as it came, like any frame the adapter cannot walk)."""
+    parsed = parse_json_text(data)
+    if parsed is not None:
+        state.realtime_server_frame(
+            adapter.name, path, parsed[0], identity=identity, session_id=session_id
+        )
 
 
 def _unparsed_frame(data: str | bytes, require_json: bool) -> str | bytes:

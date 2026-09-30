@@ -278,6 +278,9 @@ _OBJECT_ACCESS_FAULT = (
 # 123 bytes), and the bookkeeping stage that counts it.
 REALTIME_FRAME_FAULT = "llm-redact: the realtime frame check failed; the frame was not forwarded"
 REALTIME_FRAME_STAGE = "realtime_frame"
+# The bookkeeping stage a failed observation of a realtime upstream frame
+# (the optional SessionRouter.realtime_server_frame) counts in.
+REALTIME_SERVER_FRAME_STAGE = "realtime_server_frame"
 # A listed item the session router failed to answer for (its call raised):
 # delivered exactly as the provider sent it, never restored in a session.
 _UNANSWERED = object()
@@ -599,7 +602,10 @@ class ProxyState:
         # vault view's staleness check that could not read its database
         # (contained: the view keeps serving its cache, never a wrong value);
         # "recheck" is an open connection's access re-check that failed or
-        # timed out (the connection is closed: connections.LiveConnections).
+        # timed out (the connection is closed: connections.LiveConnections);
+        # "realtime_frame" a realtime client frame's check that failed (the
+        # connection is closed) and "realtime_server_frame" the router's
+        # observation of an upstream frame (contained: the frame is sent).
         self.bookkeeping_errors: Counter[str] = Counter()
         bind_fault_counter = getattr(self.vault_manager, "bind_fault_counter", None)
         if callable(bind_fault_counter):
@@ -650,6 +656,9 @@ class ProxyState:
         # Optional per-frame realtime check (plugin_api.SessionRouter), read
         # ONCE: a relay reads `checks_realtime_frames` once per connection.
         self._realtime_frame_refusal = getattr(self.session_router, "realtime_frame_refusal", None)
+        # Optional observation of realtime SERVER frames, read ONCE likewise:
+        # without it no upstream frame is parsed for the router.
+        self._realtime_server_frame = getattr(self.session_router, "realtime_server_frame", None)
         self._static_context = RequestContext(
             config.vault.session, self.vault, self.redactor, self.rehydrator
         )
@@ -1005,6 +1014,35 @@ class ProxyState:
             "WS %s -> session router realtime_frame_refusal failed (%s); closing", path, fault
         )
         return REALTIME_FRAME_FAULT
+
+    @property
+    def observes_realtime_server_frames(self) -> bool:
+        """Whether the session router observes realtime upstream frames at
+        all (the optional ``realtime_server_frame``)."""
+        return self._realtime_server_frame is not None
+
+    def realtime_server_frame(
+        self, adapter_name: str, path: str, frame: Any, *, identity: bool, session_id: str
+    ) -> None:
+        """Hand the session router one parsed realtime upstream frame
+        (optional ``realtime_server_frame``): read-only, before the frame is
+        restored or sent. A router that raises is contained — counted as the
+        ``realtime_server_frame`` bookkeeping stage and logged by exception
+        TYPE only — and the frame is delivered as usual: what a router fails
+        to record is its unknown case (llm-redact-pro then refuses a Live
+        session resumption it cannot attribute), never a wrong value."""
+        observe = self._realtime_server_frame
+        if observe is None:
+            return
+        try:
+            observe(adapter_name, path, frame, identity=identity, session_id=session_id)
+        except Exception as exc:  # noqa: BLE001 — contained by design
+            self.bookkeeping_errors[REALTIME_SERVER_FRAME_STAGE] += 1
+            logger.warning(
+                "WS %s -> session router realtime_server_frame failed (%s); frame delivered",
+                path,
+                type(exc).__name__,
+            )
 
     def object_lister(
         self,

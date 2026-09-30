@@ -356,6 +356,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``response_observer(context) -> ResponseObserver | None``",
         "``realtime_frame_refusal(adapter_name, path, frame, *, identity, session_id)"
         " -> str | None``",
+        "``realtime_server_frame(adapter_name, path, frame, *, identity, session_id) -> None``",
     ),
 }
 

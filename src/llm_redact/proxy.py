@@ -2676,13 +2676,25 @@ def _body_too_large(
     )
 
 
-def _multipart_parts_over(headers: Headers, body: bytes, limit: int) -> bool:
+def _multipart_parts_over(
+    headers: Headers,
+    body: bytes,
+    limit: int,
+    adapter: ProviderAdapter | None = None,
+    path: str = "",
+) -> bool:
     """Whether a multipart body may hold more than ``limit`` parts, decided
     without parsing it: every part multipart.parse finds ends at a
     ``CRLF--boundary`` delimiter of its own, so their count bounds the
     parts (bytes.count: no allocation per part). A body that is not
-    multipart/form-data has no parts."""
-    boundary = parse_multipart_boundary(headers.get("content-type", ""))
+    multipart — multipart/form-data, or the multipart type ``adapter``
+    reads on ``path`` (``multipart_boundary``) — has no parts."""
+    content_type = headers.get("content-type", "")
+    boundary = (
+        adapter.multipart_boundary(path, content_type)
+        if adapter is not None
+        else parse_multipart_boundary(content_type)
+    )
     return boundary is not None and body.count(b"\r\n--" + boundary) > limit
 
 
@@ -2770,7 +2782,9 @@ def _unscanned_body(
     if isinstance(parsed, dict):
         return None
     boundary = (
-        parse_multipart_boundary(content_types[0]) if parsed is None and content_types else None
+        adapter.multipart_boundary(path, content_types[0])
+        if parsed is None and content_types
+        else None
     )
     if boundary is None:
         return _Unreadable(400, "the request body is not a JSON object llm-redact can redact")
@@ -2898,6 +2912,11 @@ _EXTRA_PREFIX = (
     " (a base URL that repeats the API version, such as .../v1/v1/...), so it was not"
     " forwarded; check the tool's base URL"
 )
+# The Gemini API's media families: its upload and download endpoints are
+# the API's own routes under a leading /upload or /download by design (a
+# resumable upload's data chunk, unrecognized, goes to /upload/v1beta/files
+# like the recognized upload), never a sign of a misplaced base URL.
+_MEDIA_FAMILIES = ("/upload/v1beta/", "/download/v1beta/")
 # The longest extra prefix looked for, in segments. A base URL mistake adds
 # one or two (/v1/v1/…, /api/v1/…); each candidate tail costs a match of up
 # to the whole path, so trying every tail was quadratic in its length.
@@ -2968,7 +2987,8 @@ def _misaddressed(
       segments (404: a base URL repeating the version). Azure's ``/openai/…``
       and custom ``/custom/NAME/…`` paths embed OpenAI routes by design, and
       their adapters read their own tails; an Azure tail is never taken as a
-      sign of an extra prefix.
+      sign of an extra prefix. Nor are the Gemini API's ``/upload/v1beta/…``
+      and ``/download/v1beta/…`` media families (``_MEDIA_FAMILIES``).
 
     Only a path one of whose spellings matches a route is refused: a Gemini
     ``:method`` or a Bedrock ARN is matched as sent, and a spelling of a
@@ -2995,7 +3015,7 @@ def _misaddressed(
                 )
             if any(under(versioned, prefix) for prefix in OPENAI_PREFIXES):
                 return _Misaddressed(404, "openai", None, _MISSING_VERSION, "path without /v1")
-    if path.startswith((CUSTOM_ROUTE_PREFIX, "/openai/")):
+    if path.startswith((CUSTOM_ROUTE_PREFIX, "/openai/", *_MEDIA_FAMILIES)):
         return None
     for candidate in spellings:
         segments = candidate.split("/")
@@ -3110,6 +3130,41 @@ def _unrecognized_route_refused(
         "%s %s -> 403 unrecognized route for a credential the proxy holds", request.method, path
     )
     return JSONResponse({"error": message}, status_code=403)
+
+
+def _credential_protocol_refused(
+    state: ProxyState,
+    adapter: ProviderAdapter,
+    reason: str,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A recognized route the adapter will not serve with a credential the
+    PROXY holds (``ProviderAdapter.proxy_credential_refusal``): a recorded,
+    provider-shaped 403 before redaction, the audit START row, a plan's
+    begin() and any upstream contact. ``reason`` names the protocol only."""
+    message = (
+        f"llm-redact: {reason}; this request would be sent with a credential the proxy holds,"
+        " so it was not forwarded"
+    )
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=403,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info(
+        "%s %s -> 403 protocol not served with a credential the proxy holds", request.method, path
+    )
+    return JSONResponse(adapter.error_body(message, status=403), status_code=403)
 
 
 def _plan_request(
@@ -3490,6 +3545,24 @@ async def handle(request: Request) -> Response:
                 path=path,
                 started=started,
             )
+    if proxy_credential and adapter is not None:
+        credential_refusal = adapter.proxy_credential_refusal(
+            request.method, path, request.headers, query
+        )
+        if credential_refusal is not None:
+            # A recognized route whose protocol cannot be served with the
+            # proxy's credential (its answer would hand the client a
+            # capability minted under it): refused before redaction, the
+            # plan's begin() and any upstream contact.
+            return _credential_protocol_refused(
+                state,
+                adapter,
+                credential_refusal,
+                provider_name=provider_name,
+                request=request,
+                path=path,
+                started=started,
+            )
     detection_off = provider_conf is not None and not provider_conf.detection
     if adapter is not None and body_bytes and (proxy_credential or not detection_off):
         # The scanned-body rule: a matched route forwards only a body the
@@ -3505,7 +3578,9 @@ async def handle(request: Request) -> Response:
         # key, and unmatched pass-through (only ever sent with the client's
         # own credential: refused above under one the proxy holds), still
         # forward such bodies verbatim.
-        if parsed is None and _multipart_parts_over(request.headers, body_bytes, max_body_strings):
+        if parsed is None and _multipart_parts_over(
+            request.headers, body_bytes, max_body_strings, adapter, path
+        ):
             # More parts than max_body_strings allows: refused before any
             # parse — a body of many empty parts costs the event loop per
             # part, not per byte. Like max_body_bytes, the cap holds on every
@@ -3781,7 +3856,7 @@ async def handle(request: Request) -> Response:
         # request (require_scanned). What the upload cites (its lines and
         # form fields) was checked above, before anything was redacted
         # (_ownership_body).
-        boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
+        boundary = adapter.multipart_boundary(path, request.headers.get("content-type", ""))
         if boundary is not None:
             try:
                 # One vault transaction for the whole upload (run_batched).
@@ -3800,6 +3875,9 @@ async def handle(request: Request) -> Response:
                         # The scanned-body rule, part by part: an unscanned
                         # piece refuses the whole request.
                         require_scanned=True,
+                        # A file no detector could read (binary) goes out
+                        # as sent only with the client's own key.
+                        forward_binary=not proxy_credential,
                     ),
                 )
             except BlockedRequest as exc:
@@ -4324,6 +4402,15 @@ async def _deliver(
         )
     content_type = upstream.headers.get("content-type", "")
     headers = _response_headers(upstream)
+    if identity and adapter is not None and adapter.capability_response_headers:
+        # A capability the provider minted for the PROXY's credential (an
+        # upload session URL) never reaches a client: whatever it grants
+        # would be spent unread, as the proxy's principal.
+        headers = {
+            name: value
+            for name, value in headers.items()
+            if name.lower() not in adapter.capability_response_headers
+        }
     if route is not None:
         headers.update(route.headers)
     request_meta = RequestMeta(request.method, path, started, new_counts, new_warned, audit_token)
@@ -4581,6 +4668,12 @@ def _restore_buffered(
             payload = loads_bounded(raw)
         except ValueError:
             payload = None
+            # Not one JSON value (a JSON Lines file served as JSON —
+            # ``application/jsonl`` contains the substring too): the
+            # adapter's file-download restoration, like any non-JSON body.
+            raw_rehydrated = adapter.rehydrate_raw_body(path, raw, ctx.rehydrator) if raw else None
+            if raw_rehydrated is not None:
+                raw = raw_rehydrated
         if payload is not None:
             response_id = adapter.response_id_from_body(payload)
             if response_id is not None:

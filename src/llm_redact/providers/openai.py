@@ -575,6 +575,7 @@ class OpenAIAdapter(ProviderAdapter):
         *,
         inject_note: bool,
         require_scanned: bool = False,
+        forward_binary: bool = False,
     ) -> bytes | None:
         parsed = multipart.parse(body, boundary)
         if parsed is None:

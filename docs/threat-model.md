@@ -212,6 +212,12 @@ own answer decides whether the page may read a response).
   upstream's operator key (or no key at all) — is lent only to routes the
   proxy recognizes: an unrecognized route under one is a recorded 403
   before its body is read, never forwarded unredacted as the operator.
+  Nor does a recognized route hand a client a CAPABILITY minted for such
+  a credential whose use would bypass the proxy: the Gemini API's
+  resumable upload start (its answer is an upload URL on Google's host,
+  to which the data goes directly) is a recorded 403 under one, and an
+  upload-session answer header (`X-Goog-Upload-URL`) is never relayed
+  under one.
 - The proxy never follows an upstream redirect, and relays one only when
   the client's repeat of its original request would carry nothing the
   proxy protects: never for a request with a body on a route it redacts,

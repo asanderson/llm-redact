@@ -127,6 +127,14 @@ GEMINI_ROWS: list[tuple[str, str, str]] = [
     ("POST", "/v1beta/batches/{id}:cancel", REDACT_ONLY),
     ("DELETE", "/v1beta/batches/{id}", REDACT_ONLY),
     ("PATCH", "/v1beta/batches/{id}:updateGenerateContentBatch", PASS),
+    ("POST", "/upload/v1beta/files", CHAT),
+    ("POST", "/v1beta/files", CHAT),
+    ("POST", "/v1beta/files:register", PASS),
+    ("GET", "/v1beta/files", CHAT),
+    ("GET", "/v1beta/files/{id}", CHAT),
+    ("GET", "/v1beta/files/{id}:download", CHAT),
+    ("GET", "/download/v1beta/files/{id}:download", CHAT),
+    ("DELETE", "/v1beta/files/{id}", REDACT_ONLY),
 ]
 VERTEX_ROWS: list[tuple[str, str, str]] = [
     *[

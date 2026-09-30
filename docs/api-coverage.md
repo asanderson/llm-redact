@@ -201,6 +201,14 @@ the user's own copy of it — and no route here but the generate verbs and
 | `POST /v1beta/batches/{id}:cancel` | redact-only | the name only |
 | `DELETE /v1beta/batches/{id}` | redact-only | the name only |
 | `PATCH /v1beta/batches/{id}:updateGenerateContentBatch` | pass-through | a pending batch's update: never sent with a credential the proxy holds |
+| `POST /upload/v1beta/files` | chat | the Files upload. The SINGLE-REQUEST protocol (`X-Goog-Upload-Protocol: multipart`, a `multipart/related` body: the JSON metadata, then the media) is redacted part by part — the metadata's `displayName`, a TEXT file as text (a JSON or JSONL file as JSON: a batch input file's requests), every part's file name; a BINARY file is forwarded as sent only with the client's own key and refuses the upload (400) under a credential the proxy holds, as does anything it cannot read. The RESUMABLE protocol's start (JSON metadata) is redacted with the client's own key, and its upload URL (Google's; the data chunks go there directly, never through llm-redact — the media gap below) relayed; under a credential the proxy holds the start is REFUSED (403) — that URL would let the client store unread bytes as the proxy's principal — and an `X-Goog-Upload-URL` answer header is never relayed. A data chunk sent to the proxy (`upload_id`, an `X-Goog-Upload-Command` other than `start`) and the raw protocol are pass-through. The File answering it: `displayName` restored, reported to a session router as its creator's |
+| `POST /v1beta/files` | chat | the metadata-only create: `displayName` redacted and restored; reported as the creator's |
+| `POST /v1beta/files:register` | pass-through | registers Cloud Storage objects the provider reads as the caller: never sent with a credential the proxy holds |
+| `GET /v1beta/files` | chat | the file list (`{"files": [...]}`): each `displayName` restored in the request's own session, or — with a session router attributing listed items — each file, by its `name`, in its creator's |
+| `GET /v1beta/files/{id}` | chat | a file's metadata: `displayName` restored |
+| `GET /v1beta/files/{id}:download` | chat | the file back: a text file restored (a JSON or JSONL file as JSON source, re-escaped), a binary file never read |
+| `GET /download/v1beta/files/{id}:download` | chat | the media download a batch's output file (JSONL: model output carrying placeholders) is fetched from: as above |
+| `DELETE /v1beta/files/{id}` | redact-only | the name only |
 
 ## Google Vertex AI
 
@@ -372,19 +380,21 @@ the status restores a finished batch's inlined responses in that session
 (see the [Gemini API table](#google-gemini-api)). The per-cache
 GET/PATCH/DELETE and list return metadata only and pass through.
 
-The Gemini **Files API** passes through — files are media, the documented
-non-goal: the upload (`POST /upload/v1beta/files`), the metadata-only
-create (`POST /v1beta/files`), `files:register`, a file's metadata, delete
-and download (`GET /v1beta/files/{id}[:download]`, `DELETE`), the list,
-and `GET /download/v1beta/files/{id}:download` (a batch's output file),
-all forwarded to the Gemini upstream. What llm-redact reads is who owns
-what: the file a create answers with (`files/<id>`), and the output file a
-finished batch's status names (`GET /v1beta/batches/{id}`), are reported to
-a session router that tracks stored objects (llm-redact-pro's named users;
-see [how-it-works.md](how-it-works.md)). The google-genai SDKs upload with
-the resumable protocol and send the data chunks — the last one answers
-with the file — to the upload URL Google returns, not through the proxy:
-such a file is created without the proxy ever seeing its name.
+The Gemini **Files API** is recognized (the [Gemini API
+table](#google-gemini-api)): the single-request upload and the
+metadata-only create are redacted, every echo of a file (the create, its
+metadata, the list) restored and its download restored when it is text,
+so a credential the proxy holds may reach it. What llm-redact reads is also
+who owns what: the file a create answers with (`files/<id>`), and the
+output file a finished batch's status names (`GET /v1beta/batches/{id}`),
+are reported to a session router that tracks stored objects
+(llm-redact-pro's named users; see [how-it-works.md](how-it-works.md)). The
+google-genai SDKs upload with the RESUMABLE protocol and send the data
+chunks — the last one answers with the file — to the upload URL Google
+returns, not through the proxy: with the client's own key such a file's
+data never passes llm-redact (its display name does, redacted), and under
+a credential the proxy holds the resumable start is refused — send the
+file in one multipart request instead.
 
 A pass-through request that carries a **Google API key**
 (`x-goog-api-key`, or a `key=`/`$key=` query parameter) or any other
@@ -588,6 +598,12 @@ that is not there:
   passes through to the OpenAI upstream too, on the same terms; the files a
   Response's code wrote into a container are reported to a session router
   as that Response's creator's.
+- **Gemini API resumable and raw uploads** — a resumable upload's data
+  chunks go to the upload URL Google returns (its host, not the proxy's),
+  and a data chunk or a raw-protocol upload sent to the proxy is forwarded
+  as sent (pass-through, with the client's own key; refused under a
+  credential the proxy holds, where the resumable start is refused too).
+  Only the single-request multipart upload's content is scanned.
 - **OpenAI WebRTC realtime** (`POST /v1/realtime/calls`, SDP offer/answer) —
   after setup, media and the event data channel flow peer-to-peer and never
   transit this HTTP/WS proxy at all: structurally unreachable, not merely

@@ -27,11 +27,14 @@ Responses adapter's KNOWN_EVENT_TYPES):
 """
 
 import re
-from collections.abc import Callable
+import urllib.parse
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from llm_redact.jsonwalk import json_text, loads_bounded, transform_strings
 from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
+from llm_redact.providers.documents import redact_document_upload, rehydrate_document
+from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import Rehydrator, RehydratorPool, StreamingRehydrator
 from llm_redact.sse import SSEEvent
 
@@ -64,14 +67,40 @@ _REDACT_ONLY_VERBS = frozenset(
 # redact. The per-cache GET/PATCH/DELETE and list return metadata (name, model,
 # token counts, expiry) — never the cached content — so they pass through.
 _GEMINI_CACHED_CREATE = re.compile(r"/(?:v1|v1beta)/cachedContents")
-# The Files API (media — the documented non-goal — so every route passes
-# through, never redacted or restored). A file is created by the media
-# upload (``/upload/v1beta/files``: the multipart protocol's one request, or
-# a resumable upload's finalizing chunk when it is sent through the proxy),
+# The Files API. A file is created by the media upload
+# (``/upload/v1beta/files``: the multipart protocol's one request, or a
+# resumable upload's finalizing chunk when it is sent through the proxy),
 # the metadata-only create, or ``files:register`` (Cloud Storage objects);
 # each answer names the file(s) as ``files/<id>``, which later bodies cite
 # (``fileData.fileUri``, a batch's input ``fileName``) and paths read.
 _GEMINI_FILE_CREATE = re.compile(r"(?:/upload)?/v1beta/files(?::register)?")
+# Recognized (redacted and restored, so a credential the proxy holds may
+# reach them): the list and a file's metadata (``{"files": [...]}`` and the
+# File, each echoing its ``displayName``), delete (the name only), the
+# download (``:download``, and the ``/download/v1beta/`` media form a batch's
+# output file is fetched from: text restored, binary never read), the
+# metadata-only create and the single-request media upload (see
+# ``_upload_protocol``). ``files:register`` names Cloud Storage objects the
+# provider reads as the caller: pass-through.
+_GEMINI_FILES = "/v1beta/files"
+_GEMINI_FILE = re.compile(r"/v1beta/files/[^/:]+")
+_GEMINI_FILE_DOWNLOAD = re.compile(r"(?:/download)?/v1beta/files/[^/:]+:download")
+_GEMINI_UPLOAD = "/upload/v1beta/files"
+# Resumable upload: the start request carries the file's metadata (JSON) and
+# its answer an ``X-Goog-Upload-URL`` — an upload session on Google's host,
+# minted for the request's credential — to which the client sends the data
+# chunks DIRECTLY, never through the proxy. Under the client's own key that
+# is the client's session (its data is the documented media gap); under a
+# credential the proxy holds it would let the client store unread bytes as
+# the proxy's principal, so the start is refused there (only the
+# single-request multipart protocol is served) and the session header is
+# never relayed.
+_UPLOAD_SESSION_HEADERS = frozenset({"x-goog-upload-url", "x-goog-upload-control-url"})
+_RESUMABLE_REFUSAL = (
+    "the Gemini API's resumable upload hands the client an upload URL whose data never passes"
+    " through llm-redact; upload the file in one request with the multipart protocol"
+    " (X-Goog-Upload-Protocol: multipart) instead"
+)
 # Batch Mode's jobs, by the name the create answers with (``batches/<id>``:
 # what the SDKs poll). A batch's status (the operation read back by name)
 # echoes its display name and, once it finished, its INLINED responses —
@@ -180,12 +209,100 @@ def batch_output_file_ids(body: Any) -> tuple[str, ...]:
     )
 
 
+def _header_values(headers: "Mapping[str, str] | None", name: str) -> list[str]:
+    """Every value of header ``name`` (comma lists split, lowercased)."""
+    if headers is None:
+        return []
+    getlist = getattr(headers, "getlist", None)
+    raw = (
+        getlist(name)
+        if callable(getlist)
+        else [value for key, value in headers.items() if key.lower() == name]
+    )
+    return [item.strip().lower() for value in raw for item in value.split(",") if item.strip()]
+
+
+def _upload_query(query: str) -> list[tuple[str, str]]:
+    """The query parameters an upload reads its protocol from: every one
+    whose (decoded, lowercased) name starts ``upload`` — ``uploadType``,
+    ``upload_id``, ``upload_protocol`` — with its lowercased value."""
+    found = []
+    for piece in query.split("&"):
+        name, _, value = piece.partition("=")
+        name = urllib.parse.unquote_plus(name).strip().lower()
+        if name.startswith("upload"):
+            found.append((name, urllib.parse.unquote_plus(value).strip().lower()))
+    return found
+
+
+def _upload_forwarded_unread(headers: "Mapping[str, str] | None", query: str) -> bool:
+    """Whether a POST to the upload path carries file DATA the proxy
+    forwards unread: a resumable session's data chunk (an ``upload_id``, or
+    an ``X-Goog-Upload-Command`` other than ``start``) or the raw protocol
+    (``X-Goog-Upload-Protocol: raw``, ``uploadType=media``). Such a request
+    is no route llm-redact recognizes: pass-through with the client's own
+    key (the media gap), refused under a credential the proxy holds."""
+    params = _upload_query(query)
+    commands = _header_values(headers, "x-goog-upload-command")
+    protocols = [*_header_values(headers, "x-goog-upload-protocol")]
+    protocols += [value for name, value in params if name in ("uploadtype", "upload_protocol")]
+    return (
+        any(name == "upload_id" for name, _ in params)
+        or any(command != "start" for command in commands)
+        or any(protocol in ("raw", "media") for protocol in protocols)
+    )
+
+
+def _single_request_upload(headers: "Mapping[str, str] | None", query: str) -> bool:
+    """Whether an upload request asks for nothing but the single-request
+    (multipart) protocol: no upload command, no ``upload_id``, and every
+    protocol it names — header or query — ``multipart``."""
+    params = _upload_query(query)
+    protocols = [*_header_values(headers, "x-goog-upload-protocol")]
+    for name, value in params:
+        if name not in ("uploadtype", "upload_protocol"):
+            return False
+        protocols.append(value)
+    return not _header_values(headers, "x-goog-upload-command") and all(
+        protocol == "multipart" for protocol in protocols
+    )
+
+
+def _related_boundary(content_type: str) -> bytes | None:
+    """The boundary of a multipart/related content type (the Gemini API's
+    single-request upload: the file's JSON metadata, then its media)."""
+    media, _, params = content_type.partition(";")
+    if media.strip().lower() != "multipart/related":
+        return None
+    for piece in params.split(";"):
+        key, _, value = piece.strip().partition("=")
+        if key.strip().lower() == "boundary":
+            boundary = value.strip().strip('"')
+            return boundary.encode("ascii", "ignore") or None
+    return None
+
+
 class GeminiAdapter(ProviderAdapter):
     name = "gemini"
+    capability_response_headers = _UPLOAD_SESSION_HEADERS
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "GET" and _GEMINI_MODELS.fullmatch(path):
             return RouteKind.REDACT_ONLY
+        if method == "GET" and (
+            path == _GEMINI_FILES
+            or _GEMINI_FILE.fullmatch(path)
+            or _GEMINI_FILE_DOWNLOAD.fullmatch(path)
+        ):
+            # A file's metadata and the list echo display names; a download
+            # serves the file back (text restored, binary untouched).
+            return RouteKind.CHAT
+        if method == "DELETE" and _GEMINI_FILE.fullmatch(path):
+            return RouteKind.REDACT_ONLY  # the name only
+        if method == "POST" and path in (_GEMINI_FILES, _GEMINI_UPLOAD):
+            # The metadata-only create and the media upload: the metadata
+            # (display name) and a text file redacted, the File restored.
+            return RouteKind.CHAT
         if method == "GET" and (path == _GEMINI_BATCHES or _GEMINI_BATCH_STATUS.fullmatch(path)):
             # A batch's status and the list: display names and inlined
             # responses restored (the static session batches use).
@@ -238,16 +355,87 @@ class GeminiAdapter(ProviderAdapter):
             return batch_output_file_ids(body)
         return cache_object_ids(body)
 
+    def matches_request(
+        self,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str] | None" = None,
+        query: str = "",
+    ) -> RouteKind:
+        # An upload request carrying data the proxy would forward unread (a
+        # resumable data chunk, the raw protocol) is not recognized.
+        if method == "POST" and path == _GEMINI_UPLOAD and _upload_forwarded_unread(headers, query):
+            return RouteKind.NONE
+        return self.matches(method, path)
+
+    def proxy_credential_refusal(
+        self,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str]",
+        query: str,
+    ) -> str | None:
+        if (
+            method == "POST"
+            and path == _GEMINI_UPLOAD
+            and not _single_request_upload(headers, query)
+        ):
+            return _RESUMABLE_REFUSAL
+        return None
+
+    def multipart_boundary(self, path: str, content_type: str) -> bytes | None:
+        if path == _GEMINI_UPLOAD:
+            return _related_boundary(content_type)
+        return super().multipart_boundary(path, content_type)
+
+    def redacts_multipart(self, path: str) -> bool:
+        return path == _GEMINI_UPLOAD
+
+    def redact_multipart(
+        self,
+        path: str,
+        body: bytes,
+        boundary: bytes,
+        redactor: Redactor,
+        *,
+        inject_note: bool,
+        require_scanned: bool = False,
+        forward_binary: bool = False,
+    ) -> bytes | None:
+        # The single-request upload: the metadata part (JSON: the display
+        # name) and the media part, each a document to the shared policy
+        # (text redacted — JSON as JSON —, binary only as sent under the
+        # client's own key).
+        return redact_document_upload(
+            body,
+            boundary,
+            redactor,
+            require_scanned=require_scanned,
+            forward_binary=forward_binary,
+        )
+
+    def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
+        if _GEMINI_FILE_DOWNLOAD.fullmatch(path) is None:
+            return None
+        return rehydrate_document(raw, rehydrator)
+
     def lists_objects(self, method: str, path: str) -> bool:
-        return method == "GET" and path == _GEMINI_BATCHES
+        return method == "GET" and path in (_GEMINI_BATCHES, _GEMINI_FILES)
 
     def listing_items(self, body: Any) -> list[Any] | None:
-        # The batch list answers ``{"operations": [...], "nextPageToken"}``.
-        items = body.get("operations") if isinstance(body, dict) else None
-        return items if isinstance(items, list) else None
+        # The batch list answers ``{"operations": [...], "nextPageToken"}``,
+        # the file list ``{"files": [...], "nextPageToken"}``.
+        if not isinstance(body, dict):
+            return None
+        for key in ("operations", "files"):
+            items = body.get(key)
+            if isinstance(items, list):
+                return items
+        return None
 
     def listing_item_id(self, item: Any) -> str | None:
-        # Listed by name (``batches/<id>``), as the create reported it.
+        # Listed by name (``batches/<id>``, ``files/<id>``), as the create
+        # reported it.
         value = item.get("name") if isinstance(item, dict) else None
         return value if isinstance(value, str) else None
 

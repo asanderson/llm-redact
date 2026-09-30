@@ -643,8 +643,8 @@ def test_the_gemini_files_api_is_tracked() -> None:
 async def test_a_gemini_file_upload_and_a_batch_output_are_reported(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Pass-through Gemini Files routes: the upload's answer names the file,
-    and a finished batch's status its output file — both reported with the
+    """Gemini Files routes: the upload's answer names the file, and a
+    finished batch's status its output file — both reported with the
     session that created (or first read) them."""
     router = OwnershipRouter()
     _registry(monkeypatch, build_session_router=lambda config, **kw: router)
@@ -667,7 +667,10 @@ async def test_a_gemini_file_upload_and_a_batch_output_are_reported(
         upload = await client.post(
             "/upload/v1beta/files",
             content=b"--b\r\n\r\n{}\r\n--b--",
-            headers={"x-goog-upload-protocol": "multipart", "content-type": "multipart/related"},
+            headers={
+                "x-goog-upload-protocol": "multipart",
+                "content-type": "multipart/related; boundary=b",
+            },
         )
         status = await client.get("/v1beta/batches/b1")
     assert upload.status_code == 200 and status.status_code == 200

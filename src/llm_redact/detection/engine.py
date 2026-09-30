@@ -140,6 +140,16 @@ class DetectionConfig:
     # server names/labels bypass detection (the block is stashed before the
     # sweep and restored after, so nothing in it is counted). Stored sorted.
     mcp_exempt_servers: tuple[str, ...] = ()
+    # [detection] binary_uploads: what a BINARY file part of an upload
+    # (upload_content.classify_file — a PDF, an image, bytes that are not
+    # text) does when the request goes out with the client's own
+    # credential: "forward" (default) sends it UNSCANNED, counted and
+    # logged; "refuse" answers 400. Under a credential the proxy holds a
+    # binary file part is always refused.
+    binary_uploads: str = "forward"
+
+
+BINARY_UPLOAD_MODES = ("forward", "refuse")
 
 
 def build_allowlist(config: DetectionConfig) -> Allowlist:

@@ -22,6 +22,23 @@ and tags `vX.Y.Z`.
   is not observed). Faults are contained as bookkeeping stage `response_observer`
   (type-only log, the answer delivered unchanged); a router without the member costs
   one attribute test per answer.
+- Open realtime relays and dashboard live-events streams now end when their admission
+  ends. An access gate may close them at once through the optional
+  `AccessGate.bind_connections(control)` (`plugin_api.ConnectionControl`:
+  `close(subject=, grant=, reason=)`, thread-safe), and the core re-checks each open
+  connection's optional `Admission.recheck` every `recheck_interval` seconds (gate
+  member, 5..3600, default 30), failing closed: a check that raises, times out or
+  answers anything but a bool, None or a string closes the connection. A WebSocket
+  closes 1008 with the gate's reason (upstream 1000); an events stream ends.
+  `Admission.grant` is an opaque key the core never logs or reports. New `/status`
+  `connections` block, `llm_redact_connections_closed_total{cause}`, bookkeeping
+  stage `recheck`. Streaming HTTP answers are not cut (each answers a request that
+  was admitted).
+
+### Fixed
+- The app lifespan tolerates `add_signal_handler` raising `ValueError` (uvloop off the
+  main thread) alongside `NotImplementedError` and `RuntimeError`; SIGHUP reload is
+  then unavailable, as on Windows.
 
 ## [1.9.0] - 2026-09-29
 

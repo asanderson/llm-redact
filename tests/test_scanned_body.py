@@ -273,15 +273,10 @@ async def test_an_image_edit_keeps_its_media_parts() -> None:
 
 
 # Inside an upload the same rule holds part by part.
+_PDF_UPLOAD = _form(_PURPOSE, _file(b"%PDF-1.7\n\xe2\xe3\xcf\xd3 " + EMAIL.encode(), name="a.pdf"))
+_TEXT_UPLOAD = _form(_PURPOSE, _file(b"notes: " + EMAIL.encode(), name="notes.txt"))
+
 UNSCANNED_UPLOADS: dict[str, tuple[bytes, str]] = {
-    "text-file": (
-        _form(_PURPOSE, _file(b"notes: " + EMAIL.encode(), name="notes.txt")),
-        "an uploaded JSONL line is not a JSON object llm-redact can redact",
-    ),
-    "pdf-file": (
-        _form(_PURPOSE, _file(b"%PDF-1.7\n\xe2\xe3\xcf\xd3 " + EMAIL.encode(), name="a.pdf")),
-        "an uploaded JSONL line is not a JSON object llm-redact can redact",
-    ),
     "field-not-utf8": (
         _form(b'Content-Disposition: form-data; name="user"\r\n\r\n\xfc ' + EMAIL.encode()),
         "a multipart form field is not UTF-8 text llm-redact can redact",
@@ -315,12 +310,28 @@ async def test_key_auth_refuses_an_upload_part_it_cannot_scan(
     assert upstream.requests == []
 
 
+async def test_key_auth_redacts_a_text_file_and_forwards_a_binary_one() -> None:
+    # Decided by content: text is redacted; a binary file cannot be, and
+    # with the client's own key it goes out unscanned (binary_uploads =
+    # "forward", the default — counted in /status).
+    upstream = Upstream()
+    app = create_app(_config(), upstream_transport=httpx.MockTransport(upstream))
+    async with _client(app) as client:
+        text = await client.post("/v1/files", content=_TEXT_UPLOAD, headers=_MULTIPART)
+        pdf = await client.post("/v1/files", content=_PDF_UPLOAD, headers=_MULTIPART)
+    assert text.status_code == 200 and pdf.status_code == 200
+    assert EMAIL.encode() not in upstream.requests[0].content
+    assert TOKEN.encode() in upstream.requests[0].content
+    assert upstream.requests[1].content == _PDF_UPLOAD
+    assert app.state.proxy.unscanned_uploads == {"openai": 1}
+
+
 async def test_detection_off_forwards_an_unscanned_upload_verbatim() -> None:
     upstream = Upstream()
     app = create_app(
         _config(providers={"openai": OPENAI_OFF}), upstream_transport=httpx.MockTransport(upstream)
     )
-    body, _ = UNSCANNED_UPLOADS["pdf-file"]
+    body = _PDF_UPLOAD
     async with _client(app) as client:
         response = await client.post("/v1/files", content=body, headers=_MULTIPART)
     assert response.status_code == 200
@@ -417,19 +428,48 @@ async def test_a_routed_json_object_is_still_redacted_and_sent(
     assert EMAIL.encode() not in sent.content and len(audit.begun) == 1
 
 
-async def test_a_routed_upload_part_it_cannot_scan_is_never_sent(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("proxy_credential", [None, True], ids=["plan-silent", "operator-key"])
+async def test_a_routed_binary_upload_is_never_sent_with_the_proxys_credential(
+    proxy_credential: bool | None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    app, router, upstream, audit = _routed(monkeypatch, proxy_credential=True)
-    body, why = UNSCANNED_UPLOADS["text-file"]
+    app, router, upstream, audit = _routed(monkeypatch, proxy_credential=proxy_credential)
     caplog.set_level(logging.INFO, logger="llm_redact")
     async with _client(app) as client:
         response = await client.post(
-            "/v1/files", content=body, headers={**_MULTIPART, ROUTE_HEADER: "r"}
+            "/v1/files", content=_PDF_UPLOAD, headers={**_MULTIPART, ROUTE_HEADER: "r"}
         )
     _assert_refused(response, 400, "the proxy's own provider credential", app, caplog)
-    assert why in _message(response.json())
+    assert "an uploaded file is binary" in _message(response.json())
     assert upstream.requests == [] and router.plans[0].begun == [] and audit.begun == []
+    assert app.state.proxy.unscanned_uploads == {}
+
+
+async def test_a_routed_upload_on_the_proxys_credential_still_sends_a_redacted_text_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, router, upstream, audit = _routed(monkeypatch, proxy_credential=True)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/files", content=_TEXT_UPLOAD, headers={**_MULTIPART, ROUTE_HEADER: "r"}
+        )
+    assert response.status_code == 200
+    sent = router.plans[0].begun[0][0]
+    assert EMAIL.encode() not in sent and TOKEN.encode() in sent
+
+
+async def test_a_routed_binary_upload_on_the_clients_own_key_is_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, router, upstream, audit = _routed(monkeypatch, proxy_credential=False)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/files", content=_PDF_UPLOAD, headers={**_MULTIPART, ROUTE_HEADER: "r"}
+        )
+    assert response.status_code == 200
+    assert router.plans[0].begun[0][0] == _PDF_UPLOAD
+    assert app.state.proxy.unscanned_uploads == {"openai": 1}
 
 
 # --- the proxy's own cloud identity -----------------------------------------------------

@@ -173,6 +173,21 @@
       "targets": [
         { "expr": "increase(llm_redact_compaction_forks_total[1h])", "refId": "A" }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Binary uploads forwarded UNSCANNED by provider",
+      "description": "Binary file parts of uploads (PDF, images, archives) sent with the client's own key under [detection] binary_uploads = \"forward\" (the default). Their contents leave the box unread; set binary_uploads = \"refuse\" to refuse them instead.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "fieldConfig": { "defaults": { "unit": "cps", "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (provider) (rate(llm_redact_unscanned_uploads_total[5m]))",
+          "legendFormat": "{{provider}}",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

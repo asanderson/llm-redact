@@ -334,6 +334,75 @@ async def test_detection_off_sends_a_repeated_key_line_as_it_was_checked(
     assert router.checks[0][3] == [{"custom_id": "1", "body": {}}]
 
 
+PDF = b"%PDF-1.7\n(" + EMAIL.encode() + b")\n%%EOF\n"
+
+
+async def test_with_the_clients_own_key_a_binary_file_passes_the_check_unread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Content-decided uploads: the check reads the form fields; a binary
+    # file cites nothing and never makes the request fail — it is forwarded
+    # byte for byte (binary_uploads = "forward"), counted.
+    router = LineRouter()
+    upstream = Upstream()
+    app = _app(monkeypatch, router, upstream)
+    upload = _form(_field("purpose", b"user_data"), _file(PDF, filename=b"a.pdf"))
+    async with _client(app) as client:
+        response = await client.post("/v1/files", content=upload, headers=HEADERS)
+    assert response.status_code == 200
+    (sent,) = upstream.requests
+    assert sent.content == upload
+    assert router.checks[0][3] == [{"purpose": "user_data"}]
+    assert app.state.proxy.unscanned_uploads == {"openai": 1}
+
+
+async def test_a_text_file_sends_its_repeated_key_line_as_it_was_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A JSON line inside a text file is read by the check (the LAST
+    # occurrence of a repeated key); the file is then redacted as text, so
+    # what goes out is the line the check read — never the occurrence it
+    # did not.
+    router = LineRouter()
+    upstream = Upstream()
+    app = _app(monkeypatch, router, upstream)
+    repeated = b'{"body": {"input": [{"file_id": "file-a"}]}, "body": {"q": "' + EMAIL.encode()
+    upload = _form(_file(b"notes\n" + repeated + b'"}}\n', filename=b"notes.txt"))
+    async with _client(app) as client:
+        response = await client.post("/v1/files", content=upload, headers=HEADERS)
+    assert response.status_code == 200
+    (sent,) = upstream.requests
+    assert b"file-a" not in sent.content and EMAIL.encode() not in sent.content
+    assert "«EMAIL_001»".encode() in sent.content
+    assert router.checks[0][3] == [{"body": {"q": EMAIL}}]
+
+
+async def test_under_identity_a_binary_file_is_refused_before_it_is_signed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_redact.registry import Registry
+
+    auth = FakeAuth()
+    reg = Registry()
+    reg.build_upstream_auth = lambda name, provider: auth if provider.auth == "identity" else None
+    router = LineRouter()
+    upstream = Upstream()
+    app = _app(
+        monkeypatch,
+        router,
+        upstream,
+        registry=reg,
+        providers={"azure": ProviderConfig(AZURE, auth="identity")},
+    )
+    upload = _form(_field("purpose", b"user_data"), _file(PDF, filename=b"a.pdf"))
+    async with _client(app) as client:
+        response = await client.post("/openai/files?api-version=1", content=upload, headers=HEADERS)
+    assert response.status_code == 400
+    assert "an uploaded file is binary" in response.json()["error"]["message"]
+    assert upstream.requests == [] and auth.calls == 0
+    assert router.checks[0][3] == [{"purpose": "user_data"}]  # checked, then refused
+
+
 @pytest.mark.parametrize("detection", [True, False], ids=["redacted", "detection-off"])
 async def test_an_uploaded_line_holding_a_lone_surrogate_is_sent_as_the_same_value(
     detection: bool, monkeypatch: pytest.MonkeyPatch

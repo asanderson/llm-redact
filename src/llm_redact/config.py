@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from llm_redact.detection.deny import DenyEntry
-from llm_redact.detection.engine import CustomRule, DetectionConfig, NerConfig
+from llm_redact.detection.engine import (
+    BINARY_UPLOAD_MODES,
+    CustomRule,
+    DetectionConfig,
+    NerConfig,
+)
 
 if TYPE_CHECKING:
     from llm_redact.plugin_api import ConfigSection
@@ -2165,9 +2170,16 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
             "deny",
             "deny_strings",
             "mcp",
+            "binary_uploads",
         },
         "[detection]",
     )
+    binary_uploads = detection_raw.get("binary_uploads", "forward")
+    if binary_uploads not in BINARY_UPLOAD_MODES:
+        raise ConfigError(
+            f"[detection] binary_uploads must be one of {list(BINARY_UPLOAD_MODES)},"
+            f" got {binary_uploads!r}"
+        )
     languages: tuple[str, ...] | None = None
     if "languages" in detection_raw:
         languages_raw = detection_raw["languages"]
@@ -2326,6 +2338,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         modes=modes,
         deny_strings=deny_strings,
         mcp_exempt_servers=mcp_exempt_servers,
+        binary_uploads=binary_uploads,
     )
 
     rehydration_raw = raw.get("rehydration", {})

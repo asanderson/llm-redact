@@ -226,6 +226,9 @@ own answer decides whether the page may read a response).
   and file uploads are redacted per line (and every upload's filename,
   restored on the file objects that echo it), results/output downloads
   are restored per line, and an upload too large to buffer is rejected 413.
+  An uploaded file is read by its content: any other TEXT file is
+  redacted as one text; a BINARY file (a PDF, an image, an archive, text
+  that is not UTF-8) cannot be redacted — see the binary-upload knob below.
 - MCP connector configuration (`mcp_servers`, `tools type=mcp`) is
   deliberately NOT redacted: it is addressed to the provider, which must
   hold the real credential to call the MCP server on the model's behalf.
@@ -295,6 +298,20 @@ own answer decides whether the page may read a response).
   and Origin checks to its one public origin, so a wider Host is never
   accepted without authentication. SCIM requests skip the Origin check
   (identity providers are not browsers) but keep the Host check.
+- An access gate admits a connection once, when it opens. A request lives
+  for one response, but a realtime WebSocket relay and the `/events` live
+  feed can stay open for hours, so the core keeps a record of each open one
+  along with the admission it was opened under. The gate can close the
+  ones belonging to a user, or opened by a credential or sign-in session
+  (an opaque grant the core only compares), the moment it revokes them. On
+  top of that, the core re-asks every open connection's admission every
+  `recheck_interval` seconds (30 by default) and closes each one that is no
+  longer admitted. A check that raises, times out or gives an answer that
+  makes no sense closes the connection too (fail closed). A closed relay
+  closes the client with 1008 and never forwards a frame it reads after the
+  revocation, and a closed feed simply ends. Streaming HTTP responses are
+  not cut: each is one answer to a request that was admitted when it was
+  made, and the next request is refused.
 - Status/metrics/audit — and the `/events` live feed, which streams the
   same rows `/recent` serves — expose **types and counts only**: never
   values, never placeholder ids, never allowlist contents (the
@@ -335,7 +352,7 @@ own answer decides whether the page may read a response).
 ### Deliberate protection opt-outs
 
 Warn mode has always been observation-only (the matched value IS
-forwarded). Three configuration knobs extend that family — each is a
+forwarded). Four configuration knobs extend that family — each is a
 conscious decision the operator makes, and each is surfaced rather than
 silent:
 
@@ -349,6 +366,17 @@ silent:
   `/status` `providers_detection_off` and the `status`/`doctor` posture
   output. Meant
   for upstreams you own end to end (a local Ollama).
+- `[detection] binary_uploads = "forward"` (the DEFAULT) forwards a
+  binary file part of an upload — a PDF, an image, an archive, text that
+  is not UTF-8, anything opening with a known binary signature — UNSCANNED
+  when the request carries the client's own key: whatever is inside it
+  reaches the provider as-is, like base64 media in a chat body (its file
+  name is still redacted). Counted per provider (`/status`
+  `unscanned_uploads_total`, `llm_redact_unscanned_uploads_total`), logged
+  per request (path and count), in the `llm-redact status` posture block,
+  and stated by `doctor`. `"refuse"` answers 400 instead. Under a
+  credential the proxy holds a binary file part is always refused — the
+  proxy vouches only for what it read.
 - `[detection.mcp] exempt_servers` exempts MCP content blocks addressed
   to named servers. Result blocks that cannot be correlated to an exempt
   server stay redacted (fail-closed).
@@ -400,6 +428,7 @@ row, is [resilience.md](resilience.md).
 | Provider-side inference | The provider can guess redacted content from context; only omission fixes that |
 | Length/timing side channels | Placeholder lengths differ from originals; smoothing them would break streaming |
 | Base64 media contents | Images can't leak through text regexes; PDF parsing would need heavy deps. Media blobs at their known positions (base64 `data`, Bedrock `source.bytes`) are not even scanned — scanning base64 finds nothing real, costs event-loop CPU, and could rewrite a token-shaped run inside an image |
+| Binary file uploads | The same non-goal for multipart uploads: a file part that is not text (by its content — a PDF, even an all-ASCII one, an image, an archive, a Latin-1 text) is never read or rewritten. With the client's own key it is forwarded unscanned by default (`[detection] binary_uploads`, counted and surfaced) or refused; under a credential the proxy holds it is refused |
 | Values a client deliberately encodes | base64 inside a JSON string: the proxy scans the bytes it receives. What the proxy could not read as its plain bytes is refused instead of forwarded wherever redaction applies (and under any credential the proxy holds): a `Content-Encoding` other than identity (415), a declared multipart Content-Transfer-Encoding or charset (400) |
 | Structural names | JSON object keys, header names and a multipart part's `name` are protocol, not content; values are scanned — string values, and an upload's `filename` / `filename*` |
 | Shapes the rules exclude | Bare-digit phones, street addresses, passport/DL numbers: collision-prone with no reliable grammar |

@@ -119,7 +119,11 @@ that cannot cover:
   a given text before you rely on it.
 - **Media.** Base64 images, PDFs, and audio are never decoded and
   scanned; on realtime voice connections, only the text modality is
-  redacted — what a user *says* reaches the provider as-is.
+  redacted — what a user *says* reaches the provider as-is. File uploads
+  are read by content: text files are redacted, but a binary file (a PDF,
+  an image, an archive) sent with your own key is forwarded unscanned by
+  default — counted in `/status`; `[detection] binary_uploads = "refuse"`
+  refuses it instead.
 - **Anything you opt out of.** Warn-mode rules observe and *forward*
   the matched value; `[providers.NAME] detection = false`, MCP server
   exemptions, and language scoping likewise forward what they exempt.

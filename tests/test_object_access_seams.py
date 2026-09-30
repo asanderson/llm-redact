@@ -980,9 +980,9 @@ async def test_an_upload_is_checked_once_with_what_it_cites(
     detection: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The check reads the upload whether or not the route redacts; a CSV
-    # file has no JSON line to cite. Where redaction applies, its lines —
-    # not JSONL — are then refused by the scanned-body rule; detection =
-    # false forwards the upload as sent.
+    # file has no JSON line to cite. Where redaction applies it is then
+    # redacted as the text it is; detection = false forwards the upload as
+    # sent.
     router = LineRouter()
     upstream = Upstream()
     app = _app(
@@ -997,8 +997,8 @@ async def test_an_upload_is_checked_once_with_what_it_cites(
             files={"file": ("contacts.csv", b"name,email\nada,x\n", "text/csv")},
             data={"purpose": "assistants"},
         )
-    assert response.status_code == (400 if detection else 200)
-    assert len(upstream.requests) == (0 if detection else 1)
+    assert response.status_code == 200
+    assert len(upstream.requests) == 1
     assert router.checks == [("openai", "POST", "/v1/files", [{"purpose": "assistants"}], False)]
 
 

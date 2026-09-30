@@ -12,6 +12,19 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Changed
+- The stored-object check (`SessionRouter.object_access_refusal`, llm-redact-pro's named
+  users) now sees the METADATA part of the Gemini API's single-request upload
+  (`POST /upload/v1beta/files`, a `multipart/related` body): it is handed that part's
+  JSON object — what Google reads as the create's body, a chosen `file.name` included —
+  exactly as it is handed the metadata-only JSON create's body, before anything is
+  sent, under the client's own key and a credential the proxy holds alike. It is read
+  like a JSON body (strict UTF-8, repeated keys last-wins, at most 128 levels deep); a
+  metadata part repeating a key is sent re-serialized, exactly as checked. Metadata the
+  check cannot read (lenient or non-UTF-8 JSON, a transfer encoding, a foreign charset,
+  no JSON metadata first) is refused 400 under a credential the proxy holds and, with
+  the client's own key, wherever redaction applies; only with `detection = false` and
+  the client's own key does it go out unchecked, as an unparseable JSON body does.
+  New adapter hook `ProviderAdapter.upload_metadata_boundary`.
 - File uploads (OpenAI/Azure/custom `…/files`) are read by CONTENT
   (`upload_content.classify_file`): JSONL is redacted per line as before, any other
   text file (UTF-8, or UTF-16/32 with a BOM) is redacted as one text and re-encoded as

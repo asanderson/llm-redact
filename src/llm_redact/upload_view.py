@@ -39,6 +39,24 @@ check parses) than it parses (``max_lines``; the proxy's
 ``max_body_strings``) — every other line costs a split and a byte test,
 never a parse. What each means is the caller's decision (the proxy
 refuses them when its own credential is spent).
+
+A SINGLE-REQUEST upload whose first part is the created file's JSON
+metadata (the Gemini API's ``multipart/related`` upload: the metadata,
+then the media; its parts carry no Content-Disposition, so none is a form
+field) is read by ``read_upload_metadata`` instead: ``cited`` is that
+metadata object — exactly what the provider reads as the create's body
+(``{"file": {"name": …, "displayName": …}}``), the file's own name
+included — ``{}`` when the part is blank or the body has no part. It is
+read like a JSON request body: the part's content whatever its declared
+type (the provider finds the metadata by position), strict UTF-8 (one
+leading byte-order mark dropped), ``jsonwalk.loads_request`` (a repeated
+key's LAST occurrence, with ``normalized`` holding the body with the part
+re-serialized, for a caller that must forward exactly what was checked),
+nesting at most ``MAX_JSON_DEPTH``. ``problem`` names why it cannot be:
+outside the canonical grammar, a part header without one reading, a
+Content-Transfer-Encoding or a charset the proxy does not decode, content
+that is not UTF-8 text or not a JSON object, or JSON nested too deep. The
+media part is not read here (a file's content is not a request body).
 """
 
 from __future__ import annotations
@@ -64,6 +82,14 @@ CHARSET = "a multipart part declares a charset llm-redact does not decode"
 NOT_TEXT = "a multipart form field is not UTF-8 text"
 REPEATED_KEY = "a multipart form field repeats a JSON key"
 TOO_DEEP = f"a multipart part nests JSON deeper than {MAX_JSON_DEPTH} levels"
+METADATA_NOT_TEXT = "the upload's first part, the file's metadata, is not UTF-8 text"
+METADATA_NOT_OBJECT = (
+    "the upload's first part, the file's metadata, is not a JSON object llm-redact can read"
+)
+# The metadata part's headers, read under the names a server matches
+# case-insensitively.
+_TRANSFER_ENCODING = "content-transfer-encoding"
+_CONTENT_TYPE = "content-type"
 
 # What json.loads drops from the head of a UTF-8 document it is given as bytes.
 _UTF8_BOM = b"\xef\xbb\xbf"
@@ -80,9 +106,11 @@ _SEGMENT = re.compile(r"\[([^\[\]]*)\]")
 
 
 class UploadView(NamedTuple):
-    """One upload as the stored-object check reads it (see the module)."""
+    """One upload as the stored-object check reads it (see the module):
+    ``cited`` is the list of what a form upload cites, or the metadata
+    object of a metadata-first upload (``read_upload_metadata``)."""
 
-    cited: list[Any]
+    cited: Any
     problem: str | None = None
     oversized: bool = False
     normalized: bytes | None = None
@@ -119,6 +147,62 @@ def read_upload(body: bytes, boundary: bytes, *, max_json_bytes: int, max_lines:
     except _TooManyLines:
         return UploadView([], too_many_lines=True)
     return UploadView(reader.cited, normalized=parsed.serialize() if rewrote else None)
+
+
+def read_upload_metadata(body: bytes, boundary: bytes) -> UploadView:
+    """The single-request upload ``body`` (delimited by ``boundary``) as the
+    stored-object check reads it: its FIRST part's JSON metadata object,
+    read like a JSON request body (see the module)."""
+    parsed = multipart.parse(body, boundary)
+    if parsed is None:
+        return UploadView(None, problem=OUTSIDE_GRAMMAR)
+    if not parsed.parts:
+        return UploadView({})  # no part at all: no metadata
+    part = parsed.parts[0]
+    try:
+        metadata, duplicate_keys = _read_metadata(part)
+    except _Unreadable as exc:
+        return UploadView(None, problem=str(exc))
+    if not duplicate_keys:
+        return UploadView(metadata)
+    # A repeated key: the part is sent as it was read (its LAST occurrence),
+    # never with an earlier one a first-wins provider would act on.
+    part.content = json_bytes(metadata)
+    return UploadView(metadata, normalized=parsed.serialize())
+
+
+def _read_metadata(part: multipart.MultipartPart) -> tuple[dict[str, Any], bool]:
+    """The metadata object ``part`` holds (``{}`` when it is blank) and
+    whether it repeats a key. Raises _Unreadable for what the check cannot
+    read. A part without a header block is read too: a server may read it
+    as a part with no headers."""
+    if part.headers is not None:
+        try:
+            encoding = part.header(_TRANSFER_ENCODING)
+            content_type = part.params(_CONTENT_TYPE) or {}
+        except multipart.AmbiguousHeaders:
+            raise _Unreadable(AMBIGUOUS) from None
+        if encoding is not None and encoding.lower() not in PLAIN_TRANSFER_ENCODINGS:
+            raise _Unreadable(TRANSFER_ENCODED)
+        charset = content_type.get("charset")
+        if charset is not None and charset.value.lower() not in PLAIN_CHARSETS:
+            raise _Unreadable(CHARSET)
+    content = part.content.strip().removeprefix(_UTF8_BOM)
+    if not content:
+        return {}, False
+    try:
+        text = content.decode()  # strict UTF-8
+    except UnicodeDecodeError:
+        raise _Unreadable(METADATA_NOT_TEXT) from None
+    try:
+        metadata, duplicate_keys = loads_request(text)
+    except JsonTooDeep:
+        raise _Unreadable(TOO_DEEP) from None
+    except ValueError:
+        raise _Unreadable(METADATA_NOT_OBJECT) from None
+    if not isinstance(metadata, dict):
+        raise _Unreadable(METADATA_NOT_OBJECT)
+    return metadata, duplicate_keys
 
 
 class _Reader:

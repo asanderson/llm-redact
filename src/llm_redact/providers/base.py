@@ -621,6 +621,15 @@ class ProviderAdapter(ABC):
         multipart/related upload) accepts it on that route only."""
         return parse_multipart_boundary(content_type)
 
+    def upload_metadata_boundary(self, path: str, content_type: str) -> bytes | None:
+        """The boundary of a SINGLE-REQUEST upload on ``path`` whose first
+        part is the created file's JSON metadata — what the provider reads
+        as the create's body (the Gemini API's multipart/related upload) —
+        or None. The stored-object check reads such an upload's metadata
+        object (``upload_view.read_upload_metadata``) instead of form data
+        (``upload_view.read_upload``)."""
+        return None
+
     def proxy_credential_refusal(
         self,
         method: str,

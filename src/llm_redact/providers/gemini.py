@@ -393,6 +393,12 @@ class GeminiAdapter(ProviderAdapter):
             return _related_boundary(content_type)
         return super().multipart_boundary(path, content_type)
 
+    def upload_metadata_boundary(self, path: str, content_type: str) -> bytes | None:
+        # The single-request upload's first part is the file's metadata
+        # ({"file": {"name", "displayName", ...}}): what the stored-object
+        # check reads, as the metadata-only create's JSON body is read.
+        return _related_boundary(content_type) if path == _GEMINI_UPLOAD else None
+
     def redacts_multipart(self, path: str) -> bool:
         return path == _GEMINI_UPLOAD
 

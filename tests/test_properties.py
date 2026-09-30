@@ -514,6 +514,7 @@ _body_keys = st.sampled_from(
         "documents",
         "metadata",
         "requestMetadata",
+        "attributes",
         "prompt",
         "variables",
         "instances",
@@ -576,7 +577,7 @@ _REF_OPAQUE = {
     (None, "instances"),
     (None, "parameters"),
 }
-_REF_OPAQUE_ANYWHERE = {"documents", "metadata", "requestMetadata"}
+_REF_OPAQUE_ANYWHERE = {"attributes", "documents", "metadata", "requestMetadata"}
 # Base64 media strings, skipped only at this position.
 _REF_MEDIA = {("source", "bytes")}
 

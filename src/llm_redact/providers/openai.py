@@ -70,6 +70,7 @@ from llm_redact.upload_view import (
     AMBIGUOUS,
     PLAIN_CHARSETS,
     PLAIN_TRANSFER_ENCODINGS,
+    MetadataPart,
     header_block_found,
 )
 
@@ -375,10 +376,14 @@ def _part_kind(part: multipart.MultipartPart, *, media: bool, require_scanned: b
 class _Reading(NamedTuple):
     """How the upload's part loop reads one part: ``_part_kind``'s kind,
     with a "file" part replaced by what its content is — "jsonl", "document"
-    (any other text file) or "binary" — and that ``content``."""
+    (any other text file) or "binary" — and that ``content``; or, for a
+    single-request upload's first part, "metadata": the JSON object the
+    provider reads as the create's body (``metadata``, redacted by
+    ``documents.redact_related_upload``)."""
 
     kind: str
     content: FileContent = BINARY  # read only for "document"/"jsonl"
+    metadata: MetadataPart | None = None  # only for "metadata"
 
 
 def read_file_part(content: bytes, charge: Callable[[int], None]) -> _Reading:
@@ -486,7 +491,10 @@ def _multipart_floors(parsed: multipart.Multipart, readings: list[_Reading]) -> 
 
     for part, reading in zip(parsed.parts, readings, strict=True):
         part.redact_filenames(observe, strict=False)  # returns every name unchanged
-        if reading.kind == "document":
+        if reading.metadata is not None:
+            # A file's metadata: the JSON it parses to (escapes resolved).
+            merge_floors(floors, json_floors(reading.metadata.metadata))
+        elif reading.kind == "document":
             observe(reading.content.text)
         elif reading.kind == "jsonl":
             for line in part.content.split(b"\n"):

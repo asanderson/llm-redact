@@ -768,15 +768,33 @@ class OlderRouter:
         return None
 
 
-async def test_without_an_ownership_check_the_upload_is_redacted_as_before(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("metadata", "head", "problem"), UNREADABLE)
+async def test_without_an_ownership_check_unreadable_metadata_is_refused_where_redaction_applies(
+    metadata: bytes, head: bytes, problem: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # No check to show it to: a metadata part is redacted like any other
-    # text part of the upload and forwarded (the Free core, an older router).
+    # No check to show it to (the Free core, an older router): redaction
+    # reads the metadata as the same JSON value, so what that reading
+    # refuses is a body the proxy cannot redact — refused as the scanned-body
+    # rule refuses a JSON body it cannot read (it was once redacted as a
+    # text file and forwarded).
     upstream = FilesAPI()
     app = _app(monkeypatch, OlderRouter(), upstream, operator=False)
-    lenient = f"{{file: {{displayName: '{EMAIL}'}}}}".encode()
-    response = await _post(app, _upload(lenient))
-    assert response.status_code == 200
-    (sent,) = upstream.requests
-    assert EMAIL.encode() not in sent.content and "«EMAIL_001»".encode() in sent.content
+    response = await _post(app, _upload(metadata, head))
+    assert response.status_code == 400, response.text
+    message = response.json()["error"]["message"]
+    assert problem in message and "forwards only bodies it has redacted" in message
+    assert "ada-notes" not in response.text and upstream.requests == []
+
+
+@pytest.mark.parametrize("check", [True, False], ids=["checked", "free-core"])
+async def test_pretty_printed_metadata_is_redacted_with_its_escapes_resolved(
+    check: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upstream = FilesAPI()
+    app = _app(monkeypatch, NameRouter() if check else OlderRouter(), upstream, operator=False)
+    pretty = json.dumps({"file": {"displayName": f"notes of {EMAIL}"}}, indent=2)
+    response = await _post(app, _upload(pretty.replace("@", "\\u0040").encode()))
+    assert response.status_code == 200, response.text
+    assert json.loads(upstream.metadata()) == {"file": {"displayName": "notes of «EMAIL_001»"}}
+    # The answer's echo is restored in the request's session.
+    assert response.json()["file"]["displayName"] == f"notes of {EMAIL}"

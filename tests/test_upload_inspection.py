@@ -627,6 +627,21 @@ async def test_every_upload_route_checks_part_headers_before_inspection(
     assert inspector.parts == [] and upstream.requests == []
 
 
+async def test_gemini_metadata_redaction_cannot_read_is_never_inspected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The metadata part is read (as the create's JSON body) with the upload,
+    # before any binary part is handed over.
+    path, headers, body, _ = ROUTES["gemini"]
+    upstream, inspector = Upstream(), FakeInspector(reads("clean"))
+    app = _app(monkeypatch, inspector, upstream)
+    declared_text = body(_pdf("a")).replace(b"application/json", b"text/plain", 1)
+    async with _client(app) as client:
+        reply = await client.post(path, content=declared_text, headers=headers)
+    assert reply.status_code == 400 and "application/json" in reply.text
+    assert inspector.parts == [] and upstream.requests == []
+
+
 # --- under a credential the proxy holds ---------------------------------------------------
 
 

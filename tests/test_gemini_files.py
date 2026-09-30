@@ -72,6 +72,11 @@ def _metadata(email: str) -> bytes:
     return json.dumps({"file": {"display_name": f"notes of {email}"}}).encode()
 
 
+# The first part is the file's metadata (the create's body): a part-loop
+# case goes after one.
+META = ("application/json", b'{"file": {}}')
+
+
 # --- routing ---------------------------------------------------------------------------
 
 
@@ -178,32 +183,91 @@ def test_the_upload_is_redacted_part_by_part_every_part_a_file() -> None:
         body, b"b", _redactor(vault), require_scanned=True, forward_binary=None
     )
     assert out is not None and b"@corp.example" not in out
-    # The metadata part is JSONL (one object line): redacted as JSON.
+    # The metadata part is the create's JSON body: redacted as that value.
     assert b'"display_name": "notes of \xc2\xabEMAIL_001\xc2\xbb"' in out
     assert out.endswith(b"call \xc2\xabEMAIL_002\xc2\xbb\r\n--b--\r\n")
-    assert _related_upload(_related(("text/plain", b"nothing"))) is None
+    assert _related_upload(_related(META, ("text/plain", b"nothing"))) is None
     # A UTF-16 text file (byte-order mark) is redacted and re-encoded as it came.
     utf16 = "\ufeffmail " + EMAIL
-    out = _related_upload(_related(("text/plain", utf16.encode("utf-16-le"))))
+    out = _related_upload(_related(META, ("text/plain", utf16.encode("utf-16-le"))))
     assert out is not None and "mail «EMAIL_001»".encode("utf-16-le") in out
+
+
+@pytest.mark.parametrize("indent", [None, 2, "\t"], ids=["one-line", "pretty", "tabs"])
+def test_the_metadata_part_is_redacted_as_the_json_value_the_check_reads(
+    indent: int | str | None,
+) -> None:
+    # One reading: escapes resolved whatever the whitespace — a
+    # pretty-printed metadata part was once redacted as raw TEXT, so an
+    # escaped address ("\u0040") went out and the provider decoded it.
+    text = json.dumps({"file": {"display_name": f"notes of {EMAIL}"}}, indent=indent)
+    escaped = text.replace("@", "\\u0040").encode()
+    out = _related_upload(_related(("application/json", escaped), ("text/plain", b"hi")))
+    assert out is not None
+    metadata = out.split(b"\r\n\r\n", 1)[1].split(b"\r\n--b", 1)[0]
+    assert json.loads(metadata) == {"file": {"display_name": f"notes of {TOKEN}"}}
+    # Only the JSON text is rewritten: the part keeps its header block.
+    assert out.startswith(b"--b\r\nContent-Type: application/json\r\n\r\n{")
+
+
+def test_the_metadata_part_changes_only_when_a_value_or_a_repeated_key_does() -> None:
+    pretty = b'\xef\xbb\xbf {\n  "file": {"display_name": "notes"}\n}\r\n'
+    assert _related_upload(_related(("application/json", pretty))) is None
+    # A repeated key: exactly the reading (its LAST occurrence) goes out,
+    # the bytes around the JSON text kept.
+    repeated = b' {"file": {"name": "files/a"}, "file": {"display_name": "x"}} '
+    out = _related_upload(_related(("application/json", repeated)))
+    assert out == _related(("application/json", b' {"file": {"display_name": "x"}} '))
+    # Keys are never redacted; every string value is, "name" included.
+    keyed = json.dumps({"file": {"name": f"files/{EMAIL}", EMAIL: 1}}).encode()
+    out = _related_upload(_related(("application/json", keyed)))
+    assert out is not None
+    metadata = out.split(b"\r\n\r\n", 1)[1].split(b"\r\n--b", 1)[0]
+    assert json.loads(metadata) == {"file": {"name": f"files/{TOKEN}", EMAIL: 1}}
+
+
+@pytest.mark.parametrize(
+    ("first", "message"),
+    [
+        (("text/plain", _metadata(EMAIL)), "is not declared application/json"),
+        (("application/json", b"{file: {display_name: 'x'}}"), "not a JSON object"),
+        (("application/json", b'{"file": "\xff"}'), "is not UTF-8 text"),
+        (("image/png", PNG), "is not declared application/json"),
+        (("application/json; charset=latin-1", b"{}"), "charset"),
+    ],
+    ids=["declared-text", "lenient-json", "not-utf8", "media-first", "charset"],
+)
+def test_metadata_the_check_cannot_read_is_unredactable(
+    first: tuple[str, bytes], message: str
+) -> None:
+    # Where every piece must be scanned, the reading the stored-object
+    # check refuses is refused by redaction too (a JSON body the proxy
+    # cannot read is); leniently, the part is read as a file.
+    body = _related(first, ("text/plain", b"hi"))
+    with pytest.raises(UnredactableRequest, match=message):
+        _related_upload(body)
+    lenient = _related_upload(body, require_scanned=False)  # read as a file instead
+    assert lenient is None or EMAIL.encode() not in lenient
 
 
 @pytest.mark.parametrize(
     ("body", "message"),
     [
-        (_related(("image/png", PNG)), "is binary"),
-        (_related(("application/pdf", b"%PDF-1.7 all ascii")), "is binary"),
+        (_related(META, ("image/png", PNG)), "is binary"),
+        (_related(META, ("application/pdf", b"%PDF-1.7 all ascii")), "is binary"),
         (b"pre\r\n" + _related(("text/plain", b"x")), "preamble or epilogue"),
         (_related(("text/plain", b"x")) + b"tail", "preamble or epilogue"),
         (b"--b\r\nno closing", "outside the canonical form"),
         (
-            b"--b\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+            _related(META)[:-7]
+            + b"--b\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n"
             b"eA==\r\n--b--\r\n",
             "Content-Transfer-Encoding",
         ),
-        (_related(("text/plain; charset=latin-1", b"x")), "charset"),
+        (_related(META, ("text/plain; charset=latin-1", b"x")), "charset"),
         (
-            b'--b\r\nContent-Disposition: form-data; name="f"; filename="a\\b"\r\n\r\n'
+            _related(META)[:-7]
+            + b'--b\r\nContent-Disposition: form-data; name="f"; filename="a\\b"\r\n\r\n'
             b"x\r\n--b--\r\n",
             "cannot be parsed unambiguously",
         ),
@@ -220,7 +284,8 @@ def test_a_binary_file_goes_as_sent_only_when_allowed() -> None:
     out = _related_upload(body, forward_binary=counted.append)
     assert out is not None and PNG in out and b"@corp.example" not in out
     assert counted == [2]  # told once, with the count
-    assert _related_upload(_related(("text/plain", b"hi")), forward_binary=counted.append) is None
+    plain = _related(META, ("text/plain", b"hi"))
+    assert _related_upload(plain, forward_binary=counted.append) is None
     assert counted == [2]  # no binary part: never told
     # Lenient (never the proxy): nothing unreadable refuses.
     assert _related_upload(_related(("image/png", PNG)), require_scanned=False) is None

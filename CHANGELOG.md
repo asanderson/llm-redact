@@ -50,7 +50,10 @@ and tags `vX.Y.Z`.
   could read a form-encoded `file.name=…` out of a strict-JSON string), and a
   `multipart/related` naming its root part with `start` (the metadata then need not be
   the first part) is a body llm-redact cannot read. Both are refused 400 wherever
-  redaction applies and under a credential the proxy holds.
+  redaction applies (the metadata is redacted as the value the check reads — see
+  Fixed) and under a credential the proxy holds; with `detection = false` there, the
+  declared type only where a session router's stored-object check reads the upload
+  (llm-redact-pro).
 - File uploads (OpenAI/Azure/custom `…/files`) are read by CONTENT
   (`upload_content.classify_file`): JSONL is redacted per line as before, any other
   text file (UTF-8, or UTF-16/32 with a BOM) is redacted as one text and re-encoded as
@@ -183,6 +186,18 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- The Gemini API upload's metadata part (`POST /upload/v1beta/files`, the first part of
+  the `multipart/related` body) was shown to the stored-object check as a JSON body but
+  redacted as a FILE: on one line it was parsed as JSON, pretty-printed it was redacted
+  as raw text, so a JSON-escaped value (`\u0040` in an address, `ensure_ascii` escapes
+  of a name) went out unredacted and the provider decoded it. The part is now read and
+  redacted as the one JSON value the check reads (`upload_view.read_metadata_part`:
+  declared `application/json` or undeclared, strict UTF-8, escapes resolved, every
+  string redacted, keys never; only the JSON text's span rewritten, and only when a
+  value changed or a key repeats). Metadata that reading refuses (lenient or non-UTF-8
+  JSON, another declared type, a foreign charset, the media first) is refused 400
+  wherever redaction applies, with or without a session router, as a JSON body the
+  proxy cannot read is; it used to be redacted as a file and forwarded.
 - A multipart part with no header/body separator (no CRLF CRLF) was redacted as a
   plain field with no header at all, while a reader accepting a bare LF as a line
   break finds headers in it: a file name, a `Content-Transfer-Encoding` (a

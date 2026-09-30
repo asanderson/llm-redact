@@ -4,8 +4,13 @@ the content policy itself is the OpenAI Files upload's, shared:
 
 - ``redact_related_upload``: the Gemini API's single-request upload, a
   ``multipart/related`` body — the file's JSON metadata, then its media —
-  whose parts carry no Content-Disposition, so none is a named form field:
-  EVERY part is read as a file by its content
+  whose parts carry no Content-Disposition, so none is a named form field.
+  The FIRST part is the metadata, what the provider reads as the create's
+  body: read exactly as the stored-object check reads it
+  (``upload_view.read_metadata_part``: a JSON object, escapes resolved —
+  pretty-printed or on one line alike) and redacted as that value, every
+  string of it; metadata it cannot read is refused where every piece must
+  be scanned. Every OTHER part is read as a file by its content
   (``upload_content.classify_file``: JSONL, text or binary) and redacted by
   the OpenAI upload's own part loop (JSONL line by line as JSON, text as
   one text re-encoded as it came, a binary part refused unless
@@ -33,6 +38,7 @@ from llm_redact.providers.openai import (
     OpenAIAdapter,
     PartsReading,
     _multipart_floors,
+    _Reading,
     checked_reading,
     read_file_part,
     reading_of,
@@ -42,6 +48,7 @@ from llm_redact.providers.openai import (
 )
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator
+from llm_redact.upload_view import MetadataPart, read_metadata_part
 
 # The OpenAI Files upload: its part loop and whole-upload handling are the
 # one implementation of the upload content policy. Its system note is never
@@ -91,9 +98,10 @@ def read_related_upload(
     body: bytes, boundary: bytes, charge: Callable[[int], None], *, require_scanned: bool = True
 ) -> PartsReading | None:
     """A multipart/related upload read as ``redact_related_upload`` reads
-    it: every part a file, read by its content (a JSONL part's lines
-    charged against max_body_strings before anything walks them). None
-    for a body outside the canonical grammar read leniently."""
+    it: the first part the file's metadata (``_metadata_reading``), every
+    other part a file, read by its content (a JSONL part's lines charged
+    against max_body_strings before anything walks them). None for a body
+    outside the canonical grammar read leniently."""
     parsed = multipart.parse(body, boundary)
     if parsed is None:
         if require_scanned:
@@ -103,7 +111,47 @@ def read_related_upload(
         return None
     if require_scanned and (parsed.preamble.strip() or parsed.epilogue.strip()):
         raise UnredactableRequest(_OUTSIDE_PARTS)
-    return PartsReading(parsed, [read_file_part(part.content, charge) for part in parsed.parts])
+    readings = [
+        read_file_part(part.content, charge)
+        if index
+        else _metadata_reading(part, charge, require_scanned=require_scanned)
+        for index, part in enumerate(parsed.parts)
+    ]
+    return PartsReading(parsed, readings)
+
+
+def _metadata_reading(
+    part: multipart.MultipartPart, charge: Callable[[int], None], *, require_scanned: bool
+) -> _Reading:
+    """The upload's FIRST part, the file's metadata, read as the JSON value
+    the stored-object check reads (``upload_view.read_metadata_part``) —
+    one reading of it, so a pretty-printed part is redacted with its
+    escapes resolved like a one-line one. Metadata that reading refuses is
+    unredactable where every piece must be scanned (the problem names the
+    construct only); leniently, the part is read as a file."""
+    read = read_metadata_part(part)
+    if isinstance(read, MetadataPart):
+        return _Reading("metadata", metadata=read)
+    if require_scanned:
+        raise UnredactableRequest(read)
+    return read_file_part(part.content, charge)
+
+
+def _redact_metadata(
+    part: multipart.MultipartPart, read: MetadataPart, redactor: Redactor, *, strict: bool
+) -> bool:
+    """The metadata part redacted as the JSON value it is: every string
+    (keys never), as a data line of an upload is — the provider reads it as
+    the create's body. Only the span of its JSON text is rewritten, and only
+    when a value changed or a key repeats (exactly what was read then goes
+    out); its file names are redacted like any part's. True when it
+    changed."""
+    changed = part.redact_filenames(redactor.redact_text, strict=strict)
+    redacted = transform_all_strings(read.metadata, redactor.redact_text)
+    if redacted == read.metadata and not read.repeated:
+        return changed
+    part.content = read.splice(part.content, redacted)
+    return True
 
 
 def redact_related_upload(
@@ -135,6 +183,11 @@ def redact_related_upload(
     originals = [part.content for part in parsed.parts]
     try:
         for index, (part, part_reading) in enumerate(zip(parsed.parts, readings, strict=True)):
+            if part_reading.metadata is not None:
+                changed |= _redact_metadata(
+                    part, part_reading.metadata, redactor, strict=require_scanned
+                )
+                continue
             changed |= _FILES._redact_part(
                 part,
                 part_reading,

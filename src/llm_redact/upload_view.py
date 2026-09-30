@@ -171,7 +171,7 @@ def read_upload_metadata(body: bytes, boundary: bytes) -> UploadView:
         return UploadView({})  # no part at all: no metadata
     part = parsed.parts[0]
     try:
-        metadata, repeated = _read_metadata(part)
+        read = _read_metadata(part)
         for media in parsed.parts[1:]:
             # The media is not read, but every reader must find where each
             # part's content starts: a header block a lenient reader ends
@@ -179,24 +179,49 @@ def read_upload_metadata(body: bytes, boundary: bytes) -> UploadView:
             _require_header_block(media)
     except _Unreadable as exc:
         return UploadView(None, problem=str(exc))
-    if repeated is None:
-        return UploadView(metadata)
+    if not read.repeated:
+        return UploadView(read.metadata)
     # A repeated key: the part is sent as it was read (its LAST occurrence),
     # never with an earlier one a first-wins provider would act on. Only the
     # JSON text changes: the bytes around it (an empty header block's CRLF,
     # whitespace, a byte-order mark) stay, so the part keeps its shape.
-    start, end = repeated
-    part.content = part.content[:start] + json_bytes(metadata) + part.content[end:]
-    return UploadView(metadata, normalized=parsed.serialize())
+    part.content = read.splice(part.content, read.metadata)
+    return UploadView(read.metadata, normalized=parsed.serialize())
 
 
-def _read_metadata(
-    part: multipart.MultipartPart,
-) -> tuple[dict[str, Any], tuple[int, int] | None]:
-    """The metadata object ``part`` holds (``{}`` when it is blank) and,
-    when it repeats a key, the span of its JSON text in the part's content
-    (else None). Raises _Unreadable for what the check cannot read. A part
-    with an empty header block is read too (see ``_require_header_block``)."""
+class MetadataPart(NamedTuple):
+    """A single-request upload's metadata part as the check reads it
+    (``read_metadata_part``): the object (``{}`` when the part is blank),
+    the span of its JSON text in the part's content, and whether it
+    repeats a key."""
+
+    metadata: dict[str, Any]
+    start: int
+    end: int
+    repeated: bool
+
+    def splice(self, content: bytes, value: Any) -> bytes:
+        """``content`` with ``value`` serialized over the JSON text's span:
+        the bytes around it (an empty header block's CRLF, whitespace, a
+        byte-order mark) stay, so the part keeps its shape."""
+        return content[: self.start] + json_bytes(value) + content[self.end :]
+
+
+def read_metadata_part(part: multipart.MultipartPart) -> MetadataPart | str:
+    """``part`` read as a single-request upload's metadata exactly as the
+    check reads it (see the module) — what the redaction of that part
+    redacts, so both read one JSON value — or the problem (the construct
+    only, never content) when it cannot be read."""
+    try:
+        return _read_metadata(part)
+    except _Unreadable as exc:
+        return str(exc)
+
+
+def _read_metadata(part: multipart.MultipartPart) -> MetadataPart:
+    """The metadata ``part`` holds (see ``MetadataPart``). Raises
+    _Unreadable for what the check cannot read. A part with an empty
+    header block is read too (see ``_require_header_block``)."""
     _require_header_block(part)
     if part.headers is not None:
         try:
@@ -224,7 +249,7 @@ def _read_metadata(
     end = len(raw.rstrip())
     content = raw[start:end]
     if not content:
-        return {}, None
+        return MetadataPart({}, start, end, False)
     try:
         text = content.decode()  # strict UTF-8
     except UnicodeDecodeError:
@@ -237,7 +262,7 @@ def _read_metadata(
         raise _Unreadable(METADATA_NOT_OBJECT) from None
     if not isinstance(metadata, dict):
         raise _Unreadable(METADATA_NOT_OBJECT)
-    return metadata, (start, end) if duplicate_keys else None
+    return MetadataPart(metadata, start, end, duplicate_keys)
 
 
 def header_block_found(part: multipart.MultipartPart) -> bool:

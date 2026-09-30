@@ -821,9 +821,10 @@ class UpstreamAuth(Protocol):
 # ``upload_content.classify_file``) cannot be redacted: without an inspector
 # it is forwarded unscanned with the client's own key ([detection]
 # binary_uploads = "forward", counted) or refused. An ``UploadInspector``
-# (``Registry.build_upload_inspector``; llm-redact-pro's document extractors)
-# reads such a part as TEXT for the core to scan; the core alone decides
-# what happens to the part, with the request's live detectors.
+# (``Registry.build_upload_inspector``; the core's own document extractors,
+# ``[extraction]``, unless a plugin replaces them) reads such a part as TEXT
+# for the core to scan; the core alone decides what happens to the part,
+# with the request's live detectors.
 
 
 @dataclass(frozen=True)
@@ -835,13 +836,22 @@ class UploadPart:
     plain ``type/subtype``), the provider adapter's name, and whether the
     request would spend a credential the PROXY holds (``identity``, as for
     ``SessionRouter.object_access_refusal``). The file name is never
-    passed. ``content`` is user data: an inspector must never log it or
-    put any of it in an exception message."""
+    passed — only its ``extension``: lower-cased, when it matches
+    ``[a-z0-9]{1,10}`` and every file name the part carries (``filename``,
+    ``filename*``, read as the part's redaction reads them) has the same
+    one; ``""`` when they disagree (the provider may go by either); None
+    when there is no file name, no extension or one outside that grammar.
+    Like ``content_type`` it is the client's claim — a reader that vouches
+    for a file must not vouch for one the provider may open as another
+    format. Absent on cores that predate it (read it with ``getattr``).
+    ``content`` is user data: an inspector must never log it or put any of
+    it in an exception message."""
 
     content: bytes = field(repr=False)
     content_type: str | None
     provider: str
     identity: bool
+    extension: str | None = None
 
 
 @dataclass(frozen=True)
@@ -869,12 +879,23 @@ class Inspection:
     client's own key whatever ``[detection] binary_uploads`` says, under a
     credential the proxy holds only with ``proxy_credential``. Anything
     else (no text, incomplete, a clean incomplete reading) keeps the
-    core's rules for an unscanned binary part."""
+    core's rules for an unscanned binary part.
+
+    ``convert_text`` (convert mode, ``[extraction] convert``): the file's
+    text as a reader sees it, which the inspector allows the core to send
+    IN PLACE of the file when a COMPLETE reading holds values to redact —
+    redacted (placeholders issued as for a text upload), as a
+    ``text/plain`` file, on a route whose provider takes a text file for
+    the upload's purpose, and under a credential the proxy holds only with
+    ``proxy_credential``. None (the default): the file is never replaced.
+    Whatever it holds, the scan and the refusals above are decided on
+    ``text``."""
 
     text: str | None = field(repr=False)
     complete: bool
     extractor: str
     proxy_credential: bool = False
+    convert_text: str | None = field(default=None, repr=False)
 
 
 class UploadInspector(Protocol):

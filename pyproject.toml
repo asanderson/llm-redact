@@ -61,6 +61,12 @@ perf = ["uvloop>=0.19"]
 # second one (15.0 — before it the upstream got two, which a websockets
 # server rejects; the realtime suite fails 12 of 92 on 14.2).
 realtime = ["websockets>=15.0"]
+# [extraction] (docs/extraction.md): PDF text layers are read with pypdf
+# (BSD-3-Clause), in the isolated extraction worker process only — never on
+# the request path. Without it an enabled [extraction] whose formats include
+# "pdf" refuses to start with this install hint; the OOXML/ODF, markup and
+# RTF readers are stdlib.
+extract = ["pypdf>=5"]
 # OpenTelemetry export ([otel] enabled = true): metadata-only traces and
 # counters over OTLP/HTTP. Extras never touch the request path.
 otel = [
@@ -96,6 +102,9 @@ dev = [
     "hypothesis>=6.100",
     # Mutation testing (assurance): dev-only, never touches the request path.
     "mutmut>=3.6",
+    # The extract extra, always present in dev so the extraction worker's
+    # PDF reader is exercised (the no-extra refusal is pinned separately).
+    "pypdf>=5",
     # The complexity-coverage gate (scripts/complexity_gate.py): every
     # branching function must be executed by the suite.
     "coverage>=7.6",

@@ -844,6 +844,17 @@ def _check_routing(report: _Report, config: Config, offline: bool) -> None:
         report.line(level, "routing", message)
 
 
+def _check_extraction(report: _Report, config: Config) -> None:
+    """[extraction] (docs/extraction.md), offline and value-free: the
+    ``extract`` extra, each credential variable by NAME, a key file, which
+    services see files off this machine, convert mode, and what a clean
+    scan lets through."""
+    from llm_redact.extraction import extraction_checks
+
+    for level, message in extraction_checks(config.extraction, os.environ):
+        report.line(level, "extraction", message)
+
+
 def _check_access(report: _Report, config: Config) -> None:
     """Access control lives in llm-redact-pro; this shell hands the checks to
     the package (read-only: its registry is never written) and stays silent
@@ -939,6 +950,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_vault(report, config)
     _check_extras(report, config)
     _check_posture(report, config)
+    _check_extraction(report, config)
     _check_upstream_auth(report, config)
     _check_allowed_hosts(report, config)
     _check_allowed_origins(report, config)

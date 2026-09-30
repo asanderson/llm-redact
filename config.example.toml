@@ -307,8 +307,9 @@ fuzzy = true
 # "forward" (default) sends a binary file UNSCANNED when the request carries
 # the client's own key (counted in /status); "refuse" answers 400 instead.
 # A credential the proxy holds (auth = "identity", routing) never carries one.
-# llm-redact-pro's [extraction] reads PDFs and Office files as text first: a
-# value found refuses the upload, a complete clean reading sends the file.
+# [extraction] (docs/extraction.md) reads PDFs and Office files as text
+# first: a value found refuses the upload, a complete clean reading sends
+# the file.
 # binary_uploads = "forward"
 
 # Strings that must ALWAYS be redacted — the strongest signal there is.

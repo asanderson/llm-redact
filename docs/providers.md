@@ -185,7 +185,7 @@ exactly like base64 media in a chat body. Under a credential the proxy
 holds (its cloud identity, or a routing rule's operator key) a binary file
 is refused: the proxy vouches only for what it read — unless an upload
 inspector read it (next). With an
-**upload inspector** (llm-redact-pro's document extractors,
+**upload inspector** (the core's document extractors, `[extraction]`,
 `plugin_api.UploadInspector`) each binary file part is first read as
 TEXT and scanned with the live detectors, no placeholder issued: a value
 that would be redacted (or a block-mode one) refuses the upload 400,
@@ -300,7 +300,7 @@ llm-redact-pro's named users reads the parsed body too, so a gzip or
 non-JSON body it could not read is refused either way). With `detection`
 on, an upload holding a binary file (a PDF, an image) cannot be sent
 with the proxy's identity — unless an upload inspector read it completely
-as clean text and allows that credential (llm-redact-pro `[extraction]
+as clean text and allows that credential (`[extraction]
 proxy_credential = true`, off by default); a text file is redacted and
 sent. Realtime
 WebSocket connections are authorized the same way — Azure OpenAI

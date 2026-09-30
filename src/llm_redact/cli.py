@@ -879,6 +879,13 @@ def _print_posture(payload: dict[str, Any]) -> None:
             f"binary uploads: {seen} file part(s) forwarded after a clean scan of their"
             " EXTRACTED text (the file itself is sent as is)"
         )
+    converted = {k: v.get("converted", 0) for k, v in inspected.items() if v.get("converted")}
+    if converted:
+        seen = " ".join(f"{k}×{v}" for k, v in sorted(converted.items()))
+        lines.append(
+            f"binary uploads: {seen} file part(s) CONVERTED — sent as their redacted"
+            " extracted text instead of the file ([extraction] convert)"
+        )
     inactive = payload.get("detection", {}).get("language_inactive_rules") or []
     if inactive:
         lines.append(f"language-inactive rules: {', '.join(inactive)} (not detected)")

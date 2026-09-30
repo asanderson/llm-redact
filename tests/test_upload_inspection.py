@@ -200,7 +200,7 @@ async def test_a_complete_clean_reading_forwards_the_file_byte_identical(
     (sent,) = upstream.requests
     assert _sent_file(sent) == _pdf("a")
     (part,) = inspector.parts
-    assert part == UploadPart(_pdf("a"), "application/pdf", "openai", False)
+    assert part == UploadPart(_pdf("a"), "application/pdf", "openai", False, extension="pdf")
     assert status["inspected_uploads_total"] == {"openai": {"clean": 1}}
     assert status["unscanned_uploads_total"] == {}
     assert status["upload_inspector"] == {

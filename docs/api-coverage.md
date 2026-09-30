@@ -59,12 +59,13 @@ UTF-8): it cannot be redacted, so with the client's own key it is forwarded
 UNSCANNED (`[detection] binary_uploads = "forward"`, the default; counted in
 `/status` `unscanned_uploads_total`) or refused 400 (`"refuse"`), and under a
 credential the proxy holds it is refused 400. An upload inspector
-(llm-redact-pro's document extraction) changes both: a file it read
+(the core's document extraction, [extraction.md](extraction.md)) changes both: a file it read
 completely as text that scanned clean goes out byte-identical — with the
 client's own key even under `"refuse"`, under a credential the proxy holds
-only when the inspection allows it (llm-redact-pro `[extraction]
+only when the inspection allows it (`[extraction]
 proxy_credential = true`; off by default) — and a value found in the text
-refuses the upload 400. The per-route rows below state the rule without an
+refuses the upload 400 (or, in `[extraction] convert` mode, replaces the
+file with its redacted text where the route takes a text file). The per-route rows below state the rule without an
 inspector. `[providers.NAME] detection =
 false` with the client's own key forwards such a body as sent, and so does
 every pass-through route (a route this table does not claim) — reached

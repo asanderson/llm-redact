@@ -70,6 +70,8 @@ from llm_redact.config import (
     resolve_credentials,
     unsupported_plugin_capabilities,
 )
+from llm_redact.connections import CAUSES as CONNECTION_CLOSE_CAUSES
+from llm_redact.connections import EventStream, LiveConnections, recheck_interval
 from llm_redact.detection.engine import (
     active_rule_names,
     build_allowlist,
@@ -459,7 +461,9 @@ class ProxyState:
         # placeholders (a vault write or its COMMIT failed: rolled back, a
         # recorded 503 — a realtime frame closes 1011); "vault_check" is a
         # vault view's staleness check that could not read its database
-        # (contained: the view keeps serving its cache, never a wrong value).
+        # (contained: the view keeps serving its cache, never a wrong value);
+        # "recheck" is an open connection's access re-check that failed or
+        # timed out (the connection is closed: connections.LiveConnections).
         self.bookkeeping_errors: Counter[str] = Counter()
         bind_fault_counter = getattr(self.vault_manager, "bind_fault_counter", None)
         if callable(bind_fault_counter):
@@ -588,6 +592,21 @@ class ProxyState:
         bind_sessions = getattr(self.access_gate, "bind_sessions", None)
         if callable(bind_sessions):
             bind_sessions(_LiveSessions(self))
+        # Open long-lived connections (realtime relays, live-events streams)
+        # and the admission each opened under (plugin_api.ConnectionControl):
+        # the gate may close them the moment it revokes a user or a
+        # credential, and the lifespan's backstop re-checks them every
+        # recheck_interval (an optional gate member, read once; the backstop
+        # starts at once when the gate declares one, else with the first
+        # connection whose admission carries a recheck).
+        self.connections = LiveConnections(
+            self.bookkeeping_errors,
+            interval=recheck_interval(self.access_gate),
+            eager=getattr(self.access_gate, "recheck_interval", None) is not None,
+        )
+        bind_connections = getattr(self.access_gate, "bind_connections", None)
+        if callable(bind_connections):
+            bind_connections(self.connections)
         for warning in config.routing.warnings:  # parser-owned (inert upstreams, metered
             logger.warning("routing: %s", warning)  # defaults, dead chains) — always logged
         self.router: Router | None = registry.build_router(config, self.license.tier)
@@ -1863,12 +1882,16 @@ def _dashboard_unavailable(state: ProxyState) -> str:
     )
 
 
-async def _handle_local(request: Request, state: ProxyState) -> Response:
+async def _handle_local(
+    request: Request, state: ProxyState, admission: Admission | None = None
+) -> Response:
     """Answer reserved /__llm-redact endpoints locally. Metadata only —
     never values; allowlists reported as counts. The dashboard paths are
     delegated to the llm-redact-pro Dashboard (its config editor is the one
     exception on both fronts: it accepts POST behind the guard chain and
-    returns allowlist values)."""
+    returns allowlist values). ``admission`` is the dashboard admission
+    (``_admit_reserved``), recorded with a live-events stream."""
+    admission = admission or Admission()
     path = request.url.path
 
     # The browser dashboard (page, config editor, redaction preview) is the
@@ -1967,6 +1990,18 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 "blocked_total": dict(state.blocked_counts),
                 "upstream_errors_total": dict(state.upstream_errors),
                 "bookkeeping_errors_total": dict(state.bookkeeping_errors),
+                # Open long-lived connections (realtime relays, live-events
+                # streams) by kind, and those closed because their admission
+                # ended, by cause: the access gate revoked them ("revoked"),
+                # their re-check refused them ("recheck") or failed
+                # ("recheck_error"). Counts only — never a user or a grant.
+                "connections": {
+                    "open": state.connections.open_counts(),
+                    "closed_total": {
+                        cause: state.connections.closed[cause] for cause in CONNECTION_CLOSE_CAUSES
+                    },
+                    "recheck_interval_seconds": state.connections.interval,
+                },
                 # Requests refused before any upstream contact as a web page's
                 # (CSRF, DNS rebinding, cross-site WebSocket) or, when they
                 # would spend a credential the proxy holds, as addressed to a
@@ -2113,6 +2148,7 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
                 compaction_forks=state.compaction_forks,
                 upstream_errors=state.upstream_errors,
                 bookkeeping_errors=state.bookkeeping_errors,
+                connections_closed=state.connections.closed,
             ),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
@@ -2125,19 +2161,34 @@ async def _handle_local(request: Request, state: ProxyState) -> Response:
         if not _host_allowed(request, state):
             return JSONResponse({"error": "host not allowed"}, status_code=403)
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
+        # A long-lived connection: tracked with the dashboard admission it
+        # opened under, so the access gate (or its re-check) can end it.
+        stream = EventStream(
+            queue,
+            subject=admission.subject,
+            grant=getattr(admission, "grant", None),
+            recheck=getattr(admission, "recheck", None),
+        )
         state.event_subscribers.add(queue)
+        state.connections.track(stream)
 
         async def event_stream() -> AsyncIterator[bytes]:
             try:
                 yield b": connected\n\n"
-                while True:
+                while not stream.closed:
                     try:
                         row = await asyncio.wait_for(queue.get(), timeout=15.0)
                     except TimeoutError:
                         yield b": keepalive\n\n"
                         continue
+                    if stream.closed:
+                        # Its admission ended: the stream ends here (the
+                        # dashboard reconnects, and the gate decides again).
+                        logger.info("events stream closed (its access was revoked)")
+                        return
                     yield b"data: " + json_bytes(row) + b"\n\n"
             finally:
+                state.connections.untrack(stream)
                 state.event_subscribers.discard(queue)
 
         return StreamingResponse(
@@ -2228,15 +2279,18 @@ def _parse_public_origin(gate: object) -> tuple[str, str, str] | None:
     return parsed.scheme, host, f"{parsed.scheme}://{display_host}{port}"
 
 
-async def _admit_reserved(request: Request, state: ProxyState) -> Response | None:
+async def _admit_reserved(
+    request: Request, state: ProxyState
+) -> tuple[Response | None, Admission | None]:
     """Dashboard admission for the reserved endpoints (only when the gate
     opts in with ``guards_dashboard``): every reserved path except the
     monitoring probes and the gate's own paths (sign-in and SCIM
-    authenticate themselves). None admits; otherwise the refusal —
-    a 303 to the gate's same-proxy sign-in page for a browser GET, else a
-    403. Nothing here is forwarded."""
+    authenticate themselves). A None response admits (with the admission,
+    when the gate was asked); otherwise the refusal — a 303 to the gate's
+    same-proxy sign-in page for a browser GET, else a 403. Nothing here is
+    forwarded."""
     if not state.guards_dashboard:
-        return None
+        return None, None
     path = request.url.path
     if (
         path in PROBE_PATHS
@@ -2244,10 +2298,10 @@ async def _admit_reserved(request: Request, state: ProxyState) -> Response | Non
         or path == SCIM_PREFIX
         or path.startswith(SCIM_PREFIX + "/")
     ):
-        return None
+        return None, None
     admission = await state.admit(request, "dashboard")
     if admission.refusal is None:
-        return None
+        return None, admission
     redirect = admission.redirect
     if (
         request.method == "GET"
@@ -2256,8 +2310,8 @@ async def _admit_reserved(request: Request, state: ProxyState) -> Response | Non
         and "\\" not in redirect
         and "//" not in redirect
     ):
-        return RedirectResponse(redirect, status_code=303)
-    return JSONResponse({"error": admission.refusal}, status_code=403)
+        return RedirectResponse(redirect, status_code=303), admission
+    return JSONResponse({"error": admission.refusal}, status_code=403), admission
 
 
 def _host_allowed(request: HTTPConnection, state: ProxyState) -> bool:
@@ -3165,9 +3219,9 @@ async def handle(request: Request) -> Response:
     # Reserved local endpoints are answered here, before any routing or
     # upstream code runs — this early return is the non-forwarding guarantee.
     if path.startswith(RESERVED_PREFIX):
-        response = await _admit_reserved(request, state)
+        response, admission = await _admit_reserved(request, state)
         if response is None:
-            response = await _handle_local(request, state)
+            response = await _handle_local(request, state, admission)
         # Stamp browser-hardening headers on every reserved reply in one place
         # (setdefault so a handler that set its own header still wins).
         for header, value in _SECURITY_HEADERS.items():
@@ -5362,8 +5416,9 @@ def create_app(
             try:
                 loop.add_signal_handler(signal.SIGHUP, state.reload)
                 sighup_registered = True
-            except (NotImplementedError, RuntimeError):
-                # Windows event loops / non-main threads: reload unavailable.
+            except (NotImplementedError, RuntimeError, ValueError):
+                # Windows event loops / non-main threads (uvloop raises
+                # ValueError there, asyncio RuntimeError): reload unavailable.
                 logger.debug("SIGHUP reload unavailable on this platform")
         # Each active off-machine audit sink gets a flush-loop task; both are
         # cancelled and given a final flush at shutdown so no tail is lost.
@@ -5379,9 +5434,14 @@ def create_app(
         background_tasks.append(
             asyncio.create_task(license_refresh_loop(_LICENSE_REFRESH_INTERVAL_SECONDS))
         )
+        # The open-connection re-check backstop (connections.LiveConnections):
+        # started now, or with the first connection whose admission carries
+        # a recheck; stopped before the gate closes.
+        state.connections.start()
         try:
             yield
         finally:
+            await state.connections.stop()
             if sighup_registered:
                 loop.remove_signal_handler(signal.SIGHUP)
             await state.client.aclose()

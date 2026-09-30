@@ -42,6 +42,15 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
             "run": "(self, args: 'argparse.Namespace') -> 'int'",
         },
     ),
+    "ConnectionControl": (
+        (),
+        {
+            "close": (
+                "(self, *, subject: 'str | None' = None, grant: 'str | None' = None,"
+                " reason: 'str') -> 'int'"
+            ),
+        },
+    ),
     "ConfigSection": (
         ("name",),
         {
@@ -153,7 +162,8 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
 DATACLASSES: dict[str, str] = {
     "Admission": (
         "(subject: 'str | None' = None, refusal: 'str | None' = None,"
-        " redirect: 'str | None' = None) -> None"
+        " redirect: 'str | None' = None, grant: 'str | None' = None,"
+        " recheck: 'ConnectionRecheck | None' = None) -> None"
     ),
     "RouteInbound": (
         "(adapter_name: 'str | None', provider_name: 'str', method: 'str', path: 'str',"
@@ -188,6 +198,8 @@ ALL: tuple[str, ...] = (
     "Admission",
     "CliCommand",
     "ConfigSection",
+    "ConnectionControl",
+    "ConnectionRecheck",
     "Dashboard",
     "DashboardHost",
     "DbPasswordProvider",
@@ -300,11 +312,23 @@ def test_response_observer_alias_is_snapshotted() -> None:
     assert plugin_api.ResponseObserver == Callable[[Any], None]
 
 
+def test_connection_recheck_alias_is_snapshotted() -> None:
+    # Admission.recheck: asked again while a long-lived connection is open.
+    assert repr(plugin_api.ConnectionRecheck) == (
+        "collections.abc.Callable[[], 'bool | str | None | Awaitable[bool | str | None]']"
+    )
+
+
 # Protocol name -> the OPTIONAL members its docstring documents (read via
 # getattr by the core, so they are not Protocol methods). Pinned as the
 # documented call shapes, whitespace-normalized: renaming or re-shaping one
 # is a deliberate edit here and a pro floor bump, like any other member.
 OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
+    "AccessGate": (
+        "``public_origin() -> str | None``",
+        "``bind_sessions(store: SessionStore) -> None``",
+        "``bind_connections(control: ConnectionControl) -> None``",
+    ),
     "SessionRouter": (
         "``is_durable(session_id) -> bool``",
         "``record_object_id(object_id, session_id) -> bool | None``",

@@ -69,9 +69,10 @@ TOO_DEEP = f"a multipart part nests JSON deeper than {MAX_JSON_DEPTH} levels"
 _UTF8_BOM = b"\xef\xbb\xbf"
 # A line that can hold a JSON object: past the whitespace ``bytes.strip``
 # drops and at most one byte-order mark (then JSON's own whitespace), a
-# "{". Anchored at a line's start; never crosses a newline. Possessive
+# "{" — the match is the whole line. Anchored at a line's start; never
+# crosses a newline. Possessive
 # runs: a long run of whitespace is never backtracked into (linear).
-_OBJECT_LINE = re.compile(rb"^[ \t\r\x0b\x0c]*+(?:\xef\xbb\xbf[ \t\r]*+)?\{", re.MULTILINE)
+_OBJECT_LINE = re.compile(rb"^[ \t\r\x0b\x0c]*+(?:\xef\xbb\xbf[ \t\r]*+)?\{[^\n]*", re.MULTILINE)
 
 # A field name's bracket path: the base, then zero or more "[segment]"s.
 _BRACKETED = re.compile(r"([^\[\]]*)((?:\[[^\[\]]*\])+)")
@@ -182,10 +183,7 @@ class _Reader:
         content = part.content
         repeated: list[tuple[int, int, Any]] = []
         for match in _OBJECT_LINE.finditer(content):
-            start = match.start()
-            end = content.find(b"\n", start)
-            end = len(content) if end < 0 else end
-            text = content[start:end].strip().removeprefix(_UTF8_BOM)
+            text = match.group().strip().removeprefix(_UTF8_BOM)
             self._parse_line()
             try:
                 obj, duplicate_keys = loads_request(text.decode())
@@ -197,15 +195,15 @@ class _Reader:
             self._spend(len(text))
             self.cited.append(obj)
             if duplicate_keys:
-                repeated.append((start, end, obj))
+                repeated.append((*match.span(), obj))
         if not repeated or classify_file(content).codec != "utf-8":
             return False
+        # Each rewritten line, and the bytes since the previous one's end.
+        ends = [0, *(end for _, end, _ in repeated)]
         pieces: list[bytes] = []
-        cursor = 0
-        for start, end, obj in repeated:
-            pieces += (content[cursor:start], json_bytes(obj))
-            cursor = end
-        pieces.append(content[cursor:])
+        for (start, _, obj), previous in zip(repeated, ends, strict=False):
+            pieces += (content[previous:start], json_bytes(obj))
+        pieces.append(content[ends[-1] :])
         part.content = b"".join(pieces)
         return True
 

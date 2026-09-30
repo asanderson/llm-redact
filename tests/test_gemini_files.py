@@ -292,6 +292,31 @@ def test_a_binary_file_goes_as_sent_only_when_allowed() -> None:
     assert _related_upload(b"junk", require_scanned=False) is None
 
 
+def _named_metadata(file_name: str, metadata: bytes) -> bytes:
+    """A metadata part naming a file (Content-Disposition), then a text part."""
+    return (
+        b"--b\r\nContent-Type: application/json\r\n"
+        b'Content-Disposition: form-data; name="metadata"; filename="'
+        + file_name.encode()
+        + b'"\r\n\r\n'
+        + metadata
+        + b"\r\n"
+        + _related(("text/plain", b"hi"))
+    )
+
+
+@pytest.mark.parametrize("metadata", [b'{"file": {}}', _metadata(EMAIL)], ids=["clean", "email"])
+def test_the_metadata_parts_file_name_is_redacted(metadata: bytes) -> None:
+    # The metadata part is redacted as its JSON value, not by the file
+    # part loop — its file name still is, like any part's, whether or not
+    # a value of the metadata changed.
+    body = _named_metadata(f"from {EMAIL}", metadata)
+    out = _related_upload(body)
+    assert out is not None and EMAIL.encode() not in out
+    assert b'filename="from \xc2\xabEMAIL_001\xc2\xbb"' in out
+    assert out.endswith(_related(("text/plain", b"hi")))
+
+
 def test_the_upload_floors_every_token_it_carries() -> None:
     body = _related(
         ("application/json", _metadata(EMAIL)),
@@ -443,6 +468,24 @@ async def test_a_binary_file_needs_the_clients_own_key(monkeypatch: pytest.Monke
         assert b"@corp.example" not in files.received[0].content  # metadata redacted
         assert downloaded.content == PNG  # never read
         assert app.state.proxy.unscanned_uploads == {"gemini": 1}  # counted
+
+
+@pytest.mark.parametrize("proxy_credential", [True, False], ids=["operator-key", "own-key"])
+async def test_the_metadata_parts_file_name_never_reaches_the_provider(
+    proxy_credential: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = FilesAPI()
+    app, _ = lent_app(monkeypatch, "gemini", GEMINI, files, proxy_credential=proxy_credential)
+    body = _named_metadata(f"from {EMAIL}", _metadata(OTHER))
+    async with client(app) as http:
+        uploaded = await http.post(UPLOAD, content=body, headers={**KEY, **MULTIPART})
+    assert uploaded.status_code == 200, uploaded.text
+    (sent,) = files.received
+    assert b"@corp.example" not in sent.content
+    # The file name first (EMAIL_001), then the metadata's value.
+    assert b'filename="from \xc2\xabEMAIL_001\xc2\xbb"' in sent.content
+    assert b'"notes of \xc2\xabEMAIL_002\xc2\xbb"' in sent.content
+    assert uploaded.json()["file"]["displayName"] == f"notes of {OTHER}"
 
 
 async def test_binary_uploads_refuse_holds_for_the_clients_own_key(

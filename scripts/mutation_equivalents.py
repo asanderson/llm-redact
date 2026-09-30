@@ -739,21 +739,6 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "raise the SAME exception type -> identical verbatim-degrade downstream; "
         "only the never-asserted message text differs."
     ),
-    "llm_redact.upload_view.xǁ_Readerǁread__mutmut_11": (
-        "header name 'content-disposition' upper-cased: "
-        "MultipartPart.header/params look the name up lower-cased (name.lower()), "
-        "as header names are case-insensitive - the same header is found."
-    ),
-    "llm_redact.upload_view.xǁ_Readerǁread__mutmut_16": (
-        "header name 'content-type' upper-cased: MultipartPart.header/params look "
-        "the name up lower-cased (name.lower()), as header names are "
-        "case-insensitive - the same header is found."
-    ),
-    "llm_redact.upload_view.xǁ_Readerǁread__mutmut_6": (
-        "header name 'content-transfer-encoding' upper-cased: "
-        "MultipartPart.header/params look the name up lower-cased (name.lower()), "
-        "as header names are case-insensitive - the same header is found."
-    ),
     "llm_redact.vault.x__retired_number__mutmut_7": (
         "SQL case change only: SQLite keywords, identifiers, and function names "
         "are case-insensitive, so the statement is byte-for-byte equivalent to "

@@ -94,9 +94,10 @@ METADATA_NOT_OBJECT = (
     "the upload's first part, the file's metadata, is not a JSON object llm-redact can read"
 )
 METADATA_TYPE = "the upload's first part, the file's metadata, is not declared application/json"
-# The metadata part's headers, read under the names a server matches
-# case-insensitively.
+# The part headers the check reads (MultipartPart matches names
+# case-insensitively).
 _TRANSFER_ENCODING = "content-transfer-encoding"
+_CONTENT_DISPOSITION = "content-disposition"
 _CONTENT_TYPE = "content-type"
 _JSON = b"application/json"
 
@@ -273,9 +274,9 @@ class _Reader:
         if part.headers is None:
             return False  # an empty header block: nothing a server reads as a named part
         try:
-            encoding = part.header("content-transfer-encoding")
-            disposition = part.params("content-disposition") or {}
-            content_type = part.params("content-type") or {}
+            encoding = part.header(_TRANSFER_ENCODING)
+            disposition = part.params(_CONTENT_DISPOSITION) or {}
+            content_type = part.params(_CONTENT_TYPE) or {}
         except multipart.AmbiguousHeaders:
             raise _Unreadable(AMBIGUOUS) from None
         if encoding is not None and encoding.lower() not in PLAIN_TRANSFER_ENCODINGS:

@@ -2,11 +2,14 @@
 
 ``inspected_uploads_total{outcome="clean"}`` ("sent byte-identical after a
 clean scan") and ``unscanned_uploads_total`` count only parts of an upload
-the proxy HANDED TO THE UPSTREAM. A refusal after redaction — no upstream
-configured, the upstream authorizer failing, the ``[audit] required``
-START row failing, a routed budget refusal — sends nothing: an inspected
-clean part is then ``clean_refused`` and a binary part is not counted as
-forwarded unscanned (they once were, as soon as redaction returned). A send
+the proxy HANDED TO THE UPSTREAM. A refusal after redaction — the upstream
+authorizer failing, the counted ``[audit] required`` START row failing, a
+routed budget refusal — sends nothing: an inspected clean part is then
+``clean_refused`` and a binary part is not counted as forwarded unscanned
+(they once were, as soon as redaction returned). What refuses the request
+whatever the redaction finds — no upstream configured, a routed local
+refusal, the early START row failing — comes before the inspection, so
+nothing is inspected or counted. A send
 that fails in transit still counts as sent (bytes may have left). The
 text parts an upload redacted as one text — remembered so their download
 is restored byte-exact (``openai.RAW_TEXT_FILES``, bounded) — settle the

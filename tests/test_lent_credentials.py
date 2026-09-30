@@ -64,7 +64,10 @@ async def _send(app: Any, method: str, path: str, headers: dict[str, str], body:
 
 UNRECOGNIZED = [
     ("POST", "/v1/threads/thread_abc/messages", {"authorization": "Bearer sk-client"}),
-    ("POST", "/v1/fine_tuning/jobs", {"authorization": "Bearer sk-client"}),
+    ("POST", "/v1/uploads", {"authorization": "Bearer sk-client"}),
+    ("POST", "/v1/uploads/upload_1/parts", {"authorization": "Bearer sk-client"}),
+    ("POST", "/v1/uploads/upload_1/complete", {"authorization": "Bearer sk-client"}),
+    ("POST", "/v1/fine_tuning/checkpoints/c1/permissions", {"authorization": "Bearer sk-x"}),
     ("POST", "/v1/moderations", {"authorization": "Bearer sk-client"}),
     ("GET", "/v1/organization/admin_api_keys", {"authorization": "Bearer sk-client"}),
     ("POST", "/v1/files", {"anthropic-version": "2023-06-01", "x-api-key": "lrk_user"}),
@@ -128,7 +131,7 @@ async def test_a_no_route_refusal_for_an_unrecognized_route_precedes_the_body_re
         transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
     ) as client:
         response = await client.post(
-            "/v1/fine_tuning/jobs",
+            "/v1/uploads",
             content=b"{}",
             headers={"authorization": "Bearer sk-x", ROUTE_HEADER: "refuse"},
         )

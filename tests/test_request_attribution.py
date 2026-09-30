@@ -511,7 +511,7 @@ ARN = (
         # No normalization makes these a recognized route: pass-through as before.
         (f"/model/{ARN}/unknown-op", {"authorization": "Bearer ABSK"}, "bedrock", False),
         (f"/v1beta/models/m:unknownVerb?key={GOOGLE_KEY}", {}, "gemini", False),
-        ("/v1/vector_stores;x", OPENAI, "openai", False),
+        ("/v1/assistants;x", OPENAI, "openai", False),
         ("/v1/moderations%20", OPENAI, "openai", False),
     ],
 )
@@ -632,12 +632,20 @@ def test_custom_tails_never_cross_into_a_nested_resource() -> None:
 
     adapter = CustomOpenAIAdapter("lm")
     for method, path in (
-        ("GET", "/custom/lm/v1/containers/cntr_1/files/cf_1/content"),
-        ("GET", "/custom/lm/v1/vector_stores/vs_1/files"),
         ("GET", "/custom/lm/v1/chat/completions/c_1/messages"),
         ("POST", "/custom/lm/v1/threads/th_1/messages"),
     ):
         assert adapter.matches(method, path) is RouteKind.NONE, path
+    # A vector store's files are that store's route, never the Files API's.
+    nested = "/custom/lm/base/v1/vector_stores/vs_1/files"
+    assert adapter.matches("GET", nested) is RouteKind.CHAT
+    assert adapter._canonical(nested, method="GET") == "/v1/vector_stores/vs_1/files"
+    assert not adapter.lists_objects("GET", nested)
+    # A container's file download is the container's route: never the
+    # Files API's download (the wrong session's restore).
+    download = "/custom/lm/base/v1/containers/cntr_1/files/cf_1/content"
+    assert adapter.matches("GET", download) is RouteKind.CHAT
+    assert adapter._canonical(download, method="GET") == "/v1/containers/cntr_1/files/cf_1/content"
     for method, path, kind in (
         ("GET", "/custom/lm/v1/files/f_1/content", RouteKind.CHAT),
         ("POST", "/custom/lm/openai/deployments/d/chat/completions", RouteKind.CHAT),

@@ -451,6 +451,7 @@ def test_responses_read_the_container_files_an_answer_cites(adapter: Any, path: 
     assert not adapter.tracks_object_ids("GET", path + "/resp_1")  # a read creates nothing
     assert not adapter.tracks_object_ids("POST", path + "/resp_1/cancel")
     assert adapter.object_ids_from_body("POST", path, RESPONSE) == (
+        "cntr_1",  # the container the call ran in
         "cfile_out",
         "cfile_legacy",
         "cfile_chart",
@@ -465,19 +466,27 @@ def test_responses_events_name_the_container_files_they_carry() -> None:
     cases = [
         (
             {"type": "response.output_text.annotation.added", "annotation": _citation("cf_a")},
-            ("cf_a",),
+            ("cf_a", "cntr_1"),
         ),
         (
             {"type": "response.content_part.done", "part": RESPONSE["output"][1]["content"][0]},
-            ("cfile_chart", "cfile_out"),
+            ("cfile_chart", "cntr_1", "cfile_out"),
         ),
         (
             {"type": "response.output_item.done", "item": RESPONSE["output"][0]},
-            ("cfile_out", "cfile_legacy"),
+            ("cntr_1", "cfile_out", "cfile_legacy"),
+        ),
+        (
+            # A call starting: only its container is named so far.
+            {
+                "type": "response.output_item.added",
+                "item": {"type": "code_interpreter_call", "id": "ci_2", "container_id": "cntr_2"},
+            },
+            ("cntr_2",),
         ),
         (
             {"type": "response.completed", "response": RESPONSE},
-            ("cfile_out", "cfile_legacy", "cfile_chart"),
+            ("cntr_1", "cfile_out", "cfile_legacy", "cfile_chart"),
         ),
         ({"type": "response.output_text.delta", "delta": '"file_id": "x"'}, ()),
         ({"type": "response.output_item.added", "item": "odd", "file_id": "x"}, ()),
@@ -506,6 +515,7 @@ async def test_a_responses_answer_reports_its_container_files(
     assert response.status_code == 200
     assert EMAIL not in response.text  # nothing to restore in that session: untouched
     assert router.objects == [
+        ("cntr_1", SESSION),
         ("cfile_out", SESSION),
         ("cfile_legacy", SESSION),
         ("cfile_chart", SESSION),
@@ -568,6 +578,7 @@ async def test_a_streamed_response_reports_its_container_files_once(
     assert response.status_code == 200 and "response.completed" in response.text
     assert router.objects == [
         ("cfile_chart", SESSION),
+        ("cntr_1", SESSION),  # the container the cited file was written in
         ("cfile_out", SESSION),
         ("cfile_legacy", SESSION),
     ]
@@ -579,7 +590,7 @@ async def test_a_split_responses_stream_reports_each_file_once(
     ids, out = await _sweep(
         monkeypatch, tmp_path, OpenAIResponsesAdapter(), "/v1/responses", _responses_stream()
     )
-    assert ids == ["cfile_chart", "cfile_out", "cfile_legacy"]
+    assert ids == ["cfile_chart", "cntr_1", "cfile_out", "cfile_legacy"]
     assert EMAIL in out.decode()
 
 

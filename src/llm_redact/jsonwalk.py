@@ -108,8 +108,10 @@ OPAQUE_POSITIONS = frozenset(
 # strings) is grounding content, never protocol; `metadata` (OpenAI chat,
 # Responses, batches, conversations and Realtime `response.metadata` /
 # `tracing.metadata`, on OpenAI and Azure; Anthropic Messages) and Bedrock
-# Converse `requestMetadata` are string maps keyed by the caller.
-OPAQUE_ANYWHERE = frozenset({"documents", "metadata", "requestMetadata"})
+# Converse `requestMetadata` are string maps keyed by the caller, and so are
+# OpenAI vector-store file `attributes` (and the search results and
+# file_search results that echo them).
+OPAQUE_ANYWHERE = frozenset({"attributes", "documents", "metadata", "requestMetadata"})
 _OPAQUE_KEYS = frozenset(key for _, key in OPAQUE_POSITIONS) | OPAQUE_ANYWHERE
 
 # Enum ARRAYS at their known schema positions, (parent key, key): skipped

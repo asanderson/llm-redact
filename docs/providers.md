@@ -360,6 +360,66 @@ MCP connector configuration (Anthropic `mcp_servers`, OpenAI
 must hold the real credential to call your MCP server — while MCP call
 arguments and output are redacted and restored like any other content.
 
+## Stored-object APIs: fine-tuning, vector stores, containers
+
+OpenAI's fine-tuning jobs (`/v1/fine_tuning/jobs`: create, the list, one
+job, its cancel/pause/resume, events and checkpoints — on Azure's
+`/openai/v1` and api-version `/openai` families and custom providers too)
+are recognized, so a credential the proxy holds (a routed operator key,
+Azure's identity auth) may reach them. The caller's free-form `metadata`
+is redacted and restored in every echo of the job, and the provider's
+event messages are restored; the training data itself is the file,
+redacted at its upload. Some fields the provider keeps exactly as sent:
+the `suffix` becomes part of the fine-tuned model's name — the name
+every later request cites in its `model`, which is never rewritten — and
+the file ids and the Weights & Biases `integrations` name things that
+exist elsewhere. Those VERBATIM fields are scanned but never rewritten:
+a value llm-redact would redact there refuses the request with a 400
+naming the field (a placeholder would name a model, file or project that
+does not exist). Choose a suffix that holds nothing private. The created
+job, and the files a finished job wrote (`result_files`), are reported
+to a session router that tracks stored objects (llm-redact-pro's named
+users). Checkpoint permissions (an admin key sharing a checkpoint across
+projects) stay pass-through.
+
+Vector stores (`/v1/vector_stores`: the store, its search, its files and
+file batches — OpenAI, both Azure families, custom providers) are
+recognized the same way. A store's `description` and `metadata`, a file's
+`attributes` (a map keyed by the caller, walked like `metadata`: a key
+named `name` or `id` is data), the store's `name` (a label: the store is
+addressed by its id), a search's `query` and its attribute-filter values
+are redacted; every answer echoing them, and the stored files'
+content a search or a file's content read returns, is restored. Vector
+store traffic uses the static vault session (with llm-redact-pro's named
+users, the user's own copy of it) — the session the files were uploaded
+and the attributes redacted in — so a filter value's placeholder is the
+stored attribute's and the filter still matches (the vault is
+deterministic). The file ids a store, attach or file batch names, and a
+filter's attribute `key`, are verbatim, as above. The
+created store is reported to a session router, and the store list is a
+listing it attributes per item; a store's own files are read as the
+store's.
+
+Code interpreter containers (`/v1/containers`: the container and its
+files — OpenAI, Azure's v1 API, custom providers) are recognized too. A
+container file upload is redacted exactly as a `/v1/files` upload is (the
+file part read by its content, its filename and every form field; a
+binary file goes out unscanned only with the client's own key), a JSON
+container-file create names a stored file (verbatim), the container file
+object's `path` (the filename) is restored, and a download is restored
+like a Files API download — a text file line by line, a binary file
+untouched. A container's `name` is redacted and restored like a store's;
+its starting `file_ids` are verbatim. Created containers — and the container a
+Response's code interpreter call ran in (or a file it cites was written
+in), unless the request named it — and container files are reported to a
+session router.
+
+The Uploads API (`/v1/uploads`: a large file sent in parts) stays
+unrecognized — a part is an opaque byte range whose boundaries can split
+a line or a value, and the total size is declared before the first part —
+so a credential the proxy holds is never lent to it; upload through
+`/v1/files` instead (docs/api-coverage.md, honest gaps).
+
 ## Realtime WebSocket APIs
 
 With `pip install 'llm-redact-proxy[realtime]'`: OpenAI Realtime

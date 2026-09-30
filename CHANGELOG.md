@@ -51,6 +51,28 @@ and tags `vX.Y.Z`.
   `connections` block, `llm_redact_connections_closed_total{cause}`, bookkeeping
   stage `recheck`. Streaming HTTP answers are not cut (each answers a request that
   was admitted).
+- OpenAI fine-tuning jobs, vector stores and code interpreter containers are
+  recognized (OpenAI, both Azure families — containers on the v1 API only — and
+  custom providers), so a routed operator key or cloud identity may reach them.
+  Fine-tuning: job `metadata` redacted and restored in every echo, event messages
+  restored, checkpoints recognized. Vector stores: `name`, `description`,
+  `metadata`, file `attributes` (a caller-keyed map, now walked like `metadata`),
+  search queries and filter values redacted; echoes, search results and a file's
+  parsed content restored. Containers: `name` redacted and restored, container
+  file uploads read by content like `/v1/files` uploads, downloads restored like a
+  Files API download. New adapter hooks `verbatim_fields` and `label_fields` with
+  `providers.base.prepare_route_request` as the proxy's redaction entry point:
+  identifier fields the provider uses exactly as sent (a fine-tune `suffix`, which
+  becomes part of the model name; training/validation file ids; W&B
+  `integrations`; the file ids of a store, attach, file batch or container; a
+  search filter's attribute `key`) are scanned but never rewritten — a value that
+  would be redacted there refuses the request (400); label fields under a
+  structural key (a store's or container's `name`) are redacted and restored.
+  Created stores, containers and container files are reported to a session router
+  (so is the container a Responses code interpreter call ran in), and the job,
+  store and container lists are listings it attributes per item. Checkpoint
+  permissions stay pass-through, and the Uploads API stays unrecognized (a part is
+  an opaque byte range; documented in docs/api-coverage.md).
 
 ### Fixed
 - The app lifespan tolerates `add_signal_handler` raising `ValueError` (uvloop off the

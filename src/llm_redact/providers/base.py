@@ -171,6 +171,134 @@ def restore_exempt_mcp_blocks(original: Any, redacted: Any, exempt: frozenset[st
     return restore(original, redacted)
 
 
+class VerbatimFieldRedacted(UnredactableRequest):
+    """A request field the provider uses EXACTLY as sent — an identifier or
+    a name it keeps (a fine-tuned model's name suffix, a file id, a W&B
+    project) — holds a value llm-redact redacts. Such a
+    field is scanned but never rewritten: a placeholder there would name a
+    model, file or project that does not exist (and the client, which gets
+    the real value back, would cite a name the provider never saw). So the
+    request is refused (400) instead of forwarded with the value. The
+    message names the field only, never its content."""
+
+
+# A verbatim field's position (``ProviderAdapter.verbatim_fields``): keys from
+# the body's root; "*" steps into every item of a list, "**" into every
+# object and list below (any depth, the current level included).
+VerbatimPosition = tuple[str, ...]
+_EVERY_ITEM = "*"
+_ANY_DEPTH = "**"
+_Slot = tuple[str | int, ...]
+
+
+def _verbatim_slots(node: Any, position: VerbatimPosition, at: _Slot = ()) -> list[_Slot]:
+    """The concrete paths (keys and list indexes) ``position`` names in
+    ``node``."""
+    if not position:
+        return [at]
+    head, rest = position[0], position[1:]
+    found: list[_Slot] = []
+    if head == _ANY_DEPTH:
+        found.extend(_verbatim_slots(node, rest, at))
+        children: Any = (
+            node.items()
+            if isinstance(node, dict)
+            else enumerate(node)
+            if isinstance(node, list)
+            else ()
+        )
+        for key, child in children:
+            found.extend(_verbatim_slots(child, position, (*at, key)))
+    elif head == _EVERY_ITEM:
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                found.extend(_verbatim_slots(item, rest, (*at, index)))
+    elif isinstance(node, dict) and head in node:
+        found.extend(_verbatim_slots(node[head], rest, (*at, head)))
+    return found
+
+
+def _get_at(node: Any, slot: _Slot) -> Any:
+    for step in slot:
+        node = node[step]
+    return node
+
+
+def _replaced_at(node: Any, slot: _Slot, value: Any) -> Any:
+    """``node`` with the value at ``slot`` replaced — only the containers
+    along the path are copied (the caller's body is never changed)."""
+    if not slot:
+        return value
+    step, rest = slot[0], slot[1:]
+    copy: Any = dict(node) if isinstance(node, dict) else list(node)
+    copy[step] = _replaced_at(node[step], rest, value)
+    return copy
+
+
+def _strings_in(value: Any) -> list[str]:
+    """Every string value in ``value`` (keys are never read)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        value = list(value.values())
+    if not isinstance(value, list):
+        return []
+    return [text for item in value for text in _strings_in(item)]
+
+
+def prepare_route_request(
+    adapter: "ProviderAdapter",
+    method: str,
+    path: str,
+    body: dict[str, Any],
+    redactor: Redactor,
+    *,
+    inject_note: bool,
+    mcp_exempt: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """``adapter.prepare_request`` for a request to ``path`` — the proxy's
+    entry point, with the route in view. The route's VERBATIM fields
+    (``verbatim_fields``) are held out of the walk and scanned on their own:
+    a value llm-redact would redact there refuses the request
+    (``VerbatimFieldRedacted``; a block-mode value raises BlockedRequest, a
+    warn-mode one is counted and forwarded, as anywhere), and otherwise they
+    go back exactly as sent. The route's LABEL fields (``label_fields``) are
+    redacted after the walk, which skips them as structural."""
+    held: list[tuple[_Slot, Any, VerbatimPosition]] = []
+    target: dict[str, Any] = body
+    for position in adapter.verbatim_fields(method, path):
+        for slot in _verbatim_slots(body, position):
+            if any(slot[: len(other)] == other for other, _, _ in held):
+                continue  # inside a field already held out
+            # A field held out earlier inside this one goes back with it.
+            held = [entry for entry in held if entry[0][: len(slot)] != slot]
+            held.append((slot, _get_at(body, slot), position))
+            target = _replaced_at(target, slot, None)
+    for _, value, position in held:
+        for text in _strings_in(value):
+            if redactor.redact_text(text) != text:
+                label = ".".join(key for key in position if key not in (_EVERY_ITEM, _ANY_DEPTH))
+                raise VerbatimFieldRedacted(
+                    f"llm-redact: the request field `{label}` holds a value llm-redact redacts,"
+                    " but the provider uses that field exactly as sent (an identifier or a"
+                    " name it keeps), so it cannot carry a placeholder; the request was not"
+                    " forwarded"
+                )
+    prepared = adapter.prepare_request(
+        target, redactor, inject_note=inject_note, mcp_exempt=mcp_exempt
+    )
+    for slot, value, _ in held:
+        prepared = _replaced_at(prepared, slot, value)
+    # LABELS: user text under a key the walk skips as structural (a vector
+    # store's `name`), redacted here like any other text.
+    for position in adapter.label_fields(method, path):
+        for slot in _verbatim_slots(prepared, position):
+            value = _get_at(prepared, slot)
+            if isinstance(value, str):
+                prepared = _replaced_at(prepared, slot, redactor.redact_text(value))
+    return prepared
+
+
 class RouteKind(Enum):
     CHAT = "chat"  # redact request + rehydrate response (incl. streaming)
     REDACT_ONLY = "redact_only"  # redact request, pass response through
@@ -250,6 +378,24 @@ class ProviderAdapter(ABC):
         if inject_note and changed:
             redacted = self.inject_system_note(redacted)
         return redacted  # type: ignore[no-any-return]
+
+    def verbatim_fields(self, method: str, path: str) -> tuple[VerbatimPosition, ...]:
+        """The request fields of this route the provider uses EXACTLY as sent
+        (identifiers and names it keeps: a file id, a fine-tuned model's
+        suffix, a W&B project), as positions (``VerbatimPosition``).
+        They are scanned but never rewritten: ``prepare_route_request``
+        refuses a request whose verbatim field holds a value it would redact.
+        None by default."""
+        return ()
+
+    def label_fields(self, method: str, path: str) -> tuple[VerbatimPosition, ...]:
+        """The request fields of this route that are user text although
+        their key is one the walk treats as structural (a vector store's
+        `name`: a label, the object is addressed by id), as positions. They
+        are redacted like any other text (``prepare_route_request``); the
+        adapter restores them wherever an answer echoes them. None by
+        default."""
+        return ()
 
     def rehydrate_body(self, body: Any, rehydrator: Rehydrator) -> Any:
         return rehydrator.rehydrate_json(body)

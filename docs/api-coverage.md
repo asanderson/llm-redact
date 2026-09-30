@@ -119,7 +119,7 @@ matches](#requests-no-route-matches).
 |---|---|---|
 | `POST /v1/chat/completions` | chat | streaming `delta.content`, tool-call arguments, and reasoning-model chain-of-thought (`delta.reasoning_content` / `delta.reasoning`) are all rehydrated per choice |
 | `GET /v1/chat/completions/{id}` | chat | stored-completion retrieval restored |
-| `POST /v1/responses` | chat | MCP connector: `tools[].type == "mcp"` entries (server_url, headers) pass through unredacted BY DESIGN — the provider needs the real credential; `mcp_call` arguments/output in responses are rehydrated, streaming included. The files the code interpreter WROTE into its container (`container_file_citation` annotations, a code interpreter call's output files; streaming included) are reported to a session router as the requester's |
+| `POST /v1/responses` | chat | MCP connector: `tools[].type == "mcp"` entries (server_url, headers) pass through unredacted BY DESIGN — the provider needs the real credential; `mcp_call` arguments/output in responses are rehydrated, streaming included. The files the code interpreter WROTE into its container (`container_file_citation` annotations, a code interpreter call's output files; streaming included), and the container they were written in (a call's or a citation's `container_id`) unless the request names it, are reported to a session router as the requester's |
 | `GET /v1/responses/{id}` | chat | stored responses rehydrated |
 | `GET /v1/responses/{id}/input_items` | chat | input-item echoes restored |
 | `DELETE /v1/responses/{id}` | redact-only | id only (a body-less no-op: recognized) |
@@ -158,15 +158,44 @@ matches](#requests-no-route-matches).
 | `POST /v1/videos/{id}/remix` | chat | remix prompt redacted; echo restored |
 | `GET /v1/videos/{id}/content` | redact-only | the rendered video: media bytes verbatim (a body-less no-op) |
 | `DELETE /v1/videos/{id}` | redact-only | id only |
-| `POST /v1/fine_tuning/jobs` | pass-through | file ids only; the training FILE is covered at upload via `/v1/files`; the created job is reported to a session router as its creator's |
-| `GET /v1/fine_tuning/jobs` | pass-through | |
-| `GET /v1/fine_tuning/jobs/{id}` | pass-through | the job's `result_files` are reported to a session router (like a batch's output files on its status; also on the job's `cancel`, `pause` and `resume`) |
-| `POST /v1/uploads` | pass-through | DOCUMENTED GAP: the Uploads API (see the honest gaps below) |
+| `POST /v1/fine_tuning/jobs` | chat | the caller's free-form `metadata` redacted out and restored in the echoed job; the training data is the FILE, redacted at its upload (`/v1/files`). VERBATIM fields — `suffix` (it becomes part of the fine-tuned model's name, which later requests cite in their structural `model`), `training_file` / `validation_file` (file ids) and `integrations` (a W&B project, entity, run name and tags) — are scanned but never rewritten: a value llm-redact would redact there refuses the request (400) instead of forwarding it or naming a model, file or project that does not exist. `hyperparameters` / `method` go through the walk (numbers and enums). The created job is reported to a session router as its creator's; no system note |
+| `GET /v1/fine_tuning/jobs` | chat | the job list: each job's echoed `metadata` restored in the request's own session; a listing a session router attributes per item (`listing_item_session`) |
+| `GET /v1/fine_tuning/jobs/{id}` | chat | the job object, restored; its `result_files` are reported to a session router (like a batch's output files on its status; also on the job's `cancel`, `pause` and `resume`) |
+| `POST /v1/fine_tuning/jobs/{id}/cancel` | chat | answers the job object, restored |
+| `POST /v1/fine_tuning/jobs/{id}/pause` | chat | answers the job object, restored |
+| `POST /v1/fine_tuning/jobs/{id}/resume` | chat | answers the job object, restored |
+| `GET /v1/fine_tuning/jobs/{id}/events` | chat | the provider's messages about the job, restored |
+| `GET /v1/fine_tuning/jobs/{id}/checkpoints` | redact-only | checkpoint metadata (a body-less no-op: recognized) |
+| `POST /v1/fine_tuning/checkpoints/{id}/permissions` | pass-through | an admin key sharing a checkpoint across projects (org administration, like the Admin API) |
+| `POST /v1/uploads` | pass-through | DOCUMENTED GAP: the Uploads API cannot be redacted statelessly (see the honest gaps below); never lent a credential the proxy holds |
 | `POST /v1/uploads/{id}/parts` | pass-through | an opaque byte range of the file |
-| `POST /v1/vector_stores` | pass-through | DOCUMENTED GAP: names and attributes are forwarded as sent |
+| `POST /v1/vector_stores` | chat | create: the store's `name` (a label — the store is addressed by id), `description` and the caller's `metadata` redacted, echoed back restored (the `name` of every vector store object, alone or listed); VERBATIM (scanned, never rewritten — a value llm-redact would redact refuses the request, 400): its `file_ids`. The store is reported to a session router as its creator's; no system note on any vector store route |
+| `GET /v1/vector_stores` | chat | the store list, restored in the request's own session; a listing a session router attributes per item |
+| `GET /v1/vector_stores/{id}` | chat | the store, restored |
+| `POST /v1/vector_stores/{id}` | chat | modify: `name` and `metadata` redacted; the echo restored |
+| `DELETE /v1/vector_stores/{id}` | redact-only | id only |
+| `POST /v1/vector_stores/{id}/search` | chat | the `query` redacted, and so are attribute-filter VALUES — in the same (static) session the files' `attributes` were redacted in, so a filter's placeholder is the stored attribute's (the vault is deterministic); a filter's `key` names an attribute KEY (never rewritten where it was set) and is verbatim. The results — file content chunks, filenames, attributes, the echoed query — are restored |
+| `POST /v1/vector_stores/{id}/files` | chat | attach a file: its `attributes` (values under keys the caller chooses — walked like `metadata`, a key named `id` or `name` included) redacted, `file_id` verbatim; the vector-store file object restored |
+| `GET /v1/vector_stores/{id}/files` | chat | the store's files (attributes restored), read as the store's: not a listing attributed per item |
+| `GET /v1/vector_stores/{id}/files/{file_id}` | chat | restored |
+| `POST /v1/vector_stores/{id}/files/{file_id}` | chat | update `attributes`: redacted, the echo restored |
+| `DELETE /v1/vector_stores/{id}/files/{file_id}` | redact-only | ids only |
+| `GET /v1/vector_stores/{id}/files/{file_id}/content` | chat | the file's parsed content chunks and filename, restored |
+| `POST /v1/vector_stores/{id}/file_batches` | chat | `attributes` redacted; `file_ids` and each `files[].file_id` verbatim |
+| `GET /v1/vector_stores/{id}/file_batches/{batch_id}` | chat | the batch's status, restored |
+| `POST /v1/vector_stores/{id}/file_batches/{batch_id}/cancel` | chat | |
+| `GET /v1/vector_stores/{id}/file_batches/{batch_id}/files` | chat | the batch's vector-store files, restored like the store's files |
 | `POST /v1/assistants` | pass-through | DOCUMENTED GAP: Assistants (deprecated) |
 | `POST /v1/threads/{id}/messages` | pass-through | DOCUMENTED GAP: Threads (deprecated) carry message content |
-| `GET /v1/containers/{id}/files/{file_id}/content` | pass-through | a code-interpreter container's file, verbatim |
+| `POST /v1/containers` | chat | a code interpreter container: its `name` (a label) redacted and restored on every container object, alone or listed; its starting `file_ids` are VERBATIM (scanned, never rewritten — a value llm-redact would redact refuses the request, 400); `expires_after` / `memory_limit` go through the walk. The container is reported to a session router as its creator's (so is one a Response's code interpreter call created, `container_id`); no system note on any container route |
+| `GET /v1/containers` | chat | the container list; a listing a session router attributes per item |
+| `GET /v1/containers/{id}` | chat | |
+| `DELETE /v1/containers/{id}` | redact-only | id only |
+| `POST /v1/containers/{id}/files` | chat | multipart: read and redacted as a `/v1/files` upload is (by content: a JSONL or text file redacted, a binary file forwarded unscanned with the client's own key and refused under a credential the proxy holds or `binary_uploads = "refuse"`; its filename and every form field redacted); JSON: the stored `file_id` it copies in is verbatim. The container file object (its `path` echoes the filename) restored; the new container file is reported to a session router |
+| `GET /v1/containers/{id}/files` | chat | the container's files (paths restored), read as the container's: not a listing attributed per item |
+| `GET /v1/containers/{id}/files/{file_id}` | chat | restored |
+| `GET /v1/containers/{id}/files/{file_id}/content` | chat | the file, uploaded or written by the code, restored as a `/v1/files` download is: a text file line by line (a JSON line as JSON), a binary file untouched |
+| `DELETE /v1/containers/{id}/files/{file_id}` | redact-only | ids only |
 | `GET /v1/evals` | pass-through | |
 | `POST /v1/realtime/client_secrets` | pass-through | an ephemeral Realtime key for a browser client; the WebSocket session itself is covered below |
 | `GET /v1/organization/...` (Admin API) | pass-through | org metadata (singular: `/v1/organizations/` is Anthropic's) |
@@ -265,7 +294,25 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/models/{id}` | redact-only | |
 | `GET /openai/deployments` | redact-only | deployment listing |
 | `GET /openai/deployments/{d}` | redact-only | |
-| `POST /openai/v1/fine_tuning/jobs` | pass-through | file ids only; the training FILE is covered at upload; the job, and later its `result_files`, are reported like OpenAI's |
+| `POST /openai/v1/fine_tuning/jobs` | chat | as on OpenAI: `metadata` redacted and restored, the verbatim fields scanned but never rewritten; the job, and later its `result_files`, are reported like OpenAI's |
+| `POST /openai/fine_tuning/jobs` | chat | the api-version form |
+| `GET /openai/fine_tuning/jobs` | chat | |
+| `GET /openai/v1/fine_tuning/jobs/{id}` | chat | |
+| `POST /openai/fine_tuning/jobs/{id}/cancel` | chat | also `pause` / `resume` |
+| `GET /openai/v1/fine_tuning/jobs/{id}/events` | chat | |
+| `GET /openai/fine_tuning/jobs/{id}/checkpoints` | redact-only | |
+| `POST /openai/v1/vector_stores` | chat | vector stores, as on OpenAI (both path families) |
+| `GET /openai/vector_stores` | chat | |
+| `POST /openai/v1/vector_stores/{id}/search` | chat | |
+| `POST /openai/vector_stores/{id}/files` | chat | |
+| `GET /openai/v1/vector_stores/{id}/files/{file_id}/content` | chat | |
+| `POST /openai/v1/vector_stores/{id}/file_batches` | chat | |
+| `DELETE /openai/vector_stores/{id}` | redact-only | |
+| `POST /openai/v1/containers` | chat | code interpreter containers, as on OpenAI (the v1 API only) |
+| `GET /openai/v1/containers/{id}` | chat | |
+| `POST /openai/v1/containers/{id}/files` | chat | |
+| `GET /openai/v1/containers/{id}/files/{file_id}/content` | chat | |
+| `DELETE /openai/v1/containers/{id}/files/{file_id}` | redact-only | |
 
 ## AWS Bedrock (runtime)
 
@@ -498,8 +545,8 @@ These checks, like every routing step, cost time linear in the path's
 length, and they run only for a request the request-origin rule and the
 access gate admit (a refused request gets its own refusal). An
 OpenAI-compatible prefix (`/custom/NAME/…`, `/v1beta/openai/…`) is matched
-on the endpoint's tail: tails of at most eight segments after `/v1` (every
-OpenAI endpoint has four or fewer), and the one at the first OpenAI
+on the endpoint's tail: tails of at most ten segments after `/v1` (every
+OpenAI endpoint has five or fewer), and the one at the first OpenAI
 resource name.
 
 `GET /` and `HEAD /` — the proxy's base URL itself, no provider's API —
@@ -533,28 +580,36 @@ is forwarded verbatim, the same honesty posture as warn mode and
 per-provider `detection = false`. Documented so nobody assumes protection
 that is not there:
 
-- **OpenAI Uploads API** (`POST /v1/uploads`, `/parts`, `/complete`) — the
-  large-file sibling of `/v1/files`. Each part is an opaque byte range and a
-  secret can straddle a part boundary, so per-line scanning cannot be applied
-  safely; real coverage would need stateful cross-part buffering. Pass-through,
-  routed to the OpenAI upstream with the client's own credential (pinned by
-  test — it previously fell through to the anthropic default; a credential
-  the proxy holds is never lent to it: a recorded 403). For the same reason
-  the File a completed Upload creates is reported to a session router as its
-  creator's only when its `purpose` is stated and is not `batch`: a batch
-  input file's requests would be run with the upload's credential, and the
-  stored objects they cite were never checked.
-- **OpenAI Assistants / Threads / vector-store search** — on OpenAI's
-  announced deprecation path (Responses/Conversations is the successor), so
-  not built. The same holds for their Azure v1 twins (`/openai/v1/threads`,
-  `/openai/v1/vector_stores/{id}/search`), and Azure's `/openai/v1/evals`
-  and `/openai/v1/containers` are not covered either — pass-through, and
-  refused wherever the proxy's own credential would carry them
-  (`auth = "identity"`, or a routed operator key). OpenAI's own
-  `/v1/containers` (the code interpreter's containers and their files)
-  passes through to the OpenAI upstream too, on the same terms; the files a
-  Response's code wrote into a container are reported to a session router
-  as that Response's creator's.
+- **OpenAI Uploads API** (`POST /v1/uploads`, `/parts`, `/complete`,
+  `/cancel`) — the large-file sibling of `/v1/files`, and deliberately NOT
+  recognized: it cannot be redacted without state the proxy does not keep.
+  The create declares the file's total `bytes` (and `mime_type`) before any
+  content is sent, and redaction changes lengths; each part is an opaque
+  byte range (up to 64 MB) whose boundaries can split a JSONL line, a
+  multi-byte character or a value in two; parts may be sent in parallel and
+  are put in order only by the `part_ids` list at `/complete` (with an
+  optional checksum of the whole file). Scanning each part alone would miss
+  a secret that straddles a boundary and could corrupt the file; redacting
+  it correctly would mean buffering every part of every Upload across
+  requests — the file's plaintext held by the proxy between requests, and
+  replayed to the provider only at `/complete` — which the proxy never
+  does. So it stays pass-through, routed to the OpenAI upstream with the
+  client's own credential (pinned by test — it previously fell through to
+  the anthropic default), and a credential the proxy holds (identity, a
+  routed operator key) is never lent to any Uploads route: a recorded 403
+  before the body is read (pinned by `tests/test_lent_credentials.py`).
+  Upload through `POST /v1/files` instead, whose file part is scanned.
+  For the same reason the File a completed Upload creates is reported to a
+  session router as its creator's only when its `purpose` is stated and is
+  not `batch`: a batch input file's requests would be run with the
+  upload's credential, and the stored objects they cite were never
+  checked.
+- **OpenAI Assistants / Threads** — on OpenAI's announced deprecation path
+  (Responses/Conversations is the successor), so not built. The same holds
+  for their Azure v1 twins (`/openai/v1/threads`), and Azure's
+  `/openai/v1/evals` is not covered either — pass-through, and refused
+  wherever the proxy's own credential would carry them (`auth =
+  "identity"`, or a routed operator key).
 - **OpenAI WebRTC realtime** (`POST /v1/realtime/calls`, SDP offer/answer) —
   after setup, media and the event data channel flow peer-to-peer and never
   transit this HTTP/WS proxy at all: structurally unreachable, not merely

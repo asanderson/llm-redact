@@ -26,8 +26,11 @@ The view (``UploadView.cited``) is a list of JSON values:
   [v]}}``), its value parsed when it is a JSON object or array.
 
 ``problem`` names why an upload cannot be checked (the construct only, never
-content): outside the canonical grammar, a part header without one reading,
-a Content-Transfer-Encoding, a form field that is not UTF-8 text or declares
+content): outside the canonical grammar, a part header without one reading
+(a header line carrying a bare CR or LF or another control included: a
+lenient reader ends the header block there), a part with neither a header
+block nor an empty one (``_require_header_block``), a
+Content-Transfer-Encoding, a form field that is not UTF-8 text or declares
 another charset (its own, or the RFC 7578 ``_charset_`` field), a JSON form
 field repeating a key, a line or JSON form field nesting deeper than
 ``MAX_JSON_DEPTH`` (JSON the provider may read, but no walk can).
@@ -53,7 +56,8 @@ leading byte-order mark dropped), ``jsonwalk.loads_request`` (a repeated
 key's LAST occurrence, with ``normalized`` holding the body with the part
 re-serialized, for a caller that must forward exactly what was checked),
 nesting at most ``MAX_JSON_DEPTH``. ``problem`` names why it cannot be:
-outside the canonical grammar, a part header without one reading, a
+outside the canonical grammar, a part header without one reading or a part
+without a header block (as for a form upload), a
 Content-Transfer-Encoding or a charset the proxy does not decode, content
 that is not UTF-8 text or not a JSON object, or JSON nested too deep. The
 media part is not read here (a file's content is not a request body).
@@ -174,8 +178,9 @@ def read_upload_metadata(body: bytes, boundary: bytes) -> UploadView:
 def _read_metadata(part: multipart.MultipartPart) -> tuple[dict[str, Any], bool]:
     """The metadata object ``part`` holds (``{}`` when it is blank) and
     whether it repeats a key. Raises _Unreadable for what the check cannot
-    read. A part without a header block is read too: a server may read it
-    as a part with no headers."""
+    read. A part with an empty header block is read too (see
+    ``_require_header_block``)."""
+    _require_header_block(part)
     if part.headers is not None:
         try:
             encoding = part.header(_TRANSFER_ENCODING)
@@ -205,6 +210,18 @@ def _read_metadata(part: multipart.MultipartPart) -> tuple[dict[str, Any], bool]
     return metadata, duplicate_keys
 
 
+def _require_header_block(part: multipart.MultipartPart) -> None:
+    """Raise _Unreadable when every reader may not find ``part``'s header
+    block where the check does: a part without a header/body separator
+    has one reading only when it is empty or opens with CRLF (an empty
+    header block). Otherwise a strict reader takes its first lines for
+    headers, and one accepting a bare LF as a line break ends them at a
+    bare-LF blank line, reading what follows as the part's content — none
+    of it where the check reads it."""
+    if part.headers is None and part.content and not part.content.startswith(b"\r\n"):
+        raise _Unreadable(AMBIGUOUS)
+
+
 class _Reader:
     """Reads parts one by one into ``cited``, within a byte budget and a
     budget of lines to parse."""
@@ -229,8 +246,9 @@ class _Reader:
         """Read one part into ``cited``; True when its content was rewritten
         (a file line repeating a key, re-serialized as the provider reads
         it)."""
+        _require_header_block(part)
         if part.headers is None:
-            return False  # no header block: nothing a server reads as a named part
+            return False  # an empty header block: nothing a server reads as a named part
         try:
             encoding = part.header("content-transfer-encoding")
             disposition = part.params("content-disposition") or {}

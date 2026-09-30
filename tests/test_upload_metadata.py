@@ -134,11 +134,18 @@ def test_the_first_part_is_read_as_the_metadata_object() -> None:
             id="whitespace-then-byte-order-mark",
         ),
         pytest.param(
-            # No header/body separator: a server may read it as a part with
-            # no headers, so it is read too.
-            _related(_part(None, _meta(name=TAKEN)), _part(b"Content-Type: text/plain", b"x")),
+            # An EMPTY header block (the part opens with CRLF): every reader
+            # finds it there.
+            _related(
+                _part(None, b"\r\n" + _meta(name=TAKEN)), _part(b"Content-Type: text/plain", b"x")
+            ),
             {"file": {"name": TAKEN}},
-            id="no-header-block",
+            id="empty-header-block",
+        ),
+        pytest.param(
+            _related(_part(None, b""), _part(b"Content-Type: text/plain", b"x")),
+            {},
+            id="empty-part",
         ),
         pytest.param(
             _upload(_meta(name=TAKEN), b"Content-Type: text/plain"),
@@ -213,6 +220,39 @@ def test_a_repeated_key_is_read_as_its_last_occurrence_and_sent_so() -> None:
 )
 def test_what_the_check_cannot_read_is_named(body: bytes, problem: str) -> None:
     assert _read(body) == UploadView(None, problem=problem)
+
+
+# A header block a reader accepting a bare LF (or CR) as a line break ends
+# EARLIER than the check does: what the check reads as a header value (the
+# part's content blank) would there be the metadata — a name nobody checked.
+HIDDEN = _meta(name=TAKEN, displayName=f"of {EMAIL}")
+HIDDEN_HEADS = {
+    "lf-blank-line": b"Content-Type: application/json\n\n" + HIDDEN,
+    "cr-blank-line": b"Content-Type: application/json\r\r" + HIDDEN,
+    "crlf-then-lf": b"Content-Type: application/json\r\n\n" + HIDDEN,
+    "nul": b"Content-Type: application/json\x00" + HIDDEN,
+}
+
+
+@pytest.mark.parametrize("head", HIDDEN_HEADS.values(), ids=HIDDEN_HEADS.keys())
+def test_a_control_in_the_metadata_header_block_is_unreadable(head: bytes) -> None:
+    assert _read(_upload(b"", head)) == UploadView(None, problem=AMBIGUOUS)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(_meta(name=TAKEN), id="json"),
+        pytest.param(b"Content-Type: application/json\n\n" + _meta(name=TAKEN), id="lf-headers"),
+        pytest.param(b"\n" + _meta(name=TAKEN), id="lf"),
+    ],
+)
+def test_a_part_without_a_header_block_or_an_empty_one_is_unreadable(content: bytes) -> None:
+    # No header/body separator and no leading CRLF: a strict reader takes
+    # its first lines for headers, a lenient one may end them at a bare-LF
+    # blank line — neither reads the part where the check would.
+    body = _related(_part(None, content), _part(b"Content-Type: text/plain", b"x"))
+    assert _read(body) == UploadView(None, problem=AMBIGUOUS)
 
 
 # --- through the real app -------------------------------------------------------------
@@ -457,6 +497,68 @@ async def test_with_the_clients_own_key_unreadable_metadata_is_refused_where_red
     assert upstream.requests == [] and router.checks == []
     (row,) = app.state.proxy.recent
     assert row["status"] == 400
+
+
+HEADLESS = _related(
+    _part(None, b"Content-Type: application/json\n\n" + HIDDEN),
+    _part(b"Content-Type: text/plain", b"hello"),
+)
+HIDDEN_BODIES = [
+    *(pytest.param(_upload(b"", head), id=name) for name, head in HIDDEN_HEADS.items()),
+    pytest.param(HEADLESS, id="no-header-block"),
+]
+
+
+@pytest.mark.parametrize("body", HIDDEN_BODIES)
+@pytest.mark.parametrize(
+    ("operator", "detection"),
+    [
+        pytest.param(False, True, id="own-key"),
+        pytest.param(True, True, id="operator-key"),
+        pytest.param(True, False, id="operator-key-detection-off"),
+    ],
+)
+async def test_metadata_a_lenient_reader_finds_elsewhere_is_never_sent(
+    body: bytes, operator: bool, detection: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The check would be shown a blank part while an upstream accepting a
+    # bare LF reads a chosen name (and an unredacted display name): refused
+    # before anything is sent, the check never asked.
+    router = NameRouter()
+    upstream = FilesAPI()
+    app = _app(monkeypatch, router, upstream, operator=operator, detection=detection)
+    response = await _post(app, body)
+    assert response.status_code == 400, response.text
+    assert AMBIGUOUS in response.json()["error"]["message"]
+    assert "ada-notes" not in response.text and EMAIL not in response.text
+    assert upstream.requests == [] and router.checks == []
+
+
+@pytest.mark.parametrize("head", HIDDEN_HEADS.values(), ids=HIDDEN_HEADS.keys())
+async def test_without_an_ownership_check_such_a_header_block_is_refused_where_redaction_applies(
+    head: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The Free core: redaction reads the part's headers strictly too, so a
+    # display name hidden in a header value is never sent unredacted.
+    upstream = FilesAPI()
+    app = _app(monkeypatch, OlderRouter(), upstream, operator=False)
+    response = await _post(app, _upload(b"", head))
+    assert response.status_code == 400, response.text
+    assert AMBIGUOUS in response.json()["error"]["message"]
+    assert upstream.requests == []
+
+
+async def test_without_an_ownership_check_a_part_without_a_header_block_is_redacted_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No header block at all: redaction reads the whole part as a file,
+    # whatever a server finds in it.
+    upstream = FilesAPI()
+    app = _app(monkeypatch, OlderRouter(), upstream, operator=False)
+    response = await _post(app, HEADLESS)
+    assert response.status_code == 200, response.text
+    (sent,) = upstream.requests
+    assert EMAIL.encode() not in sent.content and "«EMAIL_001»".encode() in sent.content
 
 
 async def test_with_the_clients_own_key_and_detection_off_it_goes_out_unchecked(

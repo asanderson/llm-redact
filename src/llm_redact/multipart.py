@@ -32,8 +32,10 @@ _TCHAR = frozenset(_ALNUM + b"!#$%&'*+-.^_`|~")
 _ATTR_CHAR = frozenset(_ALNUM + b"!#$&+-.^_`|~")
 _HEX = frozenset(b"0123456789ABCDEFabcdef")
 _OWS = frozenset(b" \t")
-# Inside a quoted-string: controls other than HTAB have no single reading.
-_QUOTED_BAD = frozenset({*range(0x09), *range(0x0A, 0x20), 0x7F})
+# Controls other than HTAB: never in a header line (a bare CR or LF ends a
+# line for a lenient reader, whose header block then ends elsewhere), so
+# never in a quoted-string either.
+_CONTROLS = frozenset({*range(0x09), *range(0x0A, 0x20), 0x7F})
 # What ends an unquoted value: controls, space, DQUOTE, ";", backslash, DEL.
 _VALUE_STOP = frozenset({*range(0x21), 0x22, 0x3B, 0x5C, 0x7F})
 _AMBIGUOUS = "a multipart part header cannot be parsed unambiguously"
@@ -88,7 +90,10 @@ class MultipartPart:
         """(header block, start, end) of header ``name``'s value, whitespace
         trimmed; None when absent. AmbiguousHeaders when any line of the
         block is not a ``token: value`` field (an obs-fold continuation
-        included) or ``name`` repeats."""
+        included), carries a control other than HTAB — a bare CR or LF
+        would end the header block earlier for a reader that accepts one
+        as a line break, and what this block holds would be the part's
+        content there — or ``name`` repeats."""
         block = self.headers
         if block is None:
             return None
@@ -97,6 +102,8 @@ class MultipartPart:
         for line in block.split(b"\r\n"):
             key, colon, _ = line.partition(b":")
             if not colon or not key or not _TCHAR.issuperset(key):
+                raise AmbiguousHeaders(_AMBIGUOUS)
+            if not _CONTROLS.isdisjoint(line):
                 raise AmbiguousHeaders(_AMBIGUOUS)
             if key.lower() == name:
                 if found is not None:
@@ -312,9 +319,7 @@ def _parse_value(block: bytes, pos: int, end: int) -> tuple[Param, int]:
                 if i == end or block[i] not in b'"\\':
                     raise AmbiguousHeaders(_AMBIGUOUS)
                 byte = block[i]
-            elif byte in _QUOTED_BAD:
-                raise AmbiguousHeaders(_AMBIGUOUS)
-            out.append(byte)
+            out.append(byte)  # a control never gets here: _field refused it
             i += 1
         if i == end:
             raise AmbiguousHeaders(_AMBIGUOUS)  # unterminated

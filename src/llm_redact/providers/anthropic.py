@@ -273,6 +273,9 @@ class AnthropicAdapter(ProviderAdapter):
             forward_binary=forward_binary,
         )
 
+    def restores_file_download(self, method: str, path: str) -> bool:
+        return method == "GET" and _FILE_CONTENT_RE.fullmatch(path) is not None
+
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
         if _FILE_CONTENT_RE.fullmatch(path) is None:
             return None

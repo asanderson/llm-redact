@@ -160,6 +160,11 @@ class _PrefixedOpenAIMixin:
         canonical = self._canonical(path, kind=kind)
         return super().wants_system_note(kind, canonical)  # type: ignore[misc,no-any-return]
 
+    def restores_file_download(self, method: str, path: str) -> bool:
+        # The canonical path rehydrate_raw_body restores under.
+        canonical = self._canonical(path, kind=RouteKind.CHAT)
+        return super().restores_file_download(method, canonical)  # type: ignore[misc,no-any-return]
+
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
         # Consulted on CHAT routes only.
         canonical = self._canonical(path, kind=RouteKind.CHAT)

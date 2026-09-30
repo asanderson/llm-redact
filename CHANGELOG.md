@@ -170,6 +170,12 @@ and tags `vX.Y.Z`.
   counted against `max_body_strings` (an upload over it is refused 413 under a
   credential the proxy holds). A 10 MiB upload of blank lines used to block the
   proxy for about a minute.
+- A downloaded file (OpenAI, Azure and custom-provider files and container files,
+  Anthropic Files, Gemini downloads) is restored per file whatever Content-Type the
+  provider serves it with. A JSON file served as `application/json` used to be
+  walked as one JSON body, leaving placeholders in its keys and under names such
+  as `id` or `data` and re-serializing the whole file; JSON Lines and event-stream
+  media types took the streaming readings.
 
 ## [1.9.0] - 2026-09-29
 

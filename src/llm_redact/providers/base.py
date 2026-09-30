@@ -615,10 +615,16 @@ class ProviderAdapter(ABC):
     capability_response_headers: frozenset[str] = frozenset()
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
-        """Rehydrate a buffered non-JSON response body (None = untouched).
-
-        Consulted on CHAT routes whose response is not application/json —
-        e.g. an OpenAI batch output file download, which is JSONL served
-        as a file.
-        """
+        """Restore a downloaded FILE's bytes (None = untouched): consulted,
+        buffered, for every CHAT answer ``restores_file_download`` names —
+        whatever its Content-Type (a file is served with its own: JSON Lines,
+        CSV, even ``application/json``)."""
         return None
+
+    def restores_file_download(self, method: str, path: str) -> bool:
+        """Whether a CHAT answer to ``method path`` is a downloaded FILE
+        (an OpenAI file's or container file's content, Anthropic Files
+        content, a Gemini ``:download``): restored by ``rehydrate_raw_body``
+        — per file, as it was redacted on upload — never by the whole-body
+        JSON walk or a streaming reading its Content-Type would pick."""
+        return False

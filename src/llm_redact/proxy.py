@@ -4638,6 +4638,15 @@ async def _deliver(
     if route is not None:
         headers.update(route.headers)
     request_meta = RequestMeta(request.method, path, started, new_counts, new_warned, audit_token)
+    # A downloaded FILE is restored buffered, per file, whatever its
+    # Content-Type names (JSON, JSON Lines, an event stream): never by a
+    # streaming or whole-body JSON reading (``restores_file_download``).
+    file_download = (
+        kind is RouteKind.CHAT
+        and adapter is not None
+        and adapter.restores_file_download(request.method, path)
+    )
+    streamed = kind is RouteKind.CHAT and adapter is not None and not file_download
     observe = (
         state.response_observer(
             ResponseContext(
@@ -4655,7 +4664,7 @@ async def _deliver(
         else None
     )
 
-    if kind is RouteKind.CHAT and adapter is not None and "text/event-stream" in content_type:
+    if streamed and adapter is not None and "text/event-stream" in content_type:
         return StreamingResponse(
             _stream_rehydrated(
                 upstream,
@@ -4685,7 +4694,7 @@ async def _deliver(
         )
 
     if (
-        kind is RouteKind.CHAT
+        streamed
         and adapter is not None
         and adapter.handles_eventstream
         and "application/vnd.amazon.eventstream" in content_type
@@ -4701,7 +4710,7 @@ async def _deliver(
         )
 
     if (
-        kind is RouteKind.CHAT
+        streamed
         and adapter is not None
         and adapter.handles_ndjson
         and any(t in content_type for t in _JSONL_CONTENT_TYPES)
@@ -4887,17 +4896,23 @@ def _restore_buffered(
     received = raw  # the provider's own bytes (a listing restores items from these)
     rehydration_counts_before = dict(state.rehydration_counts)
     payload: Any = None
-    if kind is RouteKind.CHAT and adapter is not None and "application/json" in content_type:
+    if (
+        kind is RouteKind.CHAT
+        and adapter is not None
+        and adapter.restores_file_download(request.method, path)
+    ):
+        # A downloaded file, whatever its Content-Type (a JSON file served
+        # as application/json included): restored per file, as it was
+        # redacted on upload — never walked as one JSON body, which would
+        # skip its keys and structural names and re-serialize the file.
+        raw_rehydrated = adapter.rehydrate_raw_body(path, raw, ctx.rehydrator) if raw else None
+        if raw_rehydrated is not None:
+            raw = raw_rehydrated
+    elif kind is RouteKind.CHAT and adapter is not None and "application/json" in content_type:
         try:
             payload = loads_bounded(raw)
         except ValueError:
-            payload = None
-            # Not one JSON value (a JSON Lines file served as JSON —
-            # ``application/jsonl`` contains the substring too): the
-            # adapter's file-download restoration, like any non-JSON body.
-            raw_rehydrated = adapter.rehydrate_raw_body(path, raw, ctx.rehydrator) if raw else None
-            if raw_rehydrated is not None:
-                raw = raw_rehydrated
+            payload = None  # not one JSON value: forwarded as sent
         if payload is not None:
             response_id = adapter.response_id_from_body(payload)
             if response_id is not None:
@@ -4922,13 +4937,6 @@ def _restore_buffered(
                 changed = True
             if changed:
                 raw = json_bytes(rehydrated)
-    elif kind is RouteKind.CHAT and adapter is not None and raw:
-        # Non-JSON buffered CHAT responses: file downloads whose contents
-        # can carry placeholders (OpenAI batch output JSONL). The adapter
-        # decides; None leaves the bytes untouched.
-        raw_rehydrated = adapter.rehydrate_raw_body(path, raw, ctx.rehydrator)
-        if raw_rehydrated is not None:
-            raw = raw_rehydrated
     elif (
         route is not None
         and raw

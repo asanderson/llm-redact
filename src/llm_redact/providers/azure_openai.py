@@ -153,6 +153,14 @@ class AzureOpenAIAdapter(OpenAIAdapter):
         # batch and conversation bodies would be corrupted by one.
         return kind is RouteKind.CHAT and match is not None and match.group(1) == "chat/completions"
 
+    def restores_file_download(self, method: str, path: str) -> bool:
+        if _AZURE_FILE_CONTENT.fullmatch(path):
+            return method == "GET"
+        stored = _AZURE_STORED.fullmatch(path)
+        if stored is not None and stored.group(2) is not None:
+            return super().restores_file_download(method, "/v1/" + stored.group(2))
+        return super().restores_file_download(method, path)
+
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: "Rehydrator") -> bytes | None:
         if _AZURE_FILE_CONTENT.fullmatch(path):
             # Delegate with an OpenAI-shaped path: the parent's line-by-line

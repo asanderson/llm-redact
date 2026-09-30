@@ -438,6 +438,11 @@ def _require_plain_encoding(
         raise UnredactableRequest("a multipart part declares a charset llm-redact does not decode")
 
 
+def _is_file_download(path: str) -> bool:
+    """A Files API file's or a container file's content download."""
+    return bool(_FILE_CONTENT_RE.fullmatch(path) or _CONTAINER_FILE_CONTENT_RE.fullmatch(path))
+
+
 BINARY_FILE = "an uploaded file is binary (not text llm-redact can redact)"
 
 
@@ -1112,8 +1117,11 @@ class OpenAIAdapter(ProviderAdapter):
             out.append(json_bytes(redacted))
         return b"\n".join(out)
 
+    def restores_file_download(self, method: str, path: str) -> bool:
+        return method == "GET" and _is_file_download(path)
+
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
-        if not (_FILE_CONTENT_RE.fullmatch(path) or _CONTAINER_FILE_CONTENT_RE.fullmatch(path)):
+        if not _is_file_download(path):
             return None
         return rehydrate_text_file(
             raw, rehydrator, lambda value: self.rehydrate_body(value, rehydrator)

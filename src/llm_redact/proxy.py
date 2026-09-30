@@ -108,6 +108,7 @@ from llm_redact.plugin_api import (
     Router,
     RouteRefusal,
     Telemetry,
+    UploadInspector,
     UpstreamAuth,
     UpstreamAuthError,
 )
@@ -120,7 +121,11 @@ from llm_redact.providers.attribution import (
     unattributed_reason,
     under,
 )
-from llm_redact.providers.base import VerbatimFieldRedacted, prepare_route_request
+from llm_redact.providers.base import (
+    InspectedUpload,
+    VerbatimFieldRedacted,
+    prepare_route_request,
+)
 from llm_redact.providers.custom import build_custom_adapters, custom_prefix
 from llm_redact.realtime import (
     ALL_WS_ADAPTERS,
@@ -140,6 +145,13 @@ from llm_redact.registry import get_registry, loaded_plugins, pro_package_instal
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent, SSEParser, serialize
 from llm_redact.upload_content import classify_file
+from llm_redact.upload_inspection import (
+    BinaryValuesDetected,
+    Limits,
+    inspect_parts,
+    inspector_limits,
+    judge,
+)
 from llm_redact.upload_view import read_upload, read_upload_metadata
 from llm_redact.vault import Vault, VaultManager, run_batched
 from llm_redact.vault_crypto import key_source as vault_key_source
@@ -668,6 +680,20 @@ class ProxyState:
         # the authorizer that signs its requests with the proxy's own cloud
         # identity. Empty unless configured; the Free default fails closed.
         self.upstream_auth: dict[str, UpstreamAuth] = _build_upstream_auths(config.providers)
+        # Binary upload parts (PDFs, Office documents) read as text for the
+        # core to scan (plugin_api.UploadInspector, llm-redact-pro): None
+        # keeps the unscanned-binary rules. Restart-only (its config section
+        # is the plugin's): built once with the resolved tier, its declared
+        # bounds read once (upload_inspection.inspector_limits).
+        self.upload_inspector: UploadInspector | None = registry.build_upload_inspector(
+            config, self.license.tier
+        )
+        self.inspection_limits: Limits | None = (
+            inspector_limits(self.upload_inspector) if self.upload_inspector is not None else None
+        )
+        # Inspected binary upload parts by (provider, outcome) — an honesty
+        # counter like unscanned_uploads (upload_inspection.OUTCOMES).
+        self.inspected_uploads: Counter[tuple[str, str]] = Counter()
 
     async def admit(self, conn: HTTPConnection, surface: str) -> Admission:
         """The access gate's verdict (it scrubs its own credentials from the
@@ -2097,6 +2123,13 @@ async def _handle_local(
                 # client's own key ([detection] binary_uploads = "forward"),
                 # by provider — never a name or a byte of them.
                 "unscanned_uploads_total": dict(state.unscanned_uploads),
+                # Binary upload file parts an upload inspector read as text,
+                # by provider and outcome (upload_inspection.OUTCOMES):
+                # "clean" ones went out after a clean scan of their
+                # EXTRACTED text only ("clean_refused": scanned clean, but
+                # the upload was refused). Counts only.
+                "inspected_uploads_total": _inspected_by_provider(state.inspected_uploads),
+                "upload_inspector": _inspector_status(state),
                 # How many browser origins the operator listed in
                 # allowed_origins (the count, not the list): pages there can
                 # read restored values back through the proxy — opt-in.
@@ -2240,6 +2273,7 @@ async def _handle_local(
                 bookkeeping_errors=state.bookkeeping_errors,
                 connections_closed=state.connections.closed,
                 unscanned_uploads=state.unscanned_uploads,
+                inspected_uploads=state.inspected_uploads,
             ),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
@@ -2328,6 +2362,33 @@ async def _handle_local(
 # and the pro dashboard's config editor and preview).
 _CONFIG_BODY_LIMIT = 1024 * 1024
 CSRF_HEADER = "x-llm-redact-csrf"
+
+
+def _inspected_by_provider(counts: Counter[tuple[str, str]]) -> dict[str, dict[str, int]]:
+    """``inspected_uploads`` as /status reports it: provider -> outcome -> count."""
+    nested: dict[str, dict[str, int]] = {}
+    for (provider, outcome), count in sorted(counts.items()):
+        nested.setdefault(provider, {})[outcome] = count
+    return nested
+
+
+def _inspector_status(state: ProxyState) -> dict[str, Any]:
+    """The /status ``upload_inspector`` block: off, or the core's bounds
+    and the inspector's own metadata (a fault there is reported by type,
+    never raised into /status)."""
+    inspector, limits = state.upload_inspector, state.inspection_limits
+    if inspector is None or limits is None:
+        return {"enabled": False}
+    block: dict[str, Any] = {
+        "enabled": True,
+        "timeout_seconds": limits.timeout,
+        "max_part_bytes": limits.max_bytes,
+    }
+    try:
+        block["inspector"] = inspector.status()
+    except Exception as exc:  # noqa: BLE001 — metadata only, never fatal
+        block["inspector"] = {"status_error": type(exc).__name__}
+    return block
 
 
 def _allowed_hostnames(state: ProxyState) -> set[str]:
@@ -3416,6 +3477,76 @@ def _credential_protocol_refused(
     return JSONResponse(adapter.error_body(message, status=403), status_code=403)
 
 
+async def _inspect_upload(
+    state: ProxyState,
+    request: Request,
+    adapter: ProviderAdapter,
+    path: str,
+    body: bytes,
+    boundary: bytes,
+    redactor: Redactor,
+    *,
+    provider_name: str,
+    identity: bool,
+    max_body_bytes: int,
+    outcomes: Counter[str],
+) -> tuple[InspectedUpload | None, dict[str, int]]:
+    """An upload's binary file parts read as text by the upload inspector
+    and judged (``upload_inspection``): the adapter's reading of ``body``
+    (parsed and classified once, every part's headers checked) with the
+    parts cleared to go out byte-identical — None when the route reads no
+    file parts — and the token floors of the extracted texts (a placeholder
+    a file carries inside a compressed stream bounds this request's new
+    numbers). Each part's outcome is added to ``outcomes`` — counted by the
+    caller once it knows whether the upload went out
+    (``_count_inspections``). Raises BlockedRequest or BinaryValuesDetected
+    for a value found in an extracted text, and what reading the upload
+    raises (UnredactableRequest, TooManyStrings) — all before anything is
+    written or sent."""
+    inspector = state.upload_inspector
+    limits = state.inspection_limits
+    assert inspector is not None and limits is not None
+    reading = adapter.read_multipart(path, body, boundary, redactor.charge)
+    if reading is None:
+        return None, {}
+    parts = reading.binary_parts()
+    if not parts:
+        return InspectedUpload(reading), {}
+    results = await inspect_parts(
+        inspector, parts, provider=provider_name, identity=identity, limits=limits
+    )
+    verdict = judge(results, redactor, identity=identity, text_budget=max_body_bytes)
+    outcomes.update(verdict.outcomes)
+    # Counts and outcomes only — never a file name, a type found or content.
+    logger.info(
+        "%s %s inspected %d binary upload file part(s): %s",
+        request.method,
+        path,
+        len(parts),
+        " ".join(f"{outcome}={count}" for outcome, count in sorted(verdict.outcomes.items())),
+    )
+    if verdict.blocked is not None:
+        raise BlockedRequest(verdict.blocked)
+    if verdict.detected:
+        raise BinaryValuesDetected(verdict.detected)
+    return InspectedUpload(reading, verdict.cleared), verdict.floors
+
+
+def _count_inspections(
+    state: ProxyState, provider_name: str, outcomes: Counter[str], *, sent: bool
+) -> None:
+    """One upload's inspected binary parts into ``inspected_uploads``, once
+    its fate is known: ``clean`` only when the upload went out (``sent``) —
+    a part that scanned clean in an upload the proxy refused (a value in
+    another part, a block, a header rule, a credential the proxy holds that
+    the inspection did not allow) is ``clean_refused``, never reported as
+    forwarded."""
+    for outcome, count in outcomes.items():
+        if outcome == "clean" and not sent:
+            outcome = "clean_refused"
+        state.inspected_uploads[(provider_name, outcome)] += count
+
+
 def _plan_request(
     router: Router,
     request: Request,
@@ -4135,38 +4266,71 @@ async def handle(request: Request) -> Response:
             # the client's own credential it is forwarded unscanned unless
             # [detection] binary_uploads = "refuse"; under a credential the
             # proxy holds it is never sent (the proxy vouches only for what
-            # it read). Counted once the upload was read in full.
+            # it read) — unless an upload inspector read it as text that
+            # scanned clean (below). Counted once the upload was read in
+            # full.
             binary_forwarded: list[int] = []
             forward_binary = (
                 binary_forwarded.append
                 if not proxy_credential and state.config.detection.binary_uploads == "forward"
                 else None
             )
+            # The body the stored-object check read, when it re-serialized a
+            # line repeating a key: every part — a text or binary file's too
+            # — then goes out as the check read it.
+            upload_body = checked_upload if checked_upload is not None else body_bytes
+            # This body's own copy, counting its strings (form fields, file
+            # names, JSONL lines, extracted texts) against max_body_strings.
+            upload_redactor = ctx.redactor.with_budget(max_body_strings)
+            # The inspected binary parts' outcomes, counted once the upload
+            # went out or was refused (finally, below).
+            inspection_outcomes: Counter[str] = Counter()
+            upload_sent = False
             try:
+                inspected: InspectedUpload | None = None
+                if state.upload_inspector is not None:
+                    # Before redaction, and awaited HERE — never inside the
+                    # vault batch below: the upload read once, its binary
+                    # parts read as text by the plugin and scanned (no
+                    # placeholder issued), the reading handed back.
+                    inspected, floors = await _inspect_upload(
+                        state,
+                        request,
+                        adapter,
+                        path,
+                        upload_body,
+                        boundary,
+                        upload_redactor,
+                        provider_name=provider_name,
+                        identity=proxy_credential,
+                        max_body_bytes=max_body_bytes,
+                        outcomes=inspection_outcomes,
+                    )
+                    upload_redactor = upload_redactor.with_floors(floors)
                 # One vault transaction for the whole upload (run_batched).
                 rewritten = run_batched(
                     ctx.vault,
                     functools.partial(
                         adapter.redact_multipart,
                         path,
-                        # The body the stored-object check read, when it
-                        # re-serialized a line repeating a key: every part —
-                        # a text or binary file's too — then goes out as
-                        # the check read it.
-                        checked_upload if checked_upload is not None else body_bytes,
+                        upload_body,
                         boundary,
-                        # This body's own copy, counting its strings (form
-                        # fields, file names, JSONL lines) against
-                        # max_body_strings.
-                        ctx.redactor.with_budget(max_body_strings),
+                        upload_redactor,
                         inject_note=note_wanted and adapter.wants_system_note(kind, path),
                         # The scanned-body rule, part by part: an unscanned
                         # piece refuses the whole request — a binary file
-                        # part only when forward_binary is None.
+                        # part only when forward_binary is None and the
+                        # inspection did not clear it.
                         require_scanned=True,
                         forward_binary=forward_binary,
+                        inspected=inspected,
                     ),
                 )
+                upload_sent = True
+            except BinaryValuesDetected as exc:
+                # Values the proxy would redact, inside a file it cannot
+                # rewrite: refused, naming their types only.
+                return refused_response(str(exc), adapter, "values in a binary upload")
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the
                 # whole request is rejected.
@@ -4196,6 +4360,8 @@ async def handle(request: Request) -> Response:
                     path=path,
                     started=started,
                 )
+            finally:
+                _count_inspections(state, provider_name, inspection_outcomes, sent=upload_sent)
             if rewritten is not None:
                 outbound = rewritten
             elif checked_upload is not None:
@@ -5806,6 +5972,13 @@ def create_app(
             _close_upstream_auths(state.upstream_auth)
             if state.access_gate is not None:
                 state.access_gate.close()
+            if state.upload_inspector is not None:
+                # Its worker processes and HTTP clients; a fault closing them
+                # never stops the rest of the shutdown.
+                try:
+                    await state.upload_inspector.aclose()
+                except Exception:
+                    logger.exception("closing the upload inspector failed")
             if state.audit is not None:
                 state.audit.close()
             for task in background_tasks:

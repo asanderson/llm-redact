@@ -63,6 +63,28 @@ and tags `vX.Y.Z`.
   untouched.
 
 ### Added
+- Upload inspection seam (`plugin_api.UploadInspector`, `UploadPart`, `Inspection`;
+  `Registry.build_upload_inspector(config, tier)`, Free default None): a plugin
+  (llm-redact-pro's document extractors) reads each BINARY file part of an upload as
+  text, awaited before redaction on every upload route the core redacts (OpenAI,
+  Azure, custom and container `…/files`, Anthropic's and the Gemini API's Files
+  uploads), bounded by the core (16 parts, 4 at a time, the inspector's size limit,
+  one deadline capped at 300 s; what still runs is cancelled). The extracted text is
+  scanned with the live detectors without issuing placeholders
+  (`Redactor.scan_text`: allowlists, modes and deny strings apply): a block-mode
+  value blocks, any value that would be redacted refuses the upload (400, naming its
+  types — the file cannot be rewritten), a warn-mode value is counted and forwarded.
+  A COMPLETE reading that scans clean sends the file byte-identical — with the
+  client's own key always, under a credential the proxy holds only when the
+  inspection allows it; anything else (no text, an incomplete clean reading, a
+  timeout, a fault) keeps the unscanned-binary rules. New `/status`
+  `inspected_uploads_total` and `upload_inspector`,
+  `llm_redact_inspected_uploads_total{provider,outcome}` (`clean` counts only parts
+  that went out; a clean part of a refused upload is `clean_refused`), a `llm-redact
+  status` posture line for clean forwards. Every part's headers are checked (file
+  names, transfer encodings, charsets) before any part is inspected, so an upload the
+  redaction would refuse is never handed to the inspector. A clean scan covers the
+  extracted text only.
 - `[detection] binary_uploads = "forward" | "refuse"` (default `"forward"`, hot):
   `"refuse"` keeps refusing binary uploads under the client's own key too. Forwarded
   binaries are surfaced: /status `unscanned_uploads_total`,

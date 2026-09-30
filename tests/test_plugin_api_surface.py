@@ -142,6 +142,14 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
             "close": "(self) -> 'None'",
         },
     ),
+    "UploadInspector": (
+        ("timeout", "max_bytes"),
+        {
+            "inspect": "(self, part: 'UploadPart') -> 'Inspection'",
+            "status": "(self) -> 'dict[str, Any]'",
+            "aclose": "(self) -> 'None'",
+        },
+    ),
     "Router": (
         (),
         {
@@ -191,6 +199,13 @@ DATACLASSES: dict[str, str] = {
     "LocalAnswer": (
         "(status: 'int', body: 'Mapping[str, Any]', provider: 'str', reason: 'str') -> None"
     ),
+    "UploadPart": (
+        "(content: 'bytes', content_type: 'str | None', provider: 'str', identity: 'bool') -> None"
+    ),
+    "Inspection": (
+        "(text: 'str | None', complete: 'bool', extractor: 'str',"
+        " proxy_credential: 'bool' = False) -> None"
+    ),
 }
 
 ALL: tuple[str, ...] = (
@@ -206,6 +221,7 @@ ALL: tuple[str, ...] = (
     "HopDecision",
     "HopRequest",
     "HopResult",
+    "Inspection",
     "LocalAnswer",
     "MAX_RESPONSE_ROWS",
     "RESPONSE_PRUNE_EVERY",
@@ -220,6 +236,8 @@ ALL: tuple[str, ...] = (
     "SSEEvent",
     "SessionRouter",
     "Telemetry",
+    "UploadInspector",
+    "UploadPart",
     "UpstreamAuth",
     "UpstreamAuthError",
     "Vault",

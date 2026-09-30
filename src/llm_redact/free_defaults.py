@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         DbPasswordProvider,
         Router,
         Telemetry,
+        UploadInspector,
         UpstreamAuth,
     )
 
@@ -120,6 +121,22 @@ def build_dashboard(tier: str) -> Dashboard | None:
     factory contract (the pro builder honors it) and unused here.
     """
     del tier
+    return None
+
+
+def build_upload_inspector(config: Config, tier: str) -> UploadInspector | None:
+    """Always None: reading binary uploads (PDFs, Office documents) as text
+    is implemented in llm-redact-pro.
+
+    Nothing to fail closed on here: the core has no config for it (the
+    plugin claims its own ``[extraction]`` section, which without the
+    package is an unknown key — a ConfigError already). Without an
+    inspector a binary upload part keeps the core's rules: forwarded
+    unscanned with the client's own key under ``[detection] binary_uploads
+    = "forward"`` (counted), refused otherwise. ``config`` and ``tier`` are
+    part of the factory contract and unused here.
+    """
+    del config, tier
     return None
 
 

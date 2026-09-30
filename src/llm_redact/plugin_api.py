@@ -816,6 +816,97 @@ class UpstreamAuth(Protocol):
     def close(self) -> None: ...
 
 
+# --- upload inspection seam -----------------------------------------------------
+# A BINARY file part of an upload (a PDF, an Office document, an image —
+# ``upload_content.classify_file``) cannot be redacted: without an inspector
+# it is forwarded unscanned with the client's own key ([detection]
+# binary_uploads = "forward", counted) or refused. An ``UploadInspector``
+# (``Registry.build_upload_inspector``; llm-redact-pro's document extractors)
+# reads such a part as TEXT for the core to scan; the core alone decides
+# what happens to the part, with the request's live detectors.
+
+
+@dataclass(frozen=True)
+class UploadPart:
+    """One BINARY file part of an upload, as handed to
+    ``UploadInspector.inspect``: its bytes exactly as they would be
+    forwarded (never rewritten), the part's DECLARED media type (the
+    client's guess — a hint, never a verdict; None when absent or not a
+    plain ``type/subtype``), the provider adapter's name, and whether the
+    request would spend a credential the PROXY holds (``identity``, as for
+    ``SessionRouter.object_access_refusal``). The file name is never
+    passed. ``content`` is user data: an inspector must never log it or
+    put any of it in an exception message."""
+
+    content: bytes = field(repr=False)
+    content_type: str | None
+    provider: str
+    identity: bool
+
+
+@dataclass(frozen=True)
+class Inspection:
+    """An inspector's reading of one ``UploadPart``.
+
+    ``text`` is the text extracted from the file (None: nothing could be
+    extracted). ``complete`` claims that EVERY text-bearing element of the
+    file was read into ``text`` — each page's text layer, annotations,
+    form fields, metadata, every part of a document package — and that
+    nothing the provider could read as text was left unread: a page
+    without a text layer, an embedded image or an embedded document makes
+    a reading incomplete unless it was read (OCR) too. ``extractor`` names
+    the extractor(s) (metrics and logs only: a fixed name, never content).
+    ``proxy_credential``: whether a COMPLETE reading that scans clean may
+    also go out under a credential the proxy holds (the inspector's
+    configuration decides; the core never assumes it).
+
+    What the core does with it: any ``text`` is scanned with the request's
+    live detectors, placing NO placeholder (the file cannot be rewritten):
+    a block-mode value refuses the request (400, like any block), and so
+    does any value that would be redacted (400, naming its TYPES only); a
+    warn-mode value is counted and stays in the file. A complete reading
+    that scans clean lets the part go out byte-identical — with the
+    client's own key whatever ``[detection] binary_uploads`` says, under a
+    credential the proxy holds only with ``proxy_credential``. Anything
+    else (no text, incomplete, a clean incomplete reading) keeps the
+    core's rules for an unscanned binary part."""
+
+    text: str | None = field(repr=False)
+    complete: bool
+    extractor: str
+    proxy_credential: bool = False
+
+
+class UploadInspector(Protocol):
+    """Reads binary upload parts as text (``Registry.build_upload_inspector``).
+
+    ``inspect`` is awaited for each binary file part of an upload on a
+    route whose uploads the core redacts, BEFORE the request's redaction
+    and before any upstream contact, several parts of one request
+    concurrently (a bounded number at a time). It must never block the
+    event loop (parse hostile files in another process; reach an external
+    service asynchronously) and must honor cancellation: the core waits at
+    most ``timeout`` seconds (capped by the core) for ALL the parts of one
+    request, then cancels what is still running and treats those parts
+    as not read. An exception, or an answer that is not an ``Inspection``,
+    counts as not read too — nothing fails open. Parts larger than
+    ``max_bytes`` are never handed over.
+
+    ``status`` is the ``upload_inspector`` block of ``/status`` (metadata
+    only: formats, services, counters — never content or a credential).
+    ``aclose`` runs at shutdown (worker processes, HTTP clients).
+    """
+
+    timeout: float
+    max_bytes: int
+
+    async def inspect(self, part: UploadPart) -> Inspection: ...
+
+    def status(self) -> dict[str, Any]: ...
+
+    async def aclose(self) -> None: ...
+
+
 # --- vault database credential seam ---------------------------------------------
 # ``Registry.build_db_password(vault_config)`` returns one of these (or None
 # for the static password). The RDBMS vault store calls it synchronously at
@@ -891,6 +982,7 @@ __all__ = [
     "HopDecision",
     "HopRequest",
     "HopResult",
+    "Inspection",
     "LocalAnswer",
     "MAX_RESPONSE_ROWS",
     "RESPONSE_PRUNE_EVERY",
@@ -905,6 +997,8 @@ __all__ = [
     "SSEEvent",
     "SessionRouter",
     "Telemetry",
+    "UploadInspector",
+    "UploadPart",
     "UpstreamAuth",
     "UpstreamAuthError",
     "Vault",

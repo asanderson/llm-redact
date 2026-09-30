@@ -183,7 +183,19 @@ block) and says so in `doctor`; `"refuse"` answers 400 instead. **What is
 inside a forwarded PDF, image or archive reaches the provider as-is** —
 exactly like base64 media in a chat body. Under a credential the proxy
 holds (its cloud identity, or a routing rule's operator key) a binary file
-is always refused: the proxy vouches only for what it read. A JSONL line
+is always refused: the proxy vouches only for what it read. With an
+**upload inspector** (llm-redact-pro's document extractors,
+`plugin_api.UploadInspector`) each binary file part is first read as
+TEXT and scanned with the live detectors, no placeholder issued: a value
+that would be redacted (or a block-mode one) refuses the upload 400,
+naming its types; a complete reading that scans clean sends the file
+byte-identical (with the tool's own key always — even under `"refuse"` —
+and under a credential the proxy holds only when the inspector allows
+it), counted in `/status` `inspected_uploads_total`
+(`llm_redact_inspected_uploads_total{provider,outcome}`). The clean scan
+covers the extracted text only; a part the inspector could not read
+completely (a scanned page, an embedded image), a timeout or a fault keeps
+the binary rules above. A JSONL line
 nesting JSON deeper than 128 levels is refused (a JSONL reader would
 decode what no walk can read). Plain form fields (`purpose`, `user`,
 `size`, …) are scanned as UTF-8 text (a field that is not UTF-8 is

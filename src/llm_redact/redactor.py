@@ -229,5 +229,28 @@ class Redactor:
         parts.append(text[cursor:])
         return "".join(parts)
 
+    def scan_text(self, text: str) -> "Counter[str]":
+        """Detection only, for text the proxy cannot rewrite (a binary
+        upload read through its extracted text): the detections
+        ``redact_text`` would act on — the same allowlists, per-type
+        allowlists, deny strings and overlap resolution — with NO
+        placeholder issued and nothing written to the vault. A block-mode
+        winner raises BlockedRequest; a warn-mode winner is counted in
+        ``warn_counts`` (its value stays where it is); every other winner —
+        a deny string always — is returned as its detector type, counted.
+        Charged against the string budget as one string."""
+        self.charge(1)
+        found: Counter[str] = Counter()
+        for d in _resolve_overlaps(self._plan.detect(text, self._allowlist)):
+            # Deny strings (tier 0) take no mode, exactly as in redact_text.
+            mode = self._modes.get(d.detector_type) if d.tier else None
+            if mode == "block":
+                raise BlockedRequest(d.detector_type)
+            if mode == "warn":
+                self.warn_counts[d.detector_type] += 1
+            else:
+                found[d.detector_type] += 1
+        return found
+
     def redact_json(self, obj: Any) -> Any:
         return transform_strings(obj, self.redact_text)

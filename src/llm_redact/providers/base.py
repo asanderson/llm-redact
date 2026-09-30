@@ -1,11 +1,13 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from enum import Enum
 from itertools import count
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol
 
 from llm_redact.eventstream import EventStreamMessage
 from llm_redact.jsonwalk import loads_bounded
+from llm_redact.multipart import MultipartPart
 from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
@@ -386,6 +388,27 @@ class RouteKind(Enum):
     NONE = "none"  # not this adapter's route
 
 
+class UploadReading(Protocol):
+    """An upload as its adapter reads it (``ProviderAdapter.read_multipart``):
+    what the proxy needs of it before redaction."""
+
+    def binary_parts(self) -> list[tuple[int, MultipartPart]]:
+        """Each BINARY file part, with its position among the parts."""
+        ...
+
+
+@dataclass(frozen=True)
+class InspectedUpload:
+    """What the proxy hands ``redact_multipart`` after inspecting an
+    upload's binary file parts: the adapter's own ``reading`` of the SAME
+    body (``read_multipart``), and the positions of the binary parts it
+    ``cleared`` to go out byte-identical (their extracted text was complete
+    and scanned clean)."""
+
+    reading: UploadReading
+    cleared: frozenset[int] = frozenset()
+
+
 class ProviderAdapter(ABC):
     name: str
     # Adapters whose streaming responses are AWS binary event streams
@@ -567,6 +590,22 @@ class ProviderAdapter(ABC):
         when ``handles_ndjson`` is set."""
         return line
 
+    def read_multipart(
+        self, path: str, body: bytes, boundary: bytes, charge: Callable[[int], None]
+    ) -> "UploadReading | None":
+        """The upload on ``path`` as ``redact_multipart`` reads it with
+        every piece required scanned — parsed once, each part classified
+        once (``charge`` bounds the per-line JSONL check, as in
+        redaction), every part's headers checked as the redaction would
+        check them — so the proxy can inspect its BINARY file parts
+        (``plugin_api.UploadInspector``) before redaction and hand the same
+        reading back (``redact_multipart(inspected=...)``). None when the
+        route reads no file parts by their content (this base) or the body
+        is outside the canonical grammar; raises what ``redact_multipart``
+        would raise for the body as a whole (UnredactableRequest,
+        TooManyStrings)."""
+        return None
+
     def redact_multipart(
         self,
         path: str,
@@ -577,6 +616,7 @@ class ProviderAdapter(ABC):
         inject_note: bool,
         require_scanned: bool = False,
         forward_binary: Callable[[int], None] | None = None,
+        inspected: "InspectedUpload | None" = None,
     ) -> bytes | None:
         """Rewrite a multipart request body for ``path`` (delimited by the
         ``boundary`` ``multipart_boundary`` read).
@@ -594,9 +634,13 @@ class ProviderAdapter(ABC):
         for byte, and the callable is told how many were once the whole
         upload was read — the proxy passes it only when the request goes
         out with the client's own credential and ``[detection]
-        binary_uploads`` is "forward". This base scans nothing. (What an
-        upload cites for the stored-object check is read separately, before
-        redaction: ``upload_view.read_upload``.)
+        binary_uploads`` is "forward". ``inspected`` (from ``read_multipart``
+        on the same body): the reading to use instead of reading the body
+        again, and the binary file parts the proxy CLEARED — their extracted
+        text scanned clean and complete — which go out byte-identical, not
+        refused and not counted as unscanned. This base scans nothing.
+        (What an upload cites for the stored-object check is read
+        separately, before redaction: ``upload_view.read_upload``.)
 
         The proxy cannot see inside the parts, so an adapter that redacts
         them first raises ``redactor``'s token floors (``with_floors``) to

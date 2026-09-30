@@ -30,6 +30,7 @@ from .free_defaults import build_dashboard as _build_dashboard
 from .free_defaults import build_db_password as _build_db_password
 from .free_defaults import build_router as _build_router
 from .free_defaults import build_telemetry as _build_telemetry
+from .free_defaults import build_upload_inspector as _build_upload_inspector
 from .free_defaults import build_upstream_auth as _build_upstream_auth
 from .free_defaults import resolve_license as _resolve_license
 from .free_defaults import tool_base_url as _tool_base_url
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
         Router,
         SessionRouter,
         Telemetry,
+        UploadInspector,
         UpstreamAuth,
         VaultCipher,
     )
@@ -104,6 +106,7 @@ class Registry:
     build_router: Callable[[Config, str], Router | None]
     build_dashboard: Callable[[str], Dashboard | None]
     build_upstream_auth: Callable[[str, ProviderConfig], UpstreamAuth | None]
+    build_upload_inspector: Callable[[Config, str], UploadInspector | None]
     tool_base_url: Callable[[str], str]
     cli_commands: list[CliCommand]
     config_sections: list[ConfigSection]
@@ -157,6 +160,12 @@ class Registry:
         # identity, naming the package. Built per provider at startup and on
         # every reload that changes a provider's auth settings.
         self.build_upstream_auth = _build_upstream_auth
+        # Binary upload parts (PDFs, Office documents) read as text for the
+        # core to scan (plugin_api.UploadInspector): the Free default is None
+        # — such a part keeps the core's unscanned-binary rules. Built once
+        # at startup with the resolved tier (its config section is the
+        # plugin's own, restart-only).
+        self.build_upload_inspector = _build_upload_inspector
         # `llm-redact run` passes the base URL it exports to wrapped tools
         # through this hook (identity-free in the core).
         self.tool_base_url = _tool_base_url

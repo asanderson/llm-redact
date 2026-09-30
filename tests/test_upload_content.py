@@ -3,8 +3,9 @@
 JSONL (every non-blank line a JSON object) keeps the per-line path; other
 text — strict UTF-8, or UTF-16/32 behind a byte-order mark — is redacted
 as one text and re-encoded exactly as it came; everything else (bytes that
-do not decode, a NUL character, a known binary signature even when the
-bytes would decode) is binary and never rewritten.
+do not decode, a NUL character, one of the few binary signatures real text
+cannot open with even when the bytes would decode) is binary and never
+rewritten.
 """
 
 from __future__ import annotations
@@ -24,19 +25,11 @@ ASCII_TAIL = b"1.7\n1 0 obj << /Type /Catalog >> endobj\nxref\n0 1\ntrailer\n%%E
     "prefix",
     [
         b"%PDF-",
-        b"GIF87a",
-        b"GIF89a",
         b"PK\x03\x04",
         b"PK\x05\x06",
-        b"RIFF",
-        b"ID3",
-        b"OggS",
-        b"fLaC",
         b"Rar!\x1a\x07",
         b"\x1a\x45\xdf\xa3",
         b"\x7fELF",
-        b"wOFF",
-        b"wOF2",
     ],
 )
 def test_a_signature_makes_decodable_bytes_binary(prefix: bytes) -> None:
@@ -53,13 +46,36 @@ def test_an_all_ascii_pdf_is_binary() -> None:
     assert classify_file(pdf).kind == "binary"
 
 
-@pytest.mark.parametrize("size", [b"\x20\x20\x20\x20", b"    ", b"abcd"])
-def test_iso_media_ftyp_box_at_offset_4_is_binary(size: bytes) -> None:
-    assert classify_file(size + b"ftypisom" + ASCII_TAIL).kind == "binary"
-    # Anywhere else it is just text.
-    assert classify_file(size[:3] + b"ftypisom").kind == "text"
-    assert classify_file(size + b"xftyp").kind == "text"
-    assert classify_file(b"ftyp" + size).kind == "text"
+# Printable-word signatures are NOT signatures: text opening with one of them
+# (a CSV row "ID3,name,email") is text and is redacted. Real files of these
+# formats carry a NUL or a non-UTF-8 byte in their fixed header, which the
+# strict decode already reads as binary.
+@pytest.mark.parametrize(
+    ("word", "real_header"),
+    [
+        (b"GIF87a", b"GIF87a\x10\x00\x10\x00\x80\x00\x00"),
+        (b"GIF89a", b"GIF89a\x01\x00\x01\x00\x00\xff\x00"),
+        (b"RIFF", b"RIFF\x24\x08\x00\x00WAVEfmt \x10\x00\x00\x00"),
+        (b"ID3", b"ID3\x03\x00\x00\x00\x00\x0f\x76"),
+        (b"OggS", b"OggS\x00\x02\x00\x00"),
+        (b"fLaC", b"fLaC\x00\x00\x00\x22"),
+        (b"wOFF", b"wOFF\x00\x01\x00\x00\x00\x00\x02\x50"),
+        (b"wOF2", b"wOF2\x00\x01\x00\x00\x00\x00\x02\x50"),
+    ],
+)
+def test_a_printable_word_opening_text_is_text(word: bytes, real_header: bytes) -> None:
+    csv = word + b",name,email\n" + word + b"001,Jane,jane.doe@corp.example\n"
+    assert classify_file(csv).kind == "text"
+    assert classify_file(word + b" notes: " + ASCII_TAIL).kind == "text"
+    # The real format's fixed header still classifies as binary.
+    assert classify_file(real_header + ASCII_TAIL).kind == "binary"
+
+
+def test_ftyp_at_offset_4_is_no_signature() -> None:
+    assert classify_file(b"The ftyp box notes: jane.doe@corp.example\n").kind == "text"
+    assert classify_file(b"    ftypisom" + ASCII_TAIL).kind == "text"
+    # A real ISO media file opens with a big-endian box size: NUL bytes.
+    assert classify_file(b"\x00\x00\x00\x20ftypisom" + ASCII_TAIL).kind == "binary"
 
 
 # Signatures that are invalid UTF-8 themselves: the strict decode refuses.

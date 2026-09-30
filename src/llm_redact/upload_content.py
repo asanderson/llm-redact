@@ -16,16 +16,22 @@ restoration), so a part is always read as the same thing:
   mixing JSON-object lines with other lines is text (no JSONL reader
   accepts it). An empty or whitespace-only file is text.
 - ``"binary"``: everything else — bytes that do not decode, text holding a
-  NUL character, and any file opening with a known binary signature even
-  when it would decode (an all-ASCII PDF is binary: rewriting it would
-  break its cross-reference byte offsets). Never read, never rewritten.
+  NUL character, and any file opening with one of the few binary
+  signatures listed in ``_SIGNATURES`` even when it would decode (an
+  all-ASCII PDF is binary: rewriting it would break its cross-reference
+  byte offsets). Never read, never rewritten.
 
 Signatures that are themselves invalid UTF-8 — PNG (``\\x89PNG``), JPEG
 (``\\xff\\xd8\\xff``), gzip (``\\x1f\\x8b``), OLE2/legacy Office
 (``\\xd0\\xcf\\x11\\xe0``), MPEG audio frames (``\\xff\\xfb``), 7-Zip, xz, zstd
 — need no entry in ``_SIGNATURES``: the strict decode already makes them
-binary. Listed are the signatures a strict decode would accept, plus the
-ISO media ``ftyp`` box (MP4, MOV, HEIC, AVIF) at offset 4.
+binary. So do the formats whose signature is a printable word — GIF, RIFF
+(WebP/WAV/AVI), ID3, Ogg, FLAC, WOFF/WOFF2 and the ISO media ``ftyp`` box
+(MP4/MOV/HEIC/AVIF): each real file carries a NUL or a non-UTF-8 byte in
+its fixed header, while a text file opening with the same word (a CSV row
+``ID3,name,email``) is text and is redacted. Listed are only the
+signatures a strict decode would accept and no text plausibly opens with:
+``%PDF-`` and the control-byte ones.
 
 Usage (a provider's upload hook)::
 
@@ -49,26 +55,20 @@ from typing import Literal, NamedTuple
 
 FileKind = Literal["jsonl", "text", "binary"]
 
-# Binary formats whose signature a strict text decode would accept (see the
-# module docstring for the ones it already refuses).
+# The binary formats a strict text decode could accept and that must never
+# be rewritten. Only signatures real text cannot plausibly open with are
+# listed: a printable word (``ID3``, ``RIFF``, ``GIF89a`` ...) opens ordinary
+# CSV rows and prose too, and every real file of those formats already fails
+# the strict decode or carries a NUL in its fixed header, so a word-only
+# signature would only ever turn genuine text into an unscanned "binary".
 _SIGNATURES = (
     b"%PDF-",  # PDF (an all-ASCII PDF decodes; its xref offsets must not move)
-    b"GIF87a",
-    b"GIF89a",
     b"PK\x03\x04",  # ZIP local file: OOXML (docx/xlsx/pptx), ODF, EPUB, JAR
     b"PK\x05\x06",  # an empty ZIP archive
-    b"RIFF",  # WebP, WAV, AVI
-    b"ID3",  # MP3 with an ID3v2 tag
-    b"OggS",
-    b"fLaC",
     b"Rar!\x1a\x07",
     b"\x1a\x45\xdf\xa3",  # Matroska / WebM
     b"\x7fELF",
-    b"wOFF",
-    b"wOF2",
 )
-# ISO base media (MP4, MOV, M4A, HEIC, AVIF): a box size, then "ftyp".
-_ISO_MEDIA_BOX = b"ftyp"
 
 # Byte-order marks, longest first: the UTF-32LE mark begins with UTF-16LE's.
 _BOMS = (
@@ -109,7 +109,7 @@ def decode_text(content: bytes) -> FileContent | None:
     binary: a known binary signature, bytes that do not decode strictly
     (UTF-8, or the UTF-16/32 its byte-order mark names), or a NUL character
     in the decoded text."""
-    if content.startswith(_SIGNATURES) or content[4:8] == _ISO_MEDIA_BOX:
+    if content.startswith(_SIGNATURES):
         return None
     bom, codec = b"", "utf-8"
     for mark, name in _BOMS:

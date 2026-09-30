@@ -144,3 +144,31 @@ def test_doctor_states_the_knob_as_a_pass(mode: str, text: str) -> None:
     rows = [row for row in report.rows if "binary_uploads" in row["message"]]
     assert len(rows) == 1 and rows[0]["level"] == "PASS" and text in rows[0]["message"]
     assert not report.failed
+
+
+# --- a printable word is no binary signature ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"ID3,name,email\nID3001,Jane," + EMAIL.encode() + b"\n",
+        b"The ftyp box notes: " + EMAIL.encode() + b"\n",
+        b"RIFF notes " + EMAIL.encode(),
+        b"GIF89a caption by " + EMAIL.encode(),
+        b"OggS fLaC wOFF wOF2 " + EMAIL.encode(),
+    ],
+)
+async def test_text_opening_with_a_media_word_is_redacted_not_forwarded(content: bytes) -> None:
+    upstream = Upstream()
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    async with _client(app) as client:
+        reply = await client.post(
+            "/v1/files", content=_upload(content, "rows.csv"), headers=HEADERS
+        )
+        status = (await client.get("/__llm-redact/status")).json()
+    assert reply.status_code == 200
+    (sent,) = upstream.requests
+    assert EMAIL.encode() not in sent.content
+    assert "«EMAIL_001»".encode() in sent.content
+    assert status["unscanned_uploads_total"] == {}

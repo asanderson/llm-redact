@@ -114,6 +114,12 @@ and tags `vX.Y.Z`.
 - The app lifespan tolerates `add_signal_handler` raising `ValueError` (uvloop off the
   main thread) alongside `NotImplementedError` and `RuntimeError`; SIGHUP reload is
   then unavailable, as on Windows.
+- An uploaded text file whose first bytes happen to spell a media format's name
+  (a CSV row opening `ID3,`, a note opening `RIFF` or `GIF89a`, a word `ftyp` at
+  byte 4) is redacted as text again instead of being classified binary and
+  forwarded unscanned. Only `%PDF-` and control-byte signatures still mark
+  decodable bytes as binary; real files of the other formats fail the strict
+  text decode on their own.
 
 ## [1.9.0] - 2026-09-29
 

@@ -59,12 +59,18 @@ _TERMINAL_EVENTS = frozenset({"response.completed", "response.failed", "response
 # entries of type ``files`` (``files[].file_id``; the ``results`` form of
 # earlier API versions too). A ``file_citation`` names a file the request's
 # file_search read — the user's own upload, never the provider's creation.
+# A code interpreter call also names its CONTAINER (``container_id``): one
+# the call created (``{"type": "auto"}``), reported as the requester's —
+# a container the request itself names is an existing one, never reported
+# (the proxy drops every id the request body carries).
 _CONTAINER_CITATION = "container_file_citation"
 _CODE_INTERPRETER_CALL = "code_interpreter_call"
 _CALL_OUTPUT_KEYS = ("outputs", "results")
-# A key every event naming such a file carries (never inside a JSON string:
-# a quote there is escaped), so an event without it is never parsed.
+# The keys every event naming such a file or container carries (never
+# inside a JSON string: a quote there is escaped), so an event without one
+# is never parsed.
 _FILE_ID_KEY = '"file_id"'
+_CONTAINER_ID_KEY = '"container_id"'
 
 
 def _dicts(value: Any) -> list[dict[str, Any]]:
@@ -88,6 +94,9 @@ def _item_files(item: Any, found: list[str]) -> None:
     if not isinstance(item, dict):
         return
     if item.get("type") == _CODE_INTERPRETER_CALL:
+        container_id = item.get("container_id")
+        if isinstance(container_id, str) and container_id:
+            found.append(container_id)
         for key in _CALL_OUTPUT_KEYS:
             for output in _dicts(item.get(key)):
                 for file in _dicts(output.get("files")):
@@ -101,7 +110,8 @@ def _item_files(item: Any, found: list[str]) -> None:
 
 
 def container_file_ids(response: Any) -> tuple[str, ...]:
-    """The container files a Response's ``output`` names, each once."""
+    """The container files a Response's ``output`` names — and the
+    containers its code interpreter calls ran in — each once."""
     found: list[str] = []
     output = response.get("output") if isinstance(response, dict) else None
     for item in output if isinstance(output, list) else ():
@@ -250,7 +260,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         return container_file_ids(body)
 
     def object_ids_from_event(self, method: str, path: str, event: SSEEvent) -> tuple[str, ...]:
-        if _FILE_ID_KEY not in event.data:
+        if _FILE_ID_KEY not in event.data and _CONTAINER_ID_KEY not in event.data:
             return ()
         try:
             payload = loads_bounded(event.data)

@@ -51,6 +51,9 @@ from llm_redact.sse import SSEEvent
 from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS
 
 _FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
+# A code interpreter container's file, downloaded (uploaded, or written by
+# the code): restored like a Files API download, JSON-object lines only.
+_CONTAINER_FILE_CONTENT_RE = re.compile(r"/v1/containers/[^/]+/files/[^/]+/content")
 # The file list and one file's object: both echo each upload's filename.
 _FILE_OBJECT_RE = re.compile(r"/v1/files(?:/[^/]+)?")
 _STORED_COMPLETION_RE = re.compile(r"/v1/chat/completions/[^/]+")
@@ -133,6 +136,12 @@ _VECTOR_STORE_GETS = re.compile(
     r"/v1/vector_stores(?:/[^/]+(?:/files(?:/[^/]+(?:/content)?)?|/file_batches/[^/]+(?:/files)?)?)?"
 )
 _VECTOR_STORE_DELETES = re.compile(r"/v1/vector_stores/[^/]+(?:/files/[^/]+)?")
+# Code interpreter containers: the container (create, list, read, delete)
+# and its files (upload — multipart, or JSON naming a stored file — list,
+# read, download, delete).
+_CONTAINER_POSTS = re.compile(r"/v1/containers(?:/[^/]+/files)?")
+_CONTAINER_GETS = re.compile(r"/v1/containers(?:/[^/]+(?:/files(?:/[^/]+(?:/content)?)?)?)?")
+_CONTAINER_DELETES = re.compile(r"/v1/containers/[^/]+(?:/files/[^/]+)?")
 # Their verbatim fields (``verbatim_fields``), by the POST's tail: a store's
 # `name` (a label the provider keeps and every read shows), and the FILE ids
 # a store, an attach or a file batch names; a search's attribute filters
@@ -146,6 +155,10 @@ _VECTOR_STORE_VERBATIM: tuple[tuple[re.Pattern[str], tuple[tuple[str, ...], ...]
         (("file_ids",), ("files", "*", "file_id")),
     ),
     (re.compile(r"(?:^|/)vector_stores/[^/]+/search$"), (("filters", "**", "key"),)),
+    # A container's `name` and the stored files it starts with, and the
+    # stored file a JSON container-file create copies in.
+    (re.compile(r"(?:^|/)containers$"), (("name",), ("file_ids",))),
+    (re.compile(r"(?:^|/)containers/[^/]+/files$"), (("file_id",),)),
 )
 
 # Batches whose request or response carries the caller's `metadata`:
@@ -347,12 +360,15 @@ def _stored_completion_create(path: str, body: Any) -> bool:
 # completions. Tail-anchored, so the Azure and custom-provider prefixes
 # need no override.
 _LISTING_RE = re.compile(
-    r"(?:^|/)(?:files|batches|videos|chat/completions|fine_tuning/jobs|vector_stores)$"
+    r"(?:^|/)(?:files|batches|videos|chat/completions|fine_tuning/jobs|vector_stores|containers)$"
 )
-# A collection BELOW a stored object (a vector store's files): its items are
-# that object's, read in the session the object's own read resolves to — not
-# a listing of stored objects a router attributes one by one.
-_NESTED_LISTING_RE = re.compile(r"(?:^|/)vector_stores/[^/]+/(?:file_batches/[^/]+/)?files$")
+# A collection BELOW a stored object (a vector store's or a container's
+# files): its items are that object's, read in the session the object's own
+# read resolves to — not a listing of stored objects a router attributes one
+# by one.
+_NESTED_LISTING_RE = re.compile(
+    r"(?:^|/)(?:vector_stores/[^/]+/(?:file_batches/[^/]+/)?|containers/[^/]+/)files$"
+)
 
 
 # The Uploads API (large files in parts): completing an upload creates the
@@ -401,7 +417,7 @@ def _tail_is_create(path: str) -> bool:
     """POST to the collection itself (``…/files``, ``…/batches``,
     ``…/conversations``), not to a member or sub-resource."""
     tail = path.rstrip("/").rsplit("/", 1)[-1]
-    return tail in ("files", "batches", "conversations", "vector_stores")
+    return tail in ("files", "batches", "conversations", "vector_stores", "containers")
 
 
 def _match_fine_tuning(method: str, path: str) -> RouteKind:
@@ -441,6 +457,23 @@ def _match_vector_stores(method: str, path: str) -> RouteKind:
     if method == "GET" and _VECTOR_STORE_GETS.fullmatch(path):
         return RouteKind.CHAT
     if method == "DELETE" and _VECTOR_STORE_DELETES.fullmatch(path):
+        return RouteKind.REDACT_ONLY
+    return RouteKind.NONE
+
+
+def _match_containers(method: str, path: str) -> RouteKind:
+    """Code interpreter containers (``/v1/containers...``). A container file
+    upload is multipart (``redact_multipart``: the file part and its
+    filename, as a ``/v1/files`` upload) or JSON naming a stored file
+    (verbatim); a container file's object echoes its filename in `path`,
+    and its content — uploaded, or written by the code — is restored like a
+    Files API download (``rehydrate_raw_body``). A container's `name` and
+    starting `file_ids` are verbatim. Deletes carry ids only."""
+    if method == "POST" and _CONTAINER_POSTS.fullmatch(path):
+        return RouteKind.CHAT
+    if method == "GET" and _CONTAINER_GETS.fullmatch(path):
+        return RouteKind.CHAT
+    if method == "DELETE" and _CONTAINER_DELETES.fullmatch(path):
         return RouteKind.REDACT_ONLY
     return RouteKind.NONE
 
@@ -539,6 +572,8 @@ class OpenAIAdapter(ProviderAdapter):
             return _match_fine_tuning(method, path)
         if path.startswith("/v1/vector_stores"):
             return _match_vector_stores(method, path)
+        if path.startswith("/v1/containers"):
+            return _match_containers(method, path)
         if (method == "POST" and _BATCH_POST_RE.fullmatch(path)) or (
             method == "GET" and _BATCH_GET_RE.fullmatch(path)
         ):
@@ -564,10 +599,13 @@ class OpenAIAdapter(ProviderAdapter):
             # Item bodies carry `items`, not `messages`; injecting the note
             # would graft a spurious `messages` field and corrupt the request.
             return False
-        if path.startswith(("/v1/videos", "/v1/batches", "/v1/fine_tuning/", "/v1/vector_stores")):
-            # Video job, batch, fine-tuning job and vector store bodies have
-            # no messages field either — a note would graft one and corrupt
-            # the request.
+        if path.startswith(
+            ("/v1/videos", "/v1/batches", "/v1/fine_tuning/", "/v1/vector_stores", "/v1/containers")
+        ):
+            # Video job, batch, fine-tuning job, vector store and container
+            # bodies have no messages field either — a note would graft one
+            # and corrupt the request (a container file is a file, never a
+            # chat example).
             return False
         return kind is RouteKind.CHAT or path == "/v1/files"
 
@@ -799,7 +837,7 @@ class OpenAIAdapter(ProviderAdapter):
         return b"\n".join(out)
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
-        if not _FILE_CONTENT_RE.fullmatch(path):
+        if not (_FILE_CONTENT_RE.fullmatch(path) or _CONTAINER_FILE_CONTENT_RE.fullmatch(path)):
             return None
         out: list[bytes] = []
         changed = False

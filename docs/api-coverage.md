@@ -114,7 +114,7 @@ matches](#requests-no-route-matches).
 |---|---|---|
 | `POST /v1/chat/completions` | chat | streaming `delta.content`, tool-call arguments, and reasoning-model chain-of-thought (`delta.reasoning_content` / `delta.reasoning`) are all rehydrated per choice |
 | `GET /v1/chat/completions/{id}` | chat | stored-completion retrieval restored |
-| `POST /v1/responses` | chat | MCP connector: `tools[].type == "mcp"` entries (server_url, headers) pass through unredacted BY DESIGN — the provider needs the real credential; `mcp_call` arguments/output in responses are rehydrated, streaming included. The files the code interpreter WROTE into its container (`container_file_citation` annotations, a code interpreter call's output files; streaming included) are reported to a session router as the requester's |
+| `POST /v1/responses` | chat | MCP connector: `tools[].type == "mcp"` entries (server_url, headers) pass through unredacted BY DESIGN — the provider needs the real credential; `mcp_call` arguments/output in responses are rehydrated, streaming included. The files the code interpreter WROTE into its container (`container_file_citation` annotations, a code interpreter call's output files; streaming included), and the container a call ran in (`container_id`) unless the request names it, are reported to a session router as the requester's |
 | `GET /v1/responses/{id}` | chat | stored responses rehydrated |
 | `GET /v1/responses/{id}/input_items` | chat | input-item echoes restored |
 | `DELETE /v1/responses/{id}` | redact-only | id only (a body-less no-op: recognized) |
@@ -182,7 +182,15 @@ matches](#requests-no-route-matches).
 | `GET /v1/vector_stores/{id}/file_batches/{batch_id}/files` | chat | the batch's vector-store files, restored like the store's files |
 | `POST /v1/assistants` | pass-through | DOCUMENTED GAP: Assistants (deprecated) |
 | `POST /v1/threads/{id}/messages` | pass-through | DOCUMENTED GAP: Threads (deprecated) carry message content |
-| `GET /v1/containers/{id}/files/{file_id}/content` | pass-through | a code-interpreter container's file, verbatim |
+| `POST /v1/containers` | chat | a code interpreter container: its `name` and starting `file_ids` are VERBATIM (scanned, never rewritten — a value llm-redact would redact refuses the request, 400); `expires_after` / `memory_limit` go through the walk. The container is reported to a session router as its creator's (so is one a Response's code interpreter call created, `container_id`); no system note on any container route |
+| `GET /v1/containers` | chat | the container list; a listing a session router attributes per item |
+| `GET /v1/containers/{id}` | chat | |
+| `DELETE /v1/containers/{id}` | redact-only | id only |
+| `POST /v1/containers/{id}/files` | chat | multipart: redacted as a `/v1/files` upload is (the file part, its filename, every form field — a file llm-redact cannot scan refuses the upload, 400); JSON: the stored `file_id` it copies in is verbatim. The container file object (its `path` echoes the filename) restored; the new container file is reported to a session router |
+| `GET /v1/containers/{id}/files` | chat | the container's files (paths restored), read as the container's: not a listing attributed per item |
+| `GET /v1/containers/{id}/files/{file_id}` | chat | restored |
+| `GET /v1/containers/{id}/files/{file_id}/content` | chat | the file, uploaded or written by the code: JSON-object lines restored as a `/v1/files` download's are, every other byte verbatim |
+| `DELETE /v1/containers/{id}/files/{file_id}` | redact-only | ids only |
 | `GET /v1/evals` | pass-through | |
 | `POST /v1/realtime/client_secrets` | pass-through | an ephemeral Realtime key for a browser client; the WebSocket session itself is covered below |
 | `GET /v1/organization/...` (Admin API) | pass-through | org metadata (singular: `/v1/organizations/` is Anthropic's) |
@@ -295,6 +303,11 @@ file) because they echo the upload's redacted filename.
 | `GET /openai/v1/vector_stores/{id}/files/{file_id}/content` | chat | |
 | `POST /openai/v1/vector_stores/{id}/file_batches` | chat | |
 | `DELETE /openai/vector_stores/{id}` | redact-only | |
+| `POST /openai/v1/containers` | chat | code interpreter containers, as on OpenAI (the v1 API only) |
+| `GET /openai/v1/containers/{id}` | chat | |
+| `POST /openai/v1/containers/{id}/files` | chat | |
+| `GET /openai/v1/containers/{id}/files/{file_id}/content` | chat | |
+| `DELETE /openai/v1/containers/{id}/files/{file_id}` | redact-only | |
 
 ## AWS Bedrock (runtime)
 
@@ -573,17 +586,12 @@ that is not there:
   creator's only when its `purpose` is stated and is not `batch`: a batch
   input file's requests would be run with the upload's credential, and the
   stored objects they cite were never checked.
-- **OpenAI Assistants / Threads** — on OpenAI's
-  announced deprecation path (Responses/Conversations is the successor), so
-  not built. The same holds for their Azure v1 twins (`/openai/v1/threads`),
-  and Azure's `/openai/v1/evals`
-  and `/openai/v1/containers` are not covered either — pass-through, and
-  refused wherever the proxy's own credential would carry them
-  (`auth = "identity"`, or a routed operator key). OpenAI's own
-  `/v1/containers` (the code interpreter's containers and their files)
-  passes through to the OpenAI upstream too, on the same terms; the files a
-  Response's code wrote into a container are reported to a session router
-  as that Response's creator's.
+- **OpenAI Assistants / Threads** — on OpenAI's announced deprecation path
+  (Responses/Conversations is the successor), so not built. The same holds
+  for their Azure v1 twins (`/openai/v1/threads`), and Azure's
+  `/openai/v1/evals` is not covered either — pass-through, and refused
+  wherever the proxy's own credential would carry them (`auth =
+  "identity"`, or a routed operator key).
 - **OpenAI WebRTC realtime** (`POST /v1/realtime/calls`, SDP offer/answer) —
   after setup, media and the event data channel flow peer-to-peer and never
   transit this HTTP/WS proxy at all: structurally unreachable, not merely

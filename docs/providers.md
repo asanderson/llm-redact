@@ -338,7 +338,7 @@ MCP connector configuration (Anthropic `mcp_servers`, OpenAI
 must hold the real credential to call your MCP server — while MCP call
 arguments and output are redacted and restored like any other content.
 
-## Stored-object APIs: fine-tuning and vector stores
+## Stored-object APIs: fine-tuning, vector stores, containers
 
 OpenAI's fine-tuning jobs (`/v1/fine_tuning/jobs`: create, the list, one
 job, its cancel/pause/resume, events and checkpoints — on Azure's
@@ -376,6 +376,18 @@ batch names, and a filter's attribute `key` are verbatim, as above. The
 created store is reported to a session router, and the store list is a
 listing it attributes per item; a store's own files are read as the
 store's.
+
+Code interpreter containers (`/v1/containers`: the container and its
+files — OpenAI, Azure's v1 API, custom providers) are recognized too. A
+container file upload is redacted exactly as a `/v1/files` upload is (the
+file part, its filename and every form field; what llm-redact cannot scan
+refuses the upload), a JSON container-file create names a stored file
+(verbatim), the container file object's `path` (the filename) is
+restored, and a download is restored like a Files API download — JSON
+object lines, every other byte as sent. A container's `name` and starting
+`file_ids` are verbatim. Created containers — and the container a
+Response's code interpreter call ran in, unless the request named it —
+and container files are reported to a session router.
 
 ## Realtime WebSocket APIs
 

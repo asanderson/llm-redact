@@ -15,11 +15,11 @@ would route Azure traffic to api.openai.com.
 Covered beyond chat: legacy completions, embeddings, image generation/edit
 prompts and text-to-speech input on both path families; Files (multipart
 JSONL upload with its filename, batch-output download, and the file list and
-objects that echo the filename) and Batches; fine-tuning jobs and vector
-stores; the v1 Conversations item store; and the model/deployment
-listings — recognized (REDACT_ONLY, a no-op on a body-less GET) so that
-``[providers.azure] auth = "identity"``, which forwards only recognized
-routes, does not refuse them.
+objects that echo the filename) and Batches; fine-tuning jobs, vector
+stores and (v1) code interpreter containers; the v1 Conversations item
+store; and the model/deployment listings — recognized (REDACT_ONLY, a no-op
+on a body-less GET) so that ``[providers.azure] auth = "identity"``, which
+forwards only recognized routes, does not refuse them.
 """
 
 import re
@@ -51,7 +51,11 @@ _AZURE_BATCH_CANCEL = re.compile(r"/openai/(?:v1/)?batches/[^/]+/cancel")
 # OpenAI's stored-object APIs on Azure's path families, classified exactly
 # as the OpenAI adapter classifies their /v1 form: fine-tuning jobs and
 # vector stores (both families).
-_AZURE_STORED = re.compile(r"/openai/(?:v1/)?((?:fine_tuning|vector_stores)(?:/.*)?)")
+_AZURE_STORED = re.compile(
+    r"/openai/(?:v1/)?((?:fine_tuning|vector_stores)(?:/.*)?)"
+    # Code interpreter containers: the v1 API only.
+    r"|/openai/v1/(containers(?:/.*)?)"
+)
 # Model/deployment listings: metadata only.
 _AZURE_METADATA = re.compile(r"/openai/(?:(?:v1/)?models|deployments)(?:/[^/]+)?")
 # The Conversations item store (v1 API only), paired with Responses.
@@ -92,7 +96,7 @@ class AzureOpenAIAdapter(OpenAIAdapter):
         # user's placeholder in the reader's namespace.
         stored = _AZURE_STORED.fullmatch(path)
         if stored is not None:
-            return super().matches(method, "/v1/" + stored.group(1))
+            return super().matches(method, "/v1/" + (stored.group(1) or stored.group(2)))
         if method == "POST":
             return self._match_post(path)
         if method == "GET":
@@ -154,6 +158,10 @@ class AzureOpenAIAdapter(OpenAIAdapter):
             # Delegate with an OpenAI-shaped path: the parent's line-by-line
             # JSONL restoration is path-gated on /v1/files/{id}/content.
             return super().rehydrate_raw_body("/v1/files/azure/content", raw, rehydrator)
+        stored = _AZURE_STORED.fullmatch(path)
+        if stored is not None and stored.group(2) is not None:
+            # A container file's download, in the OpenAI-shaped form.
+            return super().rehydrate_raw_body("/v1/" + stored.group(2), raw, rehydrator)
         return super().rehydrate_raw_body(path, raw, rehydrator)
 
 

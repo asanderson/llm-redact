@@ -162,7 +162,12 @@ Inside an accepted multipart upload every piece must be scanned too, or
 the whole request is refused the same way. An uploaded file is read by
 its CONTENT (the declared type and file name are only the client's
 guess): a JSONL file (every non-blank line a JSON object — a batch input
-or fine-tuning file) is redacted line by line as JSON; any other text
+or fine-tuning file) is redacted line by line as JSON — every value of
+every line, whatever its key (a data file's `id`, `name`, `type` or
+`data` is content), except in what a provider runs as a request: the
+`body` of a line in an OpenAI Files upload of purpose `batch`, and the
+conversation of a `fine-tune` example, keep a request's protocol fields
+(`role`, `model`, a tool call's `id` and `name`) as sent; any other text
 file — strict UTF-8 (a byte-order mark kept), or UTF-16/UTF-32 opened by
 its byte-order mark — is redacted as one text and re-encoded exactly as it
 came (a CSV, a log, notes; a file mixing JSON lines with other lines is
@@ -195,7 +200,12 @@ file's own (its Content-Type `charset`, or the RFC 7578 `_charset_`
 field). `GET /v1/files/{id}/content` reads a download the same way: a
 JSONL file is restored line by line as JSON, any other text file as one
 text (a value lands exactly as it was redacted, never JSON-escaped), and
-re-encoded as it came; a binary file is left untouched. The image and mask parts of an image edit (and a video job's
+re-encoded as it came; a binary file is left untouched. A download is
+read this way whatever Content-Type the provider serves it with (a JSON
+file served as `application/json` included). A text upload that reads as
+JSON Lines only once redacted (a line was not valid JSON until its secret
+became a placeholder) is remembered by a digest of the bytes sent — the
+newest 1024, in the running process — and restored as the text it was. The image and mask parts of an image edit (and a video job's
 reference image) are media — the documented non-goal, as base64 media in
 a JSON body — and are sent as they came (their filenames redacted).
 

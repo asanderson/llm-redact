@@ -68,7 +68,7 @@ is never lent to one (above).
 
 | Endpoint | Classification | Notes |
 |---|---|---|
-| `POST /v1/messages` | chat | MCP connector: `mcp_servers[]` blocks pass through unredacted BY DESIGN — the provider must hold the real `authorization_token` to call the MCP server; everything else in the body is redacted. The files a code execution run WROTE (`code_execution_output` / `bash_code_execution_output` entries of a code execution tool result, streaming included) are reported to a session router as the requester's |
+| `POST /v1/messages` | chat | MCP connector: `mcp_servers[]` blocks pass through unredacted BY DESIGN — the provider must hold the real `authorization_token` to call the MCP server; everything else in the body is redacted. The files a code execution run WROTE (`code_execution_output` / `bash_code_execution_output` entries of a code execution tool result, streaming included) and the code execution CONTAINER the answer names (`container.id`, streamed in `message_start` / `message_delta`; later requests reuse it by id) are reported to a session router as the requester's — a container the request itself named is not |
 | `POST /v1/messages/count_tokens` | redact-only | note counted too, keeping counts honest |
 | `POST /v1/messages/batches` | redact-only | each `requests[].params` redacted + noted |
 | `GET /v1/messages/batches` | redact-only | processing metadata only (a body-less no-op: recognized) |

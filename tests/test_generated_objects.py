@@ -6,6 +6,9 @@ OWN answer — never from a request body, never from a read:
   wrote (``code_execution_output`` / ``bash_code_execution_output`` entries
   with a ``file_id``, downloadable through the Files API) — non-streaming,
   and streamed (the result block arrives whole in ``content_block_start``);
+  and the answer names the code execution CONTAINER it ran in (``container``;
+  streamed in ``message_start`` and ``message_delta``), which a later
+  request reuses by id — reported unless the request itself named it;
 - OpenAI Responses: a ``container_file_citation`` annotation (and a code
   interpreter call's output files) names a file the code interpreter wrote
   into its container — non-streaming, and streamed (the annotation, the
@@ -147,7 +150,16 @@ def test_anthropic_reads_the_files_a_code_execution_run_wrote() -> None:
         "file_chart",
         "file_table",
         "file_legacy",
+        "container_1",  # the code execution container the message ran in
     )
+    # No container, or none with a string id: nothing more.
+    for container in (None, "container_1", {"id": 7}, {"id": ""}, {}):
+        answer = {**MESSAGE, "container": container}
+        assert adapter.object_ids_from_body("POST", "/v1/messages", answer) == (
+            "file_chart",
+            "file_table",
+            "file_legacy",
+        ), container
     # The message id is no stored object; odd shapes name nothing.
     assert adapter.object_ids_from_body("POST", "/v1/messages", {"id": "msg_1"}) == ()
     assert adapter.object_ids_from_body("POST", "/v1/messages", {"content": "x"}) == ()
@@ -173,13 +185,30 @@ def test_anthropic_events_name_the_files_of_the_blocks_they_start() -> None:
     assert adapter.object_ids_from_event("POST", "/v1/messages", event) == ("file_a",)
     opening = {"type": "message_start", "message": {**MESSAGE, "content": [_code_result("f_m")]}}
     event = SSEEvent(event="message_start", data=json.dumps(opening))
-    assert adapter.object_ids_from_event("POST", "/v1/messages", event) == ("f_m",)
+    assert adapter.object_ids_from_event("POST", "/v1/messages", event) == ("f_m", "container_1")
+    # The container alone (no file id in the event) is read too, and from
+    # message_delta's delta.
+    opening = {"type": "message_start", "message": {**MESSAGE, "content": []}}
+    event = SSEEvent(event="message_start", data=json.dumps(opening))
+    assert adapter.object_ids_from_event("POST", "/v1/messages", event) == ("container_1",)
+    delta = {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "container": {"id": "c2"}},
+    }
+    event = SSEEvent(event="message_delta", data=json.dumps(delta))
+    assert adapter.object_ids_from_event("POST", "/v1/messages", event) == ("c2",)
     for data in (
         # No file id anywhere: never even parsed.
         '{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta"}}',
         # A text delta that merely MENTIONS the key, escaped inside a string.
         json.dumps({"type": "content_block_delta", "delta": {"text": '"file_id": "f"'}}),
         '{"type": "message_start", "message": "file_id", "x": {"file_id": 1}}',
+        '{"type": "message_start", "message": {"container": null}}',
+        '{"type": "message_delta", "delta": "container"}',
+        '{"type": "message_delta", "delta": {"container": {"id": null}}}',
+        '{"type": "message_stop", "container": {"id": "c3"}}',
+        # A text delta that merely MENTIONS the container key.
+        json.dumps({"type": "content_block_delta", "delta": {"text": '"container": {"id"'}}),
         '{"type": "content_block_stop", "index": 2, "file_id": "f"}',
         'not json "file_id"',
         '["file_id"]',
@@ -203,6 +232,7 @@ async def test_anthropic_generated_files_are_reported_with_their_creator(
         ("file_chart", SESSION),
         ("file_table", SESSION),
         ("file_legacy", SESSION),
+        ("container_1", SESSION),
     ]
     durable = app.state.proxy.vault_manager.lookup_response_session("file_chart")
     assert durable == SESSION
@@ -223,7 +253,36 @@ async def test_an_id_the_request_itself_cites_is_never_reported(
     ]
     body = {"model": "c", "max_tokens": 1, "messages": [{"role": "user", "content": content}]}
     assert (await _send(app, "POST", "/v1/messages", body)).status_code == 200
-    assert router.objects == [("file_table", SESSION), ("file_legacy", SESSION)]
+    assert router.objects == [
+        ("file_table", SESSION),
+        ("file_legacy", SESSION),
+        ("container_1", SESSION),
+    ]
+
+
+@pytest.mark.parametrize("container", ["container_1", {"id": "container_1"}])
+async def test_a_container_the_request_reuses_is_never_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, container: Any
+) -> None:
+    # A request naming an existing container (its top-level `container`, an
+    # id or an object with one) runs in it: the answer echoing it created
+    # nothing — only the files the run wrote are the requester's.
+    router = Router()
+    app = _app(
+        monkeypatch, tmp_path, router, lambda r: httpx.Response(200, json=MESSAGE), "anthropic"
+    )
+    body = {
+        "model": "c",
+        "max_tokens": 1,
+        "container": container,
+        "messages": [{"role": "user", "content": "chart"}],
+    }
+    assert (await _send(app, "POST", "/v1/messages", body)).status_code == 200
+    assert [object_id for object_id, _ in router.objects] == [
+        "file_chart",
+        "file_table",
+        "file_legacy",
+    ]
 
 
 async def test_an_answer_whose_files_are_all_cited_reports_nothing(
@@ -271,6 +330,13 @@ def _anthropic_stream() -> bytes:
                 },
             ),
             ("content_block_stop", {"type": "content_block_stop", "index": 2}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "container": MESSAGE["container"]},
+                },
+            ),
             ("message_stop", {"type": "message_stop"}),
         ]
     )
@@ -294,7 +360,7 @@ async def test_a_streamed_message_reports_its_generated_files(
     }
     response = await _send(app, "POST", "/v1/messages", body)
     assert response.status_code == 200 and "message_stop" in response.text
-    assert router.objects == [("f1", SESSION), ("f2", SESSION)]
+    assert router.objects == [("container_1", SESSION), ("f1", SESSION), ("f2", SESSION)]
 
 
 # --- the generator-level split sweep ---------------------------------------------------
@@ -364,7 +430,7 @@ async def test_a_split_anthropic_stream_reports_each_file_once(
     ids, out = await _sweep(
         monkeypatch, tmp_path, AnthropicAdapter(), "/v1/messages", _anthropic_stream()
     )
-    assert ids == ["f1", "f2"]
+    assert ids == ["container_1", "f1", "f2"]  # the container once, from both events
     assert EMAIL in out.decode()  # rehydration unaffected
 
 
@@ -372,7 +438,8 @@ async def test_a_split_anthropic_stream_skips_what_the_request_cites(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     body = {
-        "messages": [{"role": "user", "content": [{"type": "container_upload", "file_id": "f1"}]}]
+        "container": "container_1",
+        "messages": [{"role": "user", "content": [{"type": "container_upload", "file_id": "f1"}]}],
     }
     ids, _ = await _sweep(
         monkeypatch, tmp_path, AnthropicAdapter(), "/v1/messages", _anthropic_stream(), body

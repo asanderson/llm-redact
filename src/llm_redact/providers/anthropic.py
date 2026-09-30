@@ -64,6 +64,14 @@ _OUTPUT_SUFFIX = "_output"
 # A key every event naming a generated file carries (never inside a JSON
 # string: a quote there is escaped), so an event without it is never parsed.
 _FILE_ID_KEY = '"file_id"'
+# The code execution CONTAINER a message ran in: the answer names it
+# (``container: {"id", "expires_at"}``; streamed in ``message_start``'s
+# message or ``message_delta``'s delta), and a later request reuses it by
+# that id (its top-level ``container``) — files earlier runs wrote live
+# there. Reported like a generated file; a container the request itself
+# named is dropped by the proxy (``_uncited``), so only a new one is the
+# requester's. The key gates event parsing like ``_FILE_ID_KEY``.
+_CONTAINER_KEY = '"container"'
 
 
 def generated_file_ids(blocks: Any) -> tuple[str, ...]:
@@ -88,6 +96,13 @@ def generated_file_ids(blocks: Any) -> tuple[str, ...]:
             ):
                 found.append(file_id)
     return tuple(dict.fromkeys(found))
+
+
+def container_ids(container: Any) -> tuple[str, ...]:
+    """The code execution container a Messages answer names (its
+    ``container`` object's ``id``), if any."""
+    container_id = container.get("id") if isinstance(container, dict) else None
+    return (container_id,) if isinstance(container_id, str) and container_id else ()
 
 
 def _files_route(method: str, path: str) -> RouteKind:
@@ -276,7 +291,8 @@ class AnthropicAdapter(ProviderAdapter):
         # upload (POST /v1/files with anthropic-version, read back by id and
         # cited by later messages as a document or container_upload
         # `file_id`), and a message: the
-        # files its code execution runs wrote (generated_file_ids).
+        # files its code execution runs wrote (generated_file_ids) and the
+        # container they ran in (container_ids).
         tail = path.rstrip("/")
         return method == "POST" and (
             tail.endswith("/messages/batches") or tail in ("/v1/files", "/v1/messages")
@@ -284,8 +300,12 @@ class AnthropicAdapter(ProviderAdapter):
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
         if _creates_message(path):
-            # The message id names no stored object; its generated files do.
-            return generated_file_ids(body.get("content") if isinstance(body, dict) else None)
+            # The message id names no stored object; its generated files and
+            # the container its code ran in do.
+            if not isinstance(body, dict):
+                return ()
+            found = generated_file_ids(body.get("content")) + container_ids(body.get("container"))
+            return tuple(dict.fromkeys(found))
         if isinstance(body, dict) and isinstance(body.get("id"), str) and body["id"]:
             return (str(body["id"]),)
         return ()
@@ -294,9 +314,10 @@ class AnthropicAdapter(ProviderAdapter):
         # A streamed message: a code execution result arrives WHOLE in its
         # content_block_start (server tool results are never streamed as
         # deltas); message_start's content is read too, for completeness.
+        # The container: message_start's message, or message_delta's delta.
         if not _creates_message(path):
             return super().object_ids_from_event(method, path, event)
-        if _FILE_ID_KEY not in event.data:
+        if _FILE_ID_KEY not in event.data and _CONTAINER_KEY not in event.data:
             return ()
         try:
             payload = loads_bounded(event.data)
@@ -304,10 +325,17 @@ class AnthropicAdapter(ProviderAdapter):
             return ()
         if not isinstance(payload, dict):
             return ()
-        if payload.get("type") == "content_block_start":
+        kind = payload.get("type")
+        if kind == "content_block_start":
             return generated_file_ids([payload.get("content_block")])
-        message = payload.get("message") if payload.get("type") == "message_start" else None
-        return generated_file_ids(message.get("content") if isinstance(message, dict) else None)
+        if kind == "message_delta":
+            delta = payload.get("delta")
+            return container_ids(delta.get("container") if isinstance(delta, dict) else None)
+        message = payload.get("message") if kind == "message_start" else None
+        if not isinstance(message, dict):
+            return ()
+        found = generated_file_ids(message.get("content")) + container_ids(message.get("container"))
+        return tuple(dict.fromkeys(found))
 
     def reports_object_ids_once(self, method: str, path: str) -> bool:
         # A message's files are named block by block: every event is read.

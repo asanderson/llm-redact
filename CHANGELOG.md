@@ -149,6 +149,11 @@ and tags `vX.Y.Z`.
   another path cancelled) now closes its connection like any failed check; it used
   to end the re-check backstop for good, leaving later revocations only a re-check
   could see unapplied. A backstop task that ended anyway is started again.
+- An Anthropic Messages answer's code execution container (buffered, and streamed
+  in `message_start` / `message_delta`) is reported to a session router as the
+  requester's, like the files the run wrote, so a later request reusing the
+  container can be checked against its creator; a container the request itself
+  named is never reported.
 
 ## [1.9.0] - 2026-09-29
 

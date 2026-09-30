@@ -145,8 +145,9 @@ and tags `vX.Y.Z`.
   tracked like `:batchGenerateContent`. No batch route carries the system note.
 - The Gemini API's Files API is recognized: the single-request upload
   (`X-Goog-Upload-Protocol: multipart`, a `multipart/related` body) and the
-  metadata-only create are redacted part by part with the OpenAI Files upload's
-  content policy (every part read as a file by its content; a binary file forwarded
+  metadata-only create are redacted part by part: the upload's first part, the file's
+  metadata, as the create's JSON body (see Fixed), every other part with the OpenAI
+  Files upload's content policy (read as a file by its content; a binary file forwarded
   unscanned only with the client's own key under `binary_uploads = "forward"`,
   counted in `unscanned_uploads`); a file's metadata and the file list restore each
   `displayName`; the download (`…:download`, `/download/v1beta/…:download`) is

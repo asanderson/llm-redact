@@ -165,7 +165,7 @@ def test_file_listing_hooks() -> None:
     assert adapter.listing_items({"files": {}}) is None
 
 
-# --- the upload policy (the OpenAI Files upload's, every part a file) ----------------
+# --- the upload policy (the metadata a JSON value, every other part a file) ----------
 
 
 def _related_upload(body: bytes, **kwargs: object) -> bytes | None:
@@ -173,7 +173,7 @@ def _related_upload(body: bytes, **kwargs: object) -> bytes | None:
     return redact_related_upload(body, b"b", _redactor(InMemoryVault()), **options)
 
 
-def test_the_upload_is_redacted_part_by_part_every_part_a_file() -> None:
+def test_the_upload_is_redacted_part_by_part_the_media_a_file() -> None:
     vault = InMemoryVault()
     body = _related(
         ("application/json; charset=UTF-8", _metadata(EMAIL)),

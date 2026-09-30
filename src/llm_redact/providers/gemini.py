@@ -425,11 +425,13 @@ class GeminiAdapter(ProviderAdapter):
         forward_binary: Callable[[int], None] | None = None,
         inspected: InspectedUpload | None = None,
     ) -> bytes | None:
-        # The single-request upload: the metadata part (JSON: the display
-        # name) and the media part, each read as a FILE by the shared upload
-        # policy (JSONL/text redacted; binary forwarded only when the proxy
-        # passes forward_binary — the client's own key, binary_uploads =
-        # "forward" — else refused).
+        # The single-request upload: the FIRST part, the metadata (the
+        # create's JSON body: the display name), redacted as the JSON value
+        # the stored-object check reads; every other part (the media) read
+        # as a FILE by the shared upload policy (JSONL/text redacted; binary
+        # forwarded only when the proxy passes forward_binary — the client's
+        # own key, binary_uploads = "forward" — or cleared it through an
+        # upload inspection, else refused).
         return redact_related_upload(
             body,
             boundary,

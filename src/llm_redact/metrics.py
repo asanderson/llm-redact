@@ -90,6 +90,7 @@ class Metrics:
         compaction_forks: int = 0,
         upstream_errors: "Counter[str] | None" = None,
         bookkeeping_errors: "Counter[str] | None" = None,
+        unscanned_uploads: "Counter[str] | None" = None,
     ) -> str:
         lines: list[str] = []
         lines.append("# HELP llm_redact_info Build information.")
@@ -163,6 +164,18 @@ class Metrics:
         for stage, count in sorted((bookkeeping_errors or Counter()).items()):
             lines.append(
                 f'llm_redact_bookkeeping_errors_total{{stage="{_escape_label(stage)}"}} {count}'
+            )
+
+        lines.append(
+            "# HELP llm_redact_unscanned_uploads_total Binary file parts of uploads forwarded"
+            " UNSCANNED with the client's own credential ([detection] binary_uploads ="
+            ' "forward"), by provider.'
+        )
+        lines.append("# TYPE llm_redact_unscanned_uploads_total counter")
+        for provider, count in sorted((unscanned_uploads or Counter()).items()):
+            lines.append(
+                f'llm_redact_unscanned_uploads_total{{provider="{_escape_label(provider)}"}}'
+                f" {count}"
             )
 
         lines.append(

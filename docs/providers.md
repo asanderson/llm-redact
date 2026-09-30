@@ -159,25 +159,47 @@ objects, so only clients that were already sending malformed bodies see
 the refusal instead of a silent leak.
 
 Inside an accepted multipart upload every piece must be scanned too, or
-the whole request is refused the same way: each non-blank line of an
-uploaded file must be a JSON object (a batch input or fine-tuning file),
-so a text, PDF, image or other non-JSONL file is refused — llm-redact
-cannot scan it; plain form fields (`purpose`, `user`, `size`, …) are
-scanned as UTF-8 text (a field that is not UTF-8 is refused), and bytes
-outside every part (a multipart preamble or epilogue) are refused. So is
+the whole request is refused the same way. An uploaded file is read by
+its CONTENT (the declared type and file name are only the client's
+guess): a JSONL file (every non-blank line a JSON object — a batch input
+or fine-tuning file) is redacted line by line as JSON; any other text
+file — strict UTF-8 (a byte-order mark kept), or UTF-16/UTF-32 opened by
+its byte-order mark — is redacted as one text and re-encoded exactly as it
+came (a CSV, a log, notes; a file mixing JSON lines with other lines is
+text); a BINARY file — bytes that do not decode, text holding a NUL, or a
+known binary signature even when the bytes would decode (an all-ASCII PDF:
+rewriting it would break its byte offsets) — cannot be redacted at all. A
+binary file part is the one piece that may leave unscanned, and only with
+the tool's own key: `[detection] binary_uploads = "forward"` (the default)
+forwards it byte-identical — its file NAME still redacted — counts it
+(`/status` `unscanned_uploads_total`, `llm_redact_unscanned_uploads_total`,
+an INFO log line with the path and count, the `llm-redact status` posture
+block) and says so in `doctor`; `"refuse"` answers 400 instead. **What is
+inside a forwarded PDF, image or archive reaches the provider as-is** —
+exactly like base64 media in a chat body. Under a credential the proxy
+holds (its cloud identity, or a routing rule's operator key) a binary file
+is always refused: the proxy vouches only for what it read. A JSONL line
+nesting JSON deeper than 128 levels is refused (a JSONL reader would
+decode what no walk can read). Plain form fields (`purpose`, `user`,
+`size`, …) are scanned as UTF-8 text (a field that is not UTF-8 is
+refused), and bytes outside every part (a multipart preamble or epilogue)
+are refused. So is
 a part header without a single reading — a folded or repeated header
 line, a filename holding a backslash that is not a `\"` or `\\` escape, a
 malformed `filename*` or one in a charset other than UTF-8 — and a part
 the proxy could not read as its plain bytes: a Content-Transfer-Encoding
 other than `7bit`/`8bit`/`binary` on any part (RFC 7578 deprecates them),
 or, on a part whose content is scanned, a declared charset other than
-UTF-8/US-ASCII (its Content-Type `charset`, or the RFC 7578 `_charset_`
-field). The image and mask parts of an image edit (and a video job's
+the one its content decoded as — UTF-8/US-ASCII, or a UTF-16/32 text
+file's own (its Content-Type `charset`, or the RFC 7578 `_charset_`
+field). `GET /v1/files/{id}/content` reads a download the same way: a
+text file is restored line by line (a JSON line as JSON, any other line
+as text) and re-encoded as it came; a binary file is left untouched. The image and mask parts of an image edit (and a video job's
 reference image) are media — the documented non-goal, as base64 media in
 a JSON body — and are sent as they came (their filenames redacted).
 
 `[providers.NAME] detection = false` with the tool's own key is the
-explicit opt-out: nothing is scanned and such bodies — a PDF upload
+explicit opt-out: nothing is scanned and such bodies — any upload
 included — are forwarded verbatim, surfaced like every other opt-out
 (`/status` `providers_detection_off`, `llm-redact status`, `doctor`).
 Traffic on a route llm-redact does not recognize is forwarded verbatim
@@ -226,8 +248,8 @@ proxy's own identity holds whatever `detection` says: `detection = false`
 turns redaction off, not this rule (the ownership check of
 llm-redact-pro's named users reads the parsed body too, so a gzip or
 non-JSON body it could not read is refused either way). With `detection`
-on, an upload whose files are not JSONL (a text file, a PDF) cannot be
-sent with the proxy's identity. Realtime
+on, an upload holding a binary file (a PDF, an image) cannot be sent
+with the proxy's identity; a text file is redacted and sent. Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with

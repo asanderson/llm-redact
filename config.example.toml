@@ -302,6 +302,13 @@ fuzzy = true
 #     "generic_secret",
 # ]
 
+# File uploads are read by their content: JSONL and other text files are
+# redacted; a BINARY file (PDF, image, archive, non-UTF-8 text) cannot be.
+# "forward" (default) sends a binary file UNSCANNED when the request carries
+# the client's own key (counted in /status); "refuse" answers 400 instead.
+# A credential the proxy holds (auth = "identity", routing) never carries one.
+# binary_uploads = "forward"
+
 # Strings that must ALWAYS be redacted — the strongest signal there is.
 # Deny matches win every overlap against rule matches, ignore the allowlist,
 # and are never subject to [detection.modes]. Case-insensitive substrings:

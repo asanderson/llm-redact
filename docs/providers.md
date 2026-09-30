@@ -338,7 +338,7 @@ MCP connector configuration (Anthropic `mcp_servers`, OpenAI
 must hold the real credential to call your MCP server — while MCP call
 arguments and output are redacted and restored like any other content.
 
-## Stored-object APIs: fine-tuning
+## Stored-object APIs: fine-tuning and vector stores
 
 OpenAI's fine-tuning jobs (`/v1/fine_tuning/jobs`: create, the list, one
 job, its cancel/pause/resume, events and checkpoints — on Azure's
@@ -359,6 +359,23 @@ job, and the files a finished job wrote (`result_files`), are reported
 to a session router that tracks stored objects (llm-redact-pro's named
 users). Checkpoint permissions (an admin key sharing a checkpoint across
 projects) stay pass-through.
+
+Vector stores (`/v1/vector_stores`: the store, its search, its files and
+file batches — OpenAI, both Azure families, custom providers) are
+recognized the same way. A store's `description` and `metadata`, a file's
+`attributes` (a map keyed by the caller, walked like `metadata`: a key
+named `name` or `id` is data), a search's `query` and its attribute-filter
+values are redacted; every answer echoing them, and the stored files'
+content a search or a file's content read returns, is restored. Vector
+store traffic uses the static vault session (with llm-redact-pro's named
+users, the user's own copy of it) — the session the files were uploaded
+and the attributes redacted in — so a filter value's placeholder is the
+stored attribute's and the filter still matches (the vault is
+deterministic). A store's `name`, the file ids a store, attach or file
+batch names, and a filter's attribute `key` are verbatim, as above. The
+created store is reported to a session router, and the store list is a
+listing it attributes per item; a store's own files are read as the
+store's.
 
 ## Realtime WebSocket APIs
 

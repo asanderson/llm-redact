@@ -123,6 +123,31 @@ _FINE_TUNING_VERBATIM = (
     ("integrations",),
 )
 
+# Vector stores (the file_search index): the store (create, list, read,
+# modify, delete), its search, its files (attach, list, read, update, detach,
+# parsed content) and its file batches (create, read, cancel, list files).
+_VECTOR_STORE_POSTS = re.compile(
+    r"/v1/vector_stores(?:/[^/]+(?:/search|/files(?:/[^/]+)?|/file_batches(?:/[^/]+/cancel)?)?)?"
+)
+_VECTOR_STORE_GETS = re.compile(
+    r"/v1/vector_stores(?:/[^/]+(?:/files(?:/[^/]+(?:/content)?)?|/file_batches/[^/]+(?:/files)?)?)?"
+)
+_VECTOR_STORE_DELETES = re.compile(r"/v1/vector_stores/[^/]+(?:/files/[^/]+)?")
+# Their verbatim fields (``verbatim_fields``), by the POST's tail: a store's
+# `name` (a label the provider keeps and every read shows), and the FILE ids
+# a store, an attach or a file batch names; a search's attribute filters
+# name attribute KEYS (JSON keys, never rewritten where they were set).
+_VECTOR_STORE_VERBATIM: tuple[tuple[re.Pattern[str], tuple[tuple[str, ...], ...]], ...] = (
+    (re.compile(r"(?:^|/)vector_stores$"), (("name",), ("file_ids",))),
+    (re.compile(r"(?:^|/)vector_stores/[^/]+$"), (("name",),)),
+    (re.compile(r"(?:^|/)vector_stores/[^/]+/files$"), (("file_id",),)),
+    (
+        re.compile(r"(?:^|/)vector_stores/[^/]+/file_batches$"),
+        (("file_ids",), ("files", "*", "file_id")),
+    ),
+    (re.compile(r"(?:^|/)vector_stores/[^/]+/search$"), (("filters", "**", "key"),)),
+)
+
 # Batches whose request or response carries the caller's `metadata`:
 # create (POST /v1/batches) and cancel, a batch's GET and the list (every
 # answer is a batch object, or a list of them, echoing that metadata).
@@ -321,7 +346,13 @@ def _stored_completion_create(path: str, body: Any) -> bool:
 # stored objects by id: files, batches, video jobs and stored chat
 # completions. Tail-anchored, so the Azure and custom-provider prefixes
 # need no override.
-_LISTING_RE = re.compile(r"(?:^|/)(?:files|batches|videos|chat/completions|fine_tuning/jobs)$")
+_LISTING_RE = re.compile(
+    r"(?:^|/)(?:files|batches|videos|chat/completions|fine_tuning/jobs|vector_stores)$"
+)
+# A collection BELOW a stored object (a vector store's files): its items are
+# that object's, read in the session the object's own read resolves to — not
+# a listing of stored objects a router attributes one by one.
+_NESTED_LISTING_RE = re.compile(r"(?:^|/)vector_stores/[^/]+/(?:file_batches/[^/]+/)?files$")
 
 
 # The Uploads API (large files in parts): completing an upload creates the
@@ -370,7 +401,7 @@ def _tail_is_create(path: str) -> bool:
     """POST to the collection itself (``…/files``, ``…/batches``,
     ``…/conversations``), not to a member or sub-resource."""
     tail = path.rstrip("/").rsplit("/", 1)[-1]
-    return tail in ("files", "batches", "conversations")
+    return tail in ("files", "batches", "conversations", "vector_stores")
 
 
 def _match_fine_tuning(method: str, path: str) -> RouteKind:
@@ -390,6 +421,26 @@ def _match_fine_tuning(method: str, path: str) -> RouteKind:
     ):
         return RouteKind.CHAT
     if method == "GET" and _FINE_TUNING_CHECKPOINTS.fullmatch(path):
+        return RouteKind.REDACT_ONLY
+    return RouteKind.NONE
+
+
+def _match_vector_stores(method: str, path: str) -> RouteKind:
+    """Vector stores (``/v1/vector_stores...``). What the caller writes —
+    a store's `description` and `metadata`, a file's `attributes` (values
+    under keys the caller chooses: walked like `metadata`), a search's
+    `query` and attribute-filter values — is redacted, and every answer that
+    echoes it or carries the stored FILES' content (search results, a
+    file's parsed content, filenames) is restored, in the request's own
+    session: the static one, where the files were uploaded and the
+    attributes redacted, so a filter value's placeholder is the stored
+    attribute's (the vault is deterministic). Names and file ids are
+    verbatim (``_VECTOR_STORE_VERBATIM``). A delete carries ids only."""
+    if method == "POST" and _VECTOR_STORE_POSTS.fullmatch(path):
+        return RouteKind.CHAT
+    if method == "GET" and _VECTOR_STORE_GETS.fullmatch(path):
+        return RouteKind.CHAT
+    if method == "DELETE" and _VECTOR_STORE_DELETES.fullmatch(path):
         return RouteKind.REDACT_ONLY
     return RouteKind.NONE
 
@@ -486,6 +537,8 @@ class OpenAIAdapter(ProviderAdapter):
             return RouteKind.REDACT_ONLY
         if path.startswith("/v1/fine_tuning/"):
             return _match_fine_tuning(method, path)
+        if path.startswith("/v1/vector_stores"):
+            return _match_vector_stores(method, path)
         if (method == "POST" and _BATCH_POST_RE.fullmatch(path)) or (
             method == "GET" and _BATCH_GET_RE.fullmatch(path)
         ):
@@ -511,9 +564,10 @@ class OpenAIAdapter(ProviderAdapter):
             # Item bodies carry `items`, not `messages`; injecting the note
             # would graft a spurious `messages` field and corrupt the request.
             return False
-        if path.startswith(("/v1/videos", "/v1/batches", "/v1/fine_tuning/")):
-            # Video job, batch and fine-tuning job bodies have no messages
-            # field either — a note would graft one and corrupt the request.
+        if path.startswith(("/v1/videos", "/v1/batches", "/v1/fine_tuning/", "/v1/vector_stores")):
+            # Video job, batch, fine-tuning job and vector store bodies have
+            # no messages field either — a note would graft one and corrupt
+            # the request.
             return False
         return kind is RouteKind.CHAT or path == "/v1/files"
 
@@ -554,10 +608,18 @@ class OpenAIAdapter(ProviderAdapter):
             return ()
         if _FINE_TUNING_CREATE_RE.search(tail) is not None:
             return _FINE_TUNING_VERBATIM
+        for pattern, positions in _VECTOR_STORE_VERBATIM:
+            if pattern.search(tail) is not None:
+                return positions
         return ()
 
     def lists_objects(self, method: str, path: str) -> bool:
-        return method == "GET" and _LISTING_RE.search(path.rstrip("/")) is not None
+        tail = path.rstrip("/")
+        return (
+            method == "GET"
+            and _LISTING_RE.search(tail) is not None
+            and _NESTED_LISTING_RE.search(tail) is None
+        )
 
     def listing_items(self, body: Any) -> list[Any] | None:
         if not isinstance(body, dict) or body.get("object") != "list":

@@ -164,7 +164,22 @@ matches](#requests-no-route-matches).
 | `POST /v1/fine_tuning/checkpoints/{id}/permissions` | pass-through | an admin key sharing a checkpoint across projects (org administration, like the Admin API) |
 | `POST /v1/uploads` | pass-through | DOCUMENTED GAP: the Uploads API (see the honest gaps below) |
 | `POST /v1/uploads/{id}/parts` | pass-through | an opaque byte range of the file |
-| `POST /v1/vector_stores` | pass-through | DOCUMENTED GAP: names and attributes are forwarded as sent |
+| `POST /v1/vector_stores` | chat | create: `description` and the caller's `metadata` redacted, echoed back restored; VERBATIM (scanned, never rewritten — a value llm-redact would redact refuses the request, 400): the store's `name` (a label the provider keeps and shows) and its `file_ids`. The store is reported to a session router as its creator's; no system note on any vector store route |
+| `GET /v1/vector_stores` | chat | the store list, restored in the request's own session; a listing a session router attributes per item |
+| `GET /v1/vector_stores/{id}` | chat | the store, restored |
+| `POST /v1/vector_stores/{id}` | chat | modify: `metadata` redacted, `name` verbatim; the echo restored |
+| `DELETE /v1/vector_stores/{id}` | redact-only | id only |
+| `POST /v1/vector_stores/{id}/search` | chat | the `query` redacted, and so are attribute-filter VALUES — in the same (static) session the files' `attributes` were redacted in, so a filter's placeholder is the stored attribute's (the vault is deterministic); a filter's `key` names an attribute KEY (never rewritten where it was set) and is verbatim. The results — file content chunks, filenames, attributes, the echoed query — are restored |
+| `POST /v1/vector_stores/{id}/files` | chat | attach a file: its `attributes` (values under keys the caller chooses — walked like `metadata`, a key named `id` or `name` included) redacted, `file_id` verbatim; the vector-store file object restored |
+| `GET /v1/vector_stores/{id}/files` | chat | the store's files (attributes restored), read as the store's: not a listing attributed per item |
+| `GET /v1/vector_stores/{id}/files/{file_id}` | chat | restored |
+| `POST /v1/vector_stores/{id}/files/{file_id}` | chat | update `attributes`: redacted, the echo restored |
+| `DELETE /v1/vector_stores/{id}/files/{file_id}` | redact-only | ids only |
+| `GET /v1/vector_stores/{id}/files/{file_id}/content` | chat | the file's parsed content chunks and filename, restored |
+| `POST /v1/vector_stores/{id}/file_batches` | chat | `attributes` redacted; `file_ids` and each `files[].file_id` verbatim |
+| `GET /v1/vector_stores/{id}/file_batches/{batch_id}` | chat | the batch's status, restored |
+| `POST /v1/vector_stores/{id}/file_batches/{batch_id}/cancel` | chat | |
+| `GET /v1/vector_stores/{id}/file_batches/{batch_id}/files` | chat | the batch's vector-store files, restored like the store's files |
 | `POST /v1/assistants` | pass-through | DOCUMENTED GAP: Assistants (deprecated) |
 | `POST /v1/threads/{id}/messages` | pass-through | DOCUMENTED GAP: Threads (deprecated) carry message content |
 | `GET /v1/containers/{id}/files/{file_id}/content` | pass-through | a code-interpreter container's file, verbatim |
@@ -273,6 +288,13 @@ file) because they echo the upload's redacted filename.
 | `POST /openai/fine_tuning/jobs/{id}/cancel` | chat | also `pause` / `resume` |
 | `GET /openai/v1/fine_tuning/jobs/{id}/events` | chat | |
 | `GET /openai/fine_tuning/jobs/{id}/checkpoints` | redact-only | |
+| `POST /openai/v1/vector_stores` | chat | vector stores, as on OpenAI (both path families) |
+| `GET /openai/vector_stores` | chat | |
+| `POST /openai/v1/vector_stores/{id}/search` | chat | |
+| `POST /openai/vector_stores/{id}/files` | chat | |
+| `GET /openai/v1/vector_stores/{id}/files/{file_id}/content` | chat | |
+| `POST /openai/v1/vector_stores/{id}/file_batches` | chat | |
+| `DELETE /openai/vector_stores/{id}` | redact-only | |
 
 ## AWS Bedrock (runtime)
 
@@ -505,8 +527,8 @@ These checks, like every routing step, cost time linear in the path's
 length, and they run only for a request the request-origin rule and the
 access gate admit (a refused request gets its own refusal). An
 OpenAI-compatible prefix (`/custom/NAME/…`, `/v1beta/openai/…`) is matched
-on the endpoint's tail: tails of at most eight segments after `/v1` (every
-OpenAI endpoint has four or fewer), and the one at the first OpenAI
+on the endpoint's tail: tails of at most ten segments after `/v1` (every
+OpenAI endpoint has five or fewer), and the one at the first OpenAI
 resource name.
 
 `GET /` and `HEAD /` — the proxy's base URL itself, no provider's API —
@@ -551,10 +573,10 @@ that is not there:
   creator's only when its `purpose` is stated and is not `batch`: a batch
   input file's requests would be run with the upload's credential, and the
   stored objects they cite were never checked.
-- **OpenAI Assistants / Threads / vector-store search** — on OpenAI's
+- **OpenAI Assistants / Threads** — on OpenAI's
   announced deprecation path (Responses/Conversations is the successor), so
-  not built. The same holds for their Azure v1 twins (`/openai/v1/threads`,
-  `/openai/v1/vector_stores/{id}/search`), and Azure's `/openai/v1/evals`
+  not built. The same holds for their Azure v1 twins (`/openai/v1/threads`),
+  and Azure's `/openai/v1/evals`
   and `/openai/v1/containers` are not covered either — pass-through, and
   refused wherever the proxy's own credential would carry them
   (`auth = "identity"`, or a routed operator key). OpenAI's own

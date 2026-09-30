@@ -15,10 +15,11 @@ would route Azure traffic to api.openai.com.
 Covered beyond chat: legacy completions, embeddings, image generation/edit
 prompts and text-to-speech input on both path families; Files (multipart
 JSONL upload with its filename, batch-output download, and the file list and
-objects that echo the filename) and Batches; fine-tuning jobs; the v1
-Conversations item store; and the model/deployment listings — recognized
-(REDACT_ONLY, a no-op on a body-less GET) so that ``[providers.azure] auth
-= "identity"``, which forwards only recognized routes, does not refuse them.
+objects that echo the filename) and Batches; fine-tuning jobs and vector
+stores; the v1 Conversations item store; and the model/deployment
+listings — recognized (REDACT_ONLY, a no-op on a body-less GET) so that
+``[providers.azure] auth = "identity"``, which forwards only recognized
+routes, does not refuse them.
 """
 
 import re
@@ -48,9 +49,9 @@ _AZURE_BATCH_COLLECTION = re.compile(r"/openai/(?:v1/)?batches")
 _AZURE_BATCHES = re.compile(r"/openai/(?:v1/)?batches(?:/[^/]+)?")
 _AZURE_BATCH_CANCEL = re.compile(r"/openai/(?:v1/)?batches/[^/]+/cancel")
 # OpenAI's stored-object APIs on Azure's path families, classified exactly
-# as the OpenAI adapter classifies their /v1 form: fine-tuning jobs (both
-# families).
-_AZURE_STORED = re.compile(r"/openai/(?:v1/)?(fine_tuning/.*)")
+# as the OpenAI adapter classifies their /v1 form: fine-tuning jobs and
+# vector stores (both families).
+_AZURE_STORED = re.compile(r"/openai/(?:v1/)?((?:fine_tuning|vector_stores)(?:/.*)?)")
 # Model/deployment listings: metadata only.
 _AZURE_METADATA = re.compile(r"/openai/(?:(?:v1/)?models|deployments)(?:/[^/]+)?")
 # The Conversations item store (v1 API only), paired with Responses.

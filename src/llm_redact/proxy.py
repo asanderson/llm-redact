@@ -212,9 +212,44 @@ class _EarlyAudit:
         self._token = token
         self._row = row
 
+    @property
+    def holds_token(self) -> bool:
+        return self._token is not None
+
     def take(self) -> object | None:
         token, self._token = self._token, None
         return token
+
+    def supersede(self, state: "ProxyState") -> None:
+        """End the held START row now, before upstream contact: a START row
+        written after redaction (carrying the request's detections and
+        warned counts) replaces it as the request's write-ahead record.
+        Its END row goes straight to the write-ahead log (``status`` None,
+        no detections) — never through ``record_request``, so metrics, the
+        recent buffer and the sinks count the request once. A fault is
+        logged CRITICAL by type only: the counted START row is committed,
+        and the START row left open is adopted as interrupted later."""
+        token, log = self.take(), state.write_ahead_audit
+        # Called only while a token is held, which only that log mints.
+        assert token is not None and log is not None
+        entry = state._audit_entry(
+            session=self._row["session"],
+            provider=self._row["provider"],
+            method=self._row["method"],
+            path=self._row["path"],
+            detections={},
+            warned=None,
+            duration_ms=(time.perf_counter() - self._row["started"]) * 1000.0,
+        )
+        try:
+            log.finalize(token, entry)
+        except AuditWriteError as exc:
+            logger.critical(
+                "audit write failed ending a superseded START row (%s %s): %s",
+                self._row["method"],
+                self._row["path"],
+                type(exc).__name__,
+            )
 
     def close(self, state: "ProxyState", status: int | None) -> None:
         token = self.take()
@@ -4717,7 +4752,17 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     early = _EARLY_AUDIT.get()
     if early is not None and early.started:
         # An upload whose START row was written before its inspection.
-        audit_token = early.take()
+        audit_token, audit_refusal = _start_after_early(
+            state,
+            early,
+            ctx,
+            adapter,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
     else:
         audit_token, audit_refusal = _begin_audit_guarded(
             state,
@@ -4729,8 +4774,8 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             new_counts=new_counts,
             new_warned=new_warned,
         )
-        if audit_refusal is not None:
-            return audit_refusal
+    if audit_refusal is not None:
+        return audit_refusal
 
     # Handed to the upstream: an upload's parts now count as forwarded.
     upload.settle(sent=True)
@@ -4986,6 +5031,44 @@ def _legacy_target(
     return url, headers
 
 
+def _start_after_early(
+    state: ProxyState,
+    early: _EarlyAudit,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+) -> tuple[object | None, JSONResponse | None]:
+    """The write-ahead token for an upload whose START row was written
+    before its inspection (``_EarlyAudit``), at the send: that row carries
+    no detections (the redaction had not run), so when the redaction found
+    values — warn-mode ones are FORWARDED — a second START row carrying
+    them commits here, before any upstream contact, and the early row is
+    ended (``_EarlyAudit.supersede``): what is durable before contact says
+    what leaves. A second START row that cannot commit is the 503 refusal,
+    whose row ends the early one. Nothing found: the early row is the
+    request's."""
+    if early.holds_token and (new_counts or new_warned):
+        token, refusal = _begin_audit_guarded(
+            state,
+            ctx,
+            adapter,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
+        if refusal is None:
+            early.supersede(state)
+        return token, refusal
+    return early.take(), None
+
+
 def _begin_audit_guarded(
     state: ProxyState,
     ctx: RequestContext,
@@ -4999,7 +5082,10 @@ def _begin_audit_guarded(
 ) -> tuple[object | None, JSONResponse | None]:
     """[audit] required: no durably committed audit row, no upstream contact.
     The write-ahead START row commits HERE — after redaction (detections
-    known), before any byte leaves for the provider. A None token means
+    known), before any byte leaves for the provider; an upload with a binary
+    part to inspect also commits one BEFORE its inspection (no detections
+    yet: ``before_inspection``), superseded at the send by one carrying the
+    counts when the redaction found values (``_start_after_early``). A None token means
     required mode is off and nothing downstream changes; a refusal is the
     provider-shaped 503 the caller returns instead of contacting anyone."""
     try:
@@ -6110,7 +6196,19 @@ async def _handle_routed(
     if early is not None and early.started:
         # An upload with a binary part to inspect: its local refusal was
         # asked and its START row written before the inspection.
-        audit_token = early.take()
+        audit_token, audit_refusal = _start_after_early(
+            state,
+            early,
+            ctx,
+            adapter,
+            request=request,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
+        if audit_refusal is not None:
+            return audit_refusal
     else:
         # The count_tokens 404 (decision 7): a refusal that never counts as
         # an attempt, so it precedes the write-ahead START row.

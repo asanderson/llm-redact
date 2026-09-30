@@ -36,6 +36,7 @@ from fake_router import (
     routed_config,
 )
 from license_fixtures import resolved
+from llm_redact.audit import AuditWriteError
 from llm_redact.config import AuditConfig, Config
 from llm_redact.detection.engine import DetectionConfig
 from llm_redact.proxy import create_app
@@ -383,9 +384,95 @@ async def test_the_end_row_carries_what_the_redaction_found(
     body = _form(_pdf("a"), filename=f"{EMAIL}.pdf")
     reply = await _post(app, "/v1/files", FORM, body)
     assert reply.status_code == 200 and EMAIL.encode() not in upstream.requests[0].content
-    assert events == ["start", "inspect", "end:200"]
+    # The redaction found a value: a second START row carrying it commits
+    # before the send and supersedes the early one (ended, no status).
+    assert events == ["start", "inspect", "start", "end:None", "end:200"]
+    _superseded(audit)
+    assert audit.begun[1].detections == {"EMAIL": 1}
+    assert audit.finalized[1][1].detections == {"EMAIL": 1}
+    # The request is counted once: one recent row, no classic audit row.
+    assert [row["status"] for row in app.state.proxy.recent] == [200]
+
+
+def _superseded(audit: FakeAudit) -> None:
+    """Two START rows, each finalized once by its own token, the early one
+    first (before the send); no classic row."""
+    assert len(audit.begun) == 2
+    assert [token for token, _ in audit.finalized] == [1, 2]
+    assert audit.finalized[0][1].status is None
+    assert audit.finalized[0][1].detections == {}
+    assert audit.recorded == []
+
+
+class EndFails(OrderedAudit):
+    """Every END row fails (a full disk after the START rows committed)."""
+
+    def finalize(self, token: object, entry: Any) -> None:
+        self.events.append(f"end-failed:{entry.status}")
+        raise AuditWriteError("disk full")
+
+
+async def test_a_warned_value_is_durable_before_the_send(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A warn-mode value is FORWARDED: what is committed before upstream
+    # contact must say so even when no END row is ever written (the early
+    # START row, written before the redaction, cannot).
+    events: list[str] = []
+    audit, upstream = EndFails(events), Upstream()
+    _registry_with_audit(monkeypatch, OrderedInspector(events, reads("clean")), audit)
+    config = _required(detection=DetectionConfig(modes=(("email", "warn"),)))
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    body = _form(_pdf("a"), filename=f"{EMAIL}.pdf")
+    reply = await _post(app, "/v1/files", FORM, body)
+    assert reply.status_code == 200 and EMAIL.encode() in upstream.requests[0].content
+    assert events == ["start", "inspect", "start", "end-failed:None", "end-failed:200"]
+    assert audit.begun[1].warned == {"EMAIL": 1}
+    # Both END faults are loud, by type only.
+    assert "superseded START row" in caplog.text and "disk full" not in caplog.text
+    assert EMAIL not in caplog.text
+
+
+class SecondStartFails(OrderedAudit):
+    def begin(self, entry: Any) -> object | None:
+        if self.begun:
+            self.events.append("start-failed")
+            raise AuditWriteError("injected write fault")
+        return super().begin(entry)
+
+
+@pytest.mark.parametrize("routed", [False, True], ids=["legacy", "routed"])
+async def test_a_counted_start_row_that_cannot_commit_refuses(
+    monkeypatch: pytest.MonkeyPatch, routed: bool
+) -> None:
+    # The second START row fails: 503 before any upstream contact, and its
+    # refusal row ends the early START row — the pair stays balanced.
+    events: list[str] = []
+    audit, upstream = SecondStartFails(events), Upstream()
+    reg = None
+    headers = FORM
+    config = _required()
+    if routed:
+        reg, _ = install(
+            monkeypatch,
+            FakeRouter(
+                {"x": [Hop("a", "https://api.openai.com/v1/files"), Stop()]},
+                plan_kwargs={"x": {"proxy_credential": False}},
+            ),
+            audit=audit,
+        )
+        headers = {**FORM, ROUTE_HEADER: "x"}
+        config = routed_config(audit=AuditConfig(enabled=True, required=True))
+    _registry_with_audit(monkeypatch, OrderedInspector(events, reads("clean")), audit, reg)
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    body = _form(_pdf("a"), filename=f"{EMAIL}.pdf")
+    reply = await _post(app, "/v1/files", headers, body)
+    assert reply.status_code == 503 and upstream.requests == []
+    assert events == ["start", "inspect", "start-failed", "end:503"]
     _balanced(audit)
     assert audit.finalized[0][1].detections == {"EMAIL": 1}
+    assert app.state.proxy.inspected_uploads == {("openai", "clean_refused"): 1}
 
 
 def _down(request: httpx.Request) -> httpx.Response:

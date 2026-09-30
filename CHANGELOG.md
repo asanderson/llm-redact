@@ -17,7 +17,11 @@ and tags `vX.Y.Z`.
   provider with no upstream configured (the 502), a routing layer's local refusal, and
   a `[audit] required` write-ahead START row that cannot be committed (the 503). For
   such an upload the START row is written right before the inspection (with no
-  detections; the END row carries the request's own) and every refusal after the
+  detections; the END row carries the request's own). When the redaction then finds
+  values — warn-mode values are forwarded — a second START row carrying the counts is
+  committed before any upstream contact and the early row is ended (status none, no
+  detections), so the record durable before contact always says what leaves (its
+  failure refuses 503); such a request has two START rows. Every refusal after the
   inspection — a value found in the file, a block, the upstream authorizer, a routing
   budget, a send that fails — is its END row; a way out that records nothing still
   closes it, so START and END rows stay paired. The upstream authorizer stays after

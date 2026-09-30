@@ -11,7 +11,24 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+- File uploads (OpenAI/Azure/custom `…/files`) are read by CONTENT
+  (`upload_content.classify_file`): JSONL is redacted per line as before, any other
+  text file (UTF-8, or UTF-16/32 with a BOM) is redacted as one text and re-encoded as
+  it came, and a BINARY file (a PDF, image or archive — a known signature or a NUL
+  byte means binary even when the bytes decode) is no longer refused under the
+  client's own key: it is forwarded UNSCANNED, its file name still redacted, and
+  counted. Under a credential the proxy holds (cloud identity, a routed operator key)
+  a binary file is still refused 400. Downloads of text files
+  (`GET …/files/{id}/content`) are restored line by line; binary downloads are
+  untouched.
+
 ### Added
+- `[detection] binary_uploads = "forward" | "refuse"` (default `"forward"`, hot):
+  `"refuse"` keeps refusing binary uploads under the client's own key too. Forwarded
+  binaries are surfaced: /status `unscanned_uploads_total`,
+  `llm_redact_unscanned_uploads_total{provider}` (Grafana panel), a `llm-redact
+  status` posture line when nonzero, and a doctor line stating the setting.
 - Optional `SessionRouter.response_observer(context) -> ResponseObserver | None`
   (`plugin_api.ResponseContext`, `plugin_api.ResponseObserver`): a plugin observes
   upstream answers read-only and provider-neutrally. Told the adapter, method, path,
@@ -61,6 +78,28 @@ and tags `vX.Y.Z`.
   `proxy_credential_refusal` (a recognized protocol never served with a proxy-held
   credential: recorded 403) and `capability_response_headers` (never relayed under
   one). `openai.rehydrate_text_file` is the one file-download restoration.
+- OpenAI fine-tuning jobs, vector stores and code interpreter containers are
+  recognized (OpenAI, both Azure families — containers on the v1 API only — and
+  custom providers), so a routed operator key or cloud identity may reach them.
+  Fine-tuning: job `metadata` redacted and restored in every echo, event messages
+  restored, checkpoints recognized. Vector stores: `name`, `description`,
+  `metadata`, file `attributes` (a caller-keyed map, now walked like `metadata`),
+  search queries and filter values redacted; echoes, search results and a file's
+  parsed content restored. Containers: `name` redacted and restored, container
+  file uploads read by content like `/v1/files` uploads, downloads restored like a
+  Files API download. New adapter hooks `verbatim_fields` and `label_fields` with
+  `providers.base.prepare_route_request` as the proxy's redaction entry point:
+  identifier fields the provider uses exactly as sent (a fine-tune `suffix`, which
+  becomes part of the model name; training/validation file ids; W&B
+  `integrations`; the file ids of a store, attach, file batch or container; a
+  search filter's attribute `key`) are scanned but never rewritten — a value that
+  would be redacted there refuses the request (400); label fields under a
+  structural key (a store's or container's `name`) are redacted and restored.
+  Created stores, containers and container files are reported to a session router
+  (so is the container a Responses code interpreter call ran in), and the job,
+  store and container lists are listings it attributes per item. Checkpoint
+  permissions stay pass-through, and the Uploads API stays unrecognized (a part is
+  an opaque byte range; documented in docs/api-coverage.md).
 
 ### Changed
 - Recognized upload routes are capped by `max_body_bytes` (default 10 MiB):

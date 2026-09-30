@@ -183,7 +183,7 @@ def _client(app: Any) -> httpx.AsyncClient:
 @pytest.mark.parametrize(
     ("method", "path", "adapter_name", "body"),
     [
-        ("DELETE", "/v1/vector_stores/vs_1", None, None),  # pass-through: no adapter, no body
+        ("DELETE", "/v1/threads/thread_1", None, None),  # pass-through: no adapter, no body
         ("DELETE", "/v1/files/file-1", "openai", None),  # recognized: an id-only route
         ("GET", "/v1/files/file-1/content", "openai", None),
         ("POST", "/v1/batches/batch_1/cancel", "openai", None),
@@ -237,7 +237,7 @@ async def test_a_non_reason_answer_refuses_with_the_fixed_text(
     upstream = Upstream()
     app = _app(monkeypatch, ScriptedRouter(verdict=verdict), upstream)
     async with _client(app) as client:
-        response = await client.delete("/v1/vector_stores/vs_1")  # pass-through
+        response = await client.delete("/v1/assistants/asst_1")  # pass-through
     assert response.status_code == 403
     assert "ownership check failed" in response.json()["error"]
     assert upstream.requests == []
@@ -351,7 +351,7 @@ async def test_an_unrouted_request_is_checked_with_the_clients_credential(
 def _routed_pass_through(
     monkeypatch: pytest.MonkeyPatch, router: Any, *, proxy_credential: bool | None = None
 ) -> tuple[Any, FakeRouter]:
-    hop = Hop("x", "http://x.example/v1/vector_stores")
+    hop = Hop("x", "http://x.example/v1/assistants")
     kwargs = {} if proxy_credential is None else {"proxy_credential": proxy_credential}
     fake = FakeRouter({"r": [hop, Stop()]}, plan_kwargs={"r": kwargs})
     reg, _ = install(monkeypatch, fake)
@@ -371,7 +371,7 @@ async def test_a_routed_pass_through_under_the_proxys_credential_is_refused_unre
     app, fake = _routed_pass_through(monkeypatch, router, proxy_credential=lends)
     raw = b'{"name": "mine",   "file_ids": ["file-a"]}'
     async with _client(app) as client:
-        response = await client.post("/v1/vector_stores", content=raw, headers={ROUTE_HEADER: "r"})
+        response = await client.post("/v1/assistants", content=raw, headers={ROUTE_HEADER: "r"})
     assert response.status_code == 403
     assert "credential the proxy holds" in response.json()["error"]
     assert router.checks == []
@@ -398,13 +398,13 @@ async def test_other_pass_through_bodies_are_never_parsed(
     headers = {ROUTE_HEADER: "r"} if routed else {}
     async with _client(app) as client:
         response = await client.post(
-            "/v1/vector_stores",
+            "/v1/assistants",
             content=b'{"file_ids": ["file-a"], "file_ids": ["file-b"]}',
             headers={**headers, "content-encoding": "gzip"},  # never inspected here
         )
     assert response.status_code == 200
     if checks_ownership:
-        assert router.checks == [(None, "POST", "/v1/vector_stores", None, False)]
+        assert router.checks == [(None, "POST", "/v1/assistants", None, False)]
 
 
 @pytest.mark.parametrize(
@@ -433,7 +433,7 @@ async def test_no_pass_through_body_is_read_under_the_proxys_credential(
     — an unrecognized route under the proxy's credential is refused before
     the (unbounded) body read: the same recorded 403 for every body."""
     router = ScriptedRouter()
-    hop = Hop("x", "http://x.example/v1/vector_stores")
+    hop = Hop("x", "http://x.example/v1/assistants")
     fake = FakeRouter({"r": [hop, Stop()]})
     reg, _ = install(monkeypatch, fake)
     _registry(monkeypatch, router, reg)
@@ -444,7 +444,7 @@ async def test_no_pass_through_body_is_read_under_the_proxys_credential(
     request_headers = httpx.Headers(headers)
     request_headers[ROUTE_HEADER] = "r"
     async with _client(app) as client:
-        response = await client.post("/v1/vector_stores", content=raw, headers=request_headers)
+        response = await client.post("/v1/assistants", content=raw, headers=request_headers)
     assert response.status_code == 403
     assert "credential the proxy holds" in response.json()["error"]
     assert router.checks == [] and upstream.requests == []

@@ -61,6 +61,10 @@ from llm_redact.upload_content import BINARY, FileContent, classify_file
 from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS
 
 _FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
+# A code interpreter container's file, downloaded (uploaded, or written by
+# the code): restored like a Files API download (text line by line, a
+# binary file untouched).
+_CONTAINER_FILE_CONTENT_RE = re.compile(r"/v1/containers/[^/]+/files/[^/]+/content")
 # The file list and one file's object: both echo each upload's filename.
 _FILE_OBJECT_RE = re.compile(r"/v1/files(?:/[^/]+)?")
 _STORED_COMPLETION_RE = re.compile(r"/v1/chat/completions/[^/]+")
@@ -112,6 +116,84 @@ _VIDEO_CONTENT_RE = re.compile(r"/v1/videos/[^/]+/content")
 _MODELS_RE = re.compile(r"/v1/models(?:/[^/]+)?")
 # Deleting a stored object carries its id only.
 _DELETE_RE = re.compile(r"/v1/files/[^/]+|/v1/conversations/[^/]+(?:/items/[^/]+)?")
+
+# Fine-tuning jobs: create and the list, one job, its cancel/pause/resume
+# (each answering with the job, which echoes the caller's `metadata`), its
+# events (provider messages) and its checkpoints (metadata only).
+_FINE_TUNING_JOBS = re.compile(r"/v1/fine_tuning/jobs(?:/[^/]+)?")
+_FINE_TUNING_ACTION = re.compile(r"/v1/fine_tuning/jobs/[^/]+/(?:cancel|pause|resume)")
+_FINE_TUNING_EVENTS = re.compile(r"/v1/fine_tuning/jobs/[^/]+/events")
+_FINE_TUNING_CHECKPOINTS = re.compile(r"/v1/fine_tuning/jobs/[^/]+/checkpoints")
+# A job create's fields the provider uses exactly as sent (``verbatim_fields``):
+# the training and validation FILE ids; the `suffix`, which becomes part of
+# the fine-tuned model's name — the name every later request cites in its
+# `model`, structural and forwarded as sent, so a placeholder in it would name
+# a model the client can never address; and the `integrations` (a Weights &
+# Biases project, entity, run name and tags the provider logs to).
+_FINE_TUNING_VERBATIM = (
+    ("suffix",),
+    ("training_file",),
+    ("validation_file",),
+    ("integrations",),
+)
+
+# Vector stores (the file_search index): the store (create, list, read,
+# modify, delete), its search, its files (attach, list, read, update, detach,
+# parsed content) and its file batches (create, read, cancel, list files).
+_VECTOR_STORE_POSTS = re.compile(
+    r"/v1/vector_stores(?:/[^/]+(?:/search|/files(?:/[^/]+)?|/file_batches(?:/[^/]+/cancel)?)?)?"
+)
+_VECTOR_STORE_GETS = re.compile(
+    r"/v1/vector_stores(?:/[^/]+(?:/files(?:/[^/]+(?:/content)?)?|/file_batches/[^/]+(?:/files)?)?)?"
+)
+_VECTOR_STORE_DELETES = re.compile(r"/v1/vector_stores/[^/]+(?:/files/[^/]+)?")
+# Code interpreter containers: the container (create, list, read, delete)
+# and its files (upload — multipart, or JSON naming a stored file — list,
+# read, download, delete).
+_CONTAINER_POSTS = re.compile(r"/v1/containers(?:/[^/]+/files)?")
+_CONTAINER_GETS = re.compile(r"/v1/containers(?:/[^/]+(?:/files(?:/[^/]+(?:/content)?)?)?)?")
+_CONTAINER_DELETES = re.compile(r"/v1/containers/[^/]+(?:/files/[^/]+)?")
+# Vector store and container verbatim fields (``verbatim_fields``), by the
+# POST's tail: the FILE ids a store, an attach, a file batch or a container
+# names; a search's attribute filters name attribute KEYS (JSON keys, never
+# rewritten where they were set).
+_STORED_OBJECT_VERBATIM: tuple[tuple[re.Pattern[str], tuple[tuple[str, ...], ...]], ...] = (
+    (re.compile(r"(?:^|/)vector_stores$"), (("file_ids",),)),
+    (re.compile(r"(?:^|/)vector_stores/[^/]+/files$"), (("file_id",),)),
+    (
+        re.compile(r"(?:^|/)vector_stores/[^/]+/file_batches$"),
+        (("file_ids",), ("files", "*", "file_id")),
+    ),
+    (re.compile(r"(?:^|/)vector_stores/[^/]+/search$"), (("filters", "**", "key"),)),
+    # The stored files a container starts with, and the stored file a JSON
+    # container-file create copies in.
+    (re.compile(r"(?:^|/)containers$"), (("file_ids",),)),
+    (re.compile(r"(?:^|/)containers/[^/]+/files$"), (("file_id",),)),
+)
+# A store's or container's `name` is a plain LABEL (the object is addressed
+# by its id): user text under a key the walk treats as structural, so it is
+# redacted explicitly (``label_fields``: a store's create and modify, a
+# container's create) and restored on every object that echoes it — a
+# vector store or container object, alone or listed (``_restore_labels``,
+# by the object's own `object` type, so a listing item restored on its own
+# is covered too).
+_LABEL_POSTS = re.compile(r"(?:^|/)(?:vector_stores(?:/[^/]+)?|containers)$")
+_LABELLED_OBJECTS = frozenset({"vector_store", "container"})
+
+
+def _restore_labels(node: Any, rehydrator: Rehydrator) -> Any:
+    """``node`` with the `name` of a vector store or container object (the
+    node itself, or each item of a list envelope) restored."""
+    if not isinstance(node, dict):
+        return node
+    name = node.get("name")
+    if node.get("object") in _LABELLED_OBJECTS and isinstance(name, str):
+        node = {**node, "name": rehydrator.rehydrate_text(name)}
+    data = node.get("data")
+    if node.get("object") == "list" and isinstance(data, list):
+        node = {**node, "data": [_restore_labels(item, rehydrator) for item in data]}
+    return node
+
 
 # Batches whose request or response carries the caller's `metadata`:
 # create (POST /v1/batches) and cancel, a batch's GET and the list (every
@@ -388,14 +470,23 @@ def _stored_completion_create(path: str, body: Any) -> bool:
 # stored objects by id: files, batches, video jobs and stored chat
 # completions. Tail-anchored, so the Azure and custom-provider prefixes
 # need no override.
-_LISTING_RE = re.compile(r"(?:^|/)(?:files|batches|videos|chat/completions)$")
+_LISTING_RE = re.compile(
+    r"(?:^|/)(?:files|batches|videos|chat/completions|fine_tuning/jobs|vector_stores|containers)$"
+)
+# A collection BELOW a stored object (a vector store's or a container's
+# files): its items are that object's, read in the session the object's own
+# read resolves to — not a listing of stored objects a router attributes one
+# by one.
+_NESTED_LISTING_RE = re.compile(
+    r"(?:^|/)(?:vector_stores/[^/]+/(?:file_batches/[^/]+/)?|containers/[^/]+/)files$"
+)
 
 
 # The Uploads API (large files in parts): completing an upload creates the
 # stored FILE, named in the answer's nested `file` object.
 _UPLOAD_COMPLETE_RE = re.compile(r"(?:^|/)uploads/[^/]+/complete$")
 
-# Fine-tuning jobs (pass-through routes): the create answers with the job,
+# Fine-tuning jobs: the create answers with the job,
 # later read by id; a job read (and its cancel/pause/resume, each answering
 # with the job) names the files the job WROTE once it finished
 # (`result_files`) — reported like a batch's output files on its status, as
@@ -437,7 +528,67 @@ def _tail_is_create(path: str) -> bool:
     """POST to the collection itself (``…/files``, ``…/batches``,
     ``…/conversations``), not to a member or sub-resource."""
     tail = path.rstrip("/").rsplit("/", 1)[-1]
-    return tail in ("files", "batches", "conversations")
+    return tail in ("files", "batches", "conversations", "vector_stores", "containers")
+
+
+def _match_fine_tuning(method: str, path: str) -> RouteKind:
+    """Fine-tuning jobs (``/v1/fine_tuning/...``). A job create carries the
+    caller's free-form `metadata` (redacted out, like a batch's) and the
+    fields the provider keeps as sent (``_FINE_TUNING_VERBATIM``: scanned,
+    never rewritten); the training data itself is the FILE, redacted at its
+    upload (``/v1/files``). Every answer naming a job (the create, the list,
+    a job, its cancel/pause/resume) echoes that metadata, and a job's events
+    are the provider's messages about it: all restored (CHAT). Checkpoints
+    carry metadata only. Checkpoint PERMISSIONS (an admin key's sharing of a
+    checkpoint across projects) and the alpha graders stay pass-through."""
+    if method == "POST" and (path == "/v1/fine_tuning/jobs" or _FINE_TUNING_ACTION.fullmatch(path)):
+        return RouteKind.CHAT
+    if method == "GET" and (
+        _FINE_TUNING_JOBS.fullmatch(path) or _FINE_TUNING_EVENTS.fullmatch(path)
+    ):
+        return RouteKind.CHAT
+    if method == "GET" and _FINE_TUNING_CHECKPOINTS.fullmatch(path):
+        return RouteKind.REDACT_ONLY
+    return RouteKind.NONE
+
+
+def _match_vector_stores(method: str, path: str) -> RouteKind:
+    """Vector stores (``/v1/vector_stores...``). What the caller writes —
+    a store's `description` and `metadata`, a file's `attributes` (values
+    under keys the caller chooses: walked like `metadata`), a search's
+    `query` and attribute-filter values — is redacted, and every answer that
+    echoes it or carries the stored FILES' content (search results, a
+    file's parsed content, filenames) is restored, in the request's own
+    session: the static one, where the files were uploaded and the
+    attributes redacted, so a filter value's placeholder is the stored
+    attribute's (the vault is deterministic). A store's `name` is a label,
+    redacted (``label_fields``) and restored on every echo; file ids are
+    verbatim (``_STORED_OBJECT_VERBATIM``). A delete carries ids only."""
+    if method == "POST" and _VECTOR_STORE_POSTS.fullmatch(path):
+        return RouteKind.CHAT
+    if method == "GET" and _VECTOR_STORE_GETS.fullmatch(path):
+        return RouteKind.CHAT
+    if method == "DELETE" and _VECTOR_STORE_DELETES.fullmatch(path):
+        return RouteKind.REDACT_ONLY
+    return RouteKind.NONE
+
+
+def _match_containers(method: str, path: str) -> RouteKind:
+    """Code interpreter containers (``/v1/containers...``). A container file
+    upload is multipart (``redact_multipart``: the file part and its
+    filename, as a ``/v1/files`` upload) or JSON naming a stored file
+    (verbatim); a container file's object echoes its filename in `path`,
+    and its content — uploaded, or written by the code — is restored like a
+    Files API download (``rehydrate_raw_body``). A container's `name` is a
+    label (redacted, restored on every echo); its starting `file_ids` are
+    verbatim. Deletes carry ids only."""
+    if method == "POST" and _CONTAINER_POSTS.fullmatch(path):
+        return RouteKind.CHAT
+    if method == "GET" and _CONTAINER_GETS.fullmatch(path):
+        return RouteKind.CHAT
+    if method == "DELETE" and _CONTAINER_DELETES.fullmatch(path):
+        return RouteKind.REDACT_ONLY
+    return RouteKind.NONE
 
 
 class OpenAIAdapter(ProviderAdapter):
@@ -530,6 +681,12 @@ class OpenAIAdapter(ProviderAdapter):
         if method == "DELETE" and _DELETE_RE.fullmatch(path):
             # A file's delete: its id only.
             return RouteKind.REDACT_ONLY
+        if path.startswith("/v1/fine_tuning/"):
+            return _match_fine_tuning(method, path)
+        if path.startswith("/v1/vector_stores"):
+            return _match_vector_stores(method, path)
+        if path.startswith("/v1/containers"):
+            return _match_containers(method, path)
         if (method == "POST" and _BATCH_POST_RE.fullmatch(path)) or (
             method == "GET" and _BATCH_GET_RE.fullmatch(path)
         ):
@@ -555,9 +712,13 @@ class OpenAIAdapter(ProviderAdapter):
             # Item bodies carry `items`, not `messages`; injecting the note
             # would graft a spurious `messages` field and corrupt the request.
             return False
-        if path.startswith(("/v1/videos", "/v1/batches")):
-            # Video job and batch bodies have no messages field either — a
-            # note would graft one and corrupt the request.
+        if path.startswith(
+            ("/v1/videos", "/v1/batches", "/v1/fine_tuning/", "/v1/vector_stores", "/v1/containers")
+        ):
+            # Video job, batch, fine-tuning job, vector store and container
+            # bodies have no messages field either — a note would graft one
+            # and corrupt the request (a container file is a file, never a
+            # chat example).
             return False
         return kind is RouteKind.CHAT or path == "/v1/files"
 
@@ -590,8 +751,31 @@ class OpenAIAdapter(ProviderAdapter):
             return (*_string_ids(body, ("id",)), *_result_files(body))
         return _string_ids(body, ("id",))
 
+    def verbatim_fields(self, method: str, path: str) -> tuple[tuple[str, ...], ...]:
+        # Tail-anchored like the tracking patterns: the Azure and
+        # custom-provider prefixes need no override.
+        tail = path.rstrip("/")
+        if method != "POST":
+            return ()
+        if _FINE_TUNING_CREATE_RE.search(tail) is not None:
+            return _FINE_TUNING_VERBATIM
+        for pattern, positions in _STORED_OBJECT_VERBATIM:
+            if pattern.search(tail) is not None:
+                return positions
+        return ()
+
+    def label_fields(self, method: str, path: str) -> tuple[tuple[str, ...], ...]:
+        if method == "POST" and _LABEL_POSTS.search(path.rstrip("/")) is not None:
+            return (("name",),)
+        return ()
+
     def lists_objects(self, method: str, path: str) -> bool:
-        return method == "GET" and _LISTING_RE.search(path.rstrip("/")) is not None
+        tail = path.rstrip("/")
+        return (
+            method == "GET"
+            and _LISTING_RE.search(tail) is not None
+            and _NESTED_LISTING_RE.search(tail) is None
+        )
 
     def listing_items(self, body: Any) -> list[Any] | None:
         if not isinstance(body, dict) or body.get("object") != "list":
@@ -642,11 +826,14 @@ class OpenAIAdapter(ProviderAdapter):
         # `message.tool_calls[].function.arguments` is raw JSON *source*, not
         # a parsed object: restored originals must be re-escaped there or a
         # value containing quotes/newlines corrupts the arguments string.
-        return transform_strings(
+        restored = transform_strings(
             body,
             rehydrator.rehydrate_text,
             key_overrides={"arguments": rehydrator.rehydrate_json_source_text},
         )
+        # A vector store's or container's `name` is a label the request
+        # redacted (``label_fields``), under a key the walk skips.
+        return _restore_labels(restored, rehydrator)
 
     def redacts_multipart(self, path: str) -> bool:
         # The Files upload (JSONL file parts) and the prompt-field media
@@ -795,7 +982,7 @@ class OpenAIAdapter(ProviderAdapter):
         return b"\n".join(out)
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
-        if not _FILE_CONTENT_RE.fullmatch(path):
+        if not (_FILE_CONTENT_RE.fullmatch(path) or _CONTAINER_FILE_CONTENT_RE.fullmatch(path)):
             return None
         return rehydrate_text_file(
             raw, rehydrator, lambda value: self.rehydrate_body(value, rehydrator)

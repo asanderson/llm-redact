@@ -37,13 +37,15 @@ checked by the weekly gating pip-audit job.
 | `perf` | `uvloop` | Drop-in event-loop speedup; uvicorn's `loop="auto"` picks it up with zero configuration. |
 | `realtime` | `websockets` | One package serves BOTH sides of the realtime relay: uvicorn's server-side WebSocket protocol (auto-enabled when importable) and the upstream wss client. Floor 15.0: the relay overrides the asyncio client's redirect hook (added in 13.1) and forwards the client's `User-Agent`, which clients before 15.0 send a second time. |
 | `otel` | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | Metadata-only telemetry export over OTLP/HTTP, the vendor-neutral standard; scoped SDK providers, never process globals. |
+| `extract` | `pypdf` | PDF text layers for [document extraction](extraction.md) (`[extraction]`): pure Python, BSD-3-Clause, imported only in the isolated, resource-limited extraction worker process — never on the request path. The OOXML/ODF, markup and RTF readers are stdlib. |
 
 ## Development group
 
 The dev group (`uv sync`) additionally carries the test/lint toolchain
 (pytest, pytest-asyncio, ruff, mypy, hypothesis, mutmut) plus
-`cryptography` and `websockets` so the whole suite exercises the crypto,
-realtime, and mutation-assurance paths without extra flags. Dev
+`cryptography`, `websockets` and `pypdf` so the whole suite exercises the
+crypto, realtime, document-extraction and mutation-assurance paths without
+extra flags. Dev
 dependencies never ship in the wheel.
 
 ## Reproducible builds

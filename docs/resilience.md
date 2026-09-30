@@ -48,7 +48,7 @@ faults surface as the transport errors above.
 | A JSON value holding a lone UTF-16 surrogate (a `\ud800`-style escape; surrogate-encoded bytes) | Every re-serialization (the redacted request, a restored answer, an SSE event, an NDJSON line, an eventstream frame, a realtime frame) writes it back as its escape (`jsonwalk.json_text` / `json_bytes`) — the same JSON value, every other character as before. It once failed the UTF-8 encode: an unrecorded bare 500 on the request path, a 502 or a cut stream on the answer path. | `test_lone_surrogates.py` |
 | Stream **ends mid-token** (upstream closed after a prefix) | The partial placeholder held in the rehydrator buffer is flushed **verbatim** — never guessed into a value, never dropped. For every truncation point, `feed(prefix)+flush()` equals the non-streaming rehydration of exactly what arrived. | `test_stream_truncation.py` |
 
-## Upload inspector faults (llm-redact-pro's document extraction)
+## Upload inspector faults (document extraction)
 
 An upload inspector (`plugin_api.UploadInspector`) reads an upload's
 binary file parts as text before redaction. The core never trusts it with

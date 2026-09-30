@@ -6,10 +6,13 @@ WORKDIR /app
 # uvicorn loop="auto", and CAN serve OpenAI Realtime / Gemini Live upgrades —
 # without websockets uvicorn refuses every WS upgrade, so the shipped image
 # would silently lack that capability.
+# --extra extract (pypdf, imported only by the isolated extraction worker):
+# [extraction] with its default formats reads PDFs, and without it an enabled
+# [extraction] refuses to start (docs/extraction.md).
 # EXTRAS is overridable so release.yml can build the `-rdbms` image variant
 # (adds vault-postgres/vault-mysql/crypto for the Helm standalone shared-vault
 # path — a server DSN without those extras refuses startup).
-ARG EXTRAS="--extra perf --extra realtime"
+ARG EXTRAS="--extra perf --extra realtime --extra extract"
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project ${EXTRAS}

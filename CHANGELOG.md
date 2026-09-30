@@ -11,6 +11,39 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+- Document extraction is now part of the free core: `[extraction]` (docs/extraction.md)
+  reads binary uploads — PDFs, Office/OpenDocument files, markup, RTF — as text in an
+  isolated, resource-limited worker process per file, so the proxy scans them before
+  anything is sent (a value found refuses the upload; a complete clean reading sends the
+  file byte-identical). It moved here from llm-redact-pro unchanged in behavior; the
+  Pro-tier requirement is gone. A core config section (restart-only, emitted by `config
+  show`), built through `Registry.build_upload_inspector` (a plugin may still replace
+  it; an enabled section for which the registered factory builds no inspector refuses
+  to start). PDFs need the new `extract` extra (`pip install
+  "llm-redact-proxy[extract]"`, pypdf); doctor gains value-free `extraction` rows.
+- Cloud OCR services for `[extraction]`: AWS Textract (`kind = "textract"`, SigV4 with
+  the core's own signer, credentials from named env vars), Google Document AI
+  (`documentai`: an access token from a named env var, or a service-account key file —
+  RS256 JWT with the `crypto` extra), Azure AI Document Intelligence
+  (`azure_docintel`: `:analyze` then its operation polled, bounded by the service's
+  timeout). Each requires `trusted = true` and https; any failure is no reading. A
+  cloud reading counts as complete only when the pages it analyzed equal the file's
+  own page count (a PDF the local extractor opened; one for a single-image PNG, JPEG
+  or BMP) — Azure's free tier silently reads only the first two pages.
+- Convert mode, opt-in (`[extraction] convert = true` or a list of classes): an
+  upload whose binary file holds values to redact, read completely, is sent as its
+  REDACTED extracted text (`text/plain`, file name `.txt`) instead of being refused —
+  on routes whose provider takes a text file for the upload (OpenAI/Azure/custom Files
+  with purpose `assistants` or `user_data`, container files, Anthropic Files), under a
+  credential the proxy holds only with `proxy_credential`. The model sees text, not the
+  original file. New outcomes `converted`/`converted_refused`; a `status` posture line.
+- The container image ships the `extract` extra, so `[extraction]` with its default
+  formats (pdf included) runs in it.
+- `plugin_api.UploadPart.extension` (the file name's lower-cased extension, `""` when
+  the part's names disagree) and `plugin_api.Inspection.convert_text`; the extractors
+  treat an extension naming another format than the file's bytes as incomplete.
+
 ### Changed
 - An upload whose binary parts go to the upload inspector is now refused BEFORE the
   inspection — never after it — for what refuses it whatever the redaction finds: a

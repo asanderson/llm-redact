@@ -25,7 +25,7 @@ proprietary **`llm-redact-pro`** package.
 | ALL provider adapters — Anthropic/OpenAI/Gemini/Ollama/Cohere/custom **and** AWS Bedrock / Azure OpenAI / GCP Vertex | ✓ | ✓ | ✓ | ✓ |
 | In-memory + persistent unencrypted SQLite vault, JSON logs, JSON `/status` + Prometheus `/metrics` + `/recent`/`/events` feeds, `llm-redact status`/`preview`/`doctor`, agent plugins | ✓ | ✓ | ✓ | ✓ |
 | Browser dashboard: live status view, config editor, redaction-preview card (`/__llm-redact/`) | | ✓ | ✓ | ✓ |
-| Document extraction: binary uploads (PDF, Office, …) read as text through the core's upload-inspection seam and scanned before they are sent (`[extraction]`) | seam only (binary uploads forwarded unscanned or refused) | ✓ | ✓ | ✓ |
+| Document extraction: binary uploads (PDF, Office, scans via OCR services, …) read as text and scanned before they are sent (`[extraction]`, [extraction.md](extraction.md)) — part of the free core | ✓ | ✓ | ✓ | ✓ |
 | Non-loopback (mTLS) serving; Kubernetes deployment (Helm chart + HPA) | ✓ | ✓ | ✓ | ✓ |
 | Server persistent vault (PostgreSQL / MySQL / Oracle / any DB-API RDBMS, incl. cloud-managed DBMS), vault encryption at rest, audit log + tamper chain + backup sinks (with batch encryption), OTel, per-conversation sessions, named users, rule-based upstream routing (named upstreams, fallback chains with cooldown + Anthropic plan-limit detection, monthly budgets) | | ✓ | ✓ | ✓ |
 | Team deployment kit: one installer for a shared mutual-TLS team server on Docker, Podman and Kubernetes (its own Helm chart), with named users, an encrypted vault and a tamper-evident audit log | | | ✓ | ✓ |

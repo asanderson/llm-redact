@@ -69,8 +69,9 @@ docker run -d --name llm-redact \
 
 `-p 127.0.0.1:8787:8787` — never `-p 8787:8787`, which would expose the
 proxy on every interface with client auth disabled. The image ships the
-`perf` (uvloop) and `realtime` (WebSocket) extras, so it runs on uvloop
-and can relay OpenAI Realtime / Gemini Live. `XDG_DATA_HOME=/data` holds
+`perf` (uvloop), `realtime` (WebSocket) and `extract` (pypdf) extras, so it
+runs on uvloop, can relay OpenAI Realtime / Gemini Live, and can read PDFs
+for `[extraction]` (docs/extraction.md). `XDG_DATA_HOME=/data` holds
 the vault and audit DB — mount a volume there for persistence. Released
 images are multi-arch (amd64 + arm64).
 
@@ -224,7 +225,7 @@ body is still arriving never signs a pass-through request with the
 proxy's identity. Detection rules, allowlists, NER, fuzzy rehydration, note
 injection, `max_body_bytes`, `max_body_strings`, upstream URLs, and the routing sections
 `[upstreams]`/`[routing]`/`[prices]` (llm-redact-pro) hot-reload; vault, audit,
-host, port, allowed_hosts, allowed_origins, log, TLS, OTel, users, and email changes warn
+host, port, allowed_hosts, allowed_origins, log, TLS, OTel, users, email, and extraction changes warn
 "require restart"
 and keep the old value; so do sections a plugin adds, such as llm-redact-pro's
 `[auth]`. A broken config file is logged and ignored — the running config

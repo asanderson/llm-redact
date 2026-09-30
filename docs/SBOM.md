@@ -63,6 +63,7 @@ padding differs), pinned to the published Keccak test vectors.
 | `perf` | `uvloop` | Faster event loop, auto-selected by uvicorn's `loop="auto"`. |
 | `realtime` | `websockets` | The realtime WS relay — serves both uvicorn's WS protocol and the upstream wss client. |
 | `otel` | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | Metadata-only traces/counters over OTLP/HTTP. |
+| `extract` | `pypdf` | PDF text layers for document extraction, in the isolated extraction worker only. |
 
 The NER extras' heavyweight transitive dependencies (torch,
 transformers, pydantic via presidio) never touch the request-forwarding
@@ -72,8 +73,8 @@ path — detectors only read strings and return spans.
 
 `pytest`, `pytest-asyncio`, `ruff`, `mypy`, `hypothesis` (property
 tests), `mutmut` (mutation assurance), `coverage` (complexity-coverage
-gate), plus `cryptography` and `websockets` so the crypto and realtime
-paths are always exercised by the suite.
+gate), plus `cryptography`, `websockets` and `pypdf` so the crypto,
+realtime and document-extraction paths are always exercised by the suite.
 
 ## Verifying a release
 

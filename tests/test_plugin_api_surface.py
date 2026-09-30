@@ -200,11 +200,12 @@ DATACLASSES: dict[str, str] = {
         "(status: 'int', body: 'Mapping[str, Any]', provider: 'str', reason: 'str') -> None"
     ),
     "UploadPart": (
-        "(content: 'bytes', content_type: 'str | None', provider: 'str', identity: 'bool') -> None"
+        "(content: 'bytes', content_type: 'str | None', provider: 'str', identity: 'bool',"
+        " extension: 'str | None' = None) -> None"
     ),
     "Inspection": (
         "(text: 'str | None', complete: 'bool', extractor: 'str',"
-        " proxy_credential: 'bool' = False) -> None"
+        " proxy_credential: 'bool' = False, convert_text: 'str | None' = None) -> None"
     ),
 }
 

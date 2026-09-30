@@ -2,7 +2,8 @@
 
 A BINARY file part of an upload (``upload_content.classify_file``: a PDF,
 an Office document, an image) cannot be redacted. An ``UploadInspector``
-(``plugin_api``; llm-redact-pro's document extractors) may read it as text
+(``plugin_api``; the core's ``[extraction]`` document extractors,
+``extraction.py``, unless a plugin replaces them) may read it as text
 — the core never trusts it with more than that. Per request, before
 redaction and before any upstream contact — once the upload was read and
 every check the redaction applies before looking at a value passed (part
@@ -44,7 +45,9 @@ byte-identical after a clean scan), ``clean_refused`` (scanned clean, but
 the upload was refused before any upstream contact: a value in another
 part, a block, a header rule, a credential the proxy holds that the
 inspection did not allow, a routing budget, the counted audit START row, the
-upstream authorizer), ``detected``, ``blocked``, ``incomplete`` (no text,
+upstream authorizer), ``detected``, ``blocked``, ``converted`` /
+``converted_refused`` (convert mode: replaced by its redacted text; sent or
+refused), ``incomplete`` (no text,
 a partial reading, or more text than the request's scan budgets — the
 characters, or the strings of ``max_body_strings``), ``not_inspected``
 (larger than ``max_bytes`` or past ``MAX_INSPECTED_PARTS``), ``timeout``,
@@ -79,6 +82,8 @@ MAX_INSPECTED_PARTS = 16
 OUTCOMES = (
     "clean",
     "clean_refused",
+    "converted",
+    "converted_refused",
     "detected",
     "blocked",
     "incomplete",
@@ -90,6 +95,8 @@ OUTCOMES = (
 # A declared media type handed to the inspector: ``type/subtype`` tokens
 # only (RFC 6838 restricted names), lower-cased; anything else is None.
 _MEDIA_TYPE = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*")
+# A file-name extension handed to the inspector (``UploadPart.extension``).
+_EXTENSION = re.compile(r"[a-z0-9]{1,10}")
 
 
 class Limits(NamedTuple):
@@ -131,6 +138,39 @@ def declared_type(part: MultipartPart) -> str | None:
     return media if _MEDIA_TYPE.fullmatch(media) else None
 
 
+def file_extension(part: MultipartPart) -> str | None:
+    """``UploadPart.extension``: the lower-cased extension of the part's
+    file names as its redaction reads them (``redact_filenames``, strict),
+    when every name has the same one; ``""`` when they disagree; None when
+    there is no name, no extension, one outside ``[a-z0-9]{1,10}``, or no
+    single reading of the names."""
+    names: list[str] = []
+
+    def collect(name: str) -> str:
+        names.append(name)
+        return name
+
+    try:
+        part.redact_filenames(collect, strict=True)
+    except AmbiguousHeaders:
+        return None
+    found = {_extension_of(name) for name in names}
+    if len(found) > 1:
+        return ""
+    return found.pop() if found else None
+
+
+def _extension_of(name: str) -> str | None:
+    """One file name's extension (see ``file_extension``): after the last
+    path separator, a dot that does not open the name."""
+    base = name.replace("\\", "/").rpartition("/")[2]
+    stem, dot, extension = base.rpartition(".")
+    if not dot or not stem.strip("."):
+        return None
+    extension = extension.lower()
+    return extension if _EXTENSION.fullmatch(extension) else None
+
+
 async def inspect_parts(
     inspector: UploadInspector,
     parts: Sequence[tuple[int, MultipartPart]],
@@ -158,7 +198,13 @@ async def inspect_parts(
     async def one(part: MultipartPart) -> Inspection:
         async with gate:
             return await inspector.inspect(
-                UploadPart(part.content, declared_type(part), provider, identity)
+                UploadPart(
+                    part.content,
+                    declared_type(part),
+                    provider,
+                    identity,
+                    extension=file_extension(part),
+                )
             )
 
     tasks = {asyncio.ensure_future(one(part)): index for index, part in handed}
@@ -213,6 +259,9 @@ class Judgement(NamedTuple):
     # The request's string budget ran out while scanning (max_body_strings):
     # the caller refuses it (413) once the outcomes are counted.
     over_budget: TooManyStrings | None = None
+    # Convert mode: positions whose file is replaced by its redacted text
+    # (``Inspection.convert_text``), and that text before redaction.
+    converted: Mapping[int, str] = {}
 
 
 def judge(
@@ -221,6 +270,7 @@ def judge(
     *,
     identity: bool,
     text_budget: int,
+    convertible: bool = False,
 ) -> Judgement:
     """Scan every extracted text (at most ``text_budget`` characters over
     the request: a text that would exceed it is not scanned, its part
@@ -228,8 +278,16 @@ def judge(
     one outcome: when the texts exceed the request's string budget, the
     part that ran it out and every later one read as text are
     ``incomplete`` (not scanned) and ``over_budget`` holds the
-    TooManyStrings for the caller to raise."""
+    TooManyStrings for the caller to raise.
+
+    CONVERT MODE (``convertible``: the route's provider takes a text file
+    in place of this upload's file): a COMPLETE reading holding values to
+    redact whose inspection offers a ``convert_text`` — under a credential
+    the proxy holds only with ``proxy_credential`` — is ``converted``
+    instead of ``detected``: the part is replaced by that text, redacted,
+    and the request goes on. A block-mode value still refuses."""
     cleared: set[int] = set()
+    converted: dict[int, str] = {}
     outcomes: Counter[str] = Counter()
     detected: Counter[str] = Counter()
     blocked: str | None = None
@@ -247,6 +305,7 @@ def judge(
             continue
         remaining -= len(text)
         merge_floors(floors, token_floors(text))
+        warned = Counter(redactor.warn_counts)
         try:
             found = redactor.scan_text(text)
         except BlockedRequest as exc:
@@ -257,16 +316,48 @@ def judge(
             over_budget = exc
             outcomes["incomplete"] += 1
             continue
-        if found:
+        allowed = not identity or result.proxy_credential is True
+        convert = found and _converts(result, convertible=convertible, allowed=allowed)
+        if convert and len(result.convert_text or "") <= remaining:
+            # The text sent in the file's place counts against the same
+            # budget (it is redacted as one more text).
+            text = result.convert_text or ""
+            remaining -= len(text)
+            converted[index] = text
+            # The text sent is not the text scanned (a display reading
+            # joins what the full one keeps apart): its placeholders bound
+            # the request's new numbers too.
+            merge_floors(floors, token_floors(text))
+            # Its redaction counts the warn-mode values it forwards: the
+            # scan's count of them would be a second one.
+            _uncount(redactor.warn_counts, Counter(redactor.warn_counts) - warned)
+            outcomes["converted"] += 1
+        elif found:
             detected.update(found)
             outcomes["detected"] += 1
         elif result.complete is not True:
             outcomes["incomplete"] += 1
         else:
             outcomes["clean"] += 1
-            if not identity or result.proxy_credential is True:
+            if allowed:
                 cleared.add(index)
-    return Judgement(frozenset(cleared), outcomes, detected, blocked, floors, over_budget)
+    return Judgement(
+        frozenset(cleared), outcomes, detected, blocked, floors, over_budget, converted
+    )
+
+
+def _uncount(counts: Counter[str], extra: Counter[str]) -> None:
+    """``extra`` taken back out of ``counts`` (no type left at zero)."""
+    for key, n in extra.items():
+        counts[key] -= n
+        if counts[key] <= 0:
+            del counts[key]
+
+
+def _converts(result: Inspection, *, convertible: bool, allowed: bool) -> bool:
+    """Whether a reading holding values replaces its file (convert mode)."""
+    text = getattr(result, "convert_text", None)
+    return convertible and allowed and result.complete is True and isinstance(text, str)
 
 
 class BinaryValuesDetected(UnredactableRequest):

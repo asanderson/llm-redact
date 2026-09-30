@@ -61,6 +61,7 @@ from llm_redact.providers.base import (
     InspectedUpload,
     ProviderAdapter,
     RouteKind,
+    UploadReading,
 )
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
@@ -503,6 +504,52 @@ def checked_reading(reading: PartsReading | None) -> PartsReading | None:
         if reading.binary_parts():
             reading.require_readable()
     return reading
+
+
+# Purposes whose Files upload the provider reads as a document of any text
+# format (file search, file inputs): a converted file is sent for these only.
+_TEXT_FILE_PURPOSES = frozenset({b"assistants", b"user_data"})
+# How the part loop reads a part it converted: a text file now.
+_CONVERTED = _Reading("document")
+_TEXT_PLAIN = b"Content-Type: text/plain; charset=utf-8"
+
+
+def convert_part(part: multipart.MultipartPart, text: str, redactor: Redactor) -> bool:
+    """Convert mode: a binary file part replaced by its extracted ``text``,
+    redacted as a text upload is (ONE text; placeholders issued), as a
+    UTF-8 ``text/plain`` part whose file names end ``.txt`` (redacted
+    too). The part's other headers stay as they were."""
+    part.redact_filenames(lambda name: text_file_name(redactor.redact_text(name)), strict=True)
+    part.headers = with_content_type(part.headers or b"", _TEXT_PLAIN)
+    part.content = redactor.redact_text(text).encode("utf-8")
+    return True
+
+
+def text_file_name(name: str) -> str:
+    """``name`` with its extension replaced by ``.txt`` (added when it has
+    none)."""
+    stem, dot, extension = name.rpartition(".")
+    if dot and stem.strip(".") and not {"/", "\\"} & set(extension):
+        return f"{stem}.txt"
+    return f"{name}.txt"
+
+
+# Part header fields that describe the file's bytes: replaced (the type) or
+# dropped (a length) when the part becomes text.
+_BYTES_HEADERS = frozenset({b"content-type", b"content-length"})
+
+
+def with_content_type(headers: bytes, line: bytes) -> bytes:
+    """A part's header block with its Content-Type field replaced by
+    ``line`` (added when it has none) and any Content-Length dropped. The
+    block passed the strict header reading: CRLF-separated ``name: value``
+    lines, each field at most once."""
+    lines = [
+        entry
+        for entry in (headers.split(b"\r\n") if headers else [])
+        if entry.partition(b":")[0].strip().lower() not in _BYTES_HEADERS
+    ]
+    return b"\r\n".join([*lines, line])
 
 
 def reading_of(inspected: InspectedUpload | None) -> PartsReading | None:
@@ -1239,6 +1286,23 @@ class OpenAIAdapter(ProviderAdapter):
             )
         )
 
+    def converts_upload(self, path: str, reading: UploadReading) -> bool:
+        # A code interpreter container reads any text file; a Files upload
+        # takes one for file search and file inputs (purpose assistants or
+        # user_data — one purpose, exactly as sent). Never the media routes
+        # (the part IS the image or video), a batch or fine-tuning file
+        # (JSONL the provider runs), vision or evals.
+        if path.endswith(_PROMPT_FIELD_PATH_SUFFIXES) or not isinstance(reading, PartsReading):
+            return False
+        if _CONTAINER_FILES_RE.search(path):
+            return True
+        purposes = {
+            part.content
+            for part in reading.parsed.parts
+            if part.name == "purpose" and part.filename is None
+        }
+        return len(purposes) == 1 and purposes.pop() in _TEXT_FILE_PURPOSES
+
     def read_form_upload(
         self,
         path: str,
@@ -1314,6 +1378,7 @@ class OpenAIAdapter(ProviderAdapter):
             return None
         parsed, readings, request_keys = upload
         cleared = inspected.cleared if inspected is not None else frozenset()
+        converted = inspected.converted if inspected is not None else {}
         if may_carry_tokens(body):
             # Token floors from the WHOLE upload before any part is redacted:
             # a token in a later line bounds the numbers an earlier line's
@@ -1323,6 +1388,9 @@ class OpenAIAdapter(ProviderAdapter):
         originals = [part.content for part in parsed.parts]
         try:
             for index, (part, reading) in enumerate(zip(parsed.parts, readings, strict=True)):
+                if index in converted and reading.kind == "binary":
+                    changed |= convert_part(part, converted[index], redactor)
+                    continue
                 changed |= self._redact_part(
                     part,
                     reading,
@@ -1336,8 +1404,13 @@ class OpenAIAdapter(ProviderAdapter):
             # Only reachable with require_scanned (strict header reads): a part
             # header without a single reading is never signed.
             raise UnredactableRequest(str(exc)) from None
-        record_raw_texts(parsed.parts, originals, readings, remember_text)
-        binary = uncleared_binaries(readings, cleared)
+        # A converted part is a text file now: remembered for its download.
+        as_sent = [
+            _CONVERTED if index in converted and reading.kind == "binary" else reading
+            for index, reading in enumerate(readings)
+        ]
+        record_raw_texts(parsed.parts, originals, as_sent, remember_text)
+        binary = uncleared_binaries(as_sent, cleared)
         if binary and forward_binary is not None:
             # Every piece was read or allowed: these go out unscanned (a
             # cleared one was read, through its extracted text).

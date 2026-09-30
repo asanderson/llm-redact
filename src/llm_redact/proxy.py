@@ -771,13 +771,21 @@ class ProxyState:
         # identity. Empty unless configured; the Free default fails closed.
         self.upstream_auth: dict[str, UpstreamAuth] = _build_upstream_auths(config.providers)
         # Binary upload parts (PDFs, Office documents) read as text for the
-        # core to scan (plugin_api.UploadInspector, llm-redact-pro): None
-        # keeps the unscanned-binary rules. Restart-only (its config section
-        # is the plugin's): built once with the resolved tier, its declared
-        # bounds read once (upload_inspection.inspector_limits).
+        # core to scan (plugin_api.UploadInspector: the core's [extraction]
+        # extractors unless a plugin replaces the factory): None keeps the
+        # unscanned-binary rules. Restart-only: built once with the resolved
+        # tier, its declared bounds read once (inspector_limits).
         self.upload_inspector: UploadInspector | None = registry.build_upload_inspector(
             config, self.license.tier
         )
+        if config.extraction.enabled and self.upload_inspector is None:
+            # A plugin's factory that predates the core's [extraction] (it
+            # read the section from its own config) would silently drop it.
+            raise ConfigError(
+                "[extraction] enabled = true, but the registered upload inspector factory"
+                " (a plugin's) built none: upgrade the plugin (llm-redact-pro) to a version"
+                " that leaves [extraction] to the core"
+            )
         self.inspection_limits: Limits | None = (
             inspector_limits(self.upload_inspector) if self.upload_inspector is not None else None
         )
@@ -3679,7 +3687,13 @@ async def _inspect_upload(
     )
     # Other requests redacted while this one waited: their counts are theirs.
     window.restart()
-    verdict = judge(results, redactor, identity=identity, text_budget=max_body_bytes)
+    verdict = judge(
+        results,
+        redactor,
+        identity=identity,
+        text_budget=max_body_bytes,
+        convertible=adapter.converts_upload(path, reading),
+    )
     outcomes.update(verdict.outcomes)
     # Counts and outcomes only — never a file name, a type found or content.
     logger.info(
@@ -3695,7 +3709,7 @@ async def _inspect_upload(
         raise BlockedRequest(verdict.blocked)
     if verdict.detected:
         raise BinaryValuesDetected(verdict.detected)
-    return InspectedUpload(reading, verdict.cleared), verdict.floors
+    return InspectedUpload(reading, verdict.cleared, verdict.converted), verdict.floors
 
 
 class _RefusedBeforeInspection(Exception):
@@ -3735,12 +3749,14 @@ def _count_inspections(
     refused (a value in another part, a block, a header rule, a credential
     the proxy holds that the inspection did not allow, or any refusal after
     redaction: the upstream authorizer, a routed budget) is
-    ``clean_refused``, never reported as forwarded. (No upstream configured
-    and a failed ``[audit] required`` START row refuse before the inspection:
-    nothing is inspected, so nothing is counted.)"""
+    ``clean_refused``, never reported as forwarded — and a part converted to
+    its redacted text (convert mode) ``converted`` or ``converted_refused``
+    alike. (No upstream configured and a failed ``[audit] required`` START
+    row refuse before the inspection: nothing is inspected, so nothing is
+    counted.)"""
     for outcome, count in outcomes.items():
-        if outcome == "clean" and not sent:
-            outcome = "clean_refused"
+        if outcome in ("clean", "converted") and not sent:
+            outcome = f"{outcome}_refused"
         state.inspected_uploads[(provider_name, outcome)] += count
 
 

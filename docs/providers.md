@@ -203,7 +203,10 @@ refused), and bytes outside every part (a multipart preamble or epilogue)
 are refused. So is
 a part header without a single reading — a folded or repeated header
 line, a filename holding a backslash that is not a `\"` or `\\` escape, a
-malformed `filename*` or one in a charset other than UTF-8 — and a part
+malformed `filename*` or one in a charset other than UTF-8, or a part with
+no header/body separator that is neither empty nor opens with an empty
+header block (a reader accepting a bare LF as a line break would find
+headers in it the proxy never read) — and a part
 the proxy could not read as its plain bytes: a Content-Transfer-Encoding
 other than `7bit`/`8bit`/`binary` on any part (RFC 7578 deprecates them),
 or, on a part whose content is scanned, a declared charset other than

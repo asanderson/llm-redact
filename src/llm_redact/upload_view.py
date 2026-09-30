@@ -62,8 +62,9 @@ outside the canonical grammar, a part header without one reading or a part
 without a header block (as for a form upload), a
 Content-Transfer-Encoding or a charset the proxy does not decode, another
 declared type, content that is not UTF-8 text or not a JSON object, or
-JSON nested too deep. The
-media part is not read here (a file's content is not a request body).
+JSON nested too deep — or any later part without a header block (every
+reader must find where each part's content starts). The media part is not
+read here (a file's content is not a request body).
 """
 
 from __future__ import annotations
@@ -171,6 +172,11 @@ def read_upload_metadata(body: bytes, boundary: bytes) -> UploadView:
     part = parsed.parts[0]
     try:
         metadata, repeated = _read_metadata(part)
+        for media in parsed.parts[1:]:
+            # The media is not read, but every reader must find where each
+            # part's content starts: a header block a lenient reader ends
+            # elsewhere hides a transfer encoding the proxy never read.
+            _require_header_block(media)
     except _Unreadable as exc:
         return UploadView(None, problem=str(exc))
     if repeated is None:
@@ -234,15 +240,21 @@ def _read_metadata(
     return metadata, (start, end) if duplicate_keys else None
 
 
+def header_block_found(part: multipart.MultipartPart) -> bool:
+    """Whether every reader finds ``part``'s header block where
+    ``multipart.parse`` does: a part without a header/body separator has
+    one reading only when it is empty or opens with CRLF (an empty header
+    block). Otherwise a strict reader takes its first lines for headers,
+    and one accepting a bare LF as a line break ends them at a bare-LF
+    blank line, reading what follows as the part's content — a file name,
+    a transfer encoding or a charset nobody read. Shared with the
+    redaction's part loop (``openai._require_header_block``)."""
+    return part.headers is not None or not part.content or part.content.startswith(b"\r\n")
+
+
 def _require_header_block(part: multipart.MultipartPart) -> None:
-    """Raise _Unreadable when every reader may not find ``part``'s header
-    block where the check does: a part without a header/body separator
-    has one reading only when it is empty or opens with CRLF (an empty
-    header block). Otherwise a strict reader takes its first lines for
-    headers, and one accepting a bare LF as a line break ends them at a
-    bare-LF blank line, reading what follows as the part's content — none
-    of it where the check reads it."""
-    if part.headers is None and part.content and not part.content.startswith(b"\r\n"):
+    """Raise _Unreadable unless ``header_block_found``."""
+    if not header_block_found(part):
         raise _Unreadable(AMBIGUOUS)
 
 

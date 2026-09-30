@@ -33,8 +33,8 @@ and tags `vX.Y.Z`.
   there and reads what follows as the part's content — a Gemini upload's metadata (a
   chosen file name) the stored-object check never saw, or file lines redaction never
   scanned. Such an upload is refused 400 wherever redaction applies and under a
-  credential the proxy holds, on every multipart route. So is, for the stored-object
-  check, a part with no header block that does not open with an empty one.
+  credential the proxy holds, on every multipart route. So is a part with no header
+  block that does not open with an empty one (see Fixed).
 - A multipart request's boundary is read only when its Content-Type has one reading:
   a repeated `boundary` parameter (`boundary=a; boundary=b`, which a reader taking
   the last one parses with `b`), a quoted value holding `;` or an escape (which a
@@ -183,6 +183,15 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- A multipart part with no header/body separator (no CRLF CRLF) was redacted as a
+  plain field with no header at all, while a reader accepting a bare LF as a line
+  break finds headers in it: a file name, a `Content-Transfer-Encoding` (a
+  quoted-printable address no detector matches, base64 hiding a binary file) or a
+  charset the proxy never read. Such a part is now refused 400 wherever redaction
+  applies (whatever the credential) and wherever the stored-object check reads the
+  upload, on every multipart route and every part — the Gemini API upload's media
+  too — before any part is handed to an upload inspector. An empty part, or one
+  opening with an empty header block (CRLF), is still read.
 - A realtime client frame holding JSON the parser refuses for anything but its syntax
   (an integer longer than Python's 4300-digit limit) counted as "not JSON", so under
   the client's own key it was relayed as sent — neither redacted nor put to the session

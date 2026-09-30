@@ -66,7 +66,12 @@ from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
 from llm_redact.upload_content import BINARY, FileContent, classify_file
-from llm_redact.upload_view import PLAIN_CHARSETS, PLAIN_TRANSFER_ENCODINGS
+from llm_redact.upload_view import (
+    AMBIGUOUS,
+    PLAIN_CHARSETS,
+    PLAIN_TRANSFER_ENCODINGS,
+    header_block_found,
+)
 
 _FILE_CONTENT_RE = re.compile(r"/v1/files/[^/]+/content")
 # A code interpreter container's file, downloaded (uploaded, or written by
@@ -402,14 +407,16 @@ class PartsReading(NamedTuple):
 
     def require_plain_headers(self) -> None:
         """Every part's headers as the part loop requires them when every
-        piece must be scanned (``_redact_part``): one reading of its file
+        piece must be scanned (``_redact_part``): a header block every
+        reader finds (``_require_header_block``), one reading of its file
         names (the strict grammar) and plain encodings
         (``_require_plain_encoding``). Checked before the proxy hands any
         binary part to an upload inspector — which may send the file to a
-        service — so a request the redaction would refuse anyway sends
-        nothing anywhere. Raises UnredactableRequest."""
+        service — so a request the redaction would refuse for its part
+        headers sends nothing anywhere. Raises UnredactableRequest."""
         try:
             for part, reading in zip(self.parsed.parts, self.readings, strict=True):
+                _require_header_block(part)
                 part.redact_filenames(_as_is, strict=True)
                 _require_plain_encoding(
                     part,
@@ -507,6 +514,18 @@ _DECLARABLE_CHARSETS = {
     "utf-32-le": frozenset({"utf-32", "utf-32le"}),
     "utf-32-be": frozenset({"utf-32", "utf-32be"}),
 }
+
+
+def _require_header_block(part: multipart.MultipartPart) -> None:
+    """When every piece must be scanned, refuse a part without a header
+    block every reader finds (``upload_view.header_block_found``): parsed
+    here as content with no header at all, it could carry — for a reader
+    accepting a bare LF as a line break — a file name, a
+    Content-Transfer-Encoding or a charset the proxy never read, applied
+    to content it scanned as a plain field (quoted-printable hides an
+    address from every detector)."""
+    if not header_block_found(part):
+        raise UnredactableRequest(AMBIGUOUS)
 
 
 def _require_plain_encoding(
@@ -1242,6 +1261,7 @@ class OpenAIAdapter(ProviderAdapter):
         changed = part.redact_filenames(redactor.redact_text, strict=require_scanned)
         kind = reading.kind
         if require_scanned:
+            _require_header_block(part)
             _require_plain_encoding(
                 part,
                 scanned=kind not in ("media", "binary"),

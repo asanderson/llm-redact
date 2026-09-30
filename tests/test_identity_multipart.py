@@ -19,6 +19,7 @@ non-goal (like base64 media in a JSON body).
 
 from __future__ import annotations
 
+import base64
 import logging
 
 import httpx
@@ -70,6 +71,21 @@ def _jsonl(*lines: bytes) -> tuple[bytes, bytes]:
 
 PURPOSE = _field("purpose", b"batch")
 
+# Bare-LF pseudo-headers inside a part without a CRLF CRLF separator.
+_QP_PART = (
+    b'Content-Disposition: form-data; name="file"; filename="notes.txt"\n'
+    b"Content-Type: text/plain\nContent-Transfer-Encoding: quoted-printable\n\n"
+    b"contact " + EMAIL.replace("@", "=40").encode()
+)
+_BASE64_PART = (
+    b'Content-Disposition: form-data; name="file"; filename="doc.pdf"\n'
+    b"Content-Type: application/pdf\nContent-Transfer-Encoding: base64\n\n"
+    + base64.b64encode(b"%PDF-1.7\n\xe2\xe3\xcf\xd3\n(" + EMAIL.encode() + b")\n%%EOF\n")
+)
+_ASSISTANTS = b'--b\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nassistants\r\n'
+HEADERLESS_QP = _ASSISTANTS + b"--b\r\n" + _QP_PART + b"\r\n--b--\r\n"
+HEADERLESS_BASE64 = _ASSISTANTS + b"--b\r\n" + _BASE64_PART + b"\r\n--b--\r\n"
+
 # (route, body): every one holds a piece the adapter would forward unscanned.
 REFUSED: dict[str, tuple[str, bytes]] = {
     "non-utf8-field": (AZURE_FILES, _form(_field("purpose", b"\xff\xfe"), _jsonl(CLEAN_LINE))),
@@ -105,8 +121,23 @@ REFUSED: dict[str, tuple[str, bytes]] = {
             ),
         ),
     ),
+    # A part with NO header/body separator was once read as a plain field
+    # with no header at all; a reader accepting a bare LF as a line break
+    # finds a file part there, decoding quoted-printable (or base64: a
+    # binary file read as text) content nobody scanned.
+    "headerless-quoted-printable": (AZURE_FILES, HEADERLESS_QP),
+    "headerless-base64-pdf": (AZURE_FILES, HEADERLESS_BASE64),
+    "headerless-media-route": (
+        AZURE_EDITS,
+        _form(_field("prompt", b"brighter")).replace(
+            b"--b--", b"--b\r\n" + _QP_PART + b"\r\n--b--"
+        ),
+    ),
 }
 KINDS = {
+    "headerless-quoted-printable": "part header",
+    "headerless-base64-pdf": "part header",
+    "headerless-media-route": "part header",
     "non-utf8-field": "form field",
     "preamble": "preamble or epilogue",
     "epilogue": "preamble or epilogue",
@@ -191,6 +222,31 @@ async def test_detection_off_still_forwards_the_same_upload_verbatim(case: str) 
         )
     assert response.status_code == 200
     assert upstream.requests[0].content == body
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        pytest.param(b"", id="empty-part"),
+        # An EMPTY header block (the part opens with CRLF): every reader
+        # finds the content where the proxy scans it.
+        pytest.param(b"\r\ncall " + EMAIL.encode(), id="empty-header-block"),
+    ],
+)
+async def test_a_part_every_reader_finds_empty_headers_in_is_scanned_and_signed(
+    monkeypatch: pytest.MonkeyPatch, part: bytes
+) -> None:
+    _, built = _install(monkeypatch)
+    upstream = _Upstream(b"{}")
+    app = create_app(
+        _config(azure=_identity(AZURE)), upstream_transport=httpx.MockTransport(upstream)
+    )
+    body = _ASSISTANTS + b"--b\r\n" + part + b"\r\n--b--\r\n"
+    async with _client(app) as client:
+        response = await client.post(AZURE_FILES, content=body, headers=_headers())
+    assert response.status_code == 200, response.text
+    (sent,) = upstream.requests
+    assert EMAIL.encode() not in sent.content and built[0].calls[0][3] == sent.content
 
 
 @pytest.mark.parametrize("case", sorted(TEXT_FILES))

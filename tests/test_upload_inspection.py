@@ -523,8 +523,14 @@ _CTE = b"Content-Type: application/pdf\r\nContent-Transfer-Encoding: base64\r\n"
             b"Content-Type: application/pdf\r\n",
             b'Content-Type: application/pdf\r\nContent-Disposition: form-data; name="x"\r\n',
         ),
+        # A part without a header/body separator: a reader accepting a bare
+        # LF finds a transfer encoding in it the proxy never read.
+        _form(_pdf("a")).replace(
+            b"--b--",
+            b"--b\r\nContent-Type: text/plain\nContent-Transfer-Encoding: base64\n\nx\r\n--b--",
+        ),
     ],
-    ids=["transfer-encoding", "charset", "filename-charset", "repeated-disposition"],
+    ids=["transfer-encoding", "charset", "filename-charset", "repeated-disposition", "headerless"],
 )
 async def test_a_part_the_redaction_refuses_is_never_inspected(
     monkeypatch: pytest.MonkeyPatch, body: bytes

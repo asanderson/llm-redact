@@ -311,6 +311,16 @@ def test_a_part_without_a_header_block_or_an_empty_one_is_unreadable(content: by
     # blank line — neither reads the part where the check would.
     body = _related(_part(None, content), _part(b"Content-Type: text/plain", b"x"))
     assert _read(body) == UploadView(None, problem=AMBIGUOUS)
+    # The MEDIA too (every part): its content is not read, but a reader
+    # finding a transfer encoding in it decodes bytes nobody read.
+    media = _related(_part(JSON_HEAD, _meta(name="files/a")), _part(None, content))
+    assert _read(media) == UploadView(None, problem=AMBIGUOUS)
+
+
+@pytest.mark.parametrize("media", [b"", b"\r\nhello"], ids=["empty", "empty-header-block"])
+def test_a_media_part_every_reader_finds_empty_headers_in_is_read_past(media: bytes) -> None:
+    body = _related(_part(JSON_HEAD, _meta(name="files/a")), _part(None, media))
+    assert _read(body) == UploadView({"file": {"name": "files/a"}})
 
 
 # --- through the real app -------------------------------------------------------------
@@ -632,17 +642,45 @@ async def test_without_an_ownership_check_such_a_header_block_is_refused_where_r
     assert upstream.requests == []
 
 
-async def test_without_an_ownership_check_a_part_without_a_header_block_is_redacted_whole(
-    monkeypatch: pytest.MonkeyPatch,
+# A MEDIA part without a header block: a reader accepting a bare LF finds
+# a quoted-printable transfer encoding hiding an address nobody scanned.
+HEADLESS_MEDIA = _related(
+    _part(JSON, _meta(displayName="notes")),
+    _part(
+        None,
+        b"Content-Type: text/plain\nContent-Transfer-Encoding: quoted-printable\n\ncontact "
+        + EMAIL.replace("@", "=40").encode(),
+    ),
+)
+
+
+@pytest.mark.parametrize("body", [HEADLESS, HEADLESS_MEDIA], ids=["metadata", "media"])
+@pytest.mark.parametrize("check", [True, False], ids=["checked", "free-core"])
+async def test_a_part_without_a_header_block_is_refused_where_redaction_applies(
+    body: bytes, check: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # No header block at all: redaction reads the whole part as a file,
-    # whatever a server finds in it.
+    # Every part of the upload, whether or not a stored-object check reads
+    # it: redaction once read such a part as a whole file (the metadata's
+    # headers included), whatever a server finds in it.
     upstream = FilesAPI()
-    app = _app(monkeypatch, OlderRouter(), upstream, operator=False)
-    response = await _post(app, HEADLESS)
-    assert response.status_code == 200, response.text
-    (sent,) = upstream.requests
-    assert EMAIL.encode() not in sent.content and "«EMAIL_001»".encode() in sent.content
+    app = _app(monkeypatch, NameRouter() if check else OlderRouter(), upstream, operator=False)
+    response = await _post(app, body)
+    assert response.status_code == 400, response.text
+    assert AMBIGUOUS in response.json()["error"]["message"]
+    assert upstream.requests == [] and EMAIL not in response.text
+
+
+@pytest.mark.parametrize("detection", DETECTION)
+async def test_a_media_part_without_a_header_block_is_never_sent_with_the_proxys_credential(
+    detection: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    router = NameRouter()
+    upstream = FilesAPI()
+    app = _app(monkeypatch, router, upstream, operator=True, detection=detection)
+    response = await _post(app, HEADLESS_MEDIA)
+    assert response.status_code == 400, response.text
+    assert AMBIGUOUS in response.json()["error"]["message"]
+    assert upstream.requests == [] and router.checks == []
 
 
 # A multipart/related content type with more than one reading: canonical

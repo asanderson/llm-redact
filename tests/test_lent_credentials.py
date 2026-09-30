@@ -70,7 +70,9 @@ UNRECOGNIZED = [
     ("POST", "/v1/fine_tuning/checkpoints/c1/permissions", {"authorization": "Bearer sk-x"}),
     ("POST", "/v1/moderations", {"authorization": "Bearer sk-client"}),
     ("GET", "/v1/organization/admin_api_keys", {"authorization": "Bearer sk-client"}),
-    ("POST", "/v1/files", {"anthropic-version": "2023-06-01", "x-api-key": "lrk_user"}),
+    ("POST", "/v1/skills", {"anthropic-version": "2023-06-01", "x-api-key": "lrk_user"}),
+    ("POST", "/upload/v1beta/files?upload_id=u1", {"x-goog-upload-command": "upload, finalize"}),
+    ("POST", "/v1beta/files:register", {"x-goog-api-key": "AIza"}),
     ("POST", "/api/create", {}),
 ]
 
@@ -161,6 +163,13 @@ async def test_a_no_route_refusal_for_an_unrecognized_route_precedes_the_body_re
         ("GET", "/api/tags", {}),
         ("POST", "/api/show", {}),
         ("GET", "/v1beta/models", {"x-goog-api-key": "AIza"}),
+        ("GET", "/v1beta/batches/b1", {"x-goog-api-key": "AIza"}),
+        ("GET", "/v1beta/batches", {"x-goog-api-key": "AIza"}),
+        ("DELETE", "/v1beta/batches/b1", {"x-goog-api-key": "AIza"}),
+        ("GET", "/v1beta/files/f1", {"x-goog-api-key": "AIza"}),
+        ("DELETE", "/v1beta/files/f1", {"x-goog-api-key": "AIza"}),
+        ("GET", "/v1/files/file_1", {"anthropic-version": "2023-06-01", "x-api-key": "lrk"}),
+        ("DELETE", "/v1/files/file_1", {"anthropic-version": "2023-06-01", "x-api-key": "lrk"}),
     ],
 )
 async def test_recognized_metadata_routes_keep_working_under_a_proxy_held_credential(

@@ -5,6 +5,7 @@ from typing import Any
 
 from llm_redact.eventstream import EventStreamMessage
 from llm_redact.jsonwalk import loads_bounded
+from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
@@ -461,6 +462,15 @@ class ProviderAdapter(ABC):
         replaces items in it by position."""
         return None
 
+    def listing_item_id(self, item: Any) -> str | None:
+        """The stored-object id one listed item names — as this adapter's
+        ``object_ids_from_body`` reports the object when it is created — or
+        None (the item then stays as the listing's own session delivers
+        it). OpenAI-shaped listings name it ``id``; the Gemini API's name
+        it ``name`` (``files/<id>``, ``batches/<id>``)."""
+        value = item.get("id") if isinstance(item, dict) else None
+        return value if isinstance(value, str) else None
+
     @abstractmethod
     def rehydrate_event(self, event: SSEEvent, pool: RehydratorPool) -> list[SSEEvent]:
         """Rewrite one SSE event; may inject synthetic flush events."""
@@ -488,7 +498,8 @@ class ProviderAdapter(ABC):
         require_scanned: bool = False,
         forward_binary: Callable[[int], None] | None = None,
     ) -> bytes | None:
-        """Rewrite a multipart/form-data request body for ``path``.
+        """Rewrite a multipart request body for ``path`` (delimited by the
+        ``boundary`` ``multipart_boundary`` read).
 
         None means "nothing changed" — the proxy forwards the original
         bytes. Raising BlockedRequest rejects the whole request: one
@@ -521,6 +532,36 @@ class ProviderAdapter(ABC):
         scans. Consulted by the scanned-body rule: a multipart body on any
         other route is refused rather than forwarded unscanned."""
         return False
+
+    def multipart_boundary(self, path: str, content_type: str) -> bytes | None:
+        """The multipart boundary of a request body on ``path`` with this
+        ``content_type``, or None when the body is not multipart as this
+        route reads it. multipart/form-data everywhere; an adapter whose
+        upload route speaks another multipart type (the Gemini API's
+        multipart/related upload) accepts it on that route only."""
+        return parse_multipart_boundary(content_type)
+
+    def proxy_credential_refusal(
+        self,
+        method: str,
+        path: str,
+        headers: "Mapping[str, str]",
+        query: str,
+    ) -> str | None:
+        """Why this RECOGNIZED request must not be sent with a credential
+        the PROXY holds (its cloud identity, a routed operator key), or
+        None. The proxy answers such a request with a recorded 403 before
+        it redacts or sends anything — for a protocol whose answer would
+        hand the client a capability minted under the proxy's credential
+        (the Gemini API's resumable upload URL, whose data chunks go
+        straight to the provider, unread). The message names the protocol,
+        never a value."""
+        return None
+
+    # Response headers carrying a capability the provider minted for the
+    # request's credential (an upload session URL): never relayed to a
+    # client when that credential is the proxy's.
+    capability_response_headers: frozenset[str] = frozenset()
 
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
         """Rehydrate a buffered non-JSON response body (None = untouched).

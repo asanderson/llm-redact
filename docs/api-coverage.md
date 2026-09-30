@@ -1,7 +1,7 @@
 # API coverage matrix
 
 Every documented Anthropic and OpenAI endpoint, and the commonly used
-Vertex AI, Azure OpenAI and Bedrock runtime endpoints, with the
+Gemini API, Vertex AI, Azure OpenAI and Bedrock runtime endpoints, with the
 classification the proxy applies. Enumerated against docs.anthropic.com and
 platform.openai.com as of **2026-07**, and against the Vertex AI v1 REST
 reference, the Azure OpenAI REST reference (2024-10-21 GA + the `OpenAI.v1`
@@ -79,8 +79,11 @@ is never lent to one (above).
 | `GET /v1/models` | redact-only | with `anthropic-version` (every Anthropic SDK request carries it): the model listing, metadata only |
 | `GET /v1/models/{id}` | redact-only | with `anthropic-version` |
 | `POST /v1/complete` | chat | legacy Text Completions: prompt redacted, completion restored (streaming included); no system note (the body has no system field) |
-| `POST /v1/files` (with `anthropic-version`) | pass-through | beta Files API: the uploaded document is media (the non-goal) |
-| `GET /v1/files/{id}/content` (with `anthropic-version`) | pass-through | the document back, verbatim |
+| `POST /v1/files` (with `anthropic-version`) | chat | beta Files API upload (multipart/form-data): read by content exactly as the OpenAI Files upload (the same code): a JSONL file's lines redacted as JSON, any other text file as one text re-encoded as it came, every part's file name redacted; a BINARY document (a PDF — even an all-ASCII one —, an image) is forwarded unscanned with the client's own key (`binary_uploads = "forward"`, counted) and refuses the upload (400) under `"refuse"` or a credential the proxy holds, as does anything it cannot read; the file object answering it echoes the filename, restored, and is reported to a session router as its creator's |
+| `GET /v1/files` (with `anthropic-version`) | chat | the file list (`{"data": [...]}`): each echoed filename restored in the request's own session, or — with a session router attributing listed items — each file in its creator's |
+| `GET /v1/files/{id}` (with `anthropic-version`) | chat | the file's metadata: its filename restored |
+| `GET /v1/files/{id}/content` (with `anthropic-version`) | chat | the file back (downloadable for files a tool created), restored like an OpenAI file download: a text file line by line, a binary file never read |
+| `DELETE /v1/files/{id}` (with `anthropic-version`) | redact-only | the id only |
 | `GET /v1/organizations/...` (Admin API) | pass-through | org metadata |
 | WebSocket realtime | websocket | not offered by Anthropic today |
 
@@ -104,11 +107,11 @@ so they take the protocol's `default_upstream` unless a path-matched
 rule names another; their classification is unchanged.
 
 Anthropic's beta Files API shares its paths (`/v1/files...`) with
-OpenAI's. Routing is header-aware here: requests carrying an
-`anthropic-version` header pass through to the ANTHROPIC upstream
-(their uploads are documents — the media non-goal — so pass-through is
-the correct handling, but they must reach the right host); everything
-else takes the OpenAI files handling below. Any other request with
+OpenAI's. Routing is header-aware here: a request carrying the
+`anthropic-version` header (and no other provider's marker) takes the
+Anthropic rows above and reaches the ANTHROPIC upstream; everything else
+takes the OpenAI files handling below (a request carrying the markers of
+both providers is neither's: a recorded 404). Any other request with
 `anthropic-version` that no route matches is Anthropic's too (a newer
 Anthropic API such as `/v1/skills`) — see [requests no route
 matches](#requests-no-route-matches).
@@ -200,6 +203,49 @@ matches](#requests-no-route-matches).
 | `POST /v1/realtime/client_secrets` | pass-through | an ephemeral Realtime key for a browser client; the WebSocket session itself is covered below |
 | `GET /v1/organization/...` (Admin API) | pass-through | org metadata (singular: `/v1/organizations/` is Anthropic's) |
 | WebSocket `/v1/realtime` | websocket | beta + GA event vocabularies; MCP tool config preserved, MCP arguments rehydrated |
+
+## Google Gemini API
+
+The Gemini API (`generativelanguage.googleapis.com`, `[providers.gemini]`);
+every `/v1beta/models/…` verb row also matches under `/v1/` and
+`/v1beta/tunedModels/{t}`. Batch Mode and context caches are stored or
+async (read back later with no first-message anchor), so they use the
+STATIC vault session — the batch stance; with llm-redact-pro's named users,
+the user's own copy of it — and no route here but the generate verbs and
+`countTokens` ever carries the system note.
+
+| Endpoint | Classification | Notes |
+|---|---|---|
+| `POST /v1beta/models/{m}:generateContent` | chat | text, thoughts, function-call args, code and grounding restored |
+| `POST /v1beta/models/{m}:streamGenerateContent` | chat | the SSE stream (`alt=sse`) and the buffered JSON-array form, per-candidate channels |
+| `POST /v1beta/models/{m}:countTokens` | redact-only | note counted too, keeping counts honest |
+| `POST /v1beta/models/{m}:embedContent` | redact-only | vectors back |
+| `POST /v1beta/models/{m}:batchEmbedContents` | redact-only | vectors back |
+| `POST /v1beta/models/{m}:predict` | redact-only | Imagen: `instances[].prompt` redacted, image bytes back |
+| `POST /v1beta/models/{m}:predictLongRunning` | redact-only | Veo: prompt redacted; the operation is reported to a session router as its creator's |
+| `GET /v1beta/models/{m}/operations/{id}` | pass-through | the Veo job's status |
+| `GET /v1beta/models` | redact-only | the model listing, metadata only (a body-less no-op: recognized) |
+| `GET /v1beta/models/{m}` | redact-only | one model's metadata |
+| `POST /v1beta/cachedContents` | redact-only | the cached prompt redacted; the cache (`cachedContents/<id>`, which later bodies cite as `cachedContent`) is reported to a session router |
+| `GET /v1beta/cachedContents` | pass-through | metadata only (the cached content is never returned) |
+| `GET /v1beta/cachedContents/{id}` | pass-through | |
+| `PATCH /v1beta/cachedContents/{id}` | pass-through | the expiry |
+| `DELETE /v1beta/cachedContents/{id}` | pass-through | |
+| `POST /v1beta/models/{m}:batchGenerateContent` | redact-only | Batch Mode: the inlined requests (and the display name) redacted, no note; the answer is the batch operation (`batches/<id>`), reported to a session router as its creator's — its echo keeps the placeholders (restored on the status read) |
+| `POST /v1beta/models/{m}:asyncBatchEmbedContent` | redact-only | async batch embeddings: as `:batchGenerateContent` |
+| `GET /v1beta/batches` | chat | the batch list (`{"operations": [...]}`): every batch's echo restored in the request's own session, or — with a session router attributing listed items (llm-redact-pro's named users) — each item, by its `name`, in its creator's |
+| `GET /v1beta/batches/{id}` | chat | a batch's status: the display name and a finished batch's INLINED responses (model output carrying placeholders) restored; a file-output batch names its output file, reported to a session router |
+| `POST /v1beta/batches/{id}:cancel` | redact-only | the name only |
+| `DELETE /v1beta/batches/{id}` | redact-only | the name only |
+| `PATCH /v1beta/batches/{id}:updateGenerateContentBatch` | pass-through | a pending batch's update: never sent with a credential the proxy holds |
+| `POST /upload/v1beta/files` | chat | the Files upload. The SINGLE-REQUEST protocol (`X-Goog-Upload-Protocol: multipart`, a `multipart/related` body: the JSON metadata, then the media) is redacted part by part, EVERY part read as a file by its content with the OpenAI Files upload's part loop — the metadata (one JSON line: its `displayName`), a JSONL file (a batch input file's requests) line by line as JSON, any other text file as one text re-encoded as it came, every part's file name; a BINARY file is forwarded unscanned with the client's own key (`binary_uploads = "forward"`, counted) and refuses the upload (400) under `"refuse"` or a credential the proxy holds, as does anything it cannot read. The RESUMABLE protocol's start (JSON metadata) is redacted with the client's own key, and its upload URL (Google's; the data chunks go there directly, never through llm-redact — the media gap below) relayed; under a credential the proxy holds the start is REFUSED (403) — that URL would let the client store unread bytes as the proxy's principal — and an `X-Goog-Upload-URL` answer header is never relayed. A data chunk sent to the proxy (`upload_id`, an `X-Goog-Upload-Command` other than `start`) and the raw protocol are pass-through. The File answering it: `displayName` restored, reported to a session router as its creator's |
+| `POST /v1beta/files` | chat | the metadata-only create: `displayName` redacted and restored; reported as the creator's |
+| `POST /v1beta/files:register` | pass-through | registers Cloud Storage objects the provider reads as the caller: never sent with a credential the proxy holds |
+| `GET /v1beta/files` | chat | the file list (`{"files": [...]}`): each `displayName` restored in the request's own session, or — with a session router attributing listed items — each file, by its `name`, in its creator's |
+| `GET /v1beta/files/{id}` | chat | a file's metadata: `displayName` restored |
+| `GET /v1beta/files/{id}:download` | chat | the file back, restored like an OpenAI file download: a text file line by line (a JSON line as JSON, re-escaped), a binary file never read |
+| `GET /download/v1beta/files/{id}:download` | chat | the media download a batch's output file (JSONL: model output carrying placeholders) is fetched from: as above |
+| `DELETE /v1beta/files/{id}` | redact-only | the name only |
 
 ## Google Vertex AI
 
@@ -377,29 +423,33 @@ and rehydrated inbound like any other content, on Messages, Responses
 ## Other providers
 
 Gemini **context caching** (`POST /v1beta/cachedContents`) and **Batch
-Mode** (`models/{m}:batchGenerateContent`) are redact-only: the cached
-prompt and the inlined batch requests are content that must not reach the
-provider in the clear, while their responses carry only a cache/operation
-name (nothing to rehydrate). Both are stored/async — the cache is reused
-and batch results are fetched later through the operations API with no
-first-message anchor — so they use the STATIC vault session (the batch
-stance; with llm-redact-pro's named users, the user's own copy of it),
-keeping redact/rehydrate always in agreement. The per-cache
+Mode** (`models/{m}:batchGenerateContent`, `:asyncBatchEmbedContent`) are
+redact-only: the cached prompt and the inlined batch requests are content
+that must not reach the provider in the clear, while their responses carry
+only a cache/operation name. Both are stored/async — the cache is reused
+and batch results are read later through the batch's status
+(`GET /v1beta/batches/{id}`) with no first-message anchor — so they use the
+STATIC vault session (the batch stance; with llm-redact-pro's named users,
+the user's own copy of it), keeping redact/rehydrate always in agreement:
+the status restores a finished batch's inlined responses in that session
+(see the [Gemini API table](#google-gemini-api)). The per-cache
 GET/PATCH/DELETE and list return metadata only and pass through.
 
-The Gemini **Files API** passes through — files are media, the documented
-non-goal: the upload (`POST /upload/v1beta/files`), the metadata-only
-create (`POST /v1beta/files`), `files:register`, a file's metadata, delete
-and download (`GET /v1beta/files/{id}[:download]`, `DELETE`), the list,
-and `GET /download/v1beta/files/{id}:download` (a batch's output file),
-all forwarded to the Gemini upstream. What llm-redact reads is who owns
-what: the file a create answers with (`files/<id>`), and the output file a
-finished batch's status names (`GET /v1beta/batches/{id}`), are reported to
-a session router that tracks stored objects (llm-redact-pro's named users;
-see [how-it-works.md](how-it-works.md)). The google-genai SDKs upload with
-the resumable protocol and send the data chunks — the last one answers
-with the file — to the upload URL Google returns, not through the proxy:
-such a file is created without the proxy ever seeing its name.
+The Gemini **Files API** is recognized (the [Gemini API
+table](#google-gemini-api)): the single-request upload and the
+metadata-only create are redacted, every echo of a file (the create, its
+metadata, the list) restored and its download restored when it is text,
+so a credential the proxy holds may reach it. What llm-redact reads is also
+who owns what: the file a create answers with (`files/<id>`), and the
+output file a finished batch's status names (`GET /v1beta/batches/{id}`),
+are reported to a session router that tracks stored objects
+(llm-redact-pro's named users; see [how-it-works.md](how-it-works.md)). The
+google-genai SDKs upload with the RESUMABLE protocol and send the data
+chunks — the last one answers with the file — to the upload URL Google
+returns, not through the proxy: with the client's own key such a file's
+data never passes llm-redact (its display name does, redacted), and under
+a credential the proxy holds the resumable start is refused — send the
+file in one multipart request instead.
 
 A pass-through request that carries a **Google API key**
 (`x-goog-api-key`, or a `key=`/`$key=` query parameter) or any other
@@ -439,7 +489,8 @@ fixtures + a live drift test; an unrecognized event forwards verbatim.
 
 Vertex AI, Azure OpenAI, and Bedrock routes are pinned by the tables above
 (and `tests/test_cloud_routes.py`, which also proves the matchers disjoint
-and that identity auth signs every recognized route); Gemini, Cohere, and
+and that identity auth signs every recognized route); the Gemini API table
+is pinned by `tests/test_api_coverage.py` like the others; Cohere and
 Ollama route coverage is pinned by their adapter test suites
 (`tests/test_provider_*.py`); their matched routes appear in the README's
 provider section. **Claude models
@@ -610,6 +661,12 @@ that is not there:
   `/openai/v1/evals` is not covered either — pass-through, and refused
   wherever the proxy's own credential would carry them (`auth =
   "identity"`, or a routed operator key).
+- **Gemini API resumable and raw uploads** — a resumable upload's data
+  chunks go to the upload URL Google returns (its host, not the proxy's),
+  and a data chunk or a raw-protocol upload sent to the proxy is forwarded
+  as sent (pass-through, with the client's own key; refused under a
+  credential the proxy holds, where the resumable start is refused too).
+  Only the single-request multipart upload's content is scanned.
 - **OpenAI WebRTC realtime** (`POST /v1/realtime/calls`, SDP offer/answer) —
   after setup, media and the event data channel flow peer-to-peer and never
   transit this HTTP/WS proxy at all: structurally unreachable, not merely

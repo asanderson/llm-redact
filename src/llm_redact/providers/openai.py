@@ -360,6 +360,46 @@ def _require_plain_encoding(
 BINARY_FILE = "an uploaded file is binary (not text llm-redact can redact)"
 
 
+def rehydrate_text_file(
+    raw: bytes, rehydrator: Rehydrator, restore: Callable[[Any], Any]
+) -> bytes | None:
+    """A downloaded file restored (None: left untouched), read the way an
+    uploaded one is (``upload_content.classify_file``): a binary file stays
+    untouched; a text file — JSONL (batch OUTPUT files) or any other text
+    (a results CSV, a text file uploaded redacted) — is restored line by
+    line and re-encoded as it came. ``restore`` restores one parsed JSON
+    value (the adapter's non-streaming transform). Shared by every
+    provider's file download (OpenAI/Azure/custom, the Gemini API's,
+    Anthropic's)."""
+    content = classify_file(raw)
+    if content.kind == "binary" or not may_carry_tokens(content.text):
+        return None
+    lines = content.text.split("\n")
+    restored = [_rehydrate_file_line(line, rehydrator, restore) for line in lines]
+    return content.encode("\n".join(restored)) if restored != lines else None
+
+
+def _rehydrate_file_line(line: str, rehydrator: Rehydrator, restore: Callable[[Any], Any]) -> str:
+    """One line of a downloaded text file, restored: a line holding a JSON
+    value as JSON (a restored value is escaped where it lands; a token the
+    provider wrote escaped is found), any other line as text (tokens never
+    span lines), a line nesting JSON too deep untouched. The line's own
+    surrounding whitespace (a CRLF's CR) is kept."""
+    if not may_carry_tokens(line):
+        return line
+    try:
+        value = loads_bounded(line)
+    except JsonTooDeep:
+        return line
+    except ValueError:
+        return rehydrator.rehydrate_text(line)
+    hydrated = restore(value)
+    if hydrated == value:
+        return line
+    start, end = len(line) - len(line.lstrip()), len(line.rstrip())
+    return line[:start] + json_text(hydrated) + line[end:]
+
+
 # Delta fields that carry reasoning-model chain-of-thought as a string,
 # rehydrated on their own per-choice channels exactly like `content`.
 # `reasoning_content` is DeepSeek/vLLM/Groq/xAI; `reasoning` is OpenRouter's
@@ -944,37 +984,9 @@ class OpenAIAdapter(ProviderAdapter):
     def rehydrate_raw_body(self, path: str, raw: bytes, rehydrator: Rehydrator) -> bytes | None:
         if not (_FILE_CONTENT_RE.fullmatch(path) or _CONTAINER_FILE_CONTENT_RE.fullmatch(path)):
             return None
-        # A downloaded file is read the way an uploaded one is
-        # (upload_content.classify_file): a binary file stays untouched; a
-        # text file — JSONL (batch OUTPUT files) or any other text (a
-        # fine-tune results CSV, a text file uploaded redacted) — is
-        # restored line by line and re-encoded as it came.
-        content = classify_file(raw)
-        if content.kind == "binary" or not may_carry_tokens(content.text):
-            return None
-        lines = content.text.split("\n")
-        restored = [self._rehydrate_line(line, rehydrator) for line in lines]
-        return content.encode("\n".join(restored)) if restored != lines else None
-
-    def _rehydrate_line(self, line: str, rehydrator: Rehydrator) -> str:
-        """One line of a downloaded text file, restored: a line holding a
-        JSON value as JSON (a restored value is escaped where it lands; a
-        token the provider wrote escaped is found), any other line as text
-        (tokens never span lines), a line nesting JSON too deep untouched.
-        The line's own surrounding whitespace (a CRLF's CR) is kept."""
-        if not may_carry_tokens(line):
-            return line
-        try:
-            value = loads_bounded(line)
-        except JsonTooDeep:
-            return line
-        except ValueError:
-            return rehydrator.rehydrate_text(line)
-        hydrated = self.rehydrate_body(value, rehydrator)
-        if hydrated == value:
-            return line
-        start, end = len(line) - len(line.lstrip()), len(line.rstrip())
-        return line[:start] + json_text(hydrated) + line[end:]
+        return rehydrate_text_file(
+            raw, rehydrator, lambda value: self.rehydrate_body(value, rehydrator)
+        )
 
     def rehydrate_event(self, event: SSEEvent, pool: RehydratorPool) -> list[SSEEvent]:
         if not event.data:

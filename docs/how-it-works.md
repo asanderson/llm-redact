@@ -275,7 +275,8 @@ while the vault row is the secret store and is never exported.
   OpenAI's code interpreter wrote into its container
   (`container_file_citation` annotations and a code interpreter call's
   output files, streamed ones from whichever event names them first) —
-  and the long-running jobs read back by name: Gemini API batches and Veo
+  and the long-running jobs read back by name: Gemini API batches
+  (generation and async embeddings) and Veo
   operations, Vertex Veo operations (`:predictLongRunning`, polled through
   `:fetchPredictOperation`) and Bedrock async invocations (`POST
   /async-invoke`, polled by ARN) — with the session that created them.

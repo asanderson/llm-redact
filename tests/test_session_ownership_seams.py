@@ -643,8 +643,8 @@ def test_the_gemini_files_api_is_tracked() -> None:
 async def test_a_gemini_file_upload_and_a_batch_output_are_reported(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Pass-through Gemini Files routes: the upload's answer names the file,
-    and a finished batch's status its output file — both reported with the
+    """Gemini Files routes: the upload's answer names the file, and a
+    finished batch's status its output file — both reported with the
     session that created (or first read) them."""
     router = OwnershipRouter()
     _registry(monkeypatch, build_session_router=lambda config, **kw: router)
@@ -667,7 +667,10 @@ async def test_a_gemini_file_upload_and_a_batch_output_are_reported(
         upload = await client.post(
             "/upload/v1beta/files",
             content=b"--b\r\n\r\n{}\r\n--b--",
-            headers={"x-goog-upload-protocol": "multipart", "content-type": "multipart/related"},
+            headers={
+                "x-goog-upload-protocol": "multipart",
+                "content-type": "multipart/related; boundary=b",
+            },
         )
         status = await client.get("/v1beta/batches/b1")
     assert upload.status_code == 200 and status.status_code == 200
@@ -685,7 +688,8 @@ def test_gemini_file_downloads_reach_the_gemini_upstream() -> None:
 async def test_an_anthropic_files_upload_is_reported_with_its_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # Anthropic's Files API is pass-through (the document is media); the
+    # Anthropic's Files API upload (a text document is redacted, a binary
+    # one forwarded as sent with the client's own key); the
     # anthropic-version header names the provider whose adapter tracks it.
     router = OwnershipRouter()
     _registry(monkeypatch, build_session_router=lambda config, **kw: router)

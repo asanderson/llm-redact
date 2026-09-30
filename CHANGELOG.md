@@ -51,6 +51,33 @@ and tags `vX.Y.Z`.
   `connections` block, `llm_redact_connections_closed_total{cause}`, bookkeeping
   stage `recheck`. Streaming HTTP answers are not cut (each answers a request that
   was admitted).
+- The Gemini API's Batch Mode beyond the create is recognized, so a credential the
+  proxy holds (a routed operator key) may reach it: a batch's status
+  (`GET /v1beta/batches/{id}`, the name the create answers with) and the batch list
+  restore the display name and a finished batch's INLINED responses; cancel and
+  delete are redact-only; `models/{m}:asyncBatchEmbedContent` is redact-only and
+  tracked like `:batchGenerateContent`. No batch route carries the system note.
+- The Gemini API's Files API is recognized: the single-request upload
+  (`X-Goog-Upload-Protocol: multipart`, a `multipart/related` body) and the
+  metadata-only create are redacted part by part with the OpenAI Files upload's
+  content policy (every part read as a file by its content; a binary file forwarded
+  unscanned only with the client's own key under `binary_uploads = "forward"`,
+  counted in `unscanned_uploads`); a file's metadata and the file list restore each
+  `displayName`; the download (`…:download`, `/download/v1beta/…:download`) is
+  restored like an OpenAI file download; delete is redact-only. A RESUMABLE upload's
+  start is refused (403) under a credential the proxy holds — its upload URL would
+  carry the file's data to Google unread, as the proxy's principal — and an
+  `X-Goog-Upload-URL` answer header is never relayed there; data chunks and the raw
+  protocol stay pass-through (the client's own key only).
+- Anthropic's Files API (beta, a request carrying `anthropic-version` alone) is
+  recognized: the upload uses the OpenAI Files upload unchanged, every file object's
+  echoed filename is restored (upload answer, list, metadata), a file's content is
+  restored like an OpenAI file download, delete is redact-only.
+- Optional adapter hooks: `listing_item_id` (a listed item's id: `id`, Gemini
+  `name`), `multipart_boundary` (a route reading another multipart type),
+  `proxy_credential_refusal` (a recognized protocol never served with a proxy-held
+  credential: recorded 403) and `capability_response_headers` (never relayed under
+  one). `openai.rehydrate_text_file` is the one file-download restoration.
 - OpenAI fine-tuning jobs, vector stores and code interpreter containers are
   recognized (OpenAI, both Azure families — containers on the v1 API only — and
   custom providers), so a routed operator key or cloud identity may reach them.
@@ -74,7 +101,16 @@ and tags `vX.Y.Z`.
   permissions stay pass-through, and the Uploads API stays unrecognized (a part is
   an opaque byte range; documented in docs/api-coverage.md).
 
+### Changed
+- Recognized upload routes are capped by `max_body_bytes` (default 10 MiB):
+  Anthropic Files and Gemini Files uploads over the cap sent with the client's own
+  key used to pass through unscanned and are now refused 413 — raise
+  `max_body_bytes` for larger files.
+
 ### Fixed
+- A buffered file download served as JSON Lines under a JSON content type
+  (`application/jsonl` contains `application/json`) is restored through the
+  adapter's file-download restoration instead of being left unrestored.
 - The app lifespan tolerates `add_signal_handler` raising `ValueError` (uvloop off the
   main thread) alongside `NotImplementedError` and `RuntimeError`; SIGHUP reload is
   then unavailable, as on Windows.

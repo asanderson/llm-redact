@@ -164,22 +164,27 @@ def read_upload_metadata(body: bytes, boundary: bytes) -> UploadView:
         return UploadView({})  # no part at all: no metadata
     part = parsed.parts[0]
     try:
-        metadata, duplicate_keys = _read_metadata(part)
+        metadata, repeated = _read_metadata(part)
     except _Unreadable as exc:
         return UploadView(None, problem=str(exc))
-    if not duplicate_keys:
+    if repeated is None:
         return UploadView(metadata)
     # A repeated key: the part is sent as it was read (its LAST occurrence),
-    # never with an earlier one a first-wins provider would act on.
-    part.content = json_bytes(metadata)
+    # never with an earlier one a first-wins provider would act on. Only the
+    # JSON text changes: the bytes around it (an empty header block's CRLF,
+    # whitespace, a byte-order mark) stay, so the part keeps its shape.
+    start, end = repeated
+    part.content = part.content[:start] + json_bytes(metadata) + part.content[end:]
     return UploadView(metadata, normalized=parsed.serialize())
 
 
-def _read_metadata(part: multipart.MultipartPart) -> tuple[dict[str, Any], bool]:
-    """The metadata object ``part`` holds (``{}`` when it is blank) and
-    whether it repeats a key. Raises _Unreadable for what the check cannot
-    read. A part with an empty header block is read too (see
-    ``_require_header_block``)."""
+def _read_metadata(
+    part: multipart.MultipartPart,
+) -> tuple[dict[str, Any], tuple[int, int] | None]:
+    """The metadata object ``part`` holds (``{}`` when it is blank) and,
+    when it repeats a key, the span of its JSON text in the part's content
+    (else None). Raises _Unreadable for what the check cannot read. A part
+    with an empty header block is read too (see ``_require_header_block``)."""
     _require_header_block(part)
     if part.headers is not None:
         try:
@@ -192,9 +197,16 @@ def _read_metadata(part: multipart.MultipartPart) -> tuple[dict[str, Any], bool]
         charset = content_type.get("charset")
         if charset is not None and charset.value.lower() not in PLAIN_CHARSETS:
             raise _Unreadable(CHARSET)
-    content = part.content.strip().removeprefix(_UTF8_BOM)
+    # The JSON text: past the whitespace ``bytes.strip`` drops and at most
+    # one byte-order mark.
+    raw = part.content
+    start = len(raw) - len(raw.lstrip())
+    if raw.startswith(_UTF8_BOM, start):
+        start += len(_UTF8_BOM)
+    end = len(raw.rstrip())
+    content = raw[start:end]
     if not content:
-        return {}, False
+        return {}, None
     try:
         text = content.decode()  # strict UTF-8
     except UnicodeDecodeError:
@@ -207,7 +219,7 @@ def _read_metadata(part: multipart.MultipartPart) -> tuple[dict[str, Any], bool]
         raise _Unreadable(METADATA_NOT_OBJECT) from None
     if not isinstance(metadata, dict):
         raise _Unreadable(METADATA_NOT_OBJECT)
-    return metadata, duplicate_keys
+    return metadata, (start, end) if duplicate_keys else None
 
 
 def _require_header_block(part: multipart.MultipartPart) -> None:

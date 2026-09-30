@@ -177,6 +177,31 @@ def test_a_repeated_key_is_read_as_its_last_occurrence_and_sent_so() -> None:
     assert view.normalized == body.replace(repeated, '{"file": {"displayName": "«"}}'.encode())
 
 
+REPEATED = b'{"file": {"displayName": "x"}, "file": {"displayName": "y"}}'
+JSON_HEAD = b"Content-Type: application/json"
+LAST = b'{"file": {"displayName": "y"}}'
+
+
+@pytest.mark.parametrize(
+    ("head", "before", "after"),
+    [
+        # An EMPTY header block: the part opens with CRLF, which must stay —
+        # without it a reader would take the JSON for a header line.
+        pytest.param(None, b"\r\n", b"", id="empty-header-block"),
+        pytest.param(JSON_HEAD, b"", b"", id="bare"),
+        pytest.param(JSON_HEAD, b" \r\n\xef\xbb\xbf", b"\r\n \t", id="whitespace-and-bom"),
+        pytest.param(JSON_HEAD, b"\t", b"\n", id="whitespace"),
+    ],
+)
+def test_only_the_json_text_of_a_repeated_key_part_is_rewritten(
+    head: bytes | None, before: bytes, after: bytes
+) -> None:
+    media = _part(b"Content-Type: text/plain", b"hello")
+    view = _read(_related(_part(head, before + REPEATED + after), media))
+    assert view.cited == {"file": {"displayName": "y"}}
+    assert view.normalized == _related(_part(head, before + LAST + after), media)
+
+
 @pytest.mark.parametrize(
     ("body", "problem"),
     [
@@ -415,6 +440,25 @@ async def test_a_repeated_key_is_sent_exactly_as_it_was_checked(
         assert TAKEN.encode() not in upstream.requests[0].content
     else:
         assert upstream.requests == []
+
+
+@pytest.mark.parametrize("detection", DETECTION)
+@pytest.mark.parametrize("operator", CREDENTIALS)
+async def test_a_repeated_key_part_with_an_empty_header_block_keeps_it(
+    operator: bool, detection: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Sent exactly as checked: the part still opens with its empty header
+    # block, so every reader finds the metadata as its CONTENT (without the
+    # CRLF a reader takes the JSON for a malformed header line).
+    router = NameRouter()
+    upstream = FilesAPI()
+    app = _app(monkeypatch, router, upstream, operator=operator, detection=detection)
+    body = _related(_part(None, b"\r\n" + REPEATED), _part(b"Content-Type: text/plain", b"hello"))
+    response = await _post(app, body)
+    assert response.status_code == 200, response.text
+    assert [check[3] for check in router.checks] == [{"file": {"displayName": "y"}}]
+    (sent,) = upstream.requests
+    assert sent.content.startswith(b"--b\r\n\r\n" + LAST + b"\r\n--b\r\n")
 
 
 @pytest.mark.parametrize("detection", DETECTION)

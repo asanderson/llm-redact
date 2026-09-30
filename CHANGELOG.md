@@ -19,7 +19,9 @@ and tags `vX.Y.Z`.
   exactly as it is handed the metadata-only JSON create's body, before anything is
   sent, under the client's own key and a credential the proxy holds alike. It is read
   like a JSON body (strict UTF-8, repeated keys last-wins, at most 128 levels deep); a
-  metadata part repeating a key is sent re-serialized, exactly as checked. Metadata the
+  metadata part repeating a key is sent re-serialized, exactly as checked (only its JSON
+  text is rewritten: an empty header block's CRLF, whitespace and a byte-order mark
+  around it stay, so the part keeps its shape). Metadata the
   check cannot read (lenient or non-UTF-8 JSON, a transfer encoding, a foreign charset,
   no JSON metadata first) is refused 400 under a credential the proxy holds and, with
   the client's own key, wherever redaction applies; only with `detection = false` and

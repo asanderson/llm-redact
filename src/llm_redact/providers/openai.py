@@ -41,7 +41,7 @@ router (llm-redact-pro's named users) makes that the user's own copy.
 import hashlib
 import re
 from collections import OrderedDict
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any, NamedTuple
 
 from llm_redact import multipart
@@ -506,6 +506,19 @@ class _RawTextFiles:
 
 
 RAW_TEXT_FILES = _RawTextFiles()
+
+
+def record_raw_texts(
+    parts: Sequence[multipart.MultipartPart], originals: Sequence[bytes], readings: Sequence[Any]
+) -> None:
+    """Remember every text part an ACCEPTED upload redacted as ONE text
+    (values landing raw), so its download is restored as the text it was
+    (``rehydrate_text_file``). Called once the whole upload was redacted —
+    a request refused part way through records nothing, so refused
+    requests cannot evict what accepted ones recorded."""
+    for part, original, reading in zip(parts, originals, readings, strict=True):
+        if reading.kind == "document" and part.content is not original:
+            RAW_TEXT_FILES.record(part.content)
 
 
 def rehydrate_text_file(
@@ -1087,6 +1100,7 @@ class OpenAIAdapter(ProviderAdapter):
             redactor = redactor.with_floors(_multipart_floors(parsed, readings))
         request_keys = _request_line_keys(path, parsed) if request_purposes else frozenset()
         changed = False
+        originals = [part.content for part in parsed.parts]
         try:
             for part, reading in zip(parsed.parts, readings, strict=True):
                 changed |= self._redact_part(
@@ -1102,6 +1116,7 @@ class OpenAIAdapter(ProviderAdapter):
             # Only reachable with require_scanned (strict header reads): a part
             # header without a single reading is never signed.
             raise UnredactableRequest(str(exc)) from None
+        record_raw_texts(parsed.parts, originals, readings)
         binary = sum(reading.kind == "binary" for reading in readings)
         if binary and forward_binary is not None:
             # Every piece was read or allowed: these go out unscanned.
@@ -1149,9 +1164,6 @@ class OpenAIAdapter(ProviderAdapter):
             if redacted != text:
                 part.content = reading.content.encode(redacted)
                 changed = True
-                # Redacted as ONE text, values landing raw: its download
-                # is restored as the text it was (``rehydrate_text_file``).
-                RAW_TEXT_FILES.record(part.content)
         elif kind == "text":
             changed |= _redact_text_part(part, redactor, require_scanned=require_scanned)
         elif kind == "binary" and require_scanned and not forward_binary:

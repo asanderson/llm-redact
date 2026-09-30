@@ -242,3 +242,55 @@ async def test_a_json_text_upload_is_byte_exact_while_remembered() -> None:
     assert remembered.content == original
     assert json.loads(forgotten.content) == {"user": "CORP\\\\jdoe", "n": 1.5}
     assert forgotten.content.endswith(b'\n  "n": 1.50\n}\n')
+
+
+async def test_a_refused_upload_records_nothing_a_download_would_trust() -> None:
+    # The remembered-upload set is bounded: an upload refused part way
+    # through (here: its second part declares a base64 transfer encoding)
+    # must record nothing, or 1024 refused requests — nothing sent
+    # upstream — would evict what accepted uploads recorded.
+    from llm_redact.providers import openai
+
+    boundary = "b0undary"
+    body = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="a.txt"\r\n'
+        "Content-Type: text/plain\r\n\r\n"
+        "mail jane.doe@corp.example\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file2"; filename="b.txt"\r\n'
+        "Content-Transfer-Encoding: base64\r\n\r\n"
+        "aGVsbG8=\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    sent: list[bytes] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        sent.append(request.content)
+        return httpx.Response(200, json={"id": "file-1"})
+
+    app = create_app(_config(), upstream_transport=httpx.MockTransport(upstream))
+    saved = openai.RAW_TEXT_FILES
+    openai.RAW_TEXT_FILES = openai._RawTextFiles()
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client:
+            refused = await client.post(
+                "/v1/files",
+                content=body,
+                headers={**_OPENAI, "content-type": f"multipart/form-data; boundary={boundary}"},
+            )
+            accepted_body, content_type = _form(b"mail jane.doe@corp.example\n")
+            accepted = await client.post(
+                "/v1/files",
+                content=accepted_body,
+                headers={**_OPENAI, "content-type": content_type},
+            )
+        recorded = len(openai.RAW_TEXT_FILES._digests)
+    finally:
+        openai.RAW_TEXT_FILES = saved
+    assert refused.status_code == 400, refused.text
+    assert accepted.status_code == 200, accepted.text
+    assert len(sent) == 1  # only the accepted upload reached the provider
+    assert recorded == 1  # and only it was remembered

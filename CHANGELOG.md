@@ -108,6 +108,12 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- An upload refused part way through no longer records its text parts in the bounded
+  memory of text uploads whose downloads are restored byte-exact, so refused requests
+  cannot evict what accepted uploads recorded. That memory is per process: a JSON text
+  upload downloaded through another replica, another `llm-redact run` proxy or after a
+  restart is restored as valid JSON with every value, but a value whose source held an
+  escape comes back escaped once more (documented in docs/providers.md).
 - A downloaded JSONL file restores EVERY value of its lines, under `id`, `name`,
   `type`, `data` and the other request-body structural names too, as the upload now
   redacts them (the download kept the request-body skip set, so a data file came back

@@ -209,10 +209,15 @@ JSON-escaped, keys included and formatting kept, so it stays valid JSON;
 any other text file as one text; each re-encoded as it came; a binary file
 is left untouched. A download is read this way whatever Content-Type the
 provider serves it with (a JSON file served as `application/json`
-included). One residual: a JSON text upload the process no longer
-remembers (after a restart, or 1024 newer text uploads) is read like a
-file a model wrote — valid JSON, but a value whose source form held an
-escape (`\\`, `\n`) comes back escaped once more. The image and mask parts of an image edit (and a video job's
+included). One residual: the memory is per process and shared by
+every caller, so a JSON text upload downloaded through a process that does
+not remember it (another replica of a multi-replica deployment, a separate
+`llm-redact run` proxy, a restart, or after 1024 newer accepted text
+uploads — a refused upload records nothing) is read like a file a model
+wrote: valid JSON, every value restored, but a value whose source form held
+an escape (`\\`, `\n` — a PEM key in a service-account JSON file, for
+one) comes back escaped once more. Download such a file through the
+proxy process that uploaded it when its exact bytes matter. The image and mask parts of an image edit (and a video job's
 reference image) are media — the documented non-goal, as base64 media in
 a JSON body — and are sent as they came (their filenames redacted).
 

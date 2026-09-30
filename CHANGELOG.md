@@ -145,6 +145,10 @@ and tags `vX.Y.Z`.
   request was redacted, restored and checked as (a file create served as the file
   list). Unrecognized pass-through traffic forwards them as sent. A Gemini file
   create's answer reports only its own file, never a `files` array.
+- An access gate's awaitable re-check that ends in a cancellation (a shared lookup
+  another path cancelled) now closes its connection like any failed check; it used
+  to end the re-check backstop for good, leaving later revocations only a re-check
+  could see unapplied. A backstop task that ended anyway is started again.
 
 ## [1.9.0] - 2026-09-29
 

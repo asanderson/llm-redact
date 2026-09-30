@@ -306,6 +306,102 @@ async def test_the_backstop_starts_lazily_or_eagerly() -> None:
     await eager.stop()
 
 
+async def test_a_recheck_cancelled_from_outside_closes_and_the_backstop_lives_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A recheck awaiting a shared lookup that another path cancels ends in
+    # CancelledError: a failed check (the connection closes, cause
+    # recheck_error) — never the end of the backstop, whose later passes
+    # still see a revocation only the recheck can.
+    errors: Counter[str] = Counter()
+    live = LiveConnections(errors, interval=0.01, eager=True)
+    shared: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+    asked = asyncio.Event()
+
+    async def flaky() -> bool:
+        asked.set()
+        return await shared
+
+    revoked = False
+    ada = FakeConn("ada", recheck=flaky)
+    bob = FakeConn("bob", recheck=lambda: "revoked" if revoked else True)
+    caplog.set_level(logging.INFO, logger="llm_redact")
+    live.start()
+    live.track(ada)
+    live.track(bob)
+    await asyncio.wait_for(asked.wait(), 5)
+    shared.cancel()
+    await _until(lambda: ada.reasons != [])
+    assert ada.reasons == [RECHECK_FAILED_REASON]
+    assert errors == Counter({"recheck": 1})
+    assert "re-check failed (CancelledError)" in caplog.text
+    assert live._task is not None and not live._task.done()
+    revoked = True
+    await _until(lambda: bob.reasons != [])
+    assert bob.reasons == ["revoked"]
+    assert live.closed == Counter({"recheck_error": 1, "recheck": 1})
+    await live.stop()
+    assert live._task is None
+
+
+async def test_stopping_the_backstop_mid_pass_still_cancels_it() -> None:
+    # The backstop's OWN cancellation (stop) still ends it, even while a
+    # recheck is awaited, and closes nothing.
+    live = LiveConnections(Counter(), interval=0.01, eager=True)
+    asked = asyncio.Event()
+
+    async def hangs() -> bool:
+        asked.set()
+        await asyncio.Event().wait()
+        return True
+
+    conn = FakeConn(recheck=hangs)
+    live.timeout = 30
+    live.start()
+    live.track(conn)
+    await asyncio.wait_for(asked.wait(), 5)
+    task = live._task
+    assert task is not None
+    await asyncio.wait_for(live.stop(), 5)
+    assert task.cancelled() and conn.reasons == [] and live.closed == Counter()
+
+
+async def test_a_pass_ended_by_a_cancellation_is_logged_and_the_loop_goes_on(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    live = LiveConnections(Counter(), interval=0.01)
+    passes = 0
+
+    async def cancelled_pass() -> None:
+        nonlocal passes
+        passes += 1
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(live, "recheck_all", cancelled_pass)
+    caplog.set_level(logging.INFO, logger="llm_redact")
+    live.start()
+    live.track(FakeConn(recheck=lambda: True))
+    await _until(lambda: passes >= 2)
+    assert "re-check pass failed (CancelledError)" in caplog.text
+    await live.stop()
+
+
+async def test_a_backstop_task_that_ended_is_restarted() -> None:
+    live = LiveConnections(Counter(), interval=0.01)
+    live.start()
+    live.track(FakeConn(recheck=lambda: True))
+    first = live._task
+    assert first is not None
+    first.cancel()  # ended by something other than stop()
+    with contextlib.suppress(asyncio.CancelledError):
+        await first
+    conn = FakeConn(recheck=lambda: False)
+    live.track(conn)
+    assert live._task is not first
+    await _until(lambda: conn.reasons != [])
+    await live.stop()
+
+
 # --- realtime relays, real sockets ---------------------------------------------------
 
 

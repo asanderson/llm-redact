@@ -145,6 +145,14 @@ class EventStream:
             self.queue.put_nowait(self.WAKE)
 
 
+def _being_cancelled() -> bool:
+    """Whether the running task itself is being cancelled — as opposed to a
+    CancelledError raised by something it awaited that another path
+    cancelled."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
 class LiveConnections:
     """Every open realtime relay and events stream, with the admission each
     was opened under; the core's ``plugin_api.ConnectionControl``.
@@ -232,20 +240,31 @@ class LiveConnections:
                 verdict = await asyncio.wait_for(verdict, self.timeout)
             if not (verdict is None or isinstance(verdict, bool | str)):
                 raise TypeError("a recheck answered neither a bool, None nor a string")
+        except asyncio.CancelledError as problem:
+            if _being_cancelled():
+                raise  # the backstop itself is stopping
+            # The recheck's own awaitable was cancelled (a shared lookup
+            # another path cancelled): a failed check, which closes — it
+            # must never end the backstop.
+            self._check_failed(connection, problem)
+            return
         except Exception as problem:  # noqa: BLE001 — a failed check closes (fail closed)
-            self._bookkeeping_errors["recheck"] += 1
-            logger.warning(
-                "%s connection closed: its access re-check failed (%s)",
-                connection.kind,
-                type(problem).__name__,
-            )
-            self._close_one(connection, RECHECK_FAILED_REASON, "recheck_error")
+            self._check_failed(connection, problem)
             return
         if verdict is None or verdict is True:
             return
         reason = verdict if isinstance(verdict, str) and verdict else DEFAULT_REVOKED_REASON
         logger.info("%s connection closed: its access re-check refused it", connection.kind)
         self._close_one(connection, reason, "recheck")
+
+    def _check_failed(self, connection: TrackedConnection, problem: BaseException) -> None:
+        self._bookkeeping_errors["recheck"] += 1
+        logger.warning(
+            "%s connection closed: its access re-check failed (%s)",
+            connection.kind,
+            type(problem).__name__,
+        )
+        self._close_one(connection, RECHECK_FAILED_REASON, "recheck_error")
 
     def _close_one(self, connection: TrackedConnection, reason: str, cause: str) -> None:
         if connection.close_for_access(reason):
@@ -259,6 +278,10 @@ class LiveConnections:
             await asyncio.sleep(self.interval)
             try:
                 await self.recheck_all()
+            except asyncio.CancelledError as problem:
+                if _being_cancelled():
+                    raise  # stop(): the only way the backstop ends
+                logger.error("connection re-check pass failed (%s)", type(problem).__name__)
             except Exception as problem:  # noqa: BLE001 — the backstop never dies
                 logger.error("connection re-check pass failed (%s)", type(problem).__name__)
 
@@ -276,7 +299,9 @@ class LiveConnections:
                 self._ensure_running()
 
     def _ensure_running(self) -> None:
-        if self._serving and self._task is None:
+        # A backstop task that ended anyway (whatever ended it) is replaced:
+        # a done task would otherwise leave every later revocation unseen.
+        if self._serving and (self._task is None or self._task.done()):
             self._task = asyncio.get_running_loop().create_task(self.run())
 
     async def stop(self) -> None:

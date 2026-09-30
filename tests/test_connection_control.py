@@ -115,6 +115,10 @@ class FakeConn:
         self.recheck = recheck
         self.reasons: list[str] = []
 
+    @property
+    def closing(self) -> bool:
+        return bool(self.reasons)
+
     def close_for_access(self, reason: str) -> bool:
         if self.reasons:
             return False
@@ -145,7 +149,9 @@ def test_close_selects_by_subject_grant_or_both() -> None:
     assert anonymous.reasons == []
     assert live.closed == Counter({"revoked": 3})
     live.untrack(anonymous)
-    assert live.open_counts() == {"fake": 3}
+    # Closed connections still tracked (their handlers have not ended) are
+    # no longer counted open.
+    assert live.open_counts() == {}
 
 
 async def _slow() -> bool:
@@ -307,10 +313,132 @@ async def test_a_failing_recheck_closes_and_logs_its_type_only(
     assert errors == Counter({"recheck": 1})
     assert "re-check failed (RuntimeError)" in caplog.text
     assert SECRET not in caplog.text
-    # A second pass asks again (the connection is still tracked until its
-    # handler ends) but closes nothing twice.
+    # The connection is still tracked until its handler ends, but it is
+    # closing: a second pass never asks again, counts no second error and
+    # logs nothing more.
+    caplog.clear()
     await live.recheck_all()
     assert live.closed == Counter({"recheck_error": 1})
+    assert errors == Counter({"recheck": 1})
+    assert caplog.text == ""
+
+
+async def test_a_closing_connection_is_never_rechecked_again() -> None:
+    # A connection closed for access stays tracked until its handler ends —
+    # indefinitely, for an events client that stopped reading. It was asked
+    # again every interval, counting a failure (and logging it) each time.
+    errors: Counter[str] = Counter()
+    live = LiveConnections(errors)
+    calls = 0
+
+    def refusing() -> bool:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("down")
+
+    conn = FakeConn("ada", recheck=refusing)
+    other = FakeConn("bob", recheck=lambda: True)
+    live.track(conn)
+    live.track(other)
+    assert live.close(subject="ada", reason="gone") == 1
+    for _ in range(3):
+        await live.recheck_all()
+    assert calls == 0 and errors == Counter()
+    assert live.open_counts() == {"fake": 1}
+
+
+async def test_a_connection_with_a_check_still_running_is_not_asked_again() -> None:
+    # A check that swallows its cancellation keeps running after its pass
+    # abandoned it. The connection it asked about is never asked again while
+    # it runs (a failed check: closed), so abandoned checks cannot pile up
+    # per connection, pass after pass.
+    errors: Counter[str] = Counter()
+    live = LiveConnections(errors)
+    live.timeout = 0.01
+    release = asyncio.Event()
+    started = 0
+
+    async def stubborn() -> bool:
+        nonlocal started
+        started += 1
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+        return True
+
+    class Lingering(FakeConn):
+        # A connection whose close never takes (a third-party connection
+        # type without a closing state): the running check alone stops the
+        # next one.
+        @property
+        def closing(self) -> bool:
+            return False
+
+    conn = Lingering(recheck=stubborn)
+    live.track(conn)
+    try:
+        for _ in range(4):
+            await live.recheck_all()
+        assert started == 1
+        assert len(live._abandoned) == 1
+        assert errors == Counter({"recheck": 4})
+    finally:
+        release.set()  # the stubborn checks end, pass or fail
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert live._abandoned == {}  # forgotten once it ended
+    await live.recheck_all()
+    assert started == 2
+
+
+async def test_abandoned_checks_are_capped_across_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Past MAX_ABANDONED_CHECKS still running, a new awaitable recheck is a
+    # failed check and never started (its coroutine closed, never awaited).
+    monkeypatch.setattr(connections_mod, "MAX_ABANDONED_CHECKS", 2)
+    errors: Counter[str] = Counter()
+    live = LiveConnections(errors)
+    live.timeout = 0.01
+    release = asyncio.Event()
+    started = 0
+
+    async def stubborn() -> bool:
+        nonlocal started
+        started += 1
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+        return True
+
+    first = [FakeConn(recheck=stubborn) for _ in range(2)]
+    for conn in first:
+        live.track(conn)
+    try:
+        await live.recheck_all()
+        assert started == 2 and len(live._abandoned) == 2
+        late = FakeConn(recheck=stubborn)
+        live.track(late)
+        with warnings_as_errors():
+            await live.recheck_all()
+            gc.collect()
+        assert started == 2  # never started
+        assert late.reasons == [RECHECK_FAILED_REASON]
+        assert errors == Counter({"recheck": 3})
+    finally:
+        release.set()  # the stubborn checks end, pass or fail
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert live._abandoned == {}
+
+
+@contextlib.contextmanager
+def warnings_as_errors() -> Any:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        yield
 
 
 async def test_recheck_passes_run_concurrently() -> None:
@@ -848,3 +976,25 @@ def test_an_admission_compares_and_prints_by_its_verdict_only() -> None:
     assert with_fields.grant == "grant-secretish" and with_fields.recheck is recheck
     assert "grant-secretish" not in repr(with_fields)
     assert hash(with_fields) == hash(Admission(subject="ada"))
+
+
+async def test_an_events_stream_closed_for_access_is_closing_and_not_rechecked() -> None:
+    errors: Counter[str] = Counter()
+    live = LiveConnections(errors)
+    asked = 0
+
+    def recheck() -> bool:
+        nonlocal asked
+        asked += 1
+        return False
+
+    stream = EventStream(asyncio.Queue(1), subject="ada", grant=None, recheck=recheck)
+    live.track(stream)
+    assert not stream.closing and live.open_counts() == {"events": 1}
+    await live.recheck_all()  # refused: closed
+    assert asked == 1 and stream.closing
+    # Its generator never ran its finally (a client that stopped reading):
+    # still tracked, yet neither counted open nor asked again.
+    await live.recheck_all()
+    assert asked == 1 and live.open_counts() == {}
+    assert live.closed == Counter({"recheck": 1})

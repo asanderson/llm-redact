@@ -34,6 +34,7 @@ import logging
 import math
 import threading
 from collections import Counter
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from .config import ConfigError
@@ -59,6 +60,11 @@ MAX_RECHECK_INTERVAL = 3600.0
 # An awaitable recheck gets at most this long (and never longer than the
 # interval): a check that cannot answer in time is a failed check.
 MAX_RECHECK_TIMEOUT = 10.0
+# Checks abandoned still running (timed out, or their pass cancelled; one that
+# swallows its cancellation runs on) that may be alive at once: past it, a
+# new awaitable recheck is a failed check and is never started. A
+# connection with one of its own still running is never asked again either.
+MAX_ABANDONED_CHECKS = 64
 
 
 def recheck_interval(gate: object) -> float:
@@ -88,6 +94,14 @@ class TrackedConnection(Protocol):
     subject: str | None
     grant: str | None
     recheck: Recheck | None
+
+    @property
+    def closing(self) -> bool:
+        """Whether the connection is already closing (its admission ended):
+        never re-checked again, never counted open, though it stays tracked
+        until its handler ends (a client that stopped reading can hold that
+        off indefinitely)."""
+        ...
 
     def close_for_access(self, reason: str) -> bool:
         """Close the connection because its admission ended: at once,
@@ -124,6 +138,10 @@ class EventStream:
         self._lock = threading.Lock()
         self._loop = asyncio.get_running_loop()
 
+    @property
+    def closing(self) -> bool:
+        return self.closed
+
     def close_for_access(self, reason: str) -> bool:
         with self._lock:
             if self.closed:
@@ -153,33 +171,40 @@ def _being_cancelled() -> bool:
     return task is not None and task.cancelling() > 0
 
 
-async def _bounded(awaitable: Any, timeout: float) -> Any:
+async def _bounded(
+    awaitable: Any, timeout: float, abandon: Callable[[asyncio.Future[Any]], None]
+) -> Any:
     """``awaitable``'s result within ``timeout`` seconds, else TimeoutError.
     Unlike ``asyncio.wait_for`` this never waits for the cancelled check to
     finish: one that swallows its cancellation cannot hold the pass (and so
     every later re-check) open. A check left running — timed out, or its
-    pass cancelled — is cancelled and its outcome discarded whenever it
-    ends (never an unretrieved exception, whose repr a gate's message could
-    fill)."""
+    pass cancelled — is handed to ``abandon``, which cancels it and
+    discards its outcome whenever it ends (never an unretrieved exception,
+    whose repr a gate's message could fill)."""
     task = asyncio.ensure_future(awaitable)
     try:
         done, _ = await asyncio.wait({task}, timeout=timeout)
     except BaseException:
-        task.cancel()  # this pass is being cancelled: take the check with it
-        task.add_done_callback(_discard)
+        abandon(task)  # this pass is being cancelled: take the check with it
         raise
     if not done:
-        task.cancel()
-        task.add_done_callback(_discard)
+        abandon(task)
         raise TimeoutError("the access re-check did not answer in time")
     return task.result()
 
 
 def _discard(task: asyncio.Future[Any]) -> None:
     """Retrieve an abandoned check's outcome so it is never reported as an
-    unretrieved exception."""
+    unretrieved exception (whose repr a gate's message could fill)."""
     if not task.cancelled():
         task.exception()
+
+
+def _never_started(awaitable: Any) -> None:
+    """Close an awaitable recheck that will not be awaited (a coroutine
+    that never ran: nothing reported as never awaited)."""
+    if inspect.iscoroutine(awaitable):
+        awaitable.close()
 
 
 class LiveConnections:
@@ -205,6 +230,9 @@ class LiveConnections:
         self.closed: Counter[str] = Counter()
         self._bookkeeping_errors = bookkeeping_errors
         self._connections: set[TrackedConnection] = set()
+        # Checks abandoned still running, each with the connection it asks
+        # about (``MAX_ABANDONED_CHECKS``).
+        self._abandoned: dict[asyncio.Future[Any], TrackedConnection] = {}
         self._lock = threading.Lock()
         # Start the backstop with the lifespan even before any connection
         # carries a recheck (the gate declared a recheck_interval).
@@ -225,9 +253,10 @@ class LiveConnections:
             self._connections.discard(connection)
 
     def open_counts(self) -> dict[str, int]:
-        """Open connections by kind (``/status``): counts only."""
+        """Open connections by kind (``/status``): counts only — one already
+        closing is no longer open, whenever its handler ends."""
         with self._lock:
-            return dict(Counter(c.kind for c in self._connections))
+            return dict(Counter(c.kind for c in self._connections if not c.closing))
 
     # -- plugin_api.ConnectionControl --
 
@@ -256,7 +285,8 @@ class LiveConnections:
         """Ask every open connection's recheck once, concurrently; close each
         one no longer admitted."""
         with self._lock:
-            due = [c for c in self._connections if c.recheck is not None]
+            # One already closing is never asked again: its admission ended.
+            due = [c for c in self._connections if c.recheck is not None and not c.closing]
         if due:
             await asyncio.gather(*(self._recheck_one(c) for c in due))
 
@@ -264,9 +294,16 @@ class LiveConnections:
         recheck = connection.recheck
         assert recheck is not None
         try:
+            if connection in self._abandoned.values():
+                raise TimeoutError("an earlier access re-check is still running")
             verdict = recheck()
             if inspect.isawaitable(verdict):
-                verdict = await _bounded(verdict, self.timeout)
+                if len(self._abandoned) >= MAX_ABANDONED_CHECKS:
+                    _never_started(verdict)
+                    raise TimeoutError("too many earlier access re-checks are still running")
+                verdict = await _bounded(
+                    verdict, self.timeout, lambda task: self._abandon(task, connection)
+                )
             if not (verdict is None or isinstance(verdict, bool | str)):
                 raise TypeError("a recheck answered neither a bool, None nor a string")
         except asyncio.CancelledError as problem:
@@ -285,6 +322,17 @@ class LiveConnections:
         reason = verdict if isinstance(verdict, str) and verdict else DEFAULT_REVOKED_REASON
         logger.info("%s connection closed: its access re-check refused it", connection.kind)
         self._close_one(connection, reason, "recheck")
+
+    def _abandon(self, task: asyncio.Future[Any], connection: TrackedConnection) -> None:
+        """Cancel a check left running; it counts as abandoned (bounded) until
+        it ends, and its outcome is discarded then."""
+        task.cancel()
+        self._abandoned[task] = connection
+        task.add_done_callback(self._abandoned_ended)
+
+    def _abandoned_ended(self, task: asyncio.Future[Any]) -> None:
+        self._abandoned.pop(task, None)
+        _discard(task)
 
     def _check_failed(self, connection: TrackedConnection, problem: BaseException) -> None:
         self._bookkeeping_errors["recheck"] += 1

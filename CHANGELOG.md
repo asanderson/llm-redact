@@ -191,6 +191,12 @@ and tags `vX.Y.Z`.
   longer lets that check's later exception be logged at shutdown as an
   unretrieved task exception (with its message); its outcome is discarded, as a
   timed-out check's already was.
+- A connection already closed for access (an events stream whose client stopped
+  reading stays open until its socket closes) is no longer re-checked every
+  interval, logging and counting a failed re-check each time, nor reported as
+  open. A connection whose earlier re-check is still running after being
+  abandoned is not asked again, and at most 64 abandoned re-checks may run at
+  once (further awaitable re-checks count as failed without being started).
 
 ## [1.9.0] - 2026-09-29
 

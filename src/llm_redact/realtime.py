@@ -1072,6 +1072,12 @@ class RealtimeRelay:
             return "[detection] policy"
         return None
 
+    @property
+    def closing(self) -> bool:
+        """Revoked (a reload, or its access): closing, whenever the relay's
+        handler ends (``connections.TrackedConnection``)."""
+        return self.revoked is not None
+
     def revoke(self, changed: str) -> None:
         """Mark the relay revoked — at once, for its per-frame check — and
         wake it to close both sides. Never raises: a reload revokes every

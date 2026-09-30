@@ -29,7 +29,6 @@ from llm_redact.providers.openai import (
     OpenAIAdapter,
     _multipart_floors,
     read_file_part,
-    record_raw_texts,
     rehydrate_text_file,
 )
 from llm_redact.redactor import Redactor, UnredactableRequest
@@ -94,7 +93,6 @@ def redact_related_upload(
     if may_carry_tokens(body):
         redactor = redactor.with_floors(_multipart_floors(parsed, readings))
     changed = False
-    raw_texts: list[bytes] = []
     try:
         for part, reading in zip(parsed.parts, readings, strict=True):
             changed |= _FILES._redact_part(
@@ -104,11 +102,9 @@ def redact_related_upload(
                 inject_note=False,
                 require_scanned=require_scanned,
                 forward_binary=forward_binary is not None,
-                raw_texts=raw_texts,
             )
     except multipart.AmbiguousHeaders as exc:
         raise UnredactableRequest(str(exc)) from None
-    record_raw_texts(raw_texts)
     binary = sum(reading.kind == "binary" for reading in readings)
     if binary and forward_binary is not None:
         forward_binary(binary)  # every piece was read or allowed

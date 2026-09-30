@@ -118,22 +118,8 @@ and tags `vX.Y.Z`.
   restored value is JSON-escaped where it lands, keys included and formatting kept (a
   PEM key's newlines once landed raw inside a string). Raw restoration is kept for the
   files it is right for: every text upload this process redacted as one text is now
-  remembered (by digest, newest 1024) and comes back byte-exact.
-- A text upload that is ONE JSON document (a pretty-printed GCP service-account key)
-  round-trips exactly in ANY process: each string literal, keys included, is decoded,
-  redacted and written back only when it changed (a value found by its key's context,
-  such as `private_key_id`, is redacted in place inside its escape-free literal), so
-  the vault holds decoded values and the download's JSON-escaping restoration is the
-  exact inverse. It used to be redacted as raw source text and depended on the
-  uploading process remembering it: a second replica over a shared vault, another
-  `llm-redact run` proxy, a restart, or 1024 later uploads by anyone brought
-  `private_key` back with its `\n` escaped twice (a broken PEM inside valid JSON). A
-  document where a raw reading still finds a value outside the literals (a card number
-  written as a JSON number), spanning literals, or only in a literal's escaped source
-  form is redacted as one raw text as before. Only raw-redacted text that a download
-  would read as JSON is remembered now, and only once the whole upload was redacted:
-  uploads refused part-way (400) no longer evict remembered files. The record stays
-  per process and shared by every caller (documented in providers.md).
+  remembered (by digest, newest 1024) and comes back byte-exact. A JSON text upload
+  no longer remembered (a restart) is read like a model-written file.
 - A connection re-check that swallows its own cancellation can no longer hold the
   periodic re-check pass open (and so stop every later re-check): the pass stops
   waiting at the timeout, closes the connection and abandons the check, instead of

@@ -38,16 +38,13 @@ conversation anchor — the realtime WS stance); a user-scoping session
 router (llm-redact-pro's named users) makes that the user's own copy.
 """
 
-import bisect
 import hashlib
-import json
 import re
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from collections.abc import Callable, Hashable, Mapping
 from typing import Any, NamedTuple
 
 from llm_redact import multipart
-from llm_redact.detection.base import Detection
 from llm_redact.jsonwalk import (
     JsonTooDeep,
     json_bytes,
@@ -479,23 +476,18 @@ BINARY_FILE = "an uploaded file is binary (not text llm-redact can redact)"
 
 
 class _RawTextFiles:
-    """The redacted bytes of every text file uploaded redacted as ONE raw
-    text (``redact_document``) that a download would read as JSON: a JSON
-    Lines file (a line that was not a JSON object, ``{"user":"CORP\\jdoe"}``:
-    an invalid escape, became one around its placeholder) or one JSON
-    document (one whose escape-aware reading gave way to the raw one) —
-    whose restored values a provider-written file (a batch output, a JSON
-    file a model wrote) needs JSON-escaped; this one needs them exactly as
-    they were redacted. Recorded only once the whole upload was redacted (a
-    request refused part-way records nothing). Known by the SHA-256 of the
-    exact bytes sent (a provider returns a stored file as it received it),
-    the newest ``_MAX`` kept, in THIS PROCESS only and shared by every
-    caller: a download through another process (another replica, another
-    ``llm-redact run`` proxy, a restart) or after ``_MAX`` newer such
-    uploads is read by its bytes, JSON-escaping its restored values. A
-    JSON document upload redacted escape-aware (the usual case) is never
-    recorded: its download's JSON-source restoration is the exact inverse
-    in any process."""
+    """The redacted bytes of every text file uploaded redacted as ONE text,
+    its values replaced raw. From its bytes alone such a download may read
+    as JSON — a JSON Lines file (a line that was not a JSON object,
+    ``{"user":"CORP\\jdoe"}``: an invalid escape, became one around its
+    placeholder) or one JSON document — whose restored values a
+    provider-written file (a batch output, a JSON file a model wrote) needs
+    JSON-escaped; this one needs them exactly as they were redacted. Known
+    by the SHA-256 of the exact bytes sent (a provider returns a stored
+    file as it received it), the newest ``_MAX`` kept, in this process
+    only: a download the proxy no longer knows (a restart, older uploads)
+    is read by its bytes, JSON-escaping its restored values when it reads
+    as JSON."""
 
     _MAX = 1024
 
@@ -514,103 +506,6 @@ class _RawTextFiles:
 
 
 RAW_TEXT_FILES = _RawTextFiles()
-
-
-def record_raw_texts(contents: list[bytes]) -> None:
-    """Remember the raw-redacted text files of an upload redacted in full
-    (``_RawTextFiles``): called once its part loop is done, so a request a
-    later part refuses records nothing."""
-    for content in contents:
-        RAW_TEXT_FILES.record(content)
-
-
-# A string literal of valid JSON source (the unrolled form: no backtracking).
-# In a document that parses, every double quote outside a literal opens one,
-# so a left-to-right scan finds exactly its literals, keys included.
-_JSON_STRING_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
-
-
-def redact_document(content: FileContent, redactor: Redactor) -> tuple[str, bool]:
-    """A text file part's text redacted, and whether as ONE raw text. A
-    file that is ONE JSON document is redacted escape-aware over its source
-    (``_redact_json_source``) when that reading misses nothing the raw one
-    would redact: the vault then holds each value as it decodes, and the
-    download's JSON-source restoration (``rehydrate_text_file``) is its
-    exact inverse in any process. Any other text — and a JSON document the
-    escape-aware reading cannot stand in for — is redacted as one raw text,
-    each value as it appears in the source."""
-    if _is_json_document(content.text):
-        redacted = _redact_json_source(content.text, redactor)
-        if redacted is not None:
-            return redacted, False
-    return redactor.redact_text(content.text), True
-
-
-def _redact_json_source(text: str, redactor: Redactor) -> str | None:
-    """``text`` (one JSON document) with each string literal — keys
-    included — decoded, redacted and written back (``json_text``) only when
-    it changed, the rest of the source kept byte for byte. What a raw
-    reading of that result still redacts is then redacted in place when it
-    lies inside a literal holding no escape (its source IS its value: a
-    service-account key's ``private_key_id``, found by the context around
-    it). Anything else such a reading finds — a value outside every literal
-    (a card number written as a JSON number: a placeholder there leaves no
-    JSON document, whose download is restored raw), one spanning literals,
-    or one only the escaped source form shows — gives None, nothing
-    counted: the raw reading redacts the document instead."""
-    counts, warns = Counter(redactor.counts), Counter(redactor.warn_counts)
-    parts: list[str] = []
-    cursor = 0
-    for literal in _JSON_STRING_RE.finditer(text):
-        value = json.loads(literal.group())
-        redacted = redactor.redact_text(value)
-        parts += (
-            text[cursor : literal.start()],
-            json_text(redacted) if redacted != value else literal.group(),
-        )
-        cursor = literal.end()
-    parts.append(text[cursor:])
-    result = "".join(parts)
-    leftovers = redactor.detections(result)
-    if not leftovers:
-        return result
-    if _inside_plain_literals(result, leftovers):
-        seen = Counter(redactor.warn_counts)
-        result = redactor.redact_text(result)  # exactly ``leftovers`` replaced
-        _reset(redactor.warn_counts, seen)  # its warn-mode values were counted
-        return result
-    _reset(redactor.counts, counts)
-    _reset(redactor.warn_counts, warns)
-    return None
-
-
-def _inside_plain_literals(source: str, detections: list[Detection]) -> bool:
-    """Whether every detection lies inside the content of one string
-    literal of the JSON ``source`` that holds no backslash (so no escape:
-    its source text is its value, character for character)."""
-    plain = [
-        (literal.start() + 1, literal.end() - 1)
-        for literal in _JSON_STRING_RE.finditer(source)
-        if "\\" not in literal.group()
-    ]
-    starts = [start for start, _ in plain]
-    for detection in detections:
-        index = bisect.bisect_right(starts, detection.start) - 1
-        if index < 0 or detection.end > plain[index][1]:
-            return False
-    return True
-
-
-def _reset(counter: "Counter[str]", saved: "Counter[str]") -> None:
-    """``counter`` (a shared tally, updated in place) back to ``saved``."""
-    counter.clear()
-    counter.update(saved)
-
-
-def _reads_as_json(content: bytes, text: str) -> bool:
-    """Whether a download of ``content`` (decoding to ``text``) is read as
-    JSON (``rehydrate_text_file``): a JSON Lines file or one JSON document."""
-    return classify_file(content).kind == "jsonl" or _is_json_document(text)
 
 
 def rehydrate_text_file(
@@ -1192,7 +1087,6 @@ class OpenAIAdapter(ProviderAdapter):
             redactor = redactor.with_floors(_multipart_floors(parsed, readings))
         request_keys = _request_line_keys(path, parsed) if request_purposes else frozenset()
         changed = False
-        raw_texts: list[bytes] = []
         try:
             for part, reading in zip(parsed.parts, readings, strict=True):
                 changed |= self._redact_part(
@@ -1202,14 +1096,12 @@ class OpenAIAdapter(ProviderAdapter):
                     inject_note=inject_note,
                     require_scanned=require_scanned,
                     forward_binary=forward_binary is not None,
-                    raw_texts=raw_texts,
                     request_keys=request_keys,
                 )
         except multipart.AmbiguousHeaders as exc:
             # Only reachable with require_scanned (strict header reads): a part
             # header without a single reading is never signed.
             raise UnredactableRequest(str(exc)) from None
-        record_raw_texts(raw_texts)
         binary = sum(reading.kind == "binary" for reading in readings)
         if binary and forward_binary is not None:
             # Every piece was read or allowed: these go out unscanned.
@@ -1225,7 +1117,6 @@ class OpenAIAdapter(ProviderAdapter):
         inject_note: bool,
         require_scanned: bool,
         forward_binary: bool,
-        raw_texts: list[bytes],
         request_keys: frozenset[str] = frozenset(),
     ) -> bool:
         # The upload's file name is user content on every route (the part
@@ -1254,16 +1145,13 @@ class OpenAIAdapter(ProviderAdapter):
             # A text file: ONE text (a value may span its lines), re-encoded
             # exactly as it came — its own encoding, its own byte-order mark.
             text = reading.content.text
-            redacted, raw = redact_document(reading.content, redactor)
+            redacted = redactor.redact_text(text)
             if redacted != text:
                 part.content = reading.content.encode(redacted)
                 changed = True
-                if raw and _reads_as_json(part.content, redacted):
-                    # Values landing raw in what a download reads as JSON:
-                    # restored as the text it was (``rehydrate_text_file``)
-                    # while this process remembers it — recorded by the
-                    # caller once the whole upload was redacted.
-                    raw_texts.append(part.content)
+                # Redacted as ONE text, values landing raw: its download
+                # is restored as the text it was (``rehydrate_text_file``).
+                RAW_TEXT_FILES.record(part.content)
         elif kind == "text":
             changed |= _redact_text_part(part, redactor, require_scanned=require_scanned)
         elif kind == "binary" and require_scanned and not forward_binary:

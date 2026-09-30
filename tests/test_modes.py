@@ -149,26 +149,3 @@ def test_modes_non_table_rejected() -> None:
     # through parse_config: it must be a clean ConfigError, not a 500.
     with pytest.raises(ConfigError, match="must be a table"):
         parse_config({"detection": {"modes": ["email", "warn"]}}, "t")
-
-
-def test_detections_reads_what_redact_text_would_replace_or_refuse() -> None:
-    # A deny string typed like a warn-mode rule (EMAIL) still redacts; a
-    # warn-mode match is left out; redact and block matches count. Nothing
-    # is issued, counted or charged.
-    config = parse_config({"detection": {"deny": ["acme-internal"]}}, "t").detection
-    vault = InMemoryVault()
-    redactor = Redactor(
-        build_detectors(config),
-        vault,
-        build_allowlist(config),
-        modes={"EMAIL": "warn", "SSN": "block", "DENY": "warn"},
-    ).with_budget(0)
-    text = "acme-internal a@b.example 123-45-6789 +1 415 555 0100"
-    found = redactor.detections(text)
-    assert [(d.detector_type, d.value) for d in found] == [
-        ("DENY", "acme-internal"),
-        ("SSN", "123-45-6789"),
-        ("PHONE", "+1 415 555 0100"),
-    ]
-    assert vault.original_for("«DENY_001»") is None
-    assert not redactor.counts and not redactor.warn_counts

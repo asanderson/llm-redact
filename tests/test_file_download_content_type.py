@@ -199,15 +199,12 @@ async def test_a_json_file_the_model_wrote_stays_valid_json(media_type: str) -> 
 
 
 async def test_a_json_text_upload_is_byte_exact_while_remembered() -> None:
-    # A user's pretty-printed JSON text file whose secret only the SOURCE
-    # form shows (a deny string spelled with the escape): the escape-aware
-    # reading misses it, so the file is redacted as ONE raw text (the value
-    # as the source spells it) and restored raw, byte for byte, while this
-    # process remembers the upload. Once forgotten (another process), its
-    # download reads as JSON a model could have written: restored
-    # JSON-escaped — still valid JSON, the documented residual. (A JSON
-    # document redacted escape-aware needs no remembering:
-    # test_json_text_uploads.py.)
+    # A user's pretty-printed JSON text file, redacted as ONE text (the
+    # value as it appears in the source, escapes included): restored raw,
+    # byte for byte, while this process remembers the upload. Once
+    # forgotten (a restart), its download reads as JSON a model could have
+    # written: restored JSON-escaped — still valid JSON, the documented
+    # residual.
     from llm_redact.providers import openai
 
     original = b'{\n  "user": "CORP\\\\jdoe",\n  "n": 1.50\n}\n'

@@ -657,3 +657,141 @@ async def test_an_upload_over_the_part_cap_is_never_read(monkeypatch: pytest.Mon
     (sent,) = upstream.requests
     assert sent.content == upload  # forwarded as sent, never read
     assert router.checks == [("openai", "POST", "/v1/files", None, False)]
+
+
+# --- the reading never changes what a file part is ---------------------------------------
+
+# A UTF-16BE text whose SECOND line's bytes spell an ASCII JSON object that
+# repeats a key: every byte pair is a valid UTF-16 character (``{"``, ``a"``,
+# ``:1`` ... ``}\n``), so the file is UTF-16 text; spliced UTF-8 bytes of a
+# different length would misalign the rest of it.
+_UTF16_TEXT = (
+    b"\xfe\xff"
+    + "hi\n".encode("utf-16-be")
+    + b'{"a":1,"a":2}\n'
+    + f"mail {EMAIL}\n".encode("utf-16-be")
+)
+
+
+@pytest.mark.parametrize(
+    ("content", "cited"),
+    [
+        # UTF-16LE behind its mark: a bytes parse guesses UTF-16 from the
+        # mark; the line is no UTF-8 text, so it is neither read nor rewritten.
+        (b"\xff\xfe" + f'{{"a": 1, "a": 2}}\r\nmail {EMAIL}\r\n'.encode("utf-16-le"), []),
+        (b"\xff\xfe\x00\x00" + '{"a": 1, "a": 2}\n'.encode("utf-32-le"), []),
+        # A line that IS UTF-8 JSON in a UTF-16 file: cited, never rewritten.
+        (_UTF16_TEXT, [{"a": 2}]),
+        # A binary file: cited, never rewritten (its bytes must not move).
+        (b"%PDF-1.7\n" + b'{"a": 1, "a": 2}\n%%EOF\n', [{"a": 2}]),
+        (b'\x00{"a": 1}\n{"a": 1, "a": 2}\n', [{"a": 2}]),
+    ],
+    ids=["utf-16-le", "utf-32-le", "utf-16-be-json-line", "pdf", "nul"],
+)
+def test_only_a_utf8_files_repeated_key_line_is_rewritten(content: bytes, cited: Any) -> None:
+    from llm_redact.upload_content import classify_file
+
+    assert classify_file(content).codec != "utf-8"
+    view = read_upload(_form(_file(content, filename=b"n.txt")), BOUNDARY, max_json_bytes=10_000)
+    assert view == UploadView(cited)
+
+
+@pytest.mark.parametrize(
+    ("content", "cited", "rewritten"),
+    [
+        # JSONL, the first line behind a UTF-8 byte-order mark (read as the
+        # JSONL redaction reads it; the rewrite drops the mark, as its does).
+        (
+            b'\xef\xbb\xbf{"a": 1, "a": 2}\n{"b": 3}\n',
+            [{"a": 2}, {"b": 3}],
+            b'{"a": 2}\n{"b": 3}\n',
+        ),
+        # UTF-8 text: the line the check read is what goes out.
+        (b'notes\n{"a": 1, "a": 2}\n', [{"a": 2}], b'notes\n{"a": 2}\n'),
+    ],
+    ids=["jsonl-bom", "utf-8-text"],
+)
+def test_a_utf8_files_repeated_key_line_is_rewritten(
+    content: bytes, cited: Any, rewritten: bytes
+) -> None:
+    view = read_upload(_form(_file(content, filename=b"n.txt")), BOUNDARY, max_json_bytes=10_000)
+    assert view == UploadView(cited, normalized=_form(_file(rewritten, filename=b"n.txt")))
+
+
+@pytest.mark.parametrize(
+    ("content", "encoded_email"),
+    [
+        (
+            b"\xff\xfe" + f'{{"a": 1, "a": 2}}\r\nmail {EMAIL}\r\n'.encode("utf-16-le"),
+            EMAIL.encode("utf-16-le"),
+        ),
+        (_UTF16_TEXT, EMAIL.encode("utf-16-be")),
+    ],
+    ids=["utf-16-le", "utf-16-be-json-line"],
+)
+async def test_a_utf16_text_file_is_redacted_whatever_its_lines_parse_as(
+    monkeypatch: pytest.MonkeyPatch, content: bytes, encoded_email: bytes
+) -> None:
+    # The client's own key, binary_uploads = "forward" (the default): the
+    # check's re-reading once rewrote the first line as UTF-8, the file then
+    # read as "binary" and went out unscanned.
+    router = LineRouter()
+    upstream = Upstream()
+    app = _app(monkeypatch, router, upstream)
+    upload = _form(_field("purpose", b"user_data"), _file(content, filename=b"n.txt"))
+    headers = {**HEADERS, "authorization": "Bearer sk-own"}
+    async with _client(app) as client:
+        response = await client.post("/v1/files", content=upload, headers=headers)
+        status = (await client.get("/__llm-redact/status")).json()
+    assert response.status_code == 200
+    (sent,) = upstream.requests
+    assert encoded_email not in sent.content
+    codec = "utf-16-le" if encoded_email == EMAIL.encode("utf-16-le") else "utf-16-be"
+    assert "«EMAIL_001»".encode(codec) in sent.content
+    assert status["unscanned_uploads_total"] == {}
+
+
+async def test_a_reading_that_changes_a_parts_kind_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The proxy's belt: whatever the reader returns, a re-serialized upload
+    # whose file part redaction would read as something else never goes out
+    # (here a text file turned binary) — with the client's own key too.
+    import llm_redact.proxy as proxy_module
+
+    text = _form(_file(f"mail {EMAIL}\n".encode(), filename=b"n.txt"))
+    binary = _form(_file(b"\x00" + EMAIL.encode(), filename=b"n.txt"))
+    monkeypatch.setattr(
+        proxy_module,
+        "read_upload",
+        lambda body, boundary, **kw: UploadView([], normalized=binary),
+    )
+    router = LineRouter()
+    upstream = Upstream()
+    app = _app(monkeypatch, router, upstream)
+    headers = {**HEADERS, "authorization": "Bearer sk-own"}
+    async with _client(app) as client:
+        response = await client.post("/v1/files", content=text, headers=headers)
+        recent = (await client.get("/__llm-redact/recent")).json()["entries"]
+    assert response.status_code == 400
+    message = response.json()["error"]["message"]
+    assert "changed what a file part is" in message and "credential" not in message
+    assert EMAIL not in response.text
+    assert upstream.requests == [] and router.checks == []
+    assert recent[0]["status"] == 400
+
+
+async def test_a_reading_that_keeps_every_parts_kind_is_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The belt compares kinds part by part, in order: an unchanged reading
+    # (a JSONL line re-serialized, still JSONL) goes out as the check read it.
+    router = LineRouter()
+    upstream = Upstream()
+    app = _app(monkeypatch, router, upstream)
+    upload = _form(_field("purpose", b"batch"), _file(b'{"a": 1, "a": 2}\n'))
+    async with _client(app) as client:
+        response = await client.post("/v1/files", content=upload, headers=HEADERS)
+    assert response.status_code == 200
+    (sent,) = upstream.requests
+    assert b'{"a": 2}' in sent.content and b'"a": 1' not in sent.content

@@ -13,10 +13,13 @@ pass-through routes are checked exactly like the redacted ones.
 
 The view (``UploadView.cited``) is a list of JSON values:
 
-- every line of every FILE part (a part with a file name) that parses as a
-  JSON object — as the provider reads it: a repeated key's LAST occurrence,
-  with ``normalized`` holding the body with each such line re-serialized,
-  for a caller that must forward exactly what was checked;
+- every line of every FILE part (a part with a file name) that is UTF-8
+  text parsing as a JSON object — as the provider reads it: a repeated
+  key's LAST occurrence, with ``normalized`` holding the body with each
+  such line re-serialized, for a caller that must forward exactly what was
+  checked — only in a UTF-8 file (``upload_content.classify_file``: JSONL
+  or UTF-8 text); a UTF-16/32 text or a binary file is cited but never
+  rewritten;
 - every FORM FIELD as an object nested along its name's bracket path, the
   form encoders' convention (``file_id`` → ``{"file_id": v}``,
   ``file_ids[]`` → ``{"file_ids": [v]}``, ``a[b][0]`` → ``{"a": {"b":
@@ -40,6 +43,7 @@ from typing import Any, NamedTuple
 
 from llm_redact import multipart
 from llm_redact.jsonwalk import MAX_JSON_DEPTH, JsonTooDeep, json_bytes, loads_request
+from llm_redact.upload_content import classify_file
 
 # What the proxy reads as a part's plain bytes, and as a field's text: any
 # other transfer encoding or charset is decoded by the upstream, never here.
@@ -55,6 +59,9 @@ CHARSET = "a multipart part declares a charset llm-redact does not decode"
 NOT_TEXT = "a multipart form field is not UTF-8 text"
 REPEATED_KEY = "a multipart form field repeats a JSON key"
 TOO_DEEP = f"a multipart part nests JSON deeper than {MAX_JSON_DEPTH} levels"
+
+# What json.loads drops from the head of a UTF-8 document it is given as bytes.
+_UTF8_BOM = b"\xef\xbb\xbf"
 
 # A field name's bracket path: the base, then zero or more "[segment]"s.
 _BRACKETED = re.compile(r"([^\[\]]*)((?:\[[^\[\]]*\])+)")
@@ -131,31 +138,38 @@ class _Reader:
 
     def _read_file(self, part: multipart.MultipartPart) -> bool:
         """Every line that parses as a JSON object (a batch input file's
-        requests; other files have none), re-serialized where it repeats a
-        key — the reading the adapters' JSONL redaction shares. True when a
-        line was."""
+        requests; other files have none), read as the adapters' JSONL
+        redaction reads a line: UTF-8 text (a leading byte-order mark
+        dropped, as ``json.loads`` drops it from bytes) — never UTF-16/32,
+        which a bytes parse would guess from a line's first bytes. A line
+        repeating a key is re-serialized only in a UTF-8 file
+        (``upload_content.classify_file``: JSONL, or UTF-8 text), where an
+        object line re-serialized as UTF-8 keeps the file what it was; a
+        UTF-16/32 text or a binary file is never rewritten (spliced UTF-8
+        bytes would turn it into something else — a "binary" forwarded
+        unscanned). True when a line was."""
         lines = part.content.split(b"\n")
-        rewritten = False
+        repeated: list[tuple[int, Any]] = []
         for index, line in enumerate(lines):
             stripped = line.strip()
-            if not stripped:
-                continue
             try:
-                obj, duplicate_keys = loads_request(stripped)
+                obj, duplicate_keys = loads_request(stripped.removeprefix(_UTF8_BOM).decode())
             except JsonTooDeep:
                 raise _Unreadable(TOO_DEEP) from None
-            except ValueError:
+            except ValueError:  # UnicodeDecodeError included; a blank line too
                 continue
             if not isinstance(obj, dict):
                 continue
             self._spend(len(stripped))
             self.cited.append(obj)
             if duplicate_keys:
-                lines[index] = json_bytes(obj)
-                rewritten = True
-        if rewritten:
-            part.content = b"\n".join(lines)
-        return rewritten
+                repeated.append((index, obj))
+        if not repeated or classify_file(part.content).codec != "utf-8":
+            return False
+        for index, obj in repeated:
+            lines[index] = json_bytes(obj)
+        part.content = b"\n".join(lines)
+        return True
 
     def _read_field(
         self, name: str, part: multipart.MultipartPart, content_type: dict[str, multipart.Param]

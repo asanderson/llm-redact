@@ -139,6 +139,7 @@ from llm_redact.redactor import (
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent, SSEParser, serialize
+from llm_redact.upload_content import classify_file
 from llm_redact.upload_view import read_upload
 from llm_redact.vault import Vault, VaultManager, run_batched
 from llm_redact.vault_crypto import key_source as vault_key_source
@@ -2794,6 +2795,9 @@ class _Unreadable(NamedTuple):
 
     status: int
     message: str
+    # False: refused whatever credential the request spends (the message
+    # then names no credential).
+    credential_bound: bool = True
 
 
 _CONTENT_ENCODED = (
@@ -2943,7 +2947,27 @@ def _ownership_body(
         # With the client's own credential the upload goes out as the route
         # sends it, unread (the provider authorizes the client).
         return None, None, unreadable if proxy_credential else None
+    if view.normalized is not None and _part_kinds(view.normalized, boundary) != _part_kinds(
+        body, boundary
+    ):
+        # The re-serialized body is what redaction then reads: a part it
+        # would read as something else (a text file turned "binary" goes out
+        # unscanned) is refused whatever the credential. upload_view never
+        # rewrites such a part; this holds even if it did.
+        return None, None, _Unreadable(400, _RECLASSIFIED, credential_bound=False)
     return view.cited, view.normalized, None
+
+
+_RECLASSIFIED = "re-reading the upload for the stored-object check changed what a file part is"
+
+
+def _part_kinds(body: bytes, boundary: bytes) -> list[str] | None:
+    """What each part of the upload ``body`` is (``classify_file``), in
+    order — None outside the canonical grammar."""
+    parsed = parse_multipart(body, boundary)
+    if parsed is None:
+        return None
+    return [classify_file(part.content).kind for part in parsed.parts]
 
 
 class _Misaddressed(NamedTuple):
@@ -5046,9 +5070,10 @@ def _unchecked_body_refused(
 ) -> JSONResponse:
     """A request the proxy would send with its own credential — its cloud
     identity (``identity``), or a routed plan's — whose body the
-    stored-object check cannot read: refused, recorded, before any upstream
-    contact (provider-shaped on a matched route, the pass-through shape
-    otherwise)."""
+    stored-object check cannot read (or, not ``credential_bound``, any
+    request whose upload the check's re-reading would change): refused,
+    recorded, before any upstream contact (provider-shaped on a matched
+    route, the pass-through shape otherwise)."""
     credential = (
         "this provider is authorized with the proxy's own identity"
         if identity
@@ -5057,6 +5082,8 @@ def _unchecked_body_refused(
     message = (
         f"llm-redact: {unreadable.message}, and {credential}, so the stored objects it"
         " cites must be checked; the request was not forwarded"
+        if unreadable.credential_bound
+        else f"llm-redact: {unreadable.message}; the request was not forwarded"
     )
     state.record_request(
         session=state.config.vault.session,
@@ -5070,10 +5097,13 @@ def _unchecked_body_refused(
         rehydrations={},
     )
     logger.info(
-        "%s %s -> %d refused (unchecked body under the proxy's credential)",
+        "%s %s -> %d refused (%s)",
         request.method,
         path,
         unreadable.status,
+        "unchecked body under the proxy's credential"
+        if unreadable.credential_bound
+        else "upload changed by the stored-object check's re-reading",
     )
     error = (
         adapter.error_body(message, status=unreadable.status)

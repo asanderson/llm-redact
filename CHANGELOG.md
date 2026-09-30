@@ -120,6 +120,12 @@ and tags `vX.Y.Z`.
   forwarded unscanned. Only `%PDF-` and control-byte signatures still mark
   decodable bytes as binary; real files of the other formats fail the strict
   text decode on their own.
+- With a session router that checks stored-object access, a UTF-16/32 text upload
+  whose first line parsed as JSON repeating a key was rewritten in mixed encodings
+  by the check's re-reading, then read as binary and forwarded unscanned. The
+  check now reads file lines only as UTF-8 text and rewrites a line only in a
+  UTF-8 file; an upload whose re-reading would change what a file part is gets a
+  400.
 
 ## [1.9.0] - 2026-09-29
 

@@ -7,7 +7,10 @@ configured, the upstream authorizer failing, the ``[audit] required``
 START row failing, a routed budget refusal — sends nothing: an inspected
 clean part is then ``clean_refused`` and a binary part is not counted as
 forwarded unscanned (they once were, as soon as redaction returned). A send
-that fails in transit still counts as sent (bytes may have left).
+that fails in transit still counts as sent (bytes may have left). The
+text parts an upload redacted as one text — remembered so their download
+is restored byte-exact (``openai.RAW_TEXT_FILES``, bounded) — settle the
+same way: remembered only once handed to the upstream.
 
 Driven end to end through the real app with a scripted inspector
 (tests/test_upload_inspection.py) and fake upstreams, authorizers, audit
@@ -169,3 +172,114 @@ async def test_a_routed_upload_counts_as_sent_at_its_first_hop(
     assert reply.status_code == status, reply.text
     assert len(upstream.requests) == (status == 200)
     assert app.state.proxy.inspected_uploads == {("openai", outcome): 1}
+
+
+# --- the remembered raw-text uploads settle the same way --------------------------------
+
+TEXT_FILE = b"mail jane.doe@corp.example\n"
+
+
+@pytest.fixture
+def remembered(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A fresh remembered-upload set (``openai.RAW_TEXT_FILES``, bounded:
+    what a refused request records evicts what sent ones did)."""
+    from llm_redact.providers import openai
+
+    fresh = openai._RawTextFiles()
+    monkeypatch.setattr(openai, "RAW_TEXT_FILES", fresh)
+    return fresh
+
+
+def _text_form() -> bytes:
+    return _form(TEXT_FILE, filename="notes.txt", content_type="text/plain")
+
+
+async def test_a_text_upload_refused_after_redaction_is_not_remembered(
+    remembered: Any,
+) -> None:
+    # Redacted as one text, then answered 502 (no Azure upstream): nothing
+    # was sent, so nothing a download would trust is remembered.
+    upstream = Upstream()
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    reply = await _post(app, AZURE_FILES, AZURE_FORM, _text_form())
+    assert reply.status_code == 502 and upstream.requests == []
+    assert len(remembered._digests) == 0
+    # The same upload handed to the upstream is.
+    sent = await _post(app, "/v1/files", FORM, _text_form())
+    assert sent.status_code == 200 and len(upstream.requests) == 1
+    assert len(remembered._digests) == 1
+    assert _sent_text(upstream.requests[0]) in remembered
+
+
+@pytest.mark.parametrize(
+    ("script", "status", "count"),
+    [
+        pytest.param([Refuse402()], 402, 0, id="budget-refusal"),
+        pytest.param([Hop("a", "https://api.openai.com/v1/files"), Stop()], 200, 1, id="hop-sent"),
+    ],
+)
+async def test_a_routed_text_upload_is_remembered_at_its_first_hop(
+    monkeypatch: pytest.MonkeyPatch, remembered: Any, script: list[Any], status: int, count: int
+) -> None:
+    upstream = Upstream()
+    install(monkeypatch, FakeRouter({"x": script}, plan_kwargs={"x": {"proxy_credential": False}}))
+    app = create_app(routed_config(), upstream_transport=httpx.MockTransport(upstream))
+    reply = await _post(app, "/v1/files", {**FORM, ROUTE_HEADER: "x"}, _text_form())
+    assert reply.status_code == status, reply.text
+    assert len(remembered._digests) == count
+
+
+def _sent_text(request: httpx.Request) -> bytes:
+    return request.content.split(b"\r\n\r\n")[-1].rsplit(b"\r\n--b--", 1)[0]
+
+
+@pytest.mark.parametrize(
+    ("adapter", "path", "body"),
+    [
+        pytest.param("openai", "/v1/files", None, id="openai"),
+        pytest.param("anthropic", "/v1/files", None, id="anthropic"),
+        pytest.param(
+            "gemini",
+            "/upload/v1beta/files",
+            b'--b\r\nContent-Type: application/json\r\n\r\n{"file": {}}\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\n" + TEXT_FILE + b"\r\n--b--\r\n",
+            id="gemini",
+        ),
+    ],
+)
+def test_every_upload_adapter_tells_the_proxy_instead_of_remembering(
+    remembered: Any, adapter: str, path: str, body: bytes | None
+) -> None:
+    from llm_redact.detection.engine import Allowlist, build_detectors
+    from llm_redact.providers.anthropic import AnthropicAdapter
+    from llm_redact.providers.gemini import GeminiAdapter
+    from llm_redact.providers.openai import OpenAIAdapter
+    from llm_redact.redactor import Redactor
+    from llm_redact.vault import InMemoryVault
+
+    adapters = {"openai": OpenAIAdapter, "anthropic": AnthropicAdapter, "gemini": GeminiAdapter}
+    chosen = adapters[adapter]()
+    assert chosen.redacts_multipart(path)
+    redactor = Redactor(
+        build_detectors(DetectionConfig(enabled=("email",))),
+        InMemoryVault(),
+        Allowlist(exact=frozenset(), patterns=()),
+    )
+    told: list[bytes] = []
+    out = chosen.redact_multipart(
+        path,
+        body or _text_form(),
+        b"b",
+        redactor,
+        inject_note=False,
+        require_scanned=True,
+        remember_text=told.append,
+    )
+    assert out is not None and b"@corp.example" not in out
+    assert told == [b"mail \xc2\xabEMAIL_001\xc2\xbb\n"]
+    assert len(remembered._digests) == 0  # the proxy's to remember
+    # Without it (a direct caller), remembered once redacted, as before.
+    chosen.redact_multipart(
+        path, body or _text_form(), b"b", redactor, inject_note=False, require_scanned=True
+    )
+    assert told[0] in remembered

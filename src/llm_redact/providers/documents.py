@@ -77,6 +77,7 @@ def redact_files_upload(
     require_scanned: bool,
     forward_binary: Callable[[int], None] | None,
     inspected: InspectedUpload | None = None,
+    remember_text: Callable[[bytes], None] | None = None,
 ) -> bytes | None:
     """A multipart/form-data file upload (Anthropic's Files API) redacted
     exactly as the OpenAI Files upload is — every JSONL line as data: no
@@ -91,6 +92,7 @@ def redact_files_upload(
         forward_binary=forward_binary,
         request_purposes=False,
         inspected=inspected,
+        remember_text=remember_text,
     )
 
 
@@ -162,13 +164,15 @@ def redact_related_upload(
     require_scanned: bool,
     forward_binary: Callable[[int], None] | None,
     inspected: InspectedUpload | None = None,
+    remember_text: Callable[[bytes], None] | None = None,
 ) -> bytes | None:
     """A multipart/related upload redacted part by part (see the module):
     None when nothing changed (or, leniently, when the body is outside the
     canonical grammar). Raises UnredactableRequest for what it cannot read
     where that refuses, and BlockedRequest anywhere. ``inspected``: the
     proxy's reading of this same body and the binary parts it cleared
-    through their extracted text (``ProviderAdapter.redact_multipart``)."""
+    through their extracted text, and ``remember_text``: both as
+    ``ProviderAdapter.redact_multipart`` takes them."""
     reading = reading_of(inspected) or read_related_upload(
         body, boundary, redactor.charge, require_scanned=require_scanned
     )
@@ -198,7 +202,7 @@ def redact_related_upload(
             )
     except multipart.AmbiguousHeaders as exc:
         raise UnredactableRequest(str(exc)) from None
-    record_raw_texts(parsed.parts, originals, readings)
+    record_raw_texts(parsed.parts, originals, readings, remember_text)
     binary = uncleared_binaries(readings, cleared)
     if binary and forward_binary is not None:
         forward_binary(binary)  # every piece was read or allowed

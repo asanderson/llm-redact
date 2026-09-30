@@ -222,7 +222,9 @@ the one its content decoded as — UTF-8/US-ASCII, or a UTF-16/32 text
 file's own (its Content-Type `charset`, or the RFC 7578 `_charset_`
 field). `GET /v1/files/{id}/content` reads a download the same way: a
 text file this proxy uploaded redacted as one text is remembered by a
-digest of the bytes sent — the newest 1024, in the running process — and
+digest of the bytes sent — once the upload is handed to the upstream (a
+refused one is never remembered), the newest 1024, in the running
+process — and
 restored as the text it was (a value lands exactly as it was redacted,
 never JSON-escaped, even when the file now reads as JSON); a JSONL file is
 restored line by line as JSON, every value of every line; any other text

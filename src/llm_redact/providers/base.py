@@ -619,6 +619,7 @@ class ProviderAdapter(ABC):
         require_scanned: bool = False,
         forward_binary: Callable[[int], None] | None = None,
         inspected: "InspectedUpload | None" = None,
+        remember_text: Callable[[bytes], None] | None = None,
     ) -> bytes | None:
         """Rewrite a multipart request body for ``path`` (delimited by the
         ``boundary`` ``multipart_boundary`` read).
@@ -640,7 +641,12 @@ class ProviderAdapter(ABC):
         on the same body): the reading to use instead of reading the body
         again, and the binary file parts the proxy CLEARED — their extracted
         text scanned clean and complete — which go out byte-identical, not
-        refused and not counted as unscanned. This base scans nothing.
+        refused and not counted as unscanned. ``remember_text``: told the
+        redacted bytes of each text file part redacted as ONE text, which
+        its download must restore raw (``openai.RAW_TEXT_FILES``) — the
+        proxy remembers them only once the request is handed to the
+        upstream; without it they are remembered once the upload was
+        redacted. This base scans nothing.
         (What an upload cites for the stored-object check is read
         separately, before redaction: ``upload_view.read_upload``.)
 

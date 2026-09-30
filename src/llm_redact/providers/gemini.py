@@ -424,6 +424,7 @@ class GeminiAdapter(ProviderAdapter):
         require_scanned: bool = False,
         forward_binary: Callable[[int], None] | None = None,
         inspected: InspectedUpload | None = None,
+        remember_text: Callable[[bytes], None] | None = None,
     ) -> bytes | None:
         # The single-request upload: the FIRST part, the metadata (the
         # create's JSON body: the display name), redacted as the JSON value
@@ -439,6 +440,7 @@ class GeminiAdapter(ProviderAdapter):
             require_scanned=require_scanned,
             forward_binary=forward_binary,
             inspected=inspected,
+            remember_text=remember_text,
         )
 
     def restores_file_download(self, method: str, path: str) -> bool:

@@ -127,6 +127,7 @@ from llm_redact.providers.base import (
     prepare_route_request,
 )
 from llm_redact.providers.custom import build_custom_adapters, custom_prefix
+from llm_redact.providers.openai import remember_raw_texts
 from llm_redact.realtime import (
     ALL_WS_ADAPTERS,
     RealtimeRelay,
@@ -3578,8 +3579,9 @@ def _count_inspections(
 
 class _UploadFate:
     """One request's upload honesty counts — its inspected binary parts'
-    outcomes and the binary parts it forwards unscanned — held until its
-    fate is known and settled ONCE: ``sent`` when the request is handed to
+    outcomes and the binary parts it forwards unscanned — and the text
+    parts its downloads must restore raw (``remember_raw_texts``), held
+    until its fate is known and settled ONCE: ``sent`` when the request is handed to
     the upstream (a send that then fails in transit included: bytes may
     have left), refused on every other way out of ``handle()`` (its
     ``finally``), so a refusal after redaction never counts a part as
@@ -3604,13 +3606,18 @@ def _settle_upload(
     provider_name: str,
     outcomes: Counter[str],
     unscanned: list[int],
+    raw_texts: list[bytes],
     sent: bool,
 ) -> None:
     """An upload's counts once its fate is known (``_UploadFate``): the
     inspected parts (``_count_inspections``) and, only when it went out,
-    the binary parts forwarded unscanned — a count and the path only, never
-    a file name or content."""
+    the text parts redacted as one text (remembered for their download:
+    ``remember_raw_texts`` — a refused request never evicts what sent ones
+    remembered) and the binary parts forwarded unscanned — a count and the
+    path only, never a file name or content."""
     _count_inspections(state, provider_name, outcomes, sent=sent)
+    if sent:
+        remember_raw_texts(raw_texts)
     if sent and unscanned:
         state.unscanned_uploads[provider_name] += unscanned[0]
         logger.info(
@@ -4374,6 +4381,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # no upstream, the audit START, the authorizer — counts nothing
             # as forwarded).
             inspection_outcomes: Counter[str] = Counter()
+            # Its text parts redacted as one text, remembered for their
+            # download once it is handed to the upstream (never on a refusal).
+            raw_texts: list[bytes] = []
             upload.hold(
                 functools.partial(
                     _settle_upload,
@@ -4383,6 +4393,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                     provider_name,
                     inspection_outcomes,
                     binary_forwarded,
+                    raw_texts,
                 )
             )
             try:
@@ -4424,6 +4435,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                         require_scanned=True,
                         forward_binary=forward_binary,
                         inspected=inspected,
+                        remember_text=raw_texts.append,
                     ),
                 )
             except BinaryValuesDetected as exc:

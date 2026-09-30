@@ -210,6 +210,13 @@ and tags `vX.Y.Z`.
   `clean_refused`. And a request whose extracted texts ran out of `max_body_strings`
   no longer drops its parts' outcomes: the part that ran the budget out and every
   later one count `incomplete`.
+- A text file upload redacted as one text was remembered for its download (restored
+  raw, by digest, newest 1024) as soon as redaction returned, even when the proxy then
+  refused the request without contacting the upstream (no upstream configured, the
+  upstream authorizer, the `[audit] required` START row, a routed refusal): such
+  refusals could evict what sent uploads recorded, and that download then came back
+  restored escape-aware instead of byte-exact. It is now remembered only once the
+  request is handed to the upstream.
 - An upload's request row (log line, `/recent`, `/events`, audit rows and sinks, OTel)
   counted the redactions and warn-mode forwards of every OTHER request that ran while
   the upload inspector read its binary parts: the per-request count diff spanned that

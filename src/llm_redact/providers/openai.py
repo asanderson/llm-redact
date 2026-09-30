@@ -634,16 +634,31 @@ RAW_TEXT_FILES = _RawTextFiles()
 
 
 def record_raw_texts(
-    parts: Sequence[multipart.MultipartPart], originals: Sequence[bytes], readings: Sequence[Any]
+    parts: Sequence[multipart.MultipartPart],
+    originals: Sequence[bytes],
+    readings: Sequence[Any],
+    remember_text: Callable[[bytes], None] | None,
 ) -> None:
     """Remember every text part an ACCEPTED upload redacted as ONE text
     (values landing raw), so its download is restored as the text it was
     (``rehydrate_text_file``). Called once the whole upload was redacted —
     a request refused part way through records nothing, so refused
-    requests cannot evict what accepted ones recorded."""
+    requests cannot evict what sent ones recorded. ``remember_text``: the
+    proxy's — told each part's bytes instead, it remembers them
+    (``remember_raw_texts``) only once the request is handed to the
+    upstream, so a refusal AFTER redaction (no upstream configured, the
+    ``[audit] required`` START row, the upstream authorizer, a routed
+    refusal) records nothing either."""
     for part, original, reading in zip(parts, originals, readings, strict=True):
         if reading.kind == "document" and part.content is not original:
-            RAW_TEXT_FILES.record(part.content)
+            (remember_text or RAW_TEXT_FILES.record)(part.content)
+
+
+def remember_raw_texts(contents: Sequence[bytes]) -> None:
+    """The text parts an upload redacted as ONE text (``record_raw_texts``),
+    remembered once it was handed to the upstream."""
+    for content in contents:
+        RAW_TEXT_FILES.record(content)
 
 
 def rehydrate_text_file(
@@ -1168,6 +1183,7 @@ class OpenAIAdapter(ProviderAdapter):
         require_scanned: bool = False,
         forward_binary: Callable[[int], None] | None = None,
         inspected: InspectedUpload | None = None,
+        remember_text: Callable[[bytes], None] | None = None,
     ) -> bytes | None:
         return self.redact_form_upload(
             path,
@@ -1179,6 +1195,7 @@ class OpenAIAdapter(ProviderAdapter):
             forward_binary=forward_binary,
             request_purposes=True,
             inspected=inspected,
+            remember_text=remember_text,
         )
 
     def read_multipart(
@@ -1236,6 +1253,7 @@ class OpenAIAdapter(ProviderAdapter):
         forward_binary: Callable[[int], None] | None,
         request_purposes: bool,
         inspected: InspectedUpload | None = None,
+        remember_text: Callable[[bytes], None] | None = None,
     ) -> bytes | None:
         """``redact_multipart``'s form upload, shared with the other
         providers' multipart/form-data Files upload: ``request_purposes``
@@ -1273,7 +1291,7 @@ class OpenAIAdapter(ProviderAdapter):
             # Only reachable with require_scanned (strict header reads): a part
             # header without a single reading is never signed.
             raise UnredactableRequest(str(exc)) from None
-        record_raw_texts(parsed.parts, originals, readings)
+        record_raw_texts(parsed.parts, originals, readings, remember_text)
         binary = uncleared_binaries(readings, cleared)
         if binary and forward_binary is not None:
             # Every piece was read or allowed: these go out unscanned (a

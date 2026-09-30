@@ -680,6 +680,26 @@ def _check_posture(report: _Report, config: Config) -> None:
                 f" {', '.join(inactive)} unbuilt — those IDs are not detected",
             )
 
+    # Stated either way, as a PASS: a binary file cannot be redacted at all
+    # (like base64 media in a chat body, the documented non-goal), so
+    # forwarding it with the client's own key is the default, not an
+    # opt-out — but the operator must know those bytes leave unread.
+    if config.detection.binary_uploads == "forward":
+        report.line(
+            "PASS",
+            "posture",
+            'binary_uploads = "forward": binary file uploads (PDF, images, archives) sent'
+            " with the client's own key are forwarded UNSCANNED (counted in /status);"
+            " text files are redacted, and a credential the proxy holds never carries one",
+        )
+    else:
+        report.line(
+            "PASS",
+            "posture",
+            'binary_uploads = "refuse": binary file uploads are refused (400); text files'
+            " are redacted",
+        )
+
     if not opted_out:
         report.line("PASS", "posture", "no coverage opt-outs configured (all traffic redacted)")
 

@@ -91,6 +91,7 @@ class Metrics:
         upstream_errors: "Counter[str] | None" = None,
         bookkeeping_errors: "Counter[str] | None" = None,
         connections_closed: "Counter[str] | None" = None,
+        unscanned_uploads: "Counter[str] | None" = None,
     ) -> str:
         lines: list[str] = []
         lines.append("# HELP llm_redact_info Build information.")
@@ -177,6 +178,18 @@ class Metrics:
         for cause, count in sorted((connections_closed or Counter()).items()):
             lines.append(
                 f'llm_redact_connections_closed_total{{cause="{_escape_label(cause)}"}} {count}'
+            )
+
+        lines.append(
+            "# HELP llm_redact_unscanned_uploads_total Binary file parts of uploads forwarded"
+            " UNSCANNED with the client's own credential ([detection] binary_uploads ="
+            ' "forward"), by provider.'
+        )
+        lines.append("# TYPE llm_redact_unscanned_uploads_total counter")
+        for provider, count in sorted((unscanned_uploads or Counter()).items()):
+            lines.append(
+                f'llm_redact_unscanned_uploads_total{{provider="{_escape_label(provider)}"}}'
+                f" {count}"
             )
 
         lines.append(

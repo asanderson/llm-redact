@@ -472,6 +472,10 @@ class ProxyState:
         # "host" (a name the proxy does not answer to — DNS rebinding, or an
         # alias not in allowed_hosts), "origin", "fetch_site". Kinds only.
         self.request_origin_refusals: Counter[str] = Counter()
+        # Binary file parts of uploads forwarded UNSCANNED ([detection]
+        # binary_uploads = "forward", the client's own credential), by
+        # provider: an honesty counter — those bytes left unread.
+        self.unscanned_uploads: Counter[str] = Counter()
         self.redactor = Redactor(
             self.detectors,
             self.vault,
@@ -2007,6 +2011,10 @@ async def _handle_local(
                 # would spend a credential the proxy holds, as addressed to a
                 # host name it does not answer to — by kind, never a value.
                 "request_origin_refusals_total": dict(state.request_origin_refusals),
+                # Binary upload file parts forwarded UNSCANNED with the
+                # client's own key ([detection] binary_uploads = "forward"),
+                # by provider — never a name or a byte of them.
+                "unscanned_uploads_total": dict(state.unscanned_uploads),
                 # How many browser origins the operator listed in
                 # allowed_origins (the count, not the list): pages there can
                 # read restored values back through the proxy — opt-in.
@@ -2149,6 +2157,7 @@ async def _handle_local(
                 upstream_errors=state.upstream_errors,
                 bookkeeping_errors=state.bookkeeping_errors,
                 connections_closed=state.connections.closed,
+                unscanned_uploads=state.unscanned_uploads,
             ),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
@@ -3837,6 +3846,17 @@ async def handle(request: Request) -> Response:
         # (_ownership_body).
         boundary = parse_multipart_boundary(request.headers.get("content-type", ""))
         if boundary is not None:
+            # A binary file part (a PDF, an image) cannot be redacted: with
+            # the client's own credential it is forwarded unscanned unless
+            # [detection] binary_uploads = "refuse"; under a credential the
+            # proxy holds it is never sent (the proxy vouches only for what
+            # it read). Counted once the upload was read in full.
+            binary_forwarded: list[int] = []
+            forward_binary = (
+                binary_forwarded.append
+                if not proxy_credential and state.config.detection.binary_uploads == "forward"
+                else None
+            )
             try:
                 # One vault transaction for the whole upload (run_batched).
                 rewritten = run_batched(
@@ -3844,7 +3864,11 @@ async def handle(request: Request) -> Response:
                     functools.partial(
                         adapter.redact_multipart,
                         path,
-                        body_bytes,
+                        # The body the stored-object check read, when it
+                        # re-serialized a line repeating a key: every part —
+                        # a text or binary file's too — then goes out as
+                        # the check read it.
+                        checked_upload if checked_upload is not None else body_bytes,
                         boundary,
                         # This body's own copy, counting its strings (form
                         # fields, file names, JSONL lines) against
@@ -3852,8 +3876,10 @@ async def handle(request: Request) -> Response:
                         ctx.redactor.with_budget(max_body_strings),
                         inject_note=note_wanted and adapter.wants_system_note(kind, path),
                         # The scanned-body rule, part by part: an unscanned
-                        # piece refuses the whole request.
+                        # piece refuses the whole request — a binary file
+                        # part only when forward_binary is None.
                         require_scanned=True,
+                        forward_binary=forward_binary,
                     ),
                 )
             except BlockedRequest as exc:
@@ -3887,6 +3913,19 @@ async def handle(request: Request) -> Response:
                 )
             if rewritten is not None:
                 outbound = rewritten
+            elif checked_upload is not None:
+                outbound = checked_upload
+            if binary_forwarded:
+                # Honesty: these bytes leave the machine unread (a count and
+                # the path only — never a file name or content).
+                state.unscanned_uploads[provider_name] += binary_forwarded[0]
+                logger.info(
+                    "%s %s forwarded %d binary upload file part(s) unscanned"
+                    ' ([detection] binary_uploads = "forward")',
+                    request.method,
+                    path,
+                    binary_forwarded[0],
+                )
 
     new_counts = _count_delta(state.detection_counts, detection_counts_before)
     # Same diff trick for warn-mode hits: attribute forwarded-unredacted

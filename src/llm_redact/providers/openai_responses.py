@@ -59,10 +59,11 @@ _TERMINAL_EVENTS = frozenset({"response.completed", "response.failed", "response
 # entries of type ``files`` (``files[].file_id``; the ``results`` form of
 # earlier API versions too). A ``file_citation`` names a file the request's
 # file_search read — the user's own upload, never the provider's creation.
-# A code interpreter call also names its CONTAINER (``container_id``): one
-# the call created (``{"type": "auto"}``), reported as the requester's —
-# a container the request itself names is an existing one, never reported
-# (the proxy drops every id the request body carries).
+# A code interpreter call — and a citation of a file it wrote — also names
+# its CONTAINER (``container_id``): one the call created (``{"type":
+# "auto"}``), reported as the requester's — a container the request itself
+# names is an existing one, never reported (the proxy drops every id the
+# request body carries).
 _CONTAINER_CITATION = "container_file_citation"
 _CODE_INTERPRETER_CALL = "code_interpreter_call"
 _CALL_OUTPUT_KEYS = ("outputs", "results")
@@ -79,9 +80,10 @@ def _dicts(value: Any) -> list[dict[str, Any]]:
 
 def _annotation_file(annotation: Any, found: list[str]) -> None:
     if isinstance(annotation, dict) and annotation.get("type") == _CONTAINER_CITATION:
-        file_id = annotation.get("file_id")
-        if isinstance(file_id, str) and file_id:
-            found.append(file_id)
+        for key in ("file_id", "container_id"):
+            object_id = annotation.get(key)
+            if isinstance(object_id, str) and object_id:
+                found.append(object_id)
 
 
 def _part_files(part: Any, found: list[str]) -> None:

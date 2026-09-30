@@ -114,7 +114,7 @@ matches](#requests-no-route-matches).
 |---|---|---|
 | `POST /v1/chat/completions` | chat | streaming `delta.content`, tool-call arguments, and reasoning-model chain-of-thought (`delta.reasoning_content` / `delta.reasoning`) are all rehydrated per choice |
 | `GET /v1/chat/completions/{id}` | chat | stored-completion retrieval restored |
-| `POST /v1/responses` | chat | MCP connector: `tools[].type == "mcp"` entries (server_url, headers) pass through unredacted BY DESIGN — the provider needs the real credential; `mcp_call` arguments/output in responses are rehydrated, streaming included. The files the code interpreter WROTE into its container (`container_file_citation` annotations, a code interpreter call's output files; streaming included), and the container a call ran in (`container_id`) unless the request names it, are reported to a session router as the requester's |
+| `POST /v1/responses` | chat | MCP connector: `tools[].type == "mcp"` entries (server_url, headers) pass through unredacted BY DESIGN — the provider needs the real credential; `mcp_call` arguments/output in responses are rehydrated, streaming included. The files the code interpreter WROTE into its container (`container_file_citation` annotations, a code interpreter call's output files; streaming included), and the container they were written in (a call's or a citation's `container_id`) unless the request names it, are reported to a session router as the requester's |
 | `GET /v1/responses/{id}` | chat | stored responses rehydrated |
 | `GET /v1/responses/{id}/input_items` | chat | input-item echoes restored |
 | `DELETE /v1/responses/{id}` | redact-only | id only (a body-less no-op: recognized) |

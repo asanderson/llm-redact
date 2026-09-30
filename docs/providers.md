@@ -386,8 +386,9 @@ refuses the upload), a JSON container-file create names a stored file
 restored, and a download is restored like a Files API download — JSON
 object lines, every other byte as sent. A container's `name` and starting
 `file_ids` are verbatim. Created containers — and the container a
-Response's code interpreter call ran in, unless the request named it —
-and container files are reported to a session router.
+Response's code interpreter call ran in (or a file it cites was written
+in), unless the request named it — and container files are reported to a
+session router.
 
 The Uploads API (`/v1/uploads`: a large file sent in parts) stays
 unrecognized — a part is an opaque byte range whose boundaries can split

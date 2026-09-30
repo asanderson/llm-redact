@@ -466,11 +466,11 @@ def test_responses_events_name_the_container_files_they_carry() -> None:
     cases = [
         (
             {"type": "response.output_text.annotation.added", "annotation": _citation("cf_a")},
-            ("cf_a",),
+            ("cf_a", "cntr_1"),
         ),
         (
             {"type": "response.content_part.done", "part": RESPONSE["output"][1]["content"][0]},
-            ("cfile_chart", "cfile_out"),
+            ("cfile_chart", "cntr_1", "cfile_out"),
         ),
         (
             {"type": "response.output_item.done", "item": RESPONSE["output"][0]},
@@ -578,8 +578,8 @@ async def test_a_streamed_response_reports_its_container_files_once(
     assert response.status_code == 200 and "response.completed" in response.text
     assert router.objects == [
         ("cfile_chart", SESSION),
+        ("cntr_1", SESSION),  # the container the cited file was written in
         ("cfile_out", SESSION),
-        ("cntr_1", SESSION),  # the call's item arrives only with the completion
         ("cfile_legacy", SESSION),
     ]
 
@@ -590,7 +590,7 @@ async def test_a_split_responses_stream_reports_each_file_once(
     ids, out = await _sweep(
         monkeypatch, tmp_path, OpenAIResponsesAdapter(), "/v1/responses", _responses_stream()
     )
-    assert ids == ["cfile_chart", "cfile_out", "cntr_1", "cfile_legacy"]
+    assert ids == ["cfile_chart", "cntr_1", "cfile_out", "cfile_legacy"]
     assert EMAIL in out.decode()
 
 

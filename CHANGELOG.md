@@ -137,6 +137,14 @@ and tags `vX.Y.Z`.
   names included) are redacted like other user-written labels and restored in
   every echo of the job; they were forwarded as sent, now under a credential the
   proxy holds too.
+- A request on a recognized route that carries an HTTP method override (the
+  `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override` header, or a
+  `_method`/`$httpMethod`-style query parameter) is refused (400) before its body
+  is read, and those headers are never forwarded on a recognized route or a
+  realtime relay: an upstream honoring one ran another method than the one the
+  request was redacted, restored and checked as (a file create served as the file
+  list). Unrecognized pass-through traffic forwards them as sent. A Gemini file
+  create's answer reports only its own file, never a `files` array.
 
 ## [1.9.0] - 2026-09-29
 

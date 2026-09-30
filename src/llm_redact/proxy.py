@@ -276,6 +276,42 @@ _SKIP_REQUEST_HEADERS = frozenset({"host", "content-length", "connection", "acce
 # it (a named-user key sent to a proxy without an access gate must still
 # never leave the machine).
 OWN_HEADER_PREFIX = "x-llm-redact-"
+# METHOD OVERRIDES: a header or query parameter asking the upstream to run a
+# method other than the request line's (Google's front end honors
+# X-HTTP-Method-Override, OData services X-HTTP-Method, web frameworks a
+# `_method` parameter). A matched route is redacted, restored, tracked and
+# ownership-checked by the request line's method — a create overridden into
+# a listing would be restored in the caller's session and its items claimed —
+# so a matched route carrying one is refused (``method_override``) and the
+# headers never leave on a matched route. Pass-through traffic (the
+# client's own key, nothing read) forwards them as sent.
+METHOD_OVERRIDE_HEADERS = frozenset(
+    {"x-http-method-override", "x-http-method", "x-method-override"}
+)
+_METHOD_OVERRIDE_PARAMS = frozenset(
+    {
+        "_method",
+        "$method",
+        "httpmethod",
+        "$httpmethod",
+        *METHOD_OVERRIDE_HEADERS,
+        *(f"${name}" for name in METHOD_OVERRIDE_HEADERS),
+    }
+)
+
+
+def method_override(headers: Mapping[str, str], query: str) -> str | None:
+    """Which KIND of method override the request carries ("header" or
+    "query parameter"), or None. Names compare case-insensitively; query
+    names are read decoded (``+`` and percent escapes)."""
+    if any(name.lower() in METHOD_OVERRIDE_HEADERS for name in headers):
+        return "header"
+    names = (name for name, _ in urllib.parse.parse_qsl(query, keep_blank_values=True))
+    if any(name.lower() in _METHOD_OVERRIDE_PARAMS for name in names):
+        return "query parameter"
+    return None
+
+
 # The named-user base-path prefix. Only an access gate (llm-redact-pro)
 # can accept it; a path still carrying it after admission is answered
 # locally and never forwarded or recorded (its next segment is a key).
@@ -1416,12 +1452,16 @@ class ProxyState:
         return attribute(path, headers, query)
 
 
-def _request_headers(request: Request) -> list[tuple[str, str]]:
+def _request_headers(request: Request, *, matched: bool) -> list[tuple[str, str]]:
+    """The client's headers as forwarded: hop-by-hop ones and the proxy's own
+    namespace dropped — and, on a ``matched`` route, every method override
+    (refused before this; dropped again here as a second layer)."""
     headers = [
         (name, value)
         for name, value in request.headers.items()
         if name.lower() not in _SKIP_REQUEST_HEADERS
         and not name.lower().startswith(OWN_HEADER_PREFIX)
+        and not (matched and name.lower() in METHOD_OVERRIDE_HEADERS)
     ]
     # Compressed upstream bodies would force re-encoding bookkeeping on the
     # streaming path; identity keeps the byte stream directly rewritable.
@@ -3155,6 +3195,39 @@ def _misaddressed_refused(
     return JSONResponse(body, status_code=misaddressed.status)
 
 
+def _method_override_refused(
+    state: ProxyState,
+    adapter: ProviderAdapter,
+    kind: str,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A matched route carrying a method override (``method_override``): a
+    recorded, provider-shaped 400 — never forwarded, no upstream contact."""
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=400,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+    )
+    logger.info("%s %s -> 400 refused (method override %s)", request.method, path, kind)
+    message = (
+        f"llm-redact: the request carries an HTTP method override {kind}; llm-redact reads"
+        f" a {adapter.name} API request by its own method, so it refuses one asking the"
+        " provider to run another. Send the request with the method it means; the request"
+        " was not forwarded"
+    )
+    return JSONResponse(adapter.error_body(message, status=400), status_code=400)
+
+
 def _unattributed_refused(
     state: ProxyState, request: Request, *, path: str, started: float
 ) -> JSONResponse:
@@ -3472,6 +3545,22 @@ async def handle(request: Request) -> Response:
         )
         logger.info("%s %s -> 403 refused by the access gate", request.method, path)
         return JSONResponse(error, status_code=403)
+
+    override = method_override(request.headers, query) if adapter is not None else None
+    if adapter is not None and override is not None:
+        # A matched route is read by the request line's method; an upstream
+        # that honors the override would run another (a create turned into a
+        # listing). Refused before the body is read, any credential or
+        # upstream contact; the message names the KIND only.
+        return _method_override_refused(
+            state,
+            adapter,
+            override,
+            provider_name=provider_name,
+            request=request,
+            path=path,
+            started=started,
+        )
 
     if adapter is None and upstream_auth is not None:
         # The proxy lends its own cloud identity only to the API routes it
@@ -4094,7 +4183,7 @@ async def handle(request: Request) -> Response:
         # Belt and braces behind origin_form_target: whatever the path
         # holds, the request goes to the configured upstream or nowhere.
         return JSONResponse({"error": "the request target must be a path"}, status_code=400)
-    headers = _request_headers(request)
+    headers = _request_headers(request, matched=adapter is not None)
     if upstream_auth is not None:
         # The proxy's own cloud identity: strip every client credential, then
         # authorize the FINAL request — the on-the-wire URL and the bytes
@@ -5452,7 +5541,9 @@ async def _handle_routed(
         return audit_refusal
     # The budget 402 (an attempt that was refused locally, so it carries the
     # audit token) or the first hop (hop 1, or hop 2 of the budget chain).
-    first = plan.begin(outbound, outbound_obj, _request_headers(request))
+    first = plan.begin(
+        outbound, outbound_obj, _request_headers(request, matched=adapter is not None)
+    )
     if isinstance(first, RouteRefusal):
         return _route_refusal(
             state,

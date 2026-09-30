@@ -201,6 +201,16 @@ own answer decides whether the page may read a response).
   upstream that ignores case or a trailing slash, or a front end that
   normalizes the path, would otherwise serve the unredacted body as the
   route itself. Routing a path costs time linear in its length.
+- A recognized route is read by its request line's method, so a request
+  on one that carries an HTTP method override — the
+  `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override`
+  header, or a `_method`/`$httpMethod`-style query parameter, which
+  Google's front end and other gateways honor — is a recorded 400 before
+  its body is read: a create turned into a listing upstream would be
+  restored in the caller's session and its items reported as the
+  caller's. Those headers are also never forwarded on a recognized route
+  (HTTP and realtime). Unrecognized pass-through traffic, sent with the
+  client's own key and never read, forwards them as sent.
 - A request no route matches is forwarded only to a provider it can be
   POSITIVELY attributed to — a path family, or the headers only one
   provider's clients send (`anthropic-version`, a Google key, …) — never

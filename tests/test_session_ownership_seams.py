@@ -623,6 +623,14 @@ def test_the_gemini_files_api_is_tracked() -> None:
         "files/b",
     )
     assert gemini.object_ids_from_body("POST", "/v1beta/files:register", {"files": "x"}) == ()
+    # The `files` array is register's alone: a create answering with one is a
+    # LISTING (an upstream that ran another method), never created files —
+    # and register answers with no single `file`.
+    for path in ("/upload/v1beta/files", "/v1beta/files"):
+        assert gemini.object_ids_from_body("POST", path, registered) == ()
+        both = {**uploaded, **registered}
+        assert gemini.object_ids_from_body("POST", path, both) == ("files/abc-123",)
+    assert gemini.object_ids_from_body("POST", "/v1beta/files:register", uploaded) == ()
     status = {
         "name": "batches/b1",
         "done": True,

@@ -858,11 +858,17 @@ def identity_subprotocols(offered: Sequence[str]) -> list[str]:
 
 def _filtered_headers(websocket: WebSocket) -> list[tuple[str, str]]:
     # The proxy's own x-llm-redact-* namespace never reaches the upstream,
-    # whether or not an access gate consumed it (same rule as HTTP).
+    # whether or not an access gate consumed it (same rule as HTTP), and
+    # neither does a method override (every relay is a matched route, read
+    # as the GET upgrade it is; proxy.METHOD_OVERRIDE_HEADERS).
+    from llm_redact.proxy import METHOD_OVERRIDE_HEADERS
+
     return [
         (name, value)
         for name, value in websocket.headers.items()
-        if name.lower() not in _HOP_HEADERS and not name.lower().startswith("x-llm-redact-")
+        if name.lower() not in _HOP_HEADERS
+        and not name.lower().startswith("x-llm-redact-")
+        and name.lower() not in METHOD_OVERRIDE_HEADERS
     ]
 
 

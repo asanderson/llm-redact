@@ -180,14 +180,19 @@ def _file_name(value: Any) -> str | None:
     return name if isinstance(name, str) and name.startswith(_FILE_PREFIX) else None
 
 
-def file_object_ids(body: Any) -> tuple[str, ...]:
+def file_object_ids(body: Any, *, register: bool = False) -> tuple[str, ...]:
     """The files a Files API create answers with: the upload's (and the
-    metadata-only create's) ``{"file": File}``, or ``files:register``'s
-    ``{"files": [File, …]}``."""
+    metadata-only create's) ``{"file": File}`` — or, ``register``, only
+    ``files:register``'s ``{"files": [File, …]}``. A create's answer holding
+    a ``files`` array is a LISTING (an upstream that ran another method),
+    never files this request created."""
     if not isinstance(body, dict):
         return ()
+    if not register:
+        name = _file_name(body.get("file"))
+        return () if name is None else (name,)
     listed = body.get("files")
-    files = [body.get("file"), *(listed if isinstance(listed, list) else ())]
+    files = listed if isinstance(listed, list) else ()
     return tuple(name for name in map(_file_name, files) if name is not None)
 
 
@@ -350,7 +355,7 @@ class GeminiAdapter(ProviderAdapter):
 
     def object_ids_from_body(self, method: str, path: str, body: Any) -> tuple[str, ...]:
         if _GEMINI_FILE_CREATE.fullmatch(path):
-            return file_object_ids(body)
+            return file_object_ids(body, register=path.endswith(":register"))
         if method == "GET":
             return batch_output_file_ids(body)
         return cache_object_ids(body)

@@ -157,13 +157,16 @@ async def _bounded(awaitable: Any, timeout: float) -> Any:
     """``awaitable``'s result within ``timeout`` seconds, else TimeoutError.
     Unlike ``asyncio.wait_for`` this never waits for the cancelled check to
     finish: one that swallows its cancellation cannot hold the pass (and so
-    every later re-check) open. A check left running is cancelled and its
-    outcome discarded."""
+    every later re-check) open. A check left running — timed out, or its
+    pass cancelled — is cancelled and its outcome discarded whenever it
+    ends (never an unretrieved exception, whose repr a gate's message could
+    fill)."""
     task = asyncio.ensure_future(awaitable)
     try:
         done, _ = await asyncio.wait({task}, timeout=timeout)
     except BaseException:
         task.cancel()  # this pass is being cancelled: take the check with it
+        task.add_done_callback(_discard)
         raise
     if not done:
         task.cancel()

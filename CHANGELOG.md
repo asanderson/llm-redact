@@ -187,6 +187,10 @@ and tags `vX.Y.Z`.
   `max_body_strings` at once: a deeply nested vector store search with too many
   filter keys is refused as fast as any over-budget body, instead of blocking the
   proxy for tens of seconds first.
+- Stopping the connection re-check backstop while an access re-check is pending no
+  longer lets that check's later exception be logged at shutdown as an
+  unretrieved task exception (with its message); its outcome is discarded, as a
+  timed-out check's already was.
 
 ## [1.9.0] - 2026-09-29
 

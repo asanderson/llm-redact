@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import logging
 import threading
 from collections import Counter
@@ -256,6 +257,37 @@ async def test_an_abandoned_check_that_later_fails_is_not_reported() -> None:
     release.set()
     for _ in range(5):
         await asyncio.sleep(0)
+
+
+async def test_stopping_mid_check_never_reports_the_checks_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # stop() cancels the pass while it waits on a check; a check that fails
+    # once cancelled (a gate cleanup whose message could carry a URL or a
+    # token) must never surface as an unretrieved task exception with its
+    # repr at shutdown.
+    caplog.set_level(logging.ERROR, logger="asyncio")
+    live = LiveConnections(Counter(), interval=5.0)
+    live.interval, live.timeout = 0.01, 5.0
+    started = asyncio.Event()
+
+    async def fails_when_cancelled() -> bool:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            raise RuntimeError(SECRET) from None
+        return True
+
+    live.start()
+    live.track(FakeConn(recheck=fails_when_cancelled))
+    await asyncio.wait_for(started.wait(), 2)
+    await live.stop()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    gc.collect()
+    assert "never retrieved" not in caplog.text
+    assert SECRET not in caplog.text
 
 
 async def test_a_failing_recheck_closes_and_logs_its_type_only(

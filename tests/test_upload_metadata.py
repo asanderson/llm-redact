@@ -39,6 +39,7 @@ from fake_router import install, routed_config
 from lent_routes import LentRouter
 from llm_redact.config import Config, ProviderConfig
 from llm_redact.jsonwalk import MAX_JSON_DEPTH
+from llm_redact.multipart import MultipartPart
 from llm_redact.providers.gemini import GeminiAdapter
 from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.proxy import create_app
@@ -52,7 +53,9 @@ from llm_redact.upload_view import (
     OUTSIDE_GRAMMAR,
     TOO_DEEP,
     TRANSFER_ENCODED,
+    MetadataPart,
     UploadView,
+    read_metadata_part,
     read_upload_metadata,
 )
 from test_object_access_seams import _registry
@@ -174,6 +177,30 @@ def test_the_first_part_is_read_as_the_metadata_object() -> None:
 def test_what_the_metadata_part_holds(body: bytes, metadata: dict[str, Any]) -> None:
     # Declared JSON, or no type at all: the provider finds it by position.
     assert _read(body) == UploadView(metadata)
+
+
+@pytest.mark.parametrize(
+    ("content", "read"),
+    [
+        pytest.param(
+            b' \r\n\xef\xbb\xbf{"file": {}} \n', MetadataPart({"file": {}}, 6, 18, False), id="span"
+        ),
+        pytest.param(b'{"a": 1, "a": 2}', MetadataPart({"a": 2}, 0, 16, True), id="repeated"),
+        pytest.param(b" \r\n\t", MetadataPart({}, 0, 4, False), id="blank"),
+        pytest.param(b"", MetadataPart({}, 0, 0, False), id="empty"),
+        pytest.param(b"[1]", METADATA_NOT_OBJECT, id="unreadable"),
+    ],
+)
+def test_the_metadata_part_as_redaction_reads_it(content: bytes, read: Any) -> None:
+    # The one reading the check and the redaction share: the object, the
+    # span of its JSON text (spliced when a value changes or a key repeats)
+    # — the whole part when blank — or the problem.
+    assert read_metadata_part(MultipartPart(JSON_HEAD, content)) == read
+    span = read_metadata_part(MultipartPart(JSON_HEAD, content))
+    if isinstance(span, MetadataPart):
+        assert span.splice(content, {"x": "«"}) == (
+            content[: span.start] + '{"x": "«"}'.encode() + content[span.end :]
+        )
 
 
 def test_a_repeated_key_is_read_as_its_last_occurrence_and_sent_so() -> None:
@@ -311,6 +338,16 @@ def test_a_part_without_a_header_block_or_an_empty_one_is_unreadable(content: by
     # blank line — neither reads the part where the check would.
     body = _related(_part(None, content), _part(b"Content-Type: text/plain", b"x"))
     assert _read(body) == UploadView(None, problem=AMBIGUOUS)
+    # The MEDIA too (every part): its content is not read, but a reader
+    # finding a transfer encoding in it decodes bytes nobody read.
+    media = _related(_part(JSON_HEAD, _meta(name="files/a")), _part(None, content))
+    assert _read(media) == UploadView(None, problem=AMBIGUOUS)
+
+
+@pytest.mark.parametrize("media", [b"", b"\r\nhello"], ids=["empty", "empty-header-block"])
+def test_a_media_part_every_reader_finds_empty_headers_in_is_read_past(media: bytes) -> None:
+    body = _related(_part(JSON_HEAD, _meta(name="files/a")), _part(None, media))
+    assert _read(body) == UploadView({"file": {"name": "files/a"}})
 
 
 # --- through the real app -------------------------------------------------------------
@@ -632,17 +669,45 @@ async def test_without_an_ownership_check_such_a_header_block_is_refused_where_r
     assert upstream.requests == []
 
 
-async def test_without_an_ownership_check_a_part_without_a_header_block_is_redacted_whole(
-    monkeypatch: pytest.MonkeyPatch,
+# A MEDIA part without a header block: a reader accepting a bare LF finds
+# a quoted-printable transfer encoding hiding an address nobody scanned.
+HEADLESS_MEDIA = _related(
+    _part(JSON, _meta(displayName="notes")),
+    _part(
+        None,
+        b"Content-Type: text/plain\nContent-Transfer-Encoding: quoted-printable\n\ncontact "
+        + EMAIL.replace("@", "=40").encode(),
+    ),
+)
+
+
+@pytest.mark.parametrize("body", [HEADLESS, HEADLESS_MEDIA], ids=["metadata", "media"])
+@pytest.mark.parametrize("check", [True, False], ids=["checked", "free-core"])
+async def test_a_part_without_a_header_block_is_refused_where_redaction_applies(
+    body: bytes, check: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # No header block at all: redaction reads the whole part as a file,
-    # whatever a server finds in it.
+    # Every part of the upload, whether or not a stored-object check reads
+    # it: redaction once read such a part as a whole file (the metadata's
+    # headers included), whatever a server finds in it.
     upstream = FilesAPI()
-    app = _app(monkeypatch, OlderRouter(), upstream, operator=False)
-    response = await _post(app, HEADLESS)
-    assert response.status_code == 200, response.text
-    (sent,) = upstream.requests
-    assert EMAIL.encode() not in sent.content and "«EMAIL_001»".encode() in sent.content
+    app = _app(monkeypatch, NameRouter() if check else OlderRouter(), upstream, operator=False)
+    response = await _post(app, body)
+    assert response.status_code == 400, response.text
+    assert AMBIGUOUS in response.json()["error"]["message"]
+    assert upstream.requests == [] and EMAIL not in response.text
+
+
+@pytest.mark.parametrize("detection", DETECTION)
+async def test_a_media_part_without_a_header_block_is_never_sent_with_the_proxys_credential(
+    detection: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    router = NameRouter()
+    upstream = FilesAPI()
+    app = _app(monkeypatch, router, upstream, operator=True, detection=detection)
+    response = await _post(app, HEADLESS_MEDIA)
+    assert response.status_code == 400, response.text
+    assert AMBIGUOUS in response.json()["error"]["message"]
+    assert upstream.requests == [] and router.checks == []
 
 
 # A multipart/related content type with more than one reading: canonical
@@ -730,15 +795,33 @@ class OlderRouter:
         return None
 
 
-async def test_without_an_ownership_check_the_upload_is_redacted_as_before(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("metadata", "head", "problem"), UNREADABLE)
+async def test_without_an_ownership_check_unreadable_metadata_is_refused_where_redaction_applies(
+    metadata: bytes, head: bytes, problem: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # No check to show it to: a metadata part is redacted like any other
-    # text part of the upload and forwarded (the Free core, an older router).
+    # No check to show it to (the Free core, an older router): redaction
+    # reads the metadata as the same JSON value, so what that reading
+    # refuses is a body the proxy cannot redact — refused as the scanned-body
+    # rule refuses a JSON body it cannot read (it was once redacted as a
+    # text file and forwarded).
     upstream = FilesAPI()
     app = _app(monkeypatch, OlderRouter(), upstream, operator=False)
-    lenient = f"{{file: {{displayName: '{EMAIL}'}}}}".encode()
-    response = await _post(app, _upload(lenient))
-    assert response.status_code == 200
-    (sent,) = upstream.requests
-    assert EMAIL.encode() not in sent.content and "«EMAIL_001»".encode() in sent.content
+    response = await _post(app, _upload(metadata, head))
+    assert response.status_code == 400, response.text
+    message = response.json()["error"]["message"]
+    assert problem in message and "forwards only bodies it has redacted" in message
+    assert "ada-notes" not in response.text and upstream.requests == []
+
+
+@pytest.mark.parametrize("check", [True, False], ids=["checked", "free-core"])
+async def test_pretty_printed_metadata_is_redacted_with_its_escapes_resolved(
+    check: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upstream = FilesAPI()
+    app = _app(monkeypatch, NameRouter() if check else OlderRouter(), upstream, operator=False)
+    pretty = json.dumps({"file": {"displayName": f"notes of {EMAIL}"}}, indent=2)
+    response = await _post(app, _upload(pretty.replace("@", "\\u0040").encode()))
+    assert response.status_code == 200, response.text
+    assert json.loads(upstream.metadata()) == {"file": {"displayName": "notes of «EMAIL_001»"}}
+    # The answer's echo is restored in the request's session.
+    assert response.json()["file"]["displayName"] == f"notes of {EMAIL}"

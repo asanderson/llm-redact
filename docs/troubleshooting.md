@@ -114,11 +114,13 @@ and the default `binary_uploads = "forward"` such a file is forwarded
 unscanned instead (counted in `/status` `unscanned_uploads_total`).
 Convert a Latin-1/Windows-1252 text file to UTF-8 to have it redacted.
 With llm-redact-pro's document extraction a PDF or Office file read
-completely as clean text is sent instead; one it could not read completely
+completely as clean text is sent instead — with your own key always, under
+a credential the proxy holds only when `[extraction] proxy_credential =
+true` (off by default); one it could not read completely
 (a scanned page, an embedded image) keeps this refusal — `/status`
 `inspected_uploads_total` counts each part's outcome (`clean` only for a
-part that went out; `clean_refused` for one that read clean in an upload
-refused for another reason).
+part of an upload handed to the upstream; `clean_refused` for one that read
+clean in an upload refused before that, for another reason).
 
 ## "an uploaded binary file holds values it must redact (…, found in the file's extracted text)"
 

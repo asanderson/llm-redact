@@ -7,6 +7,11 @@ resolution, modes), no placeholder issued, nothing written to the vault. A
 block-mode winner raises, a warn-mode winner is counted and left alone,
 every other winner — a deny string whatever the modes — is returned by
 type. Charged against the body's string budget as one string.
+
+``Redactor.blocked_type`` is the block check ahead of a redaction (an
+upload's pieces, before its binary parts are inspected): the type
+``redact_text`` would refuse the text for, else None — nothing issued,
+counted or charged. ``Redactor.blocks`` says whether it can find one.
 """
 
 from __future__ import annotations
@@ -117,3 +122,57 @@ def test_each_scan_is_one_string_against_the_budget() -> None:
     unbounded = _redactor(DetectionConfig())
     for _ in range(3):
         unbounded.scan_text(EMAIL)
+
+
+# --- blocked_type: the block check ahead of the redaction -----------------------------
+
+
+def test_blocks_says_whether_a_rule_is_in_block_mode() -> None:
+    assert not _redactor(DetectionConfig()).blocks
+    assert not _redactor(_detection(modes={"email": "warn"})).blocks
+    assert _redactor(_detection(modes={"email": "warn", "ipv4": "block"})).blocks
+
+
+def test_blocked_type_is_the_type_redact_text_refuses_for() -> None:
+    vault = InMemoryVault()
+    config = _detection(modes={"email": "warn", "ipv4": "block"})
+    redactor = _redactor(config, vault).with_budget(1)
+    text = f"{EMAIL} then {IP}"
+    assert redactor.blocked_type(text) == "IPV4"
+    assert redactor.blocked_type(text) == "IPV4"  # never charged (a budget of one)
+    # Nothing issued or counted — not the warn value either.
+    assert len(vault) == 0 and redactor.counts == {} and redactor.warn_counts == {}
+    with pytest.raises(BlockedRequest) as caught:
+        redactor.redact_text(text)
+    assert caught.value.detector_type == "IPV4"
+
+
+def test_blocked_type_is_none_where_redact_text_goes_through() -> None:
+    redactor = _redactor(_detection(modes={"email": "block", "ipv4": "warn"}))
+    assert redactor.blocked_type(f"from {IP}") is None  # warn mode
+    assert redactor.blocked_type("nothing to see") is None
+    other = _redactor(_detection(modes={"ipv4": "block"}))
+    assert other.blocked_type(f"mail {EMAIL}") is None  # redact mode
+
+
+def test_blocked_type_never_blocks_a_deny_string() -> None:
+    # A deny string (tier 0) always redacts, whatever its type's mode...
+    config = _detection(
+        deny_strings=[{"value": "project nightjar", "type": "EMAIL"}], modes={"email": "block"}
+    )
+    redactor = _redactor(config)
+    assert redactor.blocked_type("the Project Nightjar budget") is None
+    assert redactor.redact_text("the Project Nightjar budget") == "the «EMAIL_001» budget"
+    # ...and wins the overlap with a block-mode match it covers.
+    covering = _redactor(_detection(deny=["doe@corp"], modes={"email": "block"}))
+    assert covering.blocked_type(f"mail {EMAIL}") is None
+    assert covering.redact_text(f"mail {EMAIL}") == "mail jane.«DENY_001».example"
+
+
+def test_blocked_type_applies_the_allowlists() -> None:
+    modes = (("email", "block"),)
+    allowed = DetectionConfig(allowlist=(EMAIL,), modes=modes)
+    assert _redactor(allowed).blocked_type(EMAIL) is None
+    by_type = DetectionConfig(allowlist_by_type=(("EMAIL", (EMAIL,)),), modes=modes)
+    assert _redactor(by_type).blocked_type(EMAIL) is None
+    assert _redactor(by_type).blocked_type(OTHER) == "EMAIL"

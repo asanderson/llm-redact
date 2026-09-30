@@ -33,8 +33,8 @@ and tags `vX.Y.Z`.
   there and reads what follows as the part's content — a Gemini upload's metadata (a
   chosen file name) the stored-object check never saw, or file lines redaction never
   scanned. Such an upload is refused 400 wherever redaction applies and under a
-  credential the proxy holds, on every multipart route. So is, for the stored-object
-  check, a part with no header block that does not open with an empty one.
+  credential the proxy holds, on every multipart route. So is a part with no header
+  block that does not open with an empty one (see Fixed).
 - A multipart request's boundary is read only when its Content-Type has one reading:
   a repeated `boundary` parameter (`boundary=a; boundary=b`, which a reader taking
   the last one parses with `b`), a quoted value holding `;` or an escape (which a
@@ -50,7 +50,10 @@ and tags `vX.Y.Z`.
   could read a form-encoded `file.name=…` out of a strict-JSON string), and a
   `multipart/related` naming its root part with `start` (the metadata then need not be
   the first part) is a body llm-redact cannot read. Both are refused 400 wherever
-  redaction applies and under a credential the proxy holds.
+  redaction applies (the metadata is redacted as the value the check reads — see
+  Fixed) and under a credential the proxy holds; with `detection = false` there, the
+  declared type only where a session router's stored-object check reads the upload
+  (llm-redact-pro).
 - File uploads (OpenAI/Azure/custom `…/files`) are read by CONTENT
   (`upload_content.classify_file`): JSONL is redacted per line as before, any other
   text file (UTF-8, or UTF-16/32 with a BOM) is redacted as one text and re-encoded as
@@ -58,7 +61,8 @@ and tags `vX.Y.Z`.
   byte means binary even when the bytes decode) is no longer refused under the
   client's own key: it is forwarded UNSCANNED, its file name still redacted, and
   counted. Under a credential the proxy holds (cloud identity, a routed operator key)
-  a binary file is still refused 400. Downloads of text files
+  a binary file is still refused 400 — unless an upload inspector cleared it (see
+  Added: only when the inspection allows that credential). Downloads of text files
   (`GET …/files/{id}/content`) are restored line by line; binary downloads are
   untouched.
 
@@ -80,11 +84,21 @@ and tags `vX.Y.Z`.
   timeout, a fault) keeps the unscanned-binary rules. New `/status`
   `inspected_uploads_total` and `upload_inspector`,
   `llm_redact_inspected_uploads_total{provider,outcome}` (`clean` counts only parts
-  that went out; a clean part of a refused upload is `clean_refused`), a `llm-redact
-  status` posture line for clean forwards. Every part's headers are checked (file
-  names, transfer encodings, charsets) before any part is inspected, so an upload the
-  redaction would refuse is never handed to the inspector. A clean scan covers the
-  extracted text only.
+  of an upload handed to the upstream; a clean part of an upload refused before that
+  is `clean_refused`), a `llm-redact status` posture line for clean forwards. Every
+  part's headers (file names, transfer encodings, charsets, a header block every
+  reader finds) and every scanned part's format (a form field that is not UTF-8 text,
+  a JSONL line nesting too deep, the Gemini upload's metadata) are checked before any
+  part is inspected, so an upload the redaction would refuse for its form is never
+  handed to the inspector; with a rule in block mode, so is every string the
+  redaction will scan (file names, form fields, text and JSONL files, the Gemini
+  metadata) for a block-mode value, read-only and under its own `max_body_strings`
+  count. What needs the redaction itself — `max_body_strings` without a block-mode
+  rule, a sealed session, placeholder exhaustion, a vault fault — and a local refusal
+  after redaction (no upstream configured, the upstream authorizer) can still follow
+  the inspection, and the `[audit] required` START row is written after it: that
+  guarantee covers upstream contact, and the inspector is not the upstream. A clean
+  scan covers the extracted text only.
 - `[detection] binary_uploads = "forward" | "refuse"` (default `"forward"`, hot):
   `"refuse"` keeps refusing binary uploads under the client's own key too. Forwarded
   binaries are surfaced: /status `unscanned_uploads_total`,
@@ -134,8 +148,9 @@ and tags `vX.Y.Z`.
   tracked like `:batchGenerateContent`. No batch route carries the system note.
 - The Gemini API's Files API is recognized: the single-request upload
   (`X-Goog-Upload-Protocol: multipart`, a `multipart/related` body) and the
-  metadata-only create are redacted part by part with the OpenAI Files upload's
-  content policy (every part read as a file by its content; a binary file forwarded
+  metadata-only create are redacted part by part: the upload's first part, the file's
+  metadata, as the create's JSON body (see Fixed), every other part with the OpenAI
+  Files upload's content policy (read as a file by its content; a binary file forwarded
   unscanned only with the client's own key under `binary_uploads = "forward"`,
   counted in `unscanned_uploads`); a file's metadata and the file list restore each
   `displayName`; the download (`…:download`, `/download/v1beta/…:download`) is
@@ -183,6 +198,62 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- An upload refused for a form field that is not UTF-8 text or a JSONL line nesting
+  too deep had its binary parts handed to the upload inspector first (which may send
+  them to an extraction service): those format checks now run before the inspection,
+  with the header checks. The CHANGELOG and docs claimed more than that: they now state
+  which refusals can still follow an inspection (see Added).
+- An upload refused for a block-mode value in another part or in a file name (an
+  address in a PDF's name, a text file or form field beside it) had its binary parts
+  handed to the upload inspector first. With a rule in block mode, every string the
+  redaction will scan is now checked for one before any part is inspected, exactly as
+  the redaction reads it (a batch line's request walk included), with nothing issued or
+  counted and its own `max_body_strings` count (`Redactor.blocked_type`,
+  `PartsReading.require_unblocked`).
+- An inspected upload part that scanned clean was counted `clean` ("forwarded after a
+  clean scan") as soon as redaction returned, even when the proxy then refused the
+  request without contacting the upstream (no upstream configured, the upstream
+  authorizer failing, the `[audit] required` START row failing, a routed budget
+  refusal); binary parts were likewise counted in `unscanned_uploads_total` and logged
+  as forwarded. Both now count only once the request is handed to the upstream (a
+  send that then fails in transit included); a refused upload's clean parts are
+  `clean_refused`. And a request whose extracted texts ran out of `max_body_strings`
+  no longer drops its parts' outcomes: the part that ran the budget out and every
+  later one count `incomplete`.
+- A text file upload redacted as one text was remembered for its download (restored
+  raw, by digest, newest 1024) as soon as redaction returned, even when the proxy then
+  refused the request without contacting the upstream (no upstream configured, the
+  upstream authorizer, the `[audit] required` START row, a routed refusal): such
+  refusals could evict what sent uploads recorded, and that download then came back
+  restored escape-aware instead of byte-exact. It is now remembered only once the
+  request is handed to the upstream.
+- An upload's request row (log line, `/recent`, `/events`, audit rows and sinks, OTel)
+  counted the redactions and warn-mode forwards of every OTHER request that ran while
+  the upload inspector read its binary parts: the per-request count diff spanned that
+  await. The window now restarts once the inspector returns, so a row counts only its
+  own request (the extracted texts' warn-mode values included). Process-wide totals
+  were never affected.
+- The Gemini API upload's metadata part (`POST /upload/v1beta/files`, the first part of
+  the `multipart/related` body) was shown to the stored-object check as a JSON body but
+  redacted as a FILE: on one line it was parsed as JSON, pretty-printed it was redacted
+  as raw text, so a JSON-escaped value (`\u0040` in an address, `ensure_ascii` escapes
+  of a name) went out unredacted and the provider decoded it. The part is now read and
+  redacted as the one JSON value the check reads (`upload_view.read_metadata_part`:
+  declared `application/json` or undeclared, strict UTF-8, escapes resolved, every
+  string redacted, keys never; only the JSON text's span rewritten, and only when a
+  value changed or a key repeats). Metadata that reading refuses (lenient or non-UTF-8
+  JSON, another declared type, a foreign charset, the media first) is refused 400
+  wherever redaction applies, with or without a session router, as a JSON body the
+  proxy cannot read is; it used to be redacted as a file and forwarded.
+- A multipart part with no header/body separator (no CRLF CRLF) was redacted as a
+  plain field with no header at all, while a reader accepting a bare LF as a line
+  break finds headers in it: a file name, a `Content-Transfer-Encoding` (a
+  quoted-printable address no detector matches, base64 hiding a binary file) or a
+  charset the proxy never read. Such a part is now refused 400 wherever redaction
+  applies (whatever the credential) and wherever the stored-object check reads the
+  upload, on every multipart route and every part — the Gemini API upload's media
+  too — before any part is handed to an upload inspector. An empty part, or one
+  opening with an empty header block (CRLF), is still read.
 - A realtime client frame holding JSON the parser refuses for anything but its syntax
   (an integer longer than Python's 4300-digit limit) counted as "not JSON", so under
   the client's own key it was relayed as sent — neither redacted nor put to the session

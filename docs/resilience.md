@@ -48,6 +48,24 @@ faults surface as the transport errors above.
 | A JSON value holding a lone UTF-16 surrogate (a `\ud800`-style escape; surrogate-encoded bytes) | Every re-serialization (the redacted request, a restored answer, an SSE event, an NDJSON line, an eventstream frame, a realtime frame) writes it back as its escape (`jsonwalk.json_text` / `json_bytes`) — the same JSON value, every other character as before. It once failed the UTF-8 encode: an unrecorded bare 500 on the request path, a 502 or a cut stream on the answer path. | `test_lone_surrogates.py` |
 | Stream **ends mid-token** (upstream closed after a prefix) | The partial placeholder held in the rehydrator buffer is flushed **verbatim** — never guessed into a value, never dropped. For every truncation point, `feed(prefix)+flush()` equals the non-streaming rehydration of exactly what arrived. | `test_stream_truncation.py` |
 
+## Upload inspector faults (llm-redact-pro's document extraction)
+
+An upload inspector (`plugin_api.UploadInspector`) reads an upload's
+binary file parts as text before redaction. The core never trusts it with
+more than that: whatever goes wrong, the part counts as NOT read and keeps
+the unscanned-binary rules — forwarded unscanned only with the client's
+own key under `[detection] binary_uploads = "forward"` (counted), else a
+recorded, provider-shaped **400** — never a pass on a part it did not read.
+
+| Fault | Behavior | Pinned by |
+| --- | --- | --- |
+| The inspector raises, or answers anything but an `Inspection` | Outcome `error` (logged by exception type only, never content); the unscanned-binary rules. | `test_upload_inspection.py` |
+| The inspections outlast the inspector's declared `timeout` (capped at 300 s, one deadline per request) | What still runs is cancelled and never awaited again (a result arriving later is discarded); outcome `timeout`; the unscanned-binary rules. | `test_upload_inspection.py` |
+| A part over the inspector's `max_bytes`, or past 16 parts | Never handed over; outcome `not_inspected`; the unscanned-binary rules. | `test_upload_inspection.py` |
+| An incomplete reading, no text, or more extracted text than the request's budgets (`max_body_bytes` characters, `max_body_strings` strings — the latter a **413**) | Outcome `incomplete`: a value found still refuses the upload, a clean scan does not clear the part. | `test_upload_inspection.py` |
+| The request is cancelled while its inspections run | Every inspection is cancelled with it. | `test_upload_inspection.py` |
+| The inspector's declared `timeout` or `max_bytes` is missing or not a positive number | Startup refuses (ConfigError): the bounds are never left to chance. | `test_upload_inspection.py` |
+
 ## Vault durability
 
 The vault is the one piece of state whose corruption is unacceptable: a lost

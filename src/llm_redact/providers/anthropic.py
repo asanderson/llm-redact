@@ -273,6 +273,7 @@ class AnthropicAdapter(ProviderAdapter):
         require_scanned: bool = False,
         forward_binary: Callable[[int], None] | None = None,
         inspected: InspectedUpload | None = None,
+        remember_text: Callable[[bytes], None] | None = None,
     ) -> bytes | None:
         # The Files upload: the document part (and any form field) to the
         # shared document policy, every part's file name redacted.
@@ -283,6 +284,7 @@ class AnthropicAdapter(ProviderAdapter):
             require_scanned=require_scanned,
             forward_binary=forward_binary,
             inspected=inspected,
+            remember_text=remember_text,
         )
 
     def restores_file_download(self, method: str, path: str) -> bool:

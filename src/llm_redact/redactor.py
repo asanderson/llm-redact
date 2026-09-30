@@ -252,5 +252,24 @@ class Redactor:
                 found[d.detector_type] += 1
         return found
 
+    @property
+    def blocks(self) -> bool:
+        """Whether a rule is in block mode: whether ``redact_text`` can
+        refuse a text (BlockedRequest) at all."""
+        return "block" in self._modes.values()
+
+    def blocked_type(self, text: str) -> str | None:
+        """The detector type ``redact_text`` would refuse ``text`` for — its
+        first block-mode winner, under the same allowlists, deny strings
+        and overlap resolution — else None. Nothing is issued, counted or
+        charged: a check AHEAD of the redaction that will scan ``text`` and
+        count it (an upload's pieces, before its binary parts are handed to
+        an upload inspector)."""
+        for d in _resolve_overlaps(self._plan.detect(text, self._allowlist)):
+            # Deny strings (tier 0) never block, exactly as in redact_text.
+            if d.tier and self._modes.get(d.detector_type) == "block":
+                return d.detector_type
+        return None
+
     def redact_json(self, obj: Any) -> Any:
         return transform_strings(obj, self.redact_text)

@@ -396,6 +396,12 @@ class UploadReading(Protocol):
         """Each BINARY file part, with its position among the parts."""
         ...
 
+    def require_unblocked(self, check: Callable[[str], str]) -> None:
+        """``check`` run over every string ``redact_multipart`` will
+        redact, as it reads them (it raises what refuses the request: a
+        block-mode value) — before any binary part is inspected."""
+        ...
+
 
 @dataclass(frozen=True)
 class InspectedUpload:
@@ -597,7 +603,11 @@ class ProviderAdapter(ABC):
         every piece required scanned — parsed once, each part classified
         once (``charge`` bounds the per-line JSONL check, as in
         redaction), every part's headers checked as the redaction would
-        check them — so the proxy can inspect its BINARY file parts
+        check them and, when it has a binary part, every scanned part's
+        format (what the redaction refuses before looking at a value), the
+        strings it will redact readable for the proxy's block check
+        (``UploadReading.require_unblocked``) — so the proxy can inspect
+        its BINARY file parts
         (``plugin_api.UploadInspector``) before redaction and hand the same
         reading back (``redact_multipart(inspected=...)``). None when the
         route reads no file parts by their content (this base) or the body
@@ -617,6 +627,7 @@ class ProviderAdapter(ABC):
         require_scanned: bool = False,
         forward_binary: Callable[[int], None] | None = None,
         inspected: "InspectedUpload | None" = None,
+        remember_text: Callable[[bytes], None] | None = None,
     ) -> bytes | None:
         """Rewrite a multipart request body for ``path`` (delimited by the
         ``boundary`` ``multipart_boundary`` read).
@@ -638,7 +649,12 @@ class ProviderAdapter(ABC):
         on the same body): the reading to use instead of reading the body
         again, and the binary file parts the proxy CLEARED — their extracted
         text scanned clean and complete — which go out byte-identical, not
-        refused and not counted as unscanned. This base scans nothing.
+        refused and not counted as unscanned. ``remember_text``: told the
+        redacted bytes of each text file part redacted as ONE text, which
+        its download must restore raw (``openai.RAW_TEXT_FILES``) — the
+        proxy remembers them only once the request is handed to the
+        upstream; without it they are remembered once the upload was
+        redacted. This base scans nothing.
         (What an upload cites for the stored-object check is read
         separately, before redaction: ``upload_view.read_upload``.)
 

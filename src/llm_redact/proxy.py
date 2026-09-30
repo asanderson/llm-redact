@@ -127,6 +127,7 @@ from llm_redact.providers.base import (
     prepare_route_request,
 )
 from llm_redact.providers.custom import build_custom_adapters, custom_prefix
+from llm_redact.providers.openai import remember_raw_texts
 from llm_redact.realtime import (
     ALL_WS_ADAPTERS,
     RealtimeRelay,
@@ -138,6 +139,7 @@ from llm_redact.redactor import (
     BlockedRequest,
     PlaceholderLimitReached,
     Redactor,
+    StringBudget,
     TooManyStrings,
     UnredactableRequest,
 )
@@ -3477,6 +3479,25 @@ def _credential_protocol_refused(
     return JSONResponse(adapter.error_body(message, status=403), status_code=403)
 
 
+class _CountWindow:
+    """One request's share of the process-wide detection and warn-mode
+    counts: the totals as its redaction starts (``detections``,
+    ``warned``), diffed when it ends (``_count_delta``). Redaction is
+    synchronous, so nothing else counts inside the window — except across
+    an await: an upload's inspection may take minutes while other requests
+    redact, so it ``restart``s the window once it returns (the diff trick
+    corrupts across awaits; realtime counts per connection for that
+    reason)."""
+
+    def __init__(self, state: ProxyState) -> None:
+        self._state = state
+        self.restart()
+
+    def restart(self) -> None:
+        self.detections = dict(self._state.detection_counts)
+        self.warned = dict(self._state.warn_counts)
+
+
 async def _inspect_upload(
     state: ProxyState,
     request: Request,
@@ -3489,7 +3510,9 @@ async def _inspect_upload(
     provider_name: str,
     identity: bool,
     max_body_bytes: int,
+    max_body_strings: int,
     outcomes: Counter[str],
+    window: _CountWindow,
 ) -> tuple[InspectedUpload | None, dict[str, int]]:
     """An upload's binary file parts read as text by the upload inspector
     and judged (``upload_inspection``): the adapter's reading of ``body``
@@ -3497,9 +3520,14 @@ async def _inspect_upload(
     parts cleared to go out byte-identical — None when the route reads no
     file parts — and the token floors of the extracted texts (a placeholder
     a file carries inside a compressed stream bounds this request's new
-    numbers). Each part's outcome is added to ``outcomes`` — counted by the
-    caller once it knows whether the upload went out
-    (``_count_inspections``). Raises BlockedRequest or BinaryValuesDetected
+    numbers). With a rule in block mode, every string the redaction will
+    scan is checked for one first (``_block_check``): an upload it refuses
+    is never handed to the inspector. Each part's outcome is added to
+    ``outcomes`` — counted by the caller once it knows whether the upload
+    went out (``_count_inspections``). The inspection is the one await inside the
+    request's count ``window``: it restarts once the inspector returns,
+    before the extracted texts are scanned (their warn-mode values are this
+    request's). Raises BlockedRequest or BinaryValuesDetected
     for a value found in an extracted text, and what reading the upload
     raises (UnredactableRequest, TooManyStrings) — all before anything is
     written or sent."""
@@ -3512,9 +3540,15 @@ async def _inspect_upload(
     parts = reading.binary_parts()
     if not parts:
         return InspectedUpload(reading), {}
+    if redactor.blocks:
+        # The inspector may send a file to a service: a block-mode value in
+        # another part or a file name refuses the request before that.
+        reading.require_unblocked(_block_check(redactor, max_body_strings))
     results = await inspect_parts(
         inspector, parts, provider=provider_name, identity=identity, limits=limits
     )
+    # Other requests redacted while this one waited: their counts are theirs.
+    window.restart()
     verdict = judge(results, redactor, identity=identity, text_budget=max_body_bytes)
     outcomes.update(verdict.outcomes)
     # Counts and outcomes only — never a file name, a type found or content.
@@ -3525,6 +3559,8 @@ async def _inspect_upload(
         len(parts),
         " ".join(f"{outcome}={count}" for outcome, count in sorted(verdict.outcomes.items())),
     )
+    if verdict.over_budget is not None:
+        raise verdict.over_budget  # every part's outcome counted first
     if verdict.blocked is not None:
         raise BlockedRequest(verdict.blocked)
     if verdict.detected:
@@ -3532,19 +3568,92 @@ async def _inspect_upload(
     return InspectedUpload(reading, verdict.cleared), verdict.floors
 
 
+def _block_check(redactor: Redactor, limit: int) -> Callable[[str], str]:
+    """``redactor``'s block-mode rules as a read-only check of one string
+    (``UploadReading.require_unblocked``): BlockedRequest (the type only)
+    for a string ``redact_text`` would refuse, nothing issued or counted.
+    Counted against a budget of its own of ``limit`` strings
+    (TooManyStrings, as the redaction — which charges the same strings
+    again — would refuse), so it never walks more than the redaction may."""
+    budget = StringBudget(limit)
+
+    def check(text: str) -> str:
+        budget.charge(1)
+        blocked = redactor.blocked_type(text)
+        if blocked is not None:
+            raise BlockedRequest(blocked)
+        return text
+
+    return check
+
+
 def _count_inspections(
     state: ProxyState, provider_name: str, outcomes: Counter[str], *, sent: bool
 ) -> None:
     """One upload's inspected binary parts into ``inspected_uploads``, once
-    its fate is known: ``clean`` only when the upload went out (``sent``) —
-    a part that scanned clean in an upload the proxy refused (a value in
-    another part, a block, a header rule, a credential the proxy holds that
-    the inspection did not allow) is ``clean_refused``, never reported as
-    forwarded."""
+    its fate is known: ``clean`` only when the upload was handed to the
+    upstream (``sent``) — a part that scanned clean in an upload the proxy
+    refused (a value in another part, a block, a header rule, a credential
+    the proxy holds that the inspection did not allow, or any refusal after
+    redaction: no upstream configured, the ``[audit] required`` START row,
+    the upstream authorizer, a routed budget) is ``clean_refused``, never
+    reported as forwarded."""
     for outcome, count in outcomes.items():
         if outcome == "clean" and not sent:
             outcome = "clean_refused"
         state.inspected_uploads[(provider_name, outcome)] += count
+
+
+class _UploadFate:
+    """One request's upload honesty counts — its inspected binary parts'
+    outcomes and the binary parts it forwards unscanned — and the text
+    parts its downloads must restore raw (``remember_raw_texts``), held
+    until its fate is known and settled ONCE: ``sent`` when the request is handed to
+    the upstream (a send that then fails in transit included: bytes may
+    have left), refused on every other way out of ``handle()`` (its
+    ``finally``), so a refusal after redaction never counts a part as
+    forwarded."""
+
+    def __init__(self) -> None:
+        self._pending: Callable[[bool], None] | None = None
+
+    def hold(self, settle: Callable[[bool], None]) -> None:
+        self._pending = settle
+
+    def settle(self, *, sent: bool) -> None:
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            pending(sent)
+
+
+def _settle_upload(
+    state: ProxyState,
+    method: str,
+    path: str,
+    provider_name: str,
+    outcomes: Counter[str],
+    unscanned: list[int],
+    raw_texts: list[bytes],
+    sent: bool,
+) -> None:
+    """An upload's counts once its fate is known (``_UploadFate``): the
+    inspected parts (``_count_inspections``) and, only when it went out,
+    the text parts redacted as one text (remembered for their download:
+    ``remember_raw_texts`` — a refused request never evicts what sent ones
+    remembered) and the binary parts forwarded unscanned — a count and the
+    path only, never a file name or content."""
+    _count_inspections(state, provider_name, outcomes, sent=sent)
+    if sent:
+        remember_raw_texts(raw_texts)
+    if sent and unscanned:
+        state.unscanned_uploads[provider_name] += unscanned[0]
+        logger.info(
+            "%s %s forwarded %d binary upload file part(s) unscanned"
+            ' ([detection] binary_uploads = "forward")',
+            method,
+            path,
+            unscanned[0],
+        )
 
 
 def _plan_request(
@@ -3572,6 +3681,17 @@ def _plan_request(
 
 
 async def handle(request: Request) -> Response:
+    """The catch-all route (``_handle``). An upload's honesty counts are
+    settled once its fate is known: sent when handed to the upstream, else
+    refused — here, on every other way out (``_UploadFate``)."""
+    upload = _UploadFate()
+    try:
+        return await _handle(request, upload)
+    finally:
+        upload.settle(sent=False)
+
+
+async def _handle(request: Request, upload: _UploadFate) -> Response:
     state: ProxyState = request.app.state.proxy
     if not origin_form_target(request.scope):
         # Never routed, forwarded, recorded or logged with its target.
@@ -4083,8 +4203,8 @@ async def handle(request: Request) -> Response:
             opening=True,
         )
 
-    detection_counts_before = dict(state.detection_counts)
-    warn_counts_before = dict(state.warn_counts)
+    # This request's share of the process-wide counts (the diff trick).
+    window = _CountWindow(state)
 
     def blocked_response(exc: BlockedRequest, blocked_adapter: ProviderAdapter) -> JSONResponse:
         # A block-mode rule matched: fail closed before any upstream
@@ -4248,7 +4368,7 @@ async def handle(request: Request) -> Response:
         # Never with a repeated key: the raw bytes still hold the earlier
         # occurrences the walk never saw (an upstream may keep the first).
         if duplicate_keys or sum(state.detection_counts.values()) != sum(
-            detection_counts_before.values()
+            window.detections.values()
         ):
             outbound = json_bytes(prepared)
     elif adapter is not None and parsed is None and body_bytes:
@@ -4282,10 +4402,27 @@ async def handle(request: Request) -> Response:
             # This body's own copy, counting its strings (form fields, file
             # names, JSONL lines, extracted texts) against max_body_strings.
             upload_redactor = ctx.redactor.with_budget(max_body_strings)
-            # The inspected binary parts' outcomes, counted once the upload
-            # went out or was refused (finally, below).
+            # The inspected binary parts' outcomes and the binary parts
+            # forwarded unscanned, counted once the upload is handed to the
+            # upstream or refused (_UploadFate: a refusal after redaction —
+            # no upstream, the audit START, the authorizer — counts nothing
+            # as forwarded).
             inspection_outcomes: Counter[str] = Counter()
-            upload_sent = False
+            # Its text parts redacted as one text, remembered for their
+            # download once it is handed to the upstream (never on a refusal).
+            raw_texts: list[bytes] = []
+            upload.hold(
+                functools.partial(
+                    _settle_upload,
+                    state,
+                    request.method,
+                    path,
+                    provider_name,
+                    inspection_outcomes,
+                    binary_forwarded,
+                    raw_texts,
+                )
+            )
             try:
                 inspected: InspectedUpload | None = None
                 if state.upload_inspector is not None:
@@ -4304,7 +4441,9 @@ async def handle(request: Request) -> Response:
                         provider_name=provider_name,
                         identity=proxy_credential,
                         max_body_bytes=max_body_bytes,
+                        max_body_strings=max_body_strings,
                         outcomes=inspection_outcomes,
+                        window=window,
                     )
                     upload_redactor = upload_redactor.with_floors(floors)
                 # One vault transaction for the whole upload (run_batched).
@@ -4324,9 +4463,9 @@ async def handle(request: Request) -> Response:
                         require_scanned=True,
                         forward_binary=forward_binary,
                         inspected=inspected,
+                        remember_text=raw_texts.append,
                     ),
                 )
-                upload_sent = True
             except BinaryValuesDetected as exc:
                 # Values the proxy would redact, inside a file it cannot
                 # rewrite: refused, naming their types only.
@@ -4360,28 +4499,15 @@ async def handle(request: Request) -> Response:
                     path=path,
                     started=started,
                 )
-            finally:
-                _count_inspections(state, provider_name, inspection_outcomes, sent=upload_sent)
             if rewritten is not None:
                 outbound = rewritten
             elif checked_upload is not None:
                 outbound = checked_upload
-            if binary_forwarded:
-                # Honesty: these bytes leave the machine unread (a count and
-                # the path only — never a file name or content).
-                state.unscanned_uploads[provider_name] += binary_forwarded[0]
-                logger.info(
-                    "%s %s forwarded %d binary upload file part(s) unscanned"
-                    ' ([detection] binary_uploads = "forward")',
-                    request.method,
-                    path,
-                    binary_forwarded[0],
-                )
 
-    new_counts = _count_delta(state.detection_counts, detection_counts_before)
+    new_counts = _count_delta(state.detection_counts, window.detections)
     # Same diff trick for warn-mode hits: attribute forwarded-unredacted
     # values to THIS request, not just the process-lifetime aggregate.
-    new_warned = _count_delta(state.warn_counts, warn_counts_before)
+    new_warned = _count_delta(state.warn_counts, window.warned)
 
     if plan is not None:
         return await _handle_routed(
@@ -4398,6 +4524,7 @@ async def handle(request: Request) -> Response:
             new_counts=new_counts,
             new_warned=new_warned,
             identity=proxy_credential,
+            upload=upload,
         )
 
     upstream_base = provider_conf.upstream_base_url  # the admitted config's, not a reload's
@@ -4485,6 +4612,8 @@ async def handle(request: Request) -> Response:
     if audit_refusal is not None:
         return audit_refusal
 
+    # Handed to the upstream: an upload's parts now count as forwarded.
+    upload.settle(sent=True)
     try:
         upstream = await state.client.send(upstream_request, stream=True)
     except httpx.TransportError as exc:
@@ -5770,12 +5899,14 @@ async def _handle_routed(
     new_counts: dict[str, int],
     new_warned: dict[str, int],
     identity: bool = False,
+    upload: _UploadFate | None = None,
 ) -> Response:
     """The routed request path: the router's pre-audit refusal, the
     write-ahead audit START row, the first hop, then issue/decide until the
     router stops; delivery rides the shared branches with the router's
     delivery hooks. Every decision is the router's; every byte moved is the
-    core's."""
+    core's. An upload's counts settle as sent at the first hop actually
+    issued (``upload``; a refusal before one leaves them to the caller)."""
     method = request.method
     # The count_tokens 404 (decision 7): a refusal that never counts as an
     # attempt, so it precedes the write-ahead START row.
@@ -5827,6 +5958,8 @@ async def _handle_routed(
     while True:
         if hop.reissued_from is not None:
             state.metrics.reissues[(hop.reissued_from, hop.upstream)] += 1
+        if upload is not None and hop.unavailable is None:
+            upload.settle(sent=True)  # this hop is sent
         result, response = await _issue_hop(state, hop, plan.deadline, method=method, path=path)
         decision = plan.decide(result)
         if decision.next is None:

@@ -183,7 +183,8 @@ block) and says so in `doctor`; `"refuse"` answers 400 instead. **What is
 inside a forwarded PDF, image or archive reaches the provider as-is** —
 exactly like base64 media in a chat body. Under a credential the proxy
 holds (its cloud identity, or a routing rule's operator key) a binary file
-is always refused: the proxy vouches only for what it read. With an
+is refused: the proxy vouches only for what it read — unless an upload
+inspector read it (next). With an
 **upload inspector** (llm-redact-pro's document extractors,
 `plugin_api.UploadInspector`) each binary file part is first read as
 TEXT and scanned with the live detectors, no placeholder issued: a value
@@ -195,7 +196,16 @@ it), counted in `/status` `inspected_uploads_total`
 (`llm_redact_inspected_uploads_total{provider,outcome}`). The clean scan
 covers the extracted text only; a part the inspector could not read
 completely (a scanned page, an embedded image), a timeout or a fault keeps
-the binary rules above. A JSONL line
+the binary rules above. The inspector is handed a file only once the
+upload passed every refusal below that concerns its form (part headers, a
+form field that is not UTF-8, a JSONL line nesting too deep) and, with a
+rule in block mode, a check of every string the redaction will scan (file
+names, form fields, text and JSONL files) for a block-mode value; what
+needs the redaction itself (`max_body_strings` when no rule is in block
+mode, a sealed session, a vault fault), a local refusal after redaction
+(no upstream configured, the upstream authorizer) and the `[audit]
+required` START row can still come after it — the inspector is an
+operator-configured reader, not the upstream. A JSONL line
 nesting JSON deeper than 128 levels is refused (a JSONL reader would
 decode what no walk can read). Plain form fields (`purpose`, `user`,
 `size`, …) are scanned as UTF-8 text (a field that is not UTF-8 is
@@ -203,7 +213,10 @@ refused), and bytes outside every part (a multipart preamble or epilogue)
 are refused. So is
 a part header without a single reading — a folded or repeated header
 line, a filename holding a backslash that is not a `\"` or `\\` escape, a
-malformed `filename*` or one in a charset other than UTF-8 — and a part
+malformed `filename*` or one in a charset other than UTF-8, or a part with
+no header/body separator that is neither empty nor opens with an empty
+header block (a reader accepting a bare LF as a line break would find
+headers in it the proxy never read) — and a part
 the proxy could not read as its plain bytes: a Content-Transfer-Encoding
 other than `7bit`/`8bit`/`binary` on any part (RFC 7578 deprecates them),
 or, on a part whose content is scanned, a declared charset other than
@@ -211,7 +224,9 @@ the one its content decoded as — UTF-8/US-ASCII, or a UTF-16/32 text
 file's own (its Content-Type `charset`, or the RFC 7578 `_charset_`
 field). `GET /v1/files/{id}/content` reads a download the same way: a
 text file this proxy uploaded redacted as one text is remembered by a
-digest of the bytes sent — the newest 1024, in the running process — and
+digest of the bytes sent — once the upload is handed to the upstream (a
+refused one is never remembered), the newest 1024, in the running
+process — and
 restored as the text it was (a value lands exactly as it was redacted,
 never JSON-escaped, even when the file now reads as JSON); a JSONL file is
 restored line by line as JSON, every value of every line; any other text
@@ -284,7 +299,10 @@ turns redaction off, not this rule (the ownership check of
 llm-redact-pro's named users reads the parsed body too, so a gzip or
 non-JSON body it could not read is refused either way). With `detection`
 on, an upload holding a binary file (a PDF, an image) cannot be sent
-with the proxy's identity; a text file is redacted and sent. Realtime
+with the proxy's identity — unless an upload inspector read it completely
+as clean text and allows that credential (llm-redact-pro `[extraction]
+proxy_credential = true`, off by default); a text file is redacted and
+sent. Realtime
 WebSocket connections are authorized the same way — Azure OpenAI
 Realtime and the Vertex AI Live API (below): the upgrade request is
 authorized as the HTTP GET it is and the upstream is dialled with
@@ -439,7 +457,8 @@ Code interpreter containers (`/v1/containers`: the container and its
 files — OpenAI, Azure's v1 API, custom providers) are recognized too. A
 container file upload is redacted exactly as a `/v1/files` upload is (the
 file part read by its content, its filename and every form field; a
-binary file goes out unscanned only with the client's own key), a JSON
+binary file goes out unscanned only with the client's own key, or once
+an upload inspector cleared it), a JSON
 container-file create names a stored file (verbatim), the container file
 object's `path` (the filename) is restored, and a download is restored
 like a Files API download — a text file line by line, a binary file

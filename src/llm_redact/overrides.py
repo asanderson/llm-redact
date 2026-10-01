@@ -1,6 +1,9 @@
 """Refusal overrides: the requester's one-time or every-time approval.
 
-A DETECTION refusal — a block-mode value, values found inside a binary
+Off by default (``[overrides] enabled = true`` opts in, restart-only):
+while they are off the proxy builds no store, so no refusal carries a code
+or a hint, nothing is written, and the records a store already holds are
+inert. With them on, a DETECTION refusal — a block-mode value, values found inside a binary
 upload, a verbatim identifier field that would be redacted, a body or a
 binary upload part the proxy cannot scan — is answered with a short
 single-use CODE and the text ``to allow: llm-redact override CODE --once |
@@ -142,6 +145,19 @@ def normalize_code(text: str) -> str | None:
 
 def allow_hint(code: str) -> str:
     return f"to allow: llm-redact override {code} --once | --always"
+
+
+# Refusal overrides are OFF by default: an operator opts in with this
+# setting (restart-only). While they are off no refusal carries a code or a
+# hint, nothing is written to the store, and the records it already holds
+# are inert — never applied. Every surface that answers while they are off
+# names the setting.
+ENABLE_SETTING = "[overrides] enabled = true"
+DISABLED_REASON = (
+    "refusal overrides are off ([overrides] enabled = false, the default):"
+    " no refusal carries a code and no approval is applied"
+)
+TO_ENABLE = f"set {ENABLE_SETTING} in the proxy's config and restart it to use them"
 
 
 # A named user's refusal (an access gate admitted them): approved signed in

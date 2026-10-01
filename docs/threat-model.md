@@ -411,8 +411,9 @@ silent:
 - `[detection] languages` narrows which national-id rules are built;
   universal rules (emails, keys, cards, IBANs, phones) always run, and
   the scoped-out rules are listed in `/status` and by `doctor`.
-- Refusal overrides (`[overrides]`, on by default; docs/overrides.md): a
-  detection refusal carries a single-use code, and once a person approves
+- Refusal overrides (`[overrides]`, OFF by default — an operator opts in
+  with `enabled = true`; docs/overrides.md): a detection refusal then
+  carries a single-use code, and once a person approves
   it (`llm-redact override CODE`, or a browser sign-in to the
   llm-redact-pro dashboard) the refused value — or the unscanned body or
   binary part — is FORWARDED as sent, once or every time. Never under a
@@ -423,8 +424,10 @@ silent:
   approval is only as strong as the separation between the agent and the
   person's terminal. Surfaced in `/status` `overrides`,
   `llm_redact_overrides_used_total`, the `override` mark on recent, events
-  and audit rows, the `status` posture block and a `doctor` WARN;
-  `[overrides] enabled = false` makes every refusal final.
+  and audit rows, the `status` posture block and a `doctor` WARN. Off (the
+  default) every refusal is final: no code, no store write, and approvals a
+  store kept from an earlier opt-in are inert (a `doctor` WARN names them,
+  since turning overrides back on applies them again).
 
 ### Supply chain
 

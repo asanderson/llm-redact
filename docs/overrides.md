@@ -3,8 +3,21 @@
 Some requests are **refused** by detection rather than redacted: a value a
 rule in `mode = "block"` matches, values found inside a binary upload the
 proxy cannot rewrite, an identifier field the provider uses exactly as sent,
-a body the proxy cannot read. When the refused data is yours and you want it
-sent anyway, the refusal message carries a short single-use code:
+a body the proxy cannot read.
+
+**Refusal overrides are off by default.** Every refusal is then final: it
+carries no code and no hint, and nothing can let the request through. An
+operator who wants the people using the proxy to be able to send their own
+refused data anyway opts in:
+
+```toml
+[overrides]
+enabled = true
+```
+
+and restarts the proxy (`[overrides]` is restart-only). With overrides on,
+when the refused data is yours and you want it sent anyway, the refusal
+message carries a short single-use code:
 
 ```
 llm-redact: request blocked; a EMAIL value was detected and this rule is
@@ -34,7 +47,7 @@ buttons, and your rules with **Revoke**.
 **Approval guards against accidents, not against local software.** An agent
 that has a shell running as you can approve its own refusal: it can open a
 pseudo-terminal and type `allow` into it, or edit the store file, just as it
-can edit the configuration. Keep `[overrides] enabled = false` where every
+can edit the configuration. Leave overrides off (the default) where every
 refusal must stay final, or where an agent with a shell works next to the
 proxy unsupervised.
 
@@ -182,12 +195,38 @@ point to the CLI, and the listing says `"can_approve": false`.
 
 ```toml
 [overrides]
-enabled = true      # false: no codes, every refusal is final
+enabled = true      # opt in; the default false: no codes, every refusal is final
 ttl_minutes = 15    # 1..1440
 # path = "/var/lib/llm-redact/overrides.db"
 ```
 
-`[overrides]` is restart-only.
+`[overrides]` is restart-only: turning overrides on or off (or moving the
+store) takes a restart, and a SIGHUP reload names the section as needing
+one.
+
+## While overrides are off
+
+Off is the default, and turning them off again later is the same state:
+
+- No refusal carries a code or an override hint, over HTTP or in a realtime
+  close reason. The proxy opens no store and writes nothing to one.
+- Approvals a store already holds (every-time rules and one-time grants
+  approved while overrides were on) are **inert**: the proxy never reads
+  them, so the values they cover are refused like any other. They stay on
+  disk and apply again the moment `enabled = true` is set and the proxy
+  restarts (a one-time grant only within its `ttl_minutes`). `llm-redact doctor` WARNs while the store still holds any; delete
+  the store file to drop them for good.
+- `GET` and `POST /__llm-redact/overrides…` answer a local 404 naming
+  `[overrides] enabled`.
+- `llm-redact override CODE --once|--always` and `llm-redact override revoke
+  ID` exit 1 naming the setting and touch nothing. `llm-redact override list
+  [--json]` still prints what the store holds (value-free, read-only) so you
+  can see what would apply again, then says on stderr that those records are
+  inert, and exits 1. The CLI reads the proxy's config the way `serve` does
+  (`--config`, `LLM_REDACT_CONFIG`, the default search); a config it cannot
+  parse exits 2.
+- `/__llm-redact/status` reports `"overrides": {"enabled": false}`, and
+  `llm-redact doctor` prints an informational line (or the WARN above).
 
 ## Where overrides show up
 
@@ -202,12 +241,14 @@ ttl_minutes = 15    # 1..1440
   write-ahead START row written right before the send already carries the
   marker — an uploaded file's too.
 - `/__llm-redact/status` has an `overrides` block with counts: `pending`,
-  `once`, `always`, and `used_total` by `once`/`always`.
+  `once`, `always`, and `used_total` by `once`/`always` (only
+  `{"enabled": false}` while overrides are off).
 - `/__llm-redact/metrics` has `llm_redact_overrides_used_total{kind="once"|"always"}`.
 - `llm-redact status` prints a posture line while every-time rules exist or
   overrides were used.
 - `llm-redact doctor` prints a WARN with the counts while approved overrides
-  exist.
+  exist — with overrides on (they apply), and with them off (inert, but
+  applied again when overrides are turned back on).
 
 None of these show a value, a digest or a code. Log lines name the path and
 the kind only.

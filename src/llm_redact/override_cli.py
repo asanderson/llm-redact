@@ -14,7 +14,13 @@ open a pseudo-terminal and type the answer, or edit the store file
 file directly (like ``lookup``), as the local operator: it approves only
 refusals of requests the proxy admitted without a named user (llm-redact-pro
 named users approve their own in the dashboard); it lists and revokes any.
-Nothing printed is a value, a digest or a code."""
+Nothing printed is a value, a digest or a code.
+
+Refusal overrides are off by default. While the config (the proxy's: the
+same search as ``serve``, or ``--config``) leaves them off, every form exits
+1 naming ``[overrides] enabled``: approve and revoke touch nothing, and list
+still prints what the store holds (value-free, read-only) with a line saying
+those records are inert — the proxy applies none of them."""
 
 from __future__ import annotations
 
@@ -26,7 +32,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
 
+from llm_redact.config import Config, ConfigError, apply_env_overrides, load_config
 from llm_redact.overrides import (
+    DISABLED_REASON,
+    TO_ENABLE,
     OverrideEntry,
     OverrideError,
     OverrideStore,
@@ -54,10 +63,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     override.add_argument("--db", type=Path, default=None, help="override store path")
 
 
-def _store(args: argparse.Namespace, *, read_only: bool = False) -> OverrideStore:
-    from llm_redact.config import apply_env_overrides, load_config
-
-    config = apply_env_overrides(load_config(args.config))
+def _store(args: argparse.Namespace, config: Config, *, read_only: bool = False) -> OverrideStore:
     if args.db is not None:
         path = Path(args.db).expanduser()
     elif config.overrides.path:
@@ -98,22 +104,32 @@ def _describe(entry: OverrideEntry) -> str:
 def run_override(args: argparse.Namespace) -> int:
     target = args.target
     try:
+        config = apply_env_overrides(load_config(args.config))
+    except ConfigError as exc:
+        print(f"llm-redact override: {exc}", file=sys.stderr)
+        return 2
+    try:
         if target == "list":
-            return _list(args)
+            return _list(args, config)
+        if not config.overrides.enabled:
+            # Off (the default): approving or revoking a record the proxy
+            # never applies would only look like it did something.
+            print(f"llm-redact override: {DISABLED_REASON}; {TO_ENABLE}", file=sys.stderr)
+            return 1
         if target == "revoke":
             if args.entry is None:
                 print("usage: llm-redact override revoke ID (as `override list` shows it)")
                 return 2
-            _store(args).revoke(args.entry)
+            _store(args, config).revoke(args.entry)
             print(f"revoked {args.entry}")
             return 0
-        return _approve(args)
+        return _approve(args, config)
     except OverrideError as exc:
         print(f"llm-redact override: {exc}", file=sys.stderr)
         return 1
 
 
-def _approve(args: argparse.Namespace) -> int:
+def _approve(args: argparse.Namespace, config: Config) -> int:
     code = normalize_code(args.target)
     if code is None:
         print(
@@ -126,7 +142,7 @@ def _approve(args: argparse.Namespace) -> int:
         print("llm-redact override: choose --once or --always", file=sys.stderr)
         return 2
     scope = "always" if args.always else "once"
-    store = _store(args)
+    store = _store(args, config)
     entry = store.describe(code)
     if entry.subject:
         raise OverrideError(
@@ -165,20 +181,29 @@ def _approve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _list(args: argparse.Namespace) -> int:
-    entries = _store(args, read_only=True).entries()
+def _list(args: argparse.Namespace, config: Config) -> int:
+    """The store's records (value-free, read-only). While overrides are off
+    they are still listed — so an operator sees what would apply again on
+    enabling them — followed by a line saying they are inert; exit 1."""
+    entries = _store(args, config, read_only=True).entries()
     if args.json:
         print(json.dumps([entry.as_dict() for entry in entries], indent=2))
-        return 0
-    if not entries:
+    elif not entries:
         print("no pending refusals or overrides")
+    else:
+        header = f"{'ID':<6} {'STATE':<8} {'KIND':<15} {'TYPES':<24} {'USES':>4}"
+        print(f"{header}  CREATED / REQUESTER / ROUTE")
+        for entry in entries:
+            print(
+                f"{entry.id:<6} {entry.state:<8} {entry.kind:<15}"
+                f" {','.join(entry.types) or '-':<24} {entry.uses:>4}  {_when(entry.created)}"
+                f"  {entry.subject or 'operator'}  {entry.route}"
+            )
+    if config.overrides.enabled:
         return 0
-    header = f"{'ID':<6} {'STATE':<8} {'KIND':<15} {'TYPES':<24} {'USES':>4}"
-    print(f"{header}  CREATED / REQUESTER / ROUTE")
-    for entry in entries:
-        print(
-            f"{entry.id:<6} {entry.state:<8} {entry.kind:<15}"
-            f" {','.join(entry.types) or '-':<24} {entry.uses:>4}  {_when(entry.created)}"
-            f"  {entry.subject or 'operator'}  {entry.route}"
-        )
-    return 0
+    print(
+        f"llm-redact override: {DISABLED_REASON}; the records listed are inert (the proxy"
+        f" applies none of them); {TO_ENABLE}",
+        file=sys.stderr,
+    )
+    return 1

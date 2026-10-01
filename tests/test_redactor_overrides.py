@@ -77,6 +77,21 @@ def test_thin_copies_keep_the_overrides() -> None:
     assert copy.redact_text(EMAIL) == EMAIL
 
 
+def test_with_overrides_keeps_the_floors_and_the_budget() -> None:
+    """The proxy adds the overrides LAST, onto the request's floored and
+    budgeted copy: the overrides copy keeps both — a new value is still
+    numbered above the request's tokens, and the string budget still
+    refuses the body."""
+    from llm_redact.redactor import TooManyStrings
+
+    floored = _redactor(modes=()).with_floors({"EMAIL": 7}).with_overrides(Approved())
+    assert floored.redact_text(f"mail {EMAIL}") == "mail «EMAIL_008»"
+    budgeted = _redactor(modes=()).with_budget(1).with_overrides(Approved())
+    budgeted.redact_text("first")
+    with pytest.raises(TooManyStrings):
+        budgeted.redact_text("second")
+
+
 def test_blocked_type_skips_an_approved_value() -> None:
     approved = Approved(EMAIL)
     redactor = _redactor().with_overrides(approved)

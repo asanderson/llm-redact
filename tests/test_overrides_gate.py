@@ -138,7 +138,7 @@ async def test_a_realtime_frame_asks_the_gate_nothing_until_it_is_refused(
                 "openai": ProviderConfig(f"http://127.0.0.1:{fake.port}"),
             },
             detection=DetectionConfig(modes=(("email", "block"),)),
-            overrides=OverridesConfig(path=str(tmp_path / "overrides.db")),
+            overrides=OverridesConfig(enabled=True, path=str(tmp_path / "overrides.db")),
         )
         with _proxy(config) as host:
             async with websockets.connect(

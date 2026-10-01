@@ -25,7 +25,7 @@ def _config(port: int, store: Path) -> Config:
     return Config(
         providers={**Config().providers, "openai": ProviderConfig(f"http://127.0.0.1:{port}")},
         detection=DetectionConfig(modes=(("email", "block"),)),
-        overrides=OverridesConfig(path=str(store)),
+        overrides=OverridesConfig(enabled=True, path=str(store)),
     )
 
 

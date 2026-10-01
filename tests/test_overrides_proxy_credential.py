@@ -93,7 +93,7 @@ def _identity_app(
     config = Config(
         providers={**Config().providers, "azure": ProviderConfig(AZURE, auth="identity")},
         detection=detection or DetectionConfig(modes=(("email", "block"),)),
-        overrides=OverridesConfig(path=str(tmp_path / "overrides.db")),
+        overrides=OverridesConfig(enabled=True, path=str(tmp_path / "overrides.db")),
     )
     return create_app(config, upstream_transport=httpx.MockTransport(upstream))
 
@@ -161,7 +161,7 @@ async def test_refusals_under_a_routed_operator_key_are_final(
         "http://upstream",
         upstream,
         detection=DetectionConfig(modes=(("email", "block"),) if block else ()),
-        overrides=OverridesConfig(path=str(tmp_path / "overrides.db")),
+        overrides=OverridesConfig(enabled=True, path=str(tmp_path / "overrides.db")),
     )
     path, body = (
         ("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": EMAIL}]})
@@ -190,7 +190,7 @@ async def test_the_client_key_through_the_router_still_gets_a_code(
         upstream,
         proxy_credential=False,
         detection=DetectionConfig(modes=(("email", "block"),)),
-        overrides=OverridesConfig(path=str(tmp_path / "overrides.db")),
+        overrides=OverridesConfig(enabled=True, path=str(tmp_path / "overrides.db")),
     )
     chat = {"model": "gpt-4o", "messages": [{"role": "user", "content": f"mail {EMAIL}"}]}
     async with lent_client(app) as client:
@@ -225,7 +225,7 @@ async def test_a_realtime_frame_under_identity_is_final(
                 "azure": ProviderConfig(f"http://127.0.0.1:{fake.port}", auth="identity"),
             },
             detection=DetectionConfig(modes=(("email", "block"),)),
-            overrides=OverridesConfig(path=str(tmp_path / "overrides.db")),
+            overrides=OverridesConfig(enabled=True, path=str(tmp_path / "overrides.db")),
         )
         with _proxy(config) as host:
             async with websockets.connect(f"ws://{host}/openai/v1/realtime?model=m") as ws:

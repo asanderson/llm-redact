@@ -267,10 +267,20 @@ trusted = true
   `https://oauth2.googleapis.com/token` — the only token endpoint a key file
   may name — caching the access token until a minute before it expires;
   the key file is read once at startup. With `token_env`, the variable
-  holds an access token as is: a process cannot see a variable changed
-  after it started, and Google access tokens expire (typically within an
-  hour), so this form suits a supervisor that restarts the proxy with a
-  fresh token; prefer `credentials_file` for a long-running proxy.
+  holds a static bearer token sent as is and **never refreshed**: a
+  process cannot see a variable changed after it started, and Google
+  access tokens expire (typically within an hour). Once it has expired,
+  every call to that service fails (Google answers 401; logged as
+  `extraction service documentai (HOST) failed (HTTP 401)`, counted
+  `failed` under `documentai` in `readings_total`) — fail closed: the
+  service gives no reading, so a file only it could read stays incomplete
+  and is never cleared or converted; the upload keeps the unscanned-binary
+  rules (refused under `binary_uploads = "refuse"` or a credential the
+  proxy holds, forwarded unscanned and counted under the default
+  `"forward"` with the client's own key) until the operator rotates the
+  token — sets a fresh one and restarts the proxy. This form suits a
+  supervisor that restarts the proxy with a fresh token; prefer
+  `credentials_file` for a long-running proxy.
 - **Document Intelligence** is asynchronous: `POST
   {url}/documentintelligence/documentModels/{model}:analyze?api-version=2024-11-30`
   answers 202 with an `Operation-Location`, which is polled (each wait its
@@ -428,7 +438,10 @@ not happen.
 - Legacy Office files (`.doc`, `.xls`, `.ppt`) and images are read only by
   a service.
 - Textract is synchronous only (images and one-page PDFs); Document AI's
-  `token_env` form cannot refresh its token (use `credentials_file`).
+  `token_env` form reads a static bearer token that is never refreshed: when
+  it expires that service fails closed (no reading, the file stays
+  incomplete) until the operator rotates the token and restarts the proxy
+  (use `credentials_file` instead).
 - A cloud OCR reading vouches for a file only when it covers every page and
   the file's page count is known (above): multi-page TIFFs, Office files and
   PDFs the local extractor could not open are never cleared by one — nor a

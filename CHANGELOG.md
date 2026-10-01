@@ -45,6 +45,24 @@ and tags `vX.Y.Z`.
   treat an extension naming another format than the file's bytes as incomplete.
 
 ### Changed
+- **Refusal overrides are now opt-in** (behaviour change): `[overrides] enabled`
+  defaults to `false`. Off, every detection refusal is final — no code and no override
+  hint (HTTP and realtime close reasons, the local operator and named users alike),
+  the proxy opens and writes no override store, and approvals a store kept from an
+  earlier opt-in are inert (never applied; they apply again once overrides are turned
+  back on). `/__llm-redact/overrides*` answer a local 404 naming `[overrides] enabled`;
+  `llm-redact override CODE|revoke` exit 1 naming the setting and touch nothing;
+  `override list` still prints what the store holds (value-free) with a line saying it
+  is inert, and exits 1; a config the command cannot parse exits 2; `/status` reports
+  `{"enabled": false}`; `doctor` prints an informational line, or a WARN while the
+  store still holds approvals. Set `[overrides] enabled = true` (restart-only, as
+  before) to keep today's behaviour.
+- `redactor._resolve_overlaps` finds each candidate's deny-span overlap with
+  `bisect_right` over the chosen deny spans' ends (same results): the old forward walk
+  had a mutant that never terminated, costing the mutation job about half an hour.
+- docs/extraction.md says what a Document AI service configured with `token_env`
+  does when its static token expires (it is never refreshed): that service fails
+  closed — no reading — until the operator rotates the token and restarts the proxy.
 - An upload whose binary parts go to the upload inspector is now refused BEFORE the
   inspection — never after it — for what refuses it whatever the redaction finds: a
   provider with no upstream configured (the 502), a routing layer's local refusal, and

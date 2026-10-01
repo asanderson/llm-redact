@@ -116,7 +116,7 @@ def _config(tmp_path: Path, **kwargs: Any) -> Config:
             "providers", {**Config().providers, "openai": ProviderConfig("http://upstream")}
         ),
         detection=detection,
-        overrides=kwargs.pop("overrides", OverridesConfig(path=str(overrides))),
+        overrides=kwargs.pop("overrides", OverridesConfig(enabled=True, path=str(overrides))),
         **kwargs,
     )
 

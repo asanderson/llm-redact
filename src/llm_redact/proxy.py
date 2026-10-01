@@ -93,7 +93,9 @@ from llm_redact.multipart import parse as parse_multipart
 from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
 from llm_redact.overrides import (
+    DISABLED_REASON,
     PROXY_BUSY_TIMEOUT_MS,
+    TO_ENABLE,
     OverrideError,
     OverrideScope,
     OverrideStore,
@@ -3070,10 +3072,10 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
         return JSONResponse({"error": "origin not allowed"}, status_code=403)
     store = state.overrides
     if store is None:
-        return JSONResponse(
-            {"error": "refusal overrides are disabled ([overrides] enabled = false)"},
-            status_code=404,
-        )
+        # Off (the default): a local 404 naming the setting — nothing is
+        # listed (the store, if any, holds only inert records), approved or
+        # revoked, and the file is never opened.
+        return JSONResponse({"error": f"{DISABLED_REASON}; {TO_ENABLE}"}, status_code=404)
     subject = admission.subject or ""
     # The key its records are kept under (the gate's stable id, when it
     # supplies one): none read — the gate could not name it — is no answer.

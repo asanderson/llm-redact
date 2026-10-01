@@ -1,5 +1,6 @@
 """Outbound half: replace detected values with vault-issued placeholders."""
 
+from bisect import bisect_right
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple, Protocol
@@ -116,18 +117,20 @@ def _resolve_overlaps(detections: Sequence[Detection]) -> list[Detection]:
     if all(d.tier != 0 for d in detections):
         return _sweep(detections)
     deny_chosen = _sweep([d for d in detections if d.tier == 0])
-    # Merge-walk: both lists are start-sorted, so one forward index suffices
-    # to find each candidate's potentially-overlapping deny spans.
+    # The chosen deny spans are disjoint and start-sorted, so their ends are
+    # sorted too: a binary search finds each candidate's only possible
+    # overlap. Candidates come start-sorted, so the search never needs to
+    # look left of the previous answer (``lo=i``) — the old forward walk's
+    # result, with no loop a mutated index could spin forever.
+    deny_ends = [d.end for d in deny_chosen]
     others: list[Detection] = []
     i = 0
     for d in detections:
         if d.tier == 0:
             continue
-        while i < len(deny_chosen) and deny_chosen[i].end <= d.start:
-            i += 1
+        i = bisect_right(deny_ends, d.start, lo=i)
         # deny_chosen[i] is the first deny span ending after d.start (if
-        # any); the spans are disjoint and start-sorted, so it is the only
-        # possible overlap candidate.
+        # any): the only possible overlap candidate.
         if i < len(deny_chosen) and deny_chosen[i].start < d.end:
             continue
         others.append(d)

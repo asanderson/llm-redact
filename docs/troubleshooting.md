@@ -136,7 +136,10 @@ not the original).
 
 ## "to allow: llm-redact override CODE --once | --always"
 
-A detection refusal you may override for your own data: a block-mode value,
+Refusal overrides are on for this proxy (`[overrides] enabled = true`; they
+are off by default, and then no refusal carries this line, `llm-redact
+override …` exits 1 naming the setting, and `/__llm-redact/overrides`
+answers 404). A detection refusal you may override for your own data: a block-mode value,
 values in a binary upload, a verbatim field, a body that is not JSON, or a
 binary part under `binary_uploads = "refuse"`. Run the command yourself in
 a terminal. It shows what was refused and waits for `allow` typed there. It

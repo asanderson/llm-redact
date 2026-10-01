@@ -246,6 +246,28 @@ async def test_documentai_reporting_an_error_is_incomplete() -> None:
     assert reading.complete is False and reading.text == "part"
 
 
+async def test_an_expired_documentai_access_token_fails_closed_until_rotated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """docs/extraction.md: ``token_env`` is a static bearer token, never
+    refreshed. Once Google answers 401 every call fails closed — no reading
+    (the file stays incomplete), counted ``failed`` — the same token is sent
+    again, no token endpoint is ever asked, and the log names the service
+    and status only, never the token."""
+    service = Recorder(httpx.Response(401))
+    inspector = _inspector(
+        _service(kind="documentai", processor=PROCESSOR, token_env="GTOKEN", complete=True),
+        service,
+        {"GTOKEN": "ya29.expired"},
+    )
+    for _ in range(2):
+        assert await inspector.read(PNG) == FileReading(None, False, "none")
+    assert [r.headers["authorization"] for r in service.requests] == ["Bearer ya29.expired"] * 2
+    assert {r.url.host for r in service.requests} == {"eu-documentai.googleapis.com"}
+    assert inspector.status()["readings_total"] == {"documentai": {"failed": 2}}
+    assert "HTTP 401" in caplog.text and "ya29" not in caplog.text
+
+
 def _key_file(tmp_path: Path, **overrides: Any) -> tuple[Path, Any]:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa

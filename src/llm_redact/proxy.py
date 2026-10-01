@@ -2340,7 +2340,8 @@ async def _handle_local(
                 # by provider and outcome (upload_inspection.OUTCOMES):
                 # "clean" ones went out after a clean scan of their
                 # EXTRACTED text only ("clean_refused": scanned clean, but
-                # the upload was refused). Counts only.
+                # the upload was refused; "overridden": clean only because
+                # an approved override let its values through). Counts only.
                 "inspected_uploads_total": _inspected_by_provider(state.inspected_uploads),
                 "upload_inspector": _inspector_status(state),
                 # How many browser origins the operator listed in
@@ -4034,11 +4035,12 @@ def _count_inspections(
     redaction: the upstream authorizer, a routed budget) is
     ``clean_refused``, never reported as forwarded — and a part converted to
     its redacted text (convert mode) ``converted`` or ``converted_refused``
-    alike. (No upstream configured and a failed ``[audit] required`` START
-    row refuse before the inspection: nothing is inspected, so nothing is
-    counted.)"""
+    alike, as is one clean only because an override let its values through
+    (``overridden`` / ``overridden_refused``). (No upstream configured and a
+    failed ``[audit] required`` START row refuse before the inspection:
+    nothing is inspected, so nothing is counted.)"""
     for outcome, count in outcomes.items():
-        if outcome in ("clean", "converted") and not sent:
+        if outcome in ("clean", "converted", "overridden") and not sent:
             outcome = f"{outcome}_refused"
         state.inspected_uploads[(provider_name, outcome)] += count
 

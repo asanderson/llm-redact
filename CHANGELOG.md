@@ -505,6 +505,19 @@ and tags `vX.Y.Z`.
   durable record that an override let content leave. Such a request now commits a
   second START row carrying the override marker before the send, like one whose
   redaction found values.
+- An upload refused for values in one binary part also put the values of a part that
+  `[extraction] convert` redacts (converts) to the requester's overrides: the refusal's
+  code covered them, so approving it `--always` allowlisted values the proxy had
+  redacted, and a later binary file holding only those went out byte-identical; a
+  one-time grant matching such a value was used up too. A convertible reading's values
+  are now redacted, never put to an approval (only a block-mode value there is), and
+  a deny string in a binary part or verbatim field makes the refusal final (no code
+  it could never honour). `Redactor.scan(text, redactable=)` returns a `TextScan`.
+- A binary upload part that read clean only because an approved override let its
+  values through was counted `clean` in `inspected_uploads_total` and reported by
+  `llm-redact status` as "forwarded after a clean scan". It is now its own outcome,
+  `overridden` (`overridden_refused` when the upload was then refused), with its own
+  posture line.
 
 ## [1.9.0] - 2026-09-29
 

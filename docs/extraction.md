@@ -342,7 +342,9 @@ not happen.
   sent after a clean scan — `clean_refused` — read clean, but the upload was
   refused for another part or rule — `converted` / `converted_refused` —
   replaced by its redacted text (convert mode), and whether the upload was
-  then sent — `detected`, `blocked`, `incomplete`, `not_inspected`,
+  then sent — `overridden` / `overridden_refused` — read clean only because an
+  approved refusal override (docs/overrides.md) let its values through, so the
+  file went out as sent WITH them, or the upload was refused — `detected`, `blocked`, `incomplete`, `not_inspected`,
   `timeout`, `error`) and `upload_inspector` — the core's bounds and the
   extractors' formats, services (kind, host, trusted, complete), convert
   classes, worker counts and `readings_total` per extractor.

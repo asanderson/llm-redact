@@ -2,7 +2,7 @@
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.engine import Allowlist, DetectorPlan, plan_for
@@ -52,6 +52,20 @@ class OverrideCheck(Protocol):
     may go through as sent."""
 
     def allows(self, detector_type: str, value: str) -> bool: ...
+
+    def unoverridable(self) -> None:
+        """The request is being refused for a finding no approval can pass
+        (a deny string in text the proxy cannot rewrite): its refusal must
+        carry no code."""
+
+
+class TextScan(NamedTuple):
+    """``Redactor.scan``'s answer: the detector types of the values found
+    (counted), and whether an approved override let a refusing value
+    through (the text then holds a value detection would have acted on)."""
+
+    found: Counter[str]
+    overridden: bool
 
 
 class StringBudget:
@@ -258,34 +272,50 @@ class Redactor:
         return "".join(parts)
 
     def scan_text(self, text: str) -> "Counter[str]":
+        """``scan``'s found detector types (text the proxy cannot rewrite)."""
+        return self.scan(text).found
+
+    def scan(self, text: str, *, redactable: bool = False) -> TextScan:
         """Detection only, for text the proxy cannot rewrite (a binary
-        upload read through its extracted text): the detections
-        ``redact_text`` would act on — the same allowlists, per-type
-        allowlists, deny strings and overlap resolution — with NO
+        upload read through its extracted text, a verbatim field): the
+        detections ``redact_text`` would act on — the same allowlists,
+        per-type allowlists, deny strings and overlap resolution — with NO
         placeholder issued and nothing written to the vault. A block-mode
         winner raises BlockedRequest; a warn-mode winner is counted in
         ``warn_counts`` (its value stays where it is); every other winner —
         a deny string always — is returned as its detector type, counted.
-        Every refusing winner (block mode, or one returned) but a deny
-        string is first put to the requester's overrides
-        (``with_overrides``): an approved value is skipped. Charged against
-        the string budget as one string."""
+
+        Every refusing winner but a deny string is first put to the
+        requester's overrides (``with_overrides``): an approved value is
+        skipped (``TextScan.overridden``). ``redactable``: the caller will
+        redact this text after all (convert mode sends a document's text in
+        its file's place), so only a block-mode winner refuses — a value it
+        returns is redacted, not refused, and is never put to the
+        overrides. A deny string in text that is not ``redactable`` refuses
+        it for good (``OverrideCheck.unoverridable``). Charged against the
+        string budget as one string."""
         self.charge(1)
         found: Counter[str] = Counter()
+        overridden = False
         for d in _resolve_overlaps(self._plan.detect(text, self._allowlist)):
-            # Deny strings (tier 0) take no mode, exactly as in redact_text.
-            mode = self._modes.get(d.detector_type) if d.tier else None
+            if not d.tier:
+                # Deny strings (tier 0) take no mode, exactly as in
+                # redact_text, and are the operator's always-redact list:
+                # never put to the requester's overrides.
+                found[d.detector_type] += 1
+                if not redactable and self._overrides is not None:
+                    self._overrides.unoverridable()
+                continue
+            mode = self._modes.get(d.detector_type)
             if mode == "warn":
                 self.warn_counts[d.detector_type] += 1
-            elif d.tier and self._overridden(d):
-                # Deny strings (tier 0) are the operator's always-redact
-                # list: never put to the requester's overrides.
-                continue
+            elif (mode == "block" or not redactable) and self._overridden(d):
+                overridden = True
             elif mode == "block":
                 raise BlockedRequest(d.detector_type)
             else:
                 found[d.detector_type] += 1
-        return found
+        return TextScan(found, overridden)
 
     @property
     def blocks(self) -> bool:

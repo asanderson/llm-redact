@@ -750,6 +750,9 @@ class OverrideScope:
         self._refused: dict[tuple[str, str], None] = {}
         self._once: set[int] = set()
         self._always: set[int] = set()
+        # Whether a finding no approval passes (a deny string in text the
+        # proxy cannot rewrite) refuses this request: no value code then.
+        self._final = False
         # Whether ``commit`` failed on a store fault (not a lost race).
         self.fault = False
         # What ``commit`` took, until ``settle``: (once, always, marker).
@@ -781,6 +784,12 @@ class OverrideScope:
         self._refused[(detector_type, value)] = None
         return False
 
+    def unoverridable(self) -> None:
+        """This request is refused for a finding no approval passes (a
+        deny string where the proxy cannot redact it): a value refusal's
+        code could never let it through, so none is minted."""
+        self._final = True
+
     def route_rule(
         self, kind: str, provider: str, method: str, route: str
     ) -> tuple[str, int] | None:
@@ -802,7 +811,7 @@ class OverrideScope:
         answered with, or None when it cannot carry one (a value refusal
         that refused no value through this scope, a requester who cannot
         approve it, a store fault)."""
-        if not self.approvable or (kind in VALUE_KINDS and not self._refused):
+        if not self.approvable or (kind in VALUE_KINDS and (self._final or not self._refused)):
             return None
         try:
             return self._store.record_pending(

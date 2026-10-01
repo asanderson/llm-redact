@@ -31,10 +31,14 @@ class Approved:
     def __init__(self, *values: str) -> None:
         self.values = set(values)
         self.asked: list[tuple[str, str]] = []
+        self.final = 0
 
     def allows(self, detector_type: str, value: str) -> bool:
         self.asked.append((detector_type, value))
         return value in self.values
+
+    def unoverridable(self) -> None:
+        self.final += 1
 
 
 def _redactor(modes: tuple[tuple[str, str], ...] = (("email", "block"),)) -> Redactor:
@@ -112,3 +116,38 @@ def test_a_deny_string_is_never_put_to_the_overrides() -> None:
     ).with_overrides(approved)
     assert redactor.scan_text(f"project aurora {EMAIL}") == Counter({"DENY": 1})
     assert approved.asked == [("EMAIL", EMAIL)]
+    # The refusal it causes is final: no value code (OverrideScope).
+    assert approved.final == 1
+    # In text the caller redacts (convert mode) it refuses nothing.
+    assert redactor.scan("project aurora", redactable=True).found == Counter({"DENY": 1})
+    assert approved.final == 1
+    # Without overrides there is nobody to tell.
+    plain = Redactor(
+        build_detectors(config), InMemoryVault(), build_allowlist(config), modes=build_modes(config)
+    )
+    assert plain.scan_text("project aurora") == Counter({"DENY": 1})
+
+
+def test_scan_reports_what_an_override_let_through() -> None:
+    approved = Approved(EMAIL)
+    redactor = _redactor(()).with_overrides(approved)
+    assert redactor.scan(f"mail {EMAIL}") == (Counter(), True)
+    assert redactor.scan(f"mail {OTHER}") == (Counter({"EMAIL": 1}), False)
+    assert redactor.scan("nothing") == (Counter(), False)
+    blocking = _redactor().with_overrides(Approved(EMAIL))
+    assert blocking.scan(f"mail {EMAIL}") == (Counter(), True)
+
+
+def test_a_redactable_scan_puts_only_block_winners_to_the_overrides() -> None:
+    """Convert mode: a reading whose text replaces its file is redacted, so
+    a redact-mode value there is found (to be redacted), never asked — an
+    approval must not turn it into a file sent as it came — while a
+    block-mode value still refuses unless approved."""
+    approved = Approved(EMAIL, PHONE)
+    redactor = _redactor((("phone_number", "block"),)).with_overrides(approved)
+    scan = redactor.scan(f"{EMAIL} {OTHER} {PHONE}", redactable=True)
+    assert scan == (Counter({"EMAIL": 2}), True)
+    assert approved.asked == [("PHONE", PHONE)]
+    with pytest.raises(BlockedRequest):
+        redactor.scan("+1 212 555 0198", redactable=True)
+    assert _redactor(()).scan(EMAIL, redactable=True) == (Counter({"EMAIL": 1}), False)

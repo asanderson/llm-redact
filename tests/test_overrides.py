@@ -746,8 +746,10 @@ async def test_values_in_an_inspected_binary_upload(
         status = (await client.get("/__llm-redact/status")).json()
         again = await client.post("/v1/files", content=_form(PDF), headers=FORM)
         assert again.status_code == 400
-    # Cleared by its (overridden) clean scan: not counted unscanned.
+    # Cleared by its overridden scan: not counted unscanned — and not
+    # `clean` either: it went out WITH the approved value (DOC-2).
     assert status["unscanned_uploads_total"] == {}
+    assert status["inspected_uploads_total"] == {"openai": {"detected": 1, "overridden": 1}}
 
 
 async def test_a_block_value_in_an_upload(tmp_path: Path) -> None:
@@ -1011,3 +1013,93 @@ async def test_the_start_row_of_an_inspected_upload_says_it_passed_on_an_overrid
     finals = {token: entry for token, entry in audit.finalized}
     assert finals[2].status == 200 and finals[2].override == "always"
     assert finals[1].override is None
+
+
+def _files(*contents: bytes) -> bytes:
+    body = b'--b\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nuser_data\r\n'
+    for index, content in enumerate(contents):
+        body += (
+            b'--b\r\nContent-Disposition: form-data; name="file"; filename="r%d.pdf"\r\n' % index
+            + b"Content-Type: application/pdf\r\n\r\n"
+            + content
+            + b"\r\n"
+        )
+    return body + b"--b--\r\n"
+
+
+def _reading(text: str, convert: str | None = None) -> Any:
+    from llm_redact.plugin_api import Inspection
+
+    async def script(part: Any) -> Inspection:
+        return Inspection(text, True, "fake", convert_text=convert)
+
+    return script
+
+
+async def test_a_converted_part_is_never_put_to_the_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Convert mode: part A's email is redacted in the text sent in its place
+    # — not refused — while part B's phone number refuses the upload. The
+    # code covers the phone only: approving it always must not allowlist the
+    # email, which a later binary file holding it would then carry upstream
+    # byte-identical (UP-1). A one-time grant for the email is not used by a
+    # convertible part either.
+    from test_upload_inspection import FakeInspector
+
+    phone = "+1 415 555 0132"
+    converted, detected, later = PDF + b"a", PDF + b"b", PDF + b"c"
+    inspector = FakeInspector(
+        scripts={
+            converted: _reading(f"mail {EMAIL}", convert=f"mail {EMAIL}"),
+            detected: _reading(f"call {phone}"),
+            later: _reading(f"mail {EMAIL}"),
+        },
+    )
+    reg = Registry()
+    reg.build_upload_inspector = lambda config, tier: inspector  # type: ignore[method-assign]
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    upstream = Upstream()
+    app = _app(tmp_path, upstream, detection=DetectionConfig())
+    async with _client(app) as client:
+        refused = await client.post("/v1/files", content=_files(converted, detected), headers=FORM)
+        assert refused.status_code == 400 and "PHONE" in refused.text
+        (pending,) = _store(tmp_path).entries()
+        assert pending.types == ("PHONE",)
+        _store(tmp_path).approve("always", approver=None, code=_code(refused))
+        # The email was never approved: a binary file holding it is refused.
+        alone = await client.post("/v1/files", content=_files(later), headers=FORM)
+        assert alone.status_code == 400 and "EMAIL" in alone.text
+        _store(tmp_path).approve("once", approver=None, code=_code(alone))
+        # The upload passes now (the phone always, part A converted): part A
+        # is redacted, and the one-time grant for the email is left unused.
+        passed = await client.post("/v1/files", content=_files(converted, detected), headers=FORM)
+        assert passed.status_code == 200
+        sent = upstream.requests[-1].content
+        assert converted not in sent and EMAIL.encode() not in sent and b"\xc2\xabEMAIL_" in sent
+        assert _store(tmp_path).counts()["once"] == 1
+        status = (await client.get("/__llm-redact/status")).json()
+    assert status["inspected_uploads_total"]["openai"]["converted"] == 1
+    assert status["inspected_uploads_total"]["openai"]["overridden"] == 1
+
+
+async def test_a_deny_string_in_a_binary_upload_makes_the_refusal_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A deny string in a binary file cannot be redacted and is never
+    # overridable: the refusal carries no code, even though another value of
+    # the upload was put to the overrides (approving it could never pass).
+    from llm_redact.detection.deny import DenyEntry
+    from test_upload_inspection import FakeInspector
+
+    inspector = FakeInspector(_reading(f"project aurora, contact {EMAIL}"))
+    reg = Registry()
+    reg.build_upload_inspector = lambda config, tier: inspector  # type: ignore[method-assign]
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    upstream = Upstream()
+    app = _app(tmp_path, upstream, detection=DetectionConfig(deny_strings=(DenyEntry("aurora"),)))
+    async with _client(app) as client:
+        refused = await client.post("/v1/files", content=_form(PDF), headers=FORM)
+    assert refused.status_code == 400 and "EMAIL" in refused.text
+    assert "llm-redact override" not in refused.text
+    assert _store(tmp_path).entries() == []

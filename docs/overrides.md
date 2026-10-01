@@ -56,7 +56,13 @@ on the request's row, the same way warn mode is.
 A value approval is an allowlist entry for that exact value and type, stored
 as an HMAC. It applies wherever that value would refuse a request (block
 mode, a binary upload, a verbatim field). It does not stop a value from being
-redacted where the proxy can redact it.
+redacted where the proxy can redact it — a binary file that `[extraction]
+convert` replaces by its redacted text included: the values of such a file are
+redacted, never put to an approval, never part of a code, and never use a
+one-time grant. A deny string where the proxy cannot redact it (a binary
+upload, a verbatim field) makes the whole refusal final: no code. A binary
+part that reads clean only because an approval let its values through is
+counted `overridden` in `inspected_uploads_total`, never `clean`.
 
 A block refusal names the first block-mode value the proxy meets. When a
 request holds more than one, approving the first leads to a new refusal (and

@@ -15,7 +15,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 import websockets
 

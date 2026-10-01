@@ -3089,9 +3089,7 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
     # refusal — and so could an agent presenting its user's API key, which
     # a gate also admits to the dashboard (``browser_signed_in``).
     can_approve = (
-        state.guards_dashboard
-        and bool(subject)
-        and await state.browser_signed_in(request, subject)
+        state.guards_dashboard and bool(subject) and await state.browser_signed_in(request, subject)
     )
     if request.url.path == f"{RESERVED_PREFIX}/overrides":
         if request.method != "GET":

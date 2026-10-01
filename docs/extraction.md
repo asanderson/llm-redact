@@ -195,6 +195,9 @@ loopback must be declared `trusted = true` and reached over `https`; doctor
 flags it. A service's reading counts as **complete** only with `complete =
 true` — the operator vouching that it reads every text-bearing element
 (OCR on, embedded documents followed) — and only when it reports no error.
+For a cloud OCR service (below) `complete = true` vouches for less: it reads
+the RENDERED pages, so its reading completes a file only where nothing else
+was left unread (below).
 Services are called with bounded time and answer size, no redirects, and no
 proxy or netrc settings from the environment; a credential is read from the
 environment variable `token_env` names at each call and never logged. Any
@@ -222,7 +225,8 @@ config, a log line, `/status` or `doctor` output.
 kind = "textract"                # AWS Textract DetectDocumentText
 region = "eu-west-1"             # required: the endpoint textract.REGION.amazonaws.com and the SigV4 scope
 trusted = true
-complete = true                  # Textract reads the whole image/page (OCR)
+complete = true                  # Textract reads the rendered page (OCR): it completes a scanned
+                                 # page or a plain picture, never an attachment or metadata (below)
 # url = "https://vpce-….textract.eu-west-1.vpce.amazonaws.com"  # optional (a VPC endpoint)
 # access_key_env = "AWS_ACCESS_KEY_ID"          # the variables' NAMES (these are the defaults);
 # secret_key_env = "AWS_SECRET_ACCESS_KEY"      # the session token is sent when set
@@ -283,6 +287,30 @@ page tree as pypdf reads it — keep `pdf` in `formats`), and is one for a
 PNG that is not animated, a JPEG or a BMP; a TIFF, GIF, WebP or HEIF image
 (which may hold several), an Office file, markup, or a PDF the local
 extractor did not open never counts as completely read by a cloud service.
+
+A cloud OCR service reads what the pages SHOW, nothing else: not a file
+attached to a PDF (a Factur-X invoice's XML), an XFA form, a document
+script, an image no page draws (a thumbnail, one only an annotation or a
+pattern shows, or one merely listed), a picture's metadata (PNG text chunks,
+Exif, XMP, an ICC profile, a JPEG comment or thumbnail) or bytes after the
+image's end. So its reading completes a file only where the rest is known to
+be read (counted `unseen_content` in `readings_total` otherwise):
+
+- a PDF the local PDF extractor read completely but for what OCR of its
+  pages reads: images its pages draw (every image of the file must be named
+  by a page's content stream, or that of a form the page draws, with their
+  masks) and page text that reads as nothing or as unmapped characters. Any
+  other reason the local reading gives — an attachment, a script, an XFA
+  form, an image no page draws, a font it cannot map, a form or appearance
+  stream it could not read, the `max_text_chars` cap — keeps the file
+  incomplete whatever the OCR answers;
+- a PNG or JPEG that holds nothing but the picture: only the chunks or
+  markers that draw it (a JFIF header without a thumbnail, Adobe's colour
+  marker), ending at its end marker. A BMP is never completed by OCR.
+
+What the page shows is taken as what OCR reads: an image drawn outside the
+page's visible area, under other content or fully masked is the residual of
+declaring an OCR service `complete = true`.
 
 ## Convert mode
 
@@ -382,4 +410,6 @@ not happen.
   `token_env` form cannot refresh its token (use `credentials_file`).
 - A cloud OCR reading vouches for a file only when it covers every page and
   the file's page count is known (above): multi-page TIFFs, Office files and
-  PDFs the local extractor could not open are never cleared by one.
+  PDFs the local extractor could not open are never cleared by one — nor a
+  file holding what OCR of its pages cannot see (an attachment, a script, an
+  undrawn image, a picture's metadata).

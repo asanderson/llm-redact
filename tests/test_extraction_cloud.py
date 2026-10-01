@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 import pytest
 
-from document_fixtures import pdf
+from document_fixtures import jpeg, pdf, png
 from llm_redact import extraction
 from llm_redact.config import ConfigError, ExtractionConfig, ExtractionService, parse_extraction
 from llm_redact.extraction import (
@@ -29,7 +29,7 @@ from llm_redact.extraction import (
 )
 
 EMAIL = "jane.doe@corp.example"
-PNG = b"\x89PNG\r\n\x1a\n" + bytes(64)
+PNG = png()
 AWS_ENV = {"AWS_ACCESS_KEY_ID": "AKIDTEST", "AWS_SECRET_ACCESS_KEY": "aws-secret-value"}
 PROCESSOR = "projects/p1/locations/eu/processors/abcdef12"
 DI = "https://di.cognitiveservices.azure.com"
@@ -567,7 +567,7 @@ async def test_textract_must_report_the_images_one_page(
     inspector = _inspector(
         _service(kind="textract", region="us-east-1", complete=True), service, AWS_ENV
     )
-    assert (await inspector.read(b"\xff\xd8\xff" + bytes(16))).complete is complete
+    assert (await inspector.read(jpeg())).complete is complete
 
 
 async def test_documentai_must_report_the_images_one_page() -> None:
@@ -578,3 +578,94 @@ async def test_documentai_must_report_the_images_one_page() -> None:
         {"G": "t"},
     )
     assert (await inspector.read(b"BM" + bytes(16))).complete is False
+
+
+# --- what page OCR cannot vouch for (EXT-1) ----------------------------------------------
+
+SSN = "123-45-6789"
+
+
+def _textract_inspector(formats: tuple[str, ...] = ("pdf",)) -> tuple[ExtractionInspector, Any]:
+    service = Recorder(
+        *(
+            httpx.Response(
+                200,
+                json={
+                    "Blocks": [{"BlockType": "LINE", "Text": "Quarterly report"}],
+                    "DocumentMetadata": {"Pages": 1},
+                },
+            )
+            for _ in range(4)
+        )
+    )
+    config = ExtractionConfig(
+        enabled=True,
+        formats=formats,
+        services=(_service(kind="textract", region="us-east-1", complete=True),),
+    )
+    inspector = ExtractionInspector(config, transport=httpx.MockTransport(service), environ=AWS_ENV)
+    return inspector, service
+
+
+def _with_attachment(data: bytes) -> bytes:
+    import io
+
+    from pypdf import PdfReader, PdfWriter
+
+    writer = PdfWriter(clone_from=PdfReader(io.BytesIO(data)))
+    writer.add_attachment("secret.txt", f"employee ssn {SSN}".encode())
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+async def test_an_ocr_reading_completes_only_what_page_ocr_reads() -> None:
+    inspector, service = _textract_inspector()
+    # A scanned page: the worker left only the page's image unread.
+    scanned = await inspector.read(pdf([], image_page=True))
+    assert scanned.complete is True and scanned.extractor == "local:pdf+textract"
+    # The same page with an attached file (a Factur-X invoice's XML, say):
+    # Textract reads the page, never the attachment — not complete.
+    attached = await inspector.read(_with_attachment(pdf([], image_page=True)))
+    blank = await inspector.read(_with_attachment(pdf(["Quarterly report"])))
+    for reading in (attached, blank):
+        assert reading.complete is False and reading.text is not None
+        assert "Quarterly report" in reading.text  # still scanned
+    readings = inspector.status()["readings_total"]["textract"]
+    assert readings["unseen_content"] == 2
+    assert len(service.requests) == 3
+
+
+@pytest.mark.parametrize(
+    ("data", "complete"),
+    [
+        (png(), True),
+        (jpeg(), True),
+        (png((b"tEXt", b"Comment\x00ssn " + SSN.encode())), False),
+        (png((b"iTXt", b"XML:com.adobe.xmp\x00\x00\x00\x00\x00" + SSN.encode())), False),
+        (jpeg((0xE1, b"Exif\x00\x00" + SSN.encode())), False),
+        (jpeg((0xFE, SSN.encode())), False),
+        (jpeg(thumbnail=True), False),
+        (png(trailer=SSN.encode()), False),
+        (b"BM" + bytes(64), False),  # no metadata walk for BMP: never vouched for
+    ],
+    ids=[
+        "png",
+        "jpeg",
+        "png-text",
+        "png-xmp",
+        "jpeg-exif",
+        "jpeg-comment",
+        "thumb",
+        "trail",
+        "bmp",
+    ],
+)
+async def test_an_ocr_reading_never_completes_a_picture_with_metadata(
+    data: bytes, complete: bool
+) -> None:
+    inspector, _ = _textract_inspector(formats=())
+    reading = await inspector.read(data)
+    assert reading.complete is complete
+    counted = inspector.status()["readings_total"].get("textract", {})
+    assert ("unseen_content" in counted) is not complete

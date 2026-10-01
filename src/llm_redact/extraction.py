@@ -167,6 +167,17 @@ class _Read:
     complete: bool
     display: str | None = field(default=None, repr=False)
     pages: int | None = None
+    # The worker's: whether what it left unread is only what OCR of every
+    # rendered page reads (``extract_worker.Reading.ocr_completes``).
+    ocr: bool = False
+
+
+def image_text_free(data: bytes) -> bool:
+    """Whether a single picture holds nothing an OCR of it would not read
+    (``extract_worker.image_text_free``: no metadata, no trailing bytes)."""
+    from llm_redact.extract_worker import image_text_free as text_free
+
+    return text_free(data)
 
 
 def polyglot(data: bytes) -> bool:
@@ -440,6 +451,10 @@ class ExtractionInspector:
         complete = False
         display: str | None = None
         pages = 1 if _one_image(data) else None
+        # Whether OCR of the rendered pages sees everything the file holds
+        # that was not read: the worker's verdict on a PDF; for a single
+        # picture, that it carries no metadata (asked once, when needed).
+        sees_all: bool | None = None
         if _local_class(coarse, self.config.formats):
             local = await self._local(data)
             if local is not None:
@@ -447,6 +462,7 @@ class ExtractionInspector:
                 texts.append(read.text)
                 names.append(name)
                 complete, display, pages = read.complete, read.display, read.pages
+                sees_all = read.ocr
         if not complete and services:
             for service in self.config.services:
                 if coarse not in service.formats:
@@ -463,6 +479,16 @@ class ExtractionInspector:
                     # every page the file has, which must be known.
                     self.readings[(service.kind, "pages_unverified")] += 1
                     continue
+                if service.kind in _PAGED:
+                    if sees_all is None:
+                        sees_all = await asyncio.to_thread(image_text_free, data)
+                    if not sees_all:
+                        # The file holds what no page OCR reads (an
+                        # attachment, a script, an image no page draws, a
+                        # picture's metadata, …): the OCR reading is
+                        # scanned, but it vouches for nothing.
+                        self.readings[(service.kind, "unseen_content")] += 1
+                        continue
                 if answer.complete:
                     # A service vouches for the format it opened; whether the
                     # file also holds another is a property of its bytes (the
@@ -558,7 +584,13 @@ class ExtractionInspector:
             return None
         self.readings[(name, "complete" if complete else "incomplete")] += 1
         display = result.get("display")
-        return name, _Read(text, complete, display if isinstance(display, str) else None, pages)
+        return name, _Read(
+            text,
+            complete,
+            display if isinstance(display, str) else None,
+            pages,
+            ocr=result.get("ocr") is True,
+        )
 
     async def _run_worker(self, data: bytes) -> dict[str, Any]:
         """One worker process for ``data``, killed on any way out but its

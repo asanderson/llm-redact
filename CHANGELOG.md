@@ -542,6 +542,16 @@ and tags `vX.Y.Z`.
   `AccessGate.browser_signed_in(conn, subject)` must say the connection rests on the
   gate's browser sign-in session; without it (or with an older gate) the POSTs answer
   403 and approval stays with the CLI.
+- A cloud OCR service declared `complete = true` (as the docs' Textract example did)
+  completed any file whose page count it matched, discarding every reason the local
+  extractor had found it incomplete: a PDF with an attached file (a Factur-X
+  invoice's XML), an XFA form or a script, or a PNG/JPEG whose text chunks, Exif, XMP
+  or comment held a value, then scanned clean on the OCR text alone and went out
+  byte-identical. An OCR reading now completes a PDF only when the worker left unread
+  nothing but what OCR of the rendered pages reads (images its pages draw, page text
+  that reads as nothing), and a picture only when it holds nothing but the picture
+  (counted `unseen_content` otherwise). The docs' Textract example and the meaning of
+  `complete` for cloud services are corrected.
 
 ## [1.9.0] - 2026-09-29
 

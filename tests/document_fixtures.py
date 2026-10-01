@@ -303,3 +303,38 @@ def odt(paragraphs: list[str], *, picture: bool = False) -> bytes:
 def zip_bomb(size: int = 64 << 20) -> bytes:
     """A document package whose one XML part inflates to ``size`` bytes."""
     return package({"[Content_Types].xml": _CT, "word/document.xml": b"<" + b"a" * size})
+
+
+def png(*chunks: tuple[bytes, bytes], trailer: bytes = b"") -> bytes:
+    """A 1x1 grey PNG, with ``chunks`` ((type, data) pairs) before its image
+    data and ``trailer`` after its end."""
+    import struct
+    import zlib as _zlib
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        crc = struct.pack(">I", _zlib.crc32(kind + payload))
+        return struct.pack(">I", len(payload)) + kind + payload + crc
+
+    header = chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+    extra = b"".join(chunk(kind, payload) for kind, payload in chunks)
+    image = chunk(b"IDAT", _zlib.compress(b"\x00\x80")) + chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + header + extra + image + trailer
+
+
+def jpeg(*segments: tuple[int, bytes], trailer: bytes = b"", thumbnail: bool = False) -> bytes:
+    """A JPEG-shaped file (headers right, pixels not decodable): JFIF APP0
+    (with a 1x1 thumbnail when asked), ``segments`` ((marker, payload)),
+    tables, a frame, one scan whose data holds a stuffed byte and a restart
+    marker, then EOI and ``trailer``."""
+    import struct
+
+    def segment(marker: int, payload: bytes) -> bytes:
+        return bytes([0xFF, marker]) + struct.pack(">H", len(payload) + 2) + payload
+
+    thumb = b"\x01\x01" + bytes(3) if thumbnail else b"\x00\x00"
+    jfif = segment(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01" + thumb)
+    body = b"".join(segment(marker, payload) for marker, payload in segments)
+    tables = segment(0xDB, bytes(65)) + segment(0xC4, bytes(20))
+    frame = segment(0xC0, b"\x08\x00\x01\x00\x01\x01\x01\x11\x00")
+    scan = segment(0xDA, b"\x01\x01\x00\x00\x3f\x00") + b"\x12\xff\x00\x34\xff\xd0\x56"
+    return b"\xff\xd8" + jfif + body + tables + frame + scan + b"\xff\xff\xd9" + trailer

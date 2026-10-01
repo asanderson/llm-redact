@@ -8,7 +8,9 @@ plus ``"display"`` (the file's text once, as a reader shows it: what
 ``[extraction] convert`` sends in place of a file; null unless complete)
 and ``"pages"`` (a PDF's page count, null for other formats or when the
 file could not be opened: a cloud OCR reading is complete only when it
-covers that many pages).
+covers that many pages), and ``"ocr"``: whether what the reading left unread
+is only what OCR of the rendered pages reads (``Reading.ocr_completes``) —
+only then may a cloud OCR reading complete the file.
 The process caps its own address space, CPU time, file writes, open files
 and child processes (``apply_limits``) BEFORE it reads a byte of the file,
 and the parent kills it at its wall-clock deadline, so a parser wedged or
@@ -284,12 +286,39 @@ class Reading:
         self.pieces: list[str] = []
         self.size = 0
         self.max_chars = max_chars
-        self.complete = True
+        # Why the reading may be incomplete: something left unread that a
+        # page-rendering OCR would not read either (``_unread``: anything
+        # marked ``complete = False``, by default), or only what OCR of the
+        # rendered pages reads (``ocr_gap``: an image a page draws, page
+        # text that reads as nothing or as unmapped characters).
+        self._unread = False
+        self._ocr_gap = False
         self.kind: str | None = None  # a package's kind, once known
         self.shown: list[str] = []
         self.shown_size = 0
         self.displayable = True
         self.pages: int | None = None  # a PDF's page count, once known
+
+    @property
+    def complete(self) -> bool:
+        """Whether EVERY text-bearing element was read (see the module)."""
+        return not (self._unread or self._ocr_gap)
+
+    @complete.setter
+    def complete(self, value: bool) -> None:
+        # Marking a reading incomplete is fail closed: nothing OCR reads.
+        if not value:
+            self._unread = True
+
+    def ocr_gap(self) -> None:
+        """Incomplete only for what OCR of the rendered pages reads."""
+        self._ocr_gap = True
+
+    @property
+    def ocr_completes(self) -> bool:
+        """Whether a reading of every rendered page by OCR covers what this
+        one left unread: it is incomplete only for ``ocr_gap`` reasons."""
+        return self._ocr_gap and not self._unread
 
     def add(self, text: str) -> None:
         if not text:
@@ -349,6 +378,112 @@ _EOCD_REACH = 22 + 0xFFFF
 _PDF_TAIL = b" \t\r\n\x00\x0c"
 # What a PDF reader finds a PDF by: its header, its trailer's pointer to the
 # cross-reference table, its end marker.
+# --- single images: what OCR of the picture does not see ---------------------------
+
+# PNG chunks that carry no text: the picture itself and how it is shown.
+# Every other chunk (tEXt, zTXt, iTXt, eXIf, iCCP's profile, sPLT's name, a
+# private one) may hold text no OCR of the picture reads.
+_PNG_PICTURE_CHUNKS = frozenset(
+    {
+        b"IHDR",
+        b"PLTE",
+        b"IDAT",
+        b"IEND",
+        b"tRNS",
+        b"cHRM",
+        b"gAMA",
+        b"sBIT",
+        b"sRGB",
+        b"bKGD",
+        b"hIST",
+        b"pHYs",
+        b"tIME",
+        b"cICP",
+        b"mDCV",
+        b"cLLI",
+    }
+)
+# JPEG markers that carry no text: frame and scan headers, tables, restart
+# markers, APP14 (Adobe colour transform); APP0 only as a JFIF header
+# without a thumbnail (checked on its own). Every other one — APP1 (Exif,
+# XMP), APP2 (ICC profile), any other APPn, COM, JPGn — may hold text.
+_JPEG_PICTURE_MARKERS = frozenset(
+    set(range(0xC0, 0xD0)) | {0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF, 0xEE}
+)
+
+
+def image_text_free(data: bytes) -> bool:
+    """Whether a single picture holds nothing but the picture: a PNG made of
+    ``_PNG_PICTURE_CHUNKS`` or a JPEG made of ``_JPEG_PICTURE_MARKERS``
+    (an APP0 that is a JFIF header without a thumbnail), ending at its end
+    marker with no byte after it. Any metadata a reader of the file sees
+    but OCR of the picture does not — text chunks, Exif, XMP, an ICC
+    profile, a comment, a thumbnail, trailing bytes — and any other format
+    or a malformed file: False. Header walking only, never decoding."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return _png_text_free(data)
+    if data.startswith(b"\xff\xd8"):
+        return _jpeg_text_free(data)
+    return False
+
+
+def _png_text_free(data: bytes) -> bool:
+    pos = 8
+    while pos + 12 <= len(data):
+        length = int.from_bytes(data[pos : pos + 4], "big")
+        kind = data[pos + 4 : pos + 8]
+        end = pos + 12 + length
+        if kind not in _PNG_PICTURE_CHUNKS or end > len(data):
+            return False
+        if kind == b"IEND":
+            return end == len(data)
+        pos = end
+    return False
+
+
+def _jpeg_text_free(data: bytes) -> bool:
+    pos = 2
+    while pos + 2 <= len(data):
+        if data[pos] != 0xFF:
+            return False
+        marker = data[pos + 1]
+        if marker == 0xFF:  # a fill byte
+            pos += 1
+            continue
+        if marker == 0xD9:  # EOI
+            return pos + 2 == len(data)
+        if 0xD0 <= marker <= 0xD7:  # a restart marker: no length
+            pos += 2
+            continue
+        if pos + 4 > len(data):
+            return False
+        length = int.from_bytes(data[pos + 2 : pos + 4], "big")
+        segment = data[pos + 4 : pos + 2 + length]
+        if length < 2 or pos + 2 + length > len(data):
+            return False
+        if marker == 0xE0:
+            # JFIF: identifier, version, units, densities, then the
+            # thumbnail's width and height — none allowed.
+            if length != 16 or segment[:5] != b"JFIF\x00" or segment[12:14] != b"\x00\x00":
+                return False
+        elif marker not in _JPEG_PICTURE_MARKERS:
+            return False
+        pos += 2 + length
+        if marker == 0xDA:
+            # Entropy-coded data up to the next marker that is neither a
+            # stuffed 0xFF00 nor a restart marker.
+            while True:
+                pos = data.find(b"\xff", pos)
+                if pos < 0 or pos + 1 >= len(data):
+                    return False
+                following = data[pos + 1]
+                if following == 0x00 or 0xD0 <= following <= 0xD7:
+                    pos += 2
+                    continue
+                break
+    return False
+
+
 _PDF_MARKERS = (b"%PDF-", b"startxref", b"%%EOF")
 
 
@@ -611,16 +746,17 @@ def _pdf_font_unread(value: Any) -> bool:
 
 def _pdf_dictionary_unread(value: Any) -> bool:
     """Whether one PDF dictionary (or stream) is content this reader does
-    not read: an attachment or media (``_PDF_ATTACHING``,
-    ``_PDF_MEDIA_ANNOTATIONS``), an image or PostScript XObject, or a font
-    it cannot vouch for (``_pdf_font_unread``). What forms, patterns and
-    annotation appearances draw is read (``_read_drawn``)."""
+    not read — apart from an image XObject, which ``_PdfWalk`` counts on
+    its own (OCR of a page that draws it reads it): an attachment or media
+    (``_PDF_ATTACHING``, ``_PDF_MEDIA_ANNOTATIONS``), a PostScript XObject,
+    or a font it cannot vouch for (``_pdf_font_unread``). What forms,
+    patterns and annotation appearances draw is read (``_read_drawn``)."""
     subtype = _resolved(value.get("/Subtype"))
     return bool(
         _PDF_ATTACHING.intersection(value.keys())
         or _resolved(value.get("/Type")) == "/EmbeddedFile"
         or subtype in _PDF_MEDIA_ANNOTATIONS
-        or subtype in _PDF_UNREAD_XOBJECTS
+        or (subtype in _PDF_UNREAD_XOBJECTS and subtype != "/Image")
         or _pdf_font_unread(value)
     )
 
@@ -646,15 +782,26 @@ class _PdfWalk:
 
     def __init__(self) -> None:
         self.unread = False
+        # The object numbers of the file's image XObjects (``images``), and
+        # the object being walked (``number``).
+        self.images: set[int] = set()
+        self.number = 0
         self.drawn: dict[int, Any] = {}
         self.marked: list[str] = []
         self.actual = False
         self.scripts = False
         self.bare_widgets = False
 
-    def dictionary(self, value: Any) -> None:
+    def dictionary(self, value: Any, *, top: bool = True) -> None:
         self.unread = self.unread or _pdf_dictionary_unread(value)
         subtype = _resolved(value.get("/Subtype"))
+        if subtype == "/Image":
+            # An image XObject is a stream, an object of its own: one nested
+            # in another object is nothing a page draws — unread.
+            if top:
+                self.images.add(self.number)
+            else:
+                self.unread = True
         if subtype == "/Form" or _resolved(value.get("/PatternType")) == 1:
             self.drawn[id(value)] = value
         if "/AP" in value:
@@ -679,7 +826,7 @@ class _PdfWalk:
             self.unread = True
             return
         if isinstance(value, DictionaryObject):
-            self.dictionary(value)
+            self.dictionary(value, top=depth == 0)
             items: Any = value.values()
         elif isinstance(value, ArrayObject):
             items = value
@@ -703,8 +850,47 @@ def _pdf_walk(reader: Any) -> _PdfWalk:
     numbers += [(number, 0) for number in reader.xref_objStm]
     walk = _PdfWalk()
     for number, generation in numbers:
+        walk.number = number
         walk.value(reader.get_object(IndirectObject(number, generation, reader)))
     return walk
+
+
+def _page_images(page: Any) -> set[int]:
+    """The object numbers of the image XObjects a page DRAWS — named by a
+    ``Do`` in its content stream, or in that of a form it draws (each form
+    followed once) — with each such image's soft mask and stencil mask:
+    what OCR of the rendered page reads. An image a resource dictionary
+    merely lists, or one reached any other way (a thumbnail, a pattern, an
+    annotation, an unreferenced object), is not in it."""
+    from pypdf.generic import ContentStream, IndirectObject
+
+    images: set[int] = set()
+    forms: set[int] = set()
+    pending = [(page.get_contents(), page.get("/Resources"))]
+    while pending:
+        contents, resources = pending.pop()
+        xobjects = _resolved(_get(_resolved(resources), "/XObject"))
+        if contents is None or not hasattr(xobjects, "raw_get"):
+            continue
+        if not isinstance(contents, ContentStream):
+            contents = ContentStream(contents, page.pdf)
+        names = {ops[0] for ops, operator in contents.operations if operator == b"Do" and ops}
+        for name in names:
+            ref = xobjects.raw_get(name) if name in xobjects else None
+            if not isinstance(ref, IndirectObject):
+                continue
+            target: Any = ref.get_object()
+            subtype = _resolved(_get(target, "/Subtype"))
+            if subtype == "/Image":
+                images.add(ref.idnum)
+                for key in ("/SMask", "/Mask"):
+                    mask = target.raw_get(key) if key in target else None
+                    if isinstance(mask, IndirectObject):
+                        images.add(mask.idnum)
+            elif subtype == "/Form" and ref.idnum not in forms:
+                forms.add(ref.idnum)
+                pending.append((target, _get(target, "/Resources")))
+    return images
 
 
 def _marked_visitor(walk: _PdfWalk) -> Callable[..., None]:
@@ -1082,7 +1268,15 @@ def read_pdf(data: bytes, reading: Reading) -> None:
     map), on a page or drawing that shows text but reads as none,
     JavaScript that may redraw a form field (with NeedAppearances or a
     widget without an appearance), a document script, an XFA form, a
-    character pypdf could not map (U+FFFD), or a failure."""
+    character pypdf could not map (U+FFFD), or a failure.
+
+    Only some of these are what OCR of the rendered pages reads
+    (``Reading.ocr_gap``): an image a page draws (every image XObject of
+    the file drawn by a page, ``_page_images``), and a page whose own text
+    reads as nothing or as an unmapped character. Every other reason —
+    an attachment, a script, an XFA form, an image no page draws, a font it
+    cannot map, a form or appearance stream, the text cap — stays unread
+    whatever an OCR service says."""
     from pypdf import PageObject, PdfReader
 
     reader = PdfReader(io.BytesIO(data), strict=False)
@@ -1099,26 +1293,33 @@ def read_pdf(data: bytes, reading: Reading) -> None:
     walk = _pdf_walk(reader)
     need_appearances = getattr(_resolved(acroform.get("/NeedAppearances")), "value", None)
     redrawn = need_appearances is True or walk.bare_widgets
+    drawn_images: set[int] = set()
+    for page in reader.pages:
+        drawn_images |= _page_images(page)
     if (
         "/EmbeddedFiles" in names
         or "/JavaScript" in names
         or "/XFA" in acroform
         or walk.unread
+        or not walk.images <= drawn_images
         or (walk.scripts and redrawn)
     ):
         reading.complete = False
+    elif walk.images:
+        # Every image of the file is drawn by a page: OCR of it reads them.
+        reading.ocr_gap()
     visit = _marked_visitor(walk)
     for page in reader.pages:
         text = page.extract_text(visitor_operand_before=visit)
         if "\ufffd" in text or (not text.strip() and _page_paints(page)):
             # A character pypdf could not map, or a page that paints
             # something — outlines, a pattern, glyphs it could not map — yet
-            # reads as no text at all.
-            reading.complete = False
+            # reads as no text at all: what OCR of the page reads.
+            reading.ocr_gap()
         reading.add(text)
         reading.show(text)
         if len(page.images) > 0:
-            reading.complete = False
+            reading.ocr_gap()
         for annotation in page.get("/Annots") or ():
             _pdf_strings(annotation, reading)
     drawer = reader.pages[0] if len(reader.pages) else PageObject(reader)
@@ -2366,7 +2567,8 @@ def extract(data: bytes, *, formats: set[str], max_chars: int, max_inflated: int
             readers[kind](data, reading)
         if kind not in formats:
             return {"format": kind, "text": None, "complete": False, "reason": "unsupported"}
-        reading.complete = reading.complete and not carries_another(data, detected)
+        if carries_another(data, detected):
+            reading.complete = False
     except Limit:
         return {"format": reading.kind or kind, "text": None, "complete": False, "reason": "limit"}
     except Refused:
@@ -2392,6 +2594,8 @@ def extract(data: bytes, *, formats: set[str], max_chars: int, max_inflated: int
         "reason": "ok",
         "display": reading.display() if reading.complete else None,
         "pages": reading.pages,
+        # Whether OCR of every rendered page covers what was left unread.
+        "ocr": reading.ocr_completes,
     }
 
 

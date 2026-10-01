@@ -1665,3 +1665,133 @@ def test_apply_limits_applies_none_without_resource_limits(monkeypatch: pytest.M
     # (the parent bounds its input instead) rather than failing to start.
     monkeypatch.setitem(sys.modules, "resource", None)
     apply_limits(256 << 20, 7)
+
+
+# --- what OCR of the rendered pages covers (EXT-1) ------------------------------------
+
+_IMAGE = b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray"
+_DRAW = b"q 100 0 0 100 0 0 cm /Im1 Do Q"
+
+
+def _image_pdf(content: bytes, *, resources: bytes, extra: tuple[bytes, ...] = ()) -> bytes:
+    """One page drawing ``content`` with ``resources``; object 5 is a 1x1
+    image, ``extra`` objects follow from 6."""
+    return pdf_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R"
+            b" /Resources << " + resources + b" >> >>",
+            pdf_stream(b"", content),
+            pdf_stream(_IMAGE[2:] + b" /BitsPerComponent 8", b"\x80"),
+            *extra,
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("data", "ocr"),
+    [
+        # A scanned page: the image is drawn — OCR of the page reads it.
+        (pdf([], image_page=True), True),
+        (_image_pdf(_DRAW, resources=b"/XObject << /Im1 5 0 R >>"), True),
+        # Drawn through a form the page draws.
+        (
+            _image_pdf(
+                b"/Fm1 Do",
+                resources=b"/XObject << /Fm1 6 0 R >>",
+                extra=(
+                    pdf_stream(
+                        b"/Type /XObject /Subtype /Form /BBox [0 0 612 792]"
+                        b" /Resources << /XObject << /Im1 5 0 R >> >>",
+                        _DRAW,
+                    ),
+                ),
+            ),
+            True,
+        ),
+        # Listed in the page's resources but never drawn: no OCR sees it.
+        (_image_pdf(b"", resources=b"/XObject << /Im1 5 0 R >>"), False),
+        # Drawn, but the file also holds an image no page draws.
+        (
+            _image_pdf(
+                _DRAW,
+                resources=b"/XObject << /Im1 5 0 R >>",
+                extra=(pdf_stream(_IMAGE[2:] + b" /BitsPerComponent 8", b"\x80"),),
+            ),
+            False,
+        ),
+    ],
+    ids=["scanned", "drawn", "through-a-form", "listed-only", "one-not-drawn"],
+)
+def test_an_image_a_page_draws_is_an_ocr_gap(data: bytes, ocr: bool) -> None:
+    result = _read(data)
+    assert result["complete"] is False and result["ocr"] is ocr
+
+
+def test_what_page_ocr_never_sees_stays_unread() -> None:
+    scanned = pdf([], image_page=True)
+    # An attachment beside a scanned page: OCR of the page never reads it.
+    writer_pdf = _attached(scanned)
+    assert _read(writer_pdf)["ocr"] is False
+    # The text cap cut the reading: what was cut is not on a page OCR reads.
+    capped = pdf(["x" * 200], image_page=True)
+    assert _read(capped, max_chars=50)["ocr"] is False
+    # A complete reading needs no OCR; a failure is no OCR gap.
+    assert _read(pdf(["text page"]))["ocr"] is False
+    assert _read(b"%PDF-1.7\nnot a pdf").get("ocr") is not True
+
+
+def _attached(data: bytes) -> bytes:
+    import io as _io
+
+    from pypdf import PdfReader, PdfWriter
+
+    writer = PdfWriter(clone_from=PdfReader(_io.BytesIO(data)))
+    writer.add_attachment("secret.txt", b"employee ssn 123-45-6789")
+    out = _io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def test_a_reading_marked_incomplete_is_never_an_ocr_gap() -> None:
+    reading = Reading(100)
+    reading.ocr_gap()
+    assert reading.complete is False and reading.ocr_completes is True
+    reading.complete = reading.complete  # False: anything marked so is unread
+    assert reading.ocr_completes is False
+    fresh = Reading(100)
+    fresh.complete = True
+    assert fresh.complete is True and fresh.ocr_completes is False
+
+
+def test_image_text_free() -> None:
+    from document_fixtures import jpeg, png
+    from llm_redact.extract_worker import image_text_free
+
+    assert image_text_free(png()) is True
+    assert image_text_free(jpeg()) is True
+    for chunk in (b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"iCCP", b"sPLT", b"prVt"):
+        assert image_text_free(png((chunk, b"Comment\x00ssn 123-45-6789"))) is False, chunk
+    assert image_text_free(png((b"pHYs", bytes(9)), (b"gAMA", bytes(4)))) is True
+    for marker in (0xE1, 0xE2, 0xED, 0xFE, 0xF0):
+        assert image_text_free(jpeg((marker, b"Exif\x00\x00 ssn"))) is False, hex(marker)
+    assert image_text_free(jpeg((0xEE, b"Adobe" + bytes(7)))) is True
+    assert image_text_free(jpeg(thumbnail=True)) is False
+    for trailer in (b"x", b"ssn 123-45-6789"):
+        assert image_text_free(png(trailer=trailer)) is False
+        assert image_text_free(jpeg(trailer=trailer)) is False
+    # Malformed or cut short, and every other format: not vouched for.
+    whole_png, whole_jpeg = png(), jpeg()
+    for cut in range(len(whole_png)):
+        assert image_text_free(whole_png[:cut]) is False
+    for cut in range(len(whole_jpeg)):
+        assert image_text_free(whole_jpeg[:cut]) is False
+    bad_app0 = whole_jpeg.replace(b"JFIF\x00", b"JFXX\x00", 1)
+    assert image_text_free(bad_app0) is False
+    zero_length = b"\xff\xd8\xff\xdb\x00\x01" + whole_jpeg[2:]
+    assert image_text_free(zero_length) is False
+    not_a_marker = b"\xff\xd8\x00" + whole_jpeg[2:]
+    assert image_text_free(not_a_marker) is False
+    assert image_text_free(b"BM" + bytes(64)) is False
+    assert image_text_free(b"GIF89a" + bytes(32)) is False

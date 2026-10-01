@@ -23,9 +23,17 @@ llm-redact override revoke r12              # drop a rule (r…) or a pending co
 The command shows what was refused (kind, detector types, route, requester)
 and waits for `allow` typed on the controlling terminal (`/dev/tty`). It never
 reads the answer from stdin and refuses without a terminal, so an agent that
-runs the command cannot approve its own refusal. With llm-redact-pro, the
-dashboard shows the same pending refusals with **Allow once** and **Always
-allow** buttons, and your rules with **Revoke**.
+merely pipes `allow` into the command does not approve anything. With
+llm-redact-pro and a dashboard sign-in (`[auth.dashboard]`), the dashboard
+shows the same pending refusals with **Allow once** and **Always allow**
+buttons, and your rules with **Revoke**.
+
+**Approval guards against accidents, not against local software.** An agent
+that has a shell running as you can approve its own refusal: it can open a
+pseudo-terminal and type `allow` into it, or edit the store file, just as it
+can edit the configuration. Keep `[overrides] enabled = false` where every
+refusal must stay final, or where an agent with a shell works next to the
+proxy unsupervised.
 
 **An override forwards the value.** Detection still runs and still decides the
 refusal. The override is only asked after that, and a value it lets through
@@ -104,12 +112,10 @@ The endpoints behind the dashboard buttons are core:
 
 The POSTs sit behind the same guard chain as the configuration editor
 (Host, Origin, and a CSRF token that only the llm-redact-pro dashboard page
-hands out).
-
-This is a guard against an agent approving by accident, not a security
-boundary against local software. Any process running as the operator's user
-can edit the store file, just as it can edit the configuration. Keep
-`[overrides] enabled = false` where every refusal must stay final.
+hands out), and are served only to a requester an access gate signed in to
+the dashboard. Without a sign-in any local client can fetch the CSRF token,
+so it proves no person: the POSTs answer 403 and point to the CLI, and the
+listing says `"can_approve": false`.
 
 ## Lifetimes and storage
 

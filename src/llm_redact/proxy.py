@@ -2847,8 +2847,10 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
     guard chain — Host, Origin, the CSRF token only the llm-redact-pro
     dashboard hands out). The requester is the subject the access gate
     admitted to the dashboard, else the local operator: only its own records
-    are listed, approved or revoked. An approval here is a human's click;
-    the CLI's twin reads a confirmation typed on the terminal."""
+    are listed, approved or revoked. The POSTs are served only to a subject
+    an access gate that guards the dashboard signed in (``can_approve``):
+    without a sign-in the CSRF token is no proof of a person — any local
+    client can fetch it — so the local operator approves with the CLI."""
     if not _host_allowed(request, state):
         return JSONResponse({"error": "host not allowed"}, status_code=403)
     if not _origin_allowed(request, state):
@@ -2860,18 +2862,25 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
             status_code=404,
         )
     subject = admission.subject or ""
+    # Only a requester an access gate SIGNED IN to the dashboard approves or
+    # revokes here: without one, any local client (an agent with curl) reads
+    # the CSRF token from the dashboard and could approve its own refusal.
+    can_approve = state.guards_dashboard and bool(subject)
     if request.url.path == f"{RESERVED_PREFIX}/overrides":
         if request.method != "GET":
             return JSONResponse({"error": "method not allowed"}, status_code=405)
         return JSONResponse(
             {
                 "subject": subject or None,
+                "can_approve": can_approve,
                 "entries": [entry.as_dict() for entry in store.entries(subject)],
             },
             headers={"cache-control": "no-store"},
         )
     if request.method != "POST":
         return JSONResponse({"error": "method not allowed"}, status_code=405)
+    if not can_approve:
+        return JSONResponse({"error": _OVERRIDE_SIGN_IN}, status_code=403)
     payload, guard_error = await _guarded_post_json(request, state)
     if guard_error is not None:
         return guard_error
@@ -2889,6 +2898,13 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
         return JSONResponse({"error": str(exc)}, status_code=400)
     logger.info("override %s revoked from the dashboard", entry_id)
     return JSONResponse({"revoked": entry_id})
+
+
+_OVERRIDE_SIGN_IN = (
+    "approving or revoking a refusal override here needs a dashboard sign-in"
+    " (llm-redact-pro [auth.dashboard]); on the proxy's machine run"
+    " `llm-redact override CODE --once|--always` (or `override revoke ID`) instead"
+)
 
 
 def _entry_id(value: object) -> str:

@@ -178,13 +178,14 @@ A request refused by detection (a block-mode value, values inside a binary
 upload, a verbatim identifier field, a body the proxy cannot read) carries a
 single-use code in its error message: `to allow: llm-redact override CODE
 --once | --always`. Run that yourself in a terminal: it shows what was
-refused and waits for you to type `allow` (never read from stdin, so an agent
-cannot approve for you). `--once` lets the next such request through,
+refused and waits for you to type `allow` (never read from stdin: a guard
+against an accidental approval, not against an agent with a shell, which can
+type into a terminal of its own). `--once` lets the next such request through,
 `--always` lets those exact values (or that route) through every time until
 `llm-redact override revoke ID`; `llm-redact override list` shows pending
 codes and rules without values. An overridden value is FORWARDED upstream
-unredacted, like warn mode. With llm-redact-pro the dashboard offers the
-same Allow once / Always allow buttons. Access control, request-origin
+unredacted, like warn mode. With llm-redact-pro and a dashboard sign-in the
+dashboard offers the same Allow once / Always allow buttons. Access control, request-origin
 checks, size caps and anything under a credential the proxy holds are never
 overridable. Details: `docs/overrides.md`.
 

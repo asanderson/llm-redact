@@ -4,10 +4,13 @@
     llm-redact override list [--json]           pending codes and live rules
     llm-redact override revoke ID               drop a rule (r12) or a code (p7)
 
-Approving needs a PERSON: the refusal is shown and a confirmation is read
-from the controlling terminal (``/dev/tty``) — never from stdin, so an agent
-that pipes input into the command cannot approve its own refusal, and
-without a terminal the command refuses. The CLI works on the override store
+Approving asks for a PERSON: the refusal is shown and a confirmation is
+read from the controlling terminal (``/dev/tty``) — never from stdin, so
+piping ``allow`` into the command approves nothing, and without a terminal
+the command refuses. This guards against an accidental approval, not
+against local software running as the operator: an agent with a shell can
+open a pseudo-terminal and type the answer, or edit the store file
+(docs/overrides.md). The CLI works on the override store
 file directly (like ``lookup``), as the local operator: it approves only
 refusals of requests the proxy admitted without a named user (llm-redact-pro
 named users approve their own in the dashboard); it lists and revokes any.

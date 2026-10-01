@@ -404,6 +404,7 @@ async def test_the_dashboard_endpoints_serve_the_admitted_subject_only(
         ).json()
         (entry,) = listed["entries"]
         assert listed["subject"] == "alice" and entry["types"] == ["EMAIL"]
+        assert listed["can_approve"] is True
         assert entry["state"] == "pending" and EMAIL not in json.dumps(listed)
         # No CSRF token: refused. Bob cannot approve alice's.
         no_csrf = await client.post(
@@ -461,6 +462,40 @@ async def test_the_dashboard_endpoints_serve_the_admitted_subject_only(
             "/__llm-redact/overrides", headers={"origin": "http://evil.example"}
         )
         assert cross.status_code == 403
+
+
+@pytest.mark.parametrize("gated", [False, True])
+async def test_the_dashboard_endpoints_approve_nothing_without_a_sign_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gated: bool
+) -> None:
+    """Without a subject an access gate signed in to the dashboard, the
+    CSRF token proves no person (any local client — an agent with curl —
+    can read it from the dashboard): the approve and revoke POSTs are
+    refused 403, pointing to the CLI, and the listing says so."""
+    if gated:
+        _gated(monkeypatch)  # guards the dashboard; no x-test-user: no subject
+    upstream = Upstream()
+    app = _app(tmp_path, upstream)
+    csrf = {CSRF_HEADER: app.state.proxy.csrf_token}
+    async with _client(app) as client:
+        refused = await client.post(
+            "/v1/chat/completions", json=_chat(f"mail {EMAIL}"), headers=KEY
+        )
+        assert refused.status_code == 400
+        listed = (await client.get("/__llm-redact/overrides")).json()
+        assert listed["can_approve"] is False
+        (entry,) = listed["entries"]
+        for action, body in (
+            ("approve", {"id": entry["id"], "scope": "always"}),
+            ("revoke", {"id": entry["id"]}),
+        ):
+            reply = await client.post(f"/__llm-redact/overrides/{action}", json=body, headers=csrf)
+            assert reply.status_code == 403, reply.text
+            assert "llm-redact override CODE" in reply.json()["error"]
+        again = await client.post("/v1/chat/completions", json=_chat(f"mail {EMAIL}"), headers=KEY)
+    assert again.status_code == 400
+    assert not upstream.requests
+    assert [e.state for e in _store(tmp_path).entries()] == ["pending", "pending"]
 
 
 # --- verbatim fields ------------------------------------------------------------------

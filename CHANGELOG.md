@@ -523,6 +523,10 @@ and tags `vX.Y.Z`.
   hide the kind and types the confirmation prompt asks a person to check. The route and
   the requester are now shown with every non-printable character escaped (`\x1b`,
   `‮`) in the prompt, `override list` (text and JSON) and the dashboard listing.
+  A long printable route could still push the real kind and types off the screen and
+  end the prompt in the requester's own text: a listed route or requester is now cut
+  to 120 characters with its length named, and the line answered with `allow`
+  repeats the kind and types.
 - Refusal overrides asked the access gate's `approves_overrides` for every forwarded
   request and every realtime client frame (llm-redact-pro answers from its user
   registry on the event loop), though the answer matters only when a refusal mints a

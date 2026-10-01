@@ -20,8 +20,11 @@ llm-redact override list [--json]           # pending codes and live rules (no v
 llm-redact override revoke r12              # drop a rule (r…) or a pending code (p…)
 ```
 
-The command shows what was refused (kind, detector types, route, requester)
-and waits for `allow` typed on the controlling terminal (`/dev/tty`). It never
+The command shows what was refused (kind, detector types, route, requester;
+the route and requester come from the request, so every non-printable
+character is escaped and either is cut to 120 characters, its length named),
+repeats the kind and types on the line it asks you to confirm, and waits for
+`allow` typed on the controlling terminal (`/dev/tty`). It never
 reads the answer from stdin and refuses without a terminal, so an agent that
 merely pipes `allow` into the command does not approve anything. With
 llm-redact-pro and a dashboard sign-in (`[auth.dashboard]`), the dashboard

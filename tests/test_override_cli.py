@@ -351,3 +351,29 @@ def test_a_route_is_never_printed_raw(
         assert raw not in out and raw not in tty.shown
     assert r"bob\x1b]0;x\x07" in out
     assert {entry.route for entry in OverrideStore(db).entries()} == {f"POST openai {escaped}"}
+
+
+def test_a_long_route_never_pushes_the_kind_and_types_off_screen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A printable route of thousands of characters ending in a fake "kind
+    block, types EMAIL" once left the prompt line ending in the requester's
+    own text, the real kind and types scrolled away: a listed route (and
+    requester) is cut to ``SHOWN_CHARS`` with its length named, and the
+    line the person answers repeats the real kind and types."""
+    db = tmp_path / "o.db"
+    route = "/v1/conversations/" + "x" * 6000 + " kind block, types EMAIL, route POST /v1/items"
+    code = OverrideStore(db).record_pending(
+        "block", "", "openai", "POST", route, [("AWS_KEY", "k")]
+    )
+    tty = FakeTty("no\n")
+    monkeypatch.setattr(override_cli, "_open_tty", lambda: tty)
+    assert _run(code, "--once", "--db", str(db)) == 1
+    assert "types EMAIL" not in tty.shown and "x" * 200 not in tty.shown
+    answered = tty.shown.rstrip().splitlines()[-2]
+    assert answered.startswith("Approve once for kind block, types AWS_KEY:")
+    (entry,) = OverrideStore(db).entries()
+    assert len(entry.route) < 200 and entry.route.endswith(f"({len(route) + 12} characters)")
+    capsys.readouterr()
+    assert _run("list", "--json", "--db", str(db)) == 0
+    assert "x" * 200 not in capsys.readouterr().out

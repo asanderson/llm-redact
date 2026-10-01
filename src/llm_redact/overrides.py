@@ -151,14 +151,20 @@ DASHBOARD_HINT = (
 )
 
 
+# At most this many characters of a route or requester are listed (``shown``).
+SHOWN_CHARS = 120
+
+
 def shown(text: str) -> str:
     """``text`` as it is safe to print to a terminal or a page: every
     character that is not printable — C0 and C1 controls, DEL, bidi and
     other format characters, line and paragraph separators — escaped
-    (``\\x1b``, ``\\u202e``). A route and a requester come from the request:
-    raw, an escape sequence in a path could rewrite or hide the kind and
-    types a person is asked to confirm."""
-    return "".join(
+    (``\\x1b``, ``\\u202e``), and at most ``SHOWN_CHARS`` of it, a longer
+    one cut with its length named. A route and a requester come from the
+    request: raw, an escape sequence in a path could rewrite or hide the
+    kind and types a person is asked to confirm, and a long one push them
+    off the screen."""
+    escaped = "".join(
         char
         if char.isprintable()
         else f"\\x{ord(char):02x}"
@@ -168,6 +174,9 @@ def shown(text: str) -> str:
         else f"\\U{ord(char):08x}"
         for char in text
     )
+    if len(escaped) > SHOWN_CHARS:
+        return f"{escaped[:SHOWN_CHARS]}… ({len(escaped)} characters)"
+    return escaped
 
 
 def _code_hash(code: str) -> str:

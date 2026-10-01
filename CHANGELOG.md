@@ -81,6 +81,21 @@ and tags `vX.Y.Z`.
   treat an extension naming another format than the file's bytes as incomplete.
 
 ### Changed
+- Shutdown drains the audit trail in order: the off-machine audit sinks' final flush now
+  runs while the audit database is still open (after the server has drained its
+  in-flight requests), so the END rows spooled since the last upload ship at shutdown
+  instead of waiting for the next start; the audit database closes after it and the
+  vault last. The flush is bounded: both sinks share one 20 s deadline, a flush still
+  running is cancelled (its unshipped rows stay in the database for the next start)
+  and one ignoring the cancellation is abandoned after a second, so a hanging store
+  never keeps the databases open. A failing final flush, or a sink flush loop that had
+  died, is logged by exception type and no longer cuts the rest of the shutdown short
+  (docs/resilience.md, "Shutdown order").
+- CI: a new `rdbms` job runs the RDBMS vault's real-server tests (the store battery and
+  the Live resumption handle map) against PostgreSQL 16 and MySQL 8.4 service
+  containers; before, no DSN was set anywhere and those env-gated tests always skipped.
+  `LLM_REDACT_TEST_REAL_DB_REQUIRED` makes a missing DSN fail the job instead of
+  skipping it.
 - Docs and the `llm-redact status` posture line now describe the required-mode audit
   sinks as llm-redact-pro ships them: END, interrupted and classic rows spool from
   the audit database and are never dropped, while the START and AMEND rows the sinks

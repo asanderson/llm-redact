@@ -362,8 +362,10 @@ and tags `vX.Y.Z`.
   provider-shaped 503 of a START row that cannot be committed (HTTP, and realtime
   accept-then-close 1011, recorded, before any upstream contact). An awaitable answer
   from `finalize` is closed unrun and logged CRITICAL by type like any other END-row
-  fault (no "never awaited" warning). docs/resilience.md and the `WriteAheadAudit`
-  docstring say so.
+  fault (no "never awaited" warning). A pending asyncio Task or Future answered by
+  either is cancelled, so its write never lands after the refusal (an orphan START row
+  for a request that never left) or after the CRITICAL line. docs/resilience.md and the
+  `WriteAheadAudit` docstring say so.
 - Document extraction on macOS and Windows: macOS ignores the worker's address-space
   limit (`RLIMIT_AS`) and Windows has no resource limits (the worker also failed to
   start there: no `resource` module, no `SYSTEMROOT` in its scrubbed environment), so

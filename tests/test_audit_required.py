@@ -11,6 +11,7 @@ key via registry seams, never a signed key).
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
 import warnings
@@ -318,3 +319,68 @@ async def test_an_async_finalize_is_an_end_row_fault(
     assert len(fake.begun) == 1 and fake.finalize_ran is False and fake.recorded == []
     assert "audit write failed AFTER response (POST /v1/messages): AuditWriteError" in (caplog.text)
     assert "jane.doe" not in caplog.text
+
+
+class TaskAudit(FakeAudit):
+    """``begin``/``finalize`` answer an asyncio Task (an awaitable that is no
+    coroutine): its write would commit the row after the answer was refused
+    — an orphan START row adopted as an interrupted request that never left,
+    an END row written after CRITICAL said it failed."""
+
+    def __init__(self, member: str) -> None:
+        super().__init__()
+        self.member = member
+        self.tasks: list[asyncio.Task[Any]] = []
+        self.late_rows: list[AuditRecord] = []
+
+    def _task(self, entry: AuditRecord) -> asyncio.Task[Any]:
+        async def write() -> int:
+            self.late_rows.append(entry)
+            return 1
+
+        task = asyncio.ensure_future(write())
+        self.tasks.append(task)
+        return task
+
+    def begin(self, entry: AuditRecord) -> object | None:
+        return self._task(entry) if self.member == "begin" else super().begin(entry)
+
+    def finalize(self, token: object, entry: AuditRecord) -> Any:
+        if self.member == "finalize":
+            return self._task(entry)
+        return super().finalize(token, entry)
+
+
+async def _settle() -> None:
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+async def test_a_task_from_begin_is_cancelled_and_refused(fake_registry: Registry) -> None:
+    fake = TaskAudit("begin")
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    upstream_calls: list[str] = []
+    app = create_app(_config(required=True))
+    app.state.proxy.client = httpx.AsyncClient(transport=_upstream_transport(upstream_calls))
+    response = await _post_messages(app)
+    await _settle()
+    assert response.status_code == 503 and upstream_calls == []
+    assert [task.cancelled() for task in fake.tasks] == [True]
+    assert fake.late_rows == []  # no START row for a request that never left
+
+
+async def test_a_task_from_finalize_is_cancelled_and_logged(
+    fake_registry: Registry, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = TaskAudit("finalize")
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    upstream_calls: list[str] = []
+    app = create_app(_config(required=True))
+    app.state.proxy.client = httpx.AsyncClient(transport=_upstream_transport(upstream_calls))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    response = await _post_messages(app)
+    await _settle()
+    assert response.status_code == 200 and len(upstream_calls) == 1
+    assert [task.cancelled() for task in fake.tasks] == [True]
+    assert fake.late_rows == []  # never an END row after CRITICAL said it failed
+    assert "audit write failed AFTER response (POST /v1/messages): AuditWriteError" in caplog.text

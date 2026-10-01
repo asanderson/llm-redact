@@ -100,8 +100,10 @@ class WriteAheadAudit(AuditLog, Protocol):
     non-None token; ``finalize`` commits the matching END row at completion.
     Both are SYNCHRONOUS: each must make its row durable before it returns.
     An awaitable answer (an ``async def`` member returns a coroutine, which
-    the core never awaits on the request path) is closed unrun and treated
-    as :class:`AuditWriteError` — never as a committed row: from ``begin``
+    the core never awaits on the request path) is closed unrun — a pending
+    asyncio Task or Future cancelled, so a write it scheduled never lands
+    later — and treated as :class:`AuditWriteError`, never as a committed
+    row: from ``begin``
     the request is refused with the provider-shaped 503 of a START row that
     cannot be committed (HTTP and realtime, before any upstream contact,
     recorded); from ``finalize`` it is an END-row fault, logged CRITICAL by

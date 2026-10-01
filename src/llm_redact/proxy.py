@@ -213,10 +213,15 @@ def _synchronous_audit_answer(answer: object, member: str) -> None:
     awaited" warning, the member's body never runs) and treated as the
     write fault it is: :class:`AuditWriteError`, never a durable row (a
     coroutine returned from ``begin`` once counted as a valid token, so no
-    START row was ever written)."""
+    START row was ever written). A pending asyncio Task or Future is
+    cancelled, so a write it schedules never lands after the refusal (an
+    orphan START row for a request that never left, an END row after the
+    CRITICAL line said it failed); any other awaitable is refused unawaited."""
     if inspect.isawaitable(answer):
         if inspect.iscoroutine(answer):
             answer.close()
+        elif isinstance(answer, asyncio.Future):
+            answer.cancel()
         raise AuditWriteError(f"write-ahead audit {member}() returned an awaitable")
 
 

@@ -50,6 +50,7 @@ import os
 import secrets
 import shlex
 import sqlite3
+import subprocess
 import threading
 import time
 from collections import Counter
@@ -194,6 +195,15 @@ def hint_config(loaded: Path | None, env: Mapping[str, str]) -> str | None:
         text.encode("utf-8")
     except UnicodeEncodeError:
         return None
+    return shell_quote(text)
+
+
+def shell_quote(text: str) -> str:
+    """``text`` quoted for the operator's shell: POSIX quoting, or on Windows
+    the command-line convention (double quotes only around a path with a
+    space), where POSIX single quotes would wrap every drive-letter path."""
+    if os.name == "nt":
+        return subprocess.list2cmdline([text])
     return shlex.quote(text)
 
 

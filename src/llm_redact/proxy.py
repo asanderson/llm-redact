@@ -837,7 +837,40 @@ class ProxyState:
         if self.overrides is None:
             return None
         subject = _REQUEST_USER.get() or ""
-        return OverrideScope(self.overrides, subject, approvable=self._approves_overrides(subject))
+        # The access gate is asked nothing here: its answers (can this
+        # requester approve, under which stable id are its records kept) are
+        # read only once a refusal is being decided — never per request or
+        # per realtime frame.
+        return OverrideScope(
+            self.overrides,
+            subject,
+            approvable=functools.partial(self._approves_overrides, subject),
+            owner=functools.partial(self.override_owner, subject),
+        )
+
+    def override_owner(self, subject: str) -> str | None:
+        """The key a requester's override records are stored under: "" for
+        the local operator; for a named user the access gate's OPTIONAL
+        ``override_subject(subject)`` — a stable id that survives a rename
+        and is never reused for another user (llm-redact-pro: the user's
+        namespace) — prefixed ``id:``, else (no such member) the subject
+        itself. None when the member fails or answers anything but a
+        non-empty string: then no override applies and no code is minted
+        (never the subject instead: a reused name would inherit records)."""
+        if not subject:
+            return ""
+        stable = getattr(self.access_gate, "override_subject", None)
+        if stable is None:
+            return subject
+        try:
+            key = stable(subject)
+        except Exception as exc:  # noqa: BLE001 — no override, never another's records
+            logger.warning("overrides: override_subject failed (%s)", type(exc).__name__)
+            return None
+        if not isinstance(key, str) or not key:
+            logger.warning("overrides: override_subject answered no id")
+            return None
+        return f"id:{key}"
 
     def _approves_overrides(self, subject: str) -> bool:
         """Whether this requester can approve its own refusal: the local
@@ -3021,6 +3054,14 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
             status_code=404,
         )
     subject = admission.subject or ""
+    # The key its records are kept under (the gate's stable id, when it
+    # supplies one): none read — the gate could not name it — is no answer.
+    owner = state.override_owner(subject)
+    if owner is None:
+        return JSONResponse(
+            {"error": "the access gate could not name this requester's overrides"},
+            status_code=503,
+        )
     # Only a requester an access gate SIGNED IN to the dashboard approves or
     # revokes here: without one, any local client (an agent with curl) reads
     # the CSRF token from the dashboard and could approve its own refusal.
@@ -3032,7 +3073,7 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
             {
                 "subject": subject or None,
                 "can_approve": can_approve,
-                "entries": [entry.as_dict() for entry in store.entries(subject)],
+                "entries": [entry.as_dict() for entry in store.entries(owner)],
             },
             headers={"cache-control": "no-store"},
         )
@@ -3048,11 +3089,11 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
         if request.url.path.endswith("/approve"):
             scope = payload.get("scope") if isinstance(payload, dict) else None
             approved = store.approve(
-                str(scope), approver=subject or None, pending_id=_entry_id(entry_id)
+                str(scope), approver=owner or None, pending_id=_entry_id(entry_id)
             )
             logger.info("override %s approved (%s) from the dashboard", approved.id, scope)
             return JSONResponse({"approved": approved.as_dict()})
-        store.revoke(_entry_id(entry_id), subject=subject)
+        store.revoke(_entry_id(entry_id), subject=owner)
     except OverrideError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     logger.info("override %s revoked from the dashboard", entry_id)

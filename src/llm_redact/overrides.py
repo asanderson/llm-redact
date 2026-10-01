@@ -765,14 +765,31 @@ class OverrideScope:
     consume them in ``commit`` once the request passes). Any store fault
     reads as "no override" — the refusal stands (fail closed)."""
 
-    def __init__(self, store: OverrideStore, subject: str, *, approvable: bool = True) -> None:
+    def __init__(
+        self,
+        store: OverrideStore,
+        subject: str,
+        *,
+        approvable: bool | Callable[[], bool] = True,
+        owner: Callable[[], str | None] | None = None,
+    ) -> None:
         self._store = store
+        # The requester as admitted ("" = the local operator): which hint a
+        # refusal names (the CLI's or the dashboard's).
         self.subject = subject
         # Whether this requester can approve a refusal at all (the local
         # operator always — the CLI; a named user only when the access gate
         # says it can, in the dashboard). No code is minted, and no hint
-        # promised, for one that cannot; its approved rules still apply.
-        self.approvable = approvable
+        # promised, for one that cannot; its approved rules still apply. A
+        # callable is asked once, and only when a code is about to be minted.
+        self._approvable = approvable
+        # The key the requester's records are stored under (``owner``,
+        # asked once, on the refusal path only): the access gate's stable id
+        # for the subject when it supplies one, else the subject itself;
+        # None — the gate could not name it — means no override and no code.
+        self._owner_of = owner
+        self._owner: str | None = subject if owner is None else None
+        self._owner_known = owner is None
         self._snap: _Snapshot | None = None
         # (type, value) pairs refused: held in memory for this request only
         # (the request body holds them anyway), hashed when a code is minted.
@@ -787,10 +804,26 @@ class OverrideScope:
         # What ``commit`` took, until ``settle``: (once, always, marker).
         self._settle: tuple[list[int], list[int], str] | None = None
 
+    @property
+    def approvable(self) -> bool:
+        if callable(self._approvable):
+            self._approvable = self._approvable() is True
+        return self._approvable
+
+    @property
+    def owner(self) -> str | None:
+        """The store key of this requester's records (see ``__init__``)."""
+        if not self._owner_known:
+            assert self._owner_of is not None
+            self._owner = self._owner_of()
+            self._owner_known = True
+        return self._owner
+
     def _snapshot(self) -> _Snapshot:
         if self._snap is None:
+            owner = self.owner
             try:
-                self._snap = self._store.snapshot(self.subject)
+                self._snap = _EMPTY if owner is None else self._store.snapshot(owner)
             except Exception as exc:  # noqa: BLE001 — a store fault never overrides
                 logger.warning("overrides: the store could not be read (%s)", type(exc).__name__)
                 self._snap = _EMPTY
@@ -840,12 +873,15 @@ class OverrideScope:
         answered with, or None when it cannot carry one (a value refusal
         that refused no value through this scope, a requester who cannot
         approve it, a store fault)."""
-        if not self.approvable or (kind in VALUE_KINDS and (self._final or not self._refused)):
+        if kind in VALUE_KINDS and (self._final or not self._refused):
+            return None
+        if not self.approvable:
+            return None
+        owner = self.owner
+        if owner is None:
             return None
         try:
-            return self._store.record_pending(
-                kind, self.subject, provider, method, route, self._refused
-            )
+            return self._store.record_pending(kind, owner, provider, method, route, self._refused)
         except Exception as exc:  # noqa: BLE001 — the refusal stands without a code
             logger.warning("overrides: no code minted (%s)", type(exc).__name__)
             return None

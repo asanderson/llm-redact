@@ -118,7 +118,12 @@ approval:
   approve (llm-redact-pro: anyone who cannot sign in to the dashboard, which
   admits administrators) gets no code and no hint, since they could not act
   on it. The CLI, as the local operator, refuses to approve a named user's
-  refusal. It can still list and revoke anything.
+  refusal. It can still list and revoke anything. Records are kept under the
+  user's stable id when the access gate supplies one (llm-redact-pro: the
+  user's namespace, shown as `id:…` by `override list`), so a renamed user
+  keeps their approvals and someone who later takes their old name inherits
+  none. The gate is asked about a user (can they approve, what is their id)
+  only once a refusal of theirs is being decided, never per request.
 
 The endpoints behind the dashboard buttons are core:
 

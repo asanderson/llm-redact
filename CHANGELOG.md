@@ -523,6 +523,15 @@ and tags `vX.Y.Z`.
   hide the kind and types the confirmation prompt asks a person to check. The route and
   the requester are now shown with every non-printable character escaped (`\x1b`,
   `‮`) in the prompt, `override list` (text and JSON) and the dashboard listing.
+- Refusal overrides asked the access gate's `approves_overrides` for every forwarded
+  request and every realtime client frame (llm-redact-pro answers from its user
+  registry on the event loop), though the answer matters only when a refusal mints a
+  code. The gate is now asked only once a refusal is being decided.
+- A named user's override records were keyed by their display name, so after a rename
+  (or a revocation) whoever later took the name inherited that user's every-time rules
+  and pending codes. A new optional `AccessGate.override_subject(subject)` names a
+  stable id the records are kept under (`id:…`); a gate that cannot answer gives no
+  override and no code. Without the member records stay keyed by the name.
 
 ## [1.9.0] - 2026-09-29
 

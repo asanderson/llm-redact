@@ -348,6 +348,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``bind_sessions(store: SessionStore) -> None``",
         "``bind_connections(control: ConnectionControl) -> None``",
         "``approves_overrides(subject: str) -> bool``",
+        "``override_subject(subject: str) -> str``",
     ),
     "SessionRouter": (
         "``is_durable(session_id) -> bool``",

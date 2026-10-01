@@ -73,7 +73,8 @@ from llm_redact.vault import (
     MAX_HANDLE_ROWS,
     MAX_SESSION_HANDLES,
     CheckFaults,
-    HandleMapFaults,
+    HandleReadFaults,
+    HandleWriteFaults,
     PlaceholderSpaceExhausted,
     Vault,
     VaultKeyError,
@@ -1566,14 +1567,16 @@ class RdbmsVaultManager:
         self._view_cache_size = view_cache_size
         self._live: weakref.WeakValueDictionary[str, RdbmsVault] = weakref.WeakValueDictionary()
         self._handle_writes = 0
-        self._handle_faults = HandleMapFaults()
+        self._handle_write_faults = HandleWriteFaults()
+        self._handle_read_faults = HandleReadFaults()
 
     def bind_fault_counter(self, counter: Counter[str]) -> None:
         """Count this manager's failed staleness checks and handle-map reads
         and writes in ``counter`` (the proxy's ``bookkeeping_errors``;
         optional, read via getattr)."""
         self._store.check_faults.counter = counter
-        self._handle_faults.counter = counter
+        self._handle_write_faults.counter = counter
+        self._handle_read_faults.counter = counter
 
     def get(self, session_id: str) -> Vault:
         # Every view the LRU holds is live, so the registry answers for both.
@@ -1640,15 +1643,15 @@ class RdbmsVaultManager:
         self, handle_digest: str, session_id: str, *, replaces: Sequence[str] = ()
     ) -> None:
         """``SqliteVaultManager.record_handle_session``: one transaction,
-        bounded, a fault contained (``HandleMapFaults``; the handle reads
+        bounded, a fault contained (``HandleWriteFaults``; the handle reads
         as unknown)."""
         trim_all = self._handle_writes + 1 >= _RESPONSE_PRUNE_EVERY
         try:
             self._store.record_handle(handle_digest, session_id, list(replaces), trim_all=trim_all)
         except Exception as exc:  # noqa: BLE001 — contained: the handle stays unknown
-            self._handle_faults.failed(exc)
+            self._handle_write_faults.failed(exc)
             return
-        self._handle_faults.succeeded()
+        self._handle_write_faults.succeeded()
         self._handle_writes = 0 if trim_all else self._handle_writes + 1
 
     def lookup_handle_session(self, handle_digest: str) -> str | None:
@@ -1657,9 +1660,9 @@ class RdbmsVaultManager:
         try:
             session = self._store.lookup_handle(handle_digest)
         except Exception as exc:  # noqa: BLE001 — fail closed: unknown
-            self._handle_faults.failed(exc)
+            self._handle_read_faults.failed(exc)
             return None
-        self._handle_faults.succeeded()
+        self._handle_read_faults.succeeded()
         return session
 
     def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:

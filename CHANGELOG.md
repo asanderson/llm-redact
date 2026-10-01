@@ -32,8 +32,9 @@ and tags `vX.Y.Z`.
   removes the session's rows in its own transaction, so a handle into a
   pruned-and-recreated session is unknown. A fault is contained: a failed write records
   nothing, a failed read answers None (counted as `bookkeeping_errors_total{stage=
-  "handle_map"}`, logged once per outage by exception type). The in-memory manager keeps
-  no durable map (its members record nothing and answer None).
+  "handle_map"}`, logged once per outage by exception type; reads and writes are separate
+  outages, so failing writes beside working reads never log a false recovery). The
+  in-memory manager keeps no durable map (its members record nothing and answer None).
 - `WriteAheadAudit` (re-exported from `plugin_api`) documents an OPTIONAL member
   `amend(token, entry) -> None`, read once at startup via `getattr`. With `[audit]
   required`, an upload whose binary parts go to the upload inspector writes its START row

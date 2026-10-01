@@ -73,26 +73,43 @@ class CheckFaults:
 
 
 # The proxy's bookkeeping stage a failed Live resumption handle-map read or
-# write is counted under (``HandleMapFaults``).
+# write is counted under (``HandleWriteFaults``/``HandleReadFaults``).
 HANDLE_FAULT_STAGE = "handle_map"
 
 
-class HandleMapFaults(CheckFaults):
-    """The failed reads and writes of one manager's durable Live resumption
-    handle map (``record_handle_session``/``lookup_handle_session``). Each
-    is contained: a write that fails leaves the handle unrecorded and a read
-    that fails answers None, so the handle reads as unknown — refused by
-    the plugin that asks, never resumed into a session the vault no longer
-    vouches for. Counted and logged like ``CheckFaults`` (by type only)."""
+class HandleWriteFaults(CheckFaults):
+    """The failed writes of one manager's durable Live resumption handle map
+    (``record_handle_session``). Contained: a write that fails leaves the
+    handle unrecorded, so it reads as unknown — refused by the plugin that
+    asks, never resumed into a session the vault no longer vouches for.
+    Counted and logged like ``CheckFaults`` (by type only), as an outage of
+    its own: writes can fail while reads work (a missing grant), and only a
+    write that succeeds ends it."""
 
     __slots__ = ()
 
     stage = HANDLE_FAULT_STAGE
     outage_message = (
-        "vault handle map failed (%s): Live resumption handles read as unknown until"
-        " the database answers again"
+        "vault handle map write failed (%s): Live resumption handles go unrecorded"
+        " (read as unknown) until a write succeeds again"
     )
-    recovery_message = "vault handle map: the database answers again"
+    recovery_message = "vault handle map: writes succeed again"
+
+
+class HandleReadFaults(CheckFaults):
+    """The failed reads of one manager's durable Live resumption handle map
+    (``lookup_handle_session``): each answers None, so the handle reads as
+    unknown (fail closed). An outage of its own (``HandleWriteFaults``):
+    only a read that succeeds ends it."""
+
+    __slots__ = ()
+
+    stage = HANDLE_FAULT_STAGE
+    outage_message = (
+        "vault handle map read failed (%s): Live resumption handles read as unknown"
+        " until the database answers again"
+    )
+    recovery_message = "vault handle map: reads succeed again"
 
 
 class VaultKeyError(RuntimeError):
@@ -1187,7 +1204,8 @@ class SqliteVaultManager:
         self._live: weakref.WeakValueDictionary[str, SqliteVault] = weakref.WeakValueDictionary()
         self._inserts = {_RESPONSE_KIND: 0, _OBJECT_KIND: 0}
         self._handle_writes = 0
-        self._handle_faults = HandleMapFaults()
+        self._handle_write_faults = HandleWriteFaults()
+        self._handle_read_faults = HandleReadFaults()
 
     @property
     def _conn(self) -> sqlite3.Connection:
@@ -1202,7 +1220,8 @@ class SqliteVaultManager:
         and writes in ``counter`` (the proxy's ``bookkeeping_errors``;
         optional, read via getattr)."""
         self._shared.check_faults.counter = counter
-        self._handle_faults.counter = counter
+        self._handle_write_faults.counter = counter
+        self._handle_read_faults.counter = counter
 
     def get(self, session_id: str) -> Vault:
         # Every view the LRU holds is live, so the registry answers for both.
@@ -1328,7 +1347,7 @@ class SqliteVaultManager:
         """Record the session a Live resumption handle was issued in, by the
         handle's digest, dropping the ``replaces`` digests it supersedes in
         the same transaction (``write_handle``: bounded per session and in
-        all, in insertion order). A fault is contained (``HandleMapFaults``):
+        all, in insertion order). A fault is contained (``HandleWriteFaults``):
         nothing is written, and the handle reads as unknown."""
         trim_all = self._handle_writes + 1 >= _RESPONSE_PRUNE_EVERY
         conn = self._conn
@@ -1342,9 +1361,9 @@ class SqliteVaultManager:
                     conn.execute("ROLLBACK")
                 raise
         except Exception as exc:  # noqa: BLE001 — contained: the handle stays unknown
-            self._handle_faults.failed(exc)
+            self._handle_write_faults.failed(exc)
             return
-        self._handle_faults.succeeded()
+        self._handle_write_faults.succeeded()
         self._handle_writes = 0 if trim_all else self._handle_writes + 1
 
     def lookup_handle_session(self, handle_digest: str) -> str | None:
@@ -1357,9 +1376,9 @@ class SqliteVaultManager:
                 (handle_digest,),
             ).fetchone()
         except Exception as exc:  # noqa: BLE001 — fail closed: unknown
-            self._handle_faults.failed(exc)
+            self._handle_read_faults.failed(exc)
             return None
-        self._handle_faults.succeeded()
+        self._handle_read_faults.succeeded()
         return str(row[0]) if row is not None else None
 
     def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:

@@ -303,9 +303,9 @@ def test_a_read_fault_reads_as_unknown_counted_and_logged_by_type(
     messages = [record.getMessage() for record in caplog.records]
     # One line when the outage starts, one when it ends — by type only.
     assert messages == [
-        "vault handle map failed (OperationalError): Live resumption handles read as"
-        " unknown until the database answers again",
-        "vault handle map: the database answers again",
+        "vault handle map read failed (OperationalError): Live resumption handles read"
+        " as unknown until the database answers again",
+        "vault handle map: reads succeed again",
     ]
     assert [record.levelno for record in caplog.records] == [logging.WARNING, logging.INFO]
     assert H not in " ".join(messages) and "closed" not in " ".join(messages)
@@ -528,8 +528,8 @@ def test_a_sqlite_write_fault_is_logged_by_the_writes_own_type(
         manager.record_handle_session(H + "a", "s")
     # The write's own fault (a failing rollback never masks it), by type.
     assert [record.getMessage() for record in caplog.records] == [
-        "vault handle map failed (OperationalError): Live resumption handles read as"
-        " unknown until the database answers again"
+        "vault handle map write failed (OperationalError): Live resumption handles go"
+        " unrecorded (read as unknown) until a write succeeds again"
     ]
     manager._shared.conn = real
     if real.in_transaction:  # the failed ROLLBACK left it open
@@ -745,3 +745,59 @@ def test_the_handle_map_on_a_real_server(
     assert _known(manager, "l2", "e3", "f0") == {"l2": None, "e3": None, "f0": None}
     assert counter[HANDLE_FAULT_STAGE] == 0
     manager.close()
+
+
+def _break_writes(manager: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    if isinstance(manager, SqliteVaultManager):
+        real = manager._conn
+        manager._shared.conn = _FlakyConn(real, "INSERT OR REPLACE INTO handle_sessions", times=99)  # type: ignore[assignment]
+        return
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise sqlite3.OperationalError("permission denied for table")
+
+    monkeypatch.setattr(manager._store, "_write_handle", broken)
+
+
+def test_failing_writes_and_working_reads_are_separate_outages(
+    open_instance: Factory, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Review (handles, finding 5): reads and writes shared one fault flag.
+    # With writes failing (a missing DELETE grant) and lookups working, each
+    # write logged a new WARNING and the next lookup a false "answers again".
+    manager = open_instance()
+    counter: Counter[str] = Counter()
+    manager.bind_fault_counter(counter)
+    manager.record_handle_session(H + "a", "s")
+    _break_writes(manager, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="llm_redact"):
+        for index in range(3):
+            manager.record_handle_session(H + f"w{index}", "s")  # contained
+            assert manager.lookup_handle_session(H + "a") == "s"  # reads still work
+    assert counter[HANDLE_FAULT_STAGE] == 3
+    # One line for the write outage; no read outage, no false recovery.
+    assert [record.getMessage() for record in caplog.records] == [
+        "vault handle map write failed (OperationalError): Live resumption handles go"
+        " unrecorded (read as unknown) until a write succeeds again"
+    ]
+    caplog.clear()
+    monkeypatch.undo()
+    if isinstance(manager, SqliteVaultManager):
+        manager._shared.conn = manager._conn._real  # type: ignore[attr-defined]
+    _break_reads(manager, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="llm_redact"):
+        assert manager.lookup_handle_session(H + "a") is None  # read outage starts
+        manager.record_handle_session(H + "b", "s")  # the write outage ends
+        assert manager.lookup_handle_session(H + "a") is None
+        assert manager.lookup_handle_session(H + "b") == "s"  # the read outage ends
+    assert [record.getMessage() for record in caplog.records] == [
+        "vault handle map read failed (OperationalError): Live resumption handles read"
+        " as unknown until the database answers again",
+        "vault handle map: writes succeed again",
+        "vault handle map: reads succeed again",
+    ]
+    assert [record.levelno for record in caplog.records] == [
+        logging.WARNING,
+        logging.INFO,
+        logging.INFO,
+    ]

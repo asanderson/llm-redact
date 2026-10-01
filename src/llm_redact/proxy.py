@@ -3223,7 +3223,12 @@ def _plain_text_body(body: bytes, headers: Headers) -> bool:
 
 
 def _route_override(
-    scope: OverrideScope, kind: str, provider: str, method: str, path: str
+    scope: OverrideScope,
+    upload: "_UploadFate",
+    kind: str,
+    provider: str,
+    method: str,
+    path: str,
 ) -> tuple[bool, str | None]:
     """A route refusal put to the requester's overrides: (True, None) when
     an approved one passes it (used now, the request marked), else (False,
@@ -3231,21 +3236,24 @@ def _route_override(
     rule = scope.route_rule(kind, provider, method, path)
     if rule is not None:
         scope.use_route(rule)
-        if _commit_overrides(scope):
+        if _commit_overrides(scope, upload):
             return True, None
     return False, scope.refusal_code(kind, provider, method, path)
 
 
-def _commit_overrides(scope: OverrideScope | None) -> bool:
+def _commit_overrides(scope: OverrideScope | None, upload: "_UploadFate") -> bool:
     """Consume what the request used of its requester's overrides, as it
     passes the refusal (``OverrideScope.commit``), and mark the request's
-    row. False when a one-time grant it relied on was used by another
-    request first (or could not be recorded): it must be refused."""
+    row; the use is settled with the request's fate (``upload``: a request
+    refused before it reaches the upstream hands a one-time grant back).
+    False when a one-time grant it relied on was used by another request
+    first (or could not be recorded): it must be refused."""
     if scope is None:
         return True
     ok, marker = scope.commit()
     if marker is not None:
         _REQUEST_OVERRIDE.set(marker)
+        upload.hold(scope.settle)
     return ok
 
 
@@ -3854,15 +3862,17 @@ class _UploadFate:
     forwarded."""
 
     def __init__(self) -> None:
-        self._pending: Callable[[bool], None] | None = None
+        self._pending: list[Callable[[bool], None]] = []
 
     def hold(self, settle: Callable[[bool], None]) -> None:
-        self._pending = settle
+        # The upload's counts, and the one-time overrides the request used
+        # (OverrideScope.settle: handed back when it is refused instead).
+        self._pending.append(settle)
 
     def settle(self, *, sent: bool) -> None:
-        pending, self._pending = self._pending, None
-        if pending is not None:
-            pending(sent)
+        pending, self._pending = self._pending, []
+        for settle in pending:
+            settle(sent)
 
 
 def _settle_upload(
@@ -4364,7 +4374,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             body_scope = state.override_scope()
             assert body_scope is not None  # _body_overridable: overrides are on
             passed, code = _route_override(
-                body_scope, "unscanned_body", provider_name, request.method, path
+                body_scope, upload, "unscanned_body", provider_name, request.method, path
             )
             if passed:
                 logger.info(
@@ -4639,7 +4649,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             return _vault_fault_refused(
                 state, ctx.session_id, adapter, exc, request=request, path=path, started=started
             )
-        if not _commit_overrides(scope):
+        if not _commit_overrides(scope, upload):
             return refused_response(OVERRIDE_RACED, adapter, "one-time override already used")
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
@@ -4803,7 +4813,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 )
             if binary_rule is not None and binary_forwarded:
                 scope.use_route(binary_rule)  # type: ignore[union-attr]
-            if not _commit_overrides(scope):
+            if not _commit_overrides(scope, upload):
                 return refused_response(OVERRIDE_RACED, adapter, "one-time override already used")
             if rewritten is not None:
                 outbound = rewritten

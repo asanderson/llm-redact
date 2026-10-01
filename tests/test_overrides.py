@@ -99,7 +99,9 @@ def _config(tmp_path: Path, **kwargs: Any) -> Config:
     from llm_redact.config import OverridesConfig
 
     return Config(
-        providers={**Config().providers, "openai": ProviderConfig("http://upstream")},
+        providers=kwargs.pop(
+            "providers", {**Config().providers, "openai": ProviderConfig("http://upstream")}
+        ),
         detection=detection,
         overrides=kwargs.pop("overrides", OverridesConfig(path=str(overrides))),
         **kwargs,
@@ -229,6 +231,31 @@ async def test_a_once_grant_is_used_by_exactly_one_of_two_parallel_requests(
         )
     assert sorted(r.status_code for r in replies) == [200, 400]
     assert len(upstream.requests) == 1
+
+
+async def test_a_once_grant_survives_a_refusal_before_the_upstream(tmp_path: Path) -> None:
+    """A one-time grant is consumed as the request passes the refusal, but
+    a request then refused before it reaches the upstream (here: no upstream
+    configured, a 502) hands it back: the next matching request uses it."""
+    upstream = Upstream()
+    app = _app(tmp_path, upstream)
+    unconfigured = create_app(
+        _config(tmp_path, providers={**Config().providers, "openai": ProviderConfig("")}),
+        upstream_transport=httpx.MockTransport(upstream),
+    )
+    chat = _chat(f"mail {EMAIL}")
+    async with _client(app) as client, _client(unconfigured) as other:
+        refused = await client.post("/v1/chat/completions", json=chat, headers=KEY)
+        _store(tmp_path).approve("once", approver=None, code=_code(refused))
+        not_sent = await other.post("/v1/chat/completions", json=chat, headers=KEY)
+        assert not_sent.status_code == 502 and not upstream.requests
+        assert [e.state for e in _store(tmp_path).entries()] == ["once"]
+        passed = await client.post("/v1/chat/completions", json=chat, headers=KEY)
+        assert passed.status_code == 200 and EMAIL in _sent(upstream)
+        again = await client.post("/v1/chat/completions", json=chat, headers=KEY)
+        assert again.status_code == 400
+    assert app.state.proxy.overrides.used == {"once": 1}
+    assert unconfigured.state.proxy.overrides.used == {}
 
 
 def test_a_consumed_grant_fails_a_stale_scope(tmp_path: Path) -> None:

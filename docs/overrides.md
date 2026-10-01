@@ -123,8 +123,11 @@ listing says `"can_approve": false`.
   256 pending codes are kept; the oldest are dropped first.
 - `--once` grants the next matching request of the same requester, within
   `ttl_minutes` of the approval. It is consumed atomically as that request
-  passes, so of two parallel requests exactly one uses it. A realtime
-  approval applies to the next connection's matching frame.
+  passes, so of two parallel requests exactly one uses it. A request that
+  is then refused before it reaches the upstream (an `[audit] required`
+  failure, no upstream configured, the cloud authorizer, a routed budget
+  refusal) hands the grant back for the next one. A realtime approval
+  applies to the next connection's matching frame.
 - `--always` lasts until `llm-redact override revoke`.
 - The store is `$XDG_DATA_HOME/llm-redact/overrides.db` (0600, its directory
   0700), or `[overrides] path`.

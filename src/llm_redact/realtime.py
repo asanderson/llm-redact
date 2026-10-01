@@ -1607,6 +1607,8 @@ async def _relay(
                         if not ok:
                             raise _OverrideRaced
                         override_marker = marker or override_marker
+                        # Handed to the upstream next, with no check between.
+                        frame_scope.settle(sent=True)
                 await upstream.send(outbound)
             except _FrameRefused as refused:
                 # The session router refused the frame (another user's stored

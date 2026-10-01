@@ -357,11 +357,13 @@ class OverrideStore:
                 )
         return code
 
-    def consume(self, once: Iterable[int], always: Iterable[int]) -> bool:
+    def consume(self, once: Iterable[int]) -> bool:
         """Use the one-time grants ``once`` (each exactly once: a grant
         another request consumed first, or one that expired meanwhile, fails
-        the whole use — nothing is consumed) and count a use of each rule in
-        ``always``. Atomic across processes."""
+        the whole use — nothing is consumed). Atomic across processes. A
+        consumed grant stays (inert: never matched, listed or counted) until
+        it expires, so ``release`` can hand it back to a request that was
+        refused before it reached the upstream."""
         with self._lock:
             conn = self._open(create=False)
             if conn is None:
@@ -377,14 +379,36 @@ class OverrideStore:
                     if cursor.rowcount != 1:
                         tx.rollback()
                         return False
+                # Expired one-time grants are spent: dropped.
+                conn.execute("DELETE FROM rules WHERE scope = 'once' AND expires <= ?", (now,))
+        return True
+
+    def release(self, once: Iterable[int]) -> None:
+        """Hand back the one-time grants ``once`` that ``consume`` took for a
+        request then refused before it reached the upstream (an audit
+        refusal, a missing upstream, the authorizer, a routed 402 …): the
+        next matching request uses them, within their lifetime."""
+        with self._lock:
+            conn = self._open(create=False)
+            if conn is None:
+                return
+            with self._transaction(conn):
+                for rule_id in once:
+                    conn.execute(
+                        "UPDATE rules SET consumed = 0, uses = uses - 1"
+                        " WHERE id = ? AND scope = 'once' AND consumed = 1",
+                        (rule_id,),
+                    )
+
+    def count_uses(self, always: Iterable[int]) -> None:
+        """Count a use of each every-time rule in ``always``."""
+        with self._lock:
+            conn = self._open(create=False)
+            if conn is None:
+                return
+            with self._transaction(conn):
                 for rule_id in always:
                     conn.execute("UPDATE rules SET uses = uses + 1 WHERE id = ?", (rule_id,))
-                # Consumed and expired one-time grants are spent: dropped.
-                conn.execute(
-                    "DELETE FROM rules WHERE scope = 'once' AND (consumed = 1 OR expires <= ?)",
-                    (now,),
-                )
-        return True
 
     # -- approving, listing, revoking (the CLI and the dashboard) --
 
@@ -651,6 +675,8 @@ class OverrideScope:
         self._refused: dict[tuple[str, str], None] = {}
         self._once: set[int] = set()
         self._always: set[int] = set()
+        # What ``commit`` took, until ``settle``: (once, always, marker).
+        self._settle: tuple[list[int], list[int], str] | None = None
 
     def _snapshot(self) -> _Snapshot:
         if self._snap is None:
@@ -712,21 +738,42 @@ class OverrideScope:
         """Consume what this request used, as it passes: ``(ok, marker)``,
         marker once / always / None (nothing used). ``ok`` is False when a
         one-time grant was consumed by another request first (or the store
-        failed): the request must be refused."""
+        failed): the request must be refused. The use is settled once the
+        request's fate is known (``settle``): a request refused before it
+        reaches the upstream hands its one-time grants back."""
         if not self._once and not self._always:
             return True, None
         try:
-            ok = self._store.consume(sorted(self._once), sorted(self._always))
+            ok = self._store.consume(sorted(self._once))
         except Exception as exc:  # noqa: BLE001
             logger.warning("overrides: a use could not be recorded (%s)", type(exc).__name__)
             ok = False
         if not ok:
             return False, None
         marker = "once" if self._once else "always"
-        self._store.used[marker] += 1
+        self._settle = (sorted(self._once), sorted(self._always), marker)
         self._once.clear()
         self._always.clear()
         return True, marker
+
+    def settle(self, sent: bool) -> None:
+        """The fate of what ``commit`` took: ``sent`` (handed to the
+        upstream — a send that then fails in transit included) counts the
+        use; otherwise the one-time grants go back to the store, unused.
+        Once; a store fault is logged by type only."""
+        pending, self._settle = self._settle, None
+        if pending is None:
+            return
+        once, always, marker = pending
+        try:
+            if sent:
+                self._store.used[marker] += 1
+                if always:
+                    self._store.count_uses(always)
+            elif once:
+                self._store.release(once)
+        except Exception as exc:  # noqa: BLE001 — the request's fate is already decided
+            logger.warning("overrides: a use could not be settled (%s)", type(exc).__name__)
 
 
 OVERRIDE_RACED = (

@@ -299,6 +299,9 @@ async def test_the_proxy_mirrors_stored_objects_as_owner_records(
 ) -> None:
     app = _files_app(monkeypatch, tmp_path, OwnershipRouter())
     assert (await _post_batch(app)).status_code == 200
+    # The owner record is written in the background (vault_writer): it
+    # lands in the database once the writer drained.
+    assert app.state.proxy.vault_manager.drain_map_writes(5) == 0
     conn = app.state.proxy.vault_manager._conn
     assert conn.execute(
         "SELECT kind FROM response_sessions WHERE response_id = 'batch_9'"
@@ -314,6 +317,7 @@ async def test_a_manager_without_owner_records_mirrors_them_as_before(
     monkeypatch.delattr(SqliteVaultManager, "record_object_session")
     assert (await _post_batch(app)).status_code == 200
     assert manager.lookup_response_session("batch_9") == "user:n1:main"
+    assert manager.drain_map_writes(5) == 0
     assert manager._conn.execute(
         "SELECT kind FROM response_sessions WHERE response_id = 'batch_9'"
     ).fetchone() == ("response",)

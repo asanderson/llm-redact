@@ -12,6 +12,22 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- The vault's durable maps are written off the event loop: the Responses chain rows,
+  stored-object owner records and Live resumption handles the proxy (and
+  llm-redact-pro) records after the provider answered go to one background writer
+  thread per sqlite / RDBMS vault manager (`vault_writer.MapWriter`, its own
+  connection, submission order), so a slow disk or a remote database round trip never
+  stalls other requests. Until a write lands every lookup answers from the writer's
+  in-process overlay (a `previous_response_id` or a Live resumption right after the
+  answer is served as before); a whole-session delete erases its sessions' queued
+  writes; a failed write reads as unknown, counted under its stage (`response_id`,
+  `object_ids`, `handle_map`) and logged once per outage by exception type; at most
+  10,000 writes wait (past that a record is kept in memory only, counted — after a
+  restart it reads as unknown, refused or sealed, never a wrong value); shutdown waits
+  up to 5 s for queued writes before the vault closes and counts what is left, logging
+  its number only. New OPTIONAL vault-manager members `write_maps_in_background()` and
+  `drain_map_writes(timeout)` (documented on `plugin_api.VaultManager`). See
+  docs/resilience.md "Durable map writes off the event loop".
 - A durable Live resumption handle map for plugins: the sqlite and RDBMS vault managers
   offer the OPTIONAL members `record_handle_session(handle_digest, session_id, *,
   replaces=())` and `lookup_handle_session(handle_digest)` (documented on

@@ -339,6 +339,7 @@ def test_the_docs_promise_the_same_store_only_where_it_holds() -> None:
 def test_shell_quote_follows_the_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     # POSIX single quotes around anything unsafe; on Windows the
     # command-line convention, double quotes only around a space.
+    monkeypatch.setattr("llm_redact.overrides.os.name", "posix")
     assert shell_quote("/etc/llm-redact/config.toml") == "/etc/llm-redact/config.toml"
     assert shell_quote("/my dir/c.toml") == "'/my dir/c.toml'"
     monkeypatch.setattr("llm_redact.overrides.os.name", "nt")

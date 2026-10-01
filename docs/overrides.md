@@ -172,7 +172,12 @@ ttl_minutes = 15    # 1..1440
   close reason carries it too, shortened to fit 123 bytes).
 - Each request that passed on an override is marked on its `/__llm-redact/recent`
   row, its live-events row and its audit row: `"override": "once"` or
-  `"always"`. Only the kind of use is recorded, never what passed.
+  `"always"`. Only the kind of use is recorded, never what passed. A request
+  refused after it passed (no upstream configured, the upstream authorizer, a
+  routed budget refusal) is not marked: nothing went out on the override, and
+  a one-time grant it used is handed back. With `[audit] required`, the
+  write-ahead START row written right before the send already carries the
+  marker — an uploaded file's too.
 - `/__llm-redact/status` has an `overrides` block with counts: `pending`,
   `once`, `always`, and `used_total` by `once`/`always`.
 - `/__llm-redact/metrics` has `llm_redact_overrides_used_total{kind="once"|"always"}`.

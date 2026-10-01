@@ -949,3 +949,28 @@ def test_the_overrides_section_parses_and_round_trips(tmp_path: Path) -> None:
     for bad in ({"ttl_minutes": 0}, {"ttl_minutes": 99999}, {"nope": 1}, {"enabled": "yes"}):
         with pytest.raises(ConfigError, match=r"\[overrides\]"):
             parse_config({"overrides": bad}, "t")
+
+
+async def test_a_request_refused_before_the_upstream_is_not_marked(tmp_path: Path) -> None:
+    # A one-time grant is committed as the request passes its refusal, then
+    # the request is refused before any upstream contact (no Azure upstream
+    # configured: 502). The grant is handed back, and the row of that 502
+    # says no override: nothing was forwarded on it (UP-3).
+    upstream = Upstream()
+    app = _app(tmp_path, upstream)
+    path = "/openai/deployments/gpt/chat/completions?api-version=2024-10-21"
+    body = {"messages": [{"role": "user", "content": f"mail {EMAIL}"}]}
+    async with _client(app) as client:
+        refused = await client.post(path, json=body, headers={"api-key": "k"})
+        _store(tmp_path).approve("once", approver=None, code=_code(refused))
+        unconfigured = await client.post(path, json=body, headers={"api-key": "k"})
+        assert unconfigured.status_code == 502
+        rows = (await client.get("/__llm-redact/recent")).json()["entries"]
+        status = (await client.get("/__llm-redact/status")).json()["overrides"]
+        # The grant still passes a request that reaches an upstream.
+        passed = await client.post("/v1/chat/completions", json=_chat(EMAIL), headers=KEY)
+        assert passed.status_code == 200
+        after = (await client.get("/__llm-redact/recent")).json()["entries"]
+    assert [(row["status"], row["override"]) for row in rows] == [(502, None), (400, None)]
+    assert status["once"] == 1 and status["used_total"] == {}
+    assert (after[0]["status"], after[0]["override"]) == (200, "once")

@@ -279,9 +279,17 @@ class _EarlyAudit:
 _EARLY_AUDIT: ContextVar[_EarlyAudit | None] = ContextVar("llm_redact_early_audit", default=None)
 
 # Whether the current request passed a refusal on an approved override
-# ("once" / "always", overrides.py): set as it passes, read by
-# record_request like the user — the row says so (the kind of use only).
+# ("once" / "always", overrides.py), read by record_request like the user —
+# the row says so (the kind of use only). Set only once the request is
+# handed to the upstream (``_UploadFate`` settled sent): a request refused
+# before that hands its one-time grant back, and its row says no override.
 _REQUEST_OVERRIDE: ContextVar[str | None] = ContextVar("llm_redact_override", default=None)
+# The override the request committed as it passed the refusal, its fate not
+# yet known: what the write-ahead START row (written right before the send)
+# says is about to leave.
+_COMMITTED_OVERRIDE: ContextVar[str | None] = ContextVar(
+    "llm_redact_committed_override", default=None
+)
 # The 403 text when the session router's ownership check fails or answers
 # something other than a reason (never an id or a user name).
 _OBJECT_ACCESS_FAULT = (
@@ -1564,7 +1572,7 @@ class ProxyState:
                 path=path,
                 detections=detections,
                 warned=warned,
-                override=_REQUEST_OVERRIDE.get(),
+                override=_COMMITTED_OVERRIDE.get(),
             )
         )
         if token is None:
@@ -3402,9 +3410,17 @@ def _commit_overrides(scope: OverrideScope | None, upload: "_UploadFate") -> boo
         return True
     ok, marker = scope.commit()
     if marker is not None:
-        _REQUEST_OVERRIDE.set(marker)
+        _COMMITTED_OVERRIDE.set(marker)
         upload.hold(scope.settle)
+        upload.hold(functools.partial(_mark_override, marker))
     return ok
+
+
+def _mark_override(marker: str, sent: bool) -> None:
+    """The request's rows say it passed on an override only once it is
+    handed to the upstream (``_UploadFate`` settled sent)."""
+    if sent:
+        _REQUEST_OVERRIDE.set(marker)
 
 
 def _scanned_body_clause(*, identity: bool, proxy_credential: bool) -> str:
@@ -4193,6 +4209,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         )
     _REQUEST_USER.set(admission.subject)
     _REQUEST_OVERRIDE.set(None)
+    _COMMITTED_OVERRIDE.set(None)
 
     # Captured once per request; read at finalization (incl. the streaming
     # finalizer, same task context) so an OTel span can parent into the

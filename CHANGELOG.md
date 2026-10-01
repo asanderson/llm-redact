@@ -493,6 +493,12 @@ and tags `vX.Y.Z`.
   proxy's credential; a realtime connection under identity likewise. Every refusal
   under such a credential is now final: no code, no pending record, no approved rule
   consulted.
+- A request that passed a refusal on a one-time override and was then refused before
+  reaching the upstream (no upstream configured, the authorizer, the `[audit] required`
+  START row, a routed budget refusal) handed its grant back but its recent, events and
+  audit row still said `override: once`. A row is now marked only once the request is
+  handed to the upstream; the write-ahead START row, written right before the send,
+  still says which override is about to be used.
 
 ## [1.9.0] - 2026-09-29
 

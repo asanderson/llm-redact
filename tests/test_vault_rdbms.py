@@ -230,6 +230,18 @@ def _battery(make_store: Any) -> None:
     assert len(manager.get("sess-c")) == 0
     assert manager.forget_sessions([]) == 0
     assert manager.session_count() == 1  # sess-a untouched
+
+    # The Live resumption handle map (digests only): recorded, superseded
+    # in one write, gone with its session — whatever the session held.
+    manager.record_handle_session("live-handle:h1", "sess-a")
+    manager.record_handle_session("live-handle:h2", "sess-a", replaces=["live-handle:h1"])
+    assert manager.lookup_handle_session("live-handle:h1") is None
+    assert manager.lookup_handle_session("live-handle:h2") == "sess-a"
+    assert manager.lookup_handle_session("live-handle:unknown") is None
+    manager.record_handle_session("live-handle:h3", "sess-d")  # holds no mappings
+    assert manager.forget_sessions(["sess-a", "sess-d"]) == 1
+    assert manager.lookup_handle_session("live-handle:h2") is None
+    assert manager.lookup_handle_session("live-handle:h3") is None
     store.close()
 
 
@@ -379,6 +391,9 @@ def test_encryption_mode_fixed_at_creation(tmp_path: Path) -> None:
 # --- fake drivers: the psycopg / pymysql / oracledb dialect paths --------------
 
 _PYFORMAT_RE = re.compile(r"%\((\w+)\)s")
+# Oracle's row-limiting clause (12c+), which sqlite under the fake spells
+# LIMIT/OFFSET: the handle map's trims read one row this way.
+_ORACLE_PAGE_RE = re.compile(r"OFFSET (:\w+) ROWS FETCH NEXT 1 ROWS ONLY")
 
 
 class _FakeCursor:
@@ -393,6 +408,7 @@ class _FakeCursor:
             raise fault
         if self._driver.paramstyle == "pyformat":
             sql = _PYFORMAT_RE.sub(r":\1", sql)
+        sql = _ORACLE_PAGE_RE.sub(r"LIMIT 1 OFFSET \1", sql)
         if params is None:
             self._real.execute(sql)
         else:
@@ -898,6 +914,7 @@ def _drop_tables(config: VaultConfig) -> None:
         "llm_redact_response_sessions",
         "llm_redact_meta",
         "llm_redact_retired",
+        "llm_redact_handle_sessions",
     ):
         with suppress(module.Error):
             conn.cursor().execute(f"DROP TABLE {table}")

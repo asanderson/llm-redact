@@ -361,7 +361,12 @@ while the vault row is the secret store and is never exported.
   read-only, a fault contained — so it can record whose Live session a
   resumption handle belongs to before the client can present it. With
   such a router every upstream frame (audio chunks included) is parsed
-  once more for it, CPU on the event loop only.
+  once more for it, CPU on the event loop only. A sqlite or RDBMS vault
+  offers such a plugin a durable handle map (`record_handle_session` /
+  `lookup_handle_session`: a digest of each handle and the session it was
+  issued in, bounded per session and in all, deleted with its session on
+  every prune), so a handle can be honoured after a restart and on every
+  replica sharing the vault — and never once its session was deleted.
   On an OpenAI-shaped listing
   (`GET` files, batches, video jobs, stored chat completions — OpenAI,
   Azure and `/custom/<name>/` alike) the router may name the session

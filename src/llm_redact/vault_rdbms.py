@@ -55,7 +55,7 @@ import re
 import time
 import weakref
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -70,7 +70,10 @@ from llm_redact.vault import (
     _RESPONSE_PRUNE_EVERY,
     CACHE_CHECK_SECONDS,
     LOOKUP_CHUNK,
+    MAX_HANDLE_ROWS,
+    MAX_SESSION_HANDLES,
     CheckFaults,
+    HandleMapFaults,
     PlaceholderSpaceExhausted,
     Vault,
     VaultKeyError,
@@ -194,6 +197,20 @@ def _ddl(backend: str) -> dict[str, str]:
   session_id VARCHAR(128) NOT NULL,
   n INTEGER NOT NULL,
   PRIMARY KEY (session_id)
+)""",
+        # The durable Live resumption handle map (RdbmsStore.record_handle):
+        # a handle's DIGEST -> the session it was issued in. ``seq`` orders
+        # rows by insertion (allocated MAX(seq)+1 inside the writing
+        # transaction under the primary key, the vault's portable recipe —
+        # no identity or sequence syntax); the (session_id, seq) constraint
+        # is the per-session trim's index.
+        "llm_redact_handle_sessions": """CREATE TABLE llm_redact_handle_sessions (
+  seq INTEGER NOT NULL,
+  handle_digest VARCHAR(192) NOT NULL,
+  session_id VARCHAR(128) NOT NULL,
+  PRIMARY KEY (seq),
+  CONSTRAINT llmr_uq_handle UNIQUE (handle_digest),
+  CONSTRAINT llmr_uq_handle_seq UNIQUE (session_id, seq)
 )""",
     }
 
@@ -889,11 +906,14 @@ class RdbmsStore:
             "DELETE FROM llm_redact_mappings WHERE session_id = :s AND n <= :n",
             {"s": session, "n": highest},
         )
-        self._execute(
-            conn,
-            "DELETE FROM llm_redact_response_sessions WHERE session_id = :s",
-            {"s": session},
-        )
+        self._delete_side_rows(conn, session)
+
+    def _delete_side_rows(self, conn: Any, session: str) -> None:
+        """Delete a deleted session's response-map and handle-map rows (a
+        handle issued in it must never resume into the session a later
+        value recreates)."""
+        for table in ("llm_redact_response_sessions", "llm_redact_handle_sessions"):
+            self._execute(conn, f"DELETE FROM {table} WHERE session_id = :s", {"s": session})
 
     def get_or_create(
         self, session: str, detector_type: str, original: str, *, floor: int = 0
@@ -1152,11 +1172,7 @@ class RdbmsStore:
                     present += 1
                     self._delete_session(conn, session_id, int(highest))
                 else:
-                    self._execute(
-                        conn,
-                        "DELETE FROM llm_redact_response_sessions WHERE session_id = :s",
-                        {"s": session_id},
-                    )
+                    self._delete_side_rows(conn, session_id)
             return present
 
         result: int = self._run(lambda conn: self._deleting(conn, attempt))
@@ -1251,6 +1267,125 @@ class RdbmsStore:
                 raise
 
         self._run(op)
+
+    def _nth_newest_handle(self, conn: Any, offset: int, session: str | None) -> int | None:
+        """The ``seq`` of the handle row ``offset`` places below the newest
+        (of ``session``'s rows, or of all), or None when there are not that
+        many: the trims delete it and every older row."""
+        where = " WHERE session_id = :s" if session is not None else ""
+        page = (
+            " OFFSET :o ROWS FETCH NEXT 1 ROWS ONLY"
+            if self._backend == "oracle"
+            else " LIMIT 1 OFFSET :o"
+        )
+        params: dict[str, Any] = {"o": offset}
+        if session is not None:
+            params["s"] = session
+        row = self._execute(
+            conn,
+            f"SELECT seq FROM llm_redact_handle_sessions{where} ORDER BY seq DESC{page}",
+            params,
+        ).fetchone()
+        return None if row is None else int(row[0])
+
+    def _write_handle(
+        self,
+        conn: Any,
+        handle_digest: str,
+        session_id: str,
+        replaces: list[str],
+        trim_all: bool,
+    ) -> None:
+        """One handle write (``vault.write_handle``'s semantics): the
+        superseded digests of the same session dropped, the digest moved to
+        the NEWEST row, the session and — with ``trim_all`` — the rows of
+        sessions holding no mappings trimmed, oldest first."""
+        for start in range(0, len(replaces), LOOKUP_CHUNK):
+            chunk = replaces[start : start + LOOKUP_CHUNK]
+            params = {f"d{index}": value for index, value in enumerate(chunk)}
+            marks = ", ".join(f":{name}" for name in params)
+            self._execute(
+                conn,
+                "DELETE FROM llm_redact_handle_sessions"
+                f" WHERE session_id = :s AND handle_digest IN ({marks})",
+                {**params, "s": session_id},
+            )
+        self._execute(
+            conn,
+            "DELETE FROM llm_redact_handle_sessions WHERE handle_digest = :d",
+            {"d": handle_digest},
+        )
+        (top,) = self._execute(conn, "SELECT MAX(seq) FROM llm_redact_handle_sessions").fetchone()
+        self._execute(
+            conn,
+            "INSERT INTO llm_redact_handle_sessions (seq, handle_digest, session_id)"
+            " VALUES (:n, :d, :s)",
+            {"n": (top or 0) + 1, "d": handle_digest, "s": session_id},
+        )
+        oldest_kept = self._nth_newest_handle(conn, MAX_SESSION_HANDLES, session_id)
+        if oldest_kept is not None:
+            self._execute(
+                conn,
+                "DELETE FROM llm_redact_handle_sessions WHERE session_id = :s AND seq <= :n",
+                {"s": session_id, "n": oldest_kept},
+            )
+        if trim_all:
+            beyond = self._nth_newest_handle(conn, MAX_HANDLE_ROWS, None)
+            if beyond is not None:
+                self._execute(
+                    conn,
+                    "DELETE FROM llm_redact_handle_sessions WHERE seq <= :n AND NOT EXISTS"
+                    " (SELECT 1 FROM llm_redact_mappings m"
+                    " WHERE m.session_id = llm_redact_handle_sessions.session_id)",
+                    {"n": beyond},
+                )
+
+    def record_handle(
+        self,
+        handle_digest: str,
+        session_id: str,
+        replaces: list[str],
+        *,
+        trim_all: bool,
+    ) -> None:
+        """Map a Live resumption handle's digest to its session in ONE
+        transaction (``_write_handle``). Two writers numbering the same
+        ``seq`` collide on the primary key (as a digest written twice does
+        on its UNIQUE constraint): the loser rolls back and starts over,
+        bounded like allocation (``RdbmsAllocationError`` past it)."""
+
+        def op(conn: Any) -> None:
+            for _ in range(_ALLOCATION_ATTEMPTS):
+                try:
+                    self._write_handle(conn, handle_digest, session_id, replaces, trim_all)
+                    conn.commit()
+                    return
+                except self._module.IntegrityError:
+                    self._rollback(conn)
+                    continue
+                except self._module.Error:
+                    self._rollback(conn)
+                    raise
+            raise RdbmsAllocationError(
+                f"RDBMS vault handle write kept colliding after {_ALLOCATION_ATTEMPTS} attempts"
+            )
+
+        self._run(op)
+
+    def lookup_handle(self, handle_digest: str) -> str | None:
+        """The session a recorded handle digest names, or None."""
+
+        def op(conn: Any) -> str | None:
+            row = self._execute(
+                conn,
+                "SELECT session_id FROM llm_redact_handle_sessions WHERE handle_digest = :d",
+                {"d": handle_digest},
+            ).fetchone()
+            conn.commit()
+            return str(row[0]) if row is not None else None
+
+        result: str | None = self._run(op)
+        return result
 
     def lookup_response_session(self, response_id: str) -> str | None:
         def op(conn: Any) -> str | None:
@@ -1395,11 +1530,15 @@ class RdbmsVaultManager:
         self._views: OrderedDict[str, RdbmsVault] = OrderedDict()
         self._view_cache_size = view_cache_size
         self._live: weakref.WeakValueDictionary[str, RdbmsVault] = weakref.WeakValueDictionary()
+        self._handle_writes = 0
+        self._handle_faults = HandleMapFaults()
 
     def bind_fault_counter(self, counter: Counter[str]) -> None:
-        """Count this manager's failed staleness checks in ``counter`` (the
-        proxy's ``bookkeeping_errors``; optional, read via getattr)."""
+        """Count this manager's failed staleness checks and handle-map reads
+        and writes in ``counter`` (the proxy's ``bookkeeping_errors``;
+        optional, read via getattr)."""
         self._store.check_faults.counter = counter
+        self._handle_faults.counter = counter
 
     def get(self, session_id: str) -> Vault:
         # Every view the LRU holds is live, so the registry answers for both.
@@ -1461,6 +1600,32 @@ class RdbmsVaultManager:
 
     def lookup_response_session(self, response_id: str) -> str | None:
         return self._store.lookup_response_session(response_id)
+
+    def record_handle_session(
+        self, handle_digest: str, session_id: str, *, replaces: Sequence[str] = ()
+    ) -> None:
+        """``SqliteVaultManager.record_handle_session``: one transaction,
+        bounded, a fault contained (``HandleMapFaults``; the handle reads
+        as unknown)."""
+        trim_all = self._handle_writes + 1 >= _RESPONSE_PRUNE_EVERY
+        try:
+            self._store.record_handle(handle_digest, session_id, list(replaces), trim_all=trim_all)
+        except Exception as exc:  # noqa: BLE001 — contained: the handle stays unknown
+            self._handle_faults.failed(exc)
+            return
+        self._handle_faults.succeeded()
+        self._handle_writes = 0 if trim_all else self._handle_writes + 1
+
+    def lookup_handle_session(self, handle_digest: str) -> str | None:
+        """``SqliteVaultManager.lookup_handle_session``: a fault reads as
+        None (unknown)."""
+        try:
+            session = self._store.lookup_handle(handle_digest)
+        except Exception as exc:  # noqa: BLE001 — fail closed: unknown
+            self._handle_faults.failed(exc)
+            return None
+        self._handle_faults.succeeded()
+        return session
 
     def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:
         wanted = list(dict.fromkeys(response_ids))

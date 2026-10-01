@@ -139,11 +139,17 @@ deadline. A flush still running then is cancelled — logged as a
 WARNING with the count only — and its unshipped spooled rows stay in the
 audit database for the next start (the per-sink mark advances only after a
 confirmed upload); a flush that ignores the cancellation for another
-second is abandoned and the audit database closes anyway. A flush that
+second is abandoned and the audit database and the vault close anyway.
+What is bounded is reaching those closes, not the process exit: Python's
+event-loop teardown cancels and then awaits every task still running, so
+an abandoned flush that keeps ignoring its cancellation holds the process
+open until the supervisor kills it — with both databases already closed,
+nothing is lost then beyond what that flush had not shipped. A flush that
 fails is logged by exception type only (its message may quote a URL or a
 SAS). Allow at least the drain time plus ~50 s in a supervisor's stop
 timeout (Kubernetes `terminationGracePeriodSeconds`, default 30 s;
-systemd `TimeoutStopSec`, default 90 s) so the final flush is not killed. Pinned by
+systemd `TimeoutStopSec`, default 90 s) so the final flush is not killed;
+the drain itself has no bound (step 2). Pinned by
 `test_shutdown_order.py` (order, the END row of a request in flight at
 shutdown reaching the sink, an open events stream, a hanging sink, a
 failing flush).

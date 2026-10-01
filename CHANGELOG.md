@@ -89,7 +89,8 @@ and tags `vX.Y.Z`.
   own 30 s upload timeout, so a slow but working store is never cut short), a flush still
   running is cancelled (its unshipped rows stay in the database for the next start)
   and one ignoring the cancellation is abandoned after a second, so a hanging store
-  never keeps the databases open. A failing final flush, or a sink flush loop that had
+  never keeps the databases from closing (the process exit still waits for such a
+  flush until the supervisor's kill: the event loop's teardown awaits it). A failing final flush, or a sink flush loop that had
   died, is logged by exception type and no longer cuts the rest of the shutdown short
   (docs/resilience.md, "Shutdown order").
 - `serve` ends the dashboard's open `/__llm-redact/events` streams as shutdown starts:

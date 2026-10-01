@@ -2034,7 +2034,9 @@ async def _close_audit_sinks(sinks: Sequence[S3AuditSink | AzureAuditSink], time
     (its spooled rows stay unshipped in the database for the next start); one
     that ignores the cancellation for ``_SINK_CANCEL_GRACE_SECONDS`` is
     abandoned — its outcome retrieved whenever it ends — and the shutdown
-    goes on to close the audit database."""
+    goes on to close the audit database. Abandoning bounds those closes,
+    not the process exit: the event loop's teardown still awaits a task
+    that keeps ignoring its cancellation (the supervisor's kill ends it)."""
     if not sinks:
         return
     tasks = {asyncio.ensure_future(sink.aclose()) for sink in sinks}

@@ -616,6 +616,19 @@ async def test_a_verbatim_field_override(tmp_path: Path) -> None:
         assert again.status_code == 400
 
 
+async def test_a_deny_string_in_a_verbatim_field_carries_no_code(tmp_path: Path) -> None:
+    from llm_redact.detection.deny import DenyEntry
+
+    upstream = Upstream()
+    app = _app(tmp_path, upstream, detection=DetectionConfig(deny_strings=(DenyEntry("aurora"),)))
+    body = {"model": "gpt-4o-mini", "training_file": "file-abc", "suffix": "aurora"}
+    async with _client(app) as client:
+        refused = await client.post("/v1/fine_tuning/jobs", json=body, headers=KEY)
+    assert refused.status_code == 400 and "`suffix`" in refused.text
+    assert "llm-redact override" not in refused.text
+    assert not upstream.requests
+
+
 # --- uploads --------------------------------------------------------------------------
 
 PDF = b"%PDF-1.7\n1 0 obj << >> endobj\n%%EOF\n"

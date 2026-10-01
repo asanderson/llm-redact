@@ -100,7 +100,7 @@ and tags `vX.Y.Z`.
   in `/status` `overrides` and `llm_redact_overrides_used_total{kind}`, a
   `status` posture line and a `doctor` WARN.
 
-  Access control, request origin, target checks, anything under a credential
+  Deny strings, access control, request origin, target checks, anything under a credential
   the proxy holds, framing refusals, size caps and vault faults never carry
   a code. The store is a 0600 sqlite file (`$XDG_DATA_HOME/llm-redact/overrides.db`)
   that holds HMACs of values and hashes of codes, never either in the clear.

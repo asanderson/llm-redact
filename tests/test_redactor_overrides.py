@@ -94,3 +94,21 @@ def test_scan_text_asks_for_every_refusing_winner() -> None:
     warned = _redactor((("email", "warn"),)).with_overrides(approved := Approved())
     assert warned.scan_text(EMAIL) == Counter() and approved.asked == []
     assert warned.warn_counts == Counter({"EMAIL": 1})
+
+
+def test_a_deny_string_is_never_put_to_the_overrides() -> None:
+    """Deny strings are the operator's always-redact list: where one would
+    refuse a request (``scan_text``: a verbatim field, a binary upload's
+    text) no requester's override is asked, so none can let it through."""
+    from llm_redact.detection.deny import DenyEntry
+
+    config = DetectionConfig(deny_strings=(DenyEntry("project aurora"),))
+    approved = Approved("project aurora", EMAIL)
+    redactor = Redactor(
+        build_detectors(config),
+        InMemoryVault(),
+        build_allowlist(config),
+        modes=build_modes(config),
+    ).with_overrides(approved)
+    assert redactor.scan_text(f"project aurora {EMAIL}") == Counter({"DENY": 1})
+    assert approved.asked == [("EMAIL", EMAIL)]

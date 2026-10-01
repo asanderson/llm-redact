@@ -54,9 +54,7 @@ on the request's row, the same way warn mode is.
 A value approval is an allowlist entry for that exact value and type, stored
 as an HMAC. It applies wherever that value would refuse a request (block
 mode, a binary upload, a verbatim field). It does not stop a value from being
-redacted where the proxy can redact it. Deny strings are values like any
-other: in a verbatim field or a binary upload they refuse, and an approval
-lets them through.
+redacted where the proxy can redact it.
 
 A block refusal names the first block-mode value the proxy meets. When a
 request holds more than one, approving the first leads to a new refusal (and
@@ -66,6 +64,9 @@ code) for the next.
 
 These refusals carry no code:
 
+- deny strings (`[detection] deny`): the operator's always-redact list. In a
+  verbatim field or a binary upload they refuse the request, and no approval
+  lets them through;
 - access control: the stored-object ownership check, sealed sessions, storage
   allowlists, unknown owners, the access gate itself;
 - request origin and DNS rebinding (`allowed_hosts`, `allowed_origins`);

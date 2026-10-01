@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import select
 import sys
 import time
@@ -624,3 +625,12 @@ def test_revoke_narrows_while_overrides_are_off(
     on.write_text("[overrides]\nenabled = true\n")
     assert _run("revoke", keep.id, "--config", str(on), "--db", str(db)) == 0
     assert OverrideStore(db, read_only=True).entries() == []
+
+
+@pytest.mark.parametrize("doc", ["docs/troubleshooting.md", "docs/overrides.md"])
+def test_the_docs_say_revoke_exits_0_while_overrides_are_off(doc: str) -> None:
+    # Approve and list exit 1 while overrides are off; a revoke that
+    # happened exits 0. No doc may say every form exits 1.
+    text = " ".join((Path(__file__).resolve().parents[1] / doc).read_text().split())
+    assert re.search(r"revoke[^.]*exits 0", text), doc
+    assert "override …` exits 1 naming the setting" not in text

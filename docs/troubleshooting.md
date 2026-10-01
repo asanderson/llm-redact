@@ -138,8 +138,9 @@ not the original).
 
 Refusal overrides are on for this proxy (`[overrides] enabled = true`; they
 are off by default, and then no refusal carries this line, `llm-redact
-override …` exits 1 naming the setting, and `/__llm-redact/overrides`
-answers 404). A proxy started with `serve --config PATH` (or
+override CODE` and `override list` exit 1 naming the setting — `override
+revoke ID` still revokes, names it on stderr and exits 0 — and
+`/__llm-redact/overrides` answers 404). A proxy started with `serve --config PATH` (or
 `LLM_REDACT_CONFIG`) on a file the command would not find by itself prints
 the line as `llm-redact override --config PATH CODE --once | --always`:
 run it as printed. If the command still says overrides are off in another

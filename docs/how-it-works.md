@@ -366,7 +366,9 @@ while the vault row is the secret store and is never exported.
   `lookup_handle_session`: a digest of each handle and the session it was
   issued in, bounded per session and in all, deleted with its session on
   every prune), so a handle can be honoured after a restart and on every
-  replica sharing the vault — and never once its session was deleted.
+  replica sharing the vault once its write landed (the map is written in
+  the background: another replica asked sooner reads it as unknown and
+  refuses — docs/resilience.md) — and never once its session was deleted.
   On an OpenAI-shaped listing
   (`GET` files, batches, video jobs, stored chat completions — OpenAI,
   Azure and `/custom/<name>/` alike) the router may name the session

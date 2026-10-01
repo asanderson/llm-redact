@@ -24,6 +24,10 @@ Mode: STANDALONE — a shared in-cluster proxy (Deployment + Service{{ if .Value
   (CPU target {{ .Values.autoscaling.targetCPUUtilizationPercentage }}%). Every replica shares one
   vault backend "{{ .Values.vault.backend }}" so all pods issue consistent «TYPE_NNN» tokens —
   a per-pod vault would let one pod rehydrate another's secret (never-wrong-value).
+  Chain / owner / Live-handle records are written in the background: a follow-up
+  (previous_response_id, a Live resumption) reaching another pod before its write
+  landed (normally milliseconds; never, past the writer's 10,000-write bound) is
+  refused or sealed, never wrong — use session affinity where that matters.
 {{ end -}}
   SECURITY: a standalone proxy serves other pods over the network, i.e. a
   NON-LOOPBACK bind (Pro). Prefer real mutual TLS — mount the cert Secret via

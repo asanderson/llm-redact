@@ -97,6 +97,16 @@ and standalone modes, optional HPA autoscaling) at
 `deploy/helm/llm-redact/` — its `NOTES.txt` and `values.yaml` document
 the modes and guardrails.
 
+Replicas sharing one vault issue consistent tokens, but the durable maps
+(Responses chains, stored-object owners, Live resumption handles) are
+written in the background after each answer: a follow-up
+(`previous_response_id`, a Live resumption) that reaches ANOTHER replica
+before the write landed — normally milliseconds — is refused or sealed,
+never restored wrong, and a record past the writer's 10,000-write bound
+never reaches the other replicas at all. Use session affinity at the load
+balancer where that matters (docs/resilience.md, "Durable map writes off
+the event loop").
+
 ## Host names the proxy answers to (`allowed_hosts`)
 
 Any web page in your browser can send requests to the proxy on

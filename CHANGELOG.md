@@ -25,7 +25,10 @@ and tags `vX.Y.Z`.
   10,000 writes wait (past that a record is kept in memory only, counted — after a
   restart it reads as unknown, refused or sealed, never a wrong value); shutdown waits
   up to 5 s for queued writes before the vault closes and counts what is left, logging
-  its number only. New OPTIONAL vault-manager members `write_maps_in_background()` and
+  its number only. Read-your-writes holds within one process: replicas sharing a vault
+  see a record once its write landed (normally milliseconds; a follow-up reaching
+  another replica sooner is refused or sealed — docs/deployment.md and the Helm NOTES
+  recommend session affinity). New OPTIONAL vault-manager members `write_maps_in_background()` and
   `drain_map_writes(timeout)` (documented on `plugin_api.VaultManager`). See
   docs/resilience.md "Durable map writes off the event loop".
 - A durable Live resumption handle map for plugins: the sqlite and RDBMS vault managers

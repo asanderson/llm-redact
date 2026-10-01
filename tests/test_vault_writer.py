@@ -949,3 +949,23 @@ def test_the_writers_dropped_connection_reconnects_once(
     assert other.lookup_handle_session(H + "a") == "s"
     other.close()
     manager.close()
+
+
+# --- what the docs promise replicas -----------------------------------------------
+
+
+def test_the_docs_say_another_replica_reads_a_record_only_once_written() -> None:
+    """Read-your-writes holds within one process: replicas sharing a vault
+    see a record once its background write landed (a follow-up reaching
+    another replica sooner is refused or sealed). Every place that tells
+    an operator about replicas must say so."""
+    root = Path(__file__).resolve().parent.parent
+    resilience = (root / "docs" / "resilience.md").read_text()
+    assert "Several replicas share one vault" in resilience
+    assert "Read-your-writes holds within ONE process only" in resilience
+    deployment = (root / "docs" / "deployment.md").read_text()
+    assert "reaches ANOTHER replica" in deployment and "session affinity" in deployment
+    notes = (root / "deploy" / "helm" / "llm-redact" / "templates" / "NOTES.txt").read_text()
+    assert "reaching another pod before its write" in notes
+    how = " ".join((root / "docs" / "how-it-works.md").read_text().split())
+    assert "on every replica sharing the vault once its write landed" in how

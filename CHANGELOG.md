@@ -19,7 +19,9 @@ and tags `vX.Y.Z`.
   resumption handle survives a restart and works on every replica sharing the vault).
   Only the plugin's digest of a handle is stored, never a handle. A new table
   (sqlite `handle_sessions`, RDBMS `llm_redact_handle_sessions`) is created on open; an
-  RDBMS user that may not create it refuses to start naming the table and its DDL.
+  RDBMS user that may not create it refuses to start naming the table, its DDL and the
+  privileges it needs (`SELECT, INSERT, DELETE`: every whole-session delete empties it;
+  each missing RDBMS table's refusal now names its grants).
   Rows are trimmed in insertion order (a 64-bit counter), never by timestamp: each
   session keeps its newest 1,024, and beyond 10,000 rows in all only rows of sessions
   holding no mappings go, so another session's traffic never strands a live session's

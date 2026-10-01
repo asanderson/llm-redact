@@ -167,6 +167,22 @@ def _utcnow_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# What the proxy's database user does to each table — named, with the DDL,
+# when it may not create one (``RdbmsStore._create``), so a DBA creating
+# it also grants exactly that. Every whole-session delete (TTL prune,
+# ``POST /__llm-redact/sessions/prune``, the CLI prune, a named user's
+# purge) deletes from the mappings, the response map and the handle map in
+# one transaction: a missing DELETE there fails every such delete, and a
+# purged user's values would stay. The retired numbers are never deleted.
+_GRANTS = {
+    "llm_redact_mappings": "SELECT, INSERT, DELETE",
+    "llm_redact_response_sessions": "SELECT, INSERT, DELETE",
+    "llm_redact_meta": "SELECT, INSERT",
+    "llm_redact_retired": "SELECT, INSERT, UPDATE",
+    "llm_redact_handle_sessions": "SELECT, INSERT, DELETE",
+}
+
+
 def _ddl(backend: str) -> dict[str, str]:
     long_text = _LONG_TEXT[backend]
     return {
@@ -738,10 +754,11 @@ class RdbmsStore:
         return (*driver, RdbmsAllocationError)
 
     def _create(self, conn: Any, table: str, ddl: str) -> None:
-        """Create a missing table — or refuse to start, naming it and the
-        statement a DBA must run, when this database user may not (a table
-        added by an upgrade, under a schema created by someone else). Never
-        the DSN."""
+        """Create a missing table — or refuse to start, naming it, the
+        statement a DBA must run and the privileges this database user then
+        needs on it (``_GRANTS``), when this user may not (a table added by
+        an upgrade, under a schema created by someone else). Never the
+        DSN."""
         from llm_redact.config import ConfigError
 
         try:
@@ -750,7 +767,8 @@ class RdbmsStore:
             self._rollback(conn)
             raise ConfigError(
                 f"the RDBMS vault could not create its table {table}"
-                f" ({type(exc).__name__}); create it, then start again: {ddl}"
+                f" ({type(exc).__name__}); create it, grant this database user"
+                f" {_GRANTS[table]} on it, then start again: {ddl}"
             ) from exc
 
     def _kind_missing(self, conn: Any) -> bool:

@@ -583,3 +583,44 @@ def test_an_rdbms_write_numbers_past_32_bits(tmp_path: Path) -> None:
     raw.close()
     assert _known(manager, "top", "next") == {"top": "s", "next": "s"}
     manager.close()
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "llm_redact_mappings",
+        "llm_redact_response_sessions",
+        "llm_redact_meta",
+        "llm_redact_retired",
+        "llm_redact_handle_sessions",
+    ],
+)
+def test_a_table_the_user_may_not_create_is_refused_with_its_grants(
+    table: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review (handles, finding 2): a DBA creating the handle map after the
+    # upgrade granted it like the retired-number table (no DELETE), and
+    # every whole-session delete then failed — a purged user's values
+    # stayed. The refusal now names the privileges the table needs.
+    from llm_redact.vault_rdbms import _GRANTS, _ddl
+
+    assert set(_GRANTS) == set(_ddl("postgresql"))
+    config, driver = _fake_backend_config(monkeypatch, tmp_path, "postgresql")
+    driver.inject_fault(f"CREATE TABLE {table} ", sqlite3.OperationalError("permission denied"))
+    with pytest.raises(ConfigError) as refused:
+        RdbmsStore(config, None)
+    message = str(refused.value)
+    assert f"could not create its table {table} (OperationalError)" in message
+    assert f"grant this database user {_GRANTS[table]} on it" in message
+    assert "db.corp.example" not in message and "vault@" not in message  # never the DSN
+
+
+def test_the_grants_cover_every_statement_a_whole_session_delete_runs() -> None:
+    from llm_redact.vault_rdbms import _GRANTS
+
+    # A whole-session delete empties the session from these three tables in
+    # one transaction; the retired number is only ever raised.
+    for table in ("llm_redact_mappings", "llm_redact_response_sessions"):
+        assert "DELETE" in _GRANTS[table]
+    assert _GRANTS["llm_redact_handle_sessions"] == "SELECT, INSERT, DELETE"
+    assert _GRANTS["llm_redact_retired"] == "SELECT, INSERT, UPDATE"

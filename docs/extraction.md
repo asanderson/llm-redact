@@ -133,6 +133,13 @@ at `timeout_seconds` and reaps it; its answer is read up to a size bound. A
 parser wedged or blown up by a crafted file costs one killed process: the
 file counts as not read.
 
+On **Windows** (unsupported for production, but CI-tested) the worker sets
+no limit of its own at all — no memory, CPU-time, file-write, open-file or
+child-process limit: only the proxy's wall-clock kill at `timeout_seconds`
+and its input bound (a quarter of `worker_memory_mb`) hold, and its
+environment keeps `SYSTEMROOT` and `WINDIR` (the interpreter needs them to
+start; neither is a credential).
+
 | Format | What is read | Incomplete when |
 | --- | --- | --- |
 | `pdf` (pypdf) | every page's text layer; what every form XObject, tiling pattern and annotation appearance draws — a form field's and a link's too, so a field whose value holds bare digits but whose appearance shows them formatted (`123-45-6789`) is read as shown; the text marked content and structure elements stand for (`/ActualText`, `/Alt`, `/E`: what copy and paste and screen readers read) — `/ActualText` also IN PLACE of the glyphs it stands for, as poppler and Acrobat's copy read the line; each page's lines as they are SHOWN: where text of different drawings meets on one line — the page's own, a form it draws, a form field's or another annotation's appearance placed by its rectangle — it is also read joined (directly and with a space); annotation strings, rich contents and link targets; form field names and values (text streams too); the document information dictionary and XMP metadata; bookmarks | a page draws an image, or paints anything (outlines, a pattern) yet reads as no text; a form, pattern or appearance paints an inline image, or shows text that reads as nothing (no font to read it by); ANY object of the file (every one listed, reached from a page or not, object streams included) attaches a file — a file-attachment annotation, a PDF 2.0 associated file, the embedded-files list, a portfolio — or carries rich media, a movie, a sound, 3D or a screen annotation, an image or PostScript XObject (from a pattern, a glyph or an appearance too), a font whose text pypdf cannot map (no ToUnicode map and a Type3 or composite font, an encoding or glyph name pypdf does not know, or no encoding outside the standard 14 fonts), or a Type3 glyph that shows text or an inline image; a document-level script, or a JavaScript action in a file whose form fields the viewer redraws (`NeedAppearances`, or a field without an appearance: a format script may change what it shows); an XFA form; a character could not be mapped; it cannot be decrypted with an empty password |

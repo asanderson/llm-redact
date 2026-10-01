@@ -552,6 +552,13 @@ and tags `vX.Y.Z`.
   that reads as nothing), and a picture only when it holds nothing but the picture
   (counted `unseen_content` otherwise). The docs' Textract example and the meaning of
   `complete` for cloud services are corrected.
+- Docs: the restart-only list in docs/troubleshooting.md now names `extraction` and
+  `overrides` (and is pinned to `RESTART_ONLY_KEYS` like README.md and
+  docs/deployment.md); docs/dashboard.md and the ops-surface gate in
+  docs/security-dataflows.md list the refusal-override POSTs; the threat model's
+  opt-out list and the README's name refusal overrides (with the local-agent residual);
+  docs/observability.md documents `llm_redact_overrides_used_total`; docs/extraction.md
+  states that on Windows the extraction worker runs with no resource limit of its own.
 
 ## [1.9.0] - 2026-09-29
 

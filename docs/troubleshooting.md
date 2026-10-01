@@ -181,8 +181,10 @@ message names the exact offender; fix it and re-run `serve --check`.
 Log lines from a `kill -HUP`. The first means the new file failed to parse
 or build — the proxy deliberately keeps serving the old config rather than
 crash; fix the file (`serve --check` shows the error) and HUP again. The
-second lists fields (host, port, allowed_hosts, allowed_origins, vault,
-audit, log, tls, otel, users, email) that only apply on a full restart.
+second lists sections that only apply on a full restart: host, port,
+allowed_hosts, allowed_origins, vault, audit, log, tls, otel, users, email,
+extraction, and overrides changes are kept as they were and named in the
+"require restart" line.
 
 ## "the vault at {path} is encrypted; set [vault] encryption = \"fernet\" …"
 

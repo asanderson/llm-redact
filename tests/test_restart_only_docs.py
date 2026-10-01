@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 _LIST_RE = re.compile(r"((?:[A-Za-z_]+,\s*)+and\s+[A-Za-z_]+)\s+changes\b[^.]*?require restart")
 
 
-@pytest.mark.parametrize("doc", ["README.md", "docs/deployment.md"])
+@pytest.mark.parametrize("doc", ["README.md", "docs/deployment.md", "docs/troubleshooting.md"])
 def test_docs_enumerate_exactly_the_readonly_keys(doc: str) -> None:
     text = (ROOT / doc).read_text()
     match = _LIST_RE.search(text)

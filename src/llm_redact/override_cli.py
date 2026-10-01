@@ -16,11 +16,14 @@ refusals of requests the proxy admitted without a named user (llm-redact-pro
 named users approve their own in the dashboard); it lists and revokes any.
 Nothing printed is a value, a digest or a code.
 
-Refusal overrides are off by default. While the config (the proxy's: the
-same search as ``serve``, or ``--config``) leaves them off, every form exits
-1 naming ``[overrides] enabled``: approve and revoke touch nothing, and list
-still prints what the store holds (value-free, read-only) with a line saying
-those records are inert — the proxy applies none of them."""
+Refusal overrides are off by default. While the config this command reads
+(``--config``, else the same search as ``serve``) leaves them off, every form
+exits 1 naming ``[overrides] enabled`` and the file it read (or that it found
+none): a proxy started with another file (``serve --config``, a service unit)
+may have them on, so the message points at ``--config`` and claims nothing
+about the running proxy. Approve and revoke touch nothing, and list still
+prints what the store holds (value-free, read-only) with a line saying a
+proxy running with that config applies none of it."""
 
 from __future__ import annotations
 
@@ -32,10 +35,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
 
-from llm_redact.config import Config, ConfigError, apply_env_overrides, load_config
+from llm_redact.config import (
+    Config,
+    ConfigError,
+    apply_env_overrides,
+    load_config,
+    resolve_config_path,
+)
 from llm_redact.overrides import (
-    DISABLED_REASON,
-    TO_ENABLE,
+    ENABLE_SETTING,
     OverrideEntry,
     OverrideError,
     OverrideStore,
@@ -101,20 +109,40 @@ def _describe(entry: OverrideEntry) -> str:
     )
 
 
+def _off_note(source: Path | None, effect: str) -> str:
+    """Why this command stops while its config leaves overrides off. It
+    names the file it read — never a claim about the running proxy, which
+    may have been started with another one (``serve --config``)."""
+    read = (
+        f"the config this command read ({source})"
+        if source is not None
+        else "the built-in defaults (this command found no config file)"
+    )
+    return (
+        f"llm-redact override: refusal overrides are off in {read}: [overrides] enabled ="
+        f" false, the default; {effect}. If the proxy runs with another config file, pass"
+        f" that file with --config PATH; to use overrides, set {ENABLE_SETTING} in the"
+        " proxy's config and restart it"
+    )
+
+
 def run_override(args: argparse.Namespace) -> int:
     target = args.target
     try:
-        config = apply_env_overrides(load_config(args.config))
+        # One resolution: the file named here is exactly the one loaded.
+        source = args.config if args.config is not None else resolve_config_path()
+        config = apply_env_overrides(load_config(source))
     except ConfigError as exc:
         print(f"llm-redact override: {exc}", file=sys.stderr)
         return 2
     try:
         if target == "list":
-            return _list(args, config)
+            return _list(args, config, source)
         if not config.overrides.enabled:
-            # Off (the default): approving or revoking a record the proxy
-            # never applies would only look like it did something.
-            print(f"llm-redact override: {DISABLED_REASON}; {TO_ENABLE}", file=sys.stderr)
+            # Off (the default): approving or revoking a record a proxy on
+            # this config never applies would only look like it did something.
+            effect = "a proxy running with it carries no code and applies no approval"
+            print(_off_note(source, f"{effect}, so nothing was changed"), file=sys.stderr)
             return 1
         if target == "revoke":
             if args.entry is None:
@@ -181,10 +209,11 @@ def _approve(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
-def _list(args: argparse.Namespace, config: Config) -> int:
-    """The store's records (value-free, read-only). While overrides are off
-    they are still listed — so an operator sees what would apply again on
-    enabling them — followed by a line saying they are inert; exit 1."""
+def _list(args: argparse.Namespace, config: Config, source: Path | None) -> int:
+    """The store's records (value-free, read-only). While this command's
+    config leaves overrides off they are still listed — so an operator sees
+    what would apply again on enabling them — followed by a line naming the
+    config and saying a proxy running with it applies none of them; exit 1."""
     entries = _store(args, config, read_only=True).entries()
     if args.json:
         print(json.dumps([entry.as_dict() for entry in entries], indent=2))
@@ -201,9 +230,6 @@ def _list(args: argparse.Namespace, config: Config) -> int:
             )
     if config.overrides.enabled:
         return 0
-    print(
-        f"llm-redact override: {DISABLED_REASON}; the records listed are inert (the proxy"
-        f" applies none of them); {TO_ENABLE}",
-        file=sys.stderr,
-    )
+    effect = "a proxy running with it applies none of the records listed (they are inert)"
+    print(_off_note(source, effect), file=sys.stderr)
     return 1

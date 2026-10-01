@@ -506,3 +506,75 @@ def test_doctor_warns_about_approvals_kept_while_overrides_are_off(tmp_path: Pat
     # An unreadable store while off: a WARN naming the exception type only.
     (broken,) = _doctor(Config(overrides=OverridesConfig(enabled=False, path=str(tmp_path))))
     assert broken["level"] == "WARN" and "could not be read" in broken["message"]
+
+
+async def test_off_names_the_config_it_read_not_the_running_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A proxy started with an explicit config file (`serve --config`, a
+    service unit) that turns overrides on mints a code whose hint has no
+    `--config`. Run as written, the command reads its own search — here no
+    file at all: it must not tell the operator overrides are off on the
+    proxy (they are on there) nor that the listed records are inert; it
+    names what it read and points at --config, with which the same code
+    approves."""
+    import httpx
+
+    import llm_redact.config as config_module
+    from llm_redact.config import load_config
+    from llm_redact.proxy import create_app
+
+    db = tmp_path / "o.db"
+    team = tmp_path / "team.toml"
+    team.write_text(
+        '[providers.openai]\nupstream_base_url = "http://upstream"\n'
+        '[detection.modes]\nemail = "block"\n'
+        f"[overrides]\nenabled = true\npath = '{db}'\n"
+    )
+    app = create_app(
+        load_config(team),
+        upstream_transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        refused = await client.post(
+            "/v1/chat/completions",
+            headers={"authorization": "Bearer sk-test"},
+            json={"model": "m", "messages": [{"role": "user", "content": f"mail {EMAIL}"}]},
+        )
+    message = refused.json()["error"]["message"]
+    code = message.split("llm-redact override ")[1].split()[0]
+    app.state.proxy.overrides.close()
+
+    # The operator's shell: no LLM_REDACT_CONFIG, nothing in the search.
+    monkeypatch.delenv("LLM_REDACT_CONFIG")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config-home"))
+    monkeypatch.setattr(config_module, "ETC_CONFIG_PATH", tmp_path / "no-etc.toml")
+    asked: list[bool] = []
+
+    def tty() -> FakeTty:
+        asked.append(True)
+        return FakeTty("allow\n")
+
+    monkeypatch.setattr(override_cli, "_open_tty", tty)
+    capsys.readouterr()
+    assert _run(code, "--once", "--db", str(db)) == 1
+    err = capsys.readouterr().err
+    assert "found no config file" in err and "--config PATH" in err
+    assert "no refusal carries a code" not in err  # no claim about the running proxy
+    assert code not in err and EMAIL not in err and asked == []
+    assert _run("list", "--db", str(db)) == 1
+    listed = capsys.readouterr()
+    assert "pending" in listed.out
+    assert "a proxy running with it applies none" in listed.err and "--config PATH" in listed.err
+    assert "the proxy applies none" not in listed.err
+
+    # A file this command reads that leaves them off is named.
+    off = tmp_path / "off.toml"
+    off.write_text("")
+    assert _run(code, "--once", "--config", str(off), "--db", str(db)) == 1
+    assert f"the config this command read ({off})" in capsys.readouterr().err
+    # With the proxy's own file, the same code approves.
+    assert _run(code, "--once", "--config", str(team)) == 0
+    assert asked == [True]
+    assert [e.state for e in OverrideStore(db, read_only=True).entries()] == ["once"]

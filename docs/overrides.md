@@ -221,10 +221,16 @@ Off is the default, and turning them off again later is the same state:
 - `llm-redact override CODE --once|--always` and `llm-redact override revoke
   ID` exit 1 naming the setting and touch nothing. `llm-redact override list
   [--json]` still prints what the store holds (value-free, read-only) so you
-  can see what would apply again, then says on stderr that those records are
-  inert, and exits 1. The CLI reads the proxy's config the way `serve` does
-  (`--config`, `LLM_REDACT_CONFIG`, the default search); a config it cannot
-  parse exits 2.
+  can see what would apply again, then says on stderr that a proxy running
+  with that config applies none of those records, and exits 1. The CLI
+  reads its config the way `serve` does (`--config`, `LLM_REDACT_CONFIG`,
+  the default search) and names the file it read, or that it found none; a
+  config it cannot parse exits 2.
+- The CLI cannot see which file the running proxy was started with. A proxy
+  started with `serve --config PATH` (or a service unit that passes one)
+  prints a refusal hint without `--config`: run the command with the same
+  `--config PATH`, or it reads the default search, may find overrides off
+  there, and says so about that file — not about the proxy.
 - `/__llm-redact/status` reports `"overrides": {"enabled": false}`, and
   `llm-redact doctor` prints an informational line (or the WARN above).
 

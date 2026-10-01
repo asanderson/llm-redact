@@ -52,10 +52,12 @@ and tags `vX.Y.Z`.
   earlier opt-in are inert (never applied; they apply again once overrides are turned
   back on). `/__llm-redact/overrides*` answer a local 404 naming `[overrides] enabled`;
   `llm-redact override CODE|revoke` exit 1 naming the setting and touch nothing;
-  `override list` still prints what the store holds (value-free) with a line saying it
-  is inert, and exits 1; a config the command cannot parse exits 2; `/status` reports
-  `{"enabled": false}`; `doctor` prints an informational line, or a WARN while the
-  store still holds approvals. Set `[overrides] enabled = true` (restart-only, as
+  `override list` still prints what the store holds (value-free) with a line saying a
+  proxy on that config applies none of it, and exits 1 — each names the config file it
+  read (or that it found none) and points at `--config PATH`, never claiming what a
+  proxy started with another file does; a config the command cannot parse exits 2;
+  `/status` reports `{"enabled": false}`; `doctor` prints an informational line, or a
+  WARN while the store still holds approvals. Set `[overrides] enabled = true` (restart-only, as
   before) to keep today's behaviour.
 - `redactor._resolve_overlaps` finds each candidate's deny-span overlap with
   `bisect_right` over the chosen deny spans' ends (same results): the old forward walk

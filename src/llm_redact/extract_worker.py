@@ -55,7 +55,7 @@ import json
 import re
 import sys
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from datetime import date, datetime, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
@@ -380,46 +380,50 @@ _PDF_TAIL = b" \t\r\n\x00\x0c"
 # cross-reference table, its end marker.
 # --- single images: what OCR of the picture does not see ---------------------------
 
-# PNG chunks that carry no text: the picture itself and how it is shown.
-# Every other chunk (tEXt, zTXt, iTXt, eXIf, iCCP's profile, sPLT's name, a
-# private one) may hold text no OCR of the picture reads.
-_PNG_PICTURE_CHUNKS = frozenset(
-    {
-        b"IHDR",
-        b"PLTE",
-        b"IDAT",
-        b"IEND",
-        b"tRNS",
-        b"cHRM",
-        b"gAMA",
-        b"sBIT",
-        b"sRGB",
-        b"bKGD",
-        b"hIST",
-        b"pHYs",
-        b"tIME",
-        b"cICP",
-        b"mDCV",
-        b"cLLI",
-    }
-)
-# JPEG markers that carry no text: frame and scan headers, tables, restart
-# markers, APP14 (Adobe colour transform); APP0 only as a JFIF header
-# without a thumbnail (checked on its own). Every other one — APP1 (Exif,
-# XMP), APP2 (ICC profile), any other APPn, COM, JPGn — may hold text.
-_JPEG_PICTURE_MARKERS = frozenset(
-    set(range(0xC0, 0xD0)) | {0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF, 0xEE}
-)
+# PNG chunks that carry no text: the picture itself and how it is shown,
+# each with the payload lengths its specification allows (IDAT: any). Every
+# other chunk (tEXt, zTXt, iTXt, eXIf, iCCP's profile, sPLT's name, a
+# private one) may hold text no OCR of the picture reads, and so may a
+# listed one longer than its defined content.
+_PNG_PICTURE_CHUNKS: dict[bytes, Container[int] | None] = {
+    b"IHDR": range(13, 14),
+    b"PLTE": range(3, 769, 3),
+    b"IDAT": None,
+    b"IEND": range(0, 1),
+    b"tRNS": range(1, 257),
+    b"cHRM": range(32, 33),
+    b"gAMA": range(4, 5),
+    b"sBIT": range(1, 5),
+    b"sRGB": range(1, 2),
+    b"bKGD": frozenset({1, 2, 6}),
+    b"hIST": range(2, 513, 2),
+    b"pHYs": range(9, 10),
+    b"tIME": range(7, 8),
+    b"cICP": range(4, 5),
+    b"mDCV": range(24, 25),
+    b"cLLI": range(8, 9),
+}
+# JPEG markers that carry no text: frame headers (SOFn, DHP), scan headers,
+# quantization and Huffman tables, arithmetic conditioning, restart
+# interval, line count, expansion, APP14 (Adobe colour transform), each
+# held to its layout (``_jpeg_segment_text_free``); APP0 only as a JFIF
+# header without a thumbnail. Every other one — APP1 (Exif, XMP), APP2
+# (ICC profile), any other APPn, COM, JPG and JPGn — may hold text.
+_JPEG_FRAMES = frozenset({*range(0xC0, 0xC4), *range(0xC5, 0xC8), *range(0xC9, 0xCC)})
+_JPEG_FRAMES |= frozenset({*range(0xCD, 0xD0), 0xDE})
+_JPEG_FIXED = {0xDC: 4, 0xDD: 4, 0xDF: 3, 0xEE: 14}
 
 
 def image_text_free(data: bytes) -> bool:
     """Whether a single picture holds nothing but the picture: a PNG made of
-    ``_PNG_PICTURE_CHUNKS`` or a JPEG made of ``_JPEG_PICTURE_MARKERS``
-    (an APP0 that is a JFIF header without a thumbnail), ending at its end
+    ``_PNG_PICTURE_CHUNKS`` or a JPEG made of picture headers
+    (``_jpeg_segment_text_free``; an APP0 only as a JFIF header without a
+    thumbnail), each no longer than its specified layout, ending at its end
     marker with no byte after it. Any metadata a reader of the file sees
     but OCR of the picture does not — text chunks, Exif, XMP, an ICC
-    profile, a comment, a thumbnail, trailing bytes — and any other format
-    or a malformed file: False. Header walking only, never decoding."""
+    profile, a comment, a thumbnail, bytes past a header's layout, trailing
+    bytes — and any other format or a malformed file: False. Header walking
+    only, never decoding."""
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return _png_text_free(data)
     if data.startswith(b"\xff\xd8"):
@@ -434,6 +438,9 @@ def _png_text_free(data: bytes) -> bool:
         kind = data[pos + 4 : pos + 8]
         end = pos + 12 + length
         if kind not in _PNG_PICTURE_CHUNKS or end > len(data):
+            return False
+        sizes = _PNG_PICTURE_CHUNKS[kind]
+        if sizes is not None and length not in sizes:
             return False
         if kind == b"IEND":
             return end == len(data)
@@ -461,12 +468,7 @@ def _jpeg_text_free(data: bytes) -> bool:
         segment = data[pos + 4 : pos + 2 + length]
         if length < 2 or pos + 2 + length > len(data):
             return False
-        if marker == 0xE0:
-            # JFIF: identifier, version, units, densities, then the
-            # thumbnail's width and height — none allowed.
-            if length != 16 or segment[:5] != b"JFIF\x00" or segment[12:14] != b"\x00\x00":
-                return False
-        elif marker not in _JPEG_PICTURE_MARKERS:
+        if not _jpeg_segment_text_free(marker, segment):
             return False
         pos += 2 + length
         if marker == 0xDA:
@@ -482,6 +484,46 @@ def _jpeg_text_free(data: bytes) -> bool:
                     continue
                 break
     return False
+
+
+def _jpeg_segment_text_free(marker: int, segment: bytes) -> bool:
+    """Whether one JPEG marker segment (its payload: ``segment``) is a
+    picture header of exactly its specified layout (``_JPEG_FRAMES``,
+    ``_JPEG_FIXED``, the tables, a thumbnail-less JFIF APP0)."""
+    size = len(segment)
+    if marker == 0xE0:
+        # JFIF: identifier, version, units, densities, then the thumbnail's
+        # width and height — none allowed.
+        return size == 14 and segment[:5] == b"JFIF\x00" and segment[12:14] == b"\x00\x00"
+    if marker in _JPEG_FRAMES:
+        # Precision, height, width, component count, three bytes each.
+        return size >= 6 and size == 6 + 3 * segment[5]
+    if marker == 0xDA:
+        # Component count, two bytes each, then three bytes of selection.
+        return size >= 1 and size == 4 + 2 * segment[0]
+    if marker == 0xDB:
+        return _jpeg_tables(segment, lambda at: 65 if segment[at] >> 4 == 0 else 129, 0x13)
+    if marker == 0xC4:
+        return _jpeg_tables(segment, lambda at: 17 + sum(segment[at + 1 : at + 17]), 0x13)
+    if marker == 0xCC:
+        # Arithmetic conditioning: two bytes per table, at most eight tables.
+        return 0 < size <= 16 and size % 2 == 0
+    if marker in _JPEG_FIXED:
+        return size + 2 == _JPEG_FIXED[marker] and (marker != 0xEE or segment[:5] == b"Adobe")
+    return False
+
+
+def _jpeg_tables(segment: bytes, size: Callable[[int], int], highest: int) -> bool:
+    """Whether ``segment`` is a run of whole tables — each opening with its
+    class/precision and id byte (neither nibble above ``highest``'s), then
+    ``size(offset)`` bytes in all — and nothing else."""
+    at = 0
+    while at < len(segment):
+        kind = segment[at]
+        if kind >> 4 > highest >> 4 or kind & 0x0F > highest & 0x0F:
+            return False
+        at += size(at)
+    return at == len(segment) and at > 0
 
 
 _PDF_MARKERS = (b"%PDF-", b"startxref", b"%%EOF")

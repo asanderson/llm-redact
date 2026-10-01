@@ -561,7 +561,10 @@ and tags `vX.Y.Z`.
   nothing but what OCR of the rendered pages reads (images its pages draw, page text
   that reads as nothing), and a picture only when it holds nothing but the picture
   (counted `unseen_content` otherwise). The docs' Textract example and the meaning of
-  `complete` for cloud services are corrected.
+  `complete` for cloud services are corrected. A picture header padded past its
+  specified size (an oversized PNG `tIME` or `pHYs` chunk, a JPEG APP14, quantization
+  or Huffman table segment longer than its tables) does not count as holding nothing
+  but the picture either.
 - Docs: the restart-only list in docs/troubleshooting.md now names `extraction` and
   `overrides` (and is pinned to `RESTART_ONLY_KEYS` like README.md and
   docs/deployment.md); docs/dashboard.md and the ops-surface gate in

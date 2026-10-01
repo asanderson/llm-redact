@@ -1795,3 +1795,67 @@ def test_image_text_free() -> None:
     assert image_text_free(not_a_marker) is False
     assert image_text_free(b"BM" + bytes(64)) is False
     assert image_text_free(b"GIF89a" + bytes(32)) is False
+
+
+def test_image_text_free_holds_each_header_to_its_length() -> None:
+    """A picture header the allowlist names may still carry bytes past its
+    defined size (an oversized tIME, an APP14 or a table segment longer than
+    its tables): only a header of its specified length (or layout) is text
+    free."""
+    import struct
+
+    from document_fixtures import jpeg, png
+    from llm_redact.extract_worker import image_text_free
+
+    ssn = b" ssn 123-45-6789"
+    for chunk, size in (
+        (b"tIME", 7),
+        (b"pHYs", 9),
+        (b"gAMA", 4),
+        (b"sRGB", 1),
+        (b"cHRM", 32),
+        (b"cICP", 4),
+        (b"cLLI", 8),
+        (b"mDCV", 24),
+    ):
+        assert image_text_free(png((chunk, bytes(size)))) is True, chunk
+        assert image_text_free(png((chunk, bytes(size) + ssn))) is False, chunk
+    for chunk, ok, bad in (
+        (b"PLTE", bytes(6), bytes(769)),
+        (b"PLTE", bytes(3), bytes(4)),
+        (b"tRNS", bytes(256), bytes(257)),
+        (b"sBIT", bytes(4), bytes(5)),
+        (b"bKGD", bytes(6), bytes(3)),
+        (b"hIST", bytes(512), bytes(3)),
+    ):
+        assert image_text_free(png((chunk, ok))) is True, chunk
+        assert image_text_free(png((chunk, bad))) is False, chunk
+    # IHDR is the fixture's own: a longer one is not text free.
+    whole = png()
+    longer_header = whole.replace(
+        struct.pack(">I", 13) + b"IHDR", struct.pack(">I", 13 + len(ssn)) + b"IHDR", 1
+    )
+    at = longer_header.index(b"IHDR") + 4 + 13
+    assert image_text_free(longer_header[:at] + ssn + longer_header[at:]) is False
+    assert image_text_free(jpeg((0xEE, b"Adobe" + bytes(7) + ssn))) is False
+    assert image_text_free(jpeg((0xEE, b"Other" + bytes(7)))) is False
+    # Table and frame segments hold exactly their tables and components.
+    assert image_text_free(jpeg((0xDB, bytes(65) + ssn))) is False
+    assert image_text_free(jpeg((0xDB, b"\x10" + bytes(128)))) is True
+    assert image_text_free(jpeg((0xDB, b"\x20" + bytes(128)))) is False
+    assert image_text_free(jpeg((0xC4, bytes(17) + ssn))) is False
+    assert image_text_free(jpeg((0xC4, b"\x10\x01" + bytes(15) + b"A"))) is True
+    assert image_text_free(jpeg((0xC4, b"\x10\x01" + bytes(15)))) is False
+    assert image_text_free(jpeg((0xDD, b"\x00\x04"))) is True
+    assert image_text_free(jpeg((0xDD, b"\x00\x04" + ssn))) is False
+    for marker in (0xC8, 0xD8):
+        assert image_text_free(jpeg((marker, ssn))) is False, hex(marker)
+    whole_jpeg = jpeg()
+    frame = b"\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00"
+    assert frame in whole_jpeg
+    longer_frame = b"\xff\xc0" + struct.pack(">H", 11 + len(ssn)) + frame[4:] + ssn
+    assert image_text_free(whole_jpeg.replace(frame, longer_frame)) is False
+    scan = b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00"
+    assert scan in whole_jpeg
+    longer_scan = b"\xff\xda" + struct.pack(">H", 8 + len(ssn)) + scan[4:] + ssn
+    assert image_text_free(whole_jpeg.replace(scan, longer_scan)) is False

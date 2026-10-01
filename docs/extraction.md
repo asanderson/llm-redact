@@ -313,7 +313,9 @@ be read (counted `unseen_content` in `readings_total` otherwise):
   incomplete whatever the OCR answers;
 - a PNG or JPEG that holds nothing but the picture: only the chunks or
   markers that draw it (a JFIF header without a thumbnail, Adobe's colour
-  marker), ending at its end marker. A BMP is never completed by OCR.
+  marker), each no longer than its specification defines (a header padded
+  past its size, or a table segment holding more than its tables, is not
+  vouched for), ending at its end marker. A BMP is never completed by OCR.
 
 What the page shows is taken as what OCR reads: an image drawn outside the
 page's visible area, under other content or fully masked is the residual of

@@ -334,7 +334,7 @@ def jpeg(*segments: tuple[int, bytes], trailer: bytes = b"", thumbnail: bool = F
     thumb = b"\x01\x01" + bytes(3) if thumbnail else b"\x00\x00"
     jfif = segment(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01" + thumb)
     body = b"".join(segment(marker, payload) for marker, payload in segments)
-    tables = segment(0xDB, bytes(65)) + segment(0xC4, bytes(20))
+    tables = segment(0xDB, bytes(65)) + segment(0xC4, bytes(17))
     frame = segment(0xC0, b"\x08\x00\x01\x00\x01\x01\x01\x11\x00")
     scan = segment(0xDA, b"\x01\x01\x00\x00\x3f\x00") + b"\x12\xff\x00\x34\xff\xd0\x56"
     return b"\xff\xd8" + jfif + body + tables + frame + scan + b"\xff\xff\xd9" + trailer

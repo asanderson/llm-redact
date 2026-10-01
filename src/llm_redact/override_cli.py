@@ -16,6 +16,7 @@ Nothing printed is a value, a digest or a code."""
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 from datetime import UTC, datetime
@@ -65,8 +66,17 @@ def _store(args: argparse.Namespace) -> OverrideStore:
 
 def _open_tty() -> IO[str]:
     """The controlling terminal, for reading and writing (OSError without
-    one). Module-level so tests substitute a fake terminal."""
-    return open("/dev/tty", "r+", encoding="utf-8")  # noqa: SIM115 — closed by the caller
+    one). Unbuffered bytes under a text layer: ``open("/dev/tty", "r+")``
+    wraps a terminal in a seekable BufferedRandom, which a terminal is not
+    (io.UnsupportedOperation on every real one). Module-level so tests
+    substitute a fake terminal; tests/test_override_cli.py also runs this
+    one under a real pseudo-terminal."""
+    raw = io.FileIO("/dev/tty", "r+")
+    try:
+        return io.TextIOWrapper(raw, encoding="utf-8", write_through=True)
+    except BaseException:
+        raw.close()
+        raise
 
 
 def _when(ts: float | None) -> str:

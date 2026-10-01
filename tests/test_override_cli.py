@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import select
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -215,3 +219,53 @@ def test_status_posture_line(capsys: pytest.CaptureFixture[str]) -> None:
     assert "2 every-time rule(s), uses once×1" in out and "FORWARDED" in out
     _print_posture({**base, "overrides": {"always": 1, "used_total": {}}})
     assert "uses none yet" in capsys.readouterr().out
+
+
+def _pty_run(argv: list[str], answer: bytes | None) -> tuple[int, str]:
+    """Run the real CLI with a pseudo-terminal as its controlling terminal
+    (``pty.fork``), typing ``answer`` once it asks; (exit code, output)."""
+    import pty
+
+    pid, fd = pty.fork()
+    if pid == 0:  # pragma: no cover — the child execs at once
+        os.execv(
+            sys.executable,
+            [sys.executable, "-c", "from llm_redact.cli import main; main()", *argv],
+        )
+    out = b""
+    deadline = time.monotonic() + 60
+    typed = answer is None
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 1024)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+        if not typed and b"to confirm" in out:
+            assert answer is not None
+            os.write(fd, answer)
+            typed = True
+    os.close(fd)
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status), out.decode("utf-8", "replace")
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs a pseudo-terminal")
+def test_the_real_terminal_opener_reads_a_typed_confirmation(tmp_path: Path) -> None:
+    """``_open_tty`` itself (no fake) on a real controlling terminal: it once
+    opened /dev/tty as a seekable buffered file, which every terminal
+    refuses, so the command always answered 'needs a terminal'."""
+    db = tmp_path / "o.db"
+    code = _pending(db)
+    status, out = _pty_run(["override", code, "--once", "--db", str(db)], b"allow\n")
+    assert status == 0, out
+    assert "kind block, types EMAIL" in out and "approved once" in out
+    assert [e.state for e in OverrideStore(db).entries()] == ["once"]
+    refused = _pending(db)
+    status, out = _pty_run(["override", refused, "--always", "--db", str(db)], b"no\n")
+    assert status == 1 and "not approved" in out

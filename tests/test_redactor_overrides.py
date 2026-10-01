@@ -118,6 +118,9 @@ def test_a_deny_string_is_never_put_to_the_overrides() -> None:
     assert approved.asked == [("EMAIL", EMAIL)]
     # The refusal it causes is final: no value code (OverrideScope).
     assert approved.final == 1
+    # Each deny string found is counted.
+    twice = redactor.scan("project aurora, again project aurora", redactable=True)
+    assert twice.found == Counter({"DENY": 2})
     # In text the caller redacts (convert mode) it refuses nothing.
     assert redactor.scan("project aurora", redactable=True).found == Counter({"DENY": 1})
     assert approved.final == 1

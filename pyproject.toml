@@ -214,5 +214,5 @@ only_mutate = [
 # so those must be copied alongside the tests/ and pyproject.toml mutmut
 # copies by default — a path missing here fails the BASELINE run and every
 # mutant reports "not checked".
-also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", "config.example.toml", "README.md", "Dockerfile"]
+also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", "config.example.toml", "README.md", "CHANGELOG.md", "Dockerfile"]
 pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]

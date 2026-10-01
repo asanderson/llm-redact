@@ -974,3 +974,40 @@ async def test_a_request_refused_before_the_upstream_is_not_marked(tmp_path: Pat
     assert [(row["status"], row["override"]) for row in rows] == [(502, None), (400, None)]
     assert status["once"] == 1 and status["used_total"] == {}
     assert (after[0]["status"], after[0]["override"]) == (200, "once")
+
+
+async def test_the_start_row_of_an_inspected_upload_says_it_passed_on_an_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # [audit] required: an upload with a binary part to inspect writes its
+    # START row before the inspection, with nothing known yet. When the
+    # file then goes out byte-identical on an approved value (nothing
+    # counted: it holds no detection, no warning), the durable record
+    # before contact must still say an override let content leave — a
+    # second START row superseding the early one (UP-2).
+    from llm_redact.config import AuditConfig
+    from test_audit_required import FakeAudit
+    from test_upload_fate import _registry_with_audit
+    from test_upload_inspection import FakeInspector, reads
+
+    audit = FakeAudit()
+    _registry_with_audit(monkeypatch, FakeInspector(reads(f"contact {EMAIL}")), audit)
+    upstream = Upstream()
+    app = _app(
+        tmp_path,
+        upstream,
+        detection=DetectionConfig(binary_uploads="refuse"),
+        audit=AuditConfig(enabled=True, required=True),
+    )
+    async with _client(app) as client:
+        refused = await client.post("/v1/files", content=_form(PDF), headers=FORM)
+        _store(tmp_path).approve("always", approver=None, code=_code(refused))
+        audit.begun.clear()
+        audit.finalized.clear()
+        passed = await client.post("/v1/files", content=_form(PDF), headers=FORM)
+    assert passed.status_code == 200 and PDF in upstream.requests[-1].content
+    assert [entry.override for entry in audit.begun] == [None, "always"]
+    # The early row is ended, the second one finalized with the answer.
+    finals = {token: entry for token, entry in audit.finalized}
+    assert finals[2].status == 200 and finals[2].override == "always"
+    assert finals[1].override is None

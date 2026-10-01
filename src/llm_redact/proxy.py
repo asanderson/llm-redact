@@ -5461,10 +5461,12 @@ def _start_after_early(
     values — warn-mode ones are FORWARDED — a second START row carrying
     them commits here, before any upstream contact, and the early row is
     ended (``_EarlyAudit.supersede``): what is durable before contact says
-    what leaves. A second START row that cannot commit is the 503 refusal,
-    whose row ends the early one. Nothing found: the early row is the
-    request's."""
-    if early.holds_token and (new_counts or new_warned):
+    what leaves. Likewise when the request passed a refusal on an approved
+    override (its value, or a binary part, goes out as sent): the second
+    row carries the marker. A second START row that cannot commit is the
+    503 refusal, whose row ends the early one. Nothing found and no
+    override: the early row is the request's."""
+    if early.holds_token and (new_counts or new_warned or _COMMITTED_OVERRIDE.get()):
         token, refusal = _begin_audit_guarded(
             state,
             ctx,

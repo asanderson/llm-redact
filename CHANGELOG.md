@@ -499,6 +499,12 @@ and tags `vX.Y.Z`.
   audit row still said `override: once`. A row is now marked only once the request is
   handed to the upstream; the write-ahead START row, written right before the send,
   still says which override is about to be used.
+- With `[audit] required`, an upload whose binary part is inspected writes its START row
+  before the inspection; when the file then went out byte-identical on an approved
+  override (nothing counted), only the END row said so, so a lost END row left no
+  durable record that an override let content leave. Such a request now commits a
+  second START row carrying the override marker before the send, like one whose
+  redaction found values.
 
 ## [1.9.0] - 2026-09-29
 

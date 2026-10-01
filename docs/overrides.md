@@ -140,6 +140,12 @@ listing says `"can_approve": false`.
   - The file is created with the first code.
 - The running proxy reads the store only when detection is deciding a
   refusal, so an approval applies to the very next request, with no reload.
+  A request passing on an every-time rule only reads it: its use is counted
+  in memory and written at most once a minute and at shutdown, so another
+  process's `override list` can show a use count up to a minute late. Only
+  a one-time grant needs a write as its request passes; if the store is
+  busy (another process holds its lock for more than 0.2 s) the request is
+  refused saying the use could not be recorded.
 
 ```toml
 [overrides]

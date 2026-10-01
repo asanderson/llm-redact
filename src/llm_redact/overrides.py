@@ -75,9 +75,15 @@ DEFAULT_TTL_SECONDS = 900
 # attempt) and approved one-time grants, each dropped oldest first.
 MAX_PENDING = 256
 MAX_ONCE_GRANTS = 256
-# How long a proxy request waits for the CLI's write lock before it fails
-# closed (the refusal stands). CLI transactions are a handful of rows.
-_BUSY_TIMEOUT_MS = 1000
+# How long a write waits for another process's write lock before it fails
+# closed (the refusal stands). The proxy waits briefly — it waits on the
+# event loop, and CLI transactions are a handful of rows — the CLI longer.
+PROXY_BUSY_TIMEOUT_MS = 200
+CLI_BUSY_TIMEOUT_MS = 5000
+# Every-time rules' use counts are kept in memory and written at most this
+# often (and at close): a request passing on an every-time rule never
+# writes the store on the event loop.
+USE_FLUSH_SECONDS = 60.0
 
 _VALUE_DOMAIN = b"llm-redact override value v1\x00"
 _CODE_DOMAIN = b"llm-redact override code v1\x00"
@@ -227,11 +233,16 @@ class OverrideStore:
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
         clock: Callable[[], float] = time.time,
         max_pending: int = MAX_PENDING,
+        busy_timeout_ms: int = CLI_BUSY_TIMEOUT_MS,
     ) -> None:
         self.path = path
         self.ttl = ttl_seconds
         self._clock = clock
         self._max_pending = max_pending
+        self._busy_timeout_ms = busy_timeout_ms
+        # Every-time rules' uses not yet written (count_uses), by rule id.
+        self._unflushed: Counter[int] = Counter()
+        self._last_flush = clock()
         self._conn: sqlite3.Connection | None = None
         self._key: bytes | None = None
         self._lock = threading.Lock()
@@ -254,12 +265,16 @@ class OverrideStore:
             self.path,
             isolation_level=None,
             check_same_thread=False,
-            timeout=_BUSY_TIMEOUT_MS / 1000,
+            timeout=self._busy_timeout_ms / 1000,
         )
         try:
-            conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+            conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout_ms)}")
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=FULL")
+            # NORMAL under WAL: a commit never waits for the disk (the proxy
+            # writes here on its event loop). A power loss may drop the last
+            # commits: a pending code, an approval or a one-time use — the
+            # refusal then stands, or a one-time grant passes once more.
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("BEGIN IMMEDIATE")
             for statement in _SCHEMA:
                 conn.execute(statement)
@@ -277,6 +292,10 @@ class OverrideStore:
         return conn
 
     def close(self) -> None:
+        try:
+            self.flush_uses()
+        except Exception as exc:  # noqa: BLE001 — counts only; closing goes on
+            logger.warning("overrides: use counts not written (%s)", type(exc).__name__)
         with self._lock:
             if self._conn is not None:
                 self._conn.close()
@@ -401,14 +420,25 @@ class OverrideStore:
                     )
 
     def count_uses(self, always: Iterable[int]) -> None:
-        """Count a use of each every-time rule in ``always``."""
+        """Count a use of each every-time rule in ``always``: in memory,
+        written at most every ``USE_FLUSH_SECONDS`` (and at close) — never a
+        write per request."""
         with self._lock:
-            conn = self._open(create=False)
+            self._unflushed.update(always)
+        if self._clock() - self._last_flush >= USE_FLUSH_SECONDS:
+            self.flush_uses()
+
+    def flush_uses(self) -> None:
+        """Write the every-time rules' uses counted since the last flush."""
+        with self._lock:
+            self._last_flush = self._clock()
+            pending, self._unflushed = self._unflushed, Counter()
+            conn = self._open(create=False) if pending else None
             if conn is None:
                 return
             with self._transaction(conn):
-                for rule_id in always:
-                    conn.execute("UPDATE rules SET uses = uses + 1 WHERE id = ?", (rule_id,))
+                for rule_id, uses in sorted(pending.items()):
+                    conn.execute("UPDATE rules SET uses = uses + ? WHERE id = ?", (uses, rule_id))
 
     # -- approving, listing, revoking (the CLI and the dashboard) --
 
@@ -533,6 +563,7 @@ class OverrideStore:
                 if scope == "always" and kind in VALUE_KINDS
                 else f"{method} {provider} {route}"
             )
+            uses += self._unflushed.get(rule_id, 0)  # this process's, not yet written
             listed.append(
                 OverrideEntry(
                     f"r{rule_id}", scope, kind, _types(items), where, subj, created, exp, uses
@@ -675,6 +706,8 @@ class OverrideScope:
         self._refused: dict[tuple[str, str], None] = {}
         self._once: set[int] = set()
         self._always: set[int] = set()
+        # Whether ``commit`` failed on a store fault (not a lost race).
+        self.fault = False
         # What ``commit`` took, until ``settle``: (once, always, marker).
         self._settle: tuple[list[int], list[int], str] | None = None
 
@@ -744,9 +777,12 @@ class OverrideScope:
         if not self._once and not self._always:
             return True, None
         try:
-            ok = self._store.consume(sorted(self._once))
+            # Every-time rules alone need no write: their use is counted in
+            # memory once the request is sent (settle).
+            ok = self._store.consume(sorted(self._once)) if self._once else True
         except Exception as exc:  # noqa: BLE001
             logger.warning("overrides: a use could not be recorded (%s)", type(exc).__name__)
+            self.fault = True
             ok = False
         if not ok:
             return False, None
@@ -780,3 +816,12 @@ OVERRIDE_RACED = (
     "llm-redact: the one-time override this request relied on was already used by"
     " another request; the request was not forwarded"
 )
+OVERRIDE_FAULT = (
+    "llm-redact: the one-time override this request relied on could not be recorded"
+    " (the override store is busy or unreadable); the request was not forwarded"
+)
+
+
+def raced_message(scope: OverrideScope) -> str:
+    """The refusal text when ``commit`` failed: a lost race or a store fault."""
+    return OVERRIDE_FAULT if scope.fault else OVERRIDE_RACED

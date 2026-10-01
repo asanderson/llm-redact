@@ -86,7 +86,7 @@ async def test_a_raced_grant_closes_the_frame(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store_path = tmp_path / "overrides.db"
-    monkeypatch.setattr(OverrideStore, "consume", lambda self, once, always: False)
+    monkeypatch.setattr(OverrideStore, "consume", lambda self, once: False)
     async with FakeUpstream() as fake:
         with _proxy(_config(fake.port, store_path)) as host:
             url = f"ws://{host}/v1/realtime?model=gpt-realtime"

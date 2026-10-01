@@ -93,12 +93,13 @@ from llm_redact.multipart import parse as parse_multipart
 from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
 from llm_redact.overrides import (
-    OVERRIDE_RACED,
+    PROXY_BUSY_TIMEOUT_MS,
     OverrideError,
     OverrideScope,
     OverrideStore,
     allow_hint,
     default_overrides_path,
+    raced_message,
 )
 from llm_redact.placeholders import PLACEHOLDER_RE, json_floors, may_carry_tokens
 from llm_redact.plugin_api import (
@@ -719,6 +720,7 @@ class ProxyState:
                 if config.overrides.path
                 else default_overrides_path(),
                 ttl_seconds=config.overrides.ttl_minutes * 60,
+                busy_timeout_ms=PROXY_BUSY_TIMEOUT_MS,
             )
             if config.overrides.enabled
             else None
@@ -4650,7 +4652,8 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 state, ctx.session_id, adapter, exc, request=request, path=path, started=started
             )
         if not _commit_overrides(scope, upload):
-            return refused_response(OVERRIDE_RACED, adapter, "one-time override already used")
+            assert scope is not None  # nothing to commit without one
+            return refused_response(raced_message(scope), adapter, "one-time override")
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
@@ -4814,7 +4817,8 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             if binary_rule is not None and binary_forwarded:
                 scope.use_route(binary_rule)  # type: ignore[union-attr]
             if not _commit_overrides(scope, upload):
-                return refused_response(OVERRIDE_RACED, adapter, "one-time override already used")
+                assert scope is not None  # nothing to commit without one
+                return refused_response(raced_message(scope), adapter, "one-time override")
             if rewritten is not None:
                 outbound = rewritten
             elif checked_upload is not None:

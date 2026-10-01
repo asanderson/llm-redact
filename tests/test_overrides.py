@@ -203,6 +203,13 @@ async def test_block_always_covers_only_that_value(tmp_path: Path) -> None:
         status = (await client.get("/__llm-redact/status")).json()
     assert status["overrides"]["always"] == 1
     assert status["overrides"]["used_total"] == {"always": 3}
+    # Every-time uses are counted in memory (no write per request): this
+    # process lists them at once, another one once they are flushed.
+    proxy_store = app.state.proxy.overrides
+    (live,) = [e for e in proxy_store.entries() if e.state == "always"]
+    assert live.uses == 3
+    assert next(e for e in _store(tmp_path).entries() if e.state == "always").uses == 0
+    proxy_store.flush_uses()
     entries = _store(tmp_path).entries()
     rule = next(e for e in entries if e.state == "always")
     assert rule.uses == 3 and rule.route == "any route" and rule.types == ("EMAIL",)
@@ -258,6 +265,72 @@ async def test_a_once_grant_survives_a_refusal_before_the_upstream(tmp_path: Pat
     assert unconfigured.state.proxy.overrides.used == {}
 
 
+async def test_an_always_rule_writes_nothing_and_passes_a_locked_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request passing on an every-time rule only reads the store: no
+    write transaction on the event loop, so another process holding the
+    write lock (the CLI) neither stalls nor refuses it. A one-time grant
+    needs its atomic write: on a busy store the refusal says the use could
+    not be recorded — not that another request used it."""
+    import sqlite3
+
+    upstream = Upstream()
+    app = _app(tmp_path, upstream)
+    store = app.state.proxy.overrides
+    writes: list[int] = []
+    real = store._transaction
+    monkeypatch.setattr(store, "_transaction", lambda conn: writes.append(1) or real(conn))
+    async with _client(app) as client:
+        refused = await client.post(
+            "/v1/chat/completions", json=_chat(f"mail {EMAIL}"), headers=KEY
+        )
+        _store(tmp_path).approve("always", approver=None, code=_code(refused))
+        once = await client.post("/v1/chat/completions", json=_chat(f"mail {OTHER}"), headers=KEY)
+        _store(tmp_path).approve("once", approver=None, code=_code(once))
+        writes.clear()
+        cli = sqlite3.connect(tmp_path / "overrides.db", isolation_level=None)
+        cli.execute("BEGIN IMMEDIATE")  # another process holds the write lock
+        try:
+            for _ in range(3):
+                reply = await client.post(
+                    "/v1/chat/completions", json=_chat(f"mail {EMAIL}"), headers=KEY
+                )
+                assert reply.status_code == 200
+            assert writes == []
+            busy = await client.post(
+                "/v1/chat/completions", json=_chat(f"mail {OTHER}"), headers=KEY
+            )
+        finally:
+            cli.execute("ROLLBACK")
+            cli.close()
+        assert busy.status_code == 400
+        message = busy.json()["error"]["message"]
+        assert "could not be recorded" in message and "already used" not in message
+        # The grant is still there for the next request.
+        passed = await client.post("/v1/chat/completions", json=_chat(f"mail {OTHER}"), headers=KEY)
+        assert passed.status_code == 200
+    assert store.used == {"always": 3, "once": 1}
+
+
+def test_use_counts_flush_on_their_interval_and_at_close(tmp_path: Path) -> None:
+    now = [1000.0]
+    store = OverrideStore(tmp_path / "o.db", clock=lambda: now[0])
+    code = store.record_pending("block", "", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
+    store.approve("always", approver=None, code=code)
+    (rule,) = store.entries()
+    rule_id = int(rule.id[1:])
+    other = OverrideStore(tmp_path / "o.db", clock=lambda: now[0])
+    store.count_uses([rule_id])
+    assert other.entries()[0].uses == 0 and store.entries()[0].uses == 1
+    now[0] += 61
+    store.count_uses([rule_id])
+    assert other.entries()[0].uses == 2
+    store.count_uses([rule_id])
+    store.close()
+    assert other.entries()[0].uses == 3
+
+
 def test_a_consumed_grant_fails_a_stale_scope(tmp_path: Path) -> None:
     """Two requests that both read the grant before either used it (an
     await between, or two processes): the second commit fails."""
@@ -278,7 +351,7 @@ async def test_the_race_is_refused_through_the_app(
     upstream = Upstream()
     app = _app(tmp_path, upstream)
     store = app.state.proxy.overrides
-    monkeypatch.setattr(store, "consume", lambda once, always: False)
+    monkeypatch.setattr(store, "consume", lambda once: False)
     async with _client(app) as client:
         refused = await client.post(
             "/v1/chat/completions", json=_chat(f"mail {EMAIL}"), headers=KEY

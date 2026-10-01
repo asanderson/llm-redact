@@ -1605,7 +1605,7 @@ async def _relay(
                         # first refuses the frame.
                         ok, marker = frame_scope.commit()
                         if not ok:
-                            raise _OverrideRaced
+                            raise _OverrideRaced(frame_scope.fault)
                         override_marker = marker or override_marker
                         # Handed to the upstream next, with no check between.
                         frame_scope.settle(sent=True)
@@ -1650,10 +1650,12 @@ async def _relay(
                 )
                 await close_on_policy(blocked_reason(blocked.detector_type, allow_code))
                 return
-            except _OverrideRaced:
-                logger.info("WS %s -> refused (a one-time override was already used)", path)
+            except _OverrideRaced as raced:
+                logger.info("WS %s -> refused (a one-time override could not be used)", path)
                 status = 400
-                await close_on_policy(OVERRIDE_RACED_REASON)
+                await close_on_policy(
+                    OVERRIDE_FAULT_REASON if raced.fault else OVERRIDE_RACED_REASON
+                )
                 return
             except state.vault_faults as fault:
                 # The vault could not record this frame's placeholders (a
@@ -1744,10 +1746,18 @@ async def _relay(
 
 
 class _OverrideRaced(Exception):
-    """A frame relied on a one-time override another request used first."""
+    """A frame relied on a one-time override another request used first
+    (``fault``: the store could not record the use)."""
+
+    def __init__(self, fault: bool) -> None:
+        super().__init__()
+        self.fault = fault
 
 
 OVERRIDE_RACED_REASON = "llm-redact: the one-time override was already used; frame not forwarded"
+OVERRIDE_FAULT_REASON = (
+    "llm-redact: the one-time override could not be recorded; frame not forwarded"
+)
 
 
 def blocked_reason(detector_type: str, code: str | None) -> str:

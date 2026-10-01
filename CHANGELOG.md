@@ -131,8 +131,10 @@ and tags `vX.Y.Z`.
     without a terminal);
   - or the llm-redact-pro dashboard's buttons, through the new guarded
     endpoints `GET /__llm-redact/overrides` and
-    `POST /__llm-redact/overrides/approve|revoke`. The POSTs need a subject
-    an access gate signed in to the dashboard; without one they answer 403.
+    `POST /__llm-redact/overrides/approve|revoke`. The POSTs need a person
+    signed in to the dashboard through the access gate's browser sign-in
+    (`AccessGate.browser_signed_in`, below); an API key or per-user key the
+    gate admits is not one, and without a browser sign-in they answer 403.
 
   The terminal confirmation guards against an accidental approval, not
   against local software: an agent with a shell running as the operator can
@@ -485,6 +487,110 @@ and tags `vX.Y.Z`.
   receives the upstream's opening frame, and the refusal is recorded (503 for a
   reload, 403 for an access revocation). An open relay revoked by the gate no
   longer sends the client upstream frames that arrive after the revocation.
+- Refusal overrides applied under a credential the proxy holds, though the docs said
+  they never do: a block-mode value, a verbatim field or values in an inspected binary
+  upload refused on a route authorized with the proxy's own identity (or a routed
+  plan's operator key) carried a code, and an approval — or an every-time rule
+  approved on another route — then sent the value upstream unredacted under the
+  proxy's credential; a realtime connection under identity likewise. Every refusal
+  under such a credential is now final: no code, no pending record, no approved rule
+  consulted.
+- A request that passed a refusal on a one-time override and was then refused before
+  reaching the upstream (no upstream configured, the authorizer, the `[audit] required`
+  START row, a routed budget refusal) handed its grant back but its recent, events and
+  audit row still said `override: once`. A row is now marked only once the request is
+  handed to the upstream; the write-ahead START row, written right before the send,
+  still says which override is about to be used.
+- With `[audit] required`, an upload whose binary part is inspected writes its START row
+  before the inspection; when the file then went out byte-identical on an approved
+  override (nothing counted), only the END row said so, so a lost END row left no
+  durable record that an override let content leave. Such a request now commits a
+  second START row carrying the override marker before the send, like one whose
+  redaction found values.
+- An upload refused for values in one binary part also put the values of a part that
+  `[extraction] convert` redacts (converts) to the requester's overrides: the refusal's
+  code covered them, so approving it `--always` allowlisted values the proxy had
+  redacted, and a later binary file holding only those went out byte-identical; a
+  one-time grant matching such a value was used up too. A convertible reading's values
+  are now redacted, never put to an approval (only a block-mode value there is), and
+  a deny string in a binary part or verbatim field makes the refusal final (no code
+  it could never honour). `Redactor.scan(text, redactable=)` returns a `TextScan`.
+- A binary upload part that read clean only because an approved override let its
+  values through was counted `clean` in `inspected_uploads_total` and reported by
+  `llm-redact status` as "forwarded after a clean scan". It is now its own outcome,
+  `overridden` (`overridden_refused` when the upload was then refused), with its own
+  posture line.
+- `llm-redact override CODE` printed a refused request's route as the request named it:
+  an escape sequence in a path (erase-line, cursor-up, a bidi override) could rewrite or
+  hide the kind and types the confirmation prompt asks a person to check. The route and
+  the requester are now shown with every non-printable character escaped (`\x1b`,
+  `‮`) in the prompt, `override list` (text and JSON) and the dashboard listing.
+  A long printable route could still push the real kind and types off the screen and
+  end the prompt in the requester's own text: a listed route or requester is now cut
+  to 120 characters with its length named, and the line answered with `allow`
+  repeats the kind and types.
+- Refusal overrides asked the access gate's `approves_overrides` for every forwarded
+  request and every realtime client frame (llm-redact-pro answers from its user
+  registry on the event loop), though the answer matters only when a refusal mints a
+  code. The gate is now asked only once a refusal is being decided. An upload under
+  `binary_uploads = "refuse"` (with the client's own key) also looked up its
+  requester's `binary_upload` route rule, asking the gate, before it was read, for
+  every upload of text too; it now looks it up only once the upload holds a binary
+  part it would refuse.
+- A named user's override records were keyed by their display name, so after a rename
+  (or a revocation) whoever later took the name inherited that user's every-time rules
+  and pending codes. A new optional `AccessGate.override_subject(subject)` names a
+  stable id the records are kept under (`id:…`); a gate that cannot answer gives no
+  override and no code. Without the member records stay keyed by the name.
+- The 256-code bound on pending refusal codes was global, so one requester retrying a
+  refused request dropped other requesters' codes before they could approve them. The
+  bound is now per requester (256), with a 4096-code bound on the whole file.
+- The refusal-override approve and revoke POSTs accepted any dashboard admission
+  carrying a subject, so an agent holding its user's API key (which an access gate
+  admits to the dashboard too) could fetch the CSRF token and approve its own refusal
+  with no person involved. They now need a browser sign-in: a new optional
+  `AccessGate.browser_signed_in(conn, subject)` must say the connection rests on the
+  gate's browser sign-in session; without it (or with an older gate) the POSTs answer
+  403 and approval stays with the CLI.
+- The local PDF extractor read a file as complete when a value sat only where no viewer
+  shows it: a JavaScript action (an OpenAction or a page's /AA), a URI or submit-form
+  action, private application data or any other key's string, a page's (or an
+  image's, a font's) metadata stream, a content stream's comment or a string no text
+  operator shows, or a stream nothing references. With `binary_uploads = "refuse"` such
+  a PDF scanned clean and went out byte-identical. Every string of every object, every
+  metadata and script stream and those content-stream asides are now scanned (never
+  shown in convert mode's display text), and a stream the reader neither reads nor
+  renders with (an unreferenced one, private data, a page thumbnail — one without
+  `/Subtype /Image` was missed before) keeps the reading incomplete; font programs,
+  colour profiles, functions, shadings, halftones, glyph procedures and a linearized
+  file's hint streams are rendered with, and their bytes are not read for text
+  (docs/extraction.md, "Limits").
+- A cloud OCR service declared `complete = true` (as the docs' Textract example did)
+  completed any file whose page count it matched, discarding every reason the local
+  extractor had found it incomplete: a PDF with an attached file (a Factur-X
+  invoice's XML), an XFA form or a script, or a PNG/JPEG whose text chunks, Exif, XMP
+  or comment held a value, then scanned clean on the OCR text alone and went out
+  byte-identical. An OCR reading now completes a PDF only when the worker left unread
+  nothing but what OCR of the rendered pages reads (images its pages draw, page text
+  that reads as nothing), and a picture only when it holds nothing but the picture
+  (counted `unseen_content` otherwise). The docs' Textract example and the meaning of
+  `complete` for cloud services are corrected. A picture header padded past its
+  specified size (an oversized PNG `tIME` or `pHYs` chunk, a JPEG APP14, quantization
+  or Huffman table segment longer than its tables) does not count as holding nothing
+  but the picture either. The same JPEG drawn as a PDF page's image did, though: a page's
+  drawn images were all OCR's to read whatever their data held. Now each drawn image
+  (inline ones too) must hold pixels only — Flate, LZW, run-length, ASCII or CCITT
+  coded, or a JPEG or JBIG2 image of picture headers or segments only — with no
+  metadata stream, optional content, OPI version or alternates of its own, in a file
+  without optional content; a JPEG 2000 image is never completed by OCR. A page with
+  an inline image is no longer read as an error where Pillow is not installed.
+- Docs: the restart-only list in docs/troubleshooting.md now names `extraction` and
+  `overrides` (and is pinned to `RESTART_ONLY_KEYS` like README.md and
+  docs/deployment.md); docs/dashboard.md and the ops-surface gate in
+  docs/security-dataflows.md list the refusal-override POSTs; the threat model's
+  opt-out list and the README's name refusal overrides (with the local-agent residual);
+  docs/observability.md documents `llm_redact_overrides_used_total`; docs/extraction.md
+  states that on Windows the extraction worker runs with no resource limit of its own.
 
 ## [1.9.0] - 2026-09-29
 

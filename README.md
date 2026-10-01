@@ -130,7 +130,10 @@ that cannot cover:
   complete clean reading sends the file.
 - **Anything you opt out of.** Warn-mode rules observe and *forward*
   the matched value; `[providers.NAME] detection = false`, MCP server
-  exemptions, and language scoping likewise forward what they exempt.
+  exemptions, and language scoping likewise forward what they exempt, and
+  so does an approved refusal override
+  ([docs/overrides.md](docs/overrides.md)) for the value, body or file it
+  lets through.
   Every such opt-out is surfaced in `/status`, `llm-redact status`, and
   `doctor` — never silent.
 

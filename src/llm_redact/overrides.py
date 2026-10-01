@@ -72,8 +72,11 @@ _CODE_ALIASES = str.maketrans({"O": "0", "I": "1", "L": "1"})
 
 DEFAULT_TTL_SECONDS = 900
 # Bounds: unapproved codes (a client retrying a refused request mints one per
-# attempt) and approved one-time grants, each dropped oldest first.
+# attempt) PER REQUESTER — so one requester's retries never drop another's
+# codes — and across the file, and approved one-time grants; each dropped
+# oldest first.
 MAX_PENDING = 256
+MAX_PENDING_TOTAL = 4096
 MAX_ONCE_GRANTS = 256
 # How long a write waits for another process's write lock before it fails
 # closed (the refusal stands). The proxy waits briefly — it waits on the
@@ -148,6 +151,34 @@ DASHBOARD_HINT = (
 )
 
 
+# At most this many characters of a route or requester are listed (``shown``).
+SHOWN_CHARS = 120
+
+
+def shown(text: str) -> str:
+    """``text`` as it is safe to print to a terminal or a page: every
+    character that is not printable — C0 and C1 controls, DEL, bidi and
+    other format characters, line and paragraph separators — escaped
+    (``\\x1b``, ``\\u202e``), and at most ``SHOWN_CHARS`` of it, a longer
+    one cut with its length named. A route and a requester come from the
+    request: raw, an escape sequence in a path could rewrite or hide the
+    kind and types a person is asked to confirm, and a long one push them
+    off the screen."""
+    escaped = "".join(
+        char
+        if char.isprintable()
+        else f"\\x{ord(char):02x}"
+        if ord(char) < 0x100
+        else f"\\u{ord(char):04x}"
+        if ord(char) < 0x10000
+        else f"\\U{ord(char):08x}"
+        for char in text
+    )
+    if len(escaped) > SHOWN_CHARS:
+        return f"{escaped[:SHOWN_CHARS]}… ({len(escaped)} characters)"
+    return escaped
+
+
 def _code_hash(code: str) -> str:
     return hashlib.sha256(_CODE_DOMAIN + code.encode("ascii")).hexdigest()
 
@@ -172,7 +203,9 @@ class OverrideEntry:
     """One record as listed (value-free): ``id`` is ``p<N>`` for a pending
     code, ``r<N>`` for an approved rule; ``state`` is pending / once /
     always; ``types`` the detector types a value record covers; ``route``
-    "METHOD provider path" (for an every-time value rule: "any route")."""
+    "METHOD provider path" (for an every-time value rule: "any route").
+    ``route`` and ``subject`` are as printable (``shown``): they come from
+    a request."""
 
     id: str
     state: str
@@ -240,6 +273,7 @@ class OverrideStore:
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
         clock: Callable[[], float] = time.time,
         max_pending: int = MAX_PENDING,
+        max_pending_total: int = MAX_PENDING_TOTAL,
         busy_timeout_ms: int = CLI_BUSY_TIMEOUT_MS,
         read_only: bool = False,
     ) -> None:
@@ -250,6 +284,7 @@ class OverrideStore:
         self.ttl = ttl_seconds
         self._clock = clock
         self._max_pending = max_pending
+        self._max_pending_total = max_pending_total
         self._busy_timeout_ms = busy_timeout_ms
         # Every-time rules' uses not yet written (count_uses), by rule id.
         self._unflushed: Counter[int] = Counter()
@@ -409,9 +444,14 @@ class OverrideStore:
                     ),
                 )
                 conn.execute(
+                    "DELETE FROM pending WHERE subject = ? AND id NOT IN"
+                    " (SELECT id FROM pending WHERE subject = ? ORDER BY id DESC LIMIT ?)",
+                    (subject, subject, self._max_pending),
+                )
+                conn.execute(
                     "DELETE FROM pending WHERE id NOT IN"
                     " (SELECT id FROM pending ORDER BY id DESC LIMIT ?)",
-                    (self._max_pending,),
+                    (self._max_pending_total,),
                 )
         return code
 
@@ -600,12 +640,20 @@ class OverrideStore:
             where = (
                 "any route"
                 if scope == "always" and kind in VALUE_KINDS
-                else f"{method} {provider} {route}"
+                else shown(f"{method} {provider} {route}")
             )
             uses += self._unflushed.get(rule_id, 0)  # this process's, not yet written
             listed.append(
                 OverrideEntry(
-                    f"r{rule_id}", scope, kind, _types(items), where, subj, created, exp, uses
+                    f"r{rule_id}",
+                    scope,
+                    kind,
+                    _types(items),
+                    where,
+                    shown(subj),
+                    created,
+                    exp,
+                    uses,
                 )
             )
         return listed
@@ -710,8 +758,8 @@ def _pending_entry(row: Sequence[object]) -> OverrideEntry:
         "pending",
         str(kind),
         _types(str(items)),
-        f"{method} {provider} {route}",
-        str(subject),
+        shown(f"{method} {provider} {route}"),
+        shown(str(subject)),
         float(created),  # type: ignore[arg-type]
         float(expires),  # type: ignore[arg-type]
         0,
@@ -736,29 +784,65 @@ class OverrideScope:
     consume them in ``commit`` once the request passes). Any store fault
     reads as "no override" — the refusal stands (fail closed)."""
 
-    def __init__(self, store: OverrideStore, subject: str, *, approvable: bool = True) -> None:
+    def __init__(
+        self,
+        store: OverrideStore,
+        subject: str,
+        *,
+        approvable: bool | Callable[[], bool] = True,
+        owner: Callable[[], str | None] | None = None,
+    ) -> None:
         self._store = store
+        # The requester as admitted ("" = the local operator): which hint a
+        # refusal names (the CLI's or the dashboard's).
         self.subject = subject
         # Whether this requester can approve a refusal at all (the local
         # operator always — the CLI; a named user only when the access gate
         # says it can, in the dashboard). No code is minted, and no hint
-        # promised, for one that cannot; its approved rules still apply.
-        self.approvable = approvable
+        # promised, for one that cannot; its approved rules still apply. A
+        # callable is asked once, and only when a code is about to be minted.
+        self._approvable = approvable
+        # The key the requester's records are stored under (``owner``,
+        # asked once, on the refusal path only): the access gate's stable id
+        # for the subject when it supplies one, else the subject itself;
+        # None — the gate could not name it — means no override and no code.
+        self._owner_of = owner
+        self._owner: str | None = subject if owner is None else None
+        self._owner_known = owner is None
         self._snap: _Snapshot | None = None
         # (type, value) pairs refused: held in memory for this request only
         # (the request body holds them anyway), hashed when a code is minted.
         self._refused: dict[tuple[str, str], None] = {}
         self._once: set[int] = set()
         self._always: set[int] = set()
+        # Whether a finding no approval passes (a deny string in text the
+        # proxy cannot rewrite) refuses this request: no value code then.
+        self._final = False
         # Whether ``commit`` failed on a store fault (not a lost race).
         self.fault = False
         # What ``commit`` took, until ``settle``: (once, always, marker).
         self._settle: tuple[list[int], list[int], str] | None = None
 
+    @property
+    def approvable(self) -> bool:
+        if callable(self._approvable):
+            self._approvable = self._approvable() is True
+        return self._approvable
+
+    @property
+    def owner(self) -> str | None:
+        """The store key of this requester's records (see ``__init__``)."""
+        if not self._owner_known:
+            assert self._owner_of is not None
+            self._owner = self._owner_of()
+            self._owner_known = True
+        return self._owner
+
     def _snapshot(self) -> _Snapshot:
         if self._snap is None:
+            owner = self.owner
             try:
-                self._snap = self._store.snapshot(self.subject)
+                self._snap = _EMPTY if owner is None else self._store.snapshot(owner)
             except Exception as exc:  # noqa: BLE001 — a store fault never overrides
                 logger.warning("overrides: the store could not be read (%s)", type(exc).__name__)
                 self._snap = _EMPTY
@@ -781,6 +865,12 @@ class OverrideScope:
         self._refused[(detector_type, value)] = None
         return False
 
+    def unoverridable(self) -> None:
+        """This request is refused for a finding no approval passes (a
+        deny string where the proxy cannot redact it): a value refusal's
+        code could never let it through, so none is minted."""
+        self._final = True
+
     def route_rule(
         self, kind: str, provider: str, method: str, route: str
     ) -> tuple[str, int] | None:
@@ -802,12 +892,15 @@ class OverrideScope:
         answered with, or None when it cannot carry one (a value refusal
         that refused no value through this scope, a requester who cannot
         approve it, a store fault)."""
-        if not self.approvable or (kind in VALUE_KINDS and not self._refused):
+        if kind in VALUE_KINDS and (self._final or not self._refused):
+            return None
+        if not self.approvable:
+            return None
+        owner = self.owner
+        if owner is None:
             return None
         try:
-            return self._store.record_pending(
-                kind, self.subject, provider, method, route, self._refused
-            )
+            return self._store.record_pending(kind, owner, provider, method, route, self._refused)
         except Exception as exc:  # noqa: BLE001 — the refusal stands without a code
             logger.warning("overrides: no code minted (%s)", type(exc).__name__)
             return None

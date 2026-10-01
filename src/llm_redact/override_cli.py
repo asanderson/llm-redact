@@ -151,7 +151,8 @@ def _approve(args: argparse.Namespace) -> int:
     with tty:
         tty.write(
             f"Refused request: {_describe(entry)}.\n"
-            f"Approve {scope}: {effect}.\n"
+            f"Approve {scope} for kind {entry.kind},"
+            f" types {', '.join(entry.types) or '-'}: {effect}.\n"
             f"Type '{CONFIRM_WORD}' to confirm: "
         )
         tty.flush()

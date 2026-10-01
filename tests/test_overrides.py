@@ -85,6 +85,11 @@ class SubjectGate:
     def public_origin(self) -> None:
         return None
 
+    def browser_signed_in(self, conn: HTTPConnection, subject: str) -> bool:
+        # A browser sign-in is the session cookie; the x-test-user header
+        # alone stands for an API credential (an agent can hold one).
+        return conn.cookies.get("test-session") == subject
+
     def approves_overrides(self, subject: str) -> bool:
         # carol cannot sign in to the dashboard: she cannot approve.
         if subject == "dave":
@@ -410,6 +415,24 @@ def test_the_store_file_is_private_and_bounded(tmp_path: Path) -> None:
     assert EMAIL.encode() not in (tmp_path / "d" / "o.db").read_bytes()
 
 
+def test_one_requesters_retries_never_drop_anothers_codes(tmp_path: Path) -> None:
+    # The pending bound is per requester (OVR-7); the file has its own,
+    # larger one.
+    store = OverrideStore(tmp_path / "o.db", max_pending=3, max_pending_total=7)
+    alice = store.record_pending("block", "alice", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
+    for _ in range(10):
+        store.record_pending("block", "bob", "openai", "POST", "/v1/x", [("EMAIL", OTHER)])
+    by_subject = [entry.subject for entry in store.entries()]
+    assert by_subject.count("bob") == 3 and by_subject.count("alice") == 1
+    assert store.describe(alice).subject == "alice"
+    for user in ("carol", "dave", "erin"):
+        for _ in range(3):
+            store.record_pending("block", user, "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
+    assert store.counts()["pending"] == 7  # the file's bound: oldest first
+    with pytest.raises(OverrideError):
+        store.describe(alice)
+
+
 def test_revoke_and_listing(tmp_path: Path) -> None:
     store = _store(tmp_path)
     code = store.record_pending("block", "alice", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
@@ -536,7 +559,10 @@ async def test_the_dashboard_endpoints_serve_the_admitted_subject_only(
             headers={**KEY, "x-test-user": "bob"},
         )
         listed = (
-            await client.get("/__llm-redact/overrides", headers={"x-test-user": "alice"})
+            await client.get(
+                "/__llm-redact/overrides",
+                headers={"x-test-user": "alice", "cookie": "test-session=alice"},
+            )
         ).json()
         (entry,) = listed["entries"]
         assert listed["subject"] == "alice" and entry["types"] == ["EMAIL"]
@@ -552,13 +578,13 @@ async def test_the_dashboard_endpoints_serve_the_admitted_subject_only(
         as_bob = await client.post(
             "/__llm-redact/overrides/approve",
             json={"id": entry["id"], "scope": "once"},
-            headers={"x-test-user": "bob", **csrf},
+            headers={"x-test-user": "bob", "cookie": "test-session=bob", **csrf},
         )
         assert as_bob.status_code == 400 and "another requester" in as_bob.json()["error"]
         ok = await client.post(
             "/__llm-redact/overrides/approve",
             json={"id": entry["id"], "scope": "always"},
-            headers={"x-test-user": "alice", **csrf},
+            headers={"x-test-user": "alice", "cookie": "test-session=alice", **csrf},
         )
         assert ok.status_code == 200 and ok.json()["approved"]["state"] == "always"
         passed = await client.post(
@@ -575,19 +601,19 @@ async def test_the_dashboard_endpoints_serve_the_admitted_subject_only(
         bad = await client.post(
             "/__llm-redact/overrides/revoke",
             json={"id": 7},
-            headers={"x-test-user": "alice", **csrf},
+            headers={"x-test-user": "alice", "cookie": "test-session=alice", **csrf},
         )
         assert bad.status_code == 400
         not_bobs = await client.post(
             "/__llm-redact/overrides/revoke",
             json={"id": rule["id"]},
-            headers={"x-test-user": "bob", **csrf},
+            headers={"x-test-user": "bob", "cookie": "test-session=bob", **csrf},
         )
         assert not_bobs.status_code == 400
         revoked = await client.post(
             "/__llm-redact/overrides/revoke",
             json={"id": rule["id"]},
-            headers={"x-test-user": "alice", **csrf},
+            headers={"x-test-user": "alice", "cookie": "test-session=alice", **csrf},
         )
         assert revoked.json() == {"revoked": rule["id"]}
         assert (await client.post("/__llm-redact/overrides", json={})).status_code == 405
@@ -632,6 +658,67 @@ async def test_the_dashboard_endpoints_approve_nothing_without_a_sign_in(
     assert again.status_code == 400
     assert not upstream.requests
     assert [e.state for e in _store(tmp_path).entries()] == ["pending", "pending"]
+
+
+@pytest.mark.parametrize("member", ["absent", "raises", "async", "truthy"])
+async def test_an_api_credential_admitted_to_the_dashboard_approves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str
+) -> None:
+    """A gate admits a named user's API credential to the dashboard too (an
+    agent holding its user's key — OVR-1): that proves no person. Only a
+    browser sign-in (``browser_signed_in``) approves or revokes; a gate
+    without the member, one that fails, or one answering anything but True
+    approves nothing over HTTP."""
+    if member == "absent":
+        monkeypatch.delattr(SubjectGate, "browser_signed_in")
+    elif member == "raises":
+
+        def boom(self: Any, conn: Any, subject: str) -> bool:
+            raise RuntimeError("session store down")
+
+        monkeypatch.setattr(SubjectGate, "browser_signed_in", boom)
+    elif member == "truthy":
+        monkeypatch.setattr(SubjectGate, "browser_signed_in", lambda self, conn, subject: 1)
+    else:
+
+        async def signed_in(self: Any, conn: Any, subject: str) -> bool:
+            return conn.cookies.get("test-session") == subject
+
+        monkeypatch.setattr(SubjectGate, "browser_signed_in", signed_in)
+    _gated(monkeypatch)
+    upstream = Upstream()
+    app = _app(tmp_path, upstream)
+    csrf = {CSRF_HEADER: app.state.proxy.csrf_token}
+    agent = {"x-test-user": "alice", **csrf}  # the user's key, no browser session
+    async with _client(app) as client:
+        await client.post("/v1/chat/completions", json=_chat(EMAIL), headers=_as_alice())
+        listed = (await client.get("/__llm-redact/overrides", headers=agent)).json()
+        assert listed["can_approve"] is False and listed["subject"] == "alice"
+        (entry,) = listed["entries"]
+        for action, payload in (
+            ("approve", {"id": entry["id"], "scope": "always"}),
+            ("revoke", {"id": entry["id"]}),
+        ):
+            reply = await client.post(
+                f"/__llm-redact/overrides/{action}", json=payload, headers=agent
+            )
+            assert reply.status_code == 403 and "browser" in reply.json()["error"]
+        browser = await client.post(
+            "/__llm-redact/overrides/approve",
+            json={"id": entry["id"], "scope": "once"},
+            headers={**agent, "cookie": "test-session=alice"},
+        )
+        # Another user's browser session is no sign-in as alice either.
+        other = await client.get(
+            "/__llm-redact/overrides", headers={**agent, "cookie": "test-session=bob"}
+        )
+    assert other.json()["can_approve"] is False
+    assert browser.status_code == (200 if member == "async" else 403)
+    assert not upstream.requests
+
+
+def _as_alice() -> dict[str, str]:
+    return {**KEY, "x-test-user": "alice"}
 
 
 # --- verbatim fields ------------------------------------------------------------------
@@ -746,8 +833,10 @@ async def test_values_in_an_inspected_binary_upload(
         status = (await client.get("/__llm-redact/status")).json()
         again = await client.post("/v1/files", content=_form(PDF), headers=FORM)
         assert again.status_code == 400
-    # Cleared by its (overridden) clean scan: not counted unscanned.
+    # Cleared by its overridden scan: not counted unscanned — and not
+    # `clean` either: it went out WITH the approved value (DOC-2).
     assert status["unscanned_uploads_total"] == {}
+    assert status["inspected_uploads_total"] == {"openai": {"detected": 1, "overridden": 1}}
 
 
 async def test_a_block_value_in_an_upload(tmp_path: Path) -> None:
@@ -949,3 +1038,155 @@ def test_the_overrides_section_parses_and_round_trips(tmp_path: Path) -> None:
     for bad in ({"ttl_minutes": 0}, {"ttl_minutes": 99999}, {"nope": 1}, {"enabled": "yes"}):
         with pytest.raises(ConfigError, match=r"\[overrides\]"):
             parse_config({"overrides": bad}, "t")
+
+
+async def test_a_request_refused_before_the_upstream_is_not_marked(tmp_path: Path) -> None:
+    # A one-time grant is committed as the request passes its refusal, then
+    # the request is refused before any upstream contact (no Azure upstream
+    # configured: 502). The grant is handed back, and the row of that 502
+    # says no override: nothing was forwarded on it (UP-3).
+    upstream = Upstream()
+    app = _app(tmp_path, upstream)
+    path = "/openai/deployments/gpt/chat/completions?api-version=2024-10-21"
+    body = {"messages": [{"role": "user", "content": f"mail {EMAIL}"}]}
+    async with _client(app) as client:
+        refused = await client.post(path, json=body, headers={"api-key": "k"})
+        _store(tmp_path).approve("once", approver=None, code=_code(refused))
+        unconfigured = await client.post(path, json=body, headers={"api-key": "k"})
+        assert unconfigured.status_code == 502
+        rows = (await client.get("/__llm-redact/recent")).json()["entries"]
+        status = (await client.get("/__llm-redact/status")).json()["overrides"]
+        # The grant still passes a request that reaches an upstream.
+        passed = await client.post("/v1/chat/completions", json=_chat(EMAIL), headers=KEY)
+        assert passed.status_code == 200
+        after = (await client.get("/__llm-redact/recent")).json()["entries"]
+    assert [(row["status"], row["override"]) for row in rows] == [(502, None), (400, None)]
+    assert status["once"] == 1 and status["used_total"] == {}
+    assert (after[0]["status"], after[0]["override"]) == (200, "once")
+
+
+async def test_the_start_row_of_an_inspected_upload_says_it_passed_on_an_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # [audit] required: an upload with a binary part to inspect writes its
+    # START row before the inspection, with nothing known yet. When the
+    # file then goes out byte-identical on an approved value (nothing
+    # counted: it holds no detection, no warning), the durable record
+    # before contact must still say an override let content leave — a
+    # second START row superseding the early one (UP-2).
+    from llm_redact.config import AuditConfig
+    from test_audit_required import FakeAudit
+    from test_upload_fate import _registry_with_audit
+    from test_upload_inspection import FakeInspector, reads
+
+    audit = FakeAudit()
+    _registry_with_audit(monkeypatch, FakeInspector(reads(f"contact {EMAIL}")), audit)
+    upstream = Upstream()
+    app = _app(
+        tmp_path,
+        upstream,
+        detection=DetectionConfig(binary_uploads="refuse"),
+        audit=AuditConfig(enabled=True, required=True),
+    )
+    async with _client(app) as client:
+        refused = await client.post("/v1/files", content=_form(PDF), headers=FORM)
+        _store(tmp_path).approve("always", approver=None, code=_code(refused))
+        audit.begun.clear()
+        audit.finalized.clear()
+        passed = await client.post("/v1/files", content=_form(PDF), headers=FORM)
+    assert passed.status_code == 200 and PDF in upstream.requests[-1].content
+    assert [entry.override for entry in audit.begun] == [None, "always"]
+    # The early row is ended, the second one finalized with the answer.
+    finals = {token: entry for token, entry in audit.finalized}
+    assert finals[2].status == 200 and finals[2].override == "always"
+    assert finals[1].override is None
+
+
+def _files(*contents: bytes) -> bytes:
+    body = b'--b\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nuser_data\r\n'
+    for index, content in enumerate(contents):
+        body += (
+            b'--b\r\nContent-Disposition: form-data; name="file"; filename="r%d.pdf"\r\n' % index
+            + b"Content-Type: application/pdf\r\n\r\n"
+            + content
+            + b"\r\n"
+        )
+    return body + b"--b--\r\n"
+
+
+def _reading(text: str, convert: str | None = None) -> Any:
+    from llm_redact.plugin_api import Inspection
+
+    async def script(part: Any) -> Inspection:
+        return Inspection(text, True, "fake", convert_text=convert)
+
+    return script
+
+
+async def test_a_converted_part_is_never_put_to_the_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Convert mode: part A's email is redacted in the text sent in its place
+    # — not refused — while part B's phone number refuses the upload. The
+    # code covers the phone only: approving it always must not allowlist the
+    # email, which a later binary file holding it would then carry upstream
+    # byte-identical (UP-1). A one-time grant for the email is not used by a
+    # convertible part either.
+    from test_upload_inspection import FakeInspector
+
+    phone = "+1 415 555 0132"
+    converted, detected, later = PDF + b"a", PDF + b"b", PDF + b"c"
+    inspector = FakeInspector(
+        scripts={
+            converted: _reading(f"mail {EMAIL}", convert=f"mail {EMAIL}"),
+            detected: _reading(f"call {phone}"),
+            later: _reading(f"mail {EMAIL}"),
+        },
+    )
+    reg = Registry()
+    reg.build_upload_inspector = lambda config, tier: inspector  # type: ignore[method-assign]
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    upstream = Upstream()
+    app = _app(tmp_path, upstream, detection=DetectionConfig())
+    async with _client(app) as client:
+        refused = await client.post("/v1/files", content=_files(converted, detected), headers=FORM)
+        assert refused.status_code == 400 and "PHONE" in refused.text
+        (pending,) = _store(tmp_path).entries()
+        assert pending.types == ("PHONE",)
+        _store(tmp_path).approve("always", approver=None, code=_code(refused))
+        # The email was never approved: a binary file holding it is refused.
+        alone = await client.post("/v1/files", content=_files(later), headers=FORM)
+        assert alone.status_code == 400 and "EMAIL" in alone.text
+        _store(tmp_path).approve("once", approver=None, code=_code(alone))
+        # The upload passes now (the phone always, part A converted): part A
+        # is redacted, and the one-time grant for the email is left unused.
+        passed = await client.post("/v1/files", content=_files(converted, detected), headers=FORM)
+        assert passed.status_code == 200
+        sent = upstream.requests[-1].content
+        assert converted not in sent and EMAIL.encode() not in sent and b"\xc2\xabEMAIL_" in sent
+        assert _store(tmp_path).counts()["once"] == 1
+        status = (await client.get("/__llm-redact/status")).json()
+    assert status["inspected_uploads_total"]["openai"]["converted"] == 1
+    assert status["inspected_uploads_total"]["openai"]["overridden"] == 1
+
+
+async def test_a_deny_string_in_a_binary_upload_makes_the_refusal_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A deny string in a binary file cannot be redacted and is never
+    # overridable: the refusal carries no code, even though another value of
+    # the upload was put to the overrides (approving it could never pass).
+    from llm_redact.detection.deny import DenyEntry
+    from test_upload_inspection import FakeInspector
+
+    inspector = FakeInspector(_reading(f"project aurora, contact {EMAIL}"))
+    reg = Registry()
+    reg.build_upload_inspector = lambda config, tier: inspector  # type: ignore[method-assign]
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    upstream = Upstream()
+    app = _app(tmp_path, upstream, detection=DetectionConfig(deny_strings=(DenyEntry("aurora"),)))
+    async with _client(app) as client:
+        refused = await client.post("/v1/files", content=_form(PDF), headers=FORM)
+    assert refused.status_code == 400 and "EMAIL" in refused.text
+    assert "llm-redact override" not in refused.text
+    assert _store(tmp_path).entries() == []

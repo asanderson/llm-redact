@@ -2,8 +2,10 @@
 
 Reserved `/__llm-redact/*` paths are answered locally, never forwarded,
 and carry metadata only — never redacted values. The namespace is
-GET-only except the guarded session-prune and user invite/revoke POSTs,
-and every reply is hardened with a strict CSP and framing/sniffing
+GET-only except the guarded session-prune, user invite/revoke and
+refusal-override approve/revoke POSTs (`/__llm-redact/overrides/approve`,
+`/overrides/revoke`: served only to a requester a person signed in to the
+dashboard in a browser — docs/overrides.md), and every reply is hardened with a strict CSP and framing/sniffing
 headers.
 
 - **Browser dashboard (llm-redact-pro)**: the web page at

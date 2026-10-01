@@ -474,3 +474,60 @@ async def test_a_service_sees_no_file_the_operator_key_would_refuse_anyway(
         assert _file_sent(files.requests[0]) == scan
     else:
         assert reply.status_code == 400 and asked == [] and files.requests == []
+
+
+def _hidden(catalog: bytes = b"", page: bytes = b"", *extra: bytes) -> bytes:
+    """A one-page PDF showing only "Hello world", with ``catalog`` and
+    ``page`` entries (and ``extra`` objects from 6) no viewer shows."""
+    return pdf_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R" + catalog + b" >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R"
+            b" /Resources << /Font << /F1 5 0 R >> >>" + page + b" >>",
+            pdf_stream(b"", b"BT /F1 12 Tf 72 712 Td (Hello world) Tj ET"),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            *extra,
+        ]
+    )
+
+
+_MAIL = EMAIL.encode()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        _hidden(b" /OpenAction << /S /JavaScript /JS (var m='%s';) >>" % _MAIL),
+        _hidden(page=b" /AA << /O << /S /JavaScript /JS (app.alert('%s')) >> >>" % _MAIL),
+        _hidden(b" /OpenAction << /S /URI /URI (mailto:%s) >>" % _MAIL),
+        _hidden(b" /PieceInfo << /App << /Private (%s) >> >>" % _MAIL),
+        _hidden(
+            b"",
+            b" /Metadata 6 0 R",
+            pdf_stream(b"/Type /Metadata /Subtype /XML", b"<x>%s</x>" % _MAIL),
+        ),
+    ],
+    ids=["openaction-js", "page-aa-js", "openaction-uri", "private-data", "page-metadata"],
+)
+async def test_a_value_no_viewer_shows_still_refuses_the_upload(document: bytes) -> None:
+    # binary_uploads = "refuse": a PDF whose only value sits in a script, an
+    # action, private data or a page's metadata once read clean and went
+    # out byte-identical; the value is in the file the provider receives.
+    files = Files()
+    app = _app({**_raw(), "detection": {"binary_uploads": "refuse"}}, files)
+    async with _client(app) as client:
+        reply = await client.post("/v1/files", content=_upload(document), headers=FORM)
+    assert reply.status_code == 400 and "EMAIL" in reply.text and EMAIL not in reply.text
+    assert files.requests == []
+    assert app.state.proxy.inspected_uploads == {("openai", "detected"): 1}
+
+
+async def test_a_stream_no_reader_reads_keeps_the_upload_unscanned() -> None:
+    files = Files()
+    app = _app({**_raw(), "detection": {"binary_uploads": "refuse"}}, files)
+    document = _hidden(b"", b"", pdf_stream(b"", b"note " + _MAIL))
+    async with _client(app) as client:
+        reply = await client.post("/v1/files", content=_upload(document), headers=FORM)
+    assert reply.status_code == 400 and files.requests == []
+    assert app.state.proxy.inspected_uploads == {("openai", "incomplete"): 1}

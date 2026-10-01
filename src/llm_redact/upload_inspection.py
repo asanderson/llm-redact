@@ -47,7 +47,9 @@ part, a block, a header rule, a credential the proxy holds that the
 inspection did not allow, a routing budget, the counted audit START row, the
 upstream authorizer), ``detected``, ``blocked``, ``converted`` /
 ``converted_refused`` (convert mode: replaced by its redacted text; sent or
-refused), ``incomplete`` (no text,
+refused), ``overridden`` / ``overridden_refused`` (scanned clean only because
+an approved refusal override let its values through — overrides.py; sent
+byte-identical WITH those values, or refused), ``incomplete`` (no text,
 a partial reading, or more text than the request's scan budgets — the
 characters, or the strings of ``max_body_strings``), ``not_inspected``
 (larger than ``max_bytes`` or past ``MAX_INSPECTED_PARTS``), ``timeout``,
@@ -84,6 +86,8 @@ OUTCOMES = (
     "clean_refused",
     "converted",
     "converted_refused",
+    "overridden",
+    "overridden_refused",
     "detected",
     "blocked",
     "incomplete",
@@ -306,8 +310,17 @@ def judge(
         remaining -= len(text)
         merge_floors(floors, token_floors(text))
         warned = Counter(redactor.warn_counts)
+        allowed = not identity or result.proxy_credential is True
+        # Convert mode: the values a convertible reading holds are redacted
+        # in the text sent in the file's place, not refused — never put to
+        # the requester's overrides (an approval must not turn a file the
+        # proxy can redact into one sent as it came).
+        convert = (
+            _converts(result, convertible=convertible, allowed=allowed)
+            and len(result.convert_text or "") <= remaining
+        )
         try:
-            found = redactor.scan_text(text)
+            scan = redactor.scan(text, redactable=convert)
         except BlockedRequest as exc:
             blocked = blocked or exc.detector_type
             outcomes["blocked"] += 1
@@ -316,9 +329,8 @@ def judge(
             over_budget = exc
             outcomes["incomplete"] += 1
             continue
-        allowed = not identity or result.proxy_credential is True
-        convert = found and _converts(result, convertible=convertible, allowed=allowed)
-        if convert and len(result.convert_text or "") <= remaining:
+        found = scan.found
+        if found and convert:
             # The text sent in the file's place counts against the same
             # budget (it is redacted as one more text).
             text = result.convert_text or ""
@@ -338,7 +350,10 @@ def judge(
         elif result.complete is not True:
             outcomes["incomplete"] += 1
         else:
-            outcomes["clean"] += 1
+            # Clean only when nothing refusing was found: a reading clean
+            # because an approved override let its values through is
+            # ``overridden`` (it holds values detection acted on).
+            outcomes["overridden" if scan.overridden else "clean"] += 1
             if allowed:
                 cleared.add(index)
     return Judgement(

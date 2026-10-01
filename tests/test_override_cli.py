@@ -324,3 +324,30 @@ def test_listing_and_doctor_never_write_the_store(
     assert "no pending refusals" in capsys.readouterr().out
     assert _check_overrides(_Report(), Config(overrides=OverridesConfig(path=str(empty)))) is False
     assert empty.read_bytes() == b""
+
+
+def test_a_route_is_never_printed_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The route (and requester) come from the request: an escape sequence
+    in a path (cursor-up, erase-line, a bidi override) must not rewrite or
+    hide the kind and types the person confirms — in the prompt, the
+    listing and its JSON form alike (OVR-4)."""
+    db = tmp_path / "o.db"
+    route = "/v1/conversations/conv\x1b[1A\x1b[2K\rkind block, types EMAIL\u202e\x85/items"
+    escaped = r"/v1/conversations/conv\x1b[1A\x1b[2K\x0dkind block, types EMAIL\u202e\x85/items"
+    store = OverrideStore(db)
+    code = store.record_pending("block", "", "openai", "POST", route, [("AWS_KEY", "k")])
+    store.record_pending("block", "bob\x1b]0;x\x07", "openai", "POST", route, [("EMAIL", EMAIL)])
+    tty = FakeTty("no\n")
+    monkeypatch.setattr(override_cli, "_open_tty", lambda: tty)
+    assert _run(code, "--once", "--db", str(db)) == 1
+    assert "kind block, types AWS_KEY" in tty.shown and escaped in tty.shown
+    capsys.readouterr()
+    assert _run("list", "--db", str(db)) == 0
+    assert _run("list", "--json", "--db", str(db)) == 0
+    out = capsys.readouterr().out
+    for raw in ("\x1b", "\r", "\u202e", "\x85", "\x07"):
+        assert raw not in out and raw not in tty.shown
+    assert r"bob\x1b]0;x\x07" in out
+    assert {entry.route for entry in OverrideStore(db).entries()} == {f"POST openai {escaped}"}

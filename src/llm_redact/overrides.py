@@ -148,6 +148,25 @@ DASHBOARD_HINT = (
 )
 
 
+def shown(text: str) -> str:
+    """``text`` as it is safe to print to a terminal or a page: every
+    character that is not printable — C0 and C1 controls, DEL, bidi and
+    other format characters, line and paragraph separators — escaped
+    (``\\x1b``, ``\\u202e``). A route and a requester come from the request:
+    raw, an escape sequence in a path could rewrite or hide the kind and
+    types a person is asked to confirm."""
+    return "".join(
+        char
+        if char.isprintable()
+        else f"\\x{ord(char):02x}"
+        if ord(char) < 0x100
+        else f"\\u{ord(char):04x}"
+        if ord(char) < 0x10000
+        else f"\\U{ord(char):08x}"
+        for char in text
+    )
+
+
 def _code_hash(code: str) -> str:
     return hashlib.sha256(_CODE_DOMAIN + code.encode("ascii")).hexdigest()
 
@@ -172,7 +191,9 @@ class OverrideEntry:
     """One record as listed (value-free): ``id`` is ``p<N>`` for a pending
     code, ``r<N>`` for an approved rule; ``state`` is pending / once /
     always; ``types`` the detector types a value record covers; ``route``
-    "METHOD provider path" (for an every-time value rule: "any route")."""
+    "METHOD provider path" (for an every-time value rule: "any route").
+    ``route`` and ``subject`` are as printable (``shown``): they come from
+    a request."""
 
     id: str
     state: str
@@ -600,12 +621,20 @@ class OverrideStore:
             where = (
                 "any route"
                 if scope == "always" and kind in VALUE_KINDS
-                else f"{method} {provider} {route}"
+                else shown(f"{method} {provider} {route}")
             )
             uses += self._unflushed.get(rule_id, 0)  # this process's, not yet written
             listed.append(
                 OverrideEntry(
-                    f"r{rule_id}", scope, kind, _types(items), where, subj, created, exp, uses
+                    f"r{rule_id}",
+                    scope,
+                    kind,
+                    _types(items),
+                    where,
+                    shown(subj),
+                    created,
+                    exp,
+                    uses,
                 )
             )
         return listed
@@ -710,8 +739,8 @@ def _pending_entry(row: Sequence[object]) -> OverrideEntry:
         "pending",
         str(kind),
         _types(str(items)),
-        f"{method} {provider} {route}",
-        str(subject),
+        shown(f"{method} {provider} {route}"),
+        shown(str(subject)),
         float(created),  # type: ignore[arg-type]
         float(expires),  # type: ignore[arg-type]
         0,

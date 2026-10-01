@@ -518,6 +518,11 @@ and tags `vX.Y.Z`.
   `llm-redact status` as "forwarded after a clean scan". It is now its own outcome,
   `overridden` (`overridden_refused` when the upload was then refused), with its own
   posture line.
+- `llm-redact override CODE` printed a refused request's route as the request named it:
+  an escape sequence in a path (erase-line, cursor-up, a bidi override) could rewrite or
+  hide the kind and types the confirmation prompt asks a person to check. The route and
+  the requester are now shown with every non-printable character escaped (`\x1b`,
+  `‮`) in the prompt, `override list` (text and JSON) and the dashboard listing.
 
 ## [1.9.0] - 2026-09-29
 

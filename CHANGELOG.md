@@ -485,6 +485,14 @@ and tags `vX.Y.Z`.
   receives the upstream's opening frame, and the refusal is recorded (503 for a
   reload, 403 for an access revocation). An open relay revoked by the gate no
   longer sends the client upstream frames that arrive after the revocation.
+- Refusal overrides applied under a credential the proxy holds, though the docs said
+  they never do: a block-mode value, a verbatim field or values in an inspected binary
+  upload refused on a route authorized with the proxy's own identity (or a routed
+  plan's operator key) carried a code, and an approval — or an every-time rule
+  approved on another route — then sent the value upstream unredacted under the
+  proxy's credential; a realtime connection under identity likewise. Every refusal
+  under such a credential is now final: no code, no pending record, no approved rule
+  consulted.
 
 ## [1.9.0] - 2026-09-29
 

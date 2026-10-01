@@ -4667,8 +4667,11 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     # This request's share of the process-wide counts (the diff trick).
     window = _CountWindow(state)
     # The requester's approved overrides, asked only where detection refuses
-    # (overrides.py); None when [overrides] enabled = false.
-    scope = state.override_scope()
+    # (overrides.py); None when [overrides] enabled = false — and under a
+    # credential the proxy holds (its identity, a routed plan's operator
+    # key): every refusal under one is final, so it carries no code and no
+    # approval passes it.
+    scope = None if proxy_credential else state.override_scope()
 
     def allow_suffix(kind: str) -> str:
         # The refusal's single-use code, when it can carry one: minted now

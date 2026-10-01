@@ -75,7 +75,10 @@ These refusals carry no code:
 - the request target checks: dot or empty segments, a non-origin-form target,
   an unattributable request, a method override;
 - a credential the proxy holds (identity auth, a routed operator key): every
-  refusal under one, including an unscannable body or binary part;
+  refusal under one, including an unscannable body or binary part and a
+  realtime frame on a connection authorized with the proxy's identity. An
+  every-time rule approved for a value under the client's own key does not
+  pass it there either;
 - framing where two readers could disagree: a content coding (415), a
   repeated `Content-Type`, JSON nested too deep, multipart outside the
   canonical form or on a route that does not scan it, an unreadable part

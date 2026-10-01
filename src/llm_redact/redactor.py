@@ -268,7 +268,8 @@ class Redactor:
         a deny string always — is returned as its detector type, counted.
         Every refusing winner (block mode, or one returned) but a deny
         string is first put to the requester's overrides
-        (``with_overrides``): an approved value is skipped. Charged against the string budget as one string."""
+        (``with_overrides``): an approved value is skipped. Charged against
+        the string budget as one string."""
         self.charge(1)
         found: Counter[str] = Counter()
         for d in _resolve_overlaps(self._plan.detect(text, self._allowlist)):

@@ -209,7 +209,11 @@ class _EarlyAudit:
     ``handle()`` closes one still held on a way out that recorded nothing,
     so every START row gets exactly one END row. ``started``: the local
     refusals and the START row were already applied (the later sites skip
-    them); the token is None when required mode is off."""
+    them); the token is None when required mode is off. When the
+    redaction then finds values (or the request passes on an override),
+    the row is amended with them before the send (``amend``, a log with
+    the optional member) or superseded by a second START row carrying
+    them (``supersede``, a log without it): ``_start_after_early``."""
 
     def __init__(self) -> None:
         self.started = False
@@ -228,6 +232,27 @@ class _EarlyAudit:
     def take(self) -> object | None:
         token, self._token = self._token, None
         return token
+
+    def amend(
+        self, state: "ProxyState", *, detections: dict[str, int], warned: dict[str, int]
+    ) -> None:
+        """Amend the held START row with the request's counts, before
+        upstream contact (``ProxyState.amend_audit``): it stays the
+        request's one START row and the token stays held, so the request's
+        own row — the send's END, or the 503 refusal's when the amendment
+        raises ``AuditWriteError`` — finalizes it."""
+        # Called only while a token is held, which only the write-ahead log mints.
+        assert self._token is not None
+        state.amend_audit(
+            self._token,
+            session=self._row["session"],
+            provider=self._row["provider"],
+            method=self._row["method"],
+            path=self._row["path"],
+            detections=detections,
+            warned=warned,
+            duration_ms=(time.perf_counter() - self._row["started"]) * 1000.0,
+        )
 
     def supersede(self, state: "ProxyState") -> None:
         """End the held START row now, before upstream contact: a START row
@@ -736,6 +761,11 @@ class ProxyState:
         # that somehow built no log at all, must refuse at startup — never
         # silently run fail-open under a config that promises zero loss.
         self.write_ahead_audit: WriteAheadAudit | None = None
+        # The log's OPTIONAL amend member (WriteAheadAudit's docstring), read
+        # once: an upload's START row written before its inspection is then
+        # amended with the request's counts instead of followed by a second
+        # START row. None: a log predating it (two START rows, as before).
+        self.write_ahead_amend: Callable[[object, AuditRecord], None] | None = None
         if config.audit.required:
             if not isinstance(self.audit, WriteAheadAudit):
                 raise ConfigError(
@@ -743,6 +773,8 @@ class ProxyState:
                     " write-ahead audit support (AuditLog.begin/finalize)"
                 )
             self.write_ahead_audit = self.audit
+            amend = getattr(self.audit, "amend", None)
+            self.write_ahead_amend = amend if callable(amend) else None
         self.audit_s3: S3AuditSink | None
         self.audit_azure: AzureAuditSink | None
         self.audit_s3, self.audit_azure = registry.build_audit_sinks(config.audit)
@@ -1634,6 +1666,41 @@ class ProxyState:
             # orphaning the START row behind a record()-routed END.
             raise AuditWriteError("write-ahead audit begin() returned no token")
         return token
+
+    def amend_audit(
+        self,
+        token: object,
+        *,
+        session: str,
+        provider: str | None,
+        method: str,
+        path: str,
+        detections: dict[str, int],
+        warned: dict[str, int] | None,
+        duration_ms: float,
+    ) -> None:
+        """Durably amend the write-ahead START row ``token`` names with the
+        request's counts (and the override it is about to use), BEFORE any
+        upstream contact, through the log's optional ``amend`` member: the
+        request keeps one START row. Asked only when the log has the member
+        (``write_ahead_amend``); raises :class:`AuditWriteError` when the
+        amendment cannot be committed — the caller refuses 503 like a START
+        row that cannot be committed."""
+        amend = self.write_ahead_amend
+        assert amend is not None  # asked only when the log has the member
+        amend(
+            token,
+            self._audit_entry(
+                session=session,
+                provider=provider,
+                method=method,
+                path=path,
+                detections=detections,
+                warned=warned,
+                duration_ms=duration_ms,
+                override=_COMMITTED_OVERRIDE.get(),
+            ),
+        )
 
     def record_request(
         self,
@@ -5552,15 +5619,33 @@ def _start_after_early(
     """The write-ahead token for an upload whose START row was written
     before its inspection (``_EarlyAudit``), at the send: that row carries
     no detections (the redaction had not run), so when the redaction found
-    values — warn-mode ones are FORWARDED — a second START row carrying
-    them commits here, before any upstream contact, and the early row is
-    ended (``_EarlyAudit.supersede``): what is durable before contact says
-    what leaves. Likewise when the request passed a refusal on an approved
-    override (its value, or a binary part, goes out as sent): the second
-    row carries the marker. A second START row that cannot commit is the
-    503 refusal, whose row ends the early one. Nothing found and no
-    override: the early row is the request's."""
+    values — warn-mode ones are FORWARDED — the record durable before
+    upstream contact must still say what leaves. Likewise when the request
+    passed a refusal on an approved override (its value, or a binary part,
+    goes out as sent): the marker must be durable too. A log with the
+    optional ``amend`` member amends the early row with them here
+    (``_EarlyAudit.amend``): the request keeps ONE START row, which its END
+    row finalizes. A log without it gets a second START row carrying them,
+    and the early row is ended (``_EarlyAudit.supersede``). Either write
+    that cannot commit is the 503 refusal, whose row ends the early one.
+    Nothing found and no override: the early row is the request's."""
     if early.holds_token and (new_counts or new_warned or _COMMITTED_OVERRIDE.get()):
+        if state.write_ahead_amend is not None:
+            try:
+                early.amend(state, detections=new_counts, warned=new_warned)
+            except AuditWriteError as exc:
+                return None, _audit_unavailable(
+                    state,
+                    ctx,
+                    adapter,
+                    exc,
+                    request=request,
+                    path=path,
+                    started=started,
+                    new_counts=new_counts,
+                    new_warned=new_warned,
+                )
+            return early.take(), None
         token, refusal = _begin_audit_guarded(
             state,
             ctx,
@@ -5592,8 +5677,9 @@ def _begin_audit_guarded(
     The write-ahead START row commits HERE — after redaction (detections
     known), before any byte leaves for the provider; an upload with a binary
     part to inspect also commits one BEFORE its inspection (no detections
-    yet: ``before_inspection``), superseded at the send by one carrying the
-    counts when the redaction found values (``_start_after_early``). A None token means
+    yet: ``before_inspection``), amended — or, by a log without ``amend``,
+    superseded — at the send when the redaction found values
+    (``_start_after_early``). A None token means
     required mode is off and nothing downstream changes; a refusal is the
     provider-shaped 503 the caller returns instead of contacting anyone."""
     try:
@@ -5606,33 +5692,59 @@ def _begin_audit_guarded(
             warned=new_warned,
         )
     except AuditWriteError as exc:
-        # The audit-storage twin of the upstream-fault 502: provider-shaped
-        # 503, recorded to metrics/recent (the audit write for this row will
-        # itself fail — record_request logs that loudly). Type only.
-        logger.critical(
-            "%s %s -> 503 audit write failed with [audit] required (%s)",
-            request.method,
-            path,
-            type(exc).__name__,
-        )
-        state.record_request(
-            session=ctx.session_id,
-            provider=adapter.name if adapter is not None else None,
-            method=request.method,
+        return None, _audit_unavailable(
+            state,
+            ctx,
+            adapter,
+            exc,
+            request=request,
             path=path,
-            status=503,
             started=started,
-            streamed=False,
-            detections=new_counts,
-            rehydrations={},
-            warned=new_warned,
+            new_counts=new_counts,
+            new_warned=new_warned,
         )
-        message = "llm-redact: audit log unavailable and [audit] required is enabled"
-        body = (
-            adapter.error_body(message, status=503) if adapter is not None else {"error": message}
-        )
-        return None, JSONResponse(body, status_code=503)
     return token, None
+
+
+def _audit_unavailable(
+    state: ProxyState,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    exc: AuditWriteError,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+) -> JSONResponse:
+    """The write-ahead record (a START row, or the amendment of an upload's
+    early one) could not be committed: the audit-storage twin of the
+    upstream-fault 502 — a provider-shaped 503 instead of any upstream
+    contact, recorded to metrics/recent (the audit write for this row will
+    itself fail — record_request logs that loudly; an upload's early START
+    row is ended by it). Logged by type only."""
+    logger.critical(
+        "%s %s -> 503 audit write failed with [audit] required (%s)",
+        request.method,
+        path,
+        type(exc).__name__,
+    )
+    state.record_request(
+        session=ctx.session_id,
+        provider=adapter.name if adapter is not None else None,
+        method=request.method,
+        path=path,
+        status=503,
+        started=started,
+        streamed=False,
+        detections=new_counts,
+        rehydrations={},
+        warned=new_warned,
+    )
+    message = "llm-redact: audit log unavailable and [audit] required is enabled"
+    body = adapter.error_body(message, status=503) if adapter is not None else {"error": message}
+    return JSONResponse(body, status_code=503)
 
 
 def _upstream_auth_failure(

@@ -210,10 +210,13 @@ layer's local refusal, and, with `[audit] required`, the write-ahead START
 row — a START row that cannot be committed refuses the upload (503) before
 any file is read, and a refusal after the inspection is that START row's
 END row. That early row carries no detections (the redaction has not run):
-when the redaction then finds values — warn-mode values are forwarded — a
-second START row carrying the counts is committed before the upload is sent
-(503 if it cannot be) and the early row is ended with no status, so the
-record durable before upstream contact always says what leaves. A JSONL line
+when the redaction then finds values — warn-mode values are forwarded — the
+record durable before upstream contact must still say what leaves. An audit
+log with the optional `amend` member (llm-redact-pro's) amends that START row
+with the counts before the upload is sent, so the request keeps one START row
+and its END row; a log without it gets a second START row carrying the counts,
+and the early row is ended with no status. Either write that cannot be
+committed refuses the upload 503 before anything is sent. A JSONL line
 nesting JSON deeper than 128 levels is refused (a JSONL reader would
 decode what no walk can read). Plain form fields (`purpose`, `user`,
 `size`, …) are scanned as UTF-8 text (a field that is not UTF-8 is

@@ -85,6 +85,11 @@ class SubjectGate:
     def public_origin(self) -> None:
         return None
 
+    def browser_signed_in(self, conn: HTTPConnection, subject: str) -> bool:
+        # A browser sign-in is the session cookie; the x-test-user header
+        # alone stands for an API credential (an agent can hold one).
+        return conn.cookies.get("test-session") == subject
+
     def approves_overrides(self, subject: str) -> bool:
         # carol cannot sign in to the dashboard: she cannot approve.
         if subject == "dave":
@@ -554,7 +559,10 @@ async def test_the_dashboard_endpoints_serve_the_admitted_subject_only(
             headers={**KEY, "x-test-user": "bob"},
         )
         listed = (
-            await client.get("/__llm-redact/overrides", headers={"x-test-user": "alice"})
+            await client.get(
+                "/__llm-redact/overrides",
+                headers={"x-test-user": "alice", "cookie": "test-session=alice"},
+            )
         ).json()
         (entry,) = listed["entries"]
         assert listed["subject"] == "alice" and entry["types"] == ["EMAIL"]
@@ -570,13 +578,13 @@ async def test_the_dashboard_endpoints_serve_the_admitted_subject_only(
         as_bob = await client.post(
             "/__llm-redact/overrides/approve",
             json={"id": entry["id"], "scope": "once"},
-            headers={"x-test-user": "bob", **csrf},
+            headers={"x-test-user": "bob", "cookie": "test-session=bob", **csrf},
         )
         assert as_bob.status_code == 400 and "another requester" in as_bob.json()["error"]
         ok = await client.post(
             "/__llm-redact/overrides/approve",
             json={"id": entry["id"], "scope": "always"},
-            headers={"x-test-user": "alice", **csrf},
+            headers={"x-test-user": "alice", "cookie": "test-session=alice", **csrf},
         )
         assert ok.status_code == 200 and ok.json()["approved"]["state"] == "always"
         passed = await client.post(
@@ -593,19 +601,19 @@ async def test_the_dashboard_endpoints_serve_the_admitted_subject_only(
         bad = await client.post(
             "/__llm-redact/overrides/revoke",
             json={"id": 7},
-            headers={"x-test-user": "alice", **csrf},
+            headers={"x-test-user": "alice", "cookie": "test-session=alice", **csrf},
         )
         assert bad.status_code == 400
         not_bobs = await client.post(
             "/__llm-redact/overrides/revoke",
             json={"id": rule["id"]},
-            headers={"x-test-user": "bob", **csrf},
+            headers={"x-test-user": "bob", "cookie": "test-session=bob", **csrf},
         )
         assert not_bobs.status_code == 400
         revoked = await client.post(
             "/__llm-redact/overrides/revoke",
             json={"id": rule["id"]},
-            headers={"x-test-user": "alice", **csrf},
+            headers={"x-test-user": "alice", "cookie": "test-session=alice", **csrf},
         )
         assert revoked.json() == {"revoked": rule["id"]}
         assert (await client.post("/__llm-redact/overrides", json={})).status_code == 405
@@ -650,6 +658,67 @@ async def test_the_dashboard_endpoints_approve_nothing_without_a_sign_in(
     assert again.status_code == 400
     assert not upstream.requests
     assert [e.state for e in _store(tmp_path).entries()] == ["pending", "pending"]
+
+
+@pytest.mark.parametrize("member", ["absent", "raises", "async", "truthy"])
+async def test_an_api_credential_admitted_to_the_dashboard_approves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str
+) -> None:
+    """A gate admits a named user's API credential to the dashboard too (an
+    agent holding its user's key — OVR-1): that proves no person. Only a
+    browser sign-in (``browser_signed_in``) approves or revokes; a gate
+    without the member, one that fails, or one answering anything but True
+    approves nothing over HTTP."""
+    if member == "absent":
+        monkeypatch.delattr(SubjectGate, "browser_signed_in")
+    elif member == "raises":
+
+        def boom(self: Any, conn: Any, subject: str) -> bool:
+            raise RuntimeError("session store down")
+
+        monkeypatch.setattr(SubjectGate, "browser_signed_in", boom)
+    elif member == "truthy":
+        monkeypatch.setattr(SubjectGate, "browser_signed_in", lambda self, conn, subject: 1)
+    else:
+
+        async def signed_in(self: Any, conn: Any, subject: str) -> bool:
+            return conn.cookies.get("test-session") == subject
+
+        monkeypatch.setattr(SubjectGate, "browser_signed_in", signed_in)
+    _gated(monkeypatch)
+    upstream = Upstream()
+    app = _app(tmp_path, upstream)
+    csrf = {CSRF_HEADER: app.state.proxy.csrf_token}
+    agent = {"x-test-user": "alice", **csrf}  # the user's key, no browser session
+    async with _client(app) as client:
+        await client.post("/v1/chat/completions", json=_chat(EMAIL), headers=_as_alice())
+        listed = (await client.get("/__llm-redact/overrides", headers=agent)).json()
+        assert listed["can_approve"] is False and listed["subject"] == "alice"
+        (entry,) = listed["entries"]
+        for action, payload in (
+            ("approve", {"id": entry["id"], "scope": "always"}),
+            ("revoke", {"id": entry["id"]}),
+        ):
+            reply = await client.post(
+                f"/__llm-redact/overrides/{action}", json=payload, headers=agent
+            )
+            assert reply.status_code == 403 and "browser" in reply.json()["error"]
+        browser = await client.post(
+            "/__llm-redact/overrides/approve",
+            json={"id": entry["id"], "scope": "once"},
+            headers={**agent, "cookie": "test-session=alice"},
+        )
+        # Another user's browser session is no sign-in as alice either.
+        other = await client.get(
+            "/__llm-redact/overrides", headers={**agent, "cookie": "test-session=bob"}
+        )
+    assert other.json()["can_approve"] is False
+    assert browser.status_code == (200 if member == "async" else 403)
+    assert not upstream.requests
+
+
+def _as_alice() -> dict[str, str]:
+    return {**KEY, "x-test-user": "alice"}
 
 
 # --- verbatim fields ------------------------------------------------------------------

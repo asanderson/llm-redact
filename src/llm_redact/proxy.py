@@ -889,6 +889,25 @@ class ProxyState:
             logger.warning("overrides: approves_overrides failed (%s)", type(exc).__name__)
             return False
 
+    async def browser_signed_in(self, conn: HTTPConnection, subject: str) -> bool:
+        """Whether a person signed in to the dashboard as ``subject`` in a
+        browser — the access gate's OPTIONAL ``browser_signed_in(conn,
+        subject)`` says True (a session its browser sign-in established),
+        never a credential an agent holds (an API key, a per-user key, a
+        bearer token, a certificate). Absent, False, anything but True or an
+        exception: no (the refusal-override POSTs need one)."""
+        signed_in = getattr(self.access_gate, "browser_signed_in", None)
+        if signed_in is None or not subject:
+            return False
+        try:
+            verdict = signed_in(conn, subject)
+            if inspect.isawaitable(verdict):
+                verdict = await verdict
+        except Exception as exc:  # noqa: BLE001 — no proof of a person
+            logger.warning("overrides: browser_signed_in failed (%s)", type(exc).__name__)
+            return False
+        return verdict is True
+
     async def admit(self, conn: HTTPConnection, surface: str) -> Admission:
         """The access gate's verdict (it scrubs its own credentials from the
         scope first); without a gate every client is the implicit single
@@ -3040,9 +3059,11 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
     dashboard hands out). The requester is the subject the access gate
     admitted to the dashboard, else the local operator: only its own records
     are listed, approved or revoked. The POSTs are served only to a subject
-    an access gate that guards the dashboard signed in (``can_approve``):
-    without a sign-in the CSRF token is no proof of a person — any local
-    client can fetch it — so the local operator approves with the CLI."""
+    an access gate that guards the dashboard signed in IN A BROWSER
+    (``can_approve``, ``ProxyState.browser_signed_in``): without one the
+    CSRF token is no proof of a person — any local client can fetch it, and
+    an agent holding its user's API key is admitted to the dashboard too —
+    so the local operator approves with the CLI."""
     if not _host_allowed(request, state):
         return JSONResponse({"error": "host not allowed"}, status_code=403)
     if not _origin_allowed(request, state):
@@ -3062,10 +3083,16 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
             {"error": "the access gate could not name this requester's overrides"},
             status_code=503,
         )
-    # Only a requester an access gate SIGNED IN to the dashboard approves or
-    # revokes here: without one, any local client (an agent with curl) reads
-    # the CSRF token from the dashboard and could approve its own refusal.
-    can_approve = state.guards_dashboard and bool(subject)
+    # Only a requester a PERSON signed in to the dashboard in a browser
+    # approves or revokes here: without one, any local client (an agent with
+    # curl) reads the CSRF token from the dashboard and could approve its own
+    # refusal — and so could an agent presenting its user's API key, which
+    # a gate also admits to the dashboard (``browser_signed_in``).
+    can_approve = (
+        state.guards_dashboard
+        and bool(subject)
+        and await state.browser_signed_in(request, subject)
+    )
     if request.url.path == f"{RESERVED_PREFIX}/overrides":
         if request.method != "GET":
             return JSONResponse({"error": "method not allowed"}, status_code=405)
@@ -3101,8 +3128,9 @@ async def _handle_overrides(request: Request, state: ProxyState, admission: Admi
 
 
 _OVERRIDE_SIGN_IN = (
-    "approving or revoking a refusal override here needs a dashboard sign-in"
-    " (llm-redact-pro [auth.dashboard]); on the proxy's machine run"
+    "approving or revoking a refusal override here needs a person signed in to the"
+    " dashboard in a browser (llm-redact-pro [auth.dashboard]; an API key or a user key"
+    " is not one); on the proxy's machine run"
     " `llm-redact override CODE --once|--always` (or `override revoke ID`) instead"
 )
 

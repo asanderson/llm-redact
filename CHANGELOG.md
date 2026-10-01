@@ -535,6 +535,13 @@ and tags `vX.Y.Z`.
 - The 256-code bound on pending refusal codes was global, so one requester retrying a
   refused request dropped other requesters' codes before they could approve them. The
   bound is now per requester (256), with a 4096-code bound on the whole file.
+- The refusal-override approve and revoke POSTs accepted any dashboard admission
+  carrying a subject, so an agent holding its user's API key (which an access gate
+  admits to the dashboard too) could fetch the CSRF token and approve its own refusal
+  with no person involved. They now need a browser sign-in: a new optional
+  `AccessGate.browser_signed_in(conn, subject)` must say the connection rests on the
+  gate's browser sign-in session; without it (or with an older gate) the POSTs answer
+  403 and approval stays with the CLI.
 
 ## [1.9.0] - 2026-09-29
 

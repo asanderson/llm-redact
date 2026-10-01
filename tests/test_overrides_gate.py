@@ -142,7 +142,7 @@ async def test_records_follow_the_stable_id_not_the_name(
         approved = await client.post(
             "/__llm-redact/overrides/approve",
             json={"id": pending.id, "scope": "always"},
-            headers={"x-test-user": "alice", **csrf},
+            headers={"x-test-user": "alice", "cookie": "test-session=alice", **csrf},
         )
         assert approved.status_code == 200, approved.text
         # alice is renamed alicia (same id); another user takes "alice".

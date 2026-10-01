@@ -133,10 +133,14 @@ The endpoints behind the dashboard buttons are core:
 
 The POSTs sit behind the same guard chain as the configuration editor
 (Host, Origin, and a CSRF token that only the llm-redact-pro dashboard page
-hands out), and are served only to a requester an access gate signed in to
-the dashboard. Without a sign-in any local client can fetch the CSRF token,
-so it proves no person: the POSTs answer 403 and point to the CLI, and the
-listing says `"can_approve": false`.
+hands out), and are served only to a requester a person signed in to the
+dashboard IN A BROWSER: the access gate must say the dashboard connection
+rests on its browser sign-in (its optional `browser_signed_in` member;
+llm-redact-pro: the web session cookie). An API key, a per-user key, a bearer
+token or a client certificate the gate also admits to the dashboard is no
+sign-in: an agent can hold one. Without a browser sign-in any local client
+can fetch the CSRF token, so it proves no person: the POSTs answer 403 and
+point to the CLI, and the listing says `"can_approve": false`.
 
 ## Lifetimes and storage
 

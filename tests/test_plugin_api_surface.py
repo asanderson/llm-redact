@@ -349,6 +349,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``bind_connections(control: ConnectionControl) -> None``",
         "``approves_overrides(subject: str) -> bool``",
         "``override_subject(subject: str) -> str``",
+        "``browser_signed_in(conn: HTTPConnection, subject: str) -> bool``",
     ),
     "SessionRouter": (
         "``is_durable(session_id) -> bool``",

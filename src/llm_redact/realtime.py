@@ -1507,6 +1507,10 @@ async def _relay(
     # parsed for the router.
     observe_frames = state.observes_realtime_server_frames
 
+    # "once" / "always" once a frame passed a refusal on its requester's
+    # approved override (overrides.py): the connection's row says so.
+    override_marker: str | None = None
+
     async def close_on_policy(reason: str, code: int = 1008) -> None:
         # The client FIRST: closing the upstream first lets upstream_to_client
         # mirror the upstream's 1000 to the client ahead of the 1008.
@@ -1527,7 +1531,7 @@ async def _relay(
             await close_on_policy(relay.close_reason, code=relay.close_code)
 
     async def client_to_upstream() -> None:
-        nonlocal status
+        nonlocal status, override_marker
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
@@ -1573,11 +1577,14 @@ async def _relay(
                 # Each client frame is a body of its own: redacted through a
                 # copy that counts its strings against max_body_strings (the
                 # frame cap, MAX_FRAME_BYTES, bounds bytes only).
+                # The requester's approved overrides, asked only where a
+                # block-mode value would close the connection (overrides.py).
+                frame_scope = state.override_scope()
+                frame_redactor = ctx.redactor.with_budget(state.config.max_body_strings)
+                if frame_scope is not None:
+                    frame_redactor = frame_redactor.with_overrides(frame_scope)
                 frame_ctx = RequestContext(
-                    ctx.session_id,
-                    ctx.vault,
-                    ctx.redactor.with_budget(state.config.max_body_strings),
-                    ctx.rehydrator,
+                    ctx.session_id, ctx.vault, frame_redactor, ctx.rehydrator
                 )
                 outbound: str | bytes
                 if not provider_config.detection:
@@ -1601,6 +1608,16 @@ async def _relay(
                             parsed=parsed,
                         ),
                     )
+                    if frame_scope is not None:
+                        # Consumed as the frame passes (no await since the
+                        # redaction): a one-time grant another request used
+                        # first refuses the frame.
+                        ok, marker = frame_scope.commit()
+                        if not ok:
+                            raise _OverrideRaced(frame_scope.fault)
+                        override_marker = marker or override_marker
+                        # Handed to the upstream next, with no check between.
+                        frame_scope.settle(sent=True)
                 await upstream.send(outbound)
             except _FrameRefused as refused:
                 # The session router refused the frame (another user's stored
@@ -1631,9 +1648,29 @@ async def _relay(
                 # Block mode on a realtime stream: the event must never
                 # reach the upstream, and the connection cannot continue
                 # coherently without it — close both sides (1008 = policy
-                # violation; detector type only, never the value).
+                # violation; detector type only, never the value). The
+                # reason carries the refusal's code when it can: approved,
+                # it lets the value through on the next connection.
                 logger.info("WS %s -> blocked (%s)", path, blocked)
-                await close_on_policy(f"blocked by llm-redact policy ({blocked})")
+                allow_code = (
+                    frame_scope.refusal_code("block", adapter.provider, "WS", path)
+                    if frame_scope is not None
+                    else None
+                )
+                await close_on_policy(
+                    blocked_reason(
+                        blocked.detector_type,
+                        allow_code,
+                        named=frame_scope is not None and bool(frame_scope.subject),
+                    )
+                )
+                return
+            except _OverrideRaced as raced:
+                logger.info("WS %s -> refused (a one-time override could not be used)", path)
+                status = 400
+                await close_on_policy(
+                    OVERRIDE_FAULT_REASON if raced.fault else OVERRIDE_RACED_REASON
+                )
                 return
             except state.vault_faults as fault:
                 # The vault could not record this frame's placeholders (a
@@ -1733,7 +1770,44 @@ async def _relay(
             detections=dict(connection_counts),
             rehydrations=dict(pool.counts),
             audit_token=audit_token,
+            override=override_marker,
         )
+
+
+class _OverrideRaced(Exception):
+    """A frame relied on a one-time override another request used first
+    (``fault``: the store could not record the use)."""
+
+    def __init__(self, fault: bool) -> None:
+        super().__init__()
+        self.fault = fault
+
+
+OVERRIDE_RACED_REASON = "llm-redact: the one-time override was already used; frame not forwarded"
+OVERRIDE_FAULT_REASON = (
+    "llm-redact: the one-time override could not be recorded; frame not forwarded"
+)
+
+
+def blocked_reason(detector_type: str, code: str | None, *, named: bool = False) -> str:
+    """The 1008 close reason for a block-mode value: the type, and how to
+    allow it when there is a code — the CLI with the code for the local
+    operator, the dashboard for a ``named`` user — the longest wording that
+    fits a close frame's 123 bytes, so the hint is never cut off."""
+    if code is None:
+        return f"blocked by llm-redact policy ({detector_type})"
+    hint = (
+        "Refusal overrides in the llm-redact dashboard"
+        if named
+        else f"llm-redact override {code} --once|--always"
+    )
+    for reason in (
+        f"blocked by llm-redact policy ({detector_type}); to allow: {hint}",
+        f"blocked ({detector_type}); allow: {hint}",
+    ):
+        if len(reason.encode("utf-8")) <= _MAX_CLOSE_REASON_BYTES:
+            return reason
+    return f"blocked by llm-redact policy; to allow: {hint}"
 
 
 class _FrameRefused(Exception):

@@ -225,7 +225,7 @@ body is still arriving never signs a pass-through request with the
 proxy's identity. Detection rules, allowlists, NER, fuzzy rehydration, note
 injection, `max_body_bytes`, `max_body_strings`, upstream URLs, and the routing sections
 `[upstreams]`/`[routing]`/`[prices]` (llm-redact-pro) hot-reload; vault, audit,
-host, port, allowed_hosts, allowed_origins, log, TLS, OTel, users, email, and extraction changes warn
+host, port, allowed_hosts, allowed_origins, log, TLS, OTel, users, email, extraction, and overrides changes warn
 "require restart"
 and keep the old value; so do sections a plugin adds, such as llm-redact-pro's
 `[auth]`. A broken config file is logged and ignored — the running config

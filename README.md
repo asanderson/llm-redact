@@ -386,7 +386,7 @@ essentials:
   SIGHUP — `kill -HUP $(pgrep -f 'llm-redact serve')`, or for containers
   `docker kill --signal=HUP llm-redact`. Detection settings and upstream
   URLs apply immediately; vault, audit, host, port, allowed_hosts,
-  allowed_origins, log, TLS, OTel, users, email, and extraction changes are kept as-is
+  allowed_origins, log, TLS, OTel, users, email, extraction, and overrides changes are kept as-is
   with a "require restart"
   warning, and so are sections a plugin adds (llm-redact-pro's `[auth]`).
   A broken config file is logged and ignored — the running config stays

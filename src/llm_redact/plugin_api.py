@@ -745,6 +745,13 @@ class AccessGate(Protocol):
       long-lived connections (realtime relays, live-events streams), so the
       gate can close a user's or a credential's connections the moment it
       revokes them or signs them out (``Admission.grant``).
+    - OPTIONAL ``approves_overrides(subject: str) -> bool`` — whether this
+      admitted user can approve their own refusal overrides (overrides.py;
+      they approve signed in to the dashboard). Asked when a detection
+      refusal of theirs is about to carry a code: only True mints one, with
+      a hint naming the dashboard; absent, False or an exception gives no
+      code (no hint the user could not act on). The local operator (no
+      subject) always gets the CLI's code.
     - ``recheck_interval: float`` — seconds between the core's re-checks
       of every open long-lived connection's ``Admission.recheck`` (read
       once at startup; default 30; anything but a number from 5 to 3600 is

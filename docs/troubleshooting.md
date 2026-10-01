@@ -134,6 +134,22 @@ mode to `warn` if forwarding it is acceptable, or opt in to
 of the file where the route takes a text file (the model then sees text,
 not the original).
 
+## "to allow: llm-redact override CODE --once | --always"
+
+A detection refusal you may override for your own data: a block-mode value,
+values in a binary upload, a verbatim field, a body that is not JSON, or a
+binary part under `binary_uploads = "refuse"`. Run the command yourself in
+a terminal. It shows what was refused and waits for `allow` typed there. It
+never reads stdin, so an agent cannot confirm for you. After that, send the
+request again. `--once` covers the next such request within
+`[overrides] ttl_minutes` (default 15). `--always` covers every request
+until `llm-redact override revoke`. The value is FORWARDED unredacted. The
+error "no pending refusal matches (it is unknown, used or expired)" means
+the code was already used or is older than the TTL: repeat the request for
+a new one. "belongs to a named user" means the refusal is a named user's,
+who approves it in the llm-redact-pro dashboard. See
+[overrides.md](overrides.md).
+
 ## "request body exceeds llm-redact max_body_bytes"
 
 A 413: the redactable body is bigger than the cap (default ~10 MiB), and

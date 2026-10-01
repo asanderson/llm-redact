@@ -116,6 +116,52 @@ and tags `vX.Y.Z`.
   untouched.
 
 ### Added
+- Refusal overrides (`docs/overrides.md`). A detection refusal now carries
+  a single-use code: `to allow: llm-redact override CODE --once | --always`.
+  The refusals that carry one are a block-mode value (HTTP 400, and a
+  realtime close 1008 with the code in the reason), values found in an
+  inspected binary upload, a verbatim identifier field that would be
+  redacted, a plain-text body (never one a JSON reader could take for a
+  request: invalid UTF-8, a body opening with `{` or `[`, multipart or form
+  data carry no code), and a binary upload part under
+  `binary_uploads = "refuse"` (the last two only with the client's own key).
+  The requester approves it:
+  - `llm-redact override CODE --once|--always` shows the refusal and reads a
+    confirmation typed on the controlling terminal (never stdin; it refuses
+    without a terminal);
+  - or the llm-redact-pro dashboard's buttons, through the new guarded
+    endpoints `GET /__llm-redact/overrides` and
+    `POST /__llm-redact/overrides/approve|revoke`. The POSTs need a subject
+    an access gate signed in to the dashboard; without one they answer 403.
+
+  The terminal confirmation guards against an accidental approval, not
+  against local software: an agent with a shell running as the operator can
+  type the confirmation into a pseudo-terminal it opens.
+
+  `--once` passes the next matching request of the same requester, consumed
+  atomically. `--always` is an allowlist entry for the exact values and
+  types (a route rule for the body kinds) until `llm-redact override revoke`.
+  `llm-redact override list` shows pending codes and rules without values.
+  Approvals are bound to the requester: the access gate's admitted subject,
+  else the local operator. A named user's refusal carries a code only when
+  the gate's new optional `AccessGate.approves_overrides(subject)` says they
+  can approve (in the dashboard); its hint then names the dashboard. An approved value is FORWARDED unredacted, like
+  warn mode. Every use is marked `override: once|always` on the recent,
+  events and audit rows (new `AuditRecord.override` field). Uses are counted
+  in `/status` `overrides` and `llm_redact_overrides_used_total{kind}`, a
+  `status` posture line and a `doctor` WARN.
+
+  Deny strings, access control, request origin, target checks, anything under a credential
+  the proxy holds, framing refusals, size caps and vault faults never carry
+  a code. The store is a 0600 sqlite file (`$XDG_DATA_HOME/llm-redact/overrides.db`)
+  that holds HMACs of values and hashes of codes, never either in the clear.
+  New restart-only `[overrides]` section (`enabled`, `ttl_minutes`, `path`).
+  - A verbatim field is now checked with `Redactor.scan_text` (detection
+    only). A refused field no longer issues placeholders or counts detections
+    for the value it refuses.
+  - New `providers.base.UnscannedBinaryFile`, the `UnredactableRequest`
+    subclass for an unscannable binary part.
+  - `Redactor.with_overrides`.
 - Upload inspection seam (`plugin_api.UploadInspector`, `UploadPart`, `Inspection`;
   `Registry.build_upload_inspector(config, tier)`, Free default None): a plugin
   (llm-redact-pro's document extractors) reads each BINARY file part of an upload as

@@ -193,6 +193,7 @@ RESTART_ONLY_KEYS = (
     "users",
     "email",
     "extraction",
+    "overrides",
 )
 
 # Every top-level key the core itself parses. Anything else must be claimed
@@ -211,6 +212,7 @@ CORE_SECTION_KEYS = frozenset(
         "detection",
         "vault",
         "rehydration",
+        "overrides",
         "audit",
         "log",
         "tls",
@@ -557,6 +559,19 @@ class VaultConfig:
     # [vault.kms]: the fernet key is KMS-wrapped (llm-redact-pro unwraps it
     # at startup). None = the local sources (env / key command / keychain).
     kms: VaultKmsConfig | None = None
+
+
+@dataclass(frozen=True)
+class OverridesConfig:
+    # Refusal overrides (overrides.py): a detection refusal carries a
+    # single-use code its requester may approve once or for every time
+    # (`llm-redact override CODE --once | --always`). false: no code, no
+    # override is ever applied — every refusal is final.
+    enabled: bool = True
+    # How long a code, and a one-time approval, stays usable.
+    ttl_minutes: int = 15
+    # The override store; default $XDG_DATA_HOME/llm-redact/overrides.db.
+    path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1023,6 +1038,7 @@ class Config:
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     vault: VaultConfig = field(default_factory=VaultConfig)
     rehydration: RehydrationConfig = field(default_factory=RehydrationConfig)
+    overrides: OverridesConfig = field(default_factory=OverridesConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
     log: LogConfig = field(default_factory=LogConfig)
     tls: TlsConfig = field(default_factory=TlsConfig)
@@ -2609,6 +2625,17 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     if audit.required and not audit.enabled:
         raise ConfigError("[audit] required = true needs [audit] enabled = true")
 
+    overrides_raw = raw.get("overrides", {})
+    _require_keys(overrides_raw, {"enabled", "ttl_minutes", "path"}, "[overrides]")
+    ttl_minutes = _int_key(overrides_raw, "ttl_minutes", 15, "[overrides]")
+    if not 1 <= ttl_minutes <= 1440:
+        raise ConfigError("[overrides] ttl_minutes must be between 1 and 1440")
+    overrides = OverridesConfig(
+        enabled=_bool_key(overrides_raw, "enabled", True, "[overrides]"),
+        ttl_minutes=ttl_minutes,
+        path=_optional_str(overrides_raw, "path", "[overrides]"),
+    )
+
     log_raw = raw.get("log", {})
     _require_keys(log_raw, {"format"}, "[log]")
     log_format = str(log_raw.get("format", "text"))
@@ -2688,6 +2715,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         detection=detection,
         vault=vault,
         rehydration=rehydration,
+        overrides=overrides,
         audit=audit,
         log=log,
         tls=tls,

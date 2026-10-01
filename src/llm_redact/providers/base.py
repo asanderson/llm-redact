@@ -176,6 +176,13 @@ def restore_exempt_mcp_blocks(original: Any, redacted: Any, exempt: frozenset[st
     return restore(original, redacted)
 
 
+class UnscannedBinaryFile(UnredactableRequest):
+    """A binary file part of an upload the proxy may not forward unscanned
+    (``redact_multipart`` without ``forward_binary``, the inspection did not
+    clear it): the request is refused (400). Its own class so the proxy can
+    tell this CONTENT refusal from the framing ones (overrides)."""
+
+
 class VerbatimFieldRedacted(UnredactableRequest):
     """A request field the provider uses EXACTLY as sent — an identifier or
     a name it keeps (a fine-tuned model's name suffix, a file id, a W&B
@@ -352,7 +359,10 @@ def prepare_route_request(
     fields = _held_fields(held)
     for field in fields:
         for text in _strings_in(field.value):
-            if redactor.redact_text(text) != text:
+            # Detection only (nothing issued): a value the redaction would
+            # replace refuses the request — unless the requester approved an
+            # override for it (Redactor.with_overrides), which sends it as is.
+            if redactor.scan_text(text):
                 label = ".".join(
                     key for key in field.position if key not in (_EVERY_ITEM, _ANY_DEPTH)
                 )

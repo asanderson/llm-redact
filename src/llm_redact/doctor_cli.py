@@ -700,8 +700,52 @@ def _check_posture(report: _Report, config: Config) -> None:
             " are redacted",
         )
 
+    opted_out = _check_overrides(report, config) or opted_out
+
     if not opted_out:
         report.line("PASS", "posture", "no coverage opt-outs configured (all traffic redacted)")
+
+
+def _check_overrides(report: _Report, config: Config) -> bool:
+    """Refusal overrides (overrides.py): the store read offline (never
+    created). A WARN with the counts when approved overrides exist —
+    requests that pass on one forward the refused values (or bodies) as
+    sent; True then (an opt-out). Counts only, never a value or a code."""
+    if not config.overrides.enabled:
+        report.line("PASS", "posture", "refusal overrides disabled: every refusal is final")
+        return False
+    from llm_redact.overrides import OverrideStore, default_overrides_path
+
+    path = (
+        Path(config.overrides.path).expanduser()
+        if config.overrides.path
+        else default_overrides_path()
+    )
+    store = OverrideStore(path, read_only=True)
+    try:
+        counts = store.counts()
+    except Exception as exc:  # noqa: BLE001 — doctor reports, never raises
+        problem = type(exc).__name__
+        report.line("WARN", "posture", f"the refusal override store could not be read ({problem})")
+        return False
+    finally:
+        store.close()
+    if counts["always"] or counts["once"]:
+        report.line(
+            "WARN",
+            "posture",
+            f"refusal overrides: {counts['always']} every-time rule(s), {counts['once']}"
+            " one-time grant(s) — requests they pass FORWARD the refused values (or bodies)"
+            " as sent (`llm-redact override list`)",
+        )
+        return True
+    report.line(
+        "PASS",
+        "posture",
+        "refusal overrides enabled, none approved: a refusal carries a code a person"
+        " may approve on the terminal",
+    )
+    return False
 
 
 def _access_gate_requires_identity(config: Config) -> bool:

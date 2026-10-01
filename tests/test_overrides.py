@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -401,8 +402,9 @@ def test_the_store_file_is_private_and_bounded(tmp_path: Path) -> None:
     assert store.entries() == [] and store.counts() == {"pending": 0, "once": 0, "always": 0}
     for _ in range(5):
         store.record_pending("block", "", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
-    assert (tmp_path / "d").stat().st_mode & 0o777 == 0o700
-    assert (tmp_path / "d" / "o.db").stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":  # POSIX mode bits are synthetic on Windows
+        assert (tmp_path / "d").stat().st_mode & 0o777 == 0o700
+        assert (tmp_path / "d" / "o.db").stat().st_mode & 0o777 == 0o600
     assert store.counts()["pending"] == 3  # oldest dropped
     store.close()
     assert EMAIL.encode() not in (tmp_path / "d" / "o.db").read_bytes()

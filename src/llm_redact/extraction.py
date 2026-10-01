@@ -79,6 +79,24 @@ CRYPTO_HINT = 'pip install "llm-redact-proxy[crypto]"'
 # reaches the process that parses hostile files); isolated mode (-I)
 # ignores PYTHON* variables anyway.
 _WORKER_ENV = {"PATH": os.defpath}
+# Windows' own variables a Python process needs to start (CPython reads
+# SYSTEMROOT to seed its hash randomization and load system DLLs): system
+# paths, never a credential.
+_WINDOWS_ENV = ("SYSTEMROOT", "WINDIR")
+
+
+def worker_env(
+    platform: str = sys.platform, environ: Mapping[str, str] = os.environ
+) -> dict[str, str]:
+    """The worker's whole environment: no variable of the proxy's (its
+    credentials stay out of the process that parses hostile files) but the
+    ones the platform needs to start Python."""
+    env = dict(_WORKER_ENV)
+    if platform == "win32":
+        env.update({name: environ[name] for name in _WINDOWS_ENV if name in environ})
+    return env
+
+
 _WORKER = (sys.executable, "-I", "-m", "llm_redact.extract_worker")
 _IMAGE_SIGNATURES = (
     b"\x89PNG",
@@ -334,11 +352,12 @@ def media_type(data: bytes, coarse: str) -> str:
 
 
 # Whether the kernel enforces the worker's address-space limit
-# (``extract_worker.apply_limits``): macOS accepts RLIMIT_AS and ignores it.
+# (``extract_worker.apply_limits``): macOS accepts RLIMIT_AS and ignores it,
+# and Windows has no resource limits at all.
 # Where it is not enforced, the worker is never handed a file larger than a
 # quarter of ``worker_memory_mb`` — a parser's memory grows with its input,
 # so the input bound stands in for the limit the platform will not apply.
-MEMORY_LIMIT_ENFORCED = sys.platform != "darwin"
+MEMORY_LIMIT_ENFORCED = sys.platform not in ("darwin", "win32")
 
 
 def _local_class(coarse: str, formats: tuple[str, ...]) -> bool:
@@ -553,7 +572,7 @@ class ExtractionInspector:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                env=_WORKER_ENV,
+                env=worker_env(),
                 start_new_session=True,
             )
         except OSError as exc:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import zipfile
 from typing import Any
 
@@ -1657,3 +1658,10 @@ def test_apply_limits_sets_each_cap_and_skips_refused_ones(monkeypatch: pytest.M
     assert limits[resource.RLIMIT_FSIZE] == (0, 0)
     assert limits[resource.RLIMIT_DATA] == (256 << 20, 256 << 20)
     assert resource.RLIMIT_AS in limits  # attempted, refused, skipped
+
+
+def test_apply_limits_applies_none_without_resource_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows has no `resource` module: the worker starts without limits
+    # (the parent bounds its input instead) rather than failing to start.
+    monkeypatch.setitem(sys.modules, "resource", None)
+    apply_limits(256 << 20, 7)

@@ -153,7 +153,8 @@ def test_the_store_path_comes_from_the_config(
 ) -> None:
     db = tmp_path / "from-config.db"
     config = tmp_path / "config.toml"
-    config.write_text(f'[overrides]\npath = "{db}"\n')
+    # A TOML literal string: a Windows path's backslashes are not escapes.
+    config.write_text(f"[overrides]\npath = '{db}'\n")
     _pending(db)
     assert _run("list", "--json", "--config", str(config)) == 0
     assert len(json.loads(capsys.readouterr().out)) == 1
@@ -315,7 +316,8 @@ def test_listing_and_doctor_never_write_the_store(
     report = _Report()
     assert _check_overrides(report, Config(overrides=OverridesConfig(path=str(db)))) is True
     assert hashlib.sha256(db.read_bytes()).hexdigest() == before
-    assert (store_dir.stat().st_mode & 0o777) == 0o755
+    if sys.platform != "win32":  # POSIX mode bits are synthetic on Windows
+        assert (store_dir.stat().st_mode & 0o777) == 0o755
     empty = tmp_path / "empty.db"
     empty.write_bytes(b"")
     assert _run("list", "--db", str(empty)) == 0

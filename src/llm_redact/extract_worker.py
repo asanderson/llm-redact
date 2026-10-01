@@ -2399,8 +2399,13 @@ def apply_limits(memory_bytes: int, cpu_seconds: int) -> None:
     """Cap this process before it reads the file: address space (where the
     platform enforces it — not macOS), CPU seconds, files written (none),
     open files and child processes. A limit the platform refuses is skipped
-    (the parent's wall-clock kill still holds)."""
-    import resource
+    (the parent's wall-clock kill still holds), and a platform without
+    resource limits (Windows) applies none: the parent bounds the input
+    there instead (``extraction.MEMORY_LIMIT_ENFORCED``)."""
+    try:
+        import resource
+    except ImportError:
+        return
 
     for name, value in (
         ("RLIMIT_AS", memory_bytes),

@@ -124,7 +124,8 @@ Each file is read by a **fresh worker process** (`python -I -m
 llm_redact.extract_worker`): isolated mode, an empty environment (no
 credential of the proxy's reaches the process that parses hostile files),
 and — set by the worker itself before it reads a byte — an address-space
-limit (`worker_memory_mb`; macOS ignores it, so there the proxy never hands
+limit (`worker_memory_mb`; macOS ignores it and Windows has none, so there the
+proxy never hands
 the worker a file larger than a quarter of `worker_memory_mb` — counted
 `memory_unenforced`, nothing read), a CPU-time limit, no file
 writes, few open files and no child processes. The proxy kills the worker

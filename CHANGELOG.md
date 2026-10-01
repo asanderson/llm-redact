@@ -304,8 +304,10 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
-- Document extraction on macOS: the kernel ignores the worker's address-space limit
-  (`RLIMIT_AS`), so a large file was read with unbounded memory. Where the limit is
+- Document extraction on macOS and Windows: macOS ignores the worker's address-space
+  limit (`RLIMIT_AS`) and Windows has no resource limits (the worker also failed to
+  start there: no `resource` module, no `SYSTEMROOT` in its scrubbed environment), so
+  a large file was read with unbounded memory. Where the limit is
   not enforced, the worker is now never handed a file larger than a quarter of
   `[extraction] worker_memory_mb` (counted `memory_unenforced`, nothing read: the
   file keeps the unscanned-binary rules).

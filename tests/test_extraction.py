@@ -8,6 +8,7 @@ tests/test_extraction_e2e.py."""
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -750,3 +751,17 @@ async def test_a_file_declared_as_another_format_is_not_vouched_for(
     )
     assert inspection.complete is complete
     assert inspection.text is not None and EMAIL in inspection.text  # still scanned
+
+
+def test_the_worker_environment_holds_only_what_python_needs() -> None:
+    # No variable of the proxy's reaches the worker; on Windows the two
+    # system paths CPython needs to start (SYSTEMROOT seeds its hashing).
+    environ = {"SYSTEMROOT": r"C:\\Windows", "WINDIR": r"C:\\Windows", "API_KEY": "sk-x"}
+    assert extraction.worker_env("linux", environ) == {"PATH": os.defpath}
+    assert extraction.worker_env("darwin", environ) == {"PATH": os.defpath}
+    assert extraction.worker_env("win32", environ) == {
+        "PATH": os.defpath,
+        "SYSTEMROOT": r"C:\\Windows",
+        "WINDIR": r"C:\\Windows",
+    }
+    assert extraction.worker_env("win32", {}) == {"PATH": os.defpath}

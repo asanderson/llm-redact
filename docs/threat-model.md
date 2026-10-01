@@ -362,8 +362,12 @@ own answer decides whether the page may read a response).
   environment variables or, with `auth = "identity"`, from the
   workload's cloud identity at runtime — never the config file; upload
   failures warn and drop rather than blocking or crashing the proxy
-  (under `[audit] required` the sinks instead spool from the audit DB
-  and retry until the upload is confirmed — at-least-once, never drop).
+  (under `[audit] required` the sinks instead spool END, interrupted
+  and classic rows from the audit DB and retry until the upload is
+  confirmed — at-least-once, never drop; the START and AMEND rows they
+  also ship travel through a bounded in-memory buffer, so a crash, a kill
+  or a failed final upload can lose them, and past 10,000 queued rows they
+  drop oldest-first, counted in `rows_dropped`).
 
 ### Deliberate protection opt-outs
 

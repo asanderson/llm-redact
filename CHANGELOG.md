@@ -81,6 +81,14 @@ and tags `vX.Y.Z`.
   treat an extension naming another format than the file's bytes as incomplete.
 
 ### Changed
+- Docs and the `llm-redact status` posture line now describe the required-mode audit
+  sinks as llm-redact-pro ships them: END, interrupted and classic rows spool from
+  the audit database and are never dropped, while the START and AMEND rows the sinks
+  also ship travel through a bounded in-memory buffer (lost on a crash, a kill or a
+  failed final upload; past 10,000 queued rows dropped oldest-first, counted in
+  `rows_dropped`, which the posture line now calls "not uploaded in time"). The
+  `browser_signed_in` contract and docs/overrides.md say a gate may count an
+  administrator's browser-presented client certificate as a person's sign-in.
 - `llm-redact override revoke ID` exits 0 when it revoked the record while refusal
   overrides are off in the config it read (it still prints the off note on stderr); it
   exits 1 only when nothing was revoked (an unknown id, a missing store) or on an error.

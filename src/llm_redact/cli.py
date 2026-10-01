@@ -918,7 +918,9 @@ def _print_posture(payload: dict[str, Any]) -> None:
     for sink in ("s3", "azure"):
         dropped = (payload.get("audit", {}).get(sink) or {}).get("rows_dropped") or 0
         if dropped:
-            lines.append(f"audit.{sink}: {dropped} rows dropped (upload failures)")
+            lines.append(
+                f"audit.{sink}: {dropped} rows dropped (not uploaded in time: store failing or behind)"
+            )
     vault_block = payload.get("vault") or {}
     if vault_block.get("remote_plaintext"):
         lines.append(

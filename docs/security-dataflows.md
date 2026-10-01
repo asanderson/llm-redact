@@ -80,7 +80,7 @@ deliberate scope decisions rather than gaps:
 | Logs (text or JSON) | path, status, detection counts | values, headers, bodies, URLs with query strings (`?key=` auth) |
 | `/__llm-redact/*` (incl. `/recent`, `/events`, and the llm-redact-pro dashboard) | detector types + counts, session metadata | values, placeholder ids, allowlist contents (the llm-redact-pro config-editor GET is the documented exception, behind gate ②) |
 | Audit DB (opt-in, local) | same metadata + durations | values, placeholder ids |
-| S3 audit sink (opt-in, `[audit.s3]`) | the same audit rows as NDJSON batch objects — shipping them to a bucket is an explicit off-machine trust decision; credentials come from env vars or the workload's cloud identity (`auth = "identity"`), never the config file; failures WARN and drop (under `[audit] required`: spool from the audit DB, retry until confirmed — never drop) | values, placeholder ids, credentials |
+| S3 audit sink (opt-in, `[audit.s3]`) | the same audit rows as NDJSON batch objects — shipping them to a bucket is an explicit off-machine trust decision; credentials come from env vars or the workload's cloud identity (`auth = "identity"`), never the config file; failures WARN and drop (under `[audit] required`: END, interrupted and classic rows spool from the audit DB and retry until confirmed — never dropped; START and AMEND rows ship from a bounded in-memory buffer and can be lost, counted in `rows_dropped`) | values, placeholder ids, credentials |
 | OpenTelemetry (opt-in) | same metadata as spans/counters — pointing `endpoint` at a remote collector is an explicit trust decision | values, headers, placeholder ids |
 | Vault | — (never leaves the machine) | — |
 

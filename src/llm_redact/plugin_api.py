@@ -767,7 +767,11 @@ class AccessGate(Protocol):
       on a sign-in a PERSON made in a browser (a session the gate's browser
       sign-in established, e.g. its session cookie) — never on a credential
       an agent can hold and present itself (an API key, a per-user key, a
-      bearer token, a client certificate). The refusal-override approve and
+      bearer token). A gate MAY count an administrator's client certificate
+      presented by a browser (llm-redact-pro: only when certificates are not
+      also the API credential, and documenting that whoever holds the
+      certificate and its key is then trusted as a person). The
+      refusal-override approve and
       revoke POSTs are served only when it is True. It may return an
       awaitable; absent, anything but True, or an exception: refused (403).
     - ``recheck_interval: float`` — seconds between the core's re-checks

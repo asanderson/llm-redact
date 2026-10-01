@@ -187,9 +187,12 @@ The POSTs sit behind the same guard chain as the configuration editor
 hands out), and are served only to a requester a person signed in to the
 dashboard IN A BROWSER: the access gate must say the dashboard connection
 rests on its browser sign-in (its optional `browser_signed_in` member;
-llm-redact-pro: the web session cookie). An API key, a per-user key, a bearer
-token or a client certificate the gate also admits to the dashboard is no
-sign-in: an agent can hold one. Without a browser sign-in any local client
+llm-redact-pro: the web session cookie). An API key, a per-user key or a bearer
+token the gate also admits to the dashboard is no sign-in: an agent can hold
+one. A gate may count an administrator's client certificate presented by a
+browser (llm-redact-pro does so only when certificates are not also the API
+credential); whoever holds that certificate and its key is then trusted as a
+person, so keep it in the browser's keystore, not in a file an agent can read. Without a browser sign-in any local client
 can fetch the CSRF token, so it proves no person: the POSTs answer 403 and
 point to the CLI, and the listing says `"can_approve": false`.
 

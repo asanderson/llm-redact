@@ -125,8 +125,11 @@ approval:
   user's stable id when the access gate supplies one (llm-redact-pro: the
   user's namespace, shown as `id:…` by `override list`), so a renamed user
   keeps their approvals and someone who later takes their old name inherits
-  none. The gate is asked about a user (can they approve, what is their id)
-  only once a refusal of theirs is being decided, never per request.
+  none. When the proxy forwards traffic, the gate is asked about a user (can
+  they approve, what is their id) only once a refusal of theirs is being
+  decided, never for every request or realtime frame; an upload under
+  `binary_uploads = "refuse"` looks up its route rule only once it holds a
+  binary part. The override endpoints below ask on each use.
 
 The endpoints behind the dashboard buttons are core:
 

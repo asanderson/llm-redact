@@ -136,7 +136,7 @@ from llm_redact.providers.base import (
     prepare_route_request,
 )
 from llm_redact.providers.custom import build_custom_adapters, custom_prefix
-from llm_redact.providers.openai import remember_raw_texts
+from llm_redact.providers.openai import BINARY_FILE, remember_raw_texts
 from llm_redact.realtime import (
     ALL_WS_ADAPTERS,
     RealtimeRelay,
@@ -3448,6 +3448,26 @@ def _plain_text_body(body: bytes, headers: Headers) -> bool:
     return lead[:1] not in ("", "{", "[")
 
 
+def _forward_on_rule(
+    scope: OverrideScope,
+    rules: list[tuple[str, int]],
+    forwarded: list[int],
+    route: tuple[str, str, str],
+    count: int,
+) -> None:
+    """``redact_multipart``'s ``forward_binary`` under ``binary_uploads =
+    "refuse"`` with the client's own key: told how many binary file parts
+    the upload holds once it was read in full, it forwards them only on the
+    requester's approved ``binary_upload`` rule for this route (kept in
+    ``rules``, used once the request passes), else refuses the upload as a
+    binary part without one is refused (``UnscannedBinaryFile``)."""
+    rule = scope.route_rule("binary_upload", *route)
+    if rule is None:
+        raise UnscannedBinaryFile(BINARY_FILE)
+    rules.append(rule)
+    forwarded.append(count)
+
+
 def _route_override(
     scope: OverrideScope,
     upload: "_UploadFate",
@@ -4968,14 +4988,19 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             )
             # binary_uploads = "refuse" with the client's own key: the
             # requester may have approved forwarding this route's binary
-            # parts unscanned (overrides.py) — used only if one is forwarded.
-            binary_rule = (
-                scope.route_rule("binary_upload", provider_name, request.method, path)
-                if forward_binary is None and not proxy_credential and scope is not None
-                else None
-            )
-            if binary_rule is not None:
-                forward_binary = binary_forwarded.append
+            # parts unscanned (overrides.py). Looked up only once the upload
+            # was read and holds a binary part it would refuse — never for
+            # an upload of text (the lookup may ask the access gate) — and
+            # used only then; without a rule the part is refused as before.
+            binary_rules: list[tuple[str, int]] = []
+            if forward_binary is None and not proxy_credential and scope is not None:
+                forward_binary = functools.partial(
+                    _forward_on_rule,
+                    scope,
+                    binary_rules,
+                    binary_forwarded,
+                    (provider_name, request.method, path),
+                )
             # The body the stored-object check read, when it re-serialized a
             # line repeating a key: every part — a text or binary file's too
             # — then goes out as the check read it.
@@ -5159,8 +5184,8 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                     path=path,
                     started=started,
                 )
-            if binary_rule is not None and binary_forwarded:
-                scope.use_route(binary_rule)  # type: ignore[union-attr]
+            if binary_rules and binary_forwarded:
+                scope.use_route(binary_rules[0])  # type: ignore[union-attr]
             if not _commit_overrides(scope, upload):
                 assert scope is not None  # nothing to commit without one
                 return refused_response(raced_message(scope), adapter, "one-time override")

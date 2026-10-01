@@ -532,7 +532,11 @@ and tags `vX.Y.Z`.
 - Refusal overrides asked the access gate's `approves_overrides` for every forwarded
   request and every realtime client frame (llm-redact-pro answers from its user
   registry on the event loop), though the answer matters only when a refusal mints a
-  code. The gate is now asked only once a refusal is being decided.
+  code. The gate is now asked only once a refusal is being decided. An upload under
+  `binary_uploads = "refuse"` (with the client's own key) also looked up its
+  requester's `binary_upload` route rule, asking the gate, before it was read, for
+  every upload of text too; it now looks it up only once the upload holds a binary
+  part it would refuse.
 - A named user's override records were keyed by their display name, so after a rename
   (or a revocation) whoever later took the name inherited that user's every-time rules
   and pending codes. A new optional `AccessGate.override_subject(subject)` names a

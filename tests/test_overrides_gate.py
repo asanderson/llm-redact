@@ -88,6 +88,44 @@ async def test_the_gate_is_asked_only_on_a_refusal(
     assert gate.approves == ["ada"] and gate.stable == ["ada"]
 
 
+def _upload(content: bytes, content_type: bytes) -> bytes:
+    return (
+        b'--b\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nuser_data\r\n'
+        b'--b\r\nContent-Disposition: form-data; name="file"; filename="f"\r\n'
+        b"Content-Type: " + content_type + b"\r\n\r\n" + content + b"\r\n--b--\r\n"
+    )
+
+
+async def test_an_upload_under_refuse_asks_the_gate_only_for_a_binary_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # binary_uploads = "refuse": the requester's binary_upload route rule
+    # (and so their stable id) is looked up only once a binary part is about
+    # to be refused, never for an upload of text.
+    gate = StableGate()
+    _install(monkeypatch, gate)
+    upstream = Upstream()
+    app = _app(tmp_path, upstream, detection=DetectionConfig(binary_uploads="refuse"))
+    form = {**_as("ada"), "content-type": "multipart/form-data; boundary=b"}
+    pdf = b"%PDF-1.7\n1 0 obj << >> endobj\n%%EOF\n"
+    async with _client(app) as client:
+        for n in range(5):
+            text = _upload(b"plain notes %d" % n, b"text/plain")
+            assert (await client.post("/v1/files", content=text, headers=form)).status_code == 200
+        assert gate.approves == [] and gate.stable == []
+        refused = await client.post(
+            "/v1/files", content=_upload(pdf, b"application/pdf"), headers=form
+        )
+        assert refused.status_code == 400 and DASHBOARD_HINT in refused.text
+        assert gate.stable and set(gate.stable) == {"ada"}
+        (pending,) = _store(tmp_path).entries(subject="id:ada")
+        _store(tmp_path).approve("always", approver="id:ada", pending_id=pending.id)
+        passed = await client.post(
+            "/v1/files", content=_upload(pdf, b"application/pdf"), headers=form
+        )
+    assert passed.status_code == 200 and pdf in upstream.requests[-1].content
+
+
 async def test_a_realtime_frame_asks_the_gate_nothing_until_it_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

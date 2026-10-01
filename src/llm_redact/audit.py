@@ -112,8 +112,10 @@ class WriteAheadAudit(AuditLog, Protocol):
     ``amend`` that START row's token and an entry shaped like a START row
     carrying the request's ``detections``/``warned``/``override``, before
     any upstream contact, and the request keeps ONE START row: its END row
-    finalizes the same token. ``amend`` must make the amendment durable or
-    raise :class:`AuditWriteError`; the core then refuses the request with
+    finalizes the same token. ``amend`` is synchronous and must make the
+    amendment durable before it returns, or raise :class:`AuditWriteError`
+    (an awaitable answer is closed unrun and treated as that error, never as
+    a durable amendment); the core then refuses the request with
     the provider-shaped 503 of a START row that cannot be committed (no
     upstream contact), and that refusal's END row closes the START row. A
     tamper-evident log never rewrites a chained row in place (it appends an

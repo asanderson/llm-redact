@@ -1685,10 +1685,14 @@ class ProxyState:
         request keeps one START row. Asked only when the log has the member
         (``write_ahead_amend``); raises :class:`AuditWriteError` when the
         amendment cannot be committed — the caller refuses 503 like a START
-        row that cannot be committed."""
+        row that cannot be committed. The member is synchronous: one that
+        answers an awaitable (an ``async def``) has made nothing durable yet
+        and the core never awaits it on the request path, so that answer is
+        closed unrun and treated as an amendment that cannot be committed —
+        never as a durable one."""
         amend = self.write_ahead_amend
         assert amend is not None  # asked only when the log has the member
-        amend(
+        answer: object = amend(
             token,
             self._audit_entry(
                 session=session,
@@ -1701,6 +1705,10 @@ class ProxyState:
                 override=_COMMITTED_OVERRIDE.get(),
             ),
         )
+        if inspect.isawaitable(answer):
+            if inspect.iscoroutine(answer):
+                answer.close()  # never run, never "never awaited"
+            raise AuditWriteError("write-ahead audit amend() returned an awaitable")
 
     def record_request(
         self,

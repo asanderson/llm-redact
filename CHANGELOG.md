@@ -20,7 +20,9 @@ and tags `vX.Y.Z`.
   and the marker before any upstream contact, instead of a second START row: the
   request keeps one START row, which its END row finalizes. An amendment that cannot be
   committed refuses the request with the same provider-shaped 503 as a START row that
-  cannot be committed, before anything is sent, and its row ends the START row. A log
+  cannot be committed, before anything is sent, and its row ends the START row. The
+  member is synchronous: one answering an awaitable (an `async def amend`) is closed
+  unrun and refused the same way, never taken as a durable amendment. A log
   without the member keeps the previous two-START-row behaviour. `ProxyState.amend_audit`
   is the capability a plugin can probe.
 - Document extraction is now part of the free core: `[extraction]` (docs/extraction.md)

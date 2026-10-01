@@ -112,6 +112,10 @@ _SCHEMES = {
 # Unbounded-text column type per backend; every other column is a bounded
 # VARCHAR so the composite keys index everywhere (MySQL's InnoDB limit).
 _LONG_TEXT = {"postgresql": "TEXT", "mysql": "LONGTEXT", "oracle": "CLOB", "dbapi": "TEXT"}
+# A 64-bit integer: the handle map's ``seq`` only ever grows (MAX(seq)+1,
+# and the newest row is never trimmed), so a 32-bit INTEGER would overflow
+# after 2^31 - 1 writes over a deployment's life and refuse every write.
+_BIG_INT = {"postgresql": "BIGINT", "mysql": "BIGINT", "oracle": "NUMBER(19)", "dbapi": "BIGINT"}
 
 _ALLOCATION_ATTEMPTS = 3
 
@@ -202,10 +206,10 @@ def _ddl(backend: str) -> dict[str, str]:
         # a handle's DIGEST -> the session it was issued in. ``seq`` orders
         # rows by insertion (allocated MAX(seq)+1 inside the writing
         # transaction under the primary key, the vault's portable recipe —
-        # no identity or sequence syntax); the (session_id, seq) constraint
-        # is the per-session trim's index.
-        "llm_redact_handle_sessions": """CREATE TABLE llm_redact_handle_sessions (
-  seq INTEGER NOT NULL,
+        # no identity or sequence syntax; 64-bit, ``_BIG_INT``); the
+        # (session_id, seq) constraint is the per-session trim's index.
+        "llm_redact_handle_sessions": f"""CREATE TABLE llm_redact_handle_sessions (
+  seq {_BIG_INT[backend]} NOT NULL,
   handle_digest VARCHAR(192) NOT NULL,
   session_id VARCHAR(128) NOT NULL,
   PRIMARY KEY (seq),

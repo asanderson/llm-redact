@@ -20,9 +20,10 @@ and tags `vX.Y.Z`.
   Only the plugin's digest of a handle is stored, never a handle. A new table
   (sqlite `handle_sessions`, RDBMS `llm_redact_handle_sessions`) is created on open; an
   RDBMS user that may not create it refuses to start naming the table and its DDL.
-  Rows are trimmed in insertion order, never by timestamp: each session keeps its
-  newest 1,024, and beyond 10,000 rows in all only rows of sessions holding no mappings
-  go, so another session's traffic never strands a live session's newest handles; the
+  Rows are trimmed in insertion order (a 64-bit counter), never by timestamp: each
+  session keeps its newest 1,024, and beyond 10,000 rows in all only rows of sessions
+  holding no mappings go, so another session's traffic never strands a live session's
+  newest handles; the
   `replaces` digests (the same connection's superseded handles, same session only) are
   deleted in the write's own transaction. Every whole-session delete (TTL prune, `POST
   /__llm-redact/sessions/prune`, `llm-redact sessions prune`, `SessionStore.forget`)

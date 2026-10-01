@@ -547,3 +547,39 @@ def test_replaces_beyond_one_statement_are_all_dropped(tmp_path: Path) -> None:
     assert [manager.lookup_handle_session(digest) for digest in old[-3:]] == [None] * 3
     assert manager.lookup_handle_session(H + "new") == "s"
     manager.close()
+
+
+@pytest.mark.parametrize("backend_name", ["postgresql", "mysql", "oracle", "dbapi"])
+def test_the_rdbms_order_column_is_64_bit(backend_name: str) -> None:
+    # Review (handles, finding 3): ``seq`` only ever grows (MAX(seq)+1, and
+    # the newest row is never trimmed). As a 32-bit INTEGER it overflowed
+    # after 2^31 - 1 writes over a deployment's life, and from then on every
+    # write failed (contained) — every resumption refused, nothing healing it.
+    from llm_redact.vault_rdbms import _ddl
+
+    ddl = _ddl(backend_name)["llm_redact_handle_sessions"]
+    width = "NUMBER(19)" if backend_name == "oracle" else "BIGINT"
+    assert f"seq {width} NOT NULL" in ddl
+    assert "seq INTEGER" not in ddl
+
+
+def test_an_rdbms_write_numbers_past_32_bits(tmp_path: Path) -> None:
+    from llm_redact.vault_rdbms import RdbmsVaultManager
+    from test_vault_rdbms import _dbapi_config
+
+    db = tmp_path / "vault.db"
+    manager = RdbmsVaultManager(RdbmsStore(_dbapi_config(db), None))
+    raw = sqlite3.connect(db)
+    raw.execute(
+        "INSERT INTO llm_redact_handle_sessions (seq, handle_digest, session_id)"
+        " VALUES (?, ?, 's')",
+        (2**31 - 1, H + "top"),
+    )
+    raw.commit()
+    manager.record_handle_session(H + "next", "s")
+    assert raw.execute(
+        "SELECT seq FROM llm_redact_handle_sessions WHERE handle_digest = ?", (H + "next",)
+    ).fetchone() == (2**31,)
+    raw.close()
+    assert _known(manager, "top", "next") == {"top": "s", "next": "s"}
+    manager.close()

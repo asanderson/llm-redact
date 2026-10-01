@@ -919,7 +919,8 @@ def _print_posture(payload: dict[str, Any]) -> None:
         dropped = (payload.get("audit", {}).get(sink) or {}).get("rows_dropped") or 0
         if dropped:
             lines.append(
-                f"audit.{sink}: {dropped} rows dropped (not uploaded in time: store failing or behind)"
+                f"audit.{sink}: {dropped} rows dropped"
+                " (not uploaded in time: store failing or behind)"
             )
     vault_block = payload.get("vault") or {}
     if vault_block.get("remote_plaintext"):

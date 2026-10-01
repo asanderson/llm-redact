@@ -131,8 +131,10 @@ and tags `vX.Y.Z`.
     without a terminal);
   - or the llm-redact-pro dashboard's buttons, through the new guarded
     endpoints `GET /__llm-redact/overrides` and
-    `POST /__llm-redact/overrides/approve|revoke`. The POSTs need a subject
-    an access gate signed in to the dashboard; without one they answer 403.
+    `POST /__llm-redact/overrides/approve|revoke`. The POSTs need a person
+    signed in to the dashboard through the access gate's browser sign-in
+    (`AccessGate.browser_signed_in`, below); an API key or per-user key the
+    gate admits is not one, and without a browser sign-in they answer 403.
 
   The terminal confirmation guards against an accidental approval, not
   against local software: an agent with a shell running as the operator can

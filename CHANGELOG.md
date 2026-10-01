@@ -552,6 +552,19 @@ and tags `vX.Y.Z`.
   `AccessGate.browser_signed_in(conn, subject)` must say the connection rests on the
   gate's browser sign-in session; without it (or with an older gate) the POSTs answer
   403 and approval stays with the CLI.
+- The local PDF extractor read a file as complete when a value sat only where no viewer
+  shows it: a JavaScript action (an OpenAction or a page's /AA), a URI or submit-form
+  action, private application data or any other key's string, a page's (or an
+  image's, a font's) metadata stream, a content stream's comment or a string no text
+  operator shows, or a stream nothing references. With `binary_uploads = "refuse"` such
+  a PDF scanned clean and went out byte-identical. Every string of every object, every
+  metadata and script stream and those content-stream asides are now scanned (never
+  shown in convert mode's display text), and a stream the reader neither reads nor
+  renders with (an unreferenced one, private data, a page thumbnail — one without
+  `/Subtype /Image` was missed before) keeps the reading incomplete; font programs,
+  colour profiles, functions, shadings, halftones, glyph procedures and a linearized
+  file's hint streams are rendered with, and their bytes are not read for text
+  (docs/extraction.md, "Limits").
 - A cloud OCR service declared `complete = true` (as the docs' Textract example did)
   completed any file whose page count it matched, discarding every reason the local
   extractor had found it incomplete: a PDF with an attached file (a Factur-X

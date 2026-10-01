@@ -32,7 +32,10 @@ form XObject, tiling pattern and annotation appearance draws, the text
 marked content stands for — also in place of its glyphs — each line where
 two drawings meet as the page shows it, annotation strings and link
 targets, form field names and values, the document information and XMP
-metadata, bookmarks);
+metadata, bookmarks — and, never shown in the display reading, every string
+of every object, every metadata and script stream, and content streams'
+comments and strings no text operator shows; a stream no reader reads or
+renders with keeps the reading incomplete);
 ``ooxml`` (docx/xlsx/pptx and every other Office Open XML package) and
 ``odf`` (OpenDocument): every XML part's text and attribute values, read
 three ways — joined within paragraphs (a value Word splits across runs), as
@@ -745,6 +748,43 @@ _PDF_INLINE_KEYS = frozenset(
 _PDF_MARKED_TEXT = ("/ActualText", "/Alt", "/E")
 # Direct nesting deeper than this is not followed, and so not vouched for.
 _PDF_MAX_NESTING = 32
+# Entries whose streams a reader renders WITH and shows no text of: font
+# programs and their character maps, glyph and CID sets, functions,
+# shadings, halftones, transfer functions, output colour profiles, a JBIG2
+# image's globals (checked with the image). Every stream of a file must be
+# one of these, a content stream (a page's, a form's, a pattern's, an
+# appearance's, a glyph's), an image, metadata or a text stream — what this
+# reader reads or vouches for — or the reading is incomplete.
+_PDF_MACHINERY_KEYS = frozenset(
+    {
+        "/FontFile",
+        "/FontFile2",
+        "/FontFile3",
+        "/ToUnicode",
+        "/Encoding",
+        "/UseCMap",
+        "/CIDSet",
+        "/CIDToGIDMap",
+        "/Function",
+        "/Functions",
+        "/TR",
+        "/TR2",
+        "/BG",
+        "/BG2",
+        "/UCR",
+        "/UCR2",
+        "/TransferFunction",
+        "/Shading",
+        "/HT",
+        "/DestOutputProfile",
+        "/JBIG2Globals",
+    }
+)
+# Colour space families whose array holds streams (an ICC profile, a lookup
+# table, a tint transform).
+_PDF_COLOR_FAMILIES = frozenset({"/ICCBased", "/Indexed", "/Separation", "/DeviceN", "/NChannel"})
+# Streams of a file's structure (pypdf reads the objects they hold).
+_PDF_STRUCTURE = frozenset({"/ObjStm", "/XRef"})
 
 # Simple fonts, the named encodings pypdf maps to Unicode, and the standard
 # 14 fonts (their encoding is known without an /Encoding entry).
@@ -905,6 +945,132 @@ def _marked_strings(properties: Any) -> list[str]:
     ]
 
 
+def _raw_entry(value: Any, key: str) -> Any:
+    """A dictionary's entry as written (a reference unresolved), or None."""
+    from pypdf.generic import DictionaryObject
+
+    return value.raw_get(key) if isinstance(value, DictionaryObject) and key in value else None
+
+
+def _stream_ref(value: Any) -> dict[int, Any]:
+    """The stream ``value`` references, by object number (none: {})."""
+    from pypdf.generic import IndirectObject, StreamObject
+
+    if isinstance(value, IndirectObject):
+        target = value.get_object()
+        if isinstance(target, StreamObject):
+            return {value.idnum: target}
+    return {}
+
+
+def _stream_numbers(value: Any) -> dict[int, Any]:
+    """The streams ``value`` references, by object number: itself, or the
+    items of the dictionary or array it is (or references)."""
+    from pypdf.generic import ArrayObject, DictionaryObject, StreamObject
+
+    found = _stream_ref(value)
+    target = _resolved(value)
+    items: Any = ()
+    if isinstance(target, ArrayObject):
+        items = target
+    elif isinstance(target, DictionaryObject) and not isinstance(target, StreamObject):
+        items = target.values()
+    for item in items:
+        found.update(_stream_ref(item))
+    return found
+
+
+def _string_text(value: Any) -> str:
+    """A PDF string object's text (a byte string as Latin-1)."""
+    return value.decode("latin-1") if isinstance(value, bytes) else str(value)
+
+
+def _operand_strings(value: Any, out: list[str], depth: int = 0) -> None:
+    """Every string in a content-stream operand (arrays and dictionaries
+    followed a few levels deep), into ``out``."""
+    from pypdf.generic import ByteStringObject, TextStringObject
+
+    if isinstance(value, (TextStringObject, ByteStringObject)):
+        out.append(_string_text(value))
+    elif depth < 8 and isinstance(value, dict):
+        for item in value.values():
+            _operand_strings(item, out, depth + 1)
+    elif depth < 8 and isinstance(value, list):
+        for item in value:
+            _operand_strings(item, out, depth + 1)
+
+
+# What the comment scan of a content stream steps over: a literal string, a
+# hex string (or a dictionary's ``<<``), an inline image's data — and a
+# comment itself.
+_CONTENT_SKIPS = re.compile(rb"[%(<]|" + _operators(b"ID").pattern)
+_LITERAL_STEP = re.compile(rb"\\.|[()]", re.S)
+_LINE_END = re.compile(rb"[\r\n]")
+_INLINE_END = re.compile(rb"[\x00\s]EI(?![^\x00\s()<>\[\]{}/%])")
+
+
+def _literal_end(data: bytes, pos: int) -> int:
+    """Where a literal string whose ``(`` ends at ``pos`` closes (balanced
+    parentheses, backslash escapes)."""
+    depth = 1
+    for match in _LITERAL_STEP.finditer(data, pos):
+        if match[0] == b"(":
+            depth += 1
+        elif match[0] == b")":
+            depth -= 1
+            if depth == 0:
+                return match.end()
+    return len(data)
+
+
+def _comments(data: bytes) -> list[bytes]:
+    """A content stream's comments: ``%`` to the end of its line, outside
+    literal and hex strings and inline images' data."""
+    found: list[bytes] = []
+    pos = 0
+    while (match := _CONTENT_SKIPS.search(data, pos)) is not None:
+        start, token = match.start(), match[0]
+        if token == b"%":
+            end = _LINE_END.search(data, start)
+            pos = len(data) if end is None else end.start()
+            found.append(data[start + 1 : pos])
+        elif token == b"(":
+            pos = _literal_end(data, start + 1)
+        elif token == b"<":
+            close = data.find(b">", start)
+            pos = start + 2 if data[start + 1 : start + 2] == b"<" else close + 1 or len(data)
+        else:  # ID: an inline image's data, up to its EI
+            end = _INLINE_END.search(data, match.end() + 1)
+            pos = len(data) if end is None else end.end()
+    return found
+
+
+def _content_asides(data: bytes, operations: Any) -> list[str]:
+    """What a content stream holds that no reader shows: its comments, and
+    the strings of every operator but the text-showing ones (``_SHOWS``) —
+    marked-content properties, an unknown operator's operands in a
+    compatibility section, an inline image's dictionary."""
+    found = [_aside_text(comment) for comment in _comments(data)] if b"%" in data else []
+    for operands, operator in operations:
+        if operator not in _SHOWS:
+            _operand_strings(operands, found)
+    return found
+
+
+def _aside_text(data: bytes) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
+
+
+def _drawn_asides(stream: Any, pdf: Any) -> list[str]:
+    """``_content_asides`` of one content stream object."""
+    from pypdf.generic import ContentStream
+
+    return _content_asides(stream.get_data(), ContentStream(stream, pdf).operations)
+
+
 class _PdfWalk:
     """What a walk over EVERY object of a PDF found (``_pdf_walk``): content
     this reader does not read (``unread``), the content streams drawn
@@ -924,10 +1090,55 @@ class _PdfWalk:
         self.actual = False
         self.scripts = False
         self.bare_widgets = False
+        # Every stream of the file by number (``streams``); those a reader
+        # renders with or this one reads as drawn (``consumed``), metadata
+        # and text streams (read), glyph procedures (read for what they do
+        # not show); and every string object of the file, once.
+        self.streams: dict[int, Any] = {}
+        self.consumed: set[int] = set()
+        self.metadata: dict[int, Any] = {}
+        self.texts: dict[int, Any] = {}
+        self.glyphs: dict[int, Any] = {}
+        self.strings: dict[str, None] = {}
+        # The byte offsets of a linearized file's hint streams (found by
+        # offset, referenced by nothing).
+        self.hints: set[int] = set()
+
+    def references(self, value: Any) -> None:
+        """Record the streams one dictionary's entries reference, by role."""
+        for key, item in value.items():
+            if key in _PDF_MACHINERY_KEYS:
+                self.consumed.update(_stream_numbers(item))
+            elif key == "/Metadata":
+                self.metadata.update(_stream_ref(item))
+            elif key in _PDF_TEXT_STREAMS or key == "/JS":
+                self.texts.update(_stream_ref(item))
+            elif key == "/CharProcs":
+                self.glyphs.update(_stream_numbers(item))
+            elif key == "/AP":
+                appearance = _resolved(item)
+                for state in ("/N", "/R", "/D"):
+                    raw = _raw_entry(appearance, state)
+                    self.consumed.update(_stream_numbers(raw))
 
     def dictionary(self, value: Any, *, top: bool = True) -> None:
+        from pypdf.generic import StreamObject
+
         self.unread = self.unread or _pdf_dictionary_unread(value)
+        self.references(value)
+        if "/Linearized" in value:
+            hints = _resolved(value.get("/H"))
+            offsets = list(hints)[0::2] if isinstance(hints, list) else []
+            self.hints.update(int(offset) for offset in map(_resolved, offsets))
         subtype = _resolved(value.get("/Subtype"))
+        if top and isinstance(value, StreamObject):
+            self.streams[self.number] = value
+            if (
+                subtype in ("/Form", "/Image")
+                or _resolved(value.get("/PatternType")) == 1
+                or _resolved(value.get("/Type")) in _PDF_STRUCTURE
+            ):
+                self.consumed.add(self.number)
         if subtype == "/Image":
             # An image XObject is a stream, an object of its own: one nested
             # in another object is nothing a page draws — unread.
@@ -953,7 +1164,13 @@ class _PdfWalk:
     def value(self, value: Any, depth: int = 0) -> None:
         """One object and what is nested in it DIRECTLY (a reference is
         its own object, walked on its own)."""
-        from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject
+        from pypdf.generic import (
+            ArrayObject,
+            ByteStringObject,
+            DictionaryObject,
+            IndirectObject,
+            TextStringObject,
+        )
 
         if depth > _PDF_MAX_NESTING:
             self.unread = True
@@ -962,7 +1179,13 @@ class _PdfWalk:
             self.dictionary(value, top=depth == 0)
             items: Any = value.values()
         elif isinstance(value, ArrayObject):
+            family = _resolved(value[0]) if len(value) else None
+            if isinstance(family, str) and family in _PDF_COLOR_FAMILIES:
+                self.consumed.update(_stream_numbers(value))
             items = value
+        elif isinstance(value, (TextStringObject, ByteStringObject)):
+            self.strings[_string_text(value)] = None
+            return
         else:
             return
         for item in items:
@@ -985,22 +1208,32 @@ def _pdf_walk(reader: Any) -> _PdfWalk:
     for number, generation in numbers:
         walk.number = number
         walk.value(reader.get_object(IndirectObject(number, generation, reader)))
+    # A linearized file's hint streams: structure, like its xref stream.
+    walk.consumed.update(
+        number
+        for table in reader.xref.values()
+        for number, offset in table.items()
+        if offset in walk.hints
+    )
     return walk
 
 
-def _page_images(page: Any) -> tuple[dict[int, Any], list[Any]]:
+def _page_images(page: Any, asides: list[str]) -> tuple[dict[int, Any], list[Any]]:
     """The image XObjects a page DRAWS (by object number) — named by a
     ``Do`` in its content stream, or in that of a form it draws (each form
     followed once) — with each such image's soft mask and stencil mask, and
     the inline images (their dictionary and data) those streams paint:
     what OCR of the rendered page reads. An image a resource dictionary
     merely lists, or one reached any other way (a thumbnail, a pattern, an
-    annotation, an unreferenced object), is not in it."""
+    annotation, an unreferenced object), is not in it. What the page's own
+    content stream holds that no reader shows goes into ``asides``
+    (``_content_asides``)."""
     from pypdf.generic import ContentStream, IndirectObject
 
     images: dict[int, Any] = {}
     inline: list[Any] = []
     forms: set[int] = set()
+    own = True
     pending = [(page.get_contents(), page.get("/Resources"))]
     while pending:
         contents, resources = pending.pop()
@@ -1009,6 +1242,10 @@ def _page_images(page: Any) -> tuple[dict[int, Any], list[Any]]:
         if not isinstance(contents, ContentStream):
             contents = ContentStream(contents, page.pdf)
         inline += [ops for ops, operator in contents.operations if operator == b"INLINE IMAGE"]
+        if own:
+            # The page's own content (forms are read as drawn: _read_drawn).
+            asides += _content_asides(_page_data(page), contents.operations)
+            own = False
         xobjects = _resolved(_get(_resolved(resources), "/XObject"))
         if not hasattr(xobjects, "raw_get"):
             continue
@@ -1029,6 +1266,12 @@ def _page_images(page: Any) -> tuple[dict[int, Any], list[Any]]:
                 forms.add(ref.idnum)
                 pending.append((target, _get(target, "/Resources")))
     return images, inline
+
+
+def _page_data(page: Any) -> bytes:
+    """A page's content as its streams hold it (comments included)."""
+    contents = _raw_entry(page, "/Contents")
+    return b"\n".join(stream.get_data() for stream in _stream_numbers(contents).values())
 
 
 def _filter_names(value: Any) -> list[Any]:
@@ -1131,6 +1374,8 @@ def _read_drawn(drawer: Any, stream: Any, reading: Reading, visit: Callable[...,
     ):
         reading.complete = False
     reading.add(text)
+    for aside in _drawn_asides(stream, drawer.pdf):
+        reading.add(aside)
 
 
 def _outline_titles(items: Any, reading: Reading, depth: int = 0) -> None:
@@ -1501,15 +1746,24 @@ def read_pdf(data: bytes, reading: Reading) -> None:
     redrawn = need_appearances is True or walk.bare_widgets
     drawn_images: dict[int, Any] = {}
     inline_images: list[Any] = []
+    asides: list[str] = []
+    page_contents: set[int] = set()
     for page in reader.pages:
-        drawn, inline = _page_images(page)
+        drawn, inline = _page_images(page, asides)
         drawn_images.update(drawn)
         inline_images += inline
+        page_contents.update(_stream_numbers(_raw_entry(page, "/Contents")))
+    # Every stream of the file must be one a reader renders with or this
+    # one reads; any other (an unreferenced one, private data, a thumbnail)
+    # holds what no reader shows and this one does not read.
+    read = walk.consumed | page_contents | walk.metadata.keys() | walk.texts.keys()
+    unconsumed = walk.streams.keys() - read - walk.glyphs.keys()
     if (
         "/EmbeddedFiles" in names
         or "/JavaScript" in names
         or "/XFA" in acroform
         or walk.unread
+        or unconsumed
         or not walk.images <= drawn_images.keys()
         or (walk.scripts and redrawn)
         or any(map(_image_unseen, drawn_images.values()))
@@ -1562,10 +1816,20 @@ def read_pdf(data: bytes, reading: Reading) -> None:
     for text in walk.marked:
         reading.add(text)
     _pdf_strings(reader.metadata, reading)
-    metadata: Any = root.get("/Metadata")
-    if metadata is not None:
-        reading.add(metadata.get_object().get_data().decode("utf-8", "replace"))
     _outline_titles(reader.outline, reading)
+    # What no viewer shows, scanned all the same (never displayed): every
+    # metadata stream (the document's, a page's, an image's, a font's),
+    # every text stream (a field's rich value, a script), every string of
+    # the file (actions, scripts, private data), and what content streams
+    # hold beside the text they show — comments, strings no operator shows.
+    for stream in walk.metadata.values():
+        reading.add(stream.get_data().decode("utf-8", "replace"))
+    for stream in walk.texts.values():
+        _pdf_stream_text(stream, reading)
+    for stream in walk.glyphs.values():
+        asides += _drawn_asides(stream, reader)
+    for text in [*walk.strings, *asides]:
+        reading.add(text)
 
 
 # --- spreadsheet number formats -------------------------------------------------------

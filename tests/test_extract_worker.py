@@ -1940,6 +1940,193 @@ def _attached(data: bytes) -> bytes:
     return out.getvalue()
 
 
+# --- what no reader of the file reads ---------------------------------------------
+
+_HIDDEN = b"123-45-6789"
+_HELLO = b"BT /F1 12 Tf 72 712 Td (Hello world) Tj ET"
+
+
+def _one_page(
+    *,
+    catalog: bytes = b"",
+    page: bytes = b"",
+    resources: bytes = b"",
+    content: bytes = _HELLO,
+    extra: tuple[bytes, ...] = (),
+) -> bytes:
+    """One Helvetica page showing ``content``; ``extra`` objects follow from 6."""
+    return pdf_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R" + catalog + b" >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R"
+            b" /Resources << /Font << /F1 5 0 R >>" + resources + b" >>" + page + b" >>",
+            pdf_stream(b"", content),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            *extra,
+        ]
+    )
+
+
+_JS = b"(var s = '%s';)" % _HIDDEN
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _one_page(catalog=b" /OpenAction << /S /JavaScript /JS " + _JS + b" >>"),
+        _one_page(catalog=b" /OpenAction 6 0 R", extra=(b"<< /S /JavaScript /JS " + _JS + b" >>",)),
+        _one_page(
+            catalog=b" /OpenAction << /S /JavaScript /JS 6 0 R >>",
+            extra=(pdf_stream(b"", b"var s = '%s';" % _HIDDEN),),
+        ),
+        _one_page(page=b" /AA << /O << /S /JavaScript /JS " + _JS + b" >> >>"),
+        _one_page(catalog=b" /OpenAction << /S /URI /URI (https://x.example/?id=%s) >>" % _HIDDEN),
+        _one_page(
+            catalog=b" /OpenAction << /S /SubmitForm /F << /FS /URL /F (https://x/%s) >> >>"
+            % _HIDDEN
+        ),
+        _one_page(catalog=b" /PieceInfo << /App << /Private (%s) >> >>" % _HIDDEN),
+        _one_page(catalog=b" /MyNote <%s>" % _HIDDEN.hex().encode()),
+        _one_page(catalog=b" /Note 6 0 R", extra=(b"(%s)" % _HIDDEN,)),
+        _one_page(
+            page=b" /Metadata 6 0 R",
+            extra=(pdf_stream(b"/Type /Metadata /Subtype /XML", b"<x>%s</x>" % _HIDDEN),),
+        ),
+        # Content streams: a comment, a string no operator shows (in a
+        # compatibility section, an unknown operator's operand).
+        _one_page(content=b"%% id " + _HIDDEN + b"\n" + _HELLO),
+        _one_page(content=_HELLO + b" BX (" + _HIDDEN + b") ignoreme EX"),
+        _one_page(content=_HELLO + b" /Span << /Lang (" + _HIDDEN + b") >> BDC EMC"),
+        _one_page(
+            content=_HELLO + b" /Fm1 Do",
+            resources=b" /XObject << /Fm1 6 0 R >>",
+            extra=(
+                pdf_stream(
+                    b"/Type /XObject /Subtype /Form /BBox [0 0 9 9]",
+                    b"%" + _HIDDEN + b"\r0 0 m 9 9 l S",
+                ),
+            ),
+        ),
+    ],
+    ids=[
+        "openaction-js",
+        "openaction-js-indirect",
+        "openaction-js-stream",
+        "page-aa-js",
+        "uri-action",
+        "submit-form",
+        "private-data",
+        "private-key-hex",
+        "indirect-string",
+        "page-metadata",
+        "content-comment",
+        "unknown-operator",
+        "marked-content-property",
+        "form-comment",
+    ],
+)
+def test_a_value_where_no_reader_reads_is_scanned(data: bytes) -> None:
+    """A string anywhere in the file (an action, a script, private data), a
+    metadata stream of any object, a content stream's comment and a string
+    no operator shows: no viewer shows them, the provider receives them —
+    the reading scans them (and stays complete: they are read)."""
+    result = _read(data)
+    assert _HIDDEN.decode() in result["text"]
+    assert result["complete"] is True
+    assert _HIDDEN.decode() not in (result["display"] or "")
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _one_page(extra=(pdf_stream(b"", b"note " + _HIDDEN),)),
+        _one_page(
+            catalog=b" /PieceInfo << /App << /Private 6 0 R >> >>",
+            extra=(pdf_stream(b"", __import__("zlib").compress(b"note " + _HIDDEN)),),
+        ),
+        _one_page(page=b" /Thumb 6 0 R", extra=(pdf_stream(b"/Width 1 /Height 1", b"\x80"),)),
+        _one_page(
+            page=b" /Contents2 6 0 R",
+            extra=(pdf_stream(b"", b"BT /F1 12 Tf (" + _HIDDEN + b") Tj ET"),),
+        ),
+    ],
+    ids=["unreferenced", "private-stream", "thumbnail", "unknown-key"],
+)
+def test_a_stream_no_reader_consumes_is_unread(data: bytes) -> None:
+    result = _read(data)
+    assert result["complete"] is False and result["ocr"] is False
+
+
+def test_the_streams_a_reader_consumes_keep_a_reading_complete() -> None:
+    """Font programs and maps, colour profiles, functions, shadings,
+    halftones and glyph procedures are what a reader renders WITH: a file
+    holding them (and object and cross-reference streams) still reads
+    complete; a comment in a glyph procedure is scanned."""
+    data = pdf_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R /OutputIntents [<< /Type /OutputIntent"
+            b" /S /GTS_PDFA1 /DestOutputProfile 9 0 R >>] >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [4 0 R 15 0 R]"
+            b" /Resources << /Font << /F1 5 0 R /F3 13 0 R >> /ColorSpace << /CS0 [/ICCBased"
+            b" 9 0 R] /CS1 [/Separation /Spot /DeviceCMYK 10 0 R] >> /Shading << /Sh1 11 0 R >>"
+            b" /ExtGState << /GS1 << /TR 10 0 R /HT 12 0 R >> >> >> >>",
+            pdf_stream(b"", _HELLO + b" /Sh1 sh"),
+            b"<< /Type /Font /Subtype /TrueType /BaseFont /Arial /FirstChar 32 /LastChar 32"
+            b" /Widths [250] /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R /ToUnicode 8 0 R >>",
+            b"<< /Type /FontDescriptor /FontName /Arial /Flags 32 /FontBBox [0 0 1 1]"
+            b" /ItalicAngle 0 /Ascent 1 /Descent 0 /CapHeight 1 /StemV 1 /FontFile2 7 0 R >>",
+            pdf_stream(b"/Length1 4", b"\x00\x01\x00\x00"),
+            pdf_stream(b"", b"/CIDInit /ProcSet findresource begin end"),
+            pdf_stream(b"/N 1", b"\x00" * 8),
+            pdf_stream(
+                b"/FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1 0 1]", b"{ dup dup dup }"
+            ),
+            pdf_stream(
+                b"/ShadingType 4 /ColorSpace /DeviceGray /BitsPerCoordinate 8"
+                b" /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 1 0 1 0 1] /Function [10 0 R]",
+                bytes(4),
+            ),
+            pdf_stream(b"/Type /Halftone /HalftoneType 6 /Width 1 /Height 1", b"\x00"),
+            b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1 1] /FontMatrix [1 0 0 1 0 0]"
+            b" /CharProcs 16 0 R /Encoding << /Differences [97 /a] >>"
+            b" /FirstChar 97 /LastChar 97 /Widths [1] /ToUnicode 8 0 R >>",
+            pdf_stream(b"", b"%glyph " + _HIDDEN + b"\n1 0 0 0 1 1 d1 0 0 1 1 re f"),
+            pdf_stream(b"", b"BT /F3 1 Tf (a) Tj ET"),
+            b"<< /a 14 0 R >>",
+        ],
+        packed=frozenset({2, 5, 6}),
+    )
+    result = _read(data)
+    assert result["complete"] is True, result
+    assert _HIDDEN.decode() in result["text"]
+
+
+def test_a_linearized_files_hint_stream_is_structure() -> None:
+    """A linearized ("fast web view") file's hint stream is found by its
+    byte offset (the linearization dictionary's /H), referenced by nothing:
+    structure, not an unreferenced stream. Another stream at no hint
+    offset still is one."""
+    hint = pdf_stream(b"/S 4", bytes(8))
+    stray = pdf_stream(b"/S 4", b"note 123-45-6789")
+    placeholder = b"/H [0000000000 16]"
+    for extra, complete in ((hint, True), (stray, False)):
+        data = _one_page(extra=(b"<< /Linearized 1 " + placeholder + b" >>", extra))
+        at = data.index(b"7 0 obj")
+        offset = b"%010d" % (at if complete else 1)
+        data = data.replace(placeholder, b"/H [" + offset + b" 16]")
+        assert _read(data)["complete"] is complete
+
+
+def test_a_percent_sign_in_a_string_or_image_is_no_comment() -> None:
+    shown = b"BT /F1 12 Tf 72 712 Td (50% \\(off\\) (nested %) ok) Tj <2541> Tj ET"
+    inline = b"q BI /W 1 /H 1 /CS /G /BPC 8 ID %\x80 EI Q"
+    result = _read(_one_page(content=shown + b" " + inline + b" % real comment"))
+    assert "real comment" in result["text"]
+    assert " ok) Tj" not in result["text"] and "\x80" not in result["text"]
+
+
 def test_a_reading_marked_incomplete_is_never_an_ocr_gap() -> None:
     reading = Reading(100)
     reading.ocr_gap()

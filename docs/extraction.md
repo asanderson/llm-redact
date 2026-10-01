@@ -306,7 +306,15 @@ be read (counted `unseen_content` in `readings_total` otherwise):
 - a PDF the local PDF extractor read completely but for what OCR of its
   pages reads: images its pages draw (every image of the file must be named
   by a page's content stream, or that of a form the page draws, with their
-  masks) and page text that reads as nothing or as unmapped characters. Any
+  masks) and page text that reads as nothing or as unmapped characters.
+  Each drawn image (inline ones too) must hold nothing but pixels: coded
+  with Flate, LZW, run-length, ASCII or CCITT filters only, or as a JPEG
+  holding nothing but the picture (the single-picture rule below) or JBIG2
+  of picture segments only (its globals too), each as the image's one
+  filter. A JPEG with a comment, Exif or XMP, a JPEG 2000 image (which
+  carries XML and comment boxes), an image with its own metadata stream,
+  optional content, an OPI version or alternates, and a file with optional
+  content (layers that may hide an image) are not completed by OCR. Any
   other reason the local reading gives — an attachment, a script, an XFA
   form, an image no page draws, a font it cannot map, a form or appearance
   stream it could not read, the `max_text_chars` cap — keeps the file

@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 import pytest
 
-from document_fixtures import jpeg, pdf, png
+from document_fixtures import jpeg, pdf, pdf_objects, pdf_stream, png
 from llm_redact import extraction
 from llm_redact.config import ConfigError, ExtractionConfig, ExtractionService, parse_extraction
 from llm_redact.extraction import (
@@ -634,6 +634,55 @@ async def test_an_ocr_reading_completes_only_what_page_ocr_reads() -> None:
     readings = inspector.status()["readings_total"]["textract"]
     assert readings["unseen_content"] == 2
     assert len(service.requests) == 3
+
+
+def _scan_pdf(image: bytes, data: bytes, *extra: bytes) -> bytes:
+    """A page showing a line of text and drawing one image (its dictionary
+    ``image``, its ``data``) — a scan, as a phone or a copier makes it;
+    ``extra`` objects follow from 7."""
+    return pdf_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R"
+            b" /Resources << /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >> >>",
+            pdf_stream(
+                b"", b"BT /F1 12 Tf 72 712 Td (Quarterly report) Tj ET q 9 0 0 9 0 0 cm /Im1 Do Q"
+            ),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            pdf_stream(
+                b"/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray"
+                b" /BitsPerComponent 8 " + image,
+                data,
+            ),
+            *extra,
+        ]
+    )
+
+
+_XMP = pdf_stream(b"/Type /Metadata /Subtype /XML", b"<x>ssn " + SSN.encode() + b"</x>")
+
+
+@pytest.mark.parametrize(
+    ("data", "complete"),
+    [
+        (_scan_pdf(b"/Filter /DCTDecode", jpeg()), True),
+        (_scan_pdf(b"/Filter /DCTDecode", jpeg((0xFE, b"owner ssn " + SSN.encode()))), False),
+        (_scan_pdf(b"/Filter /DCTDecode", jpeg((0xE1, b"Exif\x00\x00" + SSN.encode()))), False),
+        (_scan_pdf(b"/Metadata 7 0 R", b"\x80", _XMP), False),
+    ],
+    ids=["jpeg", "jpeg-comment", "jpeg-exif", "image-xmp"],
+)
+async def test_an_ocr_reading_never_completes_a_pdf_whose_image_holds_more(
+    data: bytes, complete: bool
+) -> None:
+    # The PDF twin of the picture rule below: Textract reads the scan's
+    # pixels, never its JPEG comment, Exif or the image's XMP.
+    inspector, _ = _textract_inspector()
+    reading = await inspector.read(data)
+    assert reading.complete is complete
+    counted = inspector.status()["readings_total"]["textract"]
+    assert ("unseen_content" in counted) is not complete
 
 
 @pytest.mark.parametrize(

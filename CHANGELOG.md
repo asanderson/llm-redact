@@ -564,7 +564,13 @@ and tags `vX.Y.Z`.
   `complete` for cloud services are corrected. A picture header padded past its
   specified size (an oversized PNG `tIME` or `pHYs` chunk, a JPEG APP14, quantization
   or Huffman table segment longer than its tables) does not count as holding nothing
-  but the picture either.
+  but the picture either. The same JPEG drawn as a PDF page's image did, though: a page's
+  drawn images were all OCR's to read whatever their data held. Now each drawn image
+  (inline ones too) must hold pixels only — Flate, LZW, run-length, ASCII or CCITT
+  coded, or a JPEG or JBIG2 image of picture headers or segments only — with no
+  metadata stream, optional content, OPI version or alternates of its own, in a file
+  without optional content; a JPEG 2000 image is never completed by OCR. A page with
+  an inline image is no longer read as an error where Pillow is not installed.
 - Docs: the restart-only list in docs/troubleshooting.md now names `extraction` and
   `overrides` (and is pinned to `RESTART_ONLY_KEYS` like README.md and
   docs/deployment.md); docs/dashboard.md and the ops-surface gate in

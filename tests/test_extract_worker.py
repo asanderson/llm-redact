@@ -16,6 +16,7 @@ import pytest
 
 from document_fixtures import (
     docx,
+    jpeg,
     odt,
     package,
     pdf,
@@ -1727,6 +1728,191 @@ def _image_pdf(content: bytes, *, resources: bytes, extra: tuple[bytes, ...] = (
 def test_an_image_a_page_draws_is_an_ocr_gap(data: bytes, ocr: bool) -> None:
     result = _read(data)
     assert result["complete"] is False and result["ocr"] is ocr
+
+
+def _jbig2(*segments: tuple[int, bytes], refs: bytes = b"\x00") -> bytes:
+    """JBIG2 segments in a PDF's embedded organization: (type, data), each
+    numbered in turn, page-associated with page 1 (``refs``: the referred-to
+    count and retention byte(s) and numbers of every segment)."""
+    return b"".join(
+        number.to_bytes(4, "big")
+        + bytes([kind])
+        + refs
+        + b"\x01"
+        + len(data).to_bytes(4, "big")
+        + data
+        for number, (kind, data) in enumerate(segments)
+    )
+
+
+_PAGE_INFO = (48, bytes(19))
+# A page drawing image 5, then opening an inline image's dictionary.
+_INLINE = _DRAW + b" q BI /W 1 /H 1 /CS /G /BPC 8 "
+_REGION = (38, bytes(20))
+_JBIG2_COMMENT = (62, b"\x20\x00\x00\x00" + b"ssn 123-45-6789")
+
+
+def _drawn_image(
+    entries: bytes = b"",
+    data: bytes = b"\x80",
+    *,
+    content: bytes = _DRAW,
+    catalog: bytes = b"",
+    extra: tuple[bytes, ...] = (),
+) -> bytes:
+    """One page drawing image 5 (``entries`` added to its dictionary, its
+    ``data``); ``extra`` objects follow from 6."""
+    return pdf_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R" + catalog + b" >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R"
+            b" /Resources << /XObject << /Im1 5 0 R >> >> >>",
+            pdf_stream(b"", content),
+            pdf_stream(_IMAGE[2:] + b" /BitsPerComponent 8 " + entries, data),
+            *extra,
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("data", "ocr"),
+    [
+        (_drawn_image(b"/Filter /FlateDecode", __import__("zlib").compress(b"\x80")), True),
+        (_drawn_image(b"/Filter /DCTDecode", jpeg()), True),
+        # A JPEG's comment, Exif or XMP: no OCR of the page reads it.
+        (_drawn_image(b"/Filter /DCTDecode", jpeg((0xFE, b"owner ssn 123-45-6789"))), False),
+        (_drawn_image(b"/Filter [/DCTDecode]", jpeg((0xE1, b"Exif\x00\x00 ssn"))), False),
+        # A codec behind another filter, JPEG 2000, an unknown filter.
+        (_drawn_image(b"/Filter [/ASCIIHexDecode /DCTDecode]", jpeg().hex().encode()), False),
+        (_drawn_image(b"/Filter /JPXDecode", b"\x00\x00\x00\x0cjP  "), False),
+        (_drawn_image(b"/Filter /Nonesuch", b"\x80"), False),
+        # JBIG2: picture segments only, its globals' too.
+        (_drawn_image(b"/Filter /JBIG2Decode", _jbig2(_PAGE_INFO, _REGION)), True),
+        (_drawn_image(b"/Filter /JBIG2Decode", _jbig2(_PAGE_INFO, _JBIG2_COMMENT)), False),
+        (
+            _drawn_image(
+                b"/Filter /JBIG2Decode /DecodeParms << /JBIG2Globals 6 0 R >>",
+                _jbig2(_PAGE_INFO, _REGION),
+                extra=(pdf_stream(b"", _jbig2((0, bytes(10)))),),
+            ),
+            True,
+        ),
+        (
+            _drawn_image(
+                b"/Filter /JBIG2Decode /DecodeParms [<< /JBIG2Globals 6 0 R >>]",
+                _jbig2(_PAGE_INFO, _REGION),
+                extra=(pdf_stream(b"", _jbig2(_JBIG2_COMMENT)),),
+            ),
+            False,
+        ),
+        # The image's own metadata stream, optional content that may hide
+        # it, an OPI version, alternates: more than the picture.
+        (
+            _drawn_image(
+                b"/Metadata 6 0 R",
+                extra=(pdf_stream(b"/Type /Metadata /Subtype /XML", b"<x>ssn 123-45-6789</x>"),),
+            ),
+            False,
+        ),
+        (_drawn_image(b"/OC 6 0 R", extra=(b"<< /Type /OCG /Name (hidden) >>",)), False),
+        (_drawn_image(b"/OPI << /2.0 << /Type /OPI /Version 2.0 /F (hi.tif) >> >>"), False),
+        # Optional content anywhere in the file may hide a drawn image.
+        (
+            _drawn_image(
+                catalog=b" /OCProperties << /OCGs [6 0 R] /D << /OFF [6 0 R] >> >>",
+                extra=(b"<< /Type /OCG /Name (layer) >>",),
+            ),
+            False,
+        ),
+        # An inline image: pixels only, a JPEG holding nothing but the
+        # picture, a JPEG with a comment, an entry beyond an image's own.
+        (_drawn_image(content=_INLINE + b"ID \x80 EI Q"), True),
+        (
+            _drawn_image(content=_INLINE + b"/F /DCT ID " + jpeg() + b" EI Q"),
+            True,
+        ),
+        (
+            _drawn_image(
+                content=_DRAW
+                + b" q BI /W 1 /H 1 /CS /G /BPC 8 /F [/DCT] ID "
+                + jpeg((0xFE, b"ssn 123-45-6789"))
+                + b" EI Q"
+            ),
+            False,
+        ),
+        (
+            _drawn_image(content=_INLINE + b"/F /RL ID \x00\x80\x80 EI Q"),
+            True,
+        ),
+        (
+            _drawn_image(content=_INLINE + b"/F /JBIG2Decode ID \x80 EI Q"),
+            False,
+        ),
+        (
+            _drawn_image(content=_INLINE + b"/Note (ssn) ID \x80 EI Q"),
+            False,
+        ),
+    ],
+    ids=[
+        "flate",
+        "jpeg",
+        "jpeg-comment",
+        "jpeg-exif",
+        "behind-another-filter",
+        "jpx",
+        "unknown-filter",
+        "jbig2",
+        "jbig2-comment",
+        "jbig2-globals",
+        "jbig2-globals-comment",
+        "image-metadata",
+        "image-oc",
+        "image-opi",
+        "optional-content",
+        "inline",
+        "inline-jpeg",
+        "inline-jpeg-comment",
+        "inline-run-length",
+        "inline-jbig2",
+        "inline-extra-entry",
+    ],
+)
+def test_a_drawn_image_completes_by_ocr_only_when_it_holds_only_pixels(
+    data: bytes, ocr: bool
+) -> None:
+    """EXT-1's PDF twin of ``image_text_free``: a cloud OCR reading may
+    complete a PDF only when every image its pages draw holds nothing but
+    pixels OCR of the rendered page sees — not the same JPEG with a comment
+    or Exif that a single upload of it is refused completion for."""
+    result = _read(data)
+    assert result["complete"] is False and result["ocr"] is ocr
+
+
+def test_jbig2_text_free() -> None:
+    from llm_redact.extract_worker import jbig2_text_free
+
+    assert jbig2_text_free(_jbig2(_PAGE_INFO, _REGION, (49, b""))) is True
+    assert jbig2_text_free(b"") is True
+    assert jbig2_text_free(_jbig2(_PAGE_INFO, _JBIG2_COMMENT)) is False
+    assert jbig2_text_free(_jbig2((99, bytes(4)))) is False  # an unknown type
+    # A text region referring to segment 0 (short and long referred-to forms).
+    region = (6, bytes(30))
+    assert jbig2_text_free(_jbig2((0, bytes(8)), region, refs=b"\x20\x00")) is True
+    long_form = b"\xe0\x00\x00\x01" + b"\x00" + b"\x00"
+    assert jbig2_text_free(_jbig2((0, bytes(8)), region, refs=long_form)) is True
+    assert jbig2_text_free(_jbig2(region, refs=b"\xa0")) is False  # five: no such form
+    # An unknown data length, a segment running past the data, a cut header.
+    whole = _jbig2(_PAGE_INFO, _REGION)
+    unknown = whole[:7] + b"\xff\xff\xff\xff" + whole[11:]
+    assert jbig2_text_free(unknown) is False
+    for cut in range(1, len(whole)):
+        if cut != len(_jbig2(_PAGE_INFO)):
+            assert jbig2_text_free(whole[:cut]) is False, cut
+    # Page association in four bytes; a segment numbered past 256 refers
+    # to others in two-byte numbers.
+    wide = (300).to_bytes(4, "big") + b"\x46\x20" + bytes(2) + (1).to_bytes(4, "big") + bytes(4)
+    assert jbig2_text_free(wide) is True
 
 
 def test_what_page_ocr_never_sees_stays_unread() -> None:

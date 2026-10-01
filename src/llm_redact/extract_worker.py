@@ -526,6 +526,48 @@ def _jpeg_tables(segment: bytes, size: Callable[[int], int], highest: int) -> bo
     return at == len(segment) and at > 0
 
 
+# JBIG2 segment types that carry no text: symbol and pattern dictionaries,
+# text, halftone, generic and refinement regions (bitmaps, whatever their
+# names), page information, end of page, stripe and file, profiles and code
+# tables. An extension segment (62: comments among them) or a reserved type
+# may hold text.
+_JBIG2_PICTURE_SEGMENTS = frozenset(
+    {0, 4, 6, 7, 16, 20, 22, 23, 36, 38, 39, 40, 42, 43, 48, 49, 50, 51, 52, 53}
+)
+
+
+def jbig2_text_free(data: bytes) -> bool:
+    """Whether JBIG2 data in a PDF's embedded organization (segment headers
+    and data, no file header) is made of ``_JBIG2_PICTURE_SEGMENTS`` only,
+    each of a stated length (an unknown one is not walked), ending exactly
+    at the data's end. Header walking only, never decoding."""
+    pos = 0
+    while pos < len(data):
+        if pos + 6 > len(data):
+            return False
+        number = int.from_bytes(data[pos : pos + 4], "big")
+        flags = data[pos + 4]
+        if flags & 0x3F not in _JBIG2_PICTURE_SEGMENTS:
+            return False
+        count = data[pos + 5] >> 5
+        pos += 6
+        if count == 7:
+            # The long form: a 29-bit count, then one retention bit per
+            # referred-to segment and one for this segment.
+            count = int.from_bytes(data[pos - 1 : pos + 3], "big") & 0x1FFFFFFF
+            pos += 3 + (count + 8) // 8
+        elif count > 4:
+            return False
+        width = 1 if number <= 256 else 2 if number <= 65536 else 4
+        pos += count * width + (4 if flags & 0x40 else 1)
+        length = int.from_bytes(data[pos : pos + 4], "big")
+        pos += 4
+        if pos > len(data) or length == 0xFFFFFFFF or pos + length > len(data):
+            return False
+        pos += length
+    return True
+
+
 _PDF_MARKERS = (b"%PDF-", b"startxref", b"%%EOF")
 
 
@@ -648,6 +690,55 @@ _PDF_MEDIA_ANNOTATIONS = frozenset(
 # XObjects the reader does not read: an image (wherever it is painted from —
 # a page, a form, a pattern, a glyph, an appearance) and PostScript.
 _PDF_UNREAD_XOBJECTS = frozenset({"/Image", "/PS"})
+# Image filters whose output is the image's samples and nothing else, by
+# their full and inline-image names: an image coded with only these holds
+# pixels, which OCR of the page drawing it sees.
+_PDF_PIXEL_FILTERS = frozenset(
+    {
+        "/FlateDecode",
+        "/Fl",
+        "/LZWDecode",
+        "/LZW",
+        "/RunLengthDecode",
+        "/RL",
+        "/ASCIIHexDecode",
+        "/AHx",
+        "/ASCII85Decode",
+        "/A85",
+        "/CCITTFaxDecode",
+        "/CCF",
+    }
+)
+# Entries of an image XObject naming more than the picture OCR of the
+# drawn page sees: its metadata stream, optional content that may hide it,
+# an OPI (prepress) version, alternate images.
+_PDF_IMAGE_ASIDES = ("/Metadata", "/OC", "/OPI", "/Alternates")
+# The entries an inline image's dictionary may have (full and abbreviated).
+_PDF_INLINE_KEYS = frozenset(
+    {
+        "/BPC",
+        "/BitsPerComponent",
+        "/CS",
+        "/ColorSpace",
+        "/D",
+        "/Decode",
+        "/DP",
+        "/DecodeParms",
+        "/F",
+        "/Filter",
+        "/H",
+        "/Height",
+        "/IM",
+        "/ImageMask",
+        "/I",
+        "/Interpolate",
+        "/Intent",
+        "/L",
+        "/Length",
+        "/W",
+        "/Width",
+    }
+)
 # The text a marked-content sequence or a structure element stands for:
 # what copy and paste, screen readers and text extraction that honours it
 # read in place of the glyphs drawn.
@@ -897,25 +988,30 @@ def _pdf_walk(reader: Any) -> _PdfWalk:
     return walk
 
 
-def _page_images(page: Any) -> set[int]:
-    """The object numbers of the image XObjects a page DRAWS — named by a
+def _page_images(page: Any) -> tuple[dict[int, Any], list[Any]]:
+    """The image XObjects a page DRAWS (by object number) — named by a
     ``Do`` in its content stream, or in that of a form it draws (each form
-    followed once) — with each such image's soft mask and stencil mask:
+    followed once) — with each such image's soft mask and stencil mask, and
+    the inline images (their dictionary and data) those streams paint:
     what OCR of the rendered page reads. An image a resource dictionary
     merely lists, or one reached any other way (a thumbnail, a pattern, an
     annotation, an unreferenced object), is not in it."""
     from pypdf.generic import ContentStream, IndirectObject
 
-    images: set[int] = set()
+    images: dict[int, Any] = {}
+    inline: list[Any] = []
     forms: set[int] = set()
     pending = [(page.get_contents(), page.get("/Resources"))]
     while pending:
         contents, resources = pending.pop()
-        xobjects = _resolved(_get(_resolved(resources), "/XObject"))
-        if contents is None or not hasattr(xobjects, "raw_get"):
+        if contents is None:
             continue
         if not isinstance(contents, ContentStream):
             contents = ContentStream(contents, page.pdf)
+        inline += [ops for ops, operator in contents.operations if operator == b"INLINE IMAGE"]
+        xobjects = _resolved(_get(_resolved(resources), "/XObject"))
+        if not hasattr(xobjects, "raw_get"):
+            continue
         names = {ops[0] for ops, operator in contents.operations if operator == b"Do" and ops}
         for name in names:
             ref = xobjects.raw_get(name) if name in xobjects else None
@@ -924,15 +1020,81 @@ def _page_images(page: Any) -> set[int]:
             target: Any = ref.get_object()
             subtype = _resolved(_get(target, "/Subtype"))
             if subtype == "/Image":
-                images.add(ref.idnum)
+                images[ref.idnum] = target
                 for key in ("/SMask", "/Mask"):
                     mask = target.raw_get(key) if key in target else None
                     if isinstance(mask, IndirectObject):
-                        images.add(mask.idnum)
+                        images[mask.idnum] = mask.get_object()
             elif subtype == "/Form" and ref.idnum not in forms:
                 forms.add(ref.idnum)
                 pending.append((target, _get(target, "/Resources")))
-    return images
+    return images, inline
+
+
+def _filter_names(value: Any) -> list[Any]:
+    """A stream's (or inline image's) filters, in order."""
+    from pypdf.generic import ArrayObject
+
+    value = _resolved(value)
+    if isinstance(value, ArrayObject):
+        return [_resolved(item) for item in value]
+    return [] if value is None else [value]
+
+
+def _coded_text_free(name: Any, data: bytes, params: Any) -> bool:
+    """Whether image data coded by ``name`` — the image's one filter — holds
+    nothing but the picture: a JPEG of picture headers only
+    (``_jpeg_text_free``; a PDF's line end after it allowed), JBIG2 of
+    picture segments only (``jbig2_text_free``, its globals stream too)."""
+    from pypdf.generic import ArrayObject, StreamObject
+
+    if name in ("/DCTDecode", "/DCT"):
+        data = data.rstrip(_PDF_TAIL)
+        return data.startswith(b"\xff\xd8") and _jpeg_text_free(data)
+    if name == "/JBIG2Decode":
+        params = _resolved(params)
+        if isinstance(params, ArrayObject):
+            params = _resolved(params[0]) if len(params) else None
+        found = _resolved(_get(params, "/JBIG2Globals"))
+        globals_free = found is None or (
+            isinstance(found, StreamObject) and jbig2_text_free(found.get_data())
+        )
+        return globals_free and jbig2_text_free(data)
+    return False
+
+
+def _image_unseen(image: Any) -> bool:
+    """Whether an image XObject a page draws may hold something OCR of the
+    rendered page does not see: an entry naming more than the picture
+    (``_PDF_IMAGE_ASIDES``), or data a filter outside
+    ``_PDF_PIXEL_FILTERS`` codes that is not the codec's picture alone
+    (``_coded_text_free``: JPEG and JBIG2 as the image's only filter; JPEG
+    2000, which carries XML and comment boxes, never). A colour-key mask
+    (an array, no data) holds nothing."""
+    from pypdf.generic import StreamObject
+
+    if not isinstance(image, StreamObject):
+        return False
+    if any(key in image for key in _PDF_IMAGE_ASIDES):
+        return True
+    names = _filter_names(image.get("/Filter"))
+    if all(name in _PDF_PIXEL_FILTERS for name in names):
+        return False
+    return len(names) != 1 or not _coded_text_free(names[0], image._data, image.get("/DecodeParms"))
+
+
+def _inline_unseen(image: Any) -> bool:
+    """``_image_unseen`` for an inline image (pypdf's ``settings`` and
+    ``data``): an entry no inline image has, or data that is not pixels
+    alone."""
+    settings = image["settings"]
+    if not set(settings.keys()) <= _PDF_INLINE_KEYS:
+        return True
+    names = _filter_names(settings.get("/F", settings.get("/Filter")))
+    if all(name in _PDF_PIXEL_FILTERS for name in names):
+        return False
+    params = settings.get("/DP", settings.get("/DecodeParms"))
+    return len(names) != 1 or not _coded_text_free(names[0], image["data"], params)
 
 
 def _marked_visitor(walk: _PdfWalk) -> Callable[..., None]:
@@ -1314,11 +1476,13 @@ def read_pdf(data: bytes, reading: Reading) -> None:
 
     Only some of these are what OCR of the rendered pages reads
     (``Reading.ocr_gap``): an image a page draws (every image XObject of
-    the file drawn by a page, ``_page_images``), and a page whose own text
+    the file drawn by a page, ``_page_images``) holding nothing but pixels
+    (``_image_unseen``, ``_inline_unseen``), and a page whose own text
     reads as nothing or as an unmapped character. Every other reason —
-    an attachment, a script, an XFA form, an image no page draws, a font it
-    cannot map, a form or appearance stream, the text cap — stays unread
-    whatever an OCR service says."""
+    an attachment, a script, an XFA form, an image no page draws or one
+    holding more than pixels, optional content, a font it cannot map, a
+    form or appearance stream, the text cap — stays unread whatever an OCR
+    service says."""
     from pypdf import PageObject, PdfReader
 
     reader = PdfReader(io.BytesIO(data), strict=False)
@@ -1335,20 +1499,29 @@ def read_pdf(data: bytes, reading: Reading) -> None:
     walk = _pdf_walk(reader)
     need_appearances = getattr(_resolved(acroform.get("/NeedAppearances")), "value", None)
     redrawn = need_appearances is True or walk.bare_widgets
-    drawn_images: set[int] = set()
+    drawn_images: dict[int, Any] = {}
+    inline_images: list[Any] = []
     for page in reader.pages:
-        drawn_images |= _page_images(page)
+        drawn, inline = _page_images(page)
+        drawn_images.update(drawn)
+        inline_images += inline
     if (
         "/EmbeddedFiles" in names
         or "/JavaScript" in names
         or "/XFA" in acroform
         or walk.unread
-        or not walk.images <= drawn_images
+        or not walk.images <= drawn_images.keys()
         or (walk.scripts and redrawn)
+        or any(map(_image_unseen, drawn_images.values()))
+        or any(map(_inline_unseen, inline_images))
+        or ("/OCProperties" in root and (walk.images or inline_images))
     ):
+        # ... or a drawn image holding more than the pixels OCR of its page
+        # sees, or optional content that may hide one.
         reading.complete = False
-    elif walk.images:
-        # Every image of the file is drawn by a page: OCR of it reads them.
+    elif walk.images or inline_images:
+        # Every image of the file is drawn by a page and holds nothing but
+        # pixels: OCR of the pages reads them.
         reading.ocr_gap()
     visit = _marked_visitor(walk)
     for page in reader.pages:
@@ -1360,8 +1533,6 @@ def read_pdf(data: bytes, reading: Reading) -> None:
             reading.ocr_gap()
         reading.add(text)
         reading.show(text)
-        if len(page.images) > 0:
-            reading.ocr_gap()
         for annotation in page.get("/Annots") or ():
             _pdf_strings(annotation, reading)
     drawer = reader.pages[0] if len(reader.pages) else PageObject(reader)

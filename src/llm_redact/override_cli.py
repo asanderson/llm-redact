@@ -54,7 +54,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     override.add_argument("--db", type=Path, default=None, help="override store path")
 
 
-def _store(args: argparse.Namespace) -> OverrideStore:
+def _store(args: argparse.Namespace, *, read_only: bool = False) -> OverrideStore:
     from llm_redact.config import apply_env_overrides, load_config
 
     config = apply_env_overrides(load_config(args.config))
@@ -64,7 +64,7 @@ def _store(args: argparse.Namespace) -> OverrideStore:
         path = Path(config.overrides.path).expanduser()
     else:
         path = default_overrides_path()
-    return OverrideStore(path, ttl_seconds=config.overrides.ttl_minutes * 60)
+    return OverrideStore(path, ttl_seconds=config.overrides.ttl_minutes * 60, read_only=read_only)
 
 
 def _open_tty() -> IO[str]:
@@ -165,7 +165,7 @@ def _approve(args: argparse.Namespace) -> int:
 
 
 def _list(args: argparse.Namespace) -> int:
-    entries = _store(args).entries()
+    entries = _store(args, read_only=True).entries()
     if args.json:
         print(json.dumps([entry.as_dict() for entry in entries], indent=2))
         return 0

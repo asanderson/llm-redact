@@ -163,9 +163,28 @@ def test_the_real_terminal_opener_fails_without_one(monkeypatch: pytest.MonkeyPa
     def refuse(*args: Any, **kwargs: Any) -> Any:
         raise OSError("no tty")
 
-    monkeypatch.setattr("builtins.open", refuse)
+    monkeypatch.setattr(override_cli.io, "FileIO", refuse)
     with pytest.raises(OSError):
         override_cli._open_tty()
+
+
+def test_the_terminal_opener_closes_the_terminal_when_it_cannot_wrap_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[bool] = []
+
+    class Raw:
+        def close(self) -> None:
+            closed.append(True)
+
+    def unwrappable(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("no text layer")
+
+    monkeypatch.setattr(override_cli.io, "FileIO", lambda *args: Raw())
+    monkeypatch.setattr(override_cli.io, "TextIOWrapper", unwrappable)
+    with pytest.raises(ValueError):
+        override_cli._open_tty()
+    assert closed == [True]
 
 
 # --- doctor and the status posture ----------------------------------------------------
@@ -269,3 +288,37 @@ def test_the_real_terminal_opener_reads_a_typed_confirmation(tmp_path: Path) -> 
     refused = _pending(db)
     status, out = _pty_run(["override", refused, "--always", "--db", str(db)], b"no\n")
     assert status == 1 and "not approved" in out
+
+
+def test_listing_and_doctor_never_write_the_store(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`override list` and doctor read the store read-only: no schema, no
+    key, no journal-mode change, no chmod — the file's bytes and its
+    directory's mode stay as they were, and a file that is not a store
+    (here: empty) is never turned into one."""
+    import hashlib
+
+    from llm_redact.config import Config, OverridesConfig
+    from llm_redact.doctor_cli import _check_overrides, _Report
+
+    store_dir = tmp_path / "data"
+    db = store_dir / "o.db"
+    writer = OverrideStore(db)
+    code = writer.record_pending("block", "", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
+    writer.approve("always", approver=None, code=code)
+    writer.close()
+    os.chmod(store_dir, 0o755)
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    assert _run("list", "--db", str(db)) == 0
+    assert "always" in capsys.readouterr().out
+    report = _Report()
+    assert _check_overrides(report, Config(overrides=OverridesConfig(path=str(db)))) is True
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before
+    assert (store_dir.stat().st_mode & 0o777) == 0o755
+    empty = tmp_path / "empty.db"
+    empty.write_bytes(b"")
+    assert _run("list", "--db", str(empty)) == 0
+    assert "no pending refusals" in capsys.readouterr().out
+    assert _check_overrides(_Report(), Config(overrides=OverridesConfig(path=str(empty)))) is False
+    assert empty.read_bytes() == b""

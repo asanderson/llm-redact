@@ -234,8 +234,12 @@ class OverrideStore:
         clock: Callable[[], float] = time.time,
         max_pending: int = MAX_PENDING,
         busy_timeout_ms: int = CLI_BUSY_TIMEOUT_MS,
+        read_only: bool = False,
     ) -> None:
         self.path = path
+        # A reader (doctor, `override list`): opens an existing file
+        # read-only — no schema, no key, no chmod, no write of any kind.
+        self.read_only = read_only
         self.ttl = ttl_seconds
         self._clock = clock
         self._max_pending = max_pending
@@ -254,6 +258,8 @@ class OverrideStore:
     def _open(self, *, create: bool) -> sqlite3.Connection | None:
         if self._conn is not None:
             return self._conn
+        if self.read_only:
+            return self._open_read_only()
         if not create and not self.path.exists():
             return None
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,6 +294,32 @@ class OverrideStore:
             conn.close()
             raise
         self._key = bytes(row[0])
+        self._conn = conn
+        return conn
+
+    def _open_read_only(self) -> sqlite3.Connection | None:
+        """The existing store, read-only (``mode=ro``), or None when there is
+        none — no file, or a file without the store's tables (never created
+        here)."""
+        if not self.path.exists():
+            return None
+        conn = sqlite3.connect(
+            self.path.resolve().as_uri() + "?mode=ro",
+            uri=True,
+            check_same_thread=False,
+            timeout=self._busy_timeout_ms / 1000,
+        )
+        try:
+            tables = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+        except BaseException:
+            conn.close()
+            raise
+        if not {"pending", "rules"} <= tables:
+            conn.close()
+            return None
         self._conn = conn
         return conn
 

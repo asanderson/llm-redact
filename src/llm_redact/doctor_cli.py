@@ -721,7 +721,7 @@ def _check_overrides(report: _Report, config: Config) -> bool:
         if config.overrides.path
         else default_overrides_path()
     )
-    store = OverrideStore(path)
+    store = OverrideStore(path, read_only=True)
     try:
         counts = store.counts()
     except Exception as exc:  # noqa: BLE001 — doctor reports, never raises

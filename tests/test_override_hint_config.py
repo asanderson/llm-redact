@@ -29,7 +29,7 @@ from llm_redact import override_cli
 from llm_redact.cli import main
 from llm_redact.config import Config, OverridesConfig, ProviderConfig, default_config_path
 from llm_redact.detection.engine import DetectionConfig
-from llm_redact.overrides import CODE_LENGTH, allow_hint, hint_config
+from llm_redact.overrides import CODE_LENGTH, allow_hint, hint_config, shell_quote
 from llm_redact.proxy import create_app
 from llm_redact.realtime import blocked_reason
 from test_override_cli import FakeTty
@@ -42,7 +42,8 @@ HINT_RE = re.compile(r"to allow: (llm-redact override .*) --once \| --always")
 
 def _write_config(path: Path, store: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f'[overrides]\nenabled = true\npath = "{store}"\n')
+    # A TOML literal string: a Windows path's backslashes are not escapes.
+    path.write_text(f"[overrides]\nenabled = true\npath = '{store}'\n")
     return path
 
 
@@ -81,7 +82,15 @@ def _command(response: httpx.Response) -> list[str]:
     message = response.json()["error"]["message"]
     match = HINT_RE.search(message)
     assert match is not None, message
-    return shlex.split(match.group(1))
+    return _split(match.group(1))
+
+
+def _split(command: str) -> list[str]:
+    """``command`` split as the operator's shell would (``shell_quote``'s
+    inverse): POSIX rules, or on Windows double quotes and no escapes."""
+    if os.name == "nt":
+        return [part.strip('"') for part in shlex.split(command, posix=False)]
+    return shlex.split(command)
 
 
 # --------------------------------------------------------------- hint_config
@@ -97,17 +106,17 @@ def test_an_explicit_config_is_named_absolute_and_quoted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spaced = tmp_path / "my configs" / "proxy.toml"
-    assert hint_config(spaced, {}) == shlex.quote(str(spaced))
-    assert shlex.split(hint_config(spaced, {}) or "") == [str(spaced)]
+    assert hint_config(spaced, {}) == shell_quote(str(spaced))
+    assert _split(hint_config(spaced, {}) or "") == [str(spaced)]
     # A relative path is named as the proxy resolved it (its working dir).
     monkeypatch.chdir(tmp_path)
-    assert hint_config(Path("rel.toml"), {}) == str(tmp_path / "rel.toml")
+    assert hint_config(Path("rel.toml"), {}) == shell_quote(str(tmp_path / "rel.toml"))
     # LLM_REDACT_CONFIG counts as explicit: the operator's shell may not set it.
     env_path = tmp_path / "env.toml"
-    assert hint_config(None, {"LLM_REDACT_CONFIG": str(env_path)}) == str(env_path)
+    assert hint_config(None, {"LLM_REDACT_CONFIG": str(env_path)}) == shell_quote(str(env_path))
     # serve --config wins over the variable, as it does when loading.
     other = tmp_path / "flag.toml"
-    assert hint_config(other, {"LLM_REDACT_CONFIG": str(env_path)}) == str(other)
+    assert hint_config(other, {"LLM_REDACT_CONFIG": str(env_path)}) == shell_quote(str(other))
     assert allow_hint("C0DE", "/x/c.toml") == (
         "to allow: llm-redact override --config /x/c.toml C0DE --once | --always"
     )
@@ -127,11 +136,12 @@ def test_the_default_search_result_needs_no_config_argument(tmp_path: Path) -> N
         link.symlink_to(searched)
         assert hint_config(link, {}) is None
         # Another file is not.
-        assert hint_config(tmp_path / "other.toml", {}) == str(tmp_path / "other.toml")
+        assert hint_config(tmp_path / "other.toml", {}) == shell_quote(str(tmp_path / "other.toml"))
     finally:
         searched.unlink()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows file names are always Unicode")
 def test_a_path_the_hint_cannot_carry_falls_back_to_the_plain_hint() -> None:
     undecodable = Path(os.fsdecode(b"/tmp/\xff-config.toml"))
     assert hint_config(undecodable, {}) is None
@@ -225,6 +235,7 @@ def test_the_close_reason_carries_the_path_only_when_it_fits() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="needs a short absolute path (/tmp) to fit 123 bytes")
 async def test_a_realtime_close_reason_names_the_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
@@ -279,8 +290,8 @@ def test_an_unreadable_default_search_names_the_explicit_config(
     # (a redundant --config is harmless; a missing one points elsewhere).
     _unreadable_default_search(monkeypatch)
     explicit = tmp_path / "proxy.toml"
-    assert hint_config(explicit, {}) == str(explicit)
-    assert hint_config(None, {"LLM_REDACT_CONFIG": str(explicit)}) == str(explicit)
+    assert hint_config(explicit, {}) == shell_quote(str(explicit))
+    assert hint_config(None, {"LLM_REDACT_CONFIG": str(explicit)}) == shell_quote(str(explicit))
 
 
 def test_serve_check_starts_with_an_unreadable_default_search(
@@ -306,7 +317,7 @@ def test_a_lost_working_directory_gives_the_plain_hint(
 
     monkeypatch.setattr(os, "getcwd", gone)
     assert hint_config(Path("rel.toml"), {}) is None
-    assert hint_config(tmp_path / "abs.toml", {}) == str(tmp_path / "abs.toml")
+    assert hint_config(tmp_path / "abs.toml", {}) == shell_quote(str(tmp_path / "abs.toml"))
 
 
 def test_the_docs_promise_the_same_store_only_where_it_holds() -> None:
@@ -323,3 +334,14 @@ def test_the_docs_promise_the_same_store_only_where_it_holds() -> None:
         assert "same config and override store as the running" not in text
     assert re.search(r"`\[overrides\] path`[^.]*absolute", overrides_doc)
     assert re.search(r"proxy's own[^.]*HOME", overrides_doc)
+
+
+def test_shell_quote_follows_the_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    # POSIX single quotes around anything unsafe; on Windows the
+    # command-line convention, double quotes only around a space.
+    monkeypatch.setattr("llm_redact.overrides.os.name", "posix")
+    assert shell_quote("/etc/llm-redact/config.toml") == "/etc/llm-redact/config.toml"
+    assert shell_quote("/my dir/c.toml") == "'/my dir/c.toml'"
+    monkeypatch.setattr("llm_redact.overrides.os.name", "nt")
+    assert shell_quote("C:\\cfg\\c.toml") == "C:\\cfg\\c.toml"
+    assert shell_quote("C:\\my dir\\c.toml") == '"C:\\my dir\\c.toml"'

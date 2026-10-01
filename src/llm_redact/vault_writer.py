@@ -44,8 +44,10 @@ hands them to a ``MapWriter`` instead:
   counters and the outage state are only ever touched there;
 - SHUTDOWN drains: the proxy's lifespan waits (``drain``, bounded by
   ``SHUTDOWN_DRAIN_SECONDS``) before the vault closes; ``close`` drops what
-  is still queued, counting each write under its stage and logging their
-  NUMBER only (a write left unwritten reads as unknown after the restart).
+  is still queued — and gives up on a write still in flight once its
+  thread does not finish in ``STOP_JOIN_SECONDS`` — counting each under its
+  stage and logging their NUMBER only (a write left unwritten reads as
+  unknown after the restart).
 
 The writer thread exits after ``IDLE_SECONDS`` without work (closing its
 connection) and starts again with the next write.
@@ -187,12 +189,16 @@ class MapWriter:
         # be erased after it ran (its session was deleted meanwhile).
         self._deletes = 0
         self._erase_in_flight = False
+        # A write in flight ``close`` gave up on: its outcome is not posted
+        # (``close`` counted it).
+        self._abandoned: MapWrite | None = None
         # The event loop outcomes are posted to (the submitter's).
         self._loop: asyncio.AbstractEventLoop | None = None
         # Whether the queue is full (logged once per episode; loop only).
         self._overflowing = False
-        # Whether a drain ran (``close`` then drains no further).
-        self._drained = False
+        # Whether the last drain ran out of time with no write landing
+        # since (the writer is stuck: ``close`` then waits no further).
+        self._stalled = False
 
     # -- the submitting side (the event loop) --------------------------------
 
@@ -306,23 +312,26 @@ class MapWriter:
         worker thread); how many have not."""
         deadline = time.monotonic() + timeout
         with self._cond:
-            self._drained = True
             while self._queue or self._in_flight is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._thread is None:
                     break
                 self._cond.wait(remaining)
-            return len(self._queue) + (self._in_flight is not None)
+            left = len(self._queue) + (self._in_flight is not None)
+            self._stalled = left > 0
+            return left
 
     def close(self, timeout: float = SHUTDOWN_DRAIN_SECONDS) -> int:
-        """Stop. Unless a ``drain`` ran already (the proxy's shutdown runs
-        one off the loop first), drain for up to ``timeout`` seconds — a
-        caller closing the manager directly never silently loses a write.
-        What is still queued then is dropped — counted under each write's
-        stage and logged by NUMBER only — and the overlay forgotten. Waits
-        ``STOP_JOIN_SECONDS`` at most for a write in flight. Returns how
-        many were dropped."""
-        if not self._drained:
+        """Stop. First drain for up to ``timeout`` seconds — a caller
+        closing the manager directly never silently loses a write — unless
+        the last drain ran out of time with no write landing since (the
+        proxy's shutdown drains off the loop first: a stuck writer is not
+        waited for twice). What is still queued then is dropped, the write
+        in flight given up on when its thread does not finish within
+        ``STOP_JOIN_SECONDS`` (a daemon thread: it never holds the exit),
+        each counted under its write's stage and logged by NUMBER only, and
+        the overlay forgotten. Returns how many were not written."""
+        if not self._stalled:
             self.drain(timeout)
         with self._cond:
             self._closed = True
@@ -332,6 +341,12 @@ class MapWriter:
             self._unwritten.clear()
             thread = self._thread
             self._cond.notify_all()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(STOP_JOIN_SECONDS)
+        with self._cond:
+            if self._in_flight is not None:
+                self._abandoned = self._in_flight
+                dropped.append(self._in_flight)
         for write in dropped:
             _count(write.faults)
         if dropped:
@@ -340,8 +355,6 @@ class MapWriter:
                 " (their records read as unknown after the restart)",
                 len(dropped),
             )
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(STOP_JOIN_SECONDS)
         return len(dropped)
 
     # -- the writer thread -------------------------------------------------------
@@ -410,14 +423,16 @@ class MapWriter:
         except BaseException:
             self._settle(write)
             raise
-        faults = write.faults
-        if error is not None:
-            self._post(faults.failed, error)
-        elif faults.failing:
-            self._post(faults.succeeded)
+        if self._abandoned is not write:
+            faults = write.faults
+            if error is not None:
+                self._post(faults.failed, error)
+            elif faults.failing:
+                self._post(faults.succeeded)
         # Only now is it done: a drain that returns has its outcome posted.
         with self._cond:
             self._in_flight = None
+            self._stalled = False
             self._cond.notify_all()
         return connection
 

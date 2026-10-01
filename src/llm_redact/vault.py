@@ -1151,7 +1151,9 @@ class VaultManager(Protocol):
     - OPTIONAL ``drain_map_writes(timeout) -> int`` — blocking: wait up to
       ``timeout`` seconds for the queued writes to land; how many have not.
       The proxy's shutdown runs it (in a worker thread) before ``close``,
-      which counts and drops what is still queued.
+      which counts and drops what is still queued (and a write still in
+      flight); a drain earlier in the manager's life never stops ``close``
+      from draining again.
 
     A manager whose ``durable_response_map`` is False (the in-memory one)
     keeps no durable map: its handle-map members record nothing and answer
@@ -1586,7 +1588,9 @@ class SqliteVaultManager:
 
     def close(self) -> None:
         """Stop the background writer (``MapWriter.close``: drained first,
-        bounded, unless a drain ran; what is left is counted and dropped),
+        bounded, unless the last drain ran out of time with nothing landing
+        since; what is left — the write in flight included — is counted and
+        dropped),
         then close the connection."""
         if self._maps is not None:
             self._maps.close()

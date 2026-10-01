@@ -40,6 +40,7 @@ import pytest
 
 import llm_redact.proxy as proxy_mod
 import llm_redact.registry as registry_mod
+import llm_redact.vault_writer as writer_mod
 from llm_redact.config import Config, ProviderConfig, VaultConfig
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
@@ -506,6 +507,80 @@ def test_drain_reports_what_has_not_landed_in_time(tmp_path: Path) -> None:
     manager.close()
 
 
+def test_closing_drains_again_after_an_earlier_drain_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drain mid-life (a plugin's test helper, an operator tool) never
+    stops a later ``close`` from draining what was queued since."""
+    monkeypatch.setattr(writer_mod, "STOP_JOIN_SECONDS", 0.01)
+    manager = SqliteVaultManager(tmp_path / "vault.db")
+    manager._maps = writer = MapWriter(manager._open_map_connection, idle_seconds=0.01)
+    manager.record_response_session("resp_0", "s")
+    assert manager.drain_map_writes(10) == 0
+    gate = _gate(writer)
+    with _paused(writer):  # a fresh thread opens a fresh (slow) connection
+        manager.record_response_session("resp_1", "s")
+    threading.Timer(0.3, gate.set).start()
+    manager.close()
+    other = SqliteVaultManager(tmp_path / "vault.db")
+    assert other.lookup_response_sessions(["resp_0", "resp_1"]) == {
+        "resp_0": "s",
+        "resp_1": "s",
+    }
+    other.close()
+
+
+def test_a_write_landing_after_a_timed_out_drain_lets_close_drain_again(
+    tmp_path: Path,
+) -> None:
+    manager = SqliteVaultManager(tmp_path / "vault.db")
+    manager._maps = writer = MapWriter(manager._open_map_connection, idle_seconds=0.01)
+    gate = _gate(writer)
+    manager.record_response_session("resp_1", "s")
+    assert manager.drain_map_writes(0.01) == 1  # held up: stalled
+    gate.set()
+    assert manager.drain_map_writes(10) == 0  # landed: no longer stalled
+    with _paused(writer):
+        manager.record_response_session("resp_2", "s")
+    manager.close()  # drains
+    other = SqliteVaultManager(tmp_path / "vault.db")
+    assert other.lookup_response_session("resp_2") == "s"
+    other.close()
+
+
+def test_a_write_given_up_on_at_close_is_counted_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The write in flight when ``close`` stops waiting is counted then —
+    and its own late outcome (a failure here) is never counted again."""
+    monkeypatch.setattr(writer_mod, "STOP_JOIN_SECONDS", 0.01)
+    manager = SqliteVaultManager(tmp_path / "vault.db")
+    counter: Counter[str] = Counter()
+    manager.bind_fault_counter(counter)
+    writer = _background(manager)
+    gate = threading.Event()
+
+    def broken() -> Any:
+        assert gate.wait(30)
+        raise sqlite3.OperationalError("disk I/O error")
+
+    writer._open_connection = broken
+    caplog.set_level(logging.WARNING, logger="llm_redact")
+    manager.record_handle_session(H + "a", "s")
+    assert manager.drain_map_writes(0.01) == 1
+    assert writer.close() == 1
+    assert counter == {"handle_map": 1}
+    assert "1 write(s) were not written at shutdown" in caplog.text
+    gate.set()
+    deadline = time.monotonic() + 10
+    while writer._in_flight is not None:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert counter == {"handle_map": 1}
+    assert "write failed" not in caplog.text
+    manager._conn.close()
+
+
 def test_close_drops_what_is_queued_counting_each_by_its_stage(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -792,6 +867,7 @@ async def test_shutdown_waits_a_bounded_time_then_counts_what_is_left(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(proxy_mod, "SHUTDOWN_DRAIN_SECONDS", 0.05)
+    monkeypatch.setattr(writer_mod, "STOP_JOIN_SECONDS", 0.05)
     upstream = Responses()
     app = _app(monkeypatch, tmp_path, upstream)
     state = app.state.proxy
@@ -807,10 +883,11 @@ async def test_shutdown_waits_a_bounded_time_then_counts_what_is_left(
                 await _until(lambda: writer._in_flight is not None)
     finally:
         gate.set()
-    # resp_1 was in flight (held up); resp_2 still queued: dropped, counted.
-    assert state.bookkeeping_errors == {"response_id": 1}
-    assert "1 write(s) were not written at shutdown" in caplog.text
-    assert "resp_2" not in caplog.text
+    # resp_1 was in flight (held up past the join): given up on; resp_2
+    # still queued: dropped. Both counted, their number logged.
+    assert state.bookkeeping_errors == {"response_id": 2}
+    assert "2 write(s) were not written at shutdown" in caplog.text
+    assert "resp_1" not in caplog.text and "resp_2" not in caplog.text
 
 
 @pytest.mark.parametrize("backend_name", ["postgresql", "mysql", "oracle"])

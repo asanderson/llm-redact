@@ -133,9 +133,16 @@ at `timeout_seconds` and reaps it; its answer is read up to a size bound. A
 parser wedged or blown up by a crafted file costs one killed process: the
 file counts as not read.
 
+On **Windows** (unsupported for production, but CI-tested) the worker sets
+no limit of its own at all — no memory, CPU-time, file-write, open-file or
+child-process limit: only the proxy's wall-clock kill at `timeout_seconds`
+and its input bound (a quarter of `worker_memory_mb`) hold, and its
+environment keeps `SYSTEMROOT` and `WINDIR` (the interpreter needs them to
+start; neither is a credential).
+
 | Format | What is read | Incomplete when |
 | --- | --- | --- |
-| `pdf` (pypdf) | every page's text layer; what every form XObject, tiling pattern and annotation appearance draws — a form field's and a link's too, so a field whose value holds bare digits but whose appearance shows them formatted (`123-45-6789`) is read as shown; the text marked content and structure elements stand for (`/ActualText`, `/Alt`, `/E`: what copy and paste and screen readers read) — `/ActualText` also IN PLACE of the glyphs it stands for, as poppler and Acrobat's copy read the line; each page's lines as they are SHOWN: where text of different drawings meets on one line — the page's own, a form it draws, a form field's or another annotation's appearance placed by its rectangle — it is also read joined (directly and with a space); annotation strings, rich contents and link targets; form field names and values (text streams too); the document information dictionary and XMP metadata; bookmarks | a page draws an image, or paints anything (outlines, a pattern) yet reads as no text; a form, pattern or appearance paints an inline image, or shows text that reads as nothing (no font to read it by); ANY object of the file (every one listed, reached from a page or not, object streams included) attaches a file — a file-attachment annotation, a PDF 2.0 associated file, the embedded-files list, a portfolio — or carries rich media, a movie, a sound, 3D or a screen annotation, an image or PostScript XObject (from a pattern, a glyph or an appearance too), a font whose text pypdf cannot map (no ToUnicode map and a Type3 or composite font, an encoding or glyph name pypdf does not know, or no encoding outside the standard 14 fonts), or a Type3 glyph that shows text or an inline image; a document-level script, or a JavaScript action in a file whose form fields the viewer redraws (`NeedAppearances`, or a field without an appearance: a format script may change what it shows); an XFA form; a character could not be mapped; it cannot be decrypted with an empty password |
+| `pdf` (pypdf) | every page's text layer; what every form XObject, tiling pattern and annotation appearance draws — a form field's and a link's too, so a field whose value holds bare digits but whose appearance shows them formatted (`123-45-6789`) is read as shown; the text marked content and structure elements stand for (`/ActualText`, `/Alt`, `/E`: what copy and paste and screen readers read) — `/ActualText` also IN PLACE of the glyphs it stands for, as poppler and Acrobat's copy read the line; each page's lines as they are SHOWN: where text of different drawings meets on one line — the page's own, a form it draws, a form field's or another annotation's appearance placed by its rectangle — it is also read joined (directly and with a space); annotation strings, rich contents and link targets; form field names and values (text streams too); the document information dictionary and XMP metadata; bookmarks; and, scanned though no viewer shows them (never in the display reading): every string of every object of the file (an action's target or script, a submit-form address, private application data, any key), every metadata stream (a page's, an image's, a font's), every script stream, and what a content stream holds beside the text it shows (comments, strings no text operator shows — marked-content properties, an unknown operator's operands) | a page draws an image, or paints anything (outlines, a pattern) yet reads as no text; a form, pattern or appearance paints an inline image, or shows text that reads as nothing (no font to read it by); ANY object of the file (every one listed, reached from a page or not, object streams included) attaches a file — a file-attachment annotation, a PDF 2.0 associated file, the embedded-files list, a portfolio — or carries rich media, a movie, a sound, 3D or a screen annotation, an image or PostScript XObject (from a pattern, a glyph or an appearance too), a font whose text pypdf cannot map (no ToUnicode map and a Type3 or composite font, an encoding or glyph name pypdf does not know, or no encoding outside the standard 14 fonts), or a Type3 glyph that shows text or an inline image; a stream the reader neither reads nor renders with (an unreferenced stream, private application data, a page thumbnail, signature revocation data — font programs and maps, colour profiles, functions, shadings, halftones, glyph procedures, object and cross-reference streams and a linearized file's hint streams are rendered with); a document-level script (the document's JavaScript name tree; any other script's text is scanned), or a JavaScript action in a file whose form fields the viewer redraws (`NeedAppearances`, or a field without an appearance: a format script may change what it shows); an XFA form; a character could not be mapped; it cannot be decrypted with an empty password |
 | `ooxml` (docx, xlsx, pptx, …) and `odf` (odt, ods, odp, …) | the entry names and the zip's comments; every XML part's text and attribute values (so sheet names, formulas, comments, hyperlink targets, document properties), read three ways: joined within paragraphs — a value Word splits across runs — as the line is SHOWN — what a renderer keeps out of the line (a tracked deletion or move, a field's instruction — everything between the field's begin and its separator, whatever element holds it — a hidden run, ruby and phonetic text, a text box or drawing, an OpenDocument inline comment or note) is read on its own and the text around it joined, and a paragraph whose mark is deleted or hidden joins the next — and element by element; tabs, spaces, Word's non-breaking hyphens and symbols (`w:sym`, a symbol font's code as its character) read as the characters they show; a spreadsheet number shown through a format that joins its digits with literal text (Excel's Special formats: `000-00-0000`, `(000) 000-0000`, `00000-0000`, or text such as `"123-45-"0000`) also as the format shows it; a date or time shown with more than four digits also as its format shows it, in the workbook's 1900 or 1904 date system (so a format such as `hhm-ss-yyyy` or `"123-45-"yyyy` over a date is read as the `123-45-6789` it shows) | the package holds anything else: an image, an embedded object or file, fonts, macros, an encrypted entry (the application's own thumbnail, a rendering of the text, is not counted); an XML part inlines base64 data (`w:binData`, `office:binary-data`); a style or the document defaults hide text (Word's `vanish`, OpenDocument's `text:display`), since which runs it hides is not resolved; a field is never closed or its boundaries are out of order; a symbol's character cannot be read; a number format joins digits with literal text in a way not rendered (a text format such as `"123-45-"@`, fractions, dates mixed with digit placeholders, an era or another calendar or digit script), or — like a date format that is not written as dates are (a number twice, two numbers with no text between them, digits in its text) — sits in a conditional format or a chart, where which values it shows is not resolved; the workbook holds a second styles part (a cell's style could find another format); the workbook names its date system only after a date was shown; a date cell holds no date |
 | `html` (markup that is not UTF-8 text) | the decoded source itself — tags, attributes, comments, scripts — its text with character references resolved, that text as a browser shows it (without scripts, styles and comments, so a value they split is read whole), and its raw bytes as Latin-1 (every ASCII byte where it stands, whatever the declared charset made of the bytes around it) | the charset was guessed rather than declared (it is taken only from an XML declaration at the very start or a real `<meta charset>` / `<meta http-equiv="Content-Type">` tag within the first 1024 bytes — never from a mention in a comment or a script), or declared as one that does not decode ASCII to itself (UTF-16/32, EBCDIC, UTF-7: the page was written in ASCII), or another charset mentioned in the first 2048 bytes disagrees with the declaration (the page is then still decoded as declared), or the page inlines an image, any base64 `data:` URI or an XML binary-data element |
 | `rtf` (best effort) | the source (every ASCII byte), its decoded text — `\'hh` escapes and 8-bit text in the code page of the current font (`\fcharset`, `\cpg`) or the document's (`\ansicpg`), consecutive bytes decoded together (a double-byte character is two escapes); `\uN` with the `\ucN` fallback characters after it skipped, as every reader does; the non-breaking hyphen `\_` and space `\~` as a hyphen and a space — and that text as SHOWN: without hidden (`\v`) or deleted text, field instructions (marked `\*` or not), notes, headers, shapes, drawing objects, index entries and the document's tables, so the text around them joins | a picture, an embedded object or binary data; bytes the code page does not decode, or a character standing for one that could not be mapped (U+FFFD) |
@@ -195,6 +202,9 @@ loopback must be declared `trusted = true` and reached over `https`; doctor
 flags it. A service's reading counts as **complete** only with `complete =
 true` — the operator vouching that it reads every text-bearing element
 (OCR on, embedded documents followed) — and only when it reports no error.
+For a cloud OCR service (below) `complete = true` vouches for less: it reads
+the RENDERED pages, so its reading completes a file only where nothing else
+was left unread (below).
 Services are called with bounded time and answer size, no redirects, and no
 proxy or netrc settings from the environment; a credential is read from the
 environment variable `token_env` names at each call and never logged. Any
@@ -222,7 +232,8 @@ config, a log line, `/status` or `doctor` output.
 kind = "textract"                # AWS Textract DetectDocumentText
 region = "eu-west-1"             # required: the endpoint textract.REGION.amazonaws.com and the SigV4 scope
 trusted = true
-complete = true                  # Textract reads the whole image/page (OCR)
+complete = true                  # Textract reads the rendered page (OCR): it completes a scanned
+                                 # page or a plain picture, never an attachment or metadata (below)
 # url = "https://vpce-….textract.eu-west-1.vpce.amazonaws.com"  # optional (a VPC endpoint)
 # access_key_env = "AWS_ACCESS_KEY_ID"          # the variables' NAMES (these are the defaults);
 # secret_key_env = "AWS_SECRET_ACCESS_KEY"      # the session token is sent when set
@@ -256,10 +267,20 @@ trusted = true
   `https://oauth2.googleapis.com/token` — the only token endpoint a key file
   may name — caching the access token until a minute before it expires;
   the key file is read once at startup. With `token_env`, the variable
-  holds an access token as is: a process cannot see a variable changed
-  after it started, and Google access tokens expire (typically within an
-  hour), so this form suits a supervisor that restarts the proxy with a
-  fresh token; prefer `credentials_file` for a long-running proxy.
+  holds a static bearer token sent as is and **never refreshed**: a
+  process cannot see a variable changed after it started, and Google
+  access tokens expire (typically within an hour). Once it has expired,
+  every call to that service fails (Google answers 401; logged as
+  `extraction service documentai (HOST) failed (HTTP 401)`, counted
+  `failed` under `documentai` in `readings_total`) — fail closed: the
+  service gives no reading, so a file only it could read stays incomplete
+  and is never cleared or converted; the upload keeps the unscanned-binary
+  rules (refused under `binary_uploads = "refuse"` or a credential the
+  proxy holds, forwarded unscanned and counted under the default
+  `"forward"` with the client's own key) until the operator rotates the
+  token — sets a fresh one and restarts the proxy. This form suits a
+  supervisor that restarts the proxy with a fresh token; prefer
+  `credentials_file` for a long-running proxy.
 - **Document Intelligence** is asynchronous: `POST
   {url}/documentintelligence/documentModels/{model}:analyze?api-version=2024-11-30`
   answers 202 with an `Operation-Location`, which is polled (each wait its
@@ -283,6 +304,40 @@ page tree as pypdf reads it — keep `pdf` in `formats`), and is one for a
 PNG that is not animated, a JPEG or a BMP; a TIFF, GIF, WebP or HEIF image
 (which may hold several), an Office file, markup, or a PDF the local
 extractor did not open never counts as completely read by a cloud service.
+
+A cloud OCR service reads what the pages SHOW, nothing else: not a file
+attached to a PDF (a Factur-X invoice's XML), an XFA form, a document
+script, an image no page draws (a thumbnail, one only an annotation or a
+pattern shows, or one merely listed), a picture's metadata (PNG text chunks,
+Exif, XMP, an ICC profile, a JPEG comment or thumbnail) or bytes after the
+image's end. So its reading completes a file only where the rest is known to
+be read (counted `unseen_content` in `readings_total` otherwise):
+
+- a PDF the local PDF extractor read completely but for what OCR of its
+  pages reads: images its pages draw (every image of the file must be named
+  by a page's content stream, or that of a form the page draws, with their
+  masks) and page text that reads as nothing or as unmapped characters.
+  Each drawn image (inline ones too) must hold nothing but pixels: coded
+  with Flate, LZW, run-length, ASCII or CCITT filters only, or as a JPEG
+  holding nothing but the picture (the single-picture rule below) or JBIG2
+  of picture segments only (its globals too), each as the image's one
+  filter. A JPEG with a comment, Exif or XMP, a JPEG 2000 image (which
+  carries XML and comment boxes), an image with its own metadata stream,
+  optional content, an OPI version or alternates, and a file with optional
+  content (layers that may hide an image) are not completed by OCR. Any
+  other reason the local reading gives — an attachment, a script, an XFA
+  form, an image no page draws, a font it cannot map, a form or appearance
+  stream it could not read, the `max_text_chars` cap — keeps the file
+  incomplete whatever the OCR answers;
+- a PNG or JPEG that holds nothing but the picture: only the chunks or
+  markers that draw it (a JFIF header without a thumbnail, Adobe's colour
+  marker), each no longer than its specification defines (a header padded
+  past its size, or a table segment holding more than its tables, is not
+  vouched for), ending at its end marker. A BMP is never completed by OCR.
+
+What the page shows is taken as what OCR reads: an image drawn outside the
+page's visible area, under other content or fully masked is the residual of
+declaring an OCR service `complete = true`.
 
 ## Convert mode
 
@@ -342,7 +397,9 @@ not happen.
   sent after a clean scan — `clean_refused` — read clean, but the upload was
   refused for another part or rule — `converted` / `converted_refused` —
   replaced by its redacted text (convert mode), and whether the upload was
-  then sent — `detected`, `blocked`, `incomplete`, `not_inspected`,
+  then sent — `overridden` / `overridden_refused` — read clean only because an
+  approved refusal override (docs/overrides.md) let its values through, so the
+  file went out as sent WITH them, or the upload was refused — `detected`, `blocked`, `incomplete`, `not_inspected`,
   `timeout`, `error`) and `upload_inspector` — the core's bounds and the
   extractors' formats, services (kind, host, trusted, complete), convert
   classes, worker counts and `readings_total` per extractor.
@@ -371,13 +428,22 @@ not happen.
   same page are not told apart from a drawing (a logo, a table rule), and a
   font whose ToUnicode map lies is taken at its word; white-on-white text is
   read like any other. A PDF drawing any image, anywhere, is incomplete
-  whether or not the image holds text. Text in PDF objects the document no
-  longer references (an earlier revision kept by an incremental save) is
-  not read — a PDF reader does not show it either.
+  whether or not the image holds text. Every object the file's
+  cross-reference table lists is walked, referenced or not (its strings
+  scanned; a stream no reader uses keeps the reading incomplete), but the
+  bytes of an earlier revision an incremental save superseded are not read —
+  a PDF reader does not reach them either. Nor are the bytes of the streams
+  a reader renders with (font programs, colour profiles, functions,
+  shadings, halftones) read for text: a value hidden inside one is not seen.
 - Legacy Office files (`.doc`, `.xls`, `.ppt`) and images are read only by
   a service.
 - Textract is synchronous only (images and one-page PDFs); Document AI's
-  `token_env` form cannot refresh its token (use `credentials_file`).
+  `token_env` form reads a static bearer token that is never refreshed: when
+  it expires that service fails closed (no reading, the file stays
+  incomplete) until the operator rotates the token and restarts the proxy
+  (use `credentials_file` instead).
 - A cloud OCR reading vouches for a file only when it covers every page and
   the file's page count is known (above): multi-page TIFFs, Office files and
-  PDFs the local extractor could not open are never cleared by one.
+  PDFs the local extractor could not open are never cleared by one — nor a
+  file holding what OCR of its pages cannot see (an attachment, a script, an
+  undrawn image, a picture's metadata).

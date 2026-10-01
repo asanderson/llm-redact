@@ -1578,8 +1578,10 @@ async def _relay(
                 # copy that counts its strings against max_body_strings (the
                 # frame cap, MAX_FRAME_BYTES, bounds bytes only).
                 # The requester's approved overrides, asked only where a
-                # block-mode value would close the connection (overrides.py).
-                frame_scope = state.override_scope()
+                # block-mode value would close the connection (overrides.py);
+                # never on a connection authorized with the proxy's own
+                # identity (every refusal under it is final, no code).
+                frame_scope = None if require_json else state.override_scope()
                 frame_redactor = ctx.redactor.with_budget(state.config.max_body_strings)
                 if frame_scope is not None:
                     frame_redactor = frame_redactor.with_overrides(frame_scope)

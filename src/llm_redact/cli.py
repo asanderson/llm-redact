@@ -887,6 +887,13 @@ def _print_posture(payload: dict[str, Any]) -> None:
             f"binary uploads: {seen} file part(s) forwarded after a clean scan of their"
             " EXTRACTED text (the file itself is sent as is)"
         )
+    overridden = {k: v.get("overridden", 0) for k, v in inspected.items() if v.get("overridden")}
+    if overridden:
+        seen = " ".join(f"{k}×{v}" for k, v in sorted(overridden.items()))
+        lines.append(
+            f"binary uploads: {seen} file part(s) forwarded AS SENT with values an approved"
+            " refusal override let through (llm-redact override list)"
+        )
     converted = {k: v.get("converted", 0) for k, v in inspected.items() if v.get("converted")}
     if converted:
         seen = " ".join(f"{k}×{v}" for k, v in sorted(converted.items()))

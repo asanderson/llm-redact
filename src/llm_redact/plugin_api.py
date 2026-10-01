@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .audit import WriteAheadAudit
 from .providers.base import RouteKind
 from .sse import SSEEvent
 from .vault import (
@@ -751,7 +752,24 @@ class AccessGate(Protocol):
       refusal of theirs is about to carry a code: only True mints one, with
       a hint naming the dashboard; absent, False or an exception gives no
       code (no hint the user could not act on). The local operator (no
-      subject) always gets the CLI's code.
+      subject) always gets the CLI's code. Never asked per request or per
+      realtime frame: only once a refusal of theirs is being decided.
+    - OPTIONAL ``override_subject(subject: str) -> str`` — a STABLE id for
+      this admitted user that their override records are kept under: one
+      that survives a rename and is never given to another user (for
+      instance the user's vault namespace id). Without it records are keyed
+      by the subject itself, so a name another user later takes inherits
+      them. Asked, like ``approves_overrides``, only on the refusal path
+      and by the override endpoints; an exception or an answer other than a
+      non-empty string means no override applies and no code is minted.
+    - OPTIONAL ``browser_signed_in(conn: HTTPConnection, subject: str) -> bool``
+      — whether this dashboard connection, admitted as ``subject``, rests
+      on a sign-in a PERSON made in a browser (a session the gate's browser
+      sign-in established, e.g. its session cookie) — never on a credential
+      an agent can hold and present itself (an API key, a per-user key, a
+      bearer token, a client certificate). The refusal-override approve and
+      revoke POSTs are served only when it is True. It may return an
+      awaitable; absent, anything but True, or an exception: refused (403).
     - ``recheck_interval: float`` — seconds between the core's re-checks
       of every open long-lived connection's ``Admission.recheck`` (read
       once at startup; default 30; anything but a number from 5 to 3600 is
@@ -1061,4 +1079,5 @@ __all__ = [
     "VaultCipher",
     "VaultKeyError",
     "VaultManager",
+    "WriteAheadAudit",
 ]

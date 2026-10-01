@@ -35,6 +35,17 @@ class FakeTty(io.StringIO):
         return self.answer
 
 
+@pytest.fixture(autouse=True)
+def _overrides_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The commands below run under a config that turns overrides ON (the
+    config search reads LLM_REDACT_CONFIG; the pseudo-terminal child inherits
+    it). Off — the default — every form exits 1 naming the setting:
+    test_every_form_names_the_setting_while_overrides_are_off."""
+    config = tmp_path / "overrides-on.toml"
+    config.write_text("[overrides]\nenabled = true\n")
+    monkeypatch.setenv("LLM_REDACT_CONFIG", str(config))
+
+
 def _run(*argv: str) -> int:
     with pytest.raises(SystemExit) as exited:
         main(["override", *argv])
@@ -154,7 +165,7 @@ def test_the_store_path_comes_from_the_config(
     db = tmp_path / "from-config.db"
     config = tmp_path / "config.toml"
     # A TOML literal string: a Windows path's backslashes are not escapes.
-    config.write_text(f"[overrides]\npath = '{db}'\n")
+    config.write_text(f"[overrides]\nenabled = true\npath = '{db}'\n")
     _pending(db)
     assert _run("list", "--json", "--config", str(config)) == 0
     assert len(json.loads(capsys.readouterr().out)) == 1
@@ -203,7 +214,7 @@ def test_doctor_reports_approved_overrides_as_counts(tmp_path: Path) -> None:
     from llm_redact.config import Config, OverridesConfig
 
     db = tmp_path / "o.db"
-    config = Config(overrides=OverridesConfig(path=str(db)))
+    config = Config(overrides=OverridesConfig(enabled=True, path=str(db)))
     (none,) = _doctor(config)
     assert none["level"] == "PASS" and "none approved" in none["message"]
     assert not db.exists()  # doctor never creates the store
@@ -212,8 +223,9 @@ def test_doctor_reports_approved_overrides_as_counts(tmp_path: Path) -> None:
     assert warn["level"] == "WARN" and "1 every-time rule(s)" in warn["message"]
     assert EMAIL not in warn["message"]
     (off,) = _doctor(Config(overrides=OverridesConfig(enabled=False)))
-    assert off["level"] == "PASS" and "disabled" in off["message"]
-    (broken,) = _doctor(Config(overrides=OverridesConfig(path=str(tmp_path))))
+    assert off["level"] == "PASS" and "off (the default)" in off["message"]
+    assert "[overrides] enabled = true" in off["message"]
+    (broken,) = _doctor(Config(overrides=OverridesConfig(enabled=True, path=str(tmp_path))))
     assert broken["level"] == "WARN" and "could not be read" in broken["message"]
 
 
@@ -224,7 +236,7 @@ def test_doctor_posture_counts_overrides_as_an_opt_out(tmp_path: Path) -> None:
     db = tmp_path / "o.db"
     OverrideStore(db).approve("always", approver=None, code=_pending(db))
     report = _Report(json_mode=True)
-    _check_posture(report, Config(overrides=OverridesConfig(path=str(db))))
+    _check_posture(report, Config(overrides=OverridesConfig(enabled=True, path=str(db))))
     assert not any("no coverage opt-outs" in row["message"] for row in report.rows)
 
 
@@ -314,7 +326,10 @@ def test_listing_and_doctor_never_write_the_store(
     assert _run("list", "--db", str(db)) == 0
     assert "always" in capsys.readouterr().out
     report = _Report()
-    assert _check_overrides(report, Config(overrides=OverridesConfig(path=str(db)))) is True
+    assert (
+        _check_overrides(report, Config(overrides=OverridesConfig(enabled=True, path=str(db))))
+        is True
+    )
     assert hashlib.sha256(db.read_bytes()).hexdigest() == before
     if sys.platform != "win32":  # POSIX mode bits are synthetic on Windows
         assert (store_dir.stat().st_mode & 0o777) == 0o755
@@ -322,5 +337,285 @@ def test_listing_and_doctor_never_write_the_store(
     empty.write_bytes(b"")
     assert _run("list", "--db", str(empty)) == 0
     assert "no pending refusals" in capsys.readouterr().out
-    assert _check_overrides(_Report(), Config(overrides=OverridesConfig(path=str(empty)))) is False
+    assert (
+        _check_overrides(
+            _Report(), Config(overrides=OverridesConfig(enabled=True, path=str(empty)))
+        )
+        is False
+    )
     assert empty.read_bytes() == b""
+
+
+def test_a_route_is_never_printed_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The route (and requester) come from the request: an escape sequence
+    in a path (cursor-up, erase-line, a bidi override) must not rewrite or
+    hide the kind and types the person confirms — in the prompt, the
+    listing and its JSON form alike (OVR-4)."""
+    db = tmp_path / "o.db"
+    route = "/v1/conversations/conv\x1b[1A\x1b[2K\rkind block, types EMAIL\u202e\x85/items"
+    escaped = r"/v1/conversations/conv\x1b[1A\x1b[2K\x0dkind block, types EMAIL\u202e\x85/items"
+    store = OverrideStore(db)
+    code = store.record_pending("block", "", "openai", "POST", route, [("AWS_KEY", "k")])
+    store.record_pending("block", "bob\x1b]0;x\x07", "openai", "POST", route, [("EMAIL", EMAIL)])
+    tty = FakeTty("no\n")
+    monkeypatch.setattr(override_cli, "_open_tty", lambda: tty)
+    assert _run(code, "--once", "--db", str(db)) == 1
+    assert "kind block, types AWS_KEY" in tty.shown and escaped in tty.shown
+    capsys.readouterr()
+    assert _run("list", "--db", str(db)) == 0
+    assert _run("list", "--json", "--db", str(db)) == 0
+    out = capsys.readouterr().out
+    for raw in ("\x1b", "\r", "\u202e", "\x85", "\x07"):
+        assert raw not in out and raw not in tty.shown
+    assert r"bob\x1b]0;x\x07" in out
+    assert {entry.route for entry in OverrideStore(db).entries()} == {f"POST openai {escaped}"}
+
+
+def test_a_long_route_never_pushes_the_kind_and_types_off_screen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A printable route of thousands of characters ending in a fake "kind
+    block, types EMAIL" once left the prompt line ending in the requester's
+    own text, the real kind and types scrolled away: a listed route (and
+    requester) is cut to ``SHOWN_CHARS`` with its length named, and the
+    line the person answers repeats the real kind and types."""
+    db = tmp_path / "o.db"
+    route = "/v1/conversations/" + "x" * 6000 + " kind block, types EMAIL, route POST /v1/items"
+    code = OverrideStore(db).record_pending(
+        "block", "", "openai", "POST", route, [("AWS_KEY", "k")]
+    )
+    tty = FakeTty("no\n")
+    monkeypatch.setattr(override_cli, "_open_tty", lambda: tty)
+    assert _run(code, "--once", "--db", str(db)) == 1
+    assert "types EMAIL" not in tty.shown and "x" * 200 not in tty.shown
+    answered = tty.shown.rstrip().splitlines()[-2]
+    assert answered.startswith("Approve once for kind block, types AWS_KEY:")
+    (entry,) = OverrideStore(db).entries()
+    assert len(entry.route) < 200 and entry.route.endswith(f"({len(route) + 12} characters)")
+    capsys.readouterr()
+    assert _run("list", "--json", "--db", str(db)) == 0
+    assert "x" * 200 not in capsys.readouterr().out
+
+
+# --- overrides off (the default) --------------------------------------------------------
+
+
+def _store_digest(db: Path) -> str:
+    """The store file's bytes (a reader's WAL index files aside: a
+    read-only connection to a WAL database may create them)."""
+    import hashlib
+
+    return hashlib.sha256(db.read_bytes()).hexdigest()
+
+
+def test_every_form_names_the_setting_while_overrides_are_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Off (a config that does not opt in): approve exits 1 naming
+    `[overrides] enabled`, never asks the terminal and touches nothing; list
+    prints what the store holds (value-free) with a line saying it is inert,
+    and exits 1 too; a config that cannot be parsed exits 2. (Revoke:
+    test_revoke_narrows_while_overrides_are_off.)"""
+    off = tmp_path / "off.toml"
+    off.write_text("")  # the default: overrides off
+    db = tmp_path / "o.db"
+    writer = OverrideStore(db)
+    code = writer.record_pending("block", "", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
+    rule_code = writer.record_pending("block", "", "openai", "POST", "/v1/x", [("EMAIL", "b@c.d")])
+    writer.approve("always", approver=None, code=rule_code)
+    writer.close()
+    before = _store_digest(db)
+    asked: list[bool] = []
+
+    def tty() -> FakeTty:
+        asked.append(True)
+        return FakeTty("allow\n")
+
+    monkeypatch.setattr(override_cli, "_open_tty", tty)
+    capsys.readouterr()
+    for scope in ("--once", "--always"):
+        assert _run(code, scope, "--config", str(off), "--db", str(db)) == 1
+        err = capsys.readouterr().err
+        assert "[overrides] enabled = true" in err and "off" in err
+        assert code not in err and EMAIL not in err
+    assert asked == []
+
+    assert _run("list", "--config", str(off), "--db", str(db)) == 1
+    listed = capsys.readouterr()
+    assert "pending" in listed.out and "always" in listed.out and EMAIL not in listed.out
+    assert "inert" in listed.err and "[overrides] enabled = true" in listed.err
+    assert _run("list", "--json", "--config", str(off), "--db", str(db)) == 1
+    listed = capsys.readouterr()
+    assert [e["state"] for e in json.loads(listed.out)] == ["pending", "always"]
+    assert "inert" in listed.err
+    empty = tmp_path / "none.db"
+    assert _run("list", "--config", str(off), "--db", str(empty)) == 1
+    listed = capsys.readouterr()
+    assert "no pending refusals" in listed.out and "inert" in listed.err
+    assert not empty.exists()
+    # Nothing was written: the same records, the same bytes.
+    assert _store_digest(db) == before
+    assert [e.state for e in OverrideStore(db, read_only=True).entries()] == ["pending", "always"]
+
+    bad = tmp_path / "bad.toml"
+    bad.write_text("[overrides]\nenabled = 'yes'\n")
+    assert _run("list", "--config", str(bad), "--db", str(db)) == 2
+    assert "[overrides]" in capsys.readouterr().err
+    # Turned on, the same store is approvable again.
+    on = tmp_path / "on.toml"
+    on.write_text("[overrides]\nenabled = true\n")
+    assert _run(code, "--once", "--config", str(on), "--db", str(db)) == 0
+    assert asked == [True]
+
+
+def test_doctor_warns_about_approvals_kept_while_overrides_are_off(tmp_path: Path) -> None:
+    """Off, the store's approvals are inert — but they apply again the
+    moment overrides are turned on: doctor WARNs with the counts and the
+    file (never a value), reads the store read-only and never creates one,
+    and does not count it as a coverage opt-out."""
+    from llm_redact.config import Config, OverridesConfig
+    from llm_redact.doctor_cli import _check_overrides, _check_posture, _Report
+
+    db = tmp_path / "o.db"
+    off = Config(overrides=OverridesConfig(enabled=False, path=str(db)))
+    (quiet,) = _doctor(off)
+    assert quiet["level"] == "PASS" and "off (the default)" in quiet["message"]
+    assert not db.exists()
+    writer = OverrideStore(db)
+    for scope in ("always", "once"):
+        code = writer.record_pending("block", "", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
+        writer.approve(scope, approver=None, code=code)
+    writer.close()
+    before = _store_digest(db)
+    (warn,) = _doctor(off)
+    assert warn["level"] == "WARN" and "inert" in warn["message"]
+    assert "1 every-time rule(s) and 1 one-time grant(s)" in warn["message"]
+    assert str(db) in warn["message"] and "[overrides] enabled = true" in warn["message"]
+    assert "override revoke ID" in warn["message"]
+    assert EMAIL not in warn["message"]
+    assert _check_overrides(_Report(json_mode=True), off) is False
+    report = _Report(json_mode=True)
+    _check_posture(report, off)
+    assert any("no coverage opt-outs" in row["message"] for row in report.rows)
+    assert _store_digest(db) == before
+    # An unreadable store while off: a WARN naming the exception type only.
+    (broken,) = _doctor(Config(overrides=OverridesConfig(enabled=False, path=str(tmp_path))))
+    assert broken["level"] == "WARN" and "could not be read" in broken["message"]
+
+
+async def test_off_names_the_config_it_read_not_the_running_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A proxy started with an explicit config file (`serve --config`, a
+    service unit) that turns overrides on mints a code whose hint has no
+    `--config`. Run as written, the command reads its own search — here no
+    file at all: it must not tell the operator overrides are off on the
+    proxy (they are on there) nor that the listed records are inert; it
+    names what it read and points at --config, with which the same code
+    approves."""
+    import httpx
+
+    import llm_redact.config as config_module
+    from llm_redact.config import load_config
+    from llm_redact.proxy import create_app
+
+    db = tmp_path / "o.db"
+    team = tmp_path / "team.toml"
+    team.write_text(
+        '[providers.openai]\nupstream_base_url = "http://upstream"\n'
+        '[detection.modes]\nemail = "block"\n'
+        f"[overrides]\nenabled = true\npath = '{db}'\n"
+    )
+    app = create_app(
+        load_config(team),
+        upstream_transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        refused = await client.post(
+            "/v1/chat/completions",
+            headers={"authorization": "Bearer sk-test"},
+            json={"model": "m", "messages": [{"role": "user", "content": f"mail {EMAIL}"}]},
+        )
+    message = refused.json()["error"]["message"]
+    code = message.split("llm-redact override ")[1].split()[0]
+    app.state.proxy.overrides.close()
+
+    # The operator's shell: no LLM_REDACT_CONFIG, nothing in the search.
+    monkeypatch.delenv("LLM_REDACT_CONFIG")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config-home"))
+    monkeypatch.setattr(config_module, "ETC_CONFIG_PATH", tmp_path / "no-etc.toml")
+    asked: list[bool] = []
+
+    def tty() -> FakeTty:
+        asked.append(True)
+        return FakeTty("allow\n")
+
+    monkeypatch.setattr(override_cli, "_open_tty", tty)
+    capsys.readouterr()
+    assert _run(code, "--once", "--db", str(db)) == 1
+    err = capsys.readouterr().err
+    assert "found no config file" in err and "--config PATH" in err
+    assert "no refusal carries a code" not in err  # no claim about the running proxy
+    assert code not in err and EMAIL not in err and asked == []
+    assert _run("list", "--db", str(db)) == 1
+    listed = capsys.readouterr()
+    assert "pending" in listed.out
+    assert "a proxy running with it applies none" in listed.err and "--config PATH" in listed.err
+    assert "the proxy applies none" not in listed.err
+
+    # A file this command reads that leaves them off is named.
+    off = tmp_path / "off.toml"
+    off.write_text("")
+    assert _run(code, "--once", "--config", str(off), "--db", str(db)) == 1
+    assert f"the config this command read ({off})" in capsys.readouterr().err
+    # With the proxy's own file, the same code approves.
+    assert _run(code, "--once", "--config", str(team)) == 0
+    assert asked == [True]
+    assert [e.state for e in OverrideStore(db, read_only=True).entries()] == ["once"]
+
+
+def test_revoke_narrows_while_overrides_are_off(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Off, a store's every-time rules are inert — but they all apply again
+    the moment overrides are turned on. Revoking one must not need that
+    window (every kept rule live, the ones meant to go included): revoke
+    drops exactly the named record while off, says overrides are off, exits
+    1 like list, and never creates a missing store."""
+    off = tmp_path / "off.toml"
+    off.write_text("")
+    db = tmp_path / "o.db"
+    writer = OverrideStore(db)
+    for value in ("a@corp.example", "b@corp.example"):
+        code = writer.record_pending("block", "", "openai", "POST", "/v1/x", [("EMAIL", value)])
+        writer.approve("always", approver=None, code=code)
+    writer.record_pending("block", "", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
+    writer.close()
+    entries = OverrideStore(db, read_only=True).entries()
+    drop, keep = [e for e in entries if e.state == "always"]
+    (code_entry,) = [e for e in entries if e.state == "pending"]
+    capsys.readouterr()
+
+    assert _run("revoke", drop.id, "--config", str(off), "--db", str(db)) == 1
+    done = capsys.readouterr()
+    assert f"revoked {drop.id}" in done.out
+    assert "[overrides] enabled = true" in done.err and "made all the same" in done.err
+    assert _run("revoke", code_entry.id, "--config", str(off), "--db", str(db)) == 1
+    assert f"revoked {code_entry.id}" in capsys.readouterr().out
+    assert [e.id for e in OverrideStore(db, read_only=True).entries()] == [keep.id]
+    # An unknown id, a missing id and a missing store: nothing revoked, nothing created.
+    assert _run("revoke", drop.id, "--config", str(off), "--db", str(db)) == 1
+    assert "no override" in capsys.readouterr().err
+    assert _run("revoke", "--config", str(off), "--db", str(db)) == 2
+    capsys.readouterr()
+    missing = tmp_path / "none.db"
+    assert _run("revoke", "r1", "--config", str(off), "--db", str(missing)) == 1
+    assert not missing.exists()
+    # On, the same command exits 0.
+    on = tmp_path / "on.toml"
+    on.write_text("[overrides]\nenabled = true\n")
+    assert _run("revoke", keep.id, "--config", str(on), "--db", str(db)) == 0
+    assert OverrideStore(db, read_only=True).entries() == []

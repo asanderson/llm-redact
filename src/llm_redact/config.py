@@ -563,11 +563,12 @@ class VaultConfig:
 
 @dataclass(frozen=True)
 class OverridesConfig:
-    # Refusal overrides (overrides.py): a detection refusal carries a
-    # single-use code its requester may approve once or for every time
-    # (`llm-redact override CODE --once | --always`). false: no code, no
-    # override is ever applied — every refusal is final.
-    enabled: bool = True
+    # Refusal overrides (overrides.py), OFF by default — an operator opts
+    # in. true: a detection refusal carries a single-use code its requester
+    # may approve once or for every time (`llm-redact override CODE --once
+    # | --always`). false: no code, no hint, nothing written to the store,
+    # and the records it already holds are inert — every refusal is final.
+    enabled: bool = False
     # How long a code, and a one-time approval, stays usable.
     ttl_minutes: int = 15
     # The override store; default $XDG_DATA_HOME/llm-redact/overrides.db.
@@ -2631,7 +2632,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     if not 1 <= ttl_minutes <= 1440:
         raise ConfigError("[overrides] ttl_minutes must be between 1 and 1440")
     overrides = OverridesConfig(
-        enabled=_bool_key(overrides_raw, "enabled", True, "[overrides]"),
+        enabled=_bool_key(overrides_raw, "enabled", False, "[overrides]"),
         ttl_minutes=ttl_minutes,
         path=_optional_str(overrides_raw, "path", "[overrides]"),
     )

@@ -30,7 +30,7 @@ from llm_redact.providers import openai
 from llm_redact.providers.gemini import GeminiAdapter
 from llm_redact.providers.openai import text_file_name, with_content_type
 from llm_redact.proxy import create_app
-from llm_redact.redactor import BlockedRequest
+from llm_redact.redactor import BlockedRequest, TextScan
 from llm_redact.upload_inspection import file_extension, judge
 
 EMAIL = "jane.doe@corp.example"
@@ -336,10 +336,10 @@ class _Scan:
     def __init__(self) -> None:
         self.warn_counts: Counter[str] = Counter()
 
-    def scan_text(self, text: str) -> Counter[str]:
+    def scan(self, text: str, *, redactable: bool = False) -> TextScan:
         if "BLOCK" in text:
             raise BlockedRequest("EMAIL")
-        return Counter({"EMAIL": 1}) if EMAIL in text else Counter()
+        return TextScan(Counter({"EMAIL": 1}) if EMAIL in text else Counter(), False)
 
 
 def test_a_convert_text_past_the_text_budget_is_not_converted() -> None:

@@ -196,14 +196,16 @@ encryption = "none"
 # tokens always pass through verbatim.
 fuzzy = true
 
-# Refusal overrides (docs/overrides.md): a detection refusal (a block-mode
-# value, values in a binary upload, a verbatim field, an unreadable body)
-# carries a single-use code that a PERSON may approve on the terminal —
+# Refusal overrides (docs/overrides.md), OFF by default: every refusal is
+# final. Opt in and a detection refusal (a block-mode value, values in a
+# binary upload, a verbatim field, an unreadable body) carries a single-use
+# code that a PERSON may approve on the terminal —
 # `llm-redact override CODE --once | --always`. An approved value is
-# FORWARDED unredacted, like warn mode. Restart-only.
+# FORWARDED unredacted, like warn mode. Restart-only. Turned off again, the
+# store's approvals stay on disk but are inert (never applied).
 #
 # [overrides]
-# enabled = true      # false: no codes, every refusal is final
+# enabled = true      # opt in (default false: no codes, every refusal final)
 # ttl_minutes = 15    # how long a code and a one-time approval stay usable
 # path = "/var/lib/llm-redact/overrides.db"
 

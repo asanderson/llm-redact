@@ -22,7 +22,9 @@ logs and routers — keyless.
 
 from __future__ import annotations
 
+import gc
 import logging
+import warnings
 from typing import Any
 
 import httpx
@@ -476,6 +478,182 @@ async def test_a_counted_start_row_that_cannot_commit_refuses(
     _balanced(audit)
     assert audit.finalized[0][1].detections == {"EMAIL": 1}
     assert app.state.proxy.inspected_uploads == {("openai", "clean_refused"): 1}
+
+
+# --- a log with the optional amend member keeps ONE START row ----------------------------
+#
+# WriteAheadAudit's optional ``amend(token, entry)``: the early START row is
+# amended with the request's counts before the send instead of followed by a
+# second START row; the END row finalizes the same token.
+
+
+class AmendingAudit(OrderedAudit):
+    """An OrderedAudit with the optional ``amend`` member."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events)
+        self.amended: list[tuple[object, Any]] = []
+
+    def amend(self, token: object, entry: Any) -> None:
+        self.events.append("amend")
+        self.amended.append((token, entry))
+
+
+class AmendFails(AmendingAudit):
+    def amend(self, token: object, entry: Any) -> None:
+        self.events.append("amend-failed")
+        raise AuditWriteError("injected write fault")
+
+
+def test_the_amend_member_is_read_once_and_only_when_callable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    amending = AmendingAudit([])
+    _registry_with_audit(monkeypatch, None, amending)
+    state = create_app(_required()).state.proxy
+    assert state.write_ahead_amend == amending.amend
+    # Not required: no write-ahead log, nothing to amend.
+    assert create_app(Config(audit=AuditConfig(enabled=True))).state.proxy.write_ahead_amend is None
+    # A non-callable attribute of that name is no member: two START rows.
+    odd = OrderedAudit([])
+    odd.amend = "not a method"  # type: ignore[attr-defined]
+    _registry_with_audit(monkeypatch, None, odd)
+    assert create_app(_required()).state.proxy.write_ahead_amend is None
+
+
+@pytest.mark.parametrize("routed", [False, True], ids=["legacy", "routed"])
+async def test_an_amending_log_keeps_one_start_row(
+    monkeypatch: pytest.MonkeyPatch, routed: bool
+) -> None:
+    events: list[str] = []
+    audit, upstream = AmendingAudit(events), Upstream()
+    reg, headers, config = _maybe_routed(monkeypatch, audit, routed)
+    _registry_with_audit(monkeypatch, OrderedInspector(events, reads("clean")), audit, reg)
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    body = _form(_pdf("a"), filename=f"{EMAIL}.pdf")
+    reply = await _post(app, "/v1/files", headers, body)
+    assert reply.status_code == 200 and EMAIL.encode() not in upstream.requests[0].content
+    # The early START row is amended with what the redaction found, before
+    # the send; its END row is the request's own. No second START row.
+    assert events == ["start", "inspect", "amend", "end:200"]
+    _balanced(audit)
+    ((token, amendment),) = audit.amended
+    assert token == 1 and amendment.detections == {"EMAIL": 1}
+    assert (amendment.status, amendment.method, amendment.path) == (None, "POST", "/v1/files")
+    assert amendment.session == audit.begun[0].session
+    assert audit.begun[0].detections == {}
+    assert audit.finalized[0][1].detections == {"EMAIL": 1}
+    # The request is counted once.
+    assert [row["status"] for row in app.state.proxy.recent] == [200]
+    assert app.state.proxy.inspected_uploads == {("openai", "clean"): 1}
+
+
+def _maybe_routed(
+    monkeypatch: pytest.MonkeyPatch, audit: FakeAudit, routed: bool
+) -> tuple[Any, dict[str, str], Config]:
+    if not routed:
+        return None, FORM, _required()
+    reg, _ = install(
+        monkeypatch,
+        FakeRouter(
+            {"x": [Hop("a", "https://api.openai.com/v1/files"), Stop()]},
+            plan_kwargs={"x": {"proxy_credential": False}},
+        ),
+        audit=audit,
+    )
+    config = routed_config(audit=AuditConfig(enabled=True, required=True))
+    return reg, {**FORM, ROUTE_HEADER: "x"}, config
+
+
+async def test_an_amendment_carries_a_warned_value_before_the_send(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A warn-mode value is FORWARDED: the amendment, committed before the
+    # send, says so even when no END row is ever written.
+    class AmendThenEndFails(AmendingAudit):
+        def finalize(self, token: object, entry: Any) -> None:
+            self.events.append(f"end-failed:{entry.status}")
+            raise AuditWriteError("disk full")
+
+    events: list[str] = []
+    audit, upstream = AmendThenEndFails(events), Upstream()
+    _registry_with_audit(monkeypatch, OrderedInspector(events, reads("clean")), audit)
+    config = _required(detection=DetectionConfig(modes=(("email", "warn"),)))
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    body = _form(_pdf("a"), filename=f"{EMAIL}.pdf")
+    reply = await _post(app, "/v1/files", FORM, body)
+    assert reply.status_code == 200 and EMAIL.encode() in upstream.requests[0].content
+    assert events == ["start", "inspect", "amend", "end-failed:200"]
+    assert len(audit.begun) == 1 and audit.amended[0][1].warned == {"EMAIL": 1}
+    assert "superseded" not in caplog.text and EMAIL not in caplog.text
+
+
+async def test_nothing_found_amends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    audit, upstream = AmendingAudit(events), Upstream()
+    _registry_with_audit(monkeypatch, OrderedInspector(events, reads("clean")), audit)
+    app = create_app(_required(), upstream_transport=httpx.MockTransport(upstream))
+    reply = await _post(app, "/v1/files", FORM, _form(_pdf("a")))
+    assert reply.status_code == 200
+    assert events == ["start", "inspect", "end:200"] and audit.amended == []
+
+
+@pytest.mark.parametrize("routed", [False, True], ids=["legacy", "routed"])
+async def test_an_amendment_that_cannot_commit_refuses(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, routed: bool
+) -> None:
+    # The amendment fails: the same provider-shaped 503 as a START row that
+    # cannot commit, before any upstream contact; the refusal's row ends the
+    # one START row, and the inspector-cleared part never counts as clean.
+    events: list[str] = []
+    audit, upstream = AmendFails(events), Upstream()
+    reg, headers, config = _maybe_routed(monkeypatch, audit, routed)
+    _registry_with_audit(monkeypatch, OrderedInspector(events, reads("clean")), audit, reg)
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    body = _form(_pdf("a"), filename=f"{EMAIL}.pdf")
+    reply = await _post(app, "/v1/files", headers, body)
+    assert reply.status_code == 503 and upstream.requests == []
+    assert reply.json()["error"]["message"] == (
+        "llm-redact: audit log unavailable and [audit] required is enabled"
+    )
+    assert events == ["start", "inspect", "amend-failed", "end:503"]
+    _balanced(audit)
+    assert audit.finalized[0][1].detections == {"EMAIL": 1}
+    assert app.state.proxy.inspected_uploads == {("openai", "clean_refused"): 1}
+    assert app.state.proxy.unscanned_uploads == {}
+    assert [row["status"] for row in app.state.proxy.recent] == [503]
+    assert "audit write failed" in caplog.text and "injected" not in caplog.text
+    assert EMAIL not in caplog.text
+
+
+async def test_an_amend_that_returns_an_awaitable_refuses(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ``amend`` is synchronous: an ``async def`` one returns a coroutine the
+    # core never awaits, so nothing would be durable before the send. That
+    # is no amendment: the coroutine is closed unrun and the request refused
+    # 503 before any upstream contact, like an amendment that cannot commit.
+    class AsyncAmend(AmendingAudit):
+        async def amend(self, token: object, entry: Any) -> None:  # type: ignore[override]
+            self.events.append("amend-ran")
+
+    events: list[str] = []
+    audit, upstream = AsyncAmend(events), Upstream()
+    _registry_with_audit(monkeypatch, OrderedInspector(events, reads("clean")), audit)
+    app = create_app(_required(), upstream_transport=httpx.MockTransport(upstream))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    with warnings.catch_warnings():
+        # A coroutine dropped unclosed warns "never awaited"; closed, it does not.
+        warnings.simplefilter("error", RuntimeWarning)
+        reply = await _post(app, "/v1/files", FORM, _form(_pdf("a"), filename=f"{EMAIL}.pdf"))
+        gc.collect()
+    assert reply.status_code == 503 and upstream.requests == []
+    assert events == ["start", "inspect", "end:503"]
+    _balanced(audit)
+    assert app.state.proxy.inspected_uploads == {("openai", "clean_refused"): 1}
+    assert "audit write failed with [audit] required (AuditWriteError)" in caplog.text
 
 
 def _down(request: httpx.Request) -> httpx.Response:

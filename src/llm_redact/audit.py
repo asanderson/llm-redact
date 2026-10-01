@@ -101,6 +101,27 @@ class WriteAheadAudit(AuditLog, Protocol):
     ``ProxyState`` resolves the capability once at startup (``isinstance``
     checks method presence, the runtime-checkable contract) and refuses
     required mode when the built log lacks the pair.
+
+    OPTIONAL ``amend(token, entry) -> None``, read once at startup via
+    ``getattr`` (it is not a Protocol method, so a log predating it still
+    satisfies the pair): an upload whose binary parts go to the upload
+    inspector commits its START row BEFORE the inspection, when the
+    redaction has not run and the row carries no detections. When the
+    redaction then finds values (warn-mode ones are FORWARDED) or the
+    request passes a refusal on an approved override, the core hands
+    ``amend`` that START row's token and an entry shaped like a START row
+    carrying the request's ``detections``/``warned``/``override``, before
+    any upstream contact, and the request keeps ONE START row: its END row
+    finalizes the same token. ``amend`` is synchronous and must make the
+    amendment durable before it returns, or raise :class:`AuditWriteError`
+    (an awaitable answer is closed unrun and treated as that error, never as
+    a durable amendment); the core then refuses the request with
+    the provider-shaped 503 of a START row that cannot be committed (no
+    upstream contact), and that refusal's END row closes the START row. A
+    tamper-evident log never rewrites a chained row in place (it appends an
+    amendment record of its own). Without the member the core commits a
+    second START row carrying the counts and ends the first one with no
+    status: two START rows for one request.
     """
 
     def begin(self, entry: AuditRecord) -> object: ...

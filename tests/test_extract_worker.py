@@ -17,6 +17,7 @@ import pytest
 
 from document_fixtures import (
     docx,
+    jpeg,
     odt,
     package,
     pdf,
@@ -1671,3 +1672,569 @@ def test_apply_limits_applies_none_without_resource_limits(monkeypatch: pytest.M
     # (the parent bounds its input instead) rather than failing to start.
     monkeypatch.setitem(sys.modules, "resource", None)
     apply_limits(256 << 20, 7)
+
+
+# --- what OCR of the rendered pages covers (EXT-1) ------------------------------------
+
+_IMAGE = b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray"
+_DRAW = b"q 100 0 0 100 0 0 cm /Im1 Do Q"
+
+
+def _image_pdf(content: bytes, *, resources: bytes, extra: tuple[bytes, ...] = ()) -> bytes:
+    """One page drawing ``content`` with ``resources``; object 5 is a 1x1
+    image, ``extra`` objects follow from 6."""
+    return pdf_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R"
+            b" /Resources << " + resources + b" >> >>",
+            pdf_stream(b"", content),
+            pdf_stream(_IMAGE[2:] + b" /BitsPerComponent 8", b"\x80"),
+            *extra,
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("data", "ocr"),
+    [
+        # A scanned page: the image is drawn — OCR of the page reads it.
+        (pdf([], image_page=True), True),
+        (_image_pdf(_DRAW, resources=b"/XObject << /Im1 5 0 R >>"), True),
+        # Drawn through a form the page draws.
+        (
+            _image_pdf(
+                b"/Fm1 Do",
+                resources=b"/XObject << /Fm1 6 0 R >>",
+                extra=(
+                    pdf_stream(
+                        b"/Type /XObject /Subtype /Form /BBox [0 0 612 792]"
+                        b" /Resources << /XObject << /Im1 5 0 R >> >>",
+                        _DRAW,
+                    ),
+                ),
+            ),
+            True,
+        ),
+        # Listed in the page's resources but never drawn: no OCR sees it.
+        (_image_pdf(b"", resources=b"/XObject << /Im1 5 0 R >>"), False),
+        # Drawn, but the file also holds an image no page draws.
+        (
+            _image_pdf(
+                _DRAW,
+                resources=b"/XObject << /Im1 5 0 R >>",
+                extra=(pdf_stream(_IMAGE[2:] + b" /BitsPerComponent 8", b"\x80"),),
+            ),
+            False,
+        ),
+    ],
+    ids=["scanned", "drawn", "through-a-form", "listed-only", "one-not-drawn"],
+)
+def test_an_image_a_page_draws_is_an_ocr_gap(data: bytes, ocr: bool) -> None:
+    result = _read(data)
+    assert result["complete"] is False and result["ocr"] is ocr
+
+
+def _jbig2(*segments: tuple[int, bytes], refs: bytes = b"\x00") -> bytes:
+    """JBIG2 segments in a PDF's embedded organization: (type, data), each
+    numbered in turn, page-associated with page 1 (``refs``: the referred-to
+    count and retention byte(s) and numbers of every segment)."""
+    return b"".join(
+        number.to_bytes(4, "big")
+        + bytes([kind])
+        + refs
+        + b"\x01"
+        + len(data).to_bytes(4, "big")
+        + data
+        for number, (kind, data) in enumerate(segments)
+    )
+
+
+_PAGE_INFO = (48, bytes(19))
+# A page drawing image 5, then opening an inline image's dictionary.
+_INLINE = _DRAW + b" q BI /W 1 /H 1 /CS /G /BPC 8 "
+_REGION = (38, bytes(20))
+_JBIG2_COMMENT = (62, b"\x20\x00\x00\x00" + b"ssn 123-45-6789")
+
+
+def _drawn_image(
+    entries: bytes = b"",
+    data: bytes = b"\x80",
+    *,
+    content: bytes = _DRAW,
+    catalog: bytes = b"",
+    extra: tuple[bytes, ...] = (),
+) -> bytes:
+    """One page drawing image 5 (``entries`` added to its dictionary, its
+    ``data``); ``extra`` objects follow from 6."""
+    return pdf_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R" + catalog + b" >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R"
+            b" /Resources << /XObject << /Im1 5 0 R >> >> >>",
+            pdf_stream(b"", content),
+            pdf_stream(_IMAGE[2:] + b" /BitsPerComponent 8 " + entries, data),
+            *extra,
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("data", "ocr"),
+    [
+        (_drawn_image(b"/Filter /FlateDecode", __import__("zlib").compress(b"\x80")), True),
+        (_drawn_image(b"/Filter /DCTDecode", jpeg()), True),
+        # A JPEG's comment, Exif or XMP: no OCR of the page reads it.
+        (_drawn_image(b"/Filter /DCTDecode", jpeg((0xFE, b"owner ssn 123-45-6789"))), False),
+        (_drawn_image(b"/Filter [/DCTDecode]", jpeg((0xE1, b"Exif\x00\x00 ssn"))), False),
+        # A codec behind another filter, JPEG 2000, an unknown filter.
+        (_drawn_image(b"/Filter [/ASCIIHexDecode /DCTDecode]", jpeg().hex().encode()), False),
+        (_drawn_image(b"/Filter /JPXDecode", b"\x00\x00\x00\x0cjP  "), False),
+        (_drawn_image(b"/Filter /Nonesuch", b"\x80"), False),
+        # JBIG2: picture segments only, its globals' too.
+        (_drawn_image(b"/Filter /JBIG2Decode", _jbig2(_PAGE_INFO, _REGION)), True),
+        (_drawn_image(b"/Filter /JBIG2Decode", _jbig2(_PAGE_INFO, _JBIG2_COMMENT)), False),
+        (
+            _drawn_image(
+                b"/Filter /JBIG2Decode /DecodeParms << /JBIG2Globals 6 0 R >>",
+                _jbig2(_PAGE_INFO, _REGION),
+                extra=(pdf_stream(b"", _jbig2((0, bytes(10)))),),
+            ),
+            True,
+        ),
+        (
+            _drawn_image(
+                b"/Filter /JBIG2Decode /DecodeParms [<< /JBIG2Globals 6 0 R >>]",
+                _jbig2(_PAGE_INFO, _REGION),
+                extra=(pdf_stream(b"", _jbig2(_JBIG2_COMMENT)),),
+            ),
+            False,
+        ),
+        # The image's own metadata stream, optional content that may hide
+        # it, an OPI version, alternates: more than the picture.
+        (
+            _drawn_image(
+                b"/Metadata 6 0 R",
+                extra=(pdf_stream(b"/Type /Metadata /Subtype /XML", b"<x>ssn 123-45-6789</x>"),),
+            ),
+            False,
+        ),
+        (_drawn_image(b"/OC 6 0 R", extra=(b"<< /Type /OCG /Name (hidden) >>",)), False),
+        (_drawn_image(b"/OPI << /2.0 << /Type /OPI /Version 2.0 /F (hi.tif) >> >>"), False),
+        # Optional content anywhere in the file may hide a drawn image.
+        (
+            _drawn_image(
+                catalog=b" /OCProperties << /OCGs [6 0 R] /D << /OFF [6 0 R] >> >>",
+                extra=(b"<< /Type /OCG /Name (layer) >>",),
+            ),
+            False,
+        ),
+        # An inline image: pixels only, a JPEG holding nothing but the
+        # picture, a JPEG with a comment, an entry beyond an image's own.
+        (_drawn_image(content=_INLINE + b"ID \x80 EI Q"), True),
+        (
+            _drawn_image(content=_INLINE + b"/F /DCT ID " + jpeg() + b" EI Q"),
+            True,
+        ),
+        (
+            _drawn_image(
+                content=_DRAW
+                + b" q BI /W 1 /H 1 /CS /G /BPC 8 /F [/DCT] ID "
+                + jpeg((0xFE, b"ssn 123-45-6789"))
+                + b" EI Q"
+            ),
+            False,
+        ),
+        (
+            _drawn_image(content=_INLINE + b"/F /RL ID \x00\x80\x80 EI Q"),
+            True,
+        ),
+        (
+            _drawn_image(content=_INLINE + b"/F /JBIG2Decode ID \x80 EI Q"),
+            False,
+        ),
+        (
+            _drawn_image(content=_INLINE + b"/Note (ssn) ID \x80 EI Q"),
+            False,
+        ),
+    ],
+    ids=[
+        "flate",
+        "jpeg",
+        "jpeg-comment",
+        "jpeg-exif",
+        "behind-another-filter",
+        "jpx",
+        "unknown-filter",
+        "jbig2",
+        "jbig2-comment",
+        "jbig2-globals",
+        "jbig2-globals-comment",
+        "image-metadata",
+        "image-oc",
+        "image-opi",
+        "optional-content",
+        "inline",
+        "inline-jpeg",
+        "inline-jpeg-comment",
+        "inline-run-length",
+        "inline-jbig2",
+        "inline-extra-entry",
+    ],
+)
+def test_a_drawn_image_completes_by_ocr_only_when_it_holds_only_pixels(
+    data: bytes, ocr: bool
+) -> None:
+    """EXT-1's PDF twin of ``image_text_free``: a cloud OCR reading may
+    complete a PDF only when every image its pages draw holds nothing but
+    pixels OCR of the rendered page sees — not the same JPEG with a comment
+    or Exif that a single upload of it is refused completion for."""
+    result = _read(data)
+    assert result["complete"] is False and result["ocr"] is ocr
+
+
+def test_jbig2_text_free() -> None:
+    from llm_redact.extract_worker import jbig2_text_free
+
+    assert jbig2_text_free(_jbig2(_PAGE_INFO, _REGION, (49, b""))) is True
+    assert jbig2_text_free(b"") is True
+    assert jbig2_text_free(_jbig2(_PAGE_INFO, _JBIG2_COMMENT)) is False
+    assert jbig2_text_free(_jbig2((99, bytes(4)))) is False  # an unknown type
+    # A text region referring to segment 0 (short and long referred-to forms).
+    region = (6, bytes(30))
+    assert jbig2_text_free(_jbig2((0, bytes(8)), region, refs=b"\x20\x00")) is True
+    long_form = b"\xe0\x00\x00\x01" + b"\x00" + b"\x00"
+    assert jbig2_text_free(_jbig2((0, bytes(8)), region, refs=long_form)) is True
+    assert jbig2_text_free(_jbig2(region, refs=b"\xa0")) is False  # five: no such form
+    # An unknown data length, a segment running past the data, a cut header.
+    whole = _jbig2(_PAGE_INFO, _REGION)
+    unknown = whole[:7] + b"\xff\xff\xff\xff" + whole[11:]
+    assert jbig2_text_free(unknown) is False
+    for cut in range(1, len(whole)):
+        if cut != len(_jbig2(_PAGE_INFO)):
+            assert jbig2_text_free(whole[:cut]) is False, cut
+    # Page association in four bytes; a segment numbered past 256 refers
+    # to others in two-byte numbers.
+    wide = (300).to_bytes(4, "big") + b"\x46\x20" + bytes(2) + (1).to_bytes(4, "big") + bytes(4)
+    assert jbig2_text_free(wide) is True
+
+
+def test_what_page_ocr_never_sees_stays_unread() -> None:
+    scanned = pdf([], image_page=True)
+    # An attachment beside a scanned page: OCR of the page never reads it.
+    writer_pdf = _attached(scanned)
+    assert _read(writer_pdf)["ocr"] is False
+    # The text cap cut the reading: what was cut is not on a page OCR reads.
+    capped = pdf(["x" * 200], image_page=True)
+    assert _read(capped, max_chars=50)["ocr"] is False
+    # A complete reading needs no OCR; a failure is no OCR gap.
+    assert _read(pdf(["text page"]))["ocr"] is False
+    assert _read(b"%PDF-1.7\nnot a pdf").get("ocr") is not True
+
+
+def _attached(data: bytes) -> bytes:
+    import io as _io
+
+    from pypdf import PdfReader, PdfWriter
+
+    writer = PdfWriter(clone_from=PdfReader(_io.BytesIO(data)))
+    writer.add_attachment("secret.txt", b"employee ssn 123-45-6789")
+    out = _io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+# --- what no reader of the file reads ---------------------------------------------
+
+_HIDDEN = b"123-45-6789"
+_HELLO = b"BT /F1 12 Tf 72 712 Td (Hello world) Tj ET"
+
+
+def _one_page(
+    *,
+    catalog: bytes = b"",
+    page: bytes = b"",
+    resources: bytes = b"",
+    content: bytes = _HELLO,
+    extra: tuple[bytes, ...] = (),
+) -> bytes:
+    """One Helvetica page showing ``content``; ``extra`` objects follow from 6."""
+    return pdf_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R" + catalog + b" >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R"
+            b" /Resources << /Font << /F1 5 0 R >>" + resources + b" >>" + page + b" >>",
+            pdf_stream(b"", content),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            *extra,
+        ]
+    )
+
+
+_JS = b"(var s = '%s';)" % _HIDDEN
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _one_page(catalog=b" /OpenAction << /S /JavaScript /JS " + _JS + b" >>"),
+        _one_page(catalog=b" /OpenAction 6 0 R", extra=(b"<< /S /JavaScript /JS " + _JS + b" >>",)),
+        _one_page(
+            catalog=b" /OpenAction << /S /JavaScript /JS 6 0 R >>",
+            extra=(pdf_stream(b"", b"var s = '%s';" % _HIDDEN),),
+        ),
+        _one_page(page=b" /AA << /O << /S /JavaScript /JS " + _JS + b" >> >>"),
+        _one_page(catalog=b" /OpenAction << /S /URI /URI (https://x.example/?id=%s) >>" % _HIDDEN),
+        _one_page(
+            catalog=b" /OpenAction << /S /SubmitForm /F << /FS /URL /F (https://x/%s) >> >>"
+            % _HIDDEN
+        ),
+        _one_page(catalog=b" /PieceInfo << /App << /Private (%s) >> >>" % _HIDDEN),
+        _one_page(catalog=b" /MyNote <%s>" % _HIDDEN.hex().encode()),
+        _one_page(catalog=b" /Note 6 0 R", extra=(b"(%s)" % _HIDDEN,)),
+        _one_page(
+            page=b" /Metadata 6 0 R",
+            extra=(pdf_stream(b"/Type /Metadata /Subtype /XML", b"<x>%s</x>" % _HIDDEN),),
+        ),
+        # Content streams: a comment, a string no operator shows (in a
+        # compatibility section, an unknown operator's operand).
+        _one_page(content=b"%% id " + _HIDDEN + b"\n" + _HELLO),
+        _one_page(content=_HELLO + b" BX (" + _HIDDEN + b") ignoreme EX"),
+        _one_page(content=_HELLO + b" /Span << /Lang (" + _HIDDEN + b") >> BDC EMC"),
+        _one_page(
+            content=_HELLO + b" /Fm1 Do",
+            resources=b" /XObject << /Fm1 6 0 R >>",
+            extra=(
+                pdf_stream(
+                    b"/Type /XObject /Subtype /Form /BBox [0 0 9 9]",
+                    b"%" + _HIDDEN + b"\r0 0 m 9 9 l S",
+                ),
+            ),
+        ),
+    ],
+    ids=[
+        "openaction-js",
+        "openaction-js-indirect",
+        "openaction-js-stream",
+        "page-aa-js",
+        "uri-action",
+        "submit-form",
+        "private-data",
+        "private-key-hex",
+        "indirect-string",
+        "page-metadata",
+        "content-comment",
+        "unknown-operator",
+        "marked-content-property",
+        "form-comment",
+    ],
+)
+def test_a_value_where_no_reader_reads_is_scanned(data: bytes) -> None:
+    """A string anywhere in the file (an action, a script, private data), a
+    metadata stream of any object, a content stream's comment and a string
+    no operator shows: no viewer shows them, the provider receives them —
+    the reading scans them (and stays complete: they are read)."""
+    result = _read(data)
+    assert _HIDDEN.decode() in result["text"]
+    assert result["complete"] is True
+    assert _HIDDEN.decode() not in (result["display"] or "")
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _one_page(extra=(pdf_stream(b"", b"note " + _HIDDEN),)),
+        _one_page(
+            catalog=b" /PieceInfo << /App << /Private 6 0 R >> >>",
+            extra=(pdf_stream(b"", __import__("zlib").compress(b"note " + _HIDDEN)),),
+        ),
+        _one_page(page=b" /Thumb 6 0 R", extra=(pdf_stream(b"/Width 1 /Height 1", b"\x80"),)),
+        _one_page(
+            page=b" /Contents2 6 0 R",
+            extra=(pdf_stream(b"", b"BT /F1 12 Tf (" + _HIDDEN + b") Tj ET"),),
+        ),
+    ],
+    ids=["unreferenced", "private-stream", "thumbnail", "unknown-key"],
+)
+def test_a_stream_no_reader_consumes_is_unread(data: bytes) -> None:
+    result = _read(data)
+    assert result["complete"] is False and result["ocr"] is False
+
+
+def test_the_streams_a_reader_consumes_keep_a_reading_complete() -> None:
+    """Font programs and maps, colour profiles, functions, shadings,
+    halftones and glyph procedures are what a reader renders WITH: a file
+    holding them (and object and cross-reference streams) still reads
+    complete; a comment in a glyph procedure is scanned."""
+    data = pdf_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R /OutputIntents [<< /Type /OutputIntent"
+            b" /S /GTS_PDFA1 /DestOutputProfile 9 0 R >>] >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [4 0 R 15 0 R]"
+            b" /Resources << /Font << /F1 5 0 R /F3 13 0 R >> /ColorSpace << /CS0 [/ICCBased"
+            b" 9 0 R] /CS1 [/Separation /Spot /DeviceCMYK 10 0 R] >> /Shading << /Sh1 11 0 R >>"
+            b" /ExtGState << /GS1 << /TR 10 0 R /HT 12 0 R >> >> >> >>",
+            pdf_stream(b"", _HELLO + b" /Sh1 sh"),
+            b"<< /Type /Font /Subtype /TrueType /BaseFont /Arial /FirstChar 32 /LastChar 32"
+            b" /Widths [250] /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R /ToUnicode 8 0 R >>",
+            b"<< /Type /FontDescriptor /FontName /Arial /Flags 32 /FontBBox [0 0 1 1]"
+            b" /ItalicAngle 0 /Ascent 1 /Descent 0 /CapHeight 1 /StemV 1 /FontFile2 7 0 R >>",
+            pdf_stream(b"/Length1 4", b"\x00\x01\x00\x00"),
+            pdf_stream(b"", b"/CIDInit /ProcSet findresource begin end"),
+            pdf_stream(b"/N 1", b"\x00" * 8),
+            pdf_stream(
+                b"/FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1 0 1]", b"{ dup dup dup }"
+            ),
+            pdf_stream(
+                b"/ShadingType 4 /ColorSpace /DeviceGray /BitsPerCoordinate 8"
+                b" /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 1 0 1 0 1] /Function [10 0 R]",
+                bytes(4),
+            ),
+            pdf_stream(b"/Type /Halftone /HalftoneType 6 /Width 1 /Height 1", b"\x00"),
+            b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1 1] /FontMatrix [1 0 0 1 0 0]"
+            b" /CharProcs 16 0 R /Encoding << /Differences [97 /a] >>"
+            b" /FirstChar 97 /LastChar 97 /Widths [1] /ToUnicode 8 0 R >>",
+            pdf_stream(b"", b"%glyph " + _HIDDEN + b"\n1 0 0 0 1 1 d1 0 0 1 1 re f"),
+            pdf_stream(b"", b"BT /F3 1 Tf (a) Tj ET"),
+            b"<< /a 14 0 R >>",
+        ],
+        packed=frozenset({2, 5, 6}),
+    )
+    result = _read(data)
+    assert result["complete"] is True, result
+    assert _HIDDEN.decode() in result["text"]
+
+
+def test_a_linearized_files_hint_stream_is_structure() -> None:
+    """A linearized ("fast web view") file's hint stream is found by its
+    byte offset (the linearization dictionary's /H), referenced by nothing:
+    structure, not an unreferenced stream. Another stream at no hint
+    offset still is one."""
+    hint = pdf_stream(b"/S 4", bytes(8))
+    stray = pdf_stream(b"/S 4", b"note 123-45-6789")
+    placeholder = b"/H [0000000000 16]"
+    for extra, complete in ((hint, True), (stray, False)):
+        data = _one_page(extra=(b"<< /Linearized 1 " + placeholder + b" >>", extra))
+        at = data.index(b"7 0 obj")
+        offset = b"%010d" % (at if complete else 1)
+        data = data.replace(placeholder, b"/H [" + offset + b" 16]")
+        assert _read(data)["complete"] is complete
+
+
+def test_a_percent_sign_in_a_string_or_image_is_no_comment() -> None:
+    shown = b"BT /F1 12 Tf 72 712 Td (50% \\(off\\) (nested %) ok) Tj <2541> Tj ET"
+    inline = b"q BI /W 1 /H 1 /CS /G /BPC 8 ID %\x80 EI Q"
+    result = _read(_one_page(content=shown + b" " + inline + b" % real comment"))
+    assert "real comment" in result["text"]
+    assert " ok) Tj" not in result["text"] and "\x80" not in result["text"]
+
+
+def test_a_reading_marked_incomplete_is_never_an_ocr_gap() -> None:
+    reading = Reading(100)
+    reading.ocr_gap()
+    assert reading.complete is False and reading.ocr_completes is True
+    reading.complete = reading.complete  # False: anything marked so is unread
+    assert reading.ocr_completes is False
+    fresh = Reading(100)
+    fresh.complete = True
+    assert fresh.complete is True and fresh.ocr_completes is False
+
+
+def test_image_text_free() -> None:
+    from document_fixtures import jpeg, png
+    from llm_redact.extract_worker import image_text_free
+
+    assert image_text_free(png()) is True
+    assert image_text_free(jpeg()) is True
+    for chunk in (b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"iCCP", b"sPLT", b"prVt"):
+        assert image_text_free(png((chunk, b"Comment\x00ssn 123-45-6789"))) is False, chunk
+    assert image_text_free(png((b"pHYs", bytes(9)), (b"gAMA", bytes(4)))) is True
+    for marker in (0xE1, 0xE2, 0xED, 0xFE, 0xF0):
+        assert image_text_free(jpeg((marker, b"Exif\x00\x00 ssn"))) is False, hex(marker)
+    assert image_text_free(jpeg((0xEE, b"Adobe" + bytes(7)))) is True
+    assert image_text_free(jpeg(thumbnail=True)) is False
+    for trailer in (b"x", b"ssn 123-45-6789"):
+        assert image_text_free(png(trailer=trailer)) is False
+        assert image_text_free(jpeg(trailer=trailer)) is False
+    # Malformed or cut short, and every other format: not vouched for.
+    whole_png, whole_jpeg = png(), jpeg()
+    for cut in range(len(whole_png)):
+        assert image_text_free(whole_png[:cut]) is False
+    for cut in range(len(whole_jpeg)):
+        assert image_text_free(whole_jpeg[:cut]) is False
+    bad_app0 = whole_jpeg.replace(b"JFIF\x00", b"JFXX\x00", 1)
+    assert image_text_free(bad_app0) is False
+    zero_length = b"\xff\xd8\xff\xdb\x00\x01" + whole_jpeg[2:]
+    assert image_text_free(zero_length) is False
+    not_a_marker = b"\xff\xd8\x00" + whole_jpeg[2:]
+    assert image_text_free(not_a_marker) is False
+    assert image_text_free(b"BM" + bytes(64)) is False
+    assert image_text_free(b"GIF89a" + bytes(32)) is False
+
+
+def test_image_text_free_holds_each_header_to_its_length() -> None:
+    """A picture header the allowlist names may still carry bytes past its
+    defined size (an oversized tIME, an APP14 or a table segment longer than
+    its tables): only a header of its specified length (or layout) is text
+    free."""
+    import struct
+
+    from document_fixtures import jpeg, png
+    from llm_redact.extract_worker import image_text_free
+
+    ssn = b" ssn 123-45-6789"
+    for chunk, size in (
+        (b"tIME", 7),
+        (b"pHYs", 9),
+        (b"gAMA", 4),
+        (b"sRGB", 1),
+        (b"cHRM", 32),
+        (b"cICP", 4),
+        (b"cLLI", 8),
+        (b"mDCV", 24),
+    ):
+        assert image_text_free(png((chunk, bytes(size)))) is True, chunk
+        assert image_text_free(png((chunk, bytes(size) + ssn))) is False, chunk
+    for chunk, ok, bad in (
+        (b"PLTE", bytes(6), bytes(769)),
+        (b"PLTE", bytes(3), bytes(4)),
+        (b"tRNS", bytes(256), bytes(257)),
+        (b"sBIT", bytes(4), bytes(5)),
+        (b"bKGD", bytes(6), bytes(3)),
+        (b"hIST", bytes(512), bytes(3)),
+    ):
+        assert image_text_free(png((chunk, ok))) is True, chunk
+        assert image_text_free(png((chunk, bad))) is False, chunk
+    # IHDR is the fixture's own: a longer one is not text free.
+    whole = png()
+    longer_header = whole.replace(
+        struct.pack(">I", 13) + b"IHDR", struct.pack(">I", 13 + len(ssn)) + b"IHDR", 1
+    )
+    at = longer_header.index(b"IHDR") + 4 + 13
+    assert image_text_free(longer_header[:at] + ssn + longer_header[at:]) is False
+    assert image_text_free(jpeg((0xEE, b"Adobe" + bytes(7) + ssn))) is False
+    assert image_text_free(jpeg((0xEE, b"Other" + bytes(7)))) is False
+    # Table and frame segments hold exactly their tables and components.
+    assert image_text_free(jpeg((0xDB, bytes(65) + ssn))) is False
+    assert image_text_free(jpeg((0xDB, b"\x10" + bytes(128)))) is True
+    assert image_text_free(jpeg((0xDB, b"\x20" + bytes(128)))) is False
+    assert image_text_free(jpeg((0xC4, bytes(17) + ssn))) is False
+    assert image_text_free(jpeg((0xC4, b"\x10\x01" + bytes(15) + b"A"))) is True
+    assert image_text_free(jpeg((0xC4, b"\x10\x01" + bytes(15)))) is False
+    assert image_text_free(jpeg((0xDD, b"\x00\x04"))) is True
+    assert image_text_free(jpeg((0xDD, b"\x00\x04" + ssn))) is False
+    for marker in (0xC8, 0xD8):
+        assert image_text_free(jpeg((marker, ssn))) is False, hex(marker)
+    whole_jpeg = jpeg()
+    frame = b"\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00"
+    assert frame in whole_jpeg
+    longer_frame = b"\xff\xc0" + struct.pack(">H", 11 + len(ssn)) + frame[4:] + ssn
+    assert image_text_free(whole_jpeg.replace(frame, longer_frame)) is False
+    scan = b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00"
+    assert scan in whole_jpeg
+    longer_scan = b"\xff\xda" + struct.pack(">H", 8 + len(ssn)) + scan[4:] + ssn
+    assert image_text_free(whole_jpeg.replace(scan, longer_scan)) is False

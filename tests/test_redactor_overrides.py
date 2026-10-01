@@ -31,10 +31,14 @@ class Approved:
     def __init__(self, *values: str) -> None:
         self.values = set(values)
         self.asked: list[tuple[str, str]] = []
+        self.final = 0
 
     def allows(self, detector_type: str, value: str) -> bool:
         self.asked.append((detector_type, value))
         return value in self.values
+
+    def unoverridable(self) -> None:
+        self.final += 1
 
 
 def _redactor(modes: tuple[tuple[str, str], ...] = (("email", "block"),)) -> Redactor:
@@ -71,6 +75,21 @@ def test_thin_copies_keep_the_overrides() -> None:
     redactor = _redactor().with_overrides(Approved(EMAIL))
     copy = redactor.with_budget(10).with_floors({"EMAIL": 5})
     assert copy.redact_text(EMAIL) == EMAIL
+
+
+def test_with_overrides_keeps_the_floors_and_the_budget() -> None:
+    """The proxy adds the overrides LAST, onto the request's floored and
+    budgeted copy: the overrides copy keeps both — a new value is still
+    numbered above the request's tokens, and the string budget still
+    refuses the body."""
+    from llm_redact.redactor import TooManyStrings
+
+    floored = _redactor(modes=()).with_floors({"EMAIL": 7}).with_overrides(Approved())
+    assert floored.redact_text(f"mail {EMAIL}") == "mail «EMAIL_008»"
+    budgeted = _redactor(modes=()).with_budget(1).with_overrides(Approved())
+    budgeted.redact_text("first")
+    with pytest.raises(TooManyStrings):
+        budgeted.redact_text("second")
 
 
 def test_blocked_type_skips_an_approved_value() -> None:
@@ -112,3 +131,41 @@ def test_a_deny_string_is_never_put_to_the_overrides() -> None:
     ).with_overrides(approved)
     assert redactor.scan_text(f"project aurora {EMAIL}") == Counter({"DENY": 1})
     assert approved.asked == [("EMAIL", EMAIL)]
+    # The refusal it causes is final: no value code (OverrideScope).
+    assert approved.final == 1
+    # Each deny string found is counted.
+    twice = redactor.scan("project aurora, again project aurora", redactable=True)
+    assert twice.found == Counter({"DENY": 2})
+    # In text the caller redacts (convert mode) it refuses nothing.
+    assert redactor.scan("project aurora", redactable=True).found == Counter({"DENY": 1})
+    assert approved.final == 1
+    # Without overrides there is nobody to tell.
+    plain = Redactor(
+        build_detectors(config), InMemoryVault(), build_allowlist(config), modes=build_modes(config)
+    )
+    assert plain.scan_text("project aurora") == Counter({"DENY": 1})
+
+
+def test_scan_reports_what_an_override_let_through() -> None:
+    approved = Approved(EMAIL)
+    redactor = _redactor(()).with_overrides(approved)
+    assert redactor.scan(f"mail {EMAIL}") == (Counter(), True)
+    assert redactor.scan(f"mail {OTHER}") == (Counter({"EMAIL": 1}), False)
+    assert redactor.scan("nothing") == (Counter(), False)
+    blocking = _redactor().with_overrides(Approved(EMAIL))
+    assert blocking.scan(f"mail {EMAIL}") == (Counter(), True)
+
+
+def test_a_redactable_scan_puts_only_block_winners_to_the_overrides() -> None:
+    """Convert mode: a reading whose text replaces its file is redacted, so
+    a redact-mode value there is found (to be redacted), never asked — an
+    approval must not turn it into a file sent as it came — while a
+    block-mode value still refuses unless approved."""
+    approved = Approved(EMAIL, PHONE)
+    redactor = _redactor((("phone_number", "block"),)).with_overrides(approved)
+    scan = redactor.scan(f"{EMAIL} {OTHER} {PHONE}", redactable=True)
+    assert scan == (Counter({"EMAIL": 2}), True)
+    assert approved.asked == [("PHONE", PHONE)]
+    with pytest.raises(BlockedRequest):
+        redactor.scan("+1 212 555 0198", redactable=True)
+    assert _redactor(()).scan(EMAIL, redactable=True) == (Counter({"EMAIL": 1}), False)

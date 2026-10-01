@@ -14,7 +14,18 @@ open a pseudo-terminal and type the answer, or edit the store file
 file directly (like ``lookup``), as the local operator: it approves only
 refusals of requests the proxy admitted without a named user (llm-redact-pro
 named users approve their own in the dashboard); it lists and revokes any.
-Nothing printed is a value, a digest or a code."""
+Nothing printed is a value, a digest or a code.
+
+Refusal overrides are off by default. While the config this command reads
+(``--config``, else the same search as ``serve``) leaves them off, every form
+exits 1 naming ``[overrides] enabled`` and the file it read (or that it found
+none): a proxy started with another file (``serve --config``, a service unit)
+may have them on, so the message points at ``--config`` and claims nothing
+about the running proxy. Approve touches nothing; list still prints what the
+store holds (value-free, read-only) with a line saying a proxy running with
+that config applies none of it; revoke still drops the record (it only
+narrows — clearing an inert rule never needs a window with every kept rule
+live) and says so."""
 
 from __future__ import annotations
 
@@ -26,7 +37,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
 
+from llm_redact.config import (
+    Config,
+    ConfigError,
+    apply_env_overrides,
+    load_config,
+    resolve_config_path,
+)
 from llm_redact.overrides import (
+    ENABLE_SETTING,
     OverrideEntry,
     OverrideError,
     OverrideStore,
@@ -54,10 +73,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     override.add_argument("--db", type=Path, default=None, help="override store path")
 
 
-def _store(args: argparse.Namespace, *, read_only: bool = False) -> OverrideStore:
-    from llm_redact.config import apply_env_overrides, load_config
-
-    config = apply_env_overrides(load_config(args.config))
+def _store(args: argparse.Namespace, config: Config, *, read_only: bool = False) -> OverrideStore:
     if args.db is not None:
         path = Path(args.db).expanduser()
     elif config.overrides.path:
@@ -95,25 +111,71 @@ def _describe(entry: OverrideEntry) -> str:
     )
 
 
+def _off_note(source: Path | None, effect: str) -> str:
+    """Why this command stops while its config leaves overrides off. It
+    names the file it read — never a claim about the running proxy, which
+    may have been started with another one (``serve --config``)."""
+    read = (
+        f"the config this command read ({source})"
+        if source is not None
+        else "the built-in defaults (this command found no config file)"
+    )
+    return (
+        f"llm-redact override: refusal overrides are off in {read}: [overrides] enabled ="
+        f" false, the default; {effect}. If the proxy runs with another config file, pass"
+        f" that file with --config PATH; to use overrides, set {ENABLE_SETTING} in the"
+        " proxy's config and restart it"
+    )
+
+
 def run_override(args: argparse.Namespace) -> int:
     target = args.target
     try:
+        # One resolution: the file named here is exactly the one loaded.
+        source = args.config if args.config is not None else resolve_config_path()
+        config = apply_env_overrides(load_config(source))
+    except ConfigError as exc:
+        print(f"llm-redact override: {exc}", file=sys.stderr)
+        return 2
+    try:
         if target == "list":
-            return _list(args)
+            return _list(args, config, source)
         if target == "revoke":
-            if args.entry is None:
-                print("usage: llm-redact override revoke ID (as `override list` shows it)")
-                return 2
-            _store(args).revoke(args.entry)
-            print(f"revoked {args.entry}")
-            return 0
-        return _approve(args)
+            return _revoke(args, config, source)
+        if not config.overrides.enabled:
+            # Off (the default): approving a record a proxy on this config
+            # never applies would only look like it did something.
+            effect = "a proxy running with it carries no code and applies no approval"
+            print(_off_note(source, f"{effect}, so nothing was approved"), file=sys.stderr)
+            return 1
+        return _approve(args, config)
     except OverrideError as exc:
         print(f"llm-redact override: {exc}", file=sys.stderr)
         return 1
 
 
-def _approve(args: argparse.Namespace) -> int:
+def _revoke(args: argparse.Namespace, config: Config, source: Path | None) -> int:
+    """Drop one record. A revocation only ever narrows what a proxy applies,
+    so it runs whether or not this command's config leaves overrides on: an
+    operator clears an inert rule without first turning overrides on — which
+    would make EVERY kept rule live until the revocation. Off, it still exits
+    1 with the off note, as list does (a missing store is never created)."""
+    if args.entry is None:
+        print("usage: llm-redact override revoke ID (as `override list` shows it)")
+        return 2
+    _store(args, config).revoke(args.entry)
+    print(f"revoked {args.entry}")
+    if config.overrides.enabled:
+        return 0
+    effect = (
+        "a proxy running with it applies none of the store's records; the revocation"
+        " was made all the same (it only narrows what turning overrides on would apply)"
+    )
+    print(_off_note(source, effect), file=sys.stderr)
+    return 1
+
+
+def _approve(args: argparse.Namespace, config: Config) -> int:
     code = normalize_code(args.target)
     if code is None:
         print(
@@ -126,7 +188,7 @@ def _approve(args: argparse.Namespace) -> int:
         print("llm-redact override: choose --once or --always", file=sys.stderr)
         return 2
     scope = "always" if args.always else "once"
-    store = _store(args)
+    store = _store(args, config)
     entry = store.describe(code)
     if entry.subject:
         raise OverrideError(
@@ -151,7 +213,8 @@ def _approve(args: argparse.Namespace) -> int:
     with tty:
         tty.write(
             f"Refused request: {_describe(entry)}.\n"
-            f"Approve {scope}: {effect}.\n"
+            f"Approve {scope} for kind {entry.kind},"
+            f" types {', '.join(entry.types) or '-'}: {effect}.\n"
             f"Type '{CONFIRM_WORD}' to confirm: "
         )
         tty.flush()
@@ -164,20 +227,27 @@ def _approve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _list(args: argparse.Namespace) -> int:
-    entries = _store(args, read_only=True).entries()
+def _list(args: argparse.Namespace, config: Config, source: Path | None) -> int:
+    """The store's records (value-free, read-only). While this command's
+    config leaves overrides off they are still listed — so an operator sees
+    what would apply again on enabling them — followed by a line naming the
+    config and saying a proxy running with it applies none of them; exit 1."""
+    entries = _store(args, config, read_only=True).entries()
     if args.json:
         print(json.dumps([entry.as_dict() for entry in entries], indent=2))
-        return 0
-    if not entries:
+    elif not entries:
         print("no pending refusals or overrides")
+    else:
+        header = f"{'ID':<6} {'STATE':<8} {'KIND':<15} {'TYPES':<24} {'USES':>4}"
+        print(f"{header}  CREATED / REQUESTER / ROUTE")
+        for entry in entries:
+            print(
+                f"{entry.id:<6} {entry.state:<8} {entry.kind:<15}"
+                f" {','.join(entry.types) or '-':<24} {entry.uses:>4}  {_when(entry.created)}"
+                f"  {entry.subject or 'operator'}  {entry.route}"
+            )
+    if config.overrides.enabled:
         return 0
-    header = f"{'ID':<6} {'STATE':<8} {'KIND':<15} {'TYPES':<24} {'USES':>4}"
-    print(f"{header}  CREATED / REQUESTER / ROUTE")
-    for entry in entries:
-        print(
-            f"{entry.id:<6} {entry.state:<8} {entry.kind:<15}"
-            f" {','.join(entry.types) or '-':<24} {entry.uses:>4}  {_when(entry.created)}"
-            f"  {entry.subject or 'operator'}  {entry.route}"
-        )
-    return 0
+    effect = "a proxy running with it applies none of the records listed (they are inert)"
+    print(_off_note(source, effect), file=sys.stderr)
+    return 1

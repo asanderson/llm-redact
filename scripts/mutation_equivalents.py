@@ -77,6 +77,14 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "correct result for every tier composition, so a different route to it is "
         "observationally identical."
     ),
+    "llm_redact.redactor.x__resolve_overlaps__mutmut_22": (
+        "bisect_right(deny_ends, d.start, lo=i) -> bisect_right(deny_ends, d.start): "
+        "the chosen deny spans are disjoint and start-sorted, so deny_ends is sorted "
+        "and the answer is the first index whose end exceeds d.start; candidates come "
+        "start-sorted, so that index never falls below the previous answer i. lo=i "
+        "only bounds the search (cost), never its result — every input gives the "
+        "same index."
+    ),
     "llm_redact.redactor.x__sweep__mutmut_4": (
         "last_end = -1 -> -2: a sentinel below every real detection start (>= 0). "
         "The first comparison `d.start >= last_end` is True for both, so no valid "

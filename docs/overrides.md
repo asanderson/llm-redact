@@ -3,8 +3,21 @@
 Some requests are **refused** by detection rather than redacted: a value a
 rule in `mode = "block"` matches, values found inside a binary upload the
 proxy cannot rewrite, an identifier field the provider uses exactly as sent,
-a body the proxy cannot read. When the refused data is yours and you want it
-sent anyway, the refusal message carries a short single-use code:
+a body the proxy cannot read.
+
+**Refusal overrides are off by default.** Every refusal is then final: it
+carries no code and no hint, and nothing can let the request through. An
+operator who wants the people using the proxy to be able to send their own
+refused data anyway opts in:
+
+```toml
+[overrides]
+enabled = true
+```
+
+and restarts the proxy (`[overrides]` is restart-only). With overrides on,
+when the refused data is yours and you want it sent anyway, the refusal
+message carries a short single-use code:
 
 ```
 llm-redact: request blocked; a EMAIL value was detected and this rule is
@@ -20,8 +33,11 @@ llm-redact override list [--json]           # pending codes and live rules (no v
 llm-redact override revoke r12              # drop a rule (r…) or a pending code (p…)
 ```
 
-The command shows what was refused (kind, detector types, route, requester)
-and waits for `allow` typed on the controlling terminal (`/dev/tty`). It never
+The command shows what was refused (kind, detector types, route, requester;
+the route and requester come from the request, so every non-printable
+character is escaped and either is cut to 120 characters, its length named),
+repeats the kind and types on the line it asks you to confirm, and waits for
+`allow` typed on the controlling terminal (`/dev/tty`). It never
 reads the answer from stdin and refuses without a terminal, so an agent that
 merely pipes `allow` into the command does not approve anything. With
 llm-redact-pro and a dashboard sign-in (`[auth.dashboard]`), the dashboard
@@ -31,7 +47,7 @@ buttons, and your rules with **Revoke**.
 **Approval guards against accidents, not against local software.** An agent
 that has a shell running as you can approve its own refusal: it can open a
 pseudo-terminal and type `allow` into it, or edit the store file, just as it
-can edit the configuration. Keep `[overrides] enabled = false` where every
+can edit the configuration. Leave overrides off (the default) where every
 refusal must stay final, or where an agent with a shell works next to the
 proxy unsupervised.
 
@@ -56,7 +72,13 @@ on the request's row, the same way warn mode is.
 A value approval is an allowlist entry for that exact value and type, stored
 as an HMAC. It applies wherever that value would refuse a request (block
 mode, a binary upload, a verbatim field). It does not stop a value from being
-redacted where the proxy can redact it.
+redacted where the proxy can redact it — a binary file that `[extraction]
+convert` replaces by its redacted text included: the values of such a file are
+redacted, never put to an approval, never part of a code, and never use a
+one-time grant. A deny string where the proxy cannot redact it (a binary
+upload, a verbatim field) makes the whole refusal final: no code. A binary
+part that reads clean only because an approval let its values through is
+counted `overridden` in `inspected_uploads_total`, never `clean`.
 
 A block refusal names the first block-mode value the proxy meets. When a
 request holds more than one, approving the first leads to a new refusal (and
@@ -75,7 +97,10 @@ These refusals carry no code:
 - the request target checks: dot or empty segments, a non-origin-form target,
   an unattributable request, a method override;
 - a credential the proxy holds (identity auth, a routed operator key): every
-  refusal under one, including an unscannable body or binary part;
+  refusal under one, including an unscannable body or binary part and a
+  realtime frame on a connection authorized with the proxy's identity. An
+  every-time rule approved for a value under the client's own key does not
+  pass it there either;
 - framing where two readers could disagree: a content coding (415), a
   repeated `Content-Type`, JSON nested too deep, multipart outside the
   canonical form or on a route that does not scan it, an unreadable part
@@ -109,7 +134,15 @@ approval:
   approve (llm-redact-pro: anyone who cannot sign in to the dashboard, which
   admits administrators) gets no code and no hint, since they could not act
   on it. The CLI, as the local operator, refuses to approve a named user's
-  refusal. It can still list and revoke anything.
+  refusal. It can still list and revoke anything. Records are kept under the
+  user's stable id when the access gate supplies one (llm-redact-pro: the
+  user's namespace, shown as `id:…` by `override list`), so a renamed user
+  keeps their approvals and someone who later takes their old name inherits
+  none. When the proxy forwards traffic, the gate is asked about a user (can
+  they approve, what is their id) only once a refusal of theirs is being
+  decided, never for every request or realtime frame; an upload under
+  `binary_uploads = "refuse"` looks up its route rule only once it holds a
+  binary part. The override endpoints below ask on each use.
 
 The endpoints behind the dashboard buttons are core:
 
@@ -119,15 +152,21 @@ The endpoints behind the dashboard buttons are core:
 
 The POSTs sit behind the same guard chain as the configuration editor
 (Host, Origin, and a CSRF token that only the llm-redact-pro dashboard page
-hands out), and are served only to a requester an access gate signed in to
-the dashboard. Without a sign-in any local client can fetch the CSRF token,
-so it proves no person: the POSTs answer 403 and point to the CLI, and the
-listing says `"can_approve": false`.
+hands out), and are served only to a requester a person signed in to the
+dashboard IN A BROWSER: the access gate must say the dashboard connection
+rests on its browser sign-in (its optional `browser_signed_in` member;
+llm-redact-pro: the web session cookie). An API key, a per-user key, a bearer
+token or a client certificate the gate also admits to the dashboard is no
+sign-in: an agent can hold one. Without a browser sign-in any local client
+can fetch the CSRF token, so it proves no person: the POSTs answer 403 and
+point to the CLI, and the listing says `"can_approve": false`.
 
 ## Lifetimes and storage
 
 - A code is single-use and expires after `ttl_minutes` (default 15). At most
-  256 pending codes are kept; the oldest are dropped first.
+  256 pending codes are kept per requester (4096 in all); the oldest are
+  dropped first, so one requester retrying a refused request never drops
+  another's codes.
 - `--once` grants the next matching request of the same requester, within
   `ttl_minutes` of the approval. It is consumed atomically as that request
   passes, so of two parallel requests exactly one uses it. A request that
@@ -156,12 +195,48 @@ listing says `"can_approve": false`.
 
 ```toml
 [overrides]
-enabled = true      # false: no codes, every refusal is final
+enabled = true      # opt in; the default false: no codes, every refusal is final
 ttl_minutes = 15    # 1..1440
 # path = "/var/lib/llm-redact/overrides.db"
 ```
 
-`[overrides]` is restart-only.
+`[overrides]` is restart-only: turning overrides on or off (or moving the
+store) takes a restart, and a SIGHUP reload names the section as needing
+one.
+
+## While overrides are off
+
+Off is the default, and turning them off again later is the same state:
+
+- No refusal carries a code or an override hint, over HTTP or in a realtime
+  close reason. The proxy opens no store and writes nothing to one.
+- Approvals a store already holds (every-time rules and one-time grants
+  approved while overrides were on) are **inert**: the proxy never reads
+  them, so the values they cover are refused like any other. They stay on
+  disk and apply again the moment `enabled = true` is set and the proxy
+  restarts (a one-time grant only within its `ttl_minutes`). `llm-redact doctor` WARNs while the store still holds any; drop
+  them one by one with `llm-redact override revoke ID` (it works while off:
+  a revocation only narrows, so clearing one never needs a window with every
+  kept rule live), or all at once by deleting the store file.
+- `GET` and `POST /__llm-redact/overrides…` answer a local 404 naming
+  `[overrides] enabled`.
+- `llm-redact override CODE --once|--always` exits 1 naming the setting and
+  touches nothing. `llm-redact override list [--json]` still prints what the
+  store holds (value-free, read-only) so you can see what would apply again,
+  then says on stderr that a proxy running with that config applies none of
+  those records, and exits 1. `llm-redact override revoke ID` still drops
+  the record (and never creates a missing store), then says the same on
+  stderr and exits 1 too. The CLI
+  reads its config the way `serve` does (`--config`, `LLM_REDACT_CONFIG`,
+  the default search) and names the file it read, or that it found none; a
+  config it cannot parse exits 2.
+- The CLI cannot see which file the running proxy was started with. A proxy
+  started with `serve --config PATH` (or a service unit that passes one)
+  prints a refusal hint without `--config`: run the command with the same
+  `--config PATH`, or it reads the default search, may find overrides off
+  there, and says so about that file — not about the proxy.
+- `/__llm-redact/status` reports `"overrides": {"enabled": false}`, and
+  `llm-redact doctor` prints an informational line (or the WARN above).
 
 ## Where overrides show up
 
@@ -169,14 +244,24 @@ ttl_minutes = 15    # 1..1440
   close reason carries it too, shortened to fit 123 bytes).
 - Each request that passed on an override is marked on its `/__llm-redact/recent`
   row, its live-events row and its audit row: `"override": "once"` or
-  `"always"`. Only the kind of use is recorded, never what passed.
+  `"always"`. Only the kind of use is recorded, never what passed. A request
+  refused after it passed (no upstream configured, the upstream authorizer, a
+  routed budget refusal) is not marked: nothing went out on the override, and
+  a one-time grant it used is handed back. With `[audit] required`, the
+  write-ahead START row written right before the send already carries the
+  marker. An upload whose binary parts are inspected writes its START row
+  before the inspection; that row is amended with the marker before the send
+  (an audit log with the optional `amend` member), or a second START row
+  carrying it is written.
 - `/__llm-redact/status` has an `overrides` block with counts: `pending`,
-  `once`, `always`, and `used_total` by `once`/`always`.
+  `once`, `always`, and `used_total` by `once`/`always` (only
+  `{"enabled": false}` while overrides are off).
 - `/__llm-redact/metrics` has `llm_redact_overrides_used_total{kind="once"|"always"}`.
 - `llm-redact status` prints a posture line while every-time rules exist or
   overrides were used.
 - `llm-redact doctor` prints a WARN with the counts while approved overrides
-  exist.
+  exist — with overrides on (they apply), and with them off (inert, but
+  applied again when overrides are turned back on).
 
 None of these show a value, a digest or a code. Log lines name the path and
 the kind only.

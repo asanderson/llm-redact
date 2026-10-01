@@ -710,11 +710,11 @@ def _check_overrides(report: _Report, config: Config) -> bool:
     """Refusal overrides (overrides.py): the store read offline (never
     created). A WARN with the counts when approved overrides exist —
     requests that pass on one forward the refused values (or bodies) as
-    sent; True then (an opt-out). Counts only, never a value or a code."""
-    if not config.overrides.enabled:
-        report.line("PASS", "posture", "refusal overrides disabled: every refusal is final")
-        return False
-    from llm_redact.overrides import OverrideStore, default_overrides_path
+    sent; True then (an opt-out). Off (the default): an informational line,
+    or a WARN when the store still holds approvals — inert now, applied
+    again the moment overrides are turned on. Counts only, never a value or
+    a code."""
+    from llm_redact.overrides import ENABLE_SETTING, OverrideStore, default_overrides_path
 
     path = (
         Path(config.overrides.path).expanduser()
@@ -730,6 +730,8 @@ def _check_overrides(report: _Report, config: Config) -> bool:
         return False
     finally:
         store.close()
+    if not config.overrides.enabled:
+        return _check_overrides_off(report, counts, path, ENABLE_SETTING)
     if counts["always"] or counts["once"]:
         report.line(
             "WARN",
@@ -744,6 +746,30 @@ def _check_overrides(report: _Report, config: Config) -> bool:
         "posture",
         "refusal overrides enabled, none approved: a refusal carries a code a person"
         " may approve on the terminal",
+    )
+    return False
+
+
+def _check_overrides_off(report: _Report, counts: dict[str, int], path: Path, enable: str) -> bool:
+    """Overrides off (the default): every refusal is final. Approvals the
+    store kept from when they were on are inert, yet the moment ``enable``
+    is set they apply again — a WARN naming the counts and the file. Never
+    an opt-out (False)."""
+    if counts["always"] or counts["once"]:
+        report.line(
+            "WARN",
+            "posture",
+            f"refusal overrides are off, but their store ({path}) still holds"
+            f" {counts['always']} every-time rule(s) and {counts['once']} one-time"
+            f" grant(s): inert now, applied again if {enable} — review them with"
+            " `llm-redact override list` and drop them with `llm-redact override revoke ID`"
+            " (it works while off), or delete the file to drop them all",
+        )
+        return False
+    report.line(
+        "PASS",
+        "posture",
+        f"refusal overrides off (the default): every refusal is final, no code; {enable} opts in",
     )
     return False
 

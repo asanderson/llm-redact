@@ -138,10 +138,14 @@ not the original).
 
 Refusal overrides are on for this proxy (`[overrides] enabled = true`; they
 are off by default, and then no refusal carries this line, `llm-redact
-override …` exits 1 naming the setting, and `/__llm-redact/overrides`
-answers 404). If the proxy was started with `--config PATH` and the command
-says overrides are off in another file (or that it found no config file),
-pass it the same `--config PATH`. A detection refusal you may override for your own data: a block-mode value,
+override CODE` and `override list` exit 1 naming the setting — `override
+revoke ID` still revokes, names it on stderr and exits 0 — and
+`/__llm-redact/overrides` answers 404). A proxy started with `serve --config PATH` (or
+`LLM_REDACT_CONFIG`) on a file the command would not find by itself prints
+the line as `llm-redact override --config PATH CODE --once | --always`:
+run it as printed. If the command still says overrides are off in another
+file (or that it found no config file) — `list`/`revoke`, or a realtime
+close reason whose path did not fit — pass it the proxy's `--config PATH`. A detection refusal you may override for your own data: a block-mode value,
 values in a binary upload, a verbatim field, a body that is not JSON, or a
 binary part under `binary_uploads = "refuse"`. Run the command yourself in
 a terminal. It shows what was refused and waits for `allow` typed there. It

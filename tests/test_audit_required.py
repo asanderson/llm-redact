@@ -11,6 +11,11 @@ key via registry seams, never a signed key).
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import logging
+from collections.abc import Coroutine
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -19,6 +24,7 @@ import pytest
 import llm_redact.registry as registry_mod
 from license_fixtures import resolved
 from llm_redact.audit import AuditRecord, AuditWriteError
+from llm_redact.cli import main
 from llm_redact.config import AuditConfig, Config, ConfigError, ProviderConfig, parse_config
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
@@ -239,3 +245,212 @@ async def test_status_surfaces_required(fake_registry: Registry) -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://proxy.test") as client:
         status = (await client.get("/__llm-redact/status")).json()
     assert status["audit"]["required"] is True
+
+
+# ------------------------------------------------- synchronous write-ahead
+
+
+class Unawaited:
+    """The coroutines a SYNC audit member answered, kept so a test asserts
+    each was CLOSED unrun (``inspect.getcoroutinestate``): one dropped
+    unclosed only warns "never awaited" from its finalizer, where the
+    warning is unraisable and fails no test."""
+
+    def __init__(self) -> None:
+        self.answers: list[Coroutine[Any, Any, Any]] = []
+
+    def __call__(self, answer: Coroutine[Any, Any, Any]) -> Coroutine[Any, Any, Any]:
+        self.answers.append(answer)
+        return answer
+
+    def closed(self) -> bool:
+        states = [inspect.getcoroutinestate(answer) for answer in self.answers]
+        return bool(states) and set(states) == {inspect.CORO_CLOSED}
+
+
+class AsyncBeginAudit(FakeAudit):
+    """A write-ahead log whose SYNC ``begin`` answers a coroutine, which once
+    counted as a valid token: no START row written. (An ``async def begin``
+    is refused at startup: ``test_an_async_def_member_refuses_startup``.)"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.begin_ran = False
+        self.unawaited = Unawaited()
+
+    async def _write_start(self, entry: AuditRecord) -> object:
+        self.begin_ran = True
+        return 1
+
+    def begin(self, entry: AuditRecord) -> object | None:
+        return self.unawaited(self._write_start(entry))
+
+
+class AsyncFinalizeAudit(FakeAudit):
+    """A write-ahead log whose ``finalize`` answers a coroutine."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.finalize_ran = False
+        self.unawaited = Unawaited()
+
+    async def _write_end(self, token: object, entry: AuditRecord) -> None:
+        self.finalize_ran = True
+
+    def finalize(self, token: object, entry: AuditRecord) -> Any:
+        return self.unawaited(self._write_end(token, entry))
+
+
+async def test_an_async_begin_refuses_503_without_upstream_contact(
+    fake_registry: Registry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # begin is synchronous: an awaitable answer has committed nothing. It is
+    # closed unrun (no "never awaited" warning) and the request refused
+    # like a START row that cannot commit — before any upstream contact.
+    fake = AsyncBeginAudit()
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    upstream_calls: list[str] = []
+    app = create_app(_config(required=True))
+    state = app.state.proxy
+    state.client = httpx.AsyncClient(transport=_upstream_transport(upstream_calls))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    response = await _post_messages(app)
+    assert response.status_code == 503 and upstream_calls == []
+    assert response.json()["error"]["message"] == (
+        "llm-redact: audit log unavailable and [audit] required is enabled"
+    )
+    assert fake.begin_ran is False and fake.unawaited.closed() and fake.finalized == []
+    # The refusal is recorded (metrics, /recent; its own row best-effort).
+    assert [row["status"] for row in state.recent] == [503]
+    assert "audit write failed with [audit] required (AuditWriteError)" in caplog.text
+    assert "jane.doe" not in caplog.text
+
+
+async def test_an_async_finalize_is_an_end_row_fault(
+    fake_registry: Registry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The answer is already committed: an awaitable END answer is closed
+    # unrun and logged CRITICAL by type, like any other END-row fault.
+    fake = AsyncFinalizeAudit()
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    upstream_calls: list[str] = []
+    app = create_app(_config(required=True))
+    app.state.proxy.client = httpx.AsyncClient(transport=_upstream_transport(upstream_calls))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    response = await _post_messages(app)
+    assert response.status_code == 200 and len(upstream_calls) == 1
+    assert len(fake.begun) == 1 and fake.recorded == []
+    assert fake.finalize_ran is False and fake.unawaited.closed()
+    assert "audit write failed AFTER response (POST /v1/messages): AuditWriteError" in (caplog.text)
+    assert "jane.doe" not in caplog.text
+
+
+class TaskAudit(FakeAudit):
+    """``begin``/``finalize`` answer an asyncio Task (an awaitable that is no
+    coroutine): its write would commit the row after the answer was refused
+    — an orphan START row adopted as an interrupted request that never left,
+    an END row written after CRITICAL said it failed."""
+
+    def __init__(self, member: str) -> None:
+        super().__init__()
+        self.member = member
+        self.tasks: list[asyncio.Task[Any]] = []
+        self.late_rows: list[AuditRecord] = []
+
+    def _task(self, entry: AuditRecord) -> asyncio.Task[Any]:
+        async def write() -> int:
+            self.late_rows.append(entry)
+            return 1
+
+        task = asyncio.ensure_future(write())
+        self.tasks.append(task)
+        return task
+
+    def begin(self, entry: AuditRecord) -> object | None:
+        return self._task(entry) if self.member == "begin" else super().begin(entry)
+
+    def finalize(self, token: object, entry: AuditRecord) -> Any:
+        if self.member == "finalize":
+            return self._task(entry)
+        return super().finalize(token, entry)
+
+
+async def _settle() -> None:
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+async def test_a_task_from_begin_is_cancelled_and_refused(fake_registry: Registry) -> None:
+    fake = TaskAudit("begin")
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    upstream_calls: list[str] = []
+    app = create_app(_config(required=True))
+    app.state.proxy.client = httpx.AsyncClient(transport=_upstream_transport(upstream_calls))
+    response = await _post_messages(app)
+    await _settle()
+    assert response.status_code == 503 and upstream_calls == []
+    assert [task.cancelled() for task in fake.tasks] == [True]
+    assert fake.late_rows == []  # no START row for a request that never left
+
+
+async def test_a_task_from_finalize_is_cancelled_and_logged(
+    fake_registry: Registry, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = TaskAudit("finalize")
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    upstream_calls: list[str] = []
+    app = create_app(_config(required=True))
+    app.state.proxy.client = httpx.AsyncClient(transport=_upstream_transport(upstream_calls))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    response = await _post_messages(app)
+    await _settle()
+    assert response.status_code == 200 and len(upstream_calls) == 1
+    assert [task.cancelled() for task in fake.tasks] == [True]
+    assert fake.late_rows == []  # never an END row after CRITICAL said it failed
+    assert "audit write failed AFTER response (POST /v1/messages): AuditWriteError" in caplog.text
+
+
+# ------------------------------------------- async def members refuse startup
+
+
+def _async_member_audit(member: str) -> FakeAudit:
+    """A write-ahead log with ``member`` declared ``async def`` (an async
+    generator for ``amend``: ``async def`` with a ``yield`` is as unusable)."""
+
+    class AsyncMember(FakeAudit):
+        pass
+
+    async def coroutine_member(self: Any, *args: Any) -> object:
+        return 1
+
+    async def async_gen_member(self: Any, *args: Any) -> Any:
+        yield 1
+
+    setattr(AsyncMember, member, async_gen_member if member == "amend" else coroutine_member)
+    return AsyncMember()
+
+
+@pytest.mark.parametrize("member", ["begin", "finalize", "amend"])
+def test_an_async_def_member_refuses_startup(fake_registry: Registry, member: str) -> None:
+    # Every request would be refused 503 (or log CRITICAL at every END row):
+    # an ``async def`` member is a startup ConfigError naming the member, so
+    # `serve --check` — the deploy gate — reports it.
+    fake = _async_member_audit(member)
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    with pytest.raises(ConfigError, match=rf"synchronous.*\b{member}\(\)"):
+        create_app(_config(required=True))
+    # Without [audit] required the members are never called: no refusal.
+    create_app(_config(required=False))
+
+
+def test_serve_check_fails_on_an_async_begin(
+    fake_registry: Registry, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _async_member_audit("begin")
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[audit]\nenabled = true\nrequired = true\n")
+    with pytest.raises(SystemExit) as exited:
+        main(["serve", "--check", "--config", str(config_file)])
+    assert exited.value.code == 1
+    assert "serve --check: FAIL:" in capsys.readouterr().err

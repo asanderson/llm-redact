@@ -375,6 +375,13 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         " -> str | None``",
         "``realtime_server_frame(adapter_name, path, frame, *, identity, session_id) -> None``",
     ),
+    # Re-exported from vault.py: the durable maps a session router reads
+    # (the Live resumption handle map is called by the plugin itself).
+    "VaultManager": (
+        "``record_object_session(object_id, session_id) -> None``",
+        "``record_handle_session(handle_digest, session_id, *, replaces=()) -> None``",
+        "``lookup_handle_session(handle_digest) -> str | None``",
+    ),
     "WriteAheadAudit": ("``amend(token, entry) -> None``",),
 }
 

@@ -100,6 +100,7 @@ from llm_redact.overrides import (
     OverrideScope,
     OverrideStore,
     default_overrides_path,
+    hint_config,
     raced_message,
 )
 from llm_redact.placeholders import PLACEHOLDER_RE, json_floors, may_carry_tokens
@@ -202,6 +203,56 @@ _INBOUND_TRACEPARENT: ContextVar[str | None] = ContextVar("llm_redact_traceparen
 _REQUEST_USER: ContextVar[str | None] = ContextVar("llm_redact_user", default=None)
 
 
+def _synchronous_audit_answer(answer: object, member: str) -> None:
+    """Refuse an awaitable answer from a write-ahead audit member.
+
+    ``begin``/``finalize``/``amend`` are synchronous: each must have made
+    its row durable before it returns. An ``async def`` member returns a
+    coroutine instead — nothing committed yet — and the core never awaits
+    one on the request path, so the answer is closed unrun (no "never
+    awaited" warning, the member's body never runs) and treated as the
+    write fault it is: :class:`AuditWriteError`, never a durable row (a
+    coroutine returned from ``begin`` once counted as a valid token, so no
+    START row was ever written). A pending asyncio Task or Future is
+    cancelled, so a write it schedules never lands after the refusal (an
+    orphan START row for a request that never left, an END row after the
+    CRITICAL line said it failed); any other awaitable is refused unawaited."""
+    if inspect.isawaitable(answer):
+        if inspect.iscoroutine(answer):
+            answer.close()
+        elif isinstance(answer, asyncio.Future):
+            answer.cancel()
+        raise AuditWriteError(f"write-ahead audit {member}() returned an awaitable")
+
+
+def _require_synchronous_audit(log: WriteAheadAudit, amend: object) -> None:
+    """Refuse at startup a write-ahead log whose ``begin``/``finalize``/
+    ``amend`` is declared ``async def`` (a coroutine or async-generator
+    function): its every answer would be refused per request
+    (``_synchronous_audit_answer``) — a 503 for every request, or a CRITICAL
+    END-row fault for every answer — so the deploy gate (``serve --check``)
+    must report it rather than call it OK. A synchronous member that answers
+    an awaitable is still refused per request."""
+    members = (("begin", log.begin), ("finalize", log.finalize), ("amend", amend))
+    asynchronous = [
+        f"{name}()"
+        for name, member in members
+        if inspect.iscoroutinefunction(member) or inspect.isasyncgenfunction(member)
+    ]
+    if asynchronous:
+        raise ConfigError(
+            "[audit] required = true needs synchronous write-ahead audit members;"
+            f" async def: {', '.join(asynchronous)}"
+        )
+
+
+def _finalize_audit(log: WriteAheadAudit, token: object, entry: AuditRecord) -> None:
+    """Commit the END row ``token`` names; raises :class:`AuditWriteError`
+    on a write fault, an awaitable answer included (closed unrun)."""
+    finalize: Callable[[object, AuditRecord], object] = log.finalize
+    _synchronous_audit_answer(finalize(token, entry), "finalize")
+
+
 class _EarlyAudit:
     """The ``[audit] required`` START row an upload wrote BEFORE its binary
     parts were handed to the upload inspector (``_handle``'s
@@ -278,7 +329,7 @@ class _EarlyAudit:
             duration_ms=(time.perf_counter() - self._row["started"]) * 1000.0,
         )
         try:
-            log.finalize(token, entry)
+            _finalize_audit(log, token, entry)
         except AuditWriteError as exc:
             logger.critical(
                 "audit write failed ending a superseded START row (%s %s): %s",
@@ -777,6 +828,7 @@ class ProxyState:
             self.write_ahead_audit = self.audit
             amend = getattr(self.audit, "amend", None)
             self.write_ahead_amend = amend if callable(amend) else None
+            _require_synchronous_audit(self.audit, self.write_ahead_amend)
         self.audit_s3: S3AuditSink | None
         self.audit_azure: AzureAuditSink | None
         self.audit_s3, self.audit_azure = registry.build_audit_sinks(config.audit)
@@ -863,6 +915,11 @@ class ProxyState:
             if config.overrides.enabled
             else None
         )
+        # The config file the CLI hint names (``--config``) when the CLI's
+        # default search would not find the one this proxy was started with.
+        self.override_config_arg = (
+            hint_config(config_path, os.environ) if self.overrides is not None else None
+        )
 
     def override_scope(self) -> OverrideScope | None:
         """This request's view of its requester's overrides — the subject
@@ -880,6 +937,7 @@ class ProxyState:
             subject,
             approvable=functools.partial(self._approves_overrides, subject),
             owner=functools.partial(self.override_owner, subject),
+            config_arg=self.override_config_arg,
         )
 
     def override_owner(self, subject: str) -> str | None:
@@ -1661,6 +1719,9 @@ class ProxyState:
                 override=_COMMITTED_OVERRIDE.get(),
             )
         )
+        # An awaitable token (an ``async def begin``) is a START row not yet
+        # committed — the core never awaits it on the request path.
+        _synchronous_audit_answer(token, "begin")
         if token is None:
             # None is the "required mode off" sentinel record_request
             # dispatches on; a write-ahead log must never mint it. Fail
@@ -1707,10 +1768,7 @@ class ProxyState:
                 override=_COMMITTED_OVERRIDE.get(),
             ),
         )
-        if inspect.isawaitable(answer):
-            if inspect.iscoroutine(answer):
-                answer.close()  # never run, never "never awaited"
-            raise AuditWriteError("write-ahead audit amend() returned an awaitable")
+        _synchronous_audit_answer(answer, "amend")
 
     def record_request(
         self,
@@ -1803,7 +1861,7 @@ class ProxyState:
             # A token exists only when begin_audit resolved the write-ahead
             # log (and it never mints None) — the conjunct narrows the type.
             if audit_token is not None and self.write_ahead_audit is not None:
-                self.write_ahead_audit.finalize(audit_token, entry)
+                _finalize_audit(self.write_ahead_audit, audit_token, entry)
             else:
                 self.audit.record(entry)
         except AuditWriteError as exc:

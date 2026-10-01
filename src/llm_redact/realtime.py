@@ -1664,6 +1664,7 @@ async def _relay(
                         blocked.detector_type,
                         allow_code,
                         named=frame_scope is not None and bool(frame_scope.subject),
+                        config_arg=frame_scope.config_arg if frame_scope is not None else None,
                     )
                 )
                 return
@@ -1791,25 +1792,39 @@ OVERRIDE_FAULT_REASON = (
 )
 
 
-def blocked_reason(detector_type: str, code: str | None, *, named: bool = False) -> str:
+def blocked_reason(
+    detector_type: str, code: str | None, *, named: bool = False, config_arg: str | None = None
+) -> str:
     """The 1008 close reason for a block-mode value: the type, and how to
     allow it when there is a code — the CLI with the code for the local
     operator, the dashboard for a ``named`` user — the longest wording that
-    fits a close frame's 123 bytes, so the hint is never cut off."""
+    fits a close frame's 123 bytes, so the hint is never cut off. The CLI
+    hint names ``config_arg`` (``--config``, the file the proxy was started
+    with) when it fits, shortening the wording and dropping the type before
+    the path (about 49 characters of path fit); a path too long for any
+    wording falls back to the plain hint (the HTTP refusal of the same value
+    carries it whole)."""
     if code is None:
         return f"blocked by llm-redact policy ({detector_type})"
-    hint = (
-        "Refusal overrides in the llm-redact dashboard"
-        if named
-        else f"llm-redact override {code} --once|--always"
-    )
-    for reason in (
-        f"blocked by llm-redact policy ({detector_type}); to allow: {hint}",
-        f"blocked ({detector_type}); allow: {hint}",
-    ):
-        if len(reason.encode("utf-8")) <= _MAX_CLOSE_REASON_BYTES:
-            return reason
-    return f"blocked by llm-redact policy; to allow: {hint}"
+    if named:
+        hints = ["Refusal overrides in the llm-redact dashboard"]
+    else:
+        hints = [f"llm-redact override {code} --once|--always"]
+        if config_arg is not None:
+            hints.insert(0, f"llm-redact override --config {config_arg} {code} --once|--always")
+    reasons = [
+        reason
+        for hint in hints
+        for reason in (
+            f"blocked by llm-redact policy ({detector_type}); to allow: {hint}",
+            f"blocked ({detector_type}); allow: {hint}",
+            f"blocked by llm-redact policy; to allow: {hint}",
+            f"blocked; allow: {hint}",
+        )
+    ]
+    # The last one (the plain hint, no type) always fits (pinned by test).
+    fits = (r for r in reasons if len(r.encode("utf-8")) <= _MAX_CLOSE_REASON_BYTES)
+    return next(fits, reasons[-1])
 
 
 class _FrameRefused(Exception):

@@ -14,6 +14,7 @@ Real sockets end to end (the test_realtime_relay harness).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -25,7 +26,7 @@ from llm_redact.config import AuditConfig, Config, ProviderConfig
 from llm_redact.plugin_api import Admission
 from llm_redact.registry import Registry
 from test_access_seam import FakeGate
-from test_audit_required import FakeAudit
+from test_audit_required import AsyncBeginAudit, AsyncFinalizeAudit, FakeAudit
 from test_realtime_identity import _closed, _recent
 from test_realtime_relay import FakeUpstream, _config, _proxy
 
@@ -94,3 +95,48 @@ async def test_audit_start_fault_is_recorded_503(monkeypatch: pytest.MonkeyPatch
     assert fake.paths == []  # no upstream contact without a committed START
     assert closed.code == 1011 and "[audit] required" in closed.reason
     assert (row["status"], row["provider"]) == (503, "openai")
+
+
+def _audited(monkeypatch: pytest.MonkeyPatch, audit: FakeAudit, port: int) -> Config:
+    reg = Registry()
+    reg.resolve_license = lambda *args, **kwargs: resolved("pro")
+    reg.build_access_gate = lambda cfg, lic: None
+    reg.build_audit = lambda cfg: audit if cfg.enabled else None
+    monkeypatch.setattr(registry_mod, "_registry", reg)
+    return Config(
+        providers={**Config().providers, "openai": ProviderConfig(f"http://127.0.0.1:{port}")},
+        audit=AuditConfig(enabled=True, required=True),
+    )
+
+
+async def test_an_async_begin_is_recorded_503_and_never_dialled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # begin is synchronous: a coroutine answer committed nothing. Closed
+    # unrun and refused like a START row that cannot commit — never dialled.
+    audit = AsyncBeginAudit()
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    async with FakeUpstream() as fake:
+        closed, row = await _refused_row(_audited(monkeypatch, audit, fake.port))
+    assert fake.paths == []
+    assert closed.code == 1011 and "[audit] required" in closed.reason
+    assert (row["status"], row["provider"]) == (503, "openai")
+    assert audit.begin_ran is False and audit.unawaited.closed() and audit.finalized == []
+    assert "audit write failed with [audit] required (AuditWriteError)" in caplog.text
+
+
+async def test_an_async_finalize_at_close_is_logged_critical(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    audit = AsyncFinalizeAudit()
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    async with FakeUpstream() as fake:
+        with _proxy(_audited(monkeypatch, audit, fake.port)) as proxy_host:
+            async with websockets.connect(f"ws://{proxy_host}/v1/realtime") as client:
+                await client.send('{"type":"noop"}')
+                await client.recv()
+            row = await _recent(proxy_host, lambda r: r["method"] == "WS")
+    assert fake.paths == ["/v1/realtime"] and row["status"] == 101
+    assert len(audit.begun) == 1
+    assert audit.finalize_ran is False and audit.unawaited.closed()
+    assert "audit write failed AFTER response (WS /v1/realtime): AuditWriteError" in caplog.text

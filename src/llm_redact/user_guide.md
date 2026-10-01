@@ -179,7 +179,9 @@ code. An operator opts in with `[overrides] enabled = true` (restart the
 proxy). With them on, a request refused by detection (a block-mode value,
 values inside a binary upload, a verbatim identifier field, a body the proxy
 cannot read) carries a single-use code in its error message: `to allow:
-llm-redact override CODE --once | --always`. Run that yourself in a terminal: it shows what was
+llm-redact override CODE --once | --always` (with `--config PATH` after `override`
+when the proxy was started with a config file the command would not find by itself:
+`serve --config PATH` or `LLM_REDACT_CONFIG`). Run that yourself in a terminal: it shows what was
 refused and waits for you to type `allow` (never read from stdin: a guard
 against an accidental approval, not against an agent with a shell, which can
 type into a terminal of its own). `--once` lets the next such request through,

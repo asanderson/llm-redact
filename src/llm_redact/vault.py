@@ -46,25 +46,70 @@ class CheckFaults:
 
     __slots__ = ("counter", "failing")
 
+    # The bookkeeping stage a failure is counted under, and the outage's two
+    # log lines (a subclass names its own).
+    stage = CHECK_FAULT_STAGE
+    outage_message = (
+        "vault staleness check failed (%s): cached values are served until the"
+        " database answers again"
+    )
+    recovery_message = "vault staleness check: the database answers again"
+
     def __init__(self) -> None:
         self.counter: Counter[str] | None = None
         self.failing = False
 
     def failed(self, exc: Exception) -> None:
         if self.counter is not None:
-            self.counter[CHECK_FAULT_STAGE] += 1
+            self.counter[self.stage] += 1
         if not self.failing:
             self.failing = True
-            logger.warning(
-                "vault staleness check failed (%s): cached values are served until the"
-                " database answers again",
-                type(exc).__name__,
-            )
+            logger.warning(self.outage_message, type(exc).__name__)
 
     def succeeded(self) -> None:
         if self.failing:
             self.failing = False
-            logger.info("vault staleness check: the database answers again")
+            logger.info(self.recovery_message)
+
+
+# The proxy's bookkeeping stage a failed Live resumption handle-map read or
+# write is counted under (``HandleWriteFaults``/``HandleReadFaults``).
+HANDLE_FAULT_STAGE = "handle_map"
+
+
+class HandleWriteFaults(CheckFaults):
+    """The failed writes of one manager's durable Live resumption handle map
+    (``record_handle_session``). Contained: a write that fails leaves the
+    handle unrecorded, so it reads as unknown — refused by the plugin that
+    asks, never resumed into a session the vault no longer vouches for.
+    Counted and logged like ``CheckFaults`` (by type only), as an outage of
+    its own: writes can fail while reads work (a missing grant), and only a
+    write that succeeds ends it."""
+
+    __slots__ = ()
+
+    stage = HANDLE_FAULT_STAGE
+    outage_message = (
+        "vault handle map write failed (%s): Live resumption handles go unrecorded"
+        " (read as unknown) until a write succeeds again"
+    )
+    recovery_message = "vault handle map: writes succeed again"
+
+
+class HandleReadFaults(CheckFaults):
+    """The failed reads of one manager's durable Live resumption handle map
+    (``lookup_handle_session``): each answers None, so the handle reads as
+    unknown (fail closed). An outage of its own (``HandleWriteFaults``):
+    only a read that succeeds ends it."""
+
+    __slots__ = ()
+
+    stage = HANDLE_FAULT_STAGE
+    outage_message = (
+        "vault handle map read failed (%s): Live resumption handles read as unknown"
+        " until the database answers again"
+    )
+    recovery_message = "vault handle map: reads succeed again"
 
 
 class VaultKeyError(RuntimeError):
@@ -246,9 +291,25 @@ _RETIRED_TABLE = (
     " (session_id TEXT PRIMARY KEY, n INTEGER NOT NULL) WITHOUT ROWID"
 )
 
+# The durable Live resumption handle map (``record_handle_session``): a
+# handle's DIGEST (the plugin's domain-separated hash; never a raw handle) ->
+# the session it was issued in. ``seq`` is the rowid: a new row is numbered
+# above every row present, so the trims below follow INSERTION order even
+# for rows written within one second (``created_at``'s resolution). Rows
+# leave with their session on every whole-session delete.
+_HANDLE_TABLE = (
+    "CREATE TABLE IF NOT EXISTS handle_sessions (seq INTEGER PRIMARY KEY,"
+    " handle_digest TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL)"
+)
+_HANDLE_INDEX = (
+    "CREATE INDEX IF NOT EXISTS handle_sessions_by_session ON handle_sessions (session_id, seq)"
+)
+
 # v2: plaintext originals. v3: HMAC index + Fernet ciphertext (crypto extra).
 _SCHEMA_V2 = f"""
 {_RETIRED_TABLE};
+{_HANDLE_TABLE};
+{_HANDLE_INDEX};
 CREATE TABLE IF NOT EXISTS mappings (
   session_id TEXT NOT NULL,
   detector_type TEXT NOT NULL,
@@ -283,6 +344,8 @@ _MAPPINGS_V3_COLUMNS = """
 
 _SCHEMA_V3 = f"""
 {_RETIRED_TABLE};
+{_HANDLE_TABLE};
+{_HANDLE_INDEX};
 CREATE TABLE IF NOT EXISTS mappings ({_MAPPINGS_V3_COLUMNS});
 CREATE TABLE IF NOT EXISTS response_sessions (
   response_id TEXT PRIMARY KEY,
@@ -305,6 +368,18 @@ _MAX_OBJECT_ROWS = 10000
 _RESPONSE_PRUNE_EVERY = 256
 _RESPONSE_KIND = "response"
 _OBJECT_KIND = "object"
+# The handle map's bound (``write_handle``): each session keeps its newest
+# MAX_SESSION_HANDLES rows (a client resumes with the NEWEST handle its
+# connection was sent, and the plugin supersedes a connection's older ones
+# through ``replaces`` — so this counts recent connections, not handles), and
+# beyond the newest MAX_HANDLE_ROWS rows in all only rows of sessions holding
+# no mappings go (checked every _RESPONSE_PRUNE_EVERY writes), so a live
+# session's newest handles are never trimmed by other sessions' traffic.
+# Rows in all: at most MAX_HANDLE_ROWS (+ one check interval) plus
+# MAX_SESSION_HANDLES per session holding mappings; a session's rows leave
+# with it (TTL prune, forget).
+MAX_SESSION_HANDLES = 1024
+MAX_HANDLE_ROWS = 10000
 # How many ids one batched response-map lookup binds per query (well under
 # every engine's parameter limit: sqlite's, and Oracle's 1000-item IN list).
 LOOKUP_CHUNK = 500
@@ -496,7 +571,9 @@ def _retired_number(conn: sqlite3.Connection, session: str) -> int:
 
 def delete_sessions(conn: sqlite3.Connection, session_ids: Sequence[str]) -> int:
     """Inside an open write transaction: delete whole sessions — their
-    mappings and response-map rows — after raising each one's retired number
+    mappings, response-map rows and Live resumption handle rows (a handle
+    issued in a deleted session must never resume into the session a later
+    value recreates) — after raising each one's retired number
     to the highest number it holds. Returns how many of them held mappings.
 
     New values are always numbered above the retired number, so no number a
@@ -523,7 +600,56 @@ def delete_sessions(conn: sqlite3.Connection, session_ids: Sequence[str]) -> int
         )
         conn.execute(f"DELETE FROM mappings WHERE session_id IN ({marks})", chunk)
         conn.execute(f"DELETE FROM response_sessions WHERE session_id IN ({marks})", chunk)
+        conn.execute(f"DELETE FROM handle_sessions WHERE session_id IN ({marks})", chunk)
     return int(present)
+
+
+def ensure_side_tables(conn: sqlite3.Connection) -> None:
+    """Create the tables a whole-session delete writes or empties beside
+    ``mappings`` — retired numbers and the handle map — in a database no
+    proxy of this version has opened yet (the CLI's prune)."""
+    conn.execute(_RETIRED_TABLE)
+    conn.execute(_HANDLE_TABLE)
+    conn.execute(_HANDLE_INDEX)
+
+
+def write_handle(
+    conn: sqlite3.Connection,
+    handle_digest: str,
+    session_id: str,
+    replaces: Sequence[str],
+    *,
+    trim_all: bool,
+) -> None:
+    """Inside an open write transaction: map ``handle_digest`` to
+    ``session_id`` as the NEWEST row (a digest written again moves up), drop
+    the ``replaces`` digests this connection's newer handle supersedes —
+    only the same session's — and trim the session to its newest
+    ``MAX_SESSION_HANDLES`` rows; with ``trim_all``, also every row beyond
+    the newest ``MAX_HANDLE_ROWS`` whose session holds no mappings. Both
+    trims follow insertion order (``seq``)."""
+    conn.executemany(
+        "DELETE FROM handle_sessions WHERE session_id = ? AND handle_digest = ?",
+        [(session_id, digest) for digest in replaces],
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO handle_sessions (handle_digest, session_id) VALUES (?, ?)",
+        (handle_digest, session_id),
+    )
+    conn.execute(
+        "DELETE FROM handle_sessions WHERE session_id = ? AND seq <="
+        " (SELECT seq FROM handle_sessions WHERE session_id = ?"
+        " ORDER BY seq DESC LIMIT 1 OFFSET ?)",
+        (session_id, session_id, MAX_SESSION_HANDLES),
+    )
+    if trim_all:
+        conn.execute(
+            "DELETE FROM handle_sessions WHERE seq <="
+            " (SELECT seq FROM handle_sessions ORDER BY seq DESC LIMIT 1 OFFSET ?)"
+            " AND NOT EXISTS"
+            " (SELECT 1 FROM mappings m WHERE m.session_id = handle_sessions.session_id)",
+            (MAX_HANDLE_ROWS,),
+        )
 
 
 def prune_idle_sessions(
@@ -909,6 +1035,40 @@ def open_sqlite_vault(path: Path, session: str, cipher: "VaultCipher | None" = N
 
 
 class VaultManager(Protocol):
+    """Per-session vaults over one store, plus the durable maps a session
+    router reads (re-exported by ``llm_redact.plugin_api``).
+
+    OPTIONAL members, read with ``getattr`` (a manager written before them
+    keeps working):
+
+    - OPTIONAL ``record_object_session(object_id, session_id) -> None`` — a
+      stored object's owner record, bounded apart from the Responses rows.
+      The proxy calls it; a manager without it records owners through
+      ``record_response_session`` (one shared bound).
+    - OPTIONAL ``record_handle_session(handle_digest, session_id, *,
+      replaces=()) -> None`` — the durable Live resumption handle map, for
+      a plugin (llm-redact-pro) to call: the session a handle was issued
+      in, keyed by the plugin's domain-separated DIGEST of it (never the
+      raw handle), the ``replaces`` digests (the same connection's older
+      handles; only rows of the same session) deleted in the same
+      transaction. Bounded per session and in all in insertion order,
+      never trimming a live session's newest rows for another session's
+      traffic; a session's rows leave with it on every whole-session
+      delete, so a handle into a pruned-and-recreated session is unknown.
+      A fault is contained (bookkeeping stage ``handle_map``, logged by
+      type): nothing is written.
+    - OPTIONAL ``lookup_handle_session(handle_digest) -> str | None`` — the
+      session a recorded digest names, None when absent (the truth: a
+      deleted session's rows are gone) or when the read fails (unknown,
+      fail closed).
+
+    A manager whose ``durable_response_map`` is False (the in-memory one)
+    keeps no durable map: its handle-map members record nothing and answer
+    None, and a caller must not read that None as "pruned" — the proxy
+    hands its session router no durable lookup, so the router keeps its own
+    in-process records instead.
+    """
+
     def get(self, session_id: str) -> Vault: ...
 
     def session_count(self) -> int: ...
@@ -922,11 +1082,6 @@ class VaultManager(Protocol):
     def forget_sessions(self, session_ids: Iterable[str]) -> int: ...
 
     def record_response_session(self, response_id: str, session_id: str) -> None: ...
-
-    # Optional, read with getattr by the proxy: ``record_object_session(
-    # object_id, session_id)`` — a stored object's owner record, bounded
-    # apart from the Responses rows. A manager without it records owners
-    # through ``record_response_session`` (one shared bound).
 
     def lookup_response_session(self, response_id: str) -> str | None: ...
 
@@ -1002,6 +1157,14 @@ class InMemoryVaultManager:
     def record_object_session(self, object_id: str, session_id: str) -> None:
         pass  # likewise: no durable map
 
+    def record_handle_session(
+        self, handle_digest: str, session_id: str, *, replaces: Sequence[str] = ()
+    ) -> None:
+        pass  # no durable map: a plugin vouches for handles in its own process
+
+    def lookup_handle_session(self, handle_digest: str) -> str | None:
+        return None  # unknown — never "pruned" (durable_response_map is False)
+
     def lookup_response_session(self, response_id: str) -> str | None:
         return None
 
@@ -1040,6 +1203,9 @@ class SqliteVaultManager:
         # holders keep them alive).
         self._live: weakref.WeakValueDictionary[str, SqliteVault] = weakref.WeakValueDictionary()
         self._inserts = {_RESPONSE_KIND: 0, _OBJECT_KIND: 0}
+        self._handle_writes = 0
+        self._handle_write_faults = HandleWriteFaults()
+        self._handle_read_faults = HandleReadFaults()
 
     @property
     def _conn(self) -> sqlite3.Connection:
@@ -1050,9 +1216,12 @@ class SqliteVaultManager:
         self._shared.conn = conn
 
     def bind_fault_counter(self, counter: Counter[str]) -> None:
-        """Count this manager's failed staleness checks in ``counter`` (the
-        proxy's ``bookkeeping_errors``; optional, read via getattr)."""
+        """Count this manager's failed staleness checks and handle-map reads
+        and writes in ``counter`` (the proxy's ``bookkeeping_errors``;
+        optional, read via getattr)."""
         self._shared.check_faults.counter = counter
+        self._handle_write_faults.counter = counter
+        self._handle_read_faults.counter = counter
 
     def get(self, session_id: str) -> Vault:
         # Every view the LRU holds is live, so the registry answers for both.
@@ -1170,6 +1339,46 @@ class SqliteVaultManager:
         row = self._conn.execute(
             "SELECT session_id FROM response_sessions WHERE response_id = ?", (response_id,)
         ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def record_handle_session(
+        self, handle_digest: str, session_id: str, *, replaces: Sequence[str] = ()
+    ) -> None:
+        """Record the session a Live resumption handle was issued in, by the
+        handle's digest, dropping the ``replaces`` digests it supersedes in
+        the same transaction (``write_handle``: bounded per session and in
+        all, in insertion order). A fault is contained (``HandleWriteFaults``):
+        nothing is written, and the handle reads as unknown."""
+        trim_all = self._handle_writes + 1 >= _RESPONSE_PRUNE_EVERY
+        conn = self._conn
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                write_handle(conn, handle_digest, session_id, replaces, trim_all=trim_all)
+                conn.execute("COMMIT")
+            except BaseException:
+                with suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
+                raise
+        except Exception as exc:  # noqa: BLE001 — contained: the handle stays unknown
+            self._handle_write_faults.failed(exc)
+            return
+        self._handle_write_faults.succeeded()
+        self._handle_writes = 0 if trim_all else self._handle_writes + 1
+
+    def lookup_handle_session(self, handle_digest: str) -> str | None:
+        """The session a recorded handle digest was issued in, or None — its
+        absence is the truth (a deleted session's rows left with it). A
+        fault reads as None: unknown, never a guess."""
+        try:
+            row = self._conn.execute(
+                "SELECT session_id FROM handle_sessions WHERE handle_digest = ?",
+                (handle_digest,),
+            ).fetchone()
+        except Exception as exc:  # noqa: BLE001 — fail closed: unknown
+            self._handle_read_faults.failed(exc)
+            return None
+        self._handle_read_faults.succeeded()
         return str(row[0]) if row is not None else None
 
     def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:

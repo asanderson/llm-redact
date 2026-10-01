@@ -323,7 +323,13 @@ silently rehydrate the *wrong* secret. Treat it accordingly.
   vault one instance can prune another's static session that kept re-using
   known values. That costs the deleted tokens their restoration (they pass
   through verbatim), never a wrong value; set `session_ttl_days` above the
-  longest such pause, or leave it `0` on a shared vault.
+  longest such pause, or leave it `0` on a shared vault. A delete also
+  removes the session's rows from the vault's Live resumption handle map
+  (`handle_sessions`: digests of the Gemini / Vertex AI Live resumption
+  handles llm-redact-pro records, each mapped to its session; at most
+  1,024 per session and, beyond 10,000 rows, only rows of sessions holding
+  no values are trimmed, oldest first), so a handle into a deleted session
+  is no longer honoured.
 
 At-rest **encryption** of the vault (`[vault] encryption = "fernet"`), **key
 rotation** (`vault rotate-key`), and the **server RDBMS** backends are Pro

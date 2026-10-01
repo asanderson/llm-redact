@@ -410,6 +410,24 @@ def test_the_store_file_is_private_and_bounded(tmp_path: Path) -> None:
     assert EMAIL.encode() not in (tmp_path / "d" / "o.db").read_bytes()
 
 
+def test_one_requesters_retries_never_drop_anothers_codes(tmp_path: Path) -> None:
+    # The pending bound is per requester (OVR-7); the file has its own,
+    # larger one.
+    store = OverrideStore(tmp_path / "o.db", max_pending=3, max_pending_total=7)
+    alice = store.record_pending("block", "alice", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
+    for _ in range(10):
+        store.record_pending("block", "bob", "openai", "POST", "/v1/x", [("EMAIL", OTHER)])
+    by_subject = [entry.subject for entry in store.entries()]
+    assert by_subject.count("bob") == 3 and by_subject.count("alice") == 1
+    assert store.describe(alice).subject == "alice"
+    for user in ("carol", "dave", "erin"):
+        for _ in range(3):
+            store.record_pending("block", user, "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
+    assert store.counts()["pending"] == 7  # the file's bound: oldest first
+    with pytest.raises(OverrideError):
+        store.describe(alice)
+
+
 def test_revoke_and_listing(tmp_path: Path) -> None:
     store = _store(tmp_path)
     code = store.record_pending("block", "alice", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])

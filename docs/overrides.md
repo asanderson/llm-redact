@@ -141,7 +141,9 @@ listing says `"can_approve": false`.
 ## Lifetimes and storage
 
 - A code is single-use and expires after `ttl_minutes` (default 15). At most
-  256 pending codes are kept; the oldest are dropped first.
+  256 pending codes are kept per requester (4096 in all); the oldest are
+  dropped first, so one requester retrying a refused request never drops
+  another's codes.
 - `--once` grants the next matching request of the same requester, within
   `ttl_minutes` of the approval. It is consumed atomically as that request
   passes, so of two parallel requests exactly one uses it. A request that

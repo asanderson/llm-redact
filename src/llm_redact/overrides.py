@@ -72,8 +72,11 @@ _CODE_ALIASES = str.maketrans({"O": "0", "I": "1", "L": "1"})
 
 DEFAULT_TTL_SECONDS = 900
 # Bounds: unapproved codes (a client retrying a refused request mints one per
-# attempt) and approved one-time grants, each dropped oldest first.
+# attempt) PER REQUESTER — so one requester's retries never drop another's
+# codes — and across the file, and approved one-time grants; each dropped
+# oldest first.
 MAX_PENDING = 256
+MAX_PENDING_TOTAL = 4096
 MAX_ONCE_GRANTS = 256
 # How long a write waits for another process's write lock before it fails
 # closed (the refusal stands). The proxy waits briefly — it waits on the
@@ -261,6 +264,7 @@ class OverrideStore:
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
         clock: Callable[[], float] = time.time,
         max_pending: int = MAX_PENDING,
+        max_pending_total: int = MAX_PENDING_TOTAL,
         busy_timeout_ms: int = CLI_BUSY_TIMEOUT_MS,
         read_only: bool = False,
     ) -> None:
@@ -271,6 +275,7 @@ class OverrideStore:
         self.ttl = ttl_seconds
         self._clock = clock
         self._max_pending = max_pending
+        self._max_pending_total = max_pending_total
         self._busy_timeout_ms = busy_timeout_ms
         # Every-time rules' uses not yet written (count_uses), by rule id.
         self._unflushed: Counter[int] = Counter()
@@ -430,9 +435,14 @@ class OverrideStore:
                     ),
                 )
                 conn.execute(
+                    "DELETE FROM pending WHERE subject = ? AND id NOT IN"
+                    " (SELECT id FROM pending WHERE subject = ? ORDER BY id DESC LIMIT ?)",
+                    (subject, subject, self._max_pending),
+                )
+                conn.execute(
                     "DELETE FROM pending WHERE id NOT IN"
                     " (SELECT id FROM pending ORDER BY id DESC LIMIT ?)",
-                    (self._max_pending,),
+                    (self._max_pending_total,),
                 )
         return code
 

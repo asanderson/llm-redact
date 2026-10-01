@@ -532,6 +532,9 @@ and tags `vX.Y.Z`.
   and pending codes. A new optional `AccessGate.override_subject(subject)` names a
   stable id the records are kept under (`id:…`); a gate that cannot answer gives no
   override and no code. Without the member records stay keyed by the name.
+- The 256-code bound on pending refusal codes was global, so one requester retrying a
+  refused request dropped other requesters' codes before they could approve them. The
+  bound is now per requester (256), with a 4096-code bound on the whole file.
 
 ## [1.9.0] - 2026-09-29
 

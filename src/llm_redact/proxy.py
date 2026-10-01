@@ -92,6 +92,14 @@ from llm_redact.metrics import Metrics
 from llm_redact.multipart import parse as parse_multipart
 from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
+from llm_redact.overrides import (
+    OVERRIDE_RACED,
+    OverrideError,
+    OverrideScope,
+    OverrideStore,
+    allow_hint,
+    default_overrides_path,
+)
 from llm_redact.placeholders import PLACEHOLDER_RE, json_floors, may_carry_tokens
 from llm_redact.plugin_api import (
     AccessGate,
@@ -123,6 +131,7 @@ from llm_redact.providers.attribution import (
 )
 from llm_redact.providers.base import (
     InspectedUpload,
+    UnscannedBinaryFile,
     VerbatimFieldRedacted,
     prepare_route_request,
 )
@@ -189,6 +198,10 @@ _INBOUND_TRACEPARENT: ContextVar[str | None] = ContextVar("llm_redact_traceparen
 # by record_request — the same task-context trick as the traceparent, so the
 # streaming finalizers attribute without threading a parameter through.
 _REQUEST_USER: ContextVar[str | None] = ContextVar("llm_redact_user", default=None)
+# Whether the current request passed a refusal on an approved override
+# ("once" / "always", overrides.py): set as it passes, read by
+# record_request like the user — the row says so (the kind of use only).
+_REQUEST_OVERRIDE: ContextVar[str | None] = ContextVar("llm_redact_override", default=None)
 # The 403 text when the session router's ownership check fails or answers
 # something other than a reason (never an id or a user name).
 _OBJECT_ACCESS_FAULT = (
@@ -696,6 +709,28 @@ class ProxyState:
         # Inspected binary upload parts by (provider, outcome) — an honesty
         # counter like unscanned_uploads (upload_inspection.OUTCOMES).
         self.inspected_uploads: Counter[tuple[str, str]] = Counter()
+        # Refusal overrides (overrides.py): the requester's approved
+        # one-time grants and every-time rules, read from their store only
+        # where a detection refusal is being decided. None when
+        # [overrides] enabled = false: every refusal is final, no code.
+        self.overrides: OverrideStore | None = (
+            OverrideStore(
+                Path(config.overrides.path).expanduser()
+                if config.overrides.path
+                else default_overrides_path(),
+                ttl_seconds=config.overrides.ttl_minutes * 60,
+            )
+            if config.overrides.enabled
+            else None
+        )
+
+    def override_scope(self) -> OverrideScope | None:
+        """This request's view of its requester's overrides — the subject
+        the access gate admitted, else the local operator — or None when
+        overrides are off."""
+        if self.overrides is None:
+            return None
+        return OverrideScope(self.overrides, _REQUEST_USER.get() or "")
 
     async def admit(self, conn: HTTPConnection, surface: str) -> Admission:
         """The access gate's verdict (it scrubs its own credentials from the
@@ -1335,6 +1370,7 @@ class ProxyState:
         duration_ms: float = 0.0,
         streamed: bool = False,
         rehydrations: dict[str, int] | None = None,
+        override: str | None = None,
     ) -> AuditRecord:
         """The one construction site for audit rows: START rows take the
         defaults, END/classic rows override them — a future AuditRecord
@@ -1352,6 +1388,7 @@ class ProxyState:
             rehydrations=rehydrations or {},
             user=_REQUEST_USER.get(),
             warned=warned or None,
+            override=override,
         )
 
     def begin_audit(
@@ -1382,6 +1419,7 @@ class ProxyState:
                 path=path,
                 detections=detections,
                 warned=warned,
+                override=_REQUEST_OVERRIDE.get(),
             )
         )
         if token is None:
@@ -1407,10 +1445,14 @@ class ProxyState:
         warned: dict[str, int] | None = None,
         audit_token: object | None = None,
         route: dict[str, Any] | None = None,
+        override: str | None = None,
     ) -> None:
         """Always update in-memory metrics and the recent buffer; write an
         audit row when enabled (finalizing the write-ahead START row when
-        ``begin_audit`` issued a token for this request)."""
+        ``begin_audit`` issued a token for this request). ``override`` (else
+        the request's own, _REQUEST_OVERRIDE) marks a request that passed a
+        refusal on an approved override: "once" or "always"."""
+        override = override or _REQUEST_OVERRIDE.get()
         duration_seconds = time.perf_counter() - started
         self.metrics.observe_request(provider, status, duration_seconds, streamed)
         row = {
@@ -1436,6 +1478,10 @@ class ProxyState:
             # rule/upstream/hops/auth/class/reissue. Audit rows are unchanged
             # (AuditRecord is shared with pro).
             "route": route,
+            # A refusal this request passed on its requester's approved
+            # override (overrides.py): "once" | "always" | None. What passed
+            # was FORWARDED as sent (a value, or a body/part unscanned).
+            "override": override,
         }
         self.recent.append(row)
         for queue in list(self.event_subscribers):
@@ -1464,6 +1510,7 @@ class ProxyState:
             duration_ms=duration_seconds * 1000.0,
             streamed=streamed,
             rehydrations=rehydrations,
+            override=override,
         )
         try:
             # A token exists only when begin_audit resolved the write-ahead
@@ -2017,6 +2064,8 @@ async def _handle_local(
         return JSONResponse({"error": _dashboard_unavailable(state)}, status_code=404)
     if path in (f"{RESERVED_PREFIX}/sessions", f"{RESERVED_PREFIX}/sessions/prune"):
         return await _handle_sessions(request, state)
+    if path in OVERRIDE_PATHS:
+        return await _handle_overrides(request, state, admission)
     scim = path == SCIM_PREFIX or path.startswith(SCIM_PREFIX + "/")
     if path in ACCESS_PATHS or _is_auth_path(path) or scim:
         # Host/Origin checked here too (defense in depth — the gate runs the
@@ -2102,6 +2151,10 @@ async def _handle_local(
                 "rehydrations_total": dict(state.rehydration_counts),
                 "warnings_total": dict(state.warn_counts),
                 "blocked_total": dict(state.blocked_counts),
+                # Refusal overrides (overrides.py): live pending codes,
+                # one-time grants and every-time rules, and the refusals
+                # passed on them by this process ("once" / "always").
+                "overrides": _overrides_status(state),
                 "upstream_errors_total": dict(state.upstream_errors),
                 "bookkeeping_errors_total": dict(state.bookkeeping_errors),
                 # Open long-lived connections (realtime relays, live-events
@@ -2276,6 +2329,7 @@ async def _handle_local(
                 connections_closed=state.connections.closed,
                 unscanned_uploads=state.unscanned_uploads,
                 inspected_uploads=state.inspected_uploads,
+                overrides_used=state.overrides.used if state.overrides is not None else None,
             ),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
@@ -2775,6 +2829,92 @@ async def _handle_sessions(request: Request, state: ProxyState) -> Response:
     return JSONResponse({"pruned": pruned})
 
 
+# The refusal-override endpoints (overrides.py): the requester's own pending
+# codes and rules (GET), and the dashboard's Allow once / Always allow /
+# Revoke buttons (guarded POSTs).
+OVERRIDE_PATHS = frozenset(
+    {
+        f"{RESERVED_PREFIX}/overrides",
+        f"{RESERVED_PREFIX}/overrides/approve",
+        f"{RESERVED_PREFIX}/overrides/revoke",
+    }
+)
+
+
+async def _handle_overrides(request: Request, state: ProxyState, admission: Admission) -> Response:
+    """The requester's refusal overrides, value-free: list them (GET), and
+    approve a pending refusal once or always, or revoke one (POST behind the
+    guard chain — Host, Origin, the CSRF token only the llm-redact-pro
+    dashboard hands out). The requester is the subject the access gate
+    admitted to the dashboard, else the local operator: only its own records
+    are listed, approved or revoked. An approval here is a human's click;
+    the CLI's twin reads a confirmation typed on the terminal."""
+    if not _host_allowed(request, state):
+        return JSONResponse({"error": "host not allowed"}, status_code=403)
+    if not _origin_allowed(request, state):
+        return JSONResponse({"error": "origin not allowed"}, status_code=403)
+    store = state.overrides
+    if store is None:
+        return JSONResponse(
+            {"error": "refusal overrides are disabled ([overrides] enabled = false)"},
+            status_code=404,
+        )
+    subject = admission.subject or ""
+    if request.url.path == f"{RESERVED_PREFIX}/overrides":
+        if request.method != "GET":
+            return JSONResponse({"error": "method not allowed"}, status_code=405)
+        return JSONResponse(
+            {
+                "subject": subject or None,
+                "entries": [entry.as_dict() for entry in store.entries(subject)],
+            },
+            headers={"cache-control": "no-store"},
+        )
+    if request.method != "POST":
+        return JSONResponse({"error": "method not allowed"}, status_code=405)
+    payload, guard_error = await _guarded_post_json(request, state)
+    if guard_error is not None:
+        return guard_error
+    entry_id = payload.get("id") if isinstance(payload, dict) else None
+    try:
+        if request.url.path.endswith("/approve"):
+            scope = payload.get("scope") if isinstance(payload, dict) else None
+            approved = store.approve(
+                str(scope), approver=subject or None, pending_id=_entry_id(entry_id)
+            )
+            logger.info("override %s approved (%s) from the dashboard", approved.id, scope)
+            return JSONResponse({"approved": approved.as_dict()})
+        store.revoke(_entry_id(entry_id), subject=subject)
+    except OverrideError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    logger.info("override %s revoked from the dashboard", entry_id)
+    return JSONResponse({"revoked": entry_id})
+
+
+def _entry_id(value: object) -> str:
+    if not isinstance(value, str):
+        raise OverrideError('body must be {"id": "p12"} (or "r12"; with "scope" to approve)')
+    return value
+
+
+def _overrides_status(state: ProxyState) -> dict[str, Any]:
+    """The /status ``overrides`` block (counts only — never a value, a
+    digest, a code or a subject)."""
+    store = state.overrides
+    if store is None:
+        return {"enabled": False}
+    block: dict[str, Any] = {
+        "enabled": True,
+        "ttl_minutes": state.config.overrides.ttl_minutes,
+        "used_total": dict(store.used),
+    }
+    try:
+        block.update(store.counts())
+    except Exception as exc:  # noqa: BLE001 — a status read never fails the page
+        logger.warning("overrides: the store could not be read (%s)", type(exc).__name__)
+    return block
+
+
 class _LiveSessions:
     """``plugin_api.SessionStore`` over the running proxy's vault manager
     (handed to an access gate's optional ``bind_sessions``)."""
@@ -2943,6 +3083,7 @@ class _Unreadable(NamedTuple):
     credential_bound: bool = True
 
 
+_NOT_JSON_OBJECT = "the request body is not a JSON object llm-redact can redact"
 _CONTENT_ENCODED = (
     "the request body is content-encoded (llm-redact does not decode request bodies;"
     " send it uncompressed)"
@@ -2998,7 +3139,7 @@ def _unscanned_body(
         else None
     )
     if boundary is None:
-        return _Unreadable(400, "the request body is not a JSON object llm-redact can redact")
+        return _Unreadable(400, _NOT_JSON_OBJECT)
     if not adapter.redacts_multipart(path):
         return _Unreadable(
             400, "the multipart body is on a route llm-redact does not redact multipart for"
@@ -3008,6 +3149,50 @@ def _unscanned_body(
             400, "the multipart body is outside the canonical form llm-redact can redact"
         )
     return None
+
+
+def _body_overridable(state: ProxyState, unscanned: _Unreadable, proxy_credential: bool) -> bool:
+    """Whether a body the scanned-body rule refuses is a CONTENT refusal its
+    requester may override (overrides.py): only a body that is simply not a
+    JSON object (non-JSON text, a top-level array or scalar, invalid UTF-8)
+    — never a content coding, a repeated Content-Type, JSON nested too deep
+    or a multipart body (framing: two readers could disagree) — sent with
+    the client's OWN credential, on a proxy that checks no stored-object
+    access (that check reads the body; an unread one could cite another
+    user's object)."""
+    return (
+        state.overrides is not None
+        and unscanned.message == _NOT_JSON_OBJECT
+        and not proxy_credential
+        and not state.checks_object_access
+    )
+
+
+def _route_override(
+    scope: OverrideScope, kind: str, provider: str, method: str, path: str
+) -> tuple[bool, str | None]:
+    """A route refusal put to the requester's overrides: (True, None) when
+    an approved one passes it (used now, the request marked), else (False,
+    the refusal's code — None when none could be minted)."""
+    rule = scope.route_rule(kind, provider, method, path)
+    if rule is not None:
+        scope.use_route(rule)
+        if _commit_overrides(scope):
+            return True, None
+    return False, scope.refusal_code(kind, provider, method, path)
+
+
+def _commit_overrides(scope: OverrideScope | None) -> bool:
+    """Consume what the request used of its requester's overrides, as it
+    passes the refusal (``OverrideScope.commit``), and mark the request's
+    row. False when a one-time grant it relied on was used by another
+    request first (or could not be recorded): it must be refused."""
+    if scope is None:
+        return True
+    ok, marker = scope.commit()
+    if marker is not None:
+        _REQUEST_OVERRIDE.set(marker)
+    return ok
 
 
 def _scanned_body_clause(*, identity: bool, proxy_credential: bool) -> str:
@@ -3757,6 +3942,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             status_code=404,
         )
     _REQUEST_USER.set(admission.subject)
+    _REQUEST_OVERRIDE.set(None)
 
     # Captured once per request; read at finalization (incl. the streaming
     # finalizer, same task context) so an OTel span can parent into the
@@ -4114,6 +4300,25 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         unscanned = _unscanned_body(
             adapter, path, request.headers, body_bytes, parsed, too_deep=too_deep
         )
+        code: str | None = None
+        if unscanned is not None and _body_overridable(state, unscanned, proxy_credential):
+            # A body that is simply not a JSON object, with the client's own
+            # key and no stored-object check: its requester may have
+            # approved forwarding it unscanned on this route (overrides.py).
+            body_scope = state.override_scope()
+            assert body_scope is not None  # _body_overridable: overrides are on
+            passed, code = _route_override(
+                body_scope, "unscanned_body", provider_name, request.method, path
+            )
+            if passed:
+                logger.info(
+                    "%s %s forwarded unscanned (a body that is not a JSON object; override)",
+                    request.method,
+                    path,
+                )
+                unscanned = None
+                # Forwarded exactly as sent: nothing below reads it as JSON.
+                parsed = None
         if unscanned is not None:
             return _unscanned_body_refused(
                 state,
@@ -4126,6 +4331,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 request=request,
                 path=path,
                 started=started,
+                code=code,
             )
     check_body: Any = parsed
     # An upload whose checked lines repeat a key, re-serialized: what a
@@ -4205,6 +4411,20 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
 
     # This request's share of the process-wide counts (the diff trick).
     window = _CountWindow(state)
+    # The requester's approved overrides, asked only where detection refuses
+    # (overrides.py); None when [overrides] enabled = false.
+    scope = state.override_scope()
+
+    def allow_suffix(kind: str) -> str:
+        # The refusal's single-use code, when it can carry one: minted now
+        # (what it matches: the values this request had refused, or the
+        # route), bound to the requester.
+        code = (
+            scope.refusal_code(kind, provider_name or "", request.method, path)
+            if scope is not None
+            else None
+        )
+        return f"; {allow_hint(code)}" if code is not None else ""
 
     def blocked_response(exc: BlockedRequest, blocked_adapter: ProviderAdapter) -> JSONResponse:
         # A block-mode rule matched: fail closed before any upstream
@@ -4227,7 +4447,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         return JSONResponse(
             blocked_adapter.error_body(
                 f"llm-redact: request blocked; a {exc.detector_type} value was"
-                ' detected and this rule is configured with mode = "block"',
+                ' detected and this rule is configured with mode = "block"' + allow_suffix("block"),
                 status=400,
             ),
             status_code=400,
@@ -4323,6 +4543,8 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         # The copy is this body's own: it counts the strings it redacts
         # against max_body_strings.
         budgeted = ctx.redactor.with_budget(max_body_strings)
+        if scope is not None:
+            budgeted = budgeted.with_overrides(scope)
         redactor = (
             budgeted.with_floors(json_floors(parsed)) if may_carry_tokens(body_bytes) else budgeted
         )
@@ -4350,7 +4572,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         except PlaceholderLimitReached as exc:
             return refused_response(str(exc), adapter, "no placeholder number left")
         except VerbatimFieldRedacted as exc:
-            return refused_response(str(exc), adapter, "verbatim field")
+            return refused_response(
+                str(exc) + allow_suffix("verbatim_field"), adapter, "verbatim field"
+            )
         except UnredactableRequest as exc:
             return refused_response(str(exc), adapter, "undecodable field")
         except SealedSessionError:
@@ -4359,6 +4583,8 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             return _vault_fault_refused(
                 state, ctx.session_id, adapter, exc, request=request, path=path, started=started
             )
+        if not _commit_overrides(scope):
+            return refused_response(OVERRIDE_RACED, adapter, "one-time override already used")
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
@@ -4395,6 +4621,16 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 if not proxy_credential and state.config.detection.binary_uploads == "forward"
                 else None
             )
+            # binary_uploads = "refuse" with the client's own key: the
+            # requester may have approved forwarding this route's binary
+            # parts unscanned (overrides.py) — used only if one is forwarded.
+            binary_rule = (
+                scope.route_rule("binary_upload", provider_name, request.method, path)
+                if forward_binary is None and not proxy_credential and scope is not None
+                else None
+            )
+            if binary_rule is not None:
+                forward_binary = binary_forwarded.append
             # The body the stored-object check read, when it re-serialized a
             # line repeating a key: every part — a text or binary file's too
             # — then goes out as the check read it.
@@ -4402,6 +4638,8 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # This body's own copy, counting its strings (form fields, file
             # names, JSONL lines, extracted texts) against max_body_strings.
             upload_redactor = ctx.redactor.with_budget(max_body_strings)
+            if scope is not None:
+                upload_redactor = upload_redactor.with_overrides(scope)
             # The inspected binary parts' outcomes and the binary parts
             # forwarded unscanned, counted once the upload is handed to the
             # upstream or refused (_UploadFate: a refusal after redaction —
@@ -4469,7 +4707,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             except BinaryValuesDetected as exc:
                 # Values the proxy would redact, inside a file it cannot
                 # rewrite: refused, naming their types only.
-                return refused_response(str(exc), adapter, "values in a binary upload")
+                return refused_response(
+                    str(exc) + allow_suffix("binary_values"), adapter, "values in a binary upload"
+                )
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the
                 # whole request is rejected.
@@ -4482,8 +4722,14 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 clause = _scanned_body_clause(
                     identity=upstream_auth is not None, proxy_credential=proxy_credential
                 )
+                # An unscannable binary part with the client's own key is a
+                # CONTENT refusal its requester may override (binary_upload);
+                # every other piece (a framing or header rule) and anything
+                # under a credential the proxy holds is final.
+                overridable = isinstance(exc, UnscannedBinaryFile) and not proxy_credential
                 return refused_response(
-                    f"llm-redact: {exc}, and {clause}; the request was not forwarded",
+                    f"llm-redact: {exc}, and {clause}; the request was not forwarded"
+                    + (allow_suffix("binary_upload") if overridable else ""),
                     adapter,
                     "unscanned multipart content",
                 )
@@ -4499,6 +4745,10 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                     path=path,
                     started=started,
                 )
+            if binary_rule is not None and binary_forwarded:
+                scope.use_route(binary_rule)  # type: ignore[union-attr]
+            if not _commit_overrides(scope):
+                return refused_response(OVERRIDE_RACED, adapter, "one-time override already used")
             if rewritten is not None:
                 outbound = rewritten
             elif checked_upload is not None:
@@ -5610,6 +5860,7 @@ def _unscanned_body_refused(
     request: Request,
     path: str,
     started: float,
+    code: str | None = None,
 ) -> JSONResponse:
     """A body the scanned-body rule refuses (``_unscanned_body``): recorded,
     provider-shaped, before the stored-object check, the session, redaction,
@@ -5617,6 +5868,8 @@ def _unscanned_body_refused(
     row either. The message names the body's kind and why the rule holds
     (``clause``), never the content."""
     message = f"llm-redact: {unreadable.message}, and {clause}; the request was not forwarded"
+    if code is not None:
+        message += f"; {allow_hint(code)}"
     state.record_request(
         session=state.config.vault.session,
         provider=provider_name,
@@ -6114,6 +6367,8 @@ def create_app(
                     logger.exception("closing the upload inspector failed")
             if state.audit is not None:
                 state.audit.close()
+            if state.overrides is not None:
+                state.overrides.close()
             for task in background_tasks:
                 task.cancel()
                 with suppress(asyncio.CancelledError):

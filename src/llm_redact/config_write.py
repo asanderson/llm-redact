@@ -24,6 +24,7 @@ from llm_redact.config import (
     Config,
     EmailConfig,
     OtelConfig,
+    OverridesConfig,
     PricesConfig,
     RdbmsConfig,
     RouteRule,
@@ -477,6 +478,13 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
             lines.append(f"encryption = {_toml_str(az.encryption)}")
         if az.auth != AzureAuditConfig().auth:
             lines.append(f"auth = {_toml_str(az.auth)}")
+
+    if config.overrides != OverridesConfig():
+        lines.append("\n[overrides]")
+        lines.append(f"enabled = {_toml_value(config.overrides.enabled)}")
+        lines.append(f"ttl_minutes = {config.overrides.ttl_minutes}")
+        if config.overrides.path is not None:
+            lines.append(f"path = {_toml_str(config.overrides.path)}")
 
     lines.append("\n[log]")
     lines.append(f"format = {_toml_str(config.log.format)}")

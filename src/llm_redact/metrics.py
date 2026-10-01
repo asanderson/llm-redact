@@ -93,6 +93,7 @@ class Metrics:
         connections_closed: "Counter[str] | None" = None,
         unscanned_uploads: "Counter[str] | None" = None,
         inspected_uploads: "Counter[tuple[str, str]] | None" = None,
+        overrides_used: "Counter[str] | None" = None,
     ) -> str:
         lines: list[str] = []
         lines.append("# HELP llm_redact_info Build information.")
@@ -180,6 +181,15 @@ class Metrics:
             lines.append(
                 f'llm_redact_connections_closed_total{{cause="{_escape_label(cause)}"}} {count}'
             )
+
+        lines.append(
+            "# HELP llm_redact_overrides_used_total Refusals passed on the requester's approved"
+            " override (the value, body or binary part FORWARDED as sent), by kind: once"
+            " (a one-time grant) or always (an every-time rule)."
+        )
+        lines.append("# TYPE llm_redact_overrides_used_total counter")
+        for kind, count in sorted((overrides_used or Counter()).items()):
+            lines.append(f'llm_redact_overrides_used_total{{kind="{_escape_label(kind)}"}} {count}')
 
         lines.append(
             "# HELP llm_redact_unscanned_uploads_total Binary file parts of uploads forwarded"

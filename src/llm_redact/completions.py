@@ -13,6 +13,7 @@ COMMANDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "status": ((), ("--config", "--port", "--json", "--ca", "--cert", "--key")),
     "sessions": (("list", "prune"), ("--config", "--db", "--json", "--older-than", "--yes")),
     "lookup": ((), ("--config", "--db", "--value", "--session")),
+    "override": ((), ("--once", "--always", "--json", "--config", "--db")),
     "vault": (
         ("gen-key", "set-key", "verify", "rotate-key", "backup"),
         ("--config", "--db", "--yes", "--force"),

@@ -85,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
     lookup.add_argument("--value", default=None, help="reverse: find the placeholder for a value")
     lookup.add_argument("--session", default=None, help="restrict to one session id")
 
+    from llm_redact.override_cli import add_parser as add_override_parser
+
+    add_override_parser(subparsers)
+
     vault = subparsers.add_parser("vault", help="vault utilities")
     vault_sub = vault.add_subparsers(dest="vault_command", required=True)
     vault_sub.add_parser("gen-key", help="generate a LLM_REDACT_VAULT_KEY value")
@@ -481,6 +485,10 @@ def main(argv: list[str] | None = None) -> None:
             print("lookup needs exactly one of: a placeholder token, or --value")
             raise SystemExit(2)
         raise SystemExit(run_lookup(args))
+    elif args.command == "override":
+        from llm_redact.override_cli import run_override
+
+        raise SystemExit(run_override(args))
     elif args.command == "vault":
         from llm_redact.vault_cli import (
             run_vault_backup,
@@ -878,6 +886,14 @@ def _print_posture(payload: dict[str, Any]) -> None:
         lines.append(
             f"binary uploads: {seen} file part(s) forwarded after a clean scan of their"
             " EXTRACTED text (the file itself is sent as is)"
+        )
+    overrides = payload.get("overrides") or {}
+    override_uses = overrides.get("used_total") or {}
+    if overrides.get("always") or override_uses:
+        seen = " ".join(f"{k}×{v}" for k, v in sorted(override_uses.items())) or "none yet"
+        lines.append(
+            f"overrides: {overrides.get('always', 0)} every-time rule(s), uses {seen} —"
+            " refused values/bodies FORWARDED as sent (`llm-redact override list`)"
         )
     inactive = payload.get("detection", {}).get("language_inactive_rules") or []
     if inactive:

@@ -61,6 +61,7 @@ from llm_redact.providers.base import (
     InspectedUpload,
     ProviderAdapter,
     RouteKind,
+    UnscannedBinaryFile,
 )
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
@@ -1389,7 +1390,7 @@ class OpenAIAdapter(ProviderAdapter):
         elif kind == "text":
             changed |= _redact_text_part(part, redactor, require_scanned=require_scanned)
         elif kind == "binary" and require_scanned and not forward_binary:
-            raise UnredactableRequest(BINARY_FILE)
+            raise UnscannedBinaryFile(BINARY_FILE)
         return changed
 
     def _redact_jsonl(

@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from enum import Enum
 from itertools import count
 from typing import Any, NamedTuple, Protocol
@@ -173,6 +174,13 @@ def restore_exempt_mcp_blocks(original: Any, redacted: Any, exempt: frozenset[st
         return red
 
     return restore(original, redacted)
+
+
+class UnscannedBinaryFile(UnredactableRequest):
+    """A binary file part of an upload the proxy may not forward unscanned
+    (``redact_multipart`` without ``forward_binary``, the inspection did not
+    clear it): the request is refused (400). Its own class so the proxy can
+    tell this CONTENT refusal from the framing ones (overrides)."""
 
 
 class VerbatimFieldRedacted(UnredactableRequest):
@@ -351,7 +359,10 @@ def prepare_route_request(
     fields = _held_fields(held)
     for field in fields:
         for text in _strings_in(field.value):
-            if redactor.redact_text(text) != text:
+            # Detection only (nothing issued): a value the redaction would
+            # replace refuses the request — unless the requester approved an
+            # override for it (Redactor.with_overrides), which sends it as is.
+            if redactor.scan_text(text):
                 label = ".".join(
                     key for key in field.position if key not in (_EVERY_ITEM, _ANY_DEPTH)
                 )
@@ -413,6 +424,10 @@ class InspectedUpload:
 
     reading: UploadReading
     cleared: frozenset[int] = frozenset()
+    # Convert mode: binary file parts replaced by their text (the text
+    # before redaction, by position) — sent as a redacted text/plain file
+    # (``ProviderAdapter.converts_upload`` said the route takes one).
+    converted: Mapping[int, str] = dataclass_field(default_factory=dict)
 
 
 class ProviderAdapter(ABC):
@@ -596,6 +611,14 @@ class ProviderAdapter(ABC):
         when ``handles_ndjson`` is set."""
         return line
 
+    def converts_upload(self, path: str, reading: "UploadReading") -> bool:
+        """Whether this upload's provider takes a TEXT file where the upload
+        carries a binary one (``[extraction] convert``: a document holding
+        values to redact is then sent as its redacted text, ``text/plain``).
+        Decided per route — and, where the provider reads a file by its
+        purpose, per purpose; this base: never."""
+        return False
+
     def read_multipart(
         self, path: str, body: bytes, boundary: bytes, charge: Callable[[int], None]
     ) -> "UploadReading | None":
@@ -649,7 +672,10 @@ class ProviderAdapter(ABC):
         on the same body): the reading to use instead of reading the body
         again, and the binary file parts the proxy CLEARED — their extracted
         text scanned clean and complete — which go out byte-identical, not
-        refused and not counted as unscanned. ``remember_text``: told the
+        refused and not counted as unscanned, and those it CONVERTED
+        (``InspectedUpload.converted``), which go out as their redacted text
+        (a ``text/plain`` part whose file name ends ``.txt``), remembered
+        like a text file for their download. ``remember_text``: told the
         redacted bytes of each text file part redacted as ONE text, which
         its download must restore raw (``openai.RAW_TEXT_FILES``) — the
         proxy remembers them only once the request is handed to the

@@ -2,7 +2,7 @@
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Protocol
 
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.engine import Allowlist, DetectorPlan, plan_for
@@ -44,6 +44,14 @@ class TooManyStrings(UnredactableRequest):
     def __init__(self, limit: int) -> None:
         super().__init__(f"request body exceeds llm-redact max_body_strings ({limit})")
         self.limit = limit
+
+
+class OverrideCheck(Protocol):
+    """The requester's approved overrides (``overrides.OverrideScope``),
+    asked only where detection has decided a refusal: whether this value
+    may go through as sent."""
+
+    def allows(self, detector_type: str, value: str) -> bool: ...
 
 
 class StringBudget:
@@ -123,6 +131,7 @@ class Redactor:
         warn_counts: "Counter[str] | None" = None,
         floors: Mapping[str, int] | None = None,
         budget: StringBudget | None = None,
+        overrides: OverrideCheck | None = None,
     ) -> None:
         # The detector list compiled for string-at-a-time detection (same
         # output, gated per string), taken as it is now: plan_for shares the
@@ -148,6 +157,9 @@ class Redactor:
         # a shared redactor (static mode) stays floor-free and each request
         # carrying tokens gets its own thin copy (with_floors).
         self._floors: Mapping[str, int] = floors if floors is not None else {}
+        # The requester's approved overrides (with_overrides), asked for a
+        # value only where detection refuses the request; None asks nothing.
+        self._overrides = overrides
 
     def with_floors(self, floors: Mapping[str, int]) -> "Redactor":
         """This redactor numbering new placeholders above ``floors`` as well
@@ -165,6 +177,14 @@ class Redactor:
         floor copies (with_floors) share the same count."""
         return self._copy(self._floors, StringBudget(limit))
 
+    def with_overrides(self, overrides: OverrideCheck) -> "Redactor":
+        """A thin copy that asks ``overrides`` before refusing a value (a
+        block-mode winner here; ``scan_text``'s findings): an approved value
+        is left in place and forwarded as sent, like a warn-mode one."""
+        copy = self._copy(self._floors, self._budget)
+        copy._overrides = overrides
+        return copy
+
     def _copy(self, floors: Mapping[str, int], budget: StringBudget | None) -> "Redactor":
         return Redactor(
             self._plan,
@@ -175,7 +195,11 @@ class Redactor:
             warn_counts=self.warn_counts,
             floors=floors,
             budget=budget,
+            overrides=self._overrides,
         )
+
+    def _overridden(self, d: Detection) -> bool:
+        return self._overrides is not None and self._overrides.allows(d.detector_type, d.value)
 
     def charge(self, count: int) -> None:
         """Count ``count`` more pieces of the body (an uploaded file's JSONL
@@ -213,6 +237,10 @@ class Redactor:
             # from a rule sharing that type.
             mode = "redact" if d.tier == 0 else self._modes.get(d.detector_type, "redact")
             if mode == "block":
+                if self._overridden(d):
+                    # The requester approved this value: forwarded as sent,
+                    # like a warn-mode one (no placeholder, no count).
+                    continue
                 # Fail closed immediately; any placeholders already issued
                 # for earlier spans are harmless (deterministic vault,
                 # nothing is forwarded).
@@ -238,16 +266,23 @@ class Redactor:
         winner raises BlockedRequest; a warn-mode winner is counted in
         ``warn_counts`` (its value stays where it is); every other winner —
         a deny string always — is returned as its detector type, counted.
-        Charged against the string budget as one string."""
+        Every refusing winner (block mode, or one returned) but a deny
+        string is first put to the requester's overrides
+        (``with_overrides``): an approved value is skipped. Charged against
+        the string budget as one string."""
         self.charge(1)
         found: Counter[str] = Counter()
         for d in _resolve_overlaps(self._plan.detect(text, self._allowlist)):
             # Deny strings (tier 0) take no mode, exactly as in redact_text.
             mode = self._modes.get(d.detector_type) if d.tier else None
-            if mode == "block":
-                raise BlockedRequest(d.detector_type)
             if mode == "warn":
                 self.warn_counts[d.detector_type] += 1
+            elif d.tier and self._overridden(d):
+                # Deny strings (tier 0) are the operator's always-redact
+                # list: never put to the requester's overrides.
+                continue
+            elif mode == "block":
+                raise BlockedRequest(d.detector_type)
             else:
                 found[d.detector_type] += 1
         return found
@@ -267,7 +302,7 @@ class Redactor:
         an upload inspector)."""
         for d in _resolve_overlaps(self._plan.detect(text, self._allowlist)):
             # Deny strings (tier 0) never block, exactly as in redact_text.
-            if d.tier and self._modes.get(d.detector_type) == "block":
+            if d.tier and self._modes.get(d.detector_type) == "block" and not self._overridden(d):
                 return d.detector_type
         return None
 

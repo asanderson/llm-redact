@@ -125,19 +125,21 @@ def build_dashboard(tier: str) -> Dashboard | None:
 
 
 def build_upload_inspector(config: Config, tier: str) -> UploadInspector | None:
-    """Always None: reading binary uploads (PDFs, Office documents) as text
-    is implemented in llm-redact-pro.
+    """The core's own document extractors (``extraction.ExtractionInspector``)
+    when ``[extraction] enabled = true``, else None — then a binary upload
+    part keeps the core's rules: forwarded unscanned with the client's own
+    key under ``[detection] binary_uploads = "forward"`` (counted), refused
+    otherwise. What keeps an enabled section from working (the ``extract``
+    extra missing for PDFs, an unset credential variable, nothing that can
+    read) is a ConfigError naming the setting, never a silent no-op. A
+    plugin may replace this factory; ``tier`` is part of the factory
+    contract and unused here (the core gates nothing)."""
+    del tier
+    if not config.extraction.enabled:
+        return None
+    from .extraction import build_inspector  # lazy: only an enabled section pays for it
 
-    Nothing to fail closed on here: the core has no config for it (the
-    plugin claims its own ``[extraction]`` section, which without the
-    package is an unknown key — a ConfigError already). Without an
-    inspector a binary upload part keeps the core's rules: forwarded
-    unscanned with the client's own key under ``[detection] binary_uploads
-    = "forward"`` (counted), refused otherwise. ``config`` and ``tier`` are
-    part of the factory contract and unused here.
-    """
-    del config, tier
-    return None
+    return build_inspector(config.extraction)
 
 
 def build_access_gate(config: Config, license: ResolvedLicense) -> AccessGate | None:

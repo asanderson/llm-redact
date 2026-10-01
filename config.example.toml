@@ -196,6 +196,17 @@ encryption = "none"
 # tokens always pass through verbatim.
 fuzzy = true
 
+# Refusal overrides (docs/overrides.md): a detection refusal (a block-mode
+# value, values in a binary upload, a verbatim field, an unreadable body)
+# carries a single-use code that a PERSON may approve on the terminal —
+# `llm-redact override CODE --once | --always`. An approved value is
+# FORWARDED unredacted, like warn mode. Restart-only.
+#
+# [overrides]
+# enabled = true      # false: no codes, every refusal is final
+# ttl_minutes = 15    # how long a code and a one-time approval stay usable
+# path = "/var/lib/llm-redact/overrides.db"
+
 [detection]
 # Languages your traffic is written in (ISO 639-1 codes). Omit to run every
 # rule (the default). When set, national-id rules for OTHER languages are
@@ -307,8 +318,9 @@ fuzzy = true
 # "forward" (default) sends a binary file UNSCANNED when the request carries
 # the client's own key (counted in /status); "refuse" answers 400 instead.
 # A credential the proxy holds (auth = "identity", routing) never carries one.
-# llm-redact-pro's [extraction] reads PDFs and Office files as text first: a
-# value found refuses the upload, a complete clean reading sends the file.
+# [extraction] (docs/extraction.md) reads PDFs and Office files as text
+# first: a value found refuses the upload, a complete clean reading sends
+# the file.
 # binary_uploads = "forward"
 
 # Strings that must ALWAYS be redacted — the strongest signal there is.

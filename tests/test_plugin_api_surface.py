@@ -200,11 +200,12 @@ DATACLASSES: dict[str, str] = {
         "(status: 'int', body: 'Mapping[str, Any]', provider: 'str', reason: 'str') -> None"
     ),
     "UploadPart": (
-        "(content: 'bytes', content_type: 'str | None', provider: 'str', identity: 'bool') -> None"
+        "(content: 'bytes', content_type: 'str | None', provider: 'str', identity: 'bool',"
+        " extension: 'str | None' = None) -> None"
     ),
     "Inspection": (
         "(text: 'str | None', complete: 'bool', extractor: 'str',"
-        " proxy_credential: 'bool' = False) -> None"
+        " proxy_credential: 'bool' = False, convert_text: 'str | None' = None) -> None"
     ),
 }
 
@@ -346,6 +347,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``public_origin() -> str | None``",
         "``bind_sessions(store: SessionStore) -> None``",
         "``bind_connections(control: ConnectionControl) -> None``",
+        "``approves_overrides(subject: str) -> bool``",
     ),
     "SessionRouter": (
         "``is_durable(session_id) -> bool``",
@@ -356,6 +358,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``response_observer(context) -> ResponseObserver | None``",
         "``realtime_frame_refusal(adapter_name, path, frame, *, identity, session_id)"
         " -> str | None``",
+        "``realtime_server_frame(adapter_name, path, frame, *, identity, session_id) -> None``",
     ),
 }
 

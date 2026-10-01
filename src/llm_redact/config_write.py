@@ -20,10 +20,16 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from llm_redact.config import (
+    EXTRACTION_CLASSES,
+    EXTRACTION_DEFAULT_SERVICE_FORMATS,
+    EXTRACTION_FORMATS,
     AzureAuditConfig,
     Config,
     EmailConfig,
+    ExtractionConfig,
+    ExtractionService,
     OtelConfig,
+    OverridesConfig,
     PricesConfig,
     RdbmsConfig,
     RouteRule,
@@ -140,6 +146,58 @@ def _emit_extensions(lines: list[str], config: Config) -> None:
         section = by_name.get(name)
         if section is not None:
             _emit_table(lines, _toml_key(name), section.emit(value))
+
+
+def emit_extraction(config: ExtractionConfig) -> dict[str, object]:
+    """``[extraction]`` as TOML-shaped data (defaults omitted)."""
+    defaults = ExtractionConfig()
+    out: dict[str, object] = {"enabled": config.enabled}
+    for key in (
+        "max_file_bytes",
+        "timeout_seconds",
+        "request_timeout_seconds",
+        "max_text_chars",
+        "max_inflated_bytes",
+        "worker_memory_mb",
+        "max_workers",
+        "proxy_credential",
+    ):
+        value = getattr(config, key)
+        if value != getattr(defaults, key):
+            out[key] = value
+    if config.formats != EXTRACTION_FORMATS:
+        out["formats"] = list(config.formats)
+    if config.convert:
+        out["convert"] = True if config.convert == EXTRACTION_CLASSES else list(config.convert)
+    if config.services:
+        out["services"] = [_emit_extraction_service(service) for service in config.services]
+    return out
+
+
+def _emit_extraction_service(service: ExtractionService) -> dict[str, object]:
+    defaults = ExtractionService(kind=service.kind, url="")
+    out: dict[str, object] = {"kind": service.kind}
+    if service.url != service.default_url():
+        out["url"] = service.url  # textract/documentai derive theirs
+    for key in (
+        "trusted",
+        "complete",
+        "token_env",
+        "timeout_seconds",
+        "region",
+        "access_key_env",
+        "secret_key_env",
+        "session_token_env",
+        "processor",
+        "credentials_file",
+        "model",
+    ):
+        value = getattr(service, key)
+        if value != getattr(defaults, key):
+            out[key] = value
+    if service.formats != EXTRACTION_DEFAULT_SERVICE_FORMATS.get(service.kind, EXTRACTION_CLASSES):
+        out["formats"] = list(service.formats)
+    return out
 
 
 def _emit_upstream(lines: list[str], upstream: UpstreamConfig, *, inject_default: bool) -> None:
@@ -478,6 +536,13 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         if az.auth != AzureAuditConfig().auth:
             lines.append(f"auth = {_toml_str(az.auth)}")
 
+    if config.overrides != OverridesConfig():
+        lines.append("\n[overrides]")
+        lines.append(f"enabled = {_toml_value(config.overrides.enabled)}")
+        lines.append(f"ttl_minutes = {config.overrides.ttl_minutes}")
+        if config.overrides.path is not None:
+            lines.append(f"path = {_toml_str(config.overrides.path)}")
+
     lines.append("\n[log]")
     lines.append(f"format = {_toml_str(config.log.format)}")
 
@@ -545,6 +610,9 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
             lines.append(f"key = {_toml_str(config.license.key)}")
         if config.license.key_file is not None:
             lines.append(f"key_file = {_toml_str(config.license.key_file)}")
+
+    if config.extraction != ExtractionConfig():
+        _emit_table(lines, "extraction", emit_extraction(config.extraction))
 
     # Plugin-owned sections (plugin_api.ConfigSection): each plugin turns its
     # parsed value back into a TOML-shaped mapping so the section survives

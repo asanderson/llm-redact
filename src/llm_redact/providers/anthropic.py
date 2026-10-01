@@ -18,7 +18,13 @@ from typing import Any
 
 from llm_redact.jsonwalk import json_bytes, json_text, loads_bounded, transform_strings
 from llm_redact.providers.attribution import provider_markers
-from llm_redact.providers.base import SYSTEM_NOTE, InspectedUpload, ProviderAdapter, RouteKind
+from llm_redact.providers.base import (
+    SYSTEM_NOTE,
+    InspectedUpload,
+    ProviderAdapter,
+    RouteKind,
+    UploadReading,
+)
 from llm_redact.providers.documents import (
     read_files_upload,
     redact_files_upload,
@@ -261,6 +267,10 @@ class AnthropicAdapter(ProviderAdapter):
         self, path: str, body: bytes, boundary: bytes, charge: Callable[[int], None]
     ) -> PartsReading | None:
         return read_files_upload(body, boundary, charge)
+
+    def converts_upload(self, path: str, reading: UploadReading) -> bool:
+        # The Files upload takes plain text as a document (text/plain).
+        return path == _FILES
 
     def redact_multipart(
         self,

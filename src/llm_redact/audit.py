@@ -52,6 +52,9 @@ class AuditRecord:
     # FORWARDED upstream unredacted. None when nothing warned and on rows
     # recorded before the column existed.
     warned: dict[str, int] | None = None
+    # A refusal this request passed on its requester's approved override
+    # (overrides.py): "once" | "always"; None otherwise and on older rows.
+    override: str | None = None
 
 
 class AuditWriteError(RuntimeError):

@@ -192,6 +192,8 @@ RESTART_ONLY_KEYS = (
     "otel",
     "users",
     "email",
+    "extraction",
+    "overrides",
 )
 
 # Every top-level key the core itself parses. Anything else must be claimed
@@ -210,6 +212,7 @@ CORE_SECTION_KEYS = frozenset(
         "detection",
         "vault",
         "rehydration",
+        "overrides",
         "audit",
         "log",
         "tls",
@@ -220,6 +223,7 @@ CORE_SECTION_KEYS = frozenset(
         "upstreams",
         "routing",
         "prices",
+        "extraction",
     }
 )
 
@@ -558,6 +562,19 @@ class VaultConfig:
 
 
 @dataclass(frozen=True)
+class OverridesConfig:
+    # Refusal overrides (overrides.py): a detection refusal carries a
+    # single-use code its requester may approve once or for every time
+    # (`llm-redact override CODE --once | --always`). false: no code, no
+    # override is ever applied — every refusal is final.
+    enabled: bool = True
+    # How long a code, and a one-time approval, stays usable.
+    ttl_minutes: int = 15
+    # The override store; default $XDG_DATA_HOME/llm-redact/overrides.db.
+    path: str | None = None
+
+
+@dataclass(frozen=True)
 class LogConfig:
     # "text" (human-readable, the default) or "json" (one object per line,
     # for log shippers). Log content is identical either way: paths,
@@ -855,6 +872,149 @@ class RoutingConfig:
         return None
 
 
+# --- [extraction]: binary uploads read as text (docs/extraction.md) ------------------
+
+# The local extractors (``extract_worker.FORMATS``, pinned equal by test: the
+# worker imports nothing from the config).
+EXTRACTION_FORMATS = ("pdf", "ooxml", "odf", "html", "rtf")
+# The coarse classes of a file (``extraction.sniff``): what a service's
+# ``formats`` and ``convert`` name.
+EXTRACTION_CLASSES = ("pdf", "office", "markup", "rtf", "image", "other")
+# The local extractors that read each coarse class.
+EXTRACTION_LOCAL_READERS = {
+    "pdf": ("pdf",),
+    "office": ("ooxml", "odf"),
+    "markup": ("html",),
+    "rtf": ("rtf",),
+}
+# Self-hosted readers (``url`` required; off loopback: https + trusted) and
+# cloud OCR services (https always, ``trusted = true`` always: the cloud
+# provider receives every file it is asked to read).
+EXTRACTION_SELF_HOSTED = ("tika", "docling", "unstructured")
+EXTRACTION_CLOUD = ("textract", "documentai", "azure_docintel")
+EXTRACTION_SERVICE_KINDS = EXTRACTION_SELF_HOSTED + EXTRACTION_CLOUD
+EXTRACTION_SERVICE_TIMEOUT = 30.0
+# The classes a service is asked for unless ``formats`` says otherwise: the
+# cloud services read only these (Textract and Document AI: PDFs and images;
+# Document Intelligence also Office files and HTML).
+EXTRACTION_DEFAULT_SERVICE_FORMATS = {
+    "textract": ("pdf", "image"),
+    "documentai": ("pdf", "image"),
+    "azure_docintel": ("pdf", "office", "markup", "image"),
+}
+_EXTRACTION_MAX_SECONDS = 300.0
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_AWS_REGION_RE = re.compile(r"[a-z]{2,4}(?:-(?:gov|iso|isob|isoe|isof))?-[a-z]+-\d{1,2}")
+_DOCAI_PROCESSOR_RE = re.compile(
+    r"projects/[a-z0-9-]{1,63}/locations/(us|eu|[a-z]+-[a-z]+\d{1,2})/processors/[a-f0-9]{8,32}"
+)
+_DOCINTEL_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,63}")
+_EXTRACTION_KEYS = frozenset(
+    {
+        "enabled",
+        "formats",
+        "max_file_bytes",
+        "timeout_seconds",
+        "request_timeout_seconds",
+        "max_text_chars",
+        "max_inflated_bytes",
+        "worker_memory_mb",
+        "max_workers",
+        "proxy_credential",
+        "convert",
+        "services",
+    }
+)
+_SERVICE_COMMON_KEYS = frozenset(
+    {"kind", "url", "trusted", "complete", "formats", "timeout_seconds"}
+)
+# Each kind's own keys (any other is refused: a key another kind reads would
+# be silently ignored here).
+_SERVICE_KIND_KEYS: dict[str, frozenset[str]] = {
+    "tika": frozenset({"token_env"}),
+    "docling": frozenset({"token_env"}),
+    "unstructured": frozenset({"token_env"}),
+    "textract": frozenset({"region", "access_key_env", "secret_key_env", "session_token_env"}),
+    "documentai": frozenset({"processor", "token_env", "credentials_file"}),
+    "azure_docintel": frozenset({"token_env", "model"}),
+}
+
+
+@dataclass(frozen=True)
+class ExtractionService:
+    """One extraction service (``[[extraction.services]]``). Credentials are
+    only ever NAMES of environment variables (``token_env``, the textract
+    ``*_env`` keys) or a file path (``credentials_file``) — never values."""
+
+    kind: str
+    url: str
+    trusted: bool = False
+    complete: bool = False
+    token_env: str | None = None
+    formats: tuple[str, ...] = EXTRACTION_CLASSES
+    timeout_seconds: float = EXTRACTION_SERVICE_TIMEOUT
+    # textract: the SigV4 region and the credential variables' names.
+    region: str | None = None
+    access_key_env: str = "AWS_ACCESS_KEY_ID"
+    secret_key_env: str = "AWS_SECRET_ACCESS_KEY"
+    session_token_env: str = "AWS_SESSION_TOKEN"
+    # documentai: the processor's resource name, and a service-account key
+    # file (instead of an access token in token_env).
+    processor: str | None = None
+    credentials_file: str | None = None
+    # azure_docintel: the analysis model.
+    model: str = "prebuilt-read"
+
+    @property
+    def host(self) -> str:
+        return urllib.parse.urlsplit(self.url).hostname or ""
+
+    @property
+    def loopback(self) -> bool:
+        return _is_loopback_host(self.host)
+
+    @property
+    def cloud(self) -> bool:
+        return self.kind in EXTRACTION_CLOUD
+
+    def default_url(self) -> str | None:
+        """The URL a cloud kind derives when ``url`` is not set."""
+        if self.kind == "textract":
+            return f"https://textract.{self.region}.amazonaws.com"
+        match = _DOCAI_PROCESSOR_RE.fullmatch(self.processor or "")
+        if self.kind == "documentai" and match is not None:
+            return f"https://{match.group(1)}-documentai.googleapis.com"
+        return None
+
+    def credential_env(self) -> tuple[str, ...]:
+        """The environment variables this service's credential must be read
+        from (their NAMES; the session token is optional, not listed)."""
+        if self.kind == "textract":
+            return (self.access_key_env, self.secret_key_env)
+        return (self.token_env,) if self.token_env is not None else ()
+
+
+@dataclass(frozen=True)
+class ExtractionConfig:
+    """``[extraction]`` (docs/extraction.md): binary upload parts read as
+    text by the built-in inspector. Restart-only."""
+
+    enabled: bool = False
+    formats: tuple[str, ...] = EXTRACTION_FORMATS
+    max_file_bytes: int = 25 << 20
+    timeout_seconds: float = 30.0
+    request_timeout_seconds: float = 60.0
+    max_text_chars: int = 5_000_000
+    max_inflated_bytes: int = 128 << 20
+    worker_memory_mb: int = 512
+    max_workers: int = 2
+    proxy_credential: bool = False
+    # The classes whose COMPLETE readings holding values to redact are sent as
+    # their redacted text instead of being refused (convert mode); () = off.
+    convert: tuple[str, ...] = ()
+    services: tuple[ExtractionService, ...] = ()
+
+
 @dataclass(frozen=True)
 class Config:
     host: str = DEFAULT_HOST
@@ -878,6 +1038,7 @@ class Config:
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     vault: VaultConfig = field(default_factory=VaultConfig)
     rehydration: RehydrationConfig = field(default_factory=RehydrationConfig)
+    overrides: OverridesConfig = field(default_factory=OverridesConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
     log: LogConfig = field(default_factory=LogConfig)
     tls: TlsConfig = field(default_factory=TlsConfig)
@@ -891,6 +1052,9 @@ class Config:
     # as before.
     routing: RoutingConfig = field(default_factory=RoutingConfig)
     prices: PricesConfig = field(default_factory=PricesConfig)
+    # [extraction]: binary uploads read as text (docs/extraction.md);
+    # restart-only.
+    extraction: ExtractionConfig = field(default_factory=ExtractionConfig)
     # Plugin-owned top-level tables (plugin_api.ConfigSection), keyed by
     # section name and holding the plugin's parsed value; only sections
     # present in the file appear. Restart-only as a whole.
@@ -2461,6 +2625,17 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     if audit.required and not audit.enabled:
         raise ConfigError("[audit] required = true needs [audit] enabled = true")
 
+    overrides_raw = raw.get("overrides", {})
+    _require_keys(overrides_raw, {"enabled", "ttl_minutes", "path"}, "[overrides]")
+    ttl_minutes = _int_key(overrides_raw, "ttl_minutes", 15, "[overrides]")
+    if not 1 <= ttl_minutes <= 1440:
+        raise ConfigError("[overrides] ttl_minutes must be between 1 and 1440")
+    overrides = OverridesConfig(
+        enabled=_bool_key(overrides_raw, "enabled", True, "[overrides]"),
+        ttl_minutes=ttl_minutes,
+        path=_optional_str(overrides_raw, "path", "[overrides]"),
+    )
+
     log_raw = raw.get("log", {})
     _require_keys(log_raw, {"format"}, "[log]")
     log_format = str(log_raw.get("format", "text"))
@@ -2540,6 +2715,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         detection=detection,
         vault=vault,
         rehydration=rehydration,
+        overrides=overrides,
         audit=audit,
         log=log,
         tls=tls,
@@ -2549,7 +2725,225 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         email=email_cfg,
         routing=routing,
         prices=prices,
+        extraction=parse_extraction(raw.get("extraction", {}), f"[extraction] in {where}"),
         extensions=extensions,
+    )
+
+
+# --- [extraction] parsing ---------------------------------------------------------------
+
+
+def _ex_int(raw: Mapping[str, Any], key: str, default: int, where: str, low: int, high: int) -> int:
+    value = raw.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+        raise ConfigError(f"{where} {key} must be an integer from {low} to {high}")
+    return value
+
+
+def _ex_seconds(raw: Mapping[str, Any], key: str, default: float, where: str) -> float:
+    value = raw.get(key, default)
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or not 0 < value <= _EXTRACTION_MAX_SECONDS
+    ):
+        raise ConfigError(f"{where} {key} must be a number of seconds above 0, at most 300")
+    return float(value)
+
+
+def _ex_choices(
+    raw: Mapping[str, Any], key: str, default: tuple[str, ...], allowed: tuple[str, ...], where: str
+) -> tuple[str, ...]:
+    value = raw.get(key, list(default))
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError(f"{where} {key} must be a list of strings")
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        raise ConfigError(f"{where} {key}: unknown {unknown}; known are {list(allowed)}")
+    return tuple(v for v in allowed if v in value)
+
+
+def _ex_env(raw: Mapping[str, Any], key: str, default: str | None, where: str) -> str | None:
+    value = raw.get(key, default)
+    if value is not None and (not isinstance(value, str) or not _ENV_NAME_RE.fullmatch(value)):
+        raise ConfigError(f"{where} {key} must name an environment variable")
+    return value
+
+
+def _ex_url(raw: Mapping[str, Any], where: str, *, cloud: bool) -> str | None:
+    value = raw.get("url")
+    if value is None and cloud:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{where} needs url")
+    parts = urllib.parse.urlsplit(value.strip())
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ConfigError(f"{where} url must be an http(s) URL with a host")
+    if parts.username is not None or parts.password is not None:
+        raise ConfigError(f"{where} url must not carry credentials (use the *_env keys)")
+    if parts.query or parts.fragment:
+        raise ConfigError(f"{where} url must not carry a query or fragment")
+    if parts.scheme == "http" and (cloud or not _is_loopback_host(parts.hostname)):
+        raise ConfigError(f"{where} url must be https off loopback: the service receives files")
+    if cloud and parts.path.strip("/"):
+        raise ConfigError(f"{where} url must be the service's origin (no path)")
+    return value.strip().rstrip("/")
+
+
+def _cloud_service_fields(kind: str, raw: Mapping[str, Any], where: str) -> dict[str, Any]:
+    """The cloud kind's own settings and its default URL."""
+    if kind == "textract":
+        region = raw.get("region")
+        if not isinstance(region, str) or not _AWS_REGION_RE.fullmatch(region):
+            raise ConfigError(f"{where} needs region (an AWS region such as us-east-1)")
+        return {
+            "region": region,
+            "access_key_env": _ex_env(raw, "access_key_env", "AWS_ACCESS_KEY_ID", where),
+            "secret_key_env": _ex_env(raw, "secret_key_env", "AWS_SECRET_ACCESS_KEY", where),
+            "session_token_env": _ex_env(raw, "session_token_env", "AWS_SESSION_TOKEN", where),
+            "url": f"https://textract.{region}.amazonaws.com",
+        }
+    if kind == "documentai":
+        processor = raw.get("processor")
+        match = _DOCAI_PROCESSOR_RE.fullmatch(processor) if isinstance(processor, str) else None
+        if match is None:
+            raise ConfigError(
+                f"{where} needs processor (projects/PROJECT/locations/LOCATION/processors/ID)"
+            )
+        token_env = _ex_env(raw, "token_env", None, where)
+        credentials_file = raw.get("credentials_file")
+        if credentials_file is not None and (
+            not isinstance(credentials_file, str) or not credentials_file.strip()
+        ):
+            raise ConfigError(f"{where} credentials_file must be a file path")
+        if (token_env is None) == (credentials_file is None):
+            raise ConfigError(
+                f"{where} needs exactly one of token_env (an access token) and"
+                " credentials_file (a service-account key file)"
+            )
+        return {
+            "processor": processor,
+            "token_env": token_env,
+            "credentials_file": credentials_file,
+            "url": f"https://{match.group(1)}-documentai.googleapis.com",
+        }
+    token_env = _ex_env(raw, "token_env", None, where)
+    if token_env is None:
+        raise ConfigError(f"{where} needs token_env (the variable holding the resource key)")
+    model = raw.get("model", "prebuilt-read")
+    if not isinstance(model, str) or not _DOCINTEL_MODEL_RE.fullmatch(model):
+        raise ConfigError(f"{where} model must be a model id such as prebuilt-read")
+    if raw.get("url") is None:
+        raise ConfigError(
+            f"{where} needs url (the resource endpoint, https://NAME.cognitiveservices.azure.com)"
+        )
+    return {"token_env": token_env, "model": model}
+
+
+def _parse_extraction_service(raw: Any, where: str) -> ExtractionService:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table")
+    kind = raw.get("kind")
+    if kind not in EXTRACTION_SERVICE_KINDS:
+        raise ConfigError(f"{where} kind must be one of {list(EXTRACTION_SERVICE_KINDS)}")
+    unknown = set(raw) - _SERVICE_COMMON_KEYS - _SERVICE_KIND_KEYS[kind]
+    if unknown:
+        raise ConfigError(f"unknown key(s) {sorted(unknown)} in {where} (kind {kind})")
+    cloud = kind in EXTRACTION_CLOUD
+    trusted = _bool_key(raw, "trusted", False, where)
+    fields: dict[str, Any] = (
+        _cloud_service_fields(kind, raw, where)
+        if cloud
+        else {"token_env": _ex_env(raw, "token_env", None, where)}
+    )
+    url = _ex_url(raw, where, cloud=cloud) or fields.pop("url")
+    fields.pop("url", None)
+    if not trusted and (cloud or not _is_loopback_host(urllib.parse.urlsplit(url).hostname or "")):
+        raise ConfigError(
+            f"{where}: the service receives every file it is asked to read (a cloud service,"
+            " or one off loopback); set trusted = true to declare that it may"
+        )
+    return ExtractionService(
+        kind=kind,
+        url=url,
+        trusted=trusted,
+        complete=_bool_key(raw, "complete", False, where),
+        formats=_ex_choices(
+            raw,
+            "formats",
+            EXTRACTION_DEFAULT_SERVICE_FORMATS.get(kind, EXTRACTION_CLASSES),
+            EXTRACTION_CLASSES,
+            where,
+        ),
+        timeout_seconds=_ex_seconds(raw, "timeout_seconds", EXTRACTION_SERVICE_TIMEOUT, where),
+        **fields,
+    )
+
+
+def _parse_convert(raw: Mapping[str, Any], where: str) -> tuple[str, ...]:
+    value = raw.get("convert", False)
+    if isinstance(value, bool):
+        return EXTRACTION_CLASSES if value else ()
+    if isinstance(value, list):
+        return _ex_choices(raw, "convert", (), EXTRACTION_CLASSES, where)
+    raise ConfigError(f"{where} convert must be true, false or a list of file classes")
+
+
+def extraction_worst_case_seconds(
+    coarse: str,
+    formats: tuple[str, ...],
+    timeout: float,
+    services: tuple[ExtractionService, ...],
+) -> float:
+    """How long one file of class ``coarse`` may take at most: the local
+    worker (when an enabled extractor reads the class), then every service
+    asked for the class, one after another (``ExtractionInspector.read``)."""
+    local = timeout if set(EXTRACTION_LOCAL_READERS.get(coarse, ())) & set(formats) else 0.0
+    return local + sum(s.timeout_seconds for s in services if coarse in s.formats)
+
+
+def parse_extraction(raw: Any, where: str = "[extraction]") -> ExtractionConfig:
+    """``[extraction]`` (``where`` names the table in messages)."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table")
+    unknown = set(raw) - _EXTRACTION_KEYS
+    if unknown:
+        raise ConfigError(f"unknown key(s) {sorted(unknown)} in {where}")
+    services_raw = raw.get("services", [])
+    if not isinstance(services_raw, list):
+        raise ConfigError(f"{where} services must be an array of tables")
+    services = tuple(
+        _parse_extraction_service(item, f"{where} services #{index + 1}")
+        for index, item in enumerate(services_raw)
+    )
+    timeout = _ex_seconds(raw, "timeout_seconds", 30.0, where)
+    request_timeout = _ex_seconds(raw, "request_timeout_seconds", 60.0, where)
+    if request_timeout < timeout:
+        raise ConfigError(f"{where} request_timeout_seconds must be at least timeout_seconds")
+    formats = _ex_choices(raw, "formats", EXTRACTION_FORMATS, EXTRACTION_FORMATS, where)
+    for coarse in EXTRACTION_CLASSES:
+        needed = extraction_worst_case_seconds(coarse, formats, timeout, services)
+        if needed > request_timeout:
+            raise ConfigError(
+                f"{where} request_timeout_seconds ({request_timeout:g}) is shorter than one"
+                f" {coarse} file may take: the local timeout_seconds and each service"
+                f" asked for {coarse} files, one after another, add up to {needed:g};"
+                " raise request_timeout_seconds or lower those timeouts"
+            )
+    return ExtractionConfig(
+        enabled=_bool_key(raw, "enabled", False, where),
+        formats=formats,
+        max_file_bytes=_ex_int(raw, "max_file_bytes", 25 << 20, where, 1, 1 << 30),
+        timeout_seconds=timeout,
+        request_timeout_seconds=request_timeout,
+        max_text_chars=_ex_int(raw, "max_text_chars", 5_000_000, where, 1, 100_000_000),
+        max_inflated_bytes=_ex_int(raw, "max_inflated_bytes", 128 << 20, where, 1, 1 << 32),
+        worker_memory_mb=_ex_int(raw, "worker_memory_mb", 512, where, 128, 65536),
+        max_workers=_ex_int(raw, "max_workers", 2, where, 1, 64),
+        proxy_credential=_bool_key(raw, "proxy_credential", False, where),
+        convert=_parse_convert(raw, where),
+        services=services,
     )
 
 

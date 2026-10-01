@@ -123,9 +123,11 @@ that cannot cover:
   are read by content: text files are redacted, but a binary file (a PDF,
   an image, an archive) sent with your own key is forwarded unscanned by
   default — counted in `/status`; `[detection] binary_uploads = "refuse"`
-  refuses it instead (llm-redact-pro can read PDFs and Office documents as
-  text first: a value found refuses the upload, a complete clean reading
-  sends the file).
+  refuses it instead. `[extraction]` ([docs/extraction.md](docs/extraction.md))
+  reads PDFs, Office documents and — through Tika, docling, unstructured or
+  a cloud OCR service — scans as text first: a value found refuses the
+  upload (or, opt-in, sends its redacted text instead of the file), a
+  complete clean reading sends the file.
 - **Anything you opt out of.** Warn-mode rules observe and *forward*
   the matched value; `[providers.NAME] detection = false`, MCP server
   exemptions, and language scoping likewise forward what they exempt.
@@ -384,7 +386,7 @@ essentials:
   SIGHUP — `kill -HUP $(pgrep -f 'llm-redact serve')`, or for containers
   `docker kill --signal=HUP llm-redact`. Detection settings and upstream
   URLs apply immediately; vault, audit, host, port, allowed_hosts,
-  allowed_origins, log, TLS, OTel, users, and email changes are kept as-is
+  allowed_origins, log, TLS, OTel, users, email, extraction, and overrides changes are kept as-is
   with a "require restart"
   warning, and so are sections a plugin adds (llm-redact-pro's `[auth]`).
   A broken config file is logged and ignored — the running config stays

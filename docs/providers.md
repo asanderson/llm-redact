@@ -185,7 +185,7 @@ exactly like base64 media in a chat body. Under a credential the proxy
 holds (its cloud identity, or a routing rule's operator key) a binary file
 is refused: the proxy vouches only for what it read — unless an upload
 inspector read it (next). With an
-**upload inspector** (llm-redact-pro's document extractors,
+**upload inspector** (the core's document extractors, `[extraction]`,
 `plugin_api.UploadInspector`) each binary file part is first read as
 TEXT and scanned with the live detectors, no placeholder issued: a value
 that would be redacted (or a block-mode one) refuses the upload 400,
@@ -202,10 +202,18 @@ form field that is not UTF-8, a JSONL line nesting too deep) and, with a
 rule in block mode, a check of every string the redaction will scan (file
 names, form fields, text and JSONL files) for a block-mode value; what
 needs the redaction itself (`max_body_strings` when no rule is in block
-mode, a sealed session, a vault fault), a local refusal after redaction
-(no upstream configured, the upstream authorizer) and the `[audit]
-required` START row can still come after it — the inspector is an
-operator-configured reader, not the upstream. A JSONL line
+mode, a sealed session, a vault fault), the upstream authorizer (it signs
+the final, redacted bytes) and a routing budget refusal can still come
+after it. What refuses the request whatever the redaction finds comes
+before it: a provider with no upstream configured (502), a routing
+layer's local refusal, and, with `[audit] required`, the write-ahead START
+row — a START row that cannot be committed refuses the upload (503) before
+any file is read, and a refusal after the inspection is that START row's
+END row. That early row carries no detections (the redaction has not run):
+when the redaction then finds values — warn-mode values are forwarded — a
+second START row carrying the counts is committed before the upload is sent
+(503 if it cannot be) and the early row is ended with no status, so the
+record durable before upstream contact always says what leaves. A JSONL line
 nesting JSON deeper than 128 levels is refused (a JSONL reader would
 decode what no walk can read). Plain form fields (`purpose`, `user`,
 `size`, …) are scanned as UTF-8 text (a field that is not UTF-8 is
@@ -300,7 +308,7 @@ llm-redact-pro's named users reads the parsed body too, so a gzip or
 non-JSON body it could not read is refused either way). With `detection`
 on, an upload holding a binary file (a PDF, an image) cannot be sent
 with the proxy's identity — unless an upload inspector read it completely
-as clean text and allows that credential (llm-redact-pro `[extraction]
+as clean text and allows that credential (`[extraction]
 proxy_credential = true`, off by default); a text file is redacted and
 sent. Realtime
 WebSocket connections are authorized the same way — Azure OpenAI

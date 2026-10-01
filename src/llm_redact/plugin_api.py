@@ -216,8 +216,9 @@ class SessionRouter(Protocol):
     …}`` wrapper, not the decoded inner event). What is not JSON (an SSE
     ``[DONE]``, a comment, a line that does not parse, a document deeper
     than the proxy's JSON bound) is skipped. Realtime WebSocket frames are
-    not observed. The return value is ignored. An exception — from the
-    factory or the callable — is contained like the other bookkeeping
+    not observed here (``realtime_server_frame`` below). The return value
+    is ignored. An exception — from the factory or the callable — is
+    contained like the other bookkeeping
     after the answer (counted as the ``response_observer`` stage, logged
     by exception type only, the answer delivered unchanged) and ends the
     observation of that answer. Both run on the event loop between the
@@ -257,6 +258,33 @@ class SessionRouter(Protocol):
     between the client's bytes and the upstream's: it must not block (no
     network I/O). A router without the member is never asked (one
     attribute test per connection).
+
+    OPTIONAL ``realtime_server_frame(adapter_name, path, frame, *,
+    identity, session_id) -> None``: the SERVER-side twin of
+    ``realtime_frame_refusal`` — lets a router OBSERVE what the provider
+    tells a realtime connection (llm-redact-pro records which namespace a
+    Gemini Live ``sessionResumptionUpdate.newHandle`` was issued to, so a
+    later ``setup`` resuming it is judged on its owner). Asked
+    synchronously for EVERY upstream frame of a realtime connection (all
+    four realtime adapters, text or binary, whatever the router's ``mode``
+    and ``[providers.NAME] detection``) that parses as JSON within the
+    proxy's JSON bound, BEFORE the frame is restored or sent to the client
+    — so whatever the router records from it is recorded before the client
+    can see (and present) it. ``frame`` is the router's OWN parse of the
+    provider's bytes: it carries placeholders, never a restored value, and
+    nothing the router does to it changes what the client receives. The
+    other arguments are ``realtime_frame_refusal``'s, and it runs in the
+    connection's own context likewise. The return value is ignored: an
+    observer cannot refuse or rewrite a frame. An exception is contained
+    (counted as the ``realtime_server_frame`` bookkeeping stage, logged by
+    exception type only) and the frame is delivered as usual. It runs on
+    the event loop between the upstream's bytes and the client's: it must
+    not block (no network I/O). The cost is one more JSON parse of every
+    upstream frame (audio chunks included) on the event loop — the
+    restoration parses the frame on its own — so an observer should return
+    at once for frames it does not care about. A router without the member
+    is never asked and no frame is parsed for it (one attribute test per
+    connection).
 
     ``record_response_id`` MAY return ``False`` to veto the proxy's durable
     mirror of the mapping (the vault manager's response-session map): the
@@ -717,6 +745,13 @@ class AccessGate(Protocol):
       long-lived connections (realtime relays, live-events streams), so the
       gate can close a user's or a credential's connections the moment it
       revokes them or signs them out (``Admission.grant``).
+    - OPTIONAL ``approves_overrides(subject: str) -> bool`` — whether this
+      admitted user can approve their own refusal overrides (overrides.py;
+      they approve signed in to the dashboard). Asked when a detection
+      refusal of theirs is about to carry a code: only True mints one, with
+      a hint naming the dashboard; absent, False or an exception gives no
+      code (no hint the user could not act on). The local operator (no
+      subject) always gets the CLI's code.
     - ``recheck_interval: float`` — seconds between the core's re-checks
       of every open long-lived connection's ``Admission.recheck`` (read
       once at startup; default 30; anything but a number from 5 to 3600 is
@@ -821,9 +856,10 @@ class UpstreamAuth(Protocol):
 # ``upload_content.classify_file``) cannot be redacted: without an inspector
 # it is forwarded unscanned with the client's own key ([detection]
 # binary_uploads = "forward", counted) or refused. An ``UploadInspector``
-# (``Registry.build_upload_inspector``; llm-redact-pro's document extractors)
-# reads such a part as TEXT for the core to scan; the core alone decides
-# what happens to the part, with the request's live detectors.
+# (``Registry.build_upload_inspector``; the core's own document extractors,
+# ``[extraction]``, unless a plugin replaces them) reads such a part as TEXT
+# for the core to scan; the core alone decides what happens to the part,
+# with the request's live detectors.
 
 
 @dataclass(frozen=True)
@@ -835,13 +871,22 @@ class UploadPart:
     plain ``type/subtype``), the provider adapter's name, and whether the
     request would spend a credential the PROXY holds (``identity``, as for
     ``SessionRouter.object_access_refusal``). The file name is never
-    passed. ``content`` is user data: an inspector must never log it or
-    put any of it in an exception message."""
+    passed — only its ``extension``: lower-cased, when it matches
+    ``[a-z0-9]{1,10}`` and every file name the part carries (``filename``,
+    ``filename*``, read as the part's redaction reads them) has the same
+    one; ``""`` when they disagree (the provider may go by either); None
+    when there is no file name, no extension or one outside that grammar.
+    Like ``content_type`` it is the client's claim — a reader that vouches
+    for a file must not vouch for one the provider may open as another
+    format. Absent on cores that predate it (read it with ``getattr``).
+    ``content`` is user data: an inspector must never log it or put any of
+    it in an exception message."""
 
     content: bytes = field(repr=False)
     content_type: str | None
     provider: str
     identity: bool
+    extension: str | None = None
 
 
 @dataclass(frozen=True)
@@ -869,12 +914,23 @@ class Inspection:
     client's own key whatever ``[detection] binary_uploads`` says, under a
     credential the proxy holds only with ``proxy_credential``. Anything
     else (no text, incomplete, a clean incomplete reading) keeps the
-    core's rules for an unscanned binary part."""
+    core's rules for an unscanned binary part.
+
+    ``convert_text`` (convert mode, ``[extraction] convert``): the file's
+    text as a reader sees it, which the inspector allows the core to send
+    IN PLACE of the file when a COMPLETE reading holds values to redact —
+    redacted (placeholders issued as for a text upload), as a
+    ``text/plain`` file, on a route whose provider takes a text file for
+    the upload's purpose, and under a credential the proxy holds only with
+    ``proxy_credential``. None (the default): the file is never replaced.
+    Whatever it holds, the scan and the refusals above are decided on
+    ``text``."""
 
     text: str | None = field(repr=False)
     complete: bool
     extractor: str
     proxy_credential: bool = False
+    convert_text: str | None = field(default=None, repr=False)
 
 
 class UploadInspector(Protocol):

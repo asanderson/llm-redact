@@ -15,7 +15,9 @@ read [src/llm_redact/user_guide.md](../src/llm_redact/user_guide.md).
 | [how-it-works.md](how-it-works.md) | The mechanism end to end: the round-trip diagrams, a worked example (placeholder body, vault rows, audit row), persistence and fuzzy token restoration, and session isolation. |
 | [providers.md](providers.md) | Per-provider setup: Azure/Vertex/Bedrock/Ollama/custom upstreams, embeddings, batch APIs, the realtime relay, and the opt-out switches. |
 | [detection.md](detection.md) | The full detection reference: built-in rules, deny strings, per-rule modes, allowlists, and the person-name NER backends. |
+| [extraction.md](extraction.md) | Document extraction for binary uploads (`[extraction]`): PDFs, Office files and scans read as text (isolated worker processes; Tika, docling-serve, unstructured, AWS Textract, Google Document AI or Azure Document Intelligence for OCR) so the proxy can scan them — a value found refuses the upload or, in convert mode, sends its redacted text; a complete clean reading sends the file as is. |
 | [dashboard.md](dashboard.md) | The local ops surface: status/metrics/health endpoints, the recent-request and event feeds, `llm-redact preview`, and the agent plugins (the browser dashboard — config editor, redaction preview — is part of llm-redact-pro). |
+| [overrides.md](overrides.md) | Refusal overrides: the single-use code a detection refusal carries, approving it once or always on the terminal (or the llm-redact-pro dashboard), what can and cannot be overridden, and where every use is recorded. |
 | [troubleshooting.md](troubleshooting.md) | Keyed by the exact error strings you will see, with the fix for each. |
 | [plugins.md](plugins.md) | The proxy's status, preview, and config-edit workflows as agent slash commands (Claude Code, Codex, OpenCode, Cursor). |
 

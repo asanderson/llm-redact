@@ -113,7 +113,7 @@ key), or when `[detection] binary_uploads = "refuse"`. With your own key
 and the default `binary_uploads = "forward"` such a file is forwarded
 unscanned instead (counted in `/status` `unscanned_uploads_total`).
 Convert a Latin-1/Windows-1252 text file to UTF-8 to have it redacted.
-With llm-redact-pro's document extraction a PDF or Office file read
+With document extraction (`[extraction]`, [extraction.md](extraction.md)) a PDF or Office file read
 completely as clean text is sent instead — with your own key always, under
 a credential the proxy holds only when `[extraction] proxy_credential =
 true` (off by default); one it could not read completely
@@ -124,12 +124,31 @@ clean in an upload refused before that, for another reason).
 
 ## "an uploaded binary file holds values it must redact (…, found in the file's extracted text)"
 
-A 400 on a file upload with an upload inspector (llm-redact-pro's document
+A 400 on a file upload with an upload inspector (the core's document
 extraction): the text read out of a PDF or Office file holds values of the
 named types that llm-redact would redact — and it cannot redact inside the
 file. Remove them from the document (or send its text instead, which is
-redacted), allowlist a value that is not sensitive, or set that rule's
-mode to `warn` if forwarding it is acceptable.
+redacted), allowlist a value that is not sensitive, set that rule's
+mode to `warn` if forwarding it is acceptable, or opt in to
+`[extraction] convert`, which sends the document's REDACTED text in place
+of the file where the route takes a text file (the model then sees text,
+not the original).
+
+## "to allow: llm-redact override CODE --once | --always"
+
+A detection refusal you may override for your own data: a block-mode value,
+values in a binary upload, a verbatim field, a body that is not JSON, or a
+binary part under `binary_uploads = "refuse"`. Run the command yourself in
+a terminal. It shows what was refused and waits for `allow` typed there. It
+never reads stdin, so an agent cannot confirm for you. After that, send the
+request again. `--once` covers the next such request within
+`[overrides] ttl_minutes` (default 15). `--always` covers every request
+until `llm-redact override revoke`. The value is FORWARDED unredacted. The
+error "no pending refusal matches (it is unknown, used or expired)" means
+the code was already used or is older than the TTL: repeat the request for
+a new one. "belongs to a named user" means the refusal is a named user's,
+who approves it in the llm-redact-pro dashboard. See
+[overrides.md](overrides.md).
 
 ## "request body exceeds llm-redact max_body_bytes"
 

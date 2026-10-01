@@ -343,3 +343,11 @@ def test_helm_allowed_hosts_render_and_parse() -> None:
     assert _rendered_config().allowed_hosts == ()
     extra = _rendered_config("allowedHosts[0]=Redact.Example", "mode=sidecar")
     assert extra.allowed_hosts == ("redact.example",)
+
+
+def test_the_image_ships_the_extras_its_features_need() -> None:
+    # Without extract, [extraction] with its default formats (pdf included)
+    # refuses to start inside the image.
+    dockerfile = (DEPLOY.parent / "Dockerfile").read_text()
+    (default,) = re.findall(r'^ARG EXTRAS="([^"]*)"$', dockerfile, re.MULTILINE)
+    assert set(re.findall(r"--extra (\S+)", default)) == {"perf", "realtime", "extract"}

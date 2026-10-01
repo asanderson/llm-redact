@@ -333,6 +333,14 @@ def media_type(data: bytes, coarse: str) -> str:
     return "application/octet-stream"
 
 
+# Whether the kernel enforces the worker's address-space limit
+# (``extract_worker.apply_limits``): macOS accepts RLIMIT_AS and ignores it.
+# Where it is not enforced, the worker is never handed a file larger than a
+# quarter of ``worker_memory_mb`` — a parser's memory grows with its input,
+# so the input bound stands in for the limit the platform will not apply.
+MEMORY_LIMIT_ENFORCED = sys.platform != "darwin"
+
+
 def _local_class(coarse: str, formats: tuple[str, ...]) -> bool:
     """Whether a local extractor reads this class."""
     return any(f in formats for f in EXTRACTION_LOCAL_READERS.get(coarse, ()))
@@ -504,7 +512,11 @@ class ExtractionInspector:
 
     async def _local(self, data: bytes) -> tuple[str, _Read] | None:
         """The worker's reading: (extractor name, reading), or None when it
-        read nothing (unsupported, killed, failed)."""
+        read nothing (unsupported, killed, failed, or too large for a
+        platform that does not enforce the worker's memory limit)."""
+        if not MEMORY_LIMIT_ENFORCED and len(data) > (self.config.worker_memory_mb << 20) // 4:
+            self.readings[("local", "memory_unenforced")] += 1
+            return None
         try:
             async with asyncio.timeout(self.config.timeout_seconds):
                 async with self._gate():

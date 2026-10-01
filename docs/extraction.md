@@ -46,7 +46,7 @@ timeout_seconds = 30             # per file: the local worker (each service has 
 request_timeout_seconds = 60     # how long the proxy waits for all files of one request
 max_text_chars = 5000000         # per file; beyond it a reading is incomplete
 max_inflated_bytes = 134217728   # a document package's parts, inflated, in total
-worker_memory_mb = 512           # the worker's address space (enforced on Linux)
+worker_memory_mb = 512           # the worker's address space (Linux; on macOS files over 1/4 of it are not read)
 max_workers = 2                  # extraction processes at a time
 proxy_credential = false         # see below
 convert = false                  # true, or a list of classes: see "Convert mode"
@@ -124,7 +124,9 @@ Each file is read by a **fresh worker process** (`python -I -m
 llm_redact.extract_worker`): isolated mode, an empty environment (no
 credential of the proxy's reaches the process that parses hostile files),
 and — set by the worker itself before it reads a byte — an address-space
-limit (`worker_memory_mb`; not enforced by macOS), a CPU-time limit, no file
+limit (`worker_memory_mb`; macOS ignores it, so there the proxy never hands
+the worker a file larger than a quarter of `worker_memory_mb` — counted
+`memory_unenforced`, nothing read), a CPU-time limit, no file
 writes, few open files and no child processes. The proxy kills the worker
 at `timeout_seconds` and reaps it; its answer is read up to a size bound. A
 parser wedged or blown up by a crafted file costs one killed process: the

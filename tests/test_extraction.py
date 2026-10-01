@@ -350,8 +350,25 @@ async def test_a_worker_over_its_memory_limit_fails_closed() -> None:
     inspector = _inspector(worker_memory_mb=128, max_file_bytes=1 << 30)
     reading = await inspector.read(pdf(["x"]) + b"\n" * (200 << 20))
     assert reading.complete is False and reading.text is None
-    if sys.platform.startswith("linux"):  # RLIMIT_AS is not enforced on macOS
-        assert inspector.status()["readings_total"] == {"local": {"failed": 1}}
+    # Linux kills the worker at its limit; macOS ignores RLIMIT_AS, so the
+    # file is never handed over (larger than a quarter of the limit).
+    outcome = "failed" if extraction.MEMORY_LIMIT_ENFORCED else "memory_unenforced"
+    assert inspector.status()["readings_total"] == {"local": {outcome: 1}}
+
+
+async def test_without_an_enforced_memory_limit_a_large_file_is_not_handed_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Where the kernel ignores the address-space limit (macOS), a file over
+    # a quarter of worker_memory_mb never reaches the worker: nothing read.
+    monkeypatch.setattr(extraction, "MEMORY_LIMIT_ENFORCED", False)
+    inspector = _inspector(worker_memory_mb=256, max_file_bytes=1 << 30)
+    big = pdf(["x"]) + b"\n" * (65 << 20)
+    assert await inspector.read(big) == FileReading(None, False, "none")
+    assert inspector.status()["readings_total"] == {"local": {"memory_unenforced": 1}}
+    # A file within the bound is still read.
+    small = await inspector.read(pdf(["x"]))
+    assert small.complete is True and small.text == "x"
 
 
 async def test_a_zip_bomb_is_refused_by_the_worker() -> None:

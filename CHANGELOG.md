@@ -304,6 +304,11 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- Document extraction on macOS: the kernel ignores the worker's address-space limit
+  (`RLIMIT_AS`), so a large file was read with unbounded memory. Where the limit is
+  not enforced, the worker is now never handed a file larger than a quarter of
+  `[extraction] worker_memory_mb` (counted `memory_unenforced`, nothing read: the
+  file keeps the unscanned-binary rules).
 - An upload refused for a form field that is not UTF-8 text or a JSONL line nesting
   too deep had its binary parts handed to the upload inspector first (which may send
   them to an extraction service): those format checks now run before the inspection,

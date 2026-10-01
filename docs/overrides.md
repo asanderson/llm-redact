@@ -38,7 +38,9 @@ proxy unsupervised.
 **An override forwards the value.** Detection still runs and still decides the
 refusal. The override is only asked after that, and a value it lets through
 goes upstream **unredacted**, exactly like a `warn`-mode value (an overridden
-body or binary part goes out **unscanned**). Every use is counted and marked
+body or binary part goes out **unscanned**). As with warn mode, that includes
+anything the approved value overlaps: a value inside its span that another
+rule would have redacted on its own is forwarded with it. Every use is counted and marked
 on the request's row, the same way warn mode is.
 
 ## What can be overridden

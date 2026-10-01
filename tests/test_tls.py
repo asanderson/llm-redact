@@ -251,12 +251,11 @@ def test_tls_extension_skips_plain_connections() -> None:
 def test_serve_wires_the_extension_for_mutual_tls_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import uvicorn
-
+    from llm_redact import serving
     from llm_redact.cli import main
 
     captured: list[dict[str, object]] = []
-    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.append(kwargs))
+    monkeypatch.setattr(serving, "run_server", lambda app, **kwargs: captured.append(kwargs))
     mutual = tmp_path / "mutual.toml"
     mutual.write_text('[tls]\ncertfile = "/c.crt"\nkeyfile = "/c.key"\nclient_ca = "/ca.crt"\n')
     server_only = tmp_path / "server.toml"

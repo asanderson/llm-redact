@@ -2766,8 +2766,10 @@ async def _handle_local(
                         continue
                     if stream.closed:
                         # Its admission ended: the stream ends here (the
-                        # dashboard reconnects, and the gate decides again).
-                        logger.info("events stream closed (its access was revoked)")
+                        # dashboard reconnects, and the gate decides again)
+                        # — or the server is shutting down.
+                        if not stream.at_shutdown:
+                            logger.info("events stream closed (its access was revoked)")
                         return
                     yield b"data: " + json_bytes(row) + b"\n\n"
             finally:

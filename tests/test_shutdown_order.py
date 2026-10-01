@@ -21,6 +21,7 @@ import uvicorn
 
 import llm_redact.proxy as proxy_mod
 import llm_redact.registry as registry_mod
+import llm_redact.serving as serving_mod
 from llm_redact.audit import AuditRecord
 from llm_redact.config import AuditConfig, Config, ProviderConfig
 from llm_redact.proxy import create_app
@@ -376,3 +377,82 @@ async def test_no_sinks_still_closes_the_audit_database_then_the_vault(
     async with app.router.lifespan_context(app):
         await asyncio.sleep(0)
     assert events == ["audit.close", "vault.close"]
+
+
+async def _start(server: uvicorn.Server) -> tuple[asyncio.Task[None], int]:
+    serving = asyncio.create_task(server.serve())
+    for _ in range(200):
+        if server.started:
+            break
+        await asyncio.sleep(0.01)
+    return serving, server.servers[0].sockets[0].getsockname()[1]
+
+
+async def test_an_open_events_stream_never_holds_the_shutdown(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The dashboard's /__llm-redact/events stream never ends on its own, and
+    # uvicorn waits for every open response before the lifespan shutdown:
+    # an open dashboard kept a SIGTERM from ever reaching the sinks' final
+    # flush and the database closes (the supervisor killed the process).
+    # ProxyServer ends the streams first; the client sees a clean end.
+    events: list[str] = []
+    audit, sinks = _register(monkeypatch, events)
+    app = _app(events, httpx.MockTransport(_answer))
+    server = serving_mod.ProxyServer(
+        uvicorn.Config(app, host="127.0.0.1", port=0, lifespan="on", log_level="warning")
+    )
+    serving, port = await _start(server)
+    with caplog.at_level(logging.INFO, logger="llm_redact"):
+        async with (
+            httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client,
+            client.stream("GET", "/__llm-redact/events") as stream,
+        ):
+            assert stream.status_code == 200
+            lines = stream.aiter_lines()
+            assert await asyncio.wait_for(anext(lines), 5) == ": connected"
+            server.should_exit = True
+            # The stream ends (no revocation logged) and the server exits.
+            remaining = [line async for line in lines]
+            assert all(line.startswith(":") or not line for line in remaining)
+        await asyncio.wait_for(serving, 5)
+    assert sorted(events[:2]) == ["azure.aclose", "s3.aclose"]
+    assert events[2:] == ["audit.close", "vault.close"]
+    assert "ended 1 events stream(s): the server is shutting down" in caplog.text
+    assert "its access was revoked" not in caplog.text
+    assert app.state.proxy.connections.closed == {}  # not a revocation
+
+
+def test_run_server_runs_the_proxy_server_like_uvicorn_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran: list[serving_mod.ProxyServer] = []
+
+    def started(self: serving_mod.ProxyServer, sockets: object = None) -> None:
+        ran.append(self)
+        self.started = True
+        raise KeyboardInterrupt  # uvicorn.run swallows it too
+
+    monkeypatch.setattr(serving_mod.ProxyServer, "run", started)
+    app = create_app(Config())
+    serving_mod.run_server(app, host="127.0.0.1", port=0, access_log=False)
+    assert ran[0].config.app is app and ran[0].config.access_log is False
+
+    # A server that never started exits with uvicorn's startup-failure code.
+    monkeypatch.setattr(serving_mod.ProxyServer, "run", lambda self, sockets=None: None)
+    with pytest.raises(SystemExit) as excinfo:
+        serving_mod.run_server(app, host="127.0.0.1", port=0)
+    assert excinfo.value.code == serving_mod.STARTUP_FAILURE == 3
+
+
+async def test_proxy_server_shutdown_without_a_proxy_app() -> None:
+    # Any other ASGI app: nothing to end, uvicorn's shutdown unchanged.
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        pass
+
+    server = serving_mod.ProxyServer(
+        uvicorn.Config(app, host="127.0.0.1", port=0, lifespan="off", log_level="warning")
+    )
+    serving, _port = await _start(server)
+    server.should_exit = True
+    await asyncio.wait_for(serving, 5)

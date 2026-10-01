@@ -91,6 +91,11 @@ and tags `vX.Y.Z`.
   never keeps the databases open. A failing final flush, or a sink flush loop that had
   died, is logged by exception type and no longer cuts the rest of the shutdown short
   (docs/resilience.md, "Shutdown order").
+- `serve` ends the dashboard's open `/__llm-redact/events` streams as shutdown starts:
+  the server waits for every open response before the application's shutdown runs,
+  and that stream never ends on its own, so an open dashboard kept a SIGTERM from
+  ever reaching the audit sinks' final flush and the database closes (the supervisor
+  killed the process instead).
 - CI: a new `rdbms` job runs the RDBMS vault's real-server tests (the store battery and
   the Live resumption handle map) against PostgreSQL 16 and MySQL 8.4 service
   containers; before, no DSN was set anywhere and those env-gated tests always skipped.

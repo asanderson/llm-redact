@@ -109,8 +109,13 @@ A clean stop (SIGTERM / Ctrl-C) drains in this order:
    graceful-shutdown timeout, so a request is never cut short to make
    room for it), so every request finalizer — buffered, streaming,
    realtime — has written its END audit row first. Open realtime relays
-   and live-event streams are closed by the server and the connection
-   re-check backstop stops.
+   are closed by the server (1012), and the dashboard's
+   `/__llm-redact/events` streams, which never end on their own, are
+   ended by the proxy as shutdown starts (`serving.ProxyServer`; before,
+   an open dashboard held the drain until the supervisor killed the
+   process). This wait has no limit of its own: a streamed answer still
+   running holds it until it ends. The connection re-check backstop then
+   stops.
 3. **Background work stops.** The sinks' periodic flush loops, the
    session-TTL prune and the license refresh are cancelled (a loop that
    had already died is logged by exception type and never cuts the
@@ -135,7 +140,8 @@ SAS). Allow at least the drain time plus ~25 s in a supervisor's stop
 timeout (Kubernetes `terminationGracePeriodSeconds`, systemd
 `TimeoutStopSec`) so the final flush is not killed. Pinned by
 `test_shutdown_order.py` (order, the END row of a request in flight at
-shutdown reaching the sink, a hanging sink, a failing flush).
+shutdown reaching the sink, an open events stream, a hanging sink, a
+failing flush).
 
 ## Faults after the upstream answered
 

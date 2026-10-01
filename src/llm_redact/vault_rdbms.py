@@ -1310,6 +1310,33 @@ class RdbmsStore:
         ).fetchone()
         return None if row is None else int(row[0])
 
+    def _drop_digests(
+        self, conn: Any, handle_digest: str, session_id: str, replaces: list[str]
+    ) -> None:
+        """Delete ``handle_digest``'s row (whichever session's: written
+        again, it becomes the newest) and the ``replaces`` digests — only
+        ``session_id``'s — in ONE statement per ``LOOKUP_CHUNK`` superseded
+        digests: a busy connection supersedes one handle with each new one,
+        so the usual write pays one round trip here, not two. The IN list
+        is on the unique digest, so the statement reads only those rows."""
+        chunks = [
+            replaces[start : start + LOOKUP_CHUNK]
+            for start in range(0, len(replaces), LOOKUP_CHUNK)
+        ]
+        for chunk in chunks or [[]]:
+            params: dict[str, Any] = {f"r{index}": value for index, value in enumerate(chunk)}
+            marks = "".join(f", :{name}" for name in params)
+            same_session = ""
+            if chunk:
+                same_session = " AND (handle_digest = :d OR session_id = :s)"
+                params["s"] = session_id
+            self._execute(
+                conn,
+                "DELETE FROM llm_redact_handle_sessions"
+                f" WHERE handle_digest IN (:d{marks}){same_session}",
+                {**params, "d": handle_digest},
+            )
+
     def _write_handle(
         self,
         conn: Any,
@@ -1322,21 +1349,7 @@ class RdbmsStore:
         superseded digests of the same session dropped, the digest moved to
         the NEWEST row, the session and — with ``trim_all`` — the rows of
         sessions holding no mappings trimmed, oldest first."""
-        for start in range(0, len(replaces), LOOKUP_CHUNK):
-            chunk = replaces[start : start + LOOKUP_CHUNK]
-            params = {f"d{index}": value for index, value in enumerate(chunk)}
-            marks = ", ".join(f":{name}" for name in params)
-            self._execute(
-                conn,
-                "DELETE FROM llm_redact_handle_sessions"
-                f" WHERE session_id = :s AND handle_digest IN ({marks})",
-                {**params, "s": session_id},
-            )
-        self._execute(
-            conn,
-            "DELETE FROM llm_redact_handle_sessions WHERE handle_digest = :d",
-            {"d": handle_digest},
-        )
+        self._drop_digests(conn, handle_digest, session_id, replaces)
         (top,) = self._execute(conn, "SELECT MAX(seq) FROM llm_redact_handle_sessions").fetchone()
         self._execute(
             conn,

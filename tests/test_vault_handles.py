@@ -624,3 +624,124 @@ def test_the_grants_cover_every_statement_a_whole_session_delete_runs() -> None:
         assert "DELETE" in _GRANTS[table]
     assert _GRANTS["llm_redact_handle_sessions"] == "SELECT, INSERT, DELETE"
     assert _GRANTS["llm_redact_retired"] == "SELECT, INSERT, UPDATE"
+
+
+def _spied_statements(store: RdbmsStore, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    statements: list[str] = []
+    execute = store._execute
+
+    def spy(conn: Any, sql: str, params: dict[str, Any] | None = None) -> Any:
+        statements.append(sql)
+        return execute(conn, sql, params)
+
+    monkeypatch.setattr(store, "_execute", spy)
+    return statements
+
+
+def test_an_rdbms_write_drops_its_digest_and_superseded_ones_in_one_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review (handles, finding 4): each write runs synchronously on the
+    # event loop, one round trip per statement. A busy connection supersedes
+    # one handle per new one, so the replaces delete and the digest's own
+    # delete are one statement (the digest's row whichever session holds it;
+    # the superseded ones only this session's).
+    from llm_redact.vault_rdbms import RdbmsVaultManager
+    from test_vault_rdbms import _dbapi_config
+
+    store = RdbmsStore(_dbapi_config(tmp_path / "vault.db"), None)
+    manager = RdbmsVaultManager(store)
+    manager.record_handle_session(H + "old", "s")
+    manager.record_handle_session(H + "t", "t")
+    manager.record_handle_session(H + "moved", "t")
+    statements = _spied_statements(store, monkeypatch)
+    manager.record_handle_session(H + "new", "s", replaces=[H + "old", H + "t"])
+    assert [sql.split()[0] for sql in statements] == ["DELETE", "SELECT", "INSERT", "SELECT"]
+    statements.clear()
+    manager.record_handle_session(H + "moved", "s")  # no replaces: still one delete
+    assert [sql.split()[0] for sql in statements] == ["DELETE", "SELECT", "INSERT", "SELECT"]
+    monkeypatch.undo()
+    assert _known(manager, "old", "t", "new", "moved") == {
+        "old": None,
+        "t": "t",  # another session's digest is never superseded
+        "new": "s",
+        "moved": "s",  # written again: the newest row, in its new session
+    }
+    manager.close()
+
+
+def test_an_rdbms_write_drops_superseded_digests_beyond_one_statement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact.vault_rdbms import RdbmsVaultManager
+    from test_vault_rdbms import _dbapi_config
+
+    monkeypatch.setattr("llm_redact.vault_rdbms.LOOKUP_CHUNK", 2)
+    store = RdbmsStore(_dbapi_config(tmp_path / "vault.db"), None)
+    manager = RdbmsVaultManager(store)
+    old = [f"o{index}" for index in range(5)]
+    for name in old:
+        manager.record_handle_session(H + name, "s")
+    manager.record_handle_session(H + "x", "t")
+    statements = _spied_statements(store, monkeypatch)
+    manager.record_handle_session(H + "new", "s", replaces=[H + name for name in [*old, "x"]])
+    deletes = [sql for sql in statements if sql.startswith("DELETE")]
+    assert len(deletes) == 3  # six superseded digests, two per statement
+    assert all("IN (:d, :r0, :r1)" in sql for sql in deletes)
+    assert _known(manager, *old, "x", "new") == {
+        **dict.fromkeys(old, None),
+        "x": "t",
+        "new": "s",
+    }
+    manager.close()
+
+
+@pytest.mark.parametrize("backend_name", ["postgresql", "mysql", "oracle"])
+def test_the_handle_map_on_a_real_server(
+    backend_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The handle map's own SQL — the one-statement digest delete, the
+    # allocation, both trims (the total one's correlated NOT EXISTS) and the
+    # whole-session delete — against a real engine (env-gated like the
+    # battery: LLM_REDACT_TEST_PG_DSN / _MYSQL_DSN / _ORACLE_DSN).
+    from llm_redact.config import RdbmsConfig
+    from llm_redact.vault_rdbms import RdbmsVaultManager
+    from test_vault_rdbms import _REAL_DSNS, _drop_tables
+
+    dsn = _REAL_DSNS[backend_name]
+    if not dsn:
+        pytest.skip(f"no real {backend_name} server configured")
+    config = VaultConfig(backend=backend_name, rdbms=RdbmsConfig(dsn=dsn))
+    _drop_tables(config)
+    _bound(monkeypatch, per_session=2, total=2)
+    manager = RdbmsVaultManager(RdbmsStore(config, None))
+    counter: Counter[str] = Counter()
+    manager.bind_fault_counter(counter)
+    manager.get("live").placeholder_for("EMAIL", "ada@corp.example")
+    manager.record_handle_session(H + "live", "live")  # the oldest row
+    for index in range(4):
+        manager.record_handle_session(H + f"e{index}", "empty")
+    manager.record_handle_session(H + "f0", "other")
+    # Per session the newest two; beyond the newest two in all, only rows
+    # of sessions without mappings (e2 goes, the live session's row stays).
+    assert _known(manager, "live", "e0", "e1", "e2", "e3", "f0") == {
+        "live": "live",
+        "e0": None,
+        "e1": None,
+        "e2": None,
+        "e3": "empty",
+        "f0": "other",
+    }
+    _bound(monkeypatch, per_session=2, total=2, every=1000)  # no more total trims
+    manager.record_handle_session(H + "l2", "live", replaces=[H + "live", H + "f0"])
+    manager.record_handle_session(H + "e3", "live")  # written again: moves
+    assert _known(manager, "live", "l2", "e3", "f0") == {
+        "live": None,
+        "l2": "live",
+        "e3": "live",
+        "f0": "other",
+    }
+    assert manager.forget_sessions(["live", "other"]) == 1
+    assert _known(manager, "l2", "e3", "f0") == {"l2": None, "e3": None, "f0": None}
+    assert counter[HANDLE_FAULT_STAGE] == 0
+    manager.close()

@@ -12,9 +12,9 @@ key via registry seams, never a signed key).
 from __future__ import annotations
 
 import asyncio
-import gc
+import inspect
 import logging
-import warnings
+from collections.abc import Coroutine
 from typing import Any
 
 import httpx
@@ -248,28 +248,55 @@ async def test_status_surfaces_required(fake_registry: Registry) -> None:
 # ------------------------------------------------- synchronous write-ahead
 
 
+class Unawaited:
+    """The coroutines a SYNC audit member answered, kept so a test asserts
+    each was CLOSED unrun (``inspect.getcoroutinestate``): one dropped
+    unclosed only warns "never awaited" from its finalizer, where the
+    warning is unraisable and fails no test."""
+
+    def __init__(self) -> None:
+        self.answers: list[Coroutine[Any, Any, Any]] = []
+
+    def __call__(self, answer: Coroutine[Any, Any, Any]) -> Coroutine[Any, Any, Any]:
+        self.answers.append(answer)
+        return answer
+
+    def closed(self) -> bool:
+        states = [inspect.getcoroutinestate(answer) for answer in self.answers]
+        return bool(states) and set(states) == {inspect.CORO_CLOSED}
+
+
 class AsyncBeginAudit(FakeAudit):
-    """A write-ahead log whose ``begin`` is ``async def``: it answers a
-    coroutine, which once counted as a valid token (no START row written)."""
+    """A write-ahead log whose ``begin`` answers a coroutine (what an
+    ``async def begin`` returns), which once counted as a valid token: no
+    START row written."""
 
     def __init__(self) -> None:
         super().__init__()
         self.begin_ran = False
+        self.unawaited = Unawaited()
 
-    async def begin(self, entry: AuditRecord) -> object | None:  # type: ignore[override]
+    async def _write_start(self, entry: AuditRecord) -> object:
         self.begin_ran = True
         return 1
 
+    def begin(self, entry: AuditRecord) -> object | None:
+        return self.unawaited(self._write_start(entry))
+
 
 class AsyncFinalizeAudit(FakeAudit):
-    """A write-ahead log whose ``finalize`` is ``async def``."""
+    """A write-ahead log whose ``finalize`` answers a coroutine."""
 
     def __init__(self) -> None:
         super().__init__()
         self.finalize_ran = False
+        self.unawaited = Unawaited()
 
-    async def finalize(self, token: object, entry: AuditRecord) -> None:  # type: ignore[override]
+    async def _write_end(self, token: object, entry: AuditRecord) -> None:
         self.finalize_ran = True
+
+    def finalize(self, token: object, entry: AuditRecord) -> Any:
+        return self.unawaited(self._write_end(token, entry))
 
 
 async def test_an_async_begin_refuses_503_without_upstream_contact(
@@ -285,15 +312,12 @@ async def test_an_async_begin_refuses_503_without_upstream_contact(
     state = app.state.proxy
     state.client = httpx.AsyncClient(transport=_upstream_transport(upstream_calls))
     caplog.set_level(logging.CRITICAL, logger="llm_redact")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        response = await _post_messages(app)
-        gc.collect()
+    response = await _post_messages(app)
     assert response.status_code == 503 and upstream_calls == []
     assert response.json()["error"]["message"] == (
         "llm-redact: audit log unavailable and [audit] required is enabled"
     )
-    assert fake.begin_ran is False and fake.finalized == []
+    assert fake.begin_ran is False and fake.unawaited.closed() and fake.finalized == []
     # The refusal is recorded (metrics, /recent; its own row best-effort).
     assert [row["status"] for row in state.recent] == [503]
     assert "audit write failed with [audit] required (AuditWriteError)" in caplog.text
@@ -311,12 +335,10 @@ async def test_an_async_finalize_is_an_end_row_fault(
     app = create_app(_config(required=True))
     app.state.proxy.client = httpx.AsyncClient(transport=_upstream_transport(upstream_calls))
     caplog.set_level(logging.CRITICAL, logger="llm_redact")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        response = await _post_messages(app)
-        gc.collect()
+    response = await _post_messages(app)
     assert response.status_code == 200 and len(upstream_calls) == 1
-    assert len(fake.begun) == 1 and fake.finalize_ran is False and fake.recorded == []
+    assert len(fake.begun) == 1 and fake.recorded == []
+    assert fake.finalize_ran is False and fake.unawaited.closed()
     assert "audit write failed AFTER response (POST /v1/messages): AuditWriteError" in (caplog.text)
     assert "jane.doe" not in caplog.text
 

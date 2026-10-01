@@ -14,9 +14,7 @@ Real sockets end to end (the test_realtime_relay harness).
 
 from __future__ import annotations
 
-import gc
 import logging
-import warnings
 from typing import Any
 
 import pytest
@@ -118,15 +116,12 @@ async def test_an_async_begin_is_recorded_503_and_never_dialled(
     # unrun and refused like a START row that cannot commit — never dialled.
     audit = AsyncBeginAudit()
     caplog.set_level(logging.CRITICAL, logger="llm_redact")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        async with FakeUpstream() as fake:
-            closed, row = await _refused_row(_audited(monkeypatch, audit, fake.port))
-        gc.collect()
+    async with FakeUpstream() as fake:
+        closed, row = await _refused_row(_audited(monkeypatch, audit, fake.port))
     assert fake.paths == []
     assert closed.code == 1011 and "[audit] required" in closed.reason
     assert (row["status"], row["provider"]) == (503, "openai")
-    assert audit.begin_ran is False and audit.finalized == []
+    assert audit.begin_ran is False and audit.unawaited.closed() and audit.finalized == []
     assert "audit write failed with [audit] required (AuditWriteError)" in caplog.text
 
 
@@ -135,15 +130,13 @@ async def test_an_async_finalize_at_close_is_logged_critical(
 ) -> None:
     audit = AsyncFinalizeAudit()
     caplog.set_level(logging.CRITICAL, logger="llm_redact")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        async with FakeUpstream() as fake:
-            with _proxy(_audited(monkeypatch, audit, fake.port)) as proxy_host:
-                async with websockets.connect(f"ws://{proxy_host}/v1/realtime") as client:
-                    await client.send('{"type":"noop"}')
-                    await client.recv()
-                row = await _recent(proxy_host, lambda r: r["method"] == "WS")
-        gc.collect()
+    async with FakeUpstream() as fake:
+        with _proxy(_audited(monkeypatch, audit, fake.port)) as proxy_host:
+            async with websockets.connect(f"ws://{proxy_host}/v1/realtime") as client:
+                await client.send('{"type":"noop"}')
+                await client.recv()
+            row = await _recent(proxy_host, lambda r: r["method"] == "WS")
     assert fake.paths == ["/v1/realtime"] and row["status"] == 101
-    assert len(audit.begun) == 1 and audit.finalize_ran is False
+    assert len(audit.begun) == 1
+    assert audit.finalize_ran is False and audit.unawaited.closed()
     assert "audit write failed AFTER response (WS /v1/realtime): AuditWriteError" in caplog.text

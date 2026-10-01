@@ -22,9 +22,7 @@ logs and routers — keyless.
 
 from __future__ import annotations
 
-import gc
 import logging
-import warnings
 from typing import Any
 
 import httpx
@@ -45,7 +43,7 @@ from llm_redact.audit import AuditWriteError
 from llm_redact.config import AuditConfig, Config
 from llm_redact.detection.engine import DetectionConfig
 from llm_redact.proxy import create_app
-from test_audit_required import FakeAudit
+from test_audit_required import FakeAudit, Unawaited
 from test_upload_inspection import (
     FORM,
     FakeInspector,
@@ -636,21 +634,23 @@ async def test_an_amend_that_returns_an_awaitable_refuses(
     # is no amendment: the coroutine is closed unrun and the request refused
     # 503 before any upstream contact, like an amendment that cannot commit.
     class AsyncAmend(AmendingAudit):
-        async def amend(self, token: object, entry: Any) -> None:  # type: ignore[override]
+        unawaited = Unawaited()
+
+        async def _write_amend(self) -> None:
             self.events.append("amend-ran")
+
+        def amend(self, token: object, entry: Any) -> Any:
+            return self.unawaited(self._write_amend())
 
     events: list[str] = []
     audit, upstream = AsyncAmend(events), Upstream()
     _registry_with_audit(monkeypatch, OrderedInspector(events, reads("clean")), audit)
     app = create_app(_required(), upstream_transport=httpx.MockTransport(upstream))
     caplog.set_level(logging.CRITICAL, logger="llm_redact")
-    with warnings.catch_warnings():
-        # A coroutine dropped unclosed warns "never awaited"; closed, it does not.
-        warnings.simplefilter("error", RuntimeWarning)
-        reply = await _post(app, "/v1/files", FORM, _form(_pdf("a"), filename=f"{EMAIL}.pdf"))
-        gc.collect()
+    reply = await _post(app, "/v1/files", FORM, _form(_pdf("a"), filename=f"{EMAIL}.pdf"))
     assert reply.status_code == 503 and upstream.requests == []
-    assert events == ["start", "inspect", "end:503"]
+    # Closed unrun: never "never awaited", the amendment's body never ran.
+    assert events == ["start", "inspect", "end:503"] and audit.unawaited.closed()
     _balanced(audit)
     assert app.state.proxy.inspected_uploads == {("openai", "clean_refused"): 1}
     assert "audit write failed with [audit] required (AuditWriteError)" in caplog.text
@@ -841,19 +841,22 @@ async def test_an_async_finalize_of_a_superseded_start_row_is_logged(
     # START row (a log without ``amend``) is closed unrun and logged
     # CRITICAL like any END-row fault; the counted START row is committed.
     class AsyncEnd(OrderedAudit):
-        async def finalize(self, token: object, entry: Any) -> None:  # type: ignore[override]
+        unawaited = Unawaited()
+
+        async def _write_end(self) -> None:
             self.events.append("end-ran")
+
+        def finalize(self, token: object, entry: Any) -> Any:
+            return self.unawaited(self._write_end())
 
     events: list[str] = []
     audit, upstream = AsyncEnd(events), Upstream()
     _registry_with_audit(monkeypatch, OrderedInspector(events, reads("clean")), audit)
     app = create_app(_required(), upstream_transport=httpx.MockTransport(upstream))
     caplog.set_level(logging.CRITICAL, logger="llm_redact")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        reply = await _post(app, "/v1/files", FORM, _form(_pdf("a"), filename=f"{EMAIL}.pdf"))
-        gc.collect()
+    reply = await _post(app, "/v1/files", FORM, _form(_pdf("a"), filename=f"{EMAIL}.pdf"))
     assert reply.status_code == 200 and EMAIL.encode() not in upstream.requests[0].content
     assert events == ["start", "inspect", "start"] and len(audit.begun) == 2
+    assert audit.unawaited.closed()  # the superseded row's END answer, closed unrun
     assert "superseded START row" in caplog.text and "AFTER response" in caplog.text
     assert EMAIL not in caplog.text

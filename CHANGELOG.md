@@ -12,6 +12,19 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- `WriteAheadAudit` (re-exported from `plugin_api`) documents an OPTIONAL member
+  `amend(token, entry) -> None`, read once at startup via `getattr`. With `[audit]
+  required`, an upload whose binary parts go to the upload inspector writes its START row
+  before the inspection; when the redaction then finds values (or the request passes on
+  an approved override), a log with `amend` has that START row amended with the counts
+  and the marker before any upstream contact, instead of a second START row: the
+  request keeps one START row, which its END row finalizes. An amendment that cannot be
+  committed refuses the request with the same provider-shaped 503 as a START row that
+  cannot be committed, before anything is sent, and its row ends the START row. The
+  member is synchronous: one answering an awaitable (an `async def amend`) is closed
+  unrun and refused the same way, never taken as a durable amendment. A log
+  without the member keeps the previous two-START-row behaviour. `ProxyState.amend_audit`
+  is the capability a plugin can probe.
 - Document extraction is now part of the free core: `[extraction]` (docs/extraction.md)
   reads binary uploads — PDFs, Office/OpenDocument files, markup, RTF — as text in an
   isolated, resource-limited worker process per file, so the proxy scans them before

@@ -150,6 +150,13 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
             "aclose": "(self) -> 'None'",
         },
     ),
+    "WriteAheadAudit": (
+        (),
+        {
+            "begin": "(self, entry: 'AuditRecord') -> 'object'",
+            "finalize": "(self, token: 'object', entry: 'AuditRecord') -> 'None'",
+        },
+    ),
     "Router": (
         (),
         {
@@ -245,6 +252,7 @@ ALL: tuple[str, ...] = (
     "VaultCipher",
     "VaultKeyError",
     "VaultManager",
+    "WriteAheadAudit",
 )
 
 
@@ -280,7 +288,7 @@ def test_all_is_snapshotted_and_resolves() -> None:
     assert list(ALL) == sorted(ALL)  # kept sorted: additions land deliberately
     for name in ALL:
         getattr(plugin_api, name)
-    # Every snapshotted Protocol and dataclass is exported; the two
+    # Every snapshotted Protocol and dataclass is exported; the
     # re-exports pro reaches through this module instead of core internals
     # are the real classes.
     assert set(PROTOCOLS) | set(DATACLASSES) <= set(ALL)
@@ -289,6 +297,11 @@ def test_all_is_snapshotted_and_resolves() -> None:
 
     assert plugin_api.RouteKind is RouteKind
     assert plugin_api.SSEEvent is SSEEvent
+    # The [audit] required write-ahead contract, re-exported from audit.py
+    # (pro's AuditLog implements it; its optional amend is pinned below).
+    from llm_redact.audit import WriteAheadAudit
+
+    assert plugin_api.WriteAheadAudit is WriteAheadAudit
 
 
 def test_vault_placeholder_for_takes_a_keyword_only_floor() -> None:
@@ -362,6 +375,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         " -> str | None``",
         "``realtime_server_frame(adapter_name, path, frame, *, identity, session_id) -> None``",
     ),
+    "WriteAheadAudit": ("``amend(token, entry) -> None``",),
 }
 
 

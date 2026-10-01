@@ -249,7 +249,10 @@ Off is the default, and turning them off again later is the same state:
   routed budget refusal) is not marked: nothing went out on the override, and
   a one-time grant it used is handed back. With `[audit] required`, the
   write-ahead START row written right before the send already carries the
-  marker — an uploaded file's too.
+  marker. An upload whose binary parts are inspected writes its START row
+  before the inspection; that row is amended with the marker before the send
+  (an audit log with the optional `amend` member), or a second START row
+  carrying it is written.
 - `/__llm-redact/status` has an `overrides` block with counts: `pending`,
   `once`, `always`, and `used_total` by `once`/`always` (only
   `{"enabled": false}` while overrides are off).

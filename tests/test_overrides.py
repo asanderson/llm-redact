@@ -1102,6 +1102,40 @@ async def test_the_start_row_of_an_inspected_upload_says_it_passed_on_an_overrid
     assert finals[1].override is None
 
 
+async def test_an_amending_log_marks_the_one_start_row_of_an_inspected_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same upload with a log offering the optional amend member: the
+    # early START row is amended with the override marker before the send —
+    # one START row, finalized with the answer.
+    from llm_redact.config import AuditConfig
+    from test_upload_fate import AmendingAudit, _registry_with_audit
+    from test_upload_inspection import FakeInspector, reads
+
+    events: list[str] = []
+    audit = AmendingAudit(events)
+    _registry_with_audit(monkeypatch, FakeInspector(reads(f"contact {EMAIL}")), audit)
+    upstream = Upstream()
+    app = _app(
+        tmp_path,
+        upstream,
+        detection=DetectionConfig(binary_uploads="refuse"),
+        audit=AuditConfig(enabled=True, required=True),
+    )
+    async with _client(app) as client:
+        refused = await client.post("/v1/files", content=_form(PDF), headers=FORM)
+        _store(tmp_path).approve("always", approver=None, code=_code(refused))
+        events.clear()
+        passed = await client.post("/v1/files", content=_form(PDF), headers=FORM)
+    assert passed.status_code == 200 and PDF in upstream.requests[-1].content
+    assert events == ["start", "amend", "end:200"]
+    ((token, amendment),) = audit.amended
+    assert amendment.override == "always" and amendment.detections == {}
+    assert audit.begun[-1].override is None
+    final_token, final = audit.finalized[-1]
+    assert final_token == token and (final.status, final.override) == (200, "always")
+
+
 def _files(*contents: bytes) -> bytes:
     body = b'--b\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nuser_data\r\n'
     for index, content in enumerate(contents):

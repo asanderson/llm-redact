@@ -98,9 +98,17 @@ class WriteAheadAudit(AuditLog, Protocol):
     ``begin`` durably commits a START row BEFORE any upstream contact
     (raising :class:`AuditWriteError` on failure) and returns an opaque
     non-None token; ``finalize`` commits the matching END row at completion.
-    ``ProxyState`` resolves the capability once at startup (``isinstance``
-    checks method presence, the runtime-checkable contract) and refuses
-    required mode when the built log lacks the pair.
+    Both are SYNCHRONOUS: each must make its row durable before it returns.
+    An awaitable answer (an ``async def`` member returns a coroutine, which
+    the core never awaits on the request path) is closed unrun and treated
+    as :class:`AuditWriteError` — never as a committed row: from ``begin``
+    the request is refused with the provider-shaped 503 of a START row that
+    cannot be committed (HTTP and realtime, before any upstream contact,
+    recorded); from ``finalize`` it is an END-row fault, logged CRITICAL by
+    type (the answer is already committed). ``ProxyState`` resolves the
+    capability once at startup (``isinstance`` checks method presence, the
+    runtime-checkable contract) and refuses required mode when the built log
+    lacks the pair.
 
     OPTIONAL ``amend(token, entry) -> None``, read once at startup via
     ``getattr`` (it is not a Protocol method, so a log predating it still

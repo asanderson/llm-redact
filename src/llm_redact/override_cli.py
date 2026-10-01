@@ -18,14 +18,15 @@ Nothing printed is a value, a digest or a code.
 
 Refusal overrides are off by default. While the config this command reads
 (``--config``, else the same search as ``serve``) leaves them off, every form
-exits 1 naming ``[overrides] enabled`` and the file it read (or that it found
-none): a proxy started with another file (``serve --config``, a service unit)
-may have them on, so the message points at ``--config`` and claims nothing
-about the running proxy. Approve touches nothing; list still prints what the
-store holds (value-free, read-only) with a line saying a proxy running with
-that config applies none of it; revoke still drops the record (it only
-narrows — clearing an inert rule never needs a window with every kept rule
-live) and says so."""
+prints a line on stderr naming ``[overrides] enabled`` and the file it read
+(or that it found none): a proxy started with another file (``serve
+--config``, a service unit) may have them on, so the message points at
+``--config`` and claims nothing about the running proxy. Approve touches
+nothing and exits 1; list still prints what the store holds (value-free,
+read-only) with a line saying a proxy running with that config applies none
+of it, and exits 1; revoke still drops the record (it only narrows —
+clearing an inert rule never needs a window with every kept rule live), says
+so and exits 0 when it did (1 when nothing was revoked)."""
 
 from __future__ import annotations
 
@@ -158,8 +159,10 @@ def _revoke(args: argparse.Namespace, config: Config, source: Path | None) -> in
     """Drop one record. A revocation only ever narrows what a proxy applies,
     so it runs whether or not this command's config leaves overrides on: an
     operator clears an inert rule without first turning overrides on — which
-    would make EVERY kept rule live until the revocation. Off, it still exits
-    1 with the off note, as list does (a missing store is never created)."""
+    would make EVERY kept rule live until the revocation. Off, it still
+    prints the off note on stderr, as list does, but a revocation that
+    happened exits 0 (the command did what it was asked); nothing revoked —
+    an unknown id, a missing store (never created) — exits 1."""
     if args.entry is None:
         print("usage: llm-redact override revoke ID (as `override list` shows it)")
         return 2
@@ -172,7 +175,7 @@ def _revoke(args: argparse.Namespace, config: Config, source: Path | None) -> in
         " was made all the same (it only narrows what turning overrides on would apply)"
     )
     print(_off_note(source, effect), file=sys.stderr)
-    return 1
+    return 0
 
 
 def _approve(args: argparse.Namespace, config: Config) -> int:

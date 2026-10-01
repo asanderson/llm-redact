@@ -24,6 +24,25 @@ llm-redact: request blocked; a EMAIL value was detected and this rule is
 configured with mode = "block"; to allow: llm-redact override 7K3M9QX2HD4P --once | --always
 ```
 
+When the proxy was started with an explicit config file that the command
+would not find by its own default search — `serve --config PATH`, or
+`LLM_REDACT_CONFIG` set for the proxy (your shell may not set it) — the hint
+names that file, so the command reads the same config, and the same override
+store, as the running proxy:
+
+```
+to allow: llm-redact override --config /srv/llm-redact/proxy.toml 7K3M9QX2HD4P --once | --always
+```
+
+The path is absolute (as the proxy resolved it) and shell-quoted when it
+holds spaces. A proxy started with the file the default search finds (the
+XDG `~/.config/llm-redact/config.toml`, else `/etc/llm-redact/config.toml`),
+or with none, prints the plain hint. A realtime close reason carries the
+path only when the whole reason still fits 123 bytes (about 49 characters of
+path, after shortening the wording and dropping the detector type); a longer
+path falls back to the plain hint there — the HTTP refusal of the same value
+carries it whole. A path that is not valid UTF-8 is never put in a hint.
+
 A **person** approves it, on the terminal:
 
 ```bash
@@ -226,15 +245,18 @@ Off is the default, and turning them off again later is the same state:
   then says on stderr that a proxy running with that config applies none of
   those records, and exits 1. `llm-redact override revoke ID` still drops
   the record (and never creates a missing store), then says the same on
-  stderr and exits 1 too. The CLI
+  stderr and exits 0 — the revocation happened; it exits 1 only when nothing
+  was revoked (an unknown id, a missing store). The CLI
   reads its config the way `serve` does (`--config`, `LLM_REDACT_CONFIG`,
   the default search) and names the file it read, or that it found none; a
   config it cannot parse exits 2.
 - The CLI cannot see which file the running proxy was started with. A proxy
-  started with `serve --config PATH` (or a service unit that passes one)
-  prints a refusal hint without `--config`: run the command with the same
-  `--config PATH`, or it reads the default search, may find overrides off
-  there, and says so about that file — not about the proxy.
+  with overrides on that was started with `serve --config PATH` or
+  `LLM_REDACT_CONFIG` names that file in its refusal hint (`override
+  --config PATH CODE …`, above); for `list` and `revoke`, pass the same
+  `--config PATH` yourself, or the command reads the default search, may
+  find overrides off there, and says so about that file — not about the
+  proxy.
 - `/__llm-redact/status` reports `"overrides": {"enabled": false}`, and
   `llm-redact doctor` prints an informational line (or the WARN above).
 

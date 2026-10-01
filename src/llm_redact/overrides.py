@@ -7,7 +7,9 @@ inert. With them on, a DETECTION refusal — a block-mode value, values found in
 upload, a verbatim identifier field that would be redacted, a body or a
 binary upload part the proxy cannot scan — is answered with a short
 single-use CODE and the text ``to allow: llm-redact override CODE --once |
---always``. A HUMAN approves it: ``llm-redact override CODE`` reads a
+--always`` (``override --config PATH CODE …`` when the proxy was started with
+an explicit config file the CLI's default search would not find:
+``hint_config``). A HUMAN approves it: ``llm-redact override CODE`` reads a
 confirmation typed on the terminal (``/dev/tty``, never stdin), or the
 llm-redact-pro dashboard's buttons (the guarded POST chain). Then:
 
@@ -46,13 +48,16 @@ import json
 import logging
 import os
 import secrets
+import shlex
 import sqlite3
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from llm_redact.config import ETC_CONFIG_PATH, default_config_path
 
 logger = logging.getLogger(__name__)
 
@@ -143,8 +148,40 @@ def normalize_code(text: str) -> str | None:
     return code
 
 
-def allow_hint(code: str) -> str:
-    return f"to allow: llm-redact override {code} --once | --always"
+def allow_hint(code: str, config_arg: str | None = None) -> str:
+    """The CLI hint for the local operator. ``config_arg`` (``hint_config``)
+    names the config file the proxy was started with when the CLI's own
+    default search would not find it: the command then reads the same
+    config — and so the same store — as the running proxy."""
+    if config_arg is None:
+        return f"to allow: llm-redact override {code} --once | --always"
+    return f"to allow: llm-redact override --config {config_arg} {code} --once | --always"
+
+
+def hint_config(loaded: Path | None, env: Mapping[str, str]) -> str | None:
+    """The ``--config`` argument a refusal hint carries (shell-quoted,
+    absolute), or None when the plain hint reaches the same config.
+
+    The proxy was started with an EXPLICIT config file — ``serve --config
+    PATH`` (``loaded``), else ``LLM_REDACT_CONFIG`` (the operator's own shell
+    may not set it) — that is not what ``llm-redact override`` finds by its
+    default search without that variable (the XDG file, else
+    /etc/llm-redact/config.toml). A path that does not encode as UTF-8 is
+    left out (the hint could not carry it; the plain hint stands). Computed
+    once at startup: overrides are restart-only."""
+    env_path = env.get("LLM_REDACT_CONFIG")
+    explicit = loaded if loaded is not None else (Path(env_path) if env_path else None)
+    if explicit is None:
+        return None
+    searched = next((p for p in (default_config_path(), ETC_CONFIG_PATH) if p.exists()), None)
+    if searched is not None and searched.resolve() == explicit.resolve():
+        return None
+    text = str(explicit.absolute())
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return shlex.quote(text)
 
 
 # Refusal overrides are OFF by default: an operator opts in with this
@@ -807,8 +844,13 @@ class OverrideScope:
         *,
         approvable: bool | Callable[[], bool] = True,
         owner: Callable[[], str | None] | None = None,
+        config_arg: str | None = None,
     ) -> None:
         self._store = store
+        # The ``--config`` argument the local operator's CLI hint carries
+        # (``hint_config``), None when the plain hint reaches the proxy's
+        # config.
+        self.config_arg = config_arg
         # The requester as admitted ("" = the local operator): which hint a
         # refusal names (the CLI's or the dashboard's).
         self.subject = subject
@@ -928,7 +970,7 @@ class OverrideScope:
         code = self.refusal_code(kind, provider, method, route)
         if code is None:
             return None
-        return allow_hint(code) if not self.subject else DASHBOARD_HINT
+        return allow_hint(code, self.config_arg) if not self.subject else DASHBOARD_HINT
 
     def commit(self) -> tuple[bool, str | None]:
         """Consume what this request used, as it passes: ``(ok, marker)``,

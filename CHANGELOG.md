@@ -58,6 +58,18 @@ and tags `vX.Y.Z`.
   treat an extension naming another format than the file's bytes as incomplete.
 
 ### Changed
+- `llm-redact override revoke ID` exits 0 when it revoked the record while refusal
+  overrides are off in the config it read (it still prints the off note on stderr); it
+  exits 1 only when nothing was revoked (an unknown id, a missing store) or on an error.
+  `override list` and `override CODE` keep exiting 1 while overrides are off.
+- The refusal-override hint names the proxy's config file when the proxy was started
+  with an explicit one (`serve --config PATH`, or `LLM_REDACT_CONFIG`) that the CLI's
+  default search (the XDG file, else `/etc/llm-redact/config.toml`) would not find:
+  `to allow: llm-redact override --config PATH CODE --once | --always` (absolute,
+  shell-quoted), so the command reads the same config and override store as the running
+  proxy. A realtime close reason carries the path only when the reason still fits 123
+  bytes (else the plain hint); a path that is not UTF-8 is never put in a hint. Logs are
+  unchanged.
 - `redactor._resolve_overlaps` finds each candidate's deny-span overlap with
   `bisect_right` over the chosen deny spans' ends (same results): the old forward walk
   had a mutant that never terminated, costing the mutation job about half an hour.
@@ -343,6 +355,15 @@ and tags `vX.Y.Z`.
   `max_body_bytes` for larger files.
 
 ### Fixed
+- `[audit] required`: the write-ahead log's `begin` and `finalize` are synchronous, like
+  `amend`. An `async def begin` returned a coroutine that counted as a valid START-row
+  token, so the request reached the upstream with no START row ever written; an
+  awaitable answer from `begin` is now closed unrun and refuses the request with the
+  provider-shaped 503 of a START row that cannot be committed (HTTP, and realtime
+  accept-then-close 1011, recorded, before any upstream contact). An awaitable answer
+  from `finalize` is closed unrun and logged CRITICAL by type like any other END-row
+  fault (no "never awaited" warning). docs/resilience.md and the `WriteAheadAudit`
+  docstring say so.
 - Document extraction on macOS and Windows: macOS ignores the worker's address-space
   limit (`RLIMIT_AS`) and Windows has no resource limits (the worker also failed to
   start there: no `resource` module, no `SYSTEMROOT` in its scrubbed environment), so

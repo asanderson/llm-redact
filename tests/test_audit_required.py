@@ -11,6 +11,9 @@ key via registry seams, never a signed key).
 
 from __future__ import annotations
 
+import gc
+import logging
+import warnings
 from typing import Any
 
 import httpx
@@ -239,3 +242,79 @@ async def test_status_surfaces_required(fake_registry: Registry) -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://proxy.test") as client:
         status = (await client.get("/__llm-redact/status")).json()
     assert status["audit"]["required"] is True
+
+
+# ------------------------------------------------- synchronous write-ahead
+
+
+class AsyncBeginAudit(FakeAudit):
+    """A write-ahead log whose ``begin`` is ``async def``: it answers a
+    coroutine, which once counted as a valid token (no START row written)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.begin_ran = False
+
+    async def begin(self, entry: AuditRecord) -> object | None:  # type: ignore[override]
+        self.begin_ran = True
+        return 1
+
+
+class AsyncFinalizeAudit(FakeAudit):
+    """A write-ahead log whose ``finalize`` is ``async def``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.finalize_ran = False
+
+    async def finalize(self, token: object, entry: AuditRecord) -> None:  # type: ignore[override]
+        self.finalize_ran = True
+
+
+async def test_an_async_begin_refuses_503_without_upstream_contact(
+    fake_registry: Registry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # begin is synchronous: an awaitable answer has committed nothing. It is
+    # closed unrun (no "never awaited" warning) and the request refused
+    # like a START row that cannot commit — before any upstream contact.
+    fake = AsyncBeginAudit()
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    upstream_calls: list[str] = []
+    app = create_app(_config(required=True))
+    state = app.state.proxy
+    state.client = httpx.AsyncClient(transport=_upstream_transport(upstream_calls))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        response = await _post_messages(app)
+        gc.collect()
+    assert response.status_code == 503 and upstream_calls == []
+    assert response.json()["error"]["message"] == (
+        "llm-redact: audit log unavailable and [audit] required is enabled"
+    )
+    assert fake.begin_ran is False and fake.finalized == []
+    # The refusal is recorded (metrics, /recent; its own row best-effort).
+    assert [row["status"] for row in state.recent] == [503]
+    assert "audit write failed with [audit] required (AuditWriteError)" in caplog.text
+    assert "jane.doe" not in caplog.text
+
+
+async def test_an_async_finalize_is_an_end_row_fault(
+    fake_registry: Registry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The answer is already committed: an awaitable END answer is closed
+    # unrun and logged CRITICAL by type, like any other END-row fault.
+    fake = AsyncFinalizeAudit()
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    upstream_calls: list[str] = []
+    app = create_app(_config(required=True))
+    app.state.proxy.client = httpx.AsyncClient(transport=_upstream_transport(upstream_calls))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        response = await _post_messages(app)
+        gc.collect()
+    assert response.status_code == 200 and len(upstream_calls) == 1
+    assert len(fake.begun) == 1 and fake.finalize_ran is False and fake.recorded == []
+    assert "audit write failed AFTER response (POST /v1/messages): AuditWriteError" in (caplog.text)
+    assert "jane.doe" not in caplog.text

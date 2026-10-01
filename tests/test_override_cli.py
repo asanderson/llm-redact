@@ -508,13 +508,15 @@ def test_doctor_warns_about_approvals_kept_while_overrides_are_off(tmp_path: Pat
 async def test_off_names_the_config_it_read_not_the_running_proxy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A proxy started with an explicit config file (`serve --config`, a
-    service unit) that turns overrides on mints a code whose hint has no
-    `--config`. Run as written, the command reads its own search — here no
-    file at all: it must not tell the operator overrides are off on the
-    proxy (they are on there) nor that the listed records are inert; it
-    names what it read and points at --config, with which the same code
-    approves."""
+    """A proxy whose config turns overrides on mints a code whose hint has
+    no `--config` — it was not told which file it loaded, or a realtime
+    close reason had no room for the path (a proxy started with `serve
+    --config`/LLM_REDACT_CONFIG names it in the HTTP hint:
+    test_override_hint_config.py). Run as written, the command reads its
+    own search — here no file at all: it must not tell the operator
+    overrides are off on the proxy (they are on there) nor that the listed
+    records are inert; it names what it read and points at --config, with
+    which the same code approves."""
     import httpx
 
     import llm_redact.config as config_module
@@ -528,6 +530,10 @@ async def test_off_names_the_config_it_read_not_the_running_proxy(
         '[detection.modes]\nemail = "block"\n'
         f"[overrides]\nenabled = true\npath = '{db}'\n"
     )
+    # The operator's shell: no LLM_REDACT_CONFIG, nothing in the search.
+    monkeypatch.delenv("LLM_REDACT_CONFIG")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config-home"))
+    monkeypatch.setattr(config_module, "ETC_CONFIG_PATH", tmp_path / "no-etc.toml")
     app = create_app(
         load_config(team),
         upstream_transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
@@ -540,13 +546,9 @@ async def test_off_names_the_config_it_read_not_the_running_proxy(
             json={"model": "m", "messages": [{"role": "user", "content": f"mail {EMAIL}"}]},
         )
     message = refused.json()["error"]["message"]
+    assert "--config" not in message
     code = message.split("llm-redact override ")[1].split()[0]
     app.state.proxy.overrides.close()
-
-    # The operator's shell: no LLM_REDACT_CONFIG, nothing in the search.
-    monkeypatch.delenv("LLM_REDACT_CONFIG")
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config-home"))
-    monkeypatch.setattr(config_module, "ETC_CONFIG_PATH", tmp_path / "no-etc.toml")
     asked: list[bool] = []
 
     def tty() -> FakeTty:
@@ -583,8 +585,9 @@ def test_revoke_narrows_while_overrides_are_off(
     """Off, a store's every-time rules are inert — but they all apply again
     the moment overrides are turned on. Revoking one must not need that
     window (every kept rule live, the ones meant to go included): revoke
-    drops exactly the named record while off, says overrides are off, exits
-    1 like list, and never creates a missing store."""
+    drops exactly the named record while off, says overrides are off on
+    stderr, exits 0 because the revocation happened (non-zero only when
+    nothing was revoked), and never creates a missing store."""
     off = tmp_path / "off.toml"
     off.write_text("")
     db = tmp_path / "o.db"
@@ -599,16 +602,18 @@ def test_revoke_narrows_while_overrides_are_off(
     (code_entry,) = [e for e in entries if e.state == "pending"]
     capsys.readouterr()
 
-    assert _run("revoke", drop.id, "--config", str(off), "--db", str(db)) == 1
+    assert _run("revoke", drop.id, "--config", str(off), "--db", str(db)) == 0
     done = capsys.readouterr()
     assert f"revoked {drop.id}" in done.out
     assert "[overrides] enabled = true" in done.err and "made all the same" in done.err
-    assert _run("revoke", code_entry.id, "--config", str(off), "--db", str(db)) == 1
-    assert f"revoked {code_entry.id}" in capsys.readouterr().out
+    assert _run("revoke", code_entry.id, "--config", str(off), "--db", str(db)) == 0
+    done = capsys.readouterr()
+    assert f"revoked {code_entry.id}" in done.out and "[overrides] enabled" in done.err
     assert [e.id for e in OverrideStore(db, read_only=True).entries()] == [keep.id]
     # An unknown id, a missing id and a missing store: nothing revoked, nothing created.
     assert _run("revoke", drop.id, "--config", str(off), "--db", str(db)) == 1
-    assert "no override" in capsys.readouterr().err
+    failed = capsys.readouterr()
+    assert "no override" in failed.err and "revoked" not in failed.out
     assert _run("revoke", "--config", str(off), "--db", str(db)) == 2
     capsys.readouterr()
     missing = tmp_path / "none.db"

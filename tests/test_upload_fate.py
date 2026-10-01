@@ -832,3 +832,28 @@ async def test_without_an_inspector_no_upstream_still_answers_after_redaction(
     assert reply.status_code == 400
     assert 'mode = "block"' in reply.json()["error"]["message"]
     assert upstream.requests == []
+
+
+async def test_an_async_finalize_of_a_superseded_start_row_is_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # finalize is synchronous: an awaitable answer ending the superseded
+    # START row (a log without ``amend``) is closed unrun and logged
+    # CRITICAL like any END-row fault; the counted START row is committed.
+    class AsyncEnd(OrderedAudit):
+        async def finalize(self, token: object, entry: Any) -> None:  # type: ignore[override]
+            self.events.append("end-ran")
+
+    events: list[str] = []
+    audit, upstream = AsyncEnd(events), Upstream()
+    _registry_with_audit(monkeypatch, OrderedInspector(events, reads("clean")), audit)
+    app = create_app(_required(), upstream_transport=httpx.MockTransport(upstream))
+    caplog.set_level(logging.CRITICAL, logger="llm_redact")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        reply = await _post(app, "/v1/files", FORM, _form(_pdf("a"), filename=f"{EMAIL}.pdf"))
+        gc.collect()
+    assert reply.status_code == 200 and EMAIL.encode() not in upstream.requests[0].content
+    assert events == ["start", "inspect", "start"] and len(audit.begun) == 2
+    assert "superseded START row" in caplog.text and "AFTER response" in caplog.text
+    assert EMAIL not in caplog.text

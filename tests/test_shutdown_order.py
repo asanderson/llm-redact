@@ -466,3 +466,31 @@ def test_the_shutdown_deadline_never_cuts_one_working_upload_short() -> None:
     # rows wait in the database) may reach the core's deadline.
     assert proxy_mod._SINK_UPLOAD_TIMEOUT_SECONDS == 30.0  # the pro sinks' httpx timeout
     assert proxy_mod._SINK_CLOSE_TIMEOUT_SECONDS >= proxy_mod._SINK_UPLOAD_TIMEOUT_SECONDS + 10
+
+
+async def test_a_failing_router_or_gate_close_never_skips_the_flush_or_the_closes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    events: list[str] = []
+    audit, sinks = _register(monkeypatch, events)
+    app = _app(events, httpx.MockTransport(_answer))
+
+    class Raises:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            events.append(f"{self.name}.close")
+            raise RuntimeError("https://idp.example/?token=SECRET")
+
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        async with app.router.lifespan_context(app):
+            await asyncio.sleep(0)
+            app.state.proxy.router = Raises("router")
+            app.state.proxy.access_gate = Raises("gate")
+    assert events[:2] == ["router.close", "gate.close"]
+    assert sorted(events[2:4]) == ["azure.aclose", "s3.aclose"]
+    assert events[4:] == ["audit.close", "vault.close"]
+    assert "closing the router failed (RuntimeError)" in caplog.text
+    assert "closing the access gate failed (RuntimeError)" in caplog.text
+    assert "SECRET" not in caplog.text

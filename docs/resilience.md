@@ -120,7 +120,8 @@ A clean stop (SIGTERM / Ctrl-C) drains in this order:
    session-TTL prune and the license refresh are cancelled (a loop that
    had already died is logged by exception type and never cuts the
    shutdown short); the upstream client, router, upstream authorizers,
-   access gate and upload inspector close.
+   access gate and upload inspector close (a plugin's close that fails is
+   logged by exception type and never skips the steps below).
 4. **The off-machine audit sinks flush from the still-open audit
    database** (`aclose()` of `[audit.s3]` and `[audit.azure]`,
    concurrently): the rows spooled since the last upload, including the

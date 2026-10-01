@@ -2062,6 +2062,17 @@ async def _close_audit_sinks(sinks: Sequence[S3AuditSink | AzureAuditSink], time
         logger.warning("%d audit sink(s) ignored the cancellation; abandoned", len(stuck))
 
 
+def _close_contained(what: str, close: Callable[[], object]) -> None:
+    """Close one plugin-supplied object at shutdown: a fault is logged by
+    exception TYPE only (a plugin's message may quote a URL or a credential)
+    and never stops the rest of the shutdown — the sinks' final flush and
+    the audit database and vault closes come after it."""
+    try:
+        close()
+    except Exception as problem:
+        logger.warning("closing the %s failed (%s)", what, type(problem).__name__)
+
+
 def _close_upstream_auths(auths: Mapping[str, UpstreamAuth]) -> None:
     for name, auth in auths.items():
         try:
@@ -7174,10 +7185,10 @@ def create_app(
                     logger.warning("a background task had failed (%s)", type(outcome).__name__)
             await state.client.aclose()
             if state.router is not None:
-                state.router.close()
+                _close_contained("router", state.router.close)
             _close_upstream_auths(state.upstream_auth)
             if state.access_gate is not None:
-                state.access_gate.close()
+                _close_contained("access gate", state.access_gate.close)
             if state.upload_inspector is not None:
                 # Its worker processes and HTTP clients; a fault closing them
                 # never stops the rest of the shutdown.

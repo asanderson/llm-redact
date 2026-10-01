@@ -90,9 +90,10 @@ and tags `vX.Y.Z`.
   running is cancelled (its unshipped rows stay in the database for the next start)
   and one ignoring the cancellation is abandoned after a second, so a hanging store
   never keeps the databases from closing (the process exit still waits for such a
-  flush until the supervisor's kill: the event loop's teardown awaits it). A failing final flush, or a sink flush loop that had
-  died, is logged by exception type and no longer cuts the rest of the shutdown short
-  (docs/resilience.md, "Shutdown order").
+  flush until the supervisor's kill: the event loop's teardown awaits it). A failing
+  final flush, a router or access gate whose close fails, or a sink flush loop that
+  had died, is logged by exception type and no longer cuts the rest of the shutdown
+  short (docs/resilience.md, "Shutdown order").
 - `serve` ends the dashboard's open `/__llm-redact/events` streams as shutdown starts:
   the server waits for every open response before the application's shutdown runs,
   and that stream never ends on its own, so an open dashboard kept a SIGTERM from

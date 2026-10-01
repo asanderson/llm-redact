@@ -121,17 +121,20 @@ async def test_a_block_value_under_identity_is_final(
     _no_new_pending(tmp_path)
 
 
+@pytest.mark.parametrize("vouches", [False, True])
 @pytest.mark.parametrize("approved", [False, True])
 async def test_values_in_a_binary_upload_under_identity_carry_no_code(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, approved: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, approved: bool, vouches: bool
 ) -> None:
-    # The inspector does not vouch for the proxy's credential (the core
-    # extraction's default): an approval could never clear the part, so the
-    # refusal names no code it could not honour (UP-4).
+    # Whether or not the inspector vouches for the proxy's credential
+    # (``Inspection.proxy_credential``; the core extraction's default does
+    # not): no refusal names a code (UP-4), and an every-time value rule
+    # approved elsewhere never clears a part a reading vouched for — the
+    # file would leave with its value under the proxy's identity.
     if approved:
         _approved_always(tmp_path, "binary_values")
     upstream, auth = _Upstream(), FakeAuth()
-    inspector = FakeInspector(reads(f"contact {EMAIL} for details"))
+    inspector = FakeInspector(reads(f"contact {EMAIL} for details", proxy_credential=vouches))
     app = _identity_app(
         tmp_path, monkeypatch, upstream, auth, inspector=inspector, detection=DetectionConfig()
     )

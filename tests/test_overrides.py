@@ -600,14 +600,79 @@ async def test_a_body_that_is_not_json(tmp_path: Path, caplog: pytest.LogCapture
         passed = await client.post("/v1/chat/completions", content=b"hello there", headers=plain)
         assert passed.status_code == 200
         assert upstream.requests[-1].content == b"hello there"
-        # A top-level array is the same kind: its own route rule applies.
-        again = await client.post("/v1/chat/completions", content=b"[1, 2]", headers=KEY)
+        # A top-level scalar is the same kind: its own route rule applies.
+        again = await client.post("/v1/chat/completions", content=b"42", headers=KEY)
         assert again.status_code == 400
         _store(tmp_path).approve("always", approver=None, code=_code(again))
         for _ in range(2):
-            reply = await client.post("/v1/chat/completions", content=b"[1, 2]", headers=KEY)
+            reply = await client.post("/v1/chat/completions", content=b"42", headers=KEY)
             assert reply.status_code == 200
     assert "forwarded unscanned" in caplog.text
+
+
+async def test_an_unscanned_body_rule_never_lets_json_past_redaction(tmp_path: Path) -> None:
+    """An every-time approval of a plain-text body on a route must not
+    reach a body a first-value or lenient reader (Go encoding/json: Ollama,
+    many gateways) reads as a chat request: JSON with one trailing byte, or
+    with one invalid UTF-8 byte, is refused with no code and never sent."""
+    upstream = Upstream()
+    app = _app(tmp_path, upstream, detection=DetectionConfig())
+    chat = json.dumps(_chat(f"mail {EMAIL}")).encode()
+    variants = [
+        chat + b"\x00",
+        chat.replace(b"jane", b"jan\xffe"),
+        b"\xef\xbb\xbf \x00" + chat + b"x",
+        b"\x0b\x0c" + chat + b"x",
+        chat.decode().encode("utf-16-be") + b"\x00x",
+        b"[" + chat + b"]",
+        b"   ",
+    ]
+    async with _client(app) as client:
+        refused = await client.post(
+            "/v1/chat/completions", content=b"hello", headers={**KEY, "content-type": "text/plain"}
+        )
+        _store(tmp_path).approve("always", approver=None, code=_code(refused))
+        for body in variants:
+            reply = await client.post(
+                "/v1/chat/completions",
+                content=body,
+                headers={**KEY, "content-type": "application/json"},
+            )
+            assert reply.status_code == 400, body
+            assert "llm-redact override" not in reply.text
+        # A plain-text body still passes on the approval.
+        plain = await client.post(
+            "/v1/chat/completions", content=b"hello", headers={**KEY, "content-type": "text/plain"}
+        )
+        assert plain.status_code == 200
+    assert all(EMAIL.encode() not in sent.content for sent in upstream.requests)
+    assert [sent.content for sent in upstream.requests] == [b"hello"]
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "multipart/form-data; boundary=a; boundary=b",
+        "multipart/form-data",
+        "application/x-www-form-urlencoded",
+    ],
+)
+async def test_a_multipart_or_form_body_carries_no_code(tmp_path: Path, content_type: str) -> None:
+    """Multipart framing two readers could disagree on (a repeated boundary
+    makes the proxy's reading None) is final: no code, nothing sent."""
+    upstream = Upstream()
+    app = _app(tmp_path, upstream, detection=DetectionConfig())
+    body = (
+        b'--a\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nassistants\r\n'
+        b'--a\r\nContent-Disposition: form-data; name="file"; filename="x.txt"\r\n\r\n'
+        b"mail " + EMAIL.encode() + b"\r\n--a--\r\n"
+    )
+    async with _client(app) as client:
+        reply = await client.post(
+            "/v1/files", content=body, headers={**KEY, "content-type": content_type}
+        )
+    assert reply.status_code == 400 and "llm-redact override" not in reply.text
+    assert not upstream.requests
 
 
 @pytest.mark.parametrize(

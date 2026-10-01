@@ -124,7 +124,7 @@ def _approve(args: argparse.Namespace) -> int:
         effect = (
             "EVERY request of this requester will forward these exact values UNREDACTED"
             if entry.kind in ("block", "binary_values", "verbatim_field")
-            else "EVERY such request on this route will be forwarded UNSCANNED"
+            else "EVERY plain-text body on this route will be forwarded UNSCANNED"
         )
     else:
         effect = "the next such request (within the code's lifetime) is let through once"

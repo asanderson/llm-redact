@@ -40,7 +40,7 @@ on the request's row, the same way warn mode is.
 | A block-mode value (HTTP 400, realtime close 1008) | `block` | each refused value and its detector type |
 | Values found in an inspected binary upload's extracted text | `binary_values` | each refused value and its detector type |
 | A verbatim identifier field (fine-tune `suffix`, file ids, …) holding a value llm-redact redacts | `verbatim_field` | each refused value and its detector type |
-| A body that is not a JSON object (plain text, a top-level array or scalar, invalid UTF-8), with the client's own key | `unscanned_body` | the kind, provider, method and exact path |
+| A plain-text body (valid UTF-8 that is not a JSON object and that no JSON reader could take for one), with the client's own key | `unscanned_body` | the kind, provider, method and exact path |
 | A binary upload part under `binary_uploads = "refuse"`, with the client's own key | `binary_upload` | the kind, provider, method and exact path |
 
 A value approval is an allowlist entry for that exact value and type, stored
@@ -69,6 +69,12 @@ These refusals carry no code:
   repeated `Content-Type`, JSON nested too deep, multipart outside the
   canonical form or on a route that does not scan it, an unreadable part
   header, a non-UTF-8 form field;
+- a body some reader could still take for a request: invalid UTF-8, a body
+  whose first character past spaces, byte-order marks and control characters
+  is `{` or `[` (JSON with a trailing byte, a top-level array), or a body sent
+  as multipart or form data. A lenient upstream reads JSON with one trailing
+  byte as an ordinary chat request, so an approval of a plain-text body never
+  reaches one;
 - a non-JSON body while a stored-object check is active (llm-redact-pro named
   users): that check reads the body, so an unread one could cite another
   user's stored object;

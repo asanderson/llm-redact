@@ -3151,21 +3151,59 @@ def _unscanned_body(
     return None
 
 
-def _body_overridable(state: ProxyState, unscanned: _Unreadable, proxy_credential: bool) -> bool:
+def _body_overridable(
+    state: ProxyState,
+    unscanned: _Unreadable,
+    proxy_credential: bool,
+    body: bytes,
+    headers: Headers,
+) -> bool:
     """Whether a body the scanned-body rule refuses is a CONTENT refusal its
     requester may override (overrides.py): only a body that is simply not a
-    JSON object (non-JSON text, a top-level array or scalar, invalid UTF-8)
-    — never a content coding, a repeated Content-Type, JSON nested too deep
-    or a multipart body (framing: two readers could disagree) — sent with
-    the client's OWN credential, on a proxy that checks no stored-object
-    access (that check reads the body; an unread one could cite another
-    user's object)."""
+    JSON object and cannot be read as JSON by any reader
+    (``_plain_text_body``) — never a content coding, a repeated
+    Content-Type, JSON nested too deep or a multipart body (framing: two
+    readers could disagree) — sent with the client's OWN credential, on a
+    proxy that checks no stored-object access (that check reads the body;
+    an unread one could cite another user's object)."""
     return (
         state.overrides is not None
         and unscanned.message == _NOT_JSON_OBJECT
         and not proxy_credential
         and not state.checks_object_access
+        and _plain_text_body(body, headers)
     )
+
+
+# Leading characters a lenient JSON reader may skip before a value: every
+# Unicode space, byte-order marks and control characters (a NUL-interleaved
+# UTF-16/32 body included).
+_LENIENT_SKIP = "".join(chr(c) for c in range(0x20) if not chr(c).isspace()) + "\x7f\ufeff\ufffe"
+_STRUCTURED_MEDIA = ("multipart", "x-www-form-urlencoded")
+
+
+def _plain_text_body(body: bytes, headers: Headers) -> bool:
+    """Whether a refused body is plain text NO reader takes for a request
+    object, so an approval to forward it unscanned can never carry a JSON
+    request past redaction: valid UTF-8 whose first character past every
+    space, byte-order mark and control character opens neither an object
+    nor an array (JSON with one trailing byte or one invalid UTF-8 byte —
+    a body a first-value or lenient reader still reads as a chat request —
+    is never overridable), sent under no multipart or form media type."""
+    media = (headers.get("content-type") or "").lower()
+    if any(kind in media for kind in _STRUCTURED_MEDIA):
+        return False
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    lead = text
+    while True:
+        stripped = lead.lstrip().lstrip(_LENIENT_SKIP)
+        if stripped == lead:
+            break
+        lead = stripped
+    return lead[:1] not in ("", "{", "[")
 
 
 def _route_override(
@@ -4301,7 +4339,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             adapter, path, request.headers, body_bytes, parsed, too_deep=too_deep
         )
         code: str | None = None
-        if unscanned is not None and _body_overridable(state, unscanned, proxy_credential):
+        if unscanned is not None and _body_overridable(
+            state, unscanned, proxy_credential, body_bytes, request.headers
+        ):
             # A body that is simply not a JSON object, with the client's own
             # key and no stored-object check: its requester may have
             # approved forwarding it unscanned on this route (overrides.py).

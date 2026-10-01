@@ -72,7 +72,9 @@ and tags `vX.Y.Z`.
   The refusals that carry one are a block-mode value (HTTP 400, and a
   realtime close 1008 with the code in the reason), values found in an
   inspected binary upload, a verbatim identifier field that would be
-  redacted, a body that is not a JSON object, and a binary upload part under
+  redacted, a plain-text body (never one a JSON reader could take for a
+  request: invalid UTF-8, a body opening with `{` or `[`, multipart or form
+  data carry no code), and a binary upload part under
   `binary_uploads = "refuse"` (the last two only with the client's own key).
   The requester approves it:
   - `llm-redact override CODE --once|--always` shows the refusal and reads a

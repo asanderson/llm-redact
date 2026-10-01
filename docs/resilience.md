@@ -129,16 +129,21 @@ A clean stop (SIGTERM / Ctrl-C) drains in this order:
    vault**, and the telemetry exporters flush last.
 
 Step 4 is bounded so a hanging store never keeps the databases open: both
-flushes share one 20 s deadline (each upload also keeps the sink's own
-30 s HTTP timeout). A flush still running then is cancelled — logged as a
+flushes share one 45 s deadline. Each upload keeps the sink's own 30 s
+HTTP timeout, and the deadline sits above it on purpose: the final flush
+uploads the sink's in-memory START/AMEND rows first, and rows it could
+not ship then are lost from the off-machine copy, so a slow but working
+store is never cut short by the core — only a stuck sink, or a long
+backlog drain whose spooled rows wait in the database anyway, reaches the
+deadline. A flush still running then is cancelled — logged as a
 WARNING with the count only — and its unshipped spooled rows stay in the
 audit database for the next start (the per-sink mark advances only after a
 confirmed upload); a flush that ignores the cancellation for another
 second is abandoned and the audit database closes anyway. A flush that
 fails is logged by exception type only (its message may quote a URL or a
-SAS). Allow at least the drain time plus ~25 s in a supervisor's stop
-timeout (Kubernetes `terminationGracePeriodSeconds`, systemd
-`TimeoutStopSec`) so the final flush is not killed. Pinned by
+SAS). Allow at least the drain time plus ~50 s in a supervisor's stop
+timeout (Kubernetes `terminationGracePeriodSeconds`, default 30 s;
+systemd `TimeoutStopSec`, default 90 s) so the final flush is not killed. Pinned by
 `test_shutdown_order.py` (order, the END row of a request in flight at
 shutdown reaching the sink, an open events stream, a hanging sink, a
 failing flush).

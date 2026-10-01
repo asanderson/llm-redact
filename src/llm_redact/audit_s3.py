@@ -90,8 +90,9 @@ class S3AuditSink(Protocol):
     the final flush — while the audit database is STILL OPEN, so rows
     spooled since the last upload ship now; the audit database closes after
     it, the vault last. ``aclose()`` of both sinks runs concurrently under
-    one deadline (``proxy._SINK_CLOSE_TIMEOUT_SECONDS``, 20 s): a flush still
-    running then is cancelled (its unshipped spooled rows wait in the
+    one deadline (``proxy._SINK_CLOSE_TIMEOUT_SECONDS``, 45 s — above one
+    upload's own 30 s timeout, so a slow but working upload is never cut
+    short): a flush still running then is cancelled (its unshipped spooled rows wait in the
     database for the next start), one ignoring the cancellation is abandoned
     after a short grace, and an exception is logged by type only.
     """

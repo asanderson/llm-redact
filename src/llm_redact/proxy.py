@@ -192,12 +192,19 @@ DASHBOARD_PATHS = frozenset(
 _TTL_PRUNE_INTERVAL_SECONDS = 3600.0
 _LICENSE_REFRESH_INTERVAL_SECONDS = 86400.0
 
+# The llm-redact-pro sinks' own bound on one upload (their HTTP client's
+# timeout): the shutdown deadline below must never be the one that cuts a
+# slow but working upload short — the final flush uploads the sink's
+# in-memory START/AMEND rows first, and rows it could not ship then are lost
+# from the off-machine copy (spooled database rows are not: they wait).
+_SINK_UPLOAD_TIMEOUT_SECONDS = 30.0
 # Shutdown bound on the off-machine audit sinks' final flush (their aclose(),
 # both sinks concurrently, from the still-open audit database): past it the
 # flushes are cancelled — unshipped spooled rows stay in the database and ship
 # at the next start — so a hanging store never keeps the audit database and
-# the vault from closing. Below Kubernetes' default 30 s termination grace.
-_SINK_CLOSE_TIMEOUT_SECONDS = 20.0
+# the vault from closing. Above one upload's own timeout (plus slack for the
+# client close), so only a stuck sink or a long backlog drain reaches it.
+_SINK_CLOSE_TIMEOUT_SECONDS = _SINK_UPLOAD_TIMEOUT_SECONDS + 15.0
 # How long a cancelled flush gets to unwind (close its HTTP client) before
 # shutdown abandons it and closes the audit database anyway.
 _SINK_CANCEL_GRACE_SECONDS = 1.0

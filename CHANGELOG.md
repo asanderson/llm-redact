@@ -85,7 +85,8 @@ and tags `vX.Y.Z`.
   runs while the audit database is still open (after the server has drained its
   in-flight requests), so the END rows spooled since the last upload ship at shutdown
   instead of waiting for the next start; the audit database closes after it and the
-  vault last. The flush is bounded: both sinks share one 20 s deadline, a flush still
+  vault last. The flush is bounded: both sinks share one 45 s deadline (above the sinks'
+  own 30 s upload timeout, so a slow but working store is never cut short), a flush still
   running is cancelled (its unshipped rows stay in the database for the next start)
   and one ignoring the cancellation is abandoned after a second, so a hanging store
   never keeps the databases open. A failing final flush, or a sink flush loop that had

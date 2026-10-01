@@ -456,3 +456,13 @@ async def test_proxy_server_shutdown_without_a_proxy_app() -> None:
     serving, _port = await _start(server)
     server.should_exit = True
     await asyncio.wait_for(serving, 5)
+
+
+def test_the_shutdown_deadline_never_cuts_one_working_upload_short() -> None:
+    # The final flush uploads the sink's in-memory START/AMEND rows first;
+    # rows it cannot ship then are lost from the off-machine copy. A slow
+    # but working store (one upload within the sink's own 30 s timeout)
+    # must finish: only a stuck sink or a long backlog drain (whose spooled
+    # rows wait in the database) may reach the core's deadline.
+    assert proxy_mod._SINK_UPLOAD_TIMEOUT_SECONDS == 30.0  # the pro sinks' httpx timeout
+    assert proxy_mod._SINK_CLOSE_TIMEOUT_SECONDS >= proxy_mod._SINK_UPLOAD_TIMEOUT_SECONDS + 10

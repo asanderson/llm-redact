@@ -111,3 +111,8 @@ def test_the_close_reason_always_fits_with_its_code() -> None:
     assert "(EMAIL); to allow" in blocked_reason("EMAIL", code)
     assert blocked_reason("X" * 40, code).startswith("blocked (XXX")
     assert blocked_reason("Y" * 200, code).startswith("blocked by llm-redact policy; to allow")
+    # A named user approves in the dashboard: no code in the reason.
+    for detector_type in ("EMAIL", "Y" * 200):
+        named = blocked_reason(detector_type, code, named=True)
+        assert len(named.encode()) <= 123 and code not in named
+        assert named.endswith("Refusal overrides in the llm-redact dashboard")

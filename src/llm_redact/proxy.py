@@ -97,7 +97,6 @@ from llm_redact.overrides import (
     OverrideError,
     OverrideScope,
     OverrideStore,
-    allow_hint,
     default_overrides_path,
     raced_message,
 )
@@ -732,7 +731,25 @@ class ProxyState:
         overrides are off."""
         if self.overrides is None:
             return None
-        return OverrideScope(self.overrides, _REQUEST_USER.get() or "")
+        subject = _REQUEST_USER.get() or ""
+        return OverrideScope(self.overrides, subject, approvable=self._approves_overrides(subject))
+
+    def _approves_overrides(self, subject: str) -> bool:
+        """Whether this requester can approve its own refusal: the local
+        operator always (the CLI); a named user only when the access gate's
+        OPTIONAL ``approves_overrides(subject)`` says True (llm-redact-pro:
+        a user who can sign in to the dashboard) — absent, False or an
+        exception: no code and no hint it could not act on."""
+        if not subject:
+            return True
+        approves = getattr(self.access_gate, "approves_overrides", None)
+        if approves is None:
+            return False
+        try:
+            return approves(subject) is True
+        except Exception as exc:  # noqa: BLE001 — a hint, never a failed request
+            logger.warning("overrides: approves_overrides failed (%s)", type(exc).__name__)
+            return False
 
     async def admit(self, conn: HTTPConnection, surface: str) -> Admission:
         """The access gate's verdict (it scrubs its own credentials from the
@@ -3234,13 +3251,13 @@ def _route_override(
 ) -> tuple[bool, str | None]:
     """A route refusal put to the requester's overrides: (True, None) when
     an approved one passes it (used now, the request marked), else (False,
-    the refusal's code — None when none could be minted)."""
+    the refusal's hint — None when no code could be minted)."""
     rule = scope.route_rule(kind, provider, method, path)
     if rule is not None:
         scope.use_route(rule)
         if _commit_overrides(scope, upload):
             return True, None
-    return False, scope.refusal_code(kind, provider, method, path)
+    return False, scope.refusal_hint(kind, provider, method, path)
 
 
 def _commit_overrides(scope: OverrideScope | None, upload: "_UploadFate") -> bool:
@@ -4366,7 +4383,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         unscanned = _unscanned_body(
             adapter, path, request.headers, body_bytes, parsed, too_deep=too_deep
         )
-        code: str | None = None
+        hint: str | None = None
         if unscanned is not None and _body_overridable(
             state, unscanned, proxy_credential, body_bytes, request.headers
         ):
@@ -4375,7 +4392,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # approved forwarding it unscanned on this route (overrides.py).
             body_scope = state.override_scope()
             assert body_scope is not None  # _body_overridable: overrides are on
-            passed, code = _route_override(
+            passed, hint = _route_override(
                 body_scope, upload, "unscanned_body", provider_name, request.method, path
             )
             if passed:
@@ -4399,7 +4416,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 request=request,
                 path=path,
                 started=started,
-                code=code,
+                hint=hint,
             )
     check_body: Any = parsed
     # An upload whose checked lines repeat a key, re-serialized: what a
@@ -4487,12 +4504,12 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         # The refusal's single-use code, when it can carry one: minted now
         # (what it matches: the values this request had refused, or the
         # route), bound to the requester.
-        code = (
-            scope.refusal_code(kind, provider_name or "", request.method, path)
+        hint = (
+            scope.refusal_hint(kind, provider_name or "", request.method, path)
             if scope is not None
             else None
         )
-        return f"; {allow_hint(code)}" if code is not None else ""
+        return f"; {hint}" if hint is not None else ""
 
     def blocked_response(exc: BlockedRequest, blocked_adapter: ProviderAdapter) -> JSONResponse:
         # A block-mode rule matched: fail closed before any upstream
@@ -5930,7 +5947,7 @@ def _unscanned_body_refused(
     request: Request,
     path: str,
     started: float,
-    code: str | None = None,
+    hint: str | None = None,
 ) -> JSONResponse:
     """A body the scanned-body rule refuses (``_unscanned_body``): recorded,
     provider-shaped, before the stored-object check, the session, redaction,
@@ -5938,8 +5955,8 @@ def _unscanned_body_refused(
     row either. The message names the body's kind and why the rule holds
     (``clause``), never the content."""
     message = f"llm-redact: {unreadable.message}, and {clause}; the request was not forwarded"
-    if code is not None:
-        message += f"; {allow_hint(code)}"
+    if hint is not None:
+        message += f"; {hint}"
     state.record_request(
         session=state.config.vault.session,
         provider=provider_name,

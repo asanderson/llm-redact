@@ -346,6 +346,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``public_origin() -> str | None``",
         "``bind_sessions(store: SessionStore) -> None``",
         "``bind_connections(control: ConnectionControl) -> None``",
+        "``approves_overrides(subject: str) -> bool``",
     ),
     "SessionRouter": (
         "``is_durable(session_id) -> bool``",

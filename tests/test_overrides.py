@@ -30,6 +30,7 @@ from llm_redact.config import Config, ProviderConfig
 from llm_redact.detection.engine import DetectionConfig
 from llm_redact.overrides import (
     CODE_LENGTH,
+    DASHBOARD_HINT,
     OverrideError,
     OverrideStore,
     allow_hint,
@@ -82,6 +83,12 @@ class SubjectGate:
 
     def public_origin(self) -> None:
         return None
+
+    def approves_overrides(self, subject: str) -> bool:
+        # carol cannot sign in to the dashboard: she cannot approve.
+        if subject == "dave":
+            raise RuntimeError("directory down")
+        return subject != "carol"
 
     def status(self) -> dict[str, Any]:
         return {}
@@ -462,13 +469,17 @@ async def test_only_the_requester_uses_and_approves_its_override(
         refused = await client.post(
             "/v1/chat/completions", json=_chat(f"mail {EMAIL}"), headers=alice
         )
-        code = _code(refused)
+        # A named user approves in the dashboard: the hint says so (the
+        # code is the CLI's, which approves only the operator's refusals).
+        message = refused.json()["error"]["message"]
+        assert message.endswith(DASHBOARD_HINT) and "llm-redact override" not in message
+        (pending,) = _store(tmp_path).entries()
         # The operator (CLI, no subject) and another user cannot approve it.
         with pytest.raises(OverrideError, match="another requester"):
-            _store(tmp_path).approve("always", approver=None, code=code)
+            _store(tmp_path).approve("always", approver=None, pending_id=pending.id)
         with pytest.raises(OverrideError, match="another requester"):
-            _store(tmp_path).approve("always", approver="bob", code=code)
-        _store(tmp_path).approve("always", approver="alice", code=code)
+            _store(tmp_path).approve("always", approver="bob", pending_id=pending.id)
+        _store(tmp_path).approve("always", approver="alice", pending_id=pending.id)
         assert (
             await client.post("/v1/chat/completions", json=_chat(f"mail {EMAIL}"), headers=alice)
         ).status_code == 200
@@ -479,6 +490,29 @@ async def test_only_the_requester_uses_and_approves_its_override(
         assert (
             await client.post("/v1/chat/completions", json=_chat(f"mail {EMAIL}"), headers=KEY)
         ).status_code == 400
+
+
+@pytest.mark.parametrize("user", ["carol", "dave", "erin"])
+async def test_no_hint_for_a_named_user_who_cannot_approve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user: str
+) -> None:
+    """A named user the gate does not let approve (carol), a gate whose
+    answer fails (dave), or a gate without ``approves_overrides`` (erin):
+    the refusal carries no hint it could not act on, and no code is minted."""
+    if user == "erin":
+        monkeypatch.delattr(SubjectGate, "approves_overrides")
+    _gated(monkeypatch)
+    upstream = Upstream()
+    app = _app(tmp_path, upstream)
+    async with _client(app) as client:
+        refused = await client.post(
+            "/v1/chat/completions",
+            json=_chat(f"mail {EMAIL}"),
+            headers={**KEY, "x-test-user": user},
+        )
+    assert refused.status_code == 400
+    assert "to allow" not in refused.text
+    assert not (tmp_path / "overrides.db").exists()
 
 
 async def test_the_dashboard_endpoints_serve_the_admitted_subject_only(

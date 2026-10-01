@@ -94,7 +94,9 @@ and tags `vX.Y.Z`.
   types (a route rule for the body kinds) until `llm-redact override revoke`.
   `llm-redact override list` shows pending codes and rules without values.
   Approvals are bound to the requester: the access gate's admitted subject,
-  else the local operator. An approved value is FORWARDED unredacted, like
+  else the local operator. A named user's refusal carries a code only when
+  the gate's new optional `AccessGate.approves_overrides(subject)` says they
+  can approve (in the dashboard); its hint then names the dashboard. An approved value is FORWARDED unredacted, like
   warn mode. Every use is marked `override: once|always` on the recent,
   events and audit rows (new `AuditRecord.override` field). Uses are counted
   in `/status` `overrides` and `llm_redact_overrides_used_total{kind}`, a

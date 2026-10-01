@@ -101,9 +101,13 @@ approval:
 - **llm-redact-pro named users**: the requester is the admitted user. Their
   refusal codes, one-time grants and every-time rules belong to them. Another
   user can neither use nor approve them. They approve in the dashboard, signed
-  in as themselves (`[auth.dashboard]`). The CLI, as the local operator,
-  refuses to approve a named user's refusal. It can still list and revoke
-  anything.
+  in as themselves (`[auth.dashboard]`), so their refusal says `to allow:
+  Allow once | Always allow under Refusal overrides in the llm-redact
+  dashboard` instead of naming the CLI. A user the access gate does not let
+  approve (llm-redact-pro: anyone who cannot sign in to the dashboard, which
+  admits administrators) gets no code and no hint, since they could not act
+  on it. The CLI, as the local operator, refuses to approve a named user's
+  refusal. It can still list and revoke anything.
 
 The endpoints behind the dashboard buttons are core:
 

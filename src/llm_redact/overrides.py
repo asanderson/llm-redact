@@ -141,6 +141,13 @@ def allow_hint(code: str) -> str:
     return f"to allow: llm-redact override {code} --once | --always"
 
 
+# A named user's refusal (an access gate admitted them): approved signed in
+# to the dashboard, where it is listed — the code is the CLI's, not theirs.
+DASHBOARD_HINT = (
+    "to allow: Allow once | Always allow under Refusal overrides in the llm-redact dashboard"
+)
+
+
 def _code_hash(code: str) -> str:
     return hashlib.sha256(_CODE_DOMAIN + code.encode("ascii")).hexdigest()
 
@@ -729,9 +736,14 @@ class OverrideScope:
     consume them in ``commit`` once the request passes). Any store fault
     reads as "no override" — the refusal stands (fail closed)."""
 
-    def __init__(self, store: OverrideStore, subject: str) -> None:
+    def __init__(self, store: OverrideStore, subject: str, *, approvable: bool = True) -> None:
         self._store = store
         self.subject = subject
+        # Whether this requester can approve a refusal at all (the local
+        # operator always — the CLI; a named user only when the access gate
+        # says it can, in the dashboard). No code is minted, and no hint
+        # promised, for one that cannot; its approved rules still apply.
+        self.approvable = approvable
         self._snap: _Snapshot | None = None
         # (type, value) pairs refused: held in memory for this request only
         # (the request body holds them anyway), hashed when a code is minted.
@@ -788,8 +800,9 @@ class OverrideScope:
     def refusal_code(self, kind: str, provider: str, method: str, route: str) -> str | None:
         """Mint the code for the refusal this request is about to be
         answered with, or None when it cannot carry one (a value refusal
-        that refused no value through this scope, a store fault)."""
-        if kind in VALUE_KINDS and not self._refused:
+        that refused no value through this scope, a requester who cannot
+        approve it, a store fault)."""
+        if not self.approvable or (kind in VALUE_KINDS and not self._refused):
             return None
         try:
             return self._store.record_pending(
@@ -798,6 +811,15 @@ class OverrideScope:
         except Exception as exc:  # noqa: BLE001 — the refusal stands without a code
             logger.warning("overrides: no code minted (%s)", type(exc).__name__)
             return None
+
+    def refusal_hint(self, kind: str, provider: str, method: str, route: str) -> str | None:
+        """The text telling this requester how to allow the refusal (its code
+        minted), or None when there is none: the local operator runs the CLI
+        with the code; a named user approves in the dashboard."""
+        code = self.refusal_code(kind, provider, method, route)
+        if code is None:
+            return None
+        return allow_hint(code) if not self.subject else DASHBOARD_HINT
 
     def commit(self) -> tuple[bool, str | None]:
         """Consume what this request used, as it passes: ``(ok, marker)``,

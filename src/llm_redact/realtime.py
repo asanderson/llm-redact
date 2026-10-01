@@ -1648,7 +1648,13 @@ async def _relay(
                     if frame_scope is not None
                     else None
                 )
-                await close_on_policy(blocked_reason(blocked.detector_type, allow_code))
+                await close_on_policy(
+                    blocked_reason(
+                        blocked.detector_type,
+                        allow_code,
+                        named=frame_scope is not None and bool(frame_scope.subject),
+                    )
+                )
                 return
             except _OverrideRaced as raced:
                 logger.info("WS %s -> refused (a one-time override could not be used)", path)
@@ -1760,13 +1766,18 @@ OVERRIDE_FAULT_REASON = (
 )
 
 
-def blocked_reason(detector_type: str, code: str | None) -> str:
-    """The 1008 close reason for a block-mode value: the type, and the
-    refusal's code when there is one — the longest wording that fits a
-    close frame's 123 bytes, so the code is never cut off."""
+def blocked_reason(detector_type: str, code: str | None, *, named: bool = False) -> str:
+    """The 1008 close reason for a block-mode value: the type, and how to
+    allow it when there is a code — the CLI with the code for the local
+    operator, the dashboard for a ``named`` user — the longest wording that
+    fits a close frame's 123 bytes, so the hint is never cut off."""
     if code is None:
         return f"blocked by llm-redact policy ({detector_type})"
-    hint = f"llm-redact override {code} --once|--always"
+    hint = (
+        "Refusal overrides in the llm-redact dashboard"
+        if named
+        else f"llm-redact override {code} --once|--always"
+    )
     for reason in (
         f"blocked by llm-redact policy ({detector_type}); to allow: {hint}",
         f"blocked ({detector_type}); allow: {hint}",

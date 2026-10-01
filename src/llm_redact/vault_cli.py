@@ -21,7 +21,12 @@ from typing import TYPE_CHECKING
 
 from llm_redact.config import apply_env_overrides, dial_url, load_config
 from llm_redact.placeholders import MAX_TOKEN_NUMBER, canonicalize
-from llm_redact.vault import _RETIRED_TABLE, VaultKeyError, default_vault_path, prune_idle_sessions
+from llm_redact.vault import (
+    VaultKeyError,
+    default_vault_path,
+    ensure_side_tables,
+    prune_idle_sessions,
+)
 
 if TYPE_CHECKING:
     # Type-only import against the plugin-API Protocol: the concrete cipher is
@@ -249,9 +254,10 @@ def run_sessions_prune(args: argparse.Namespace) -> int:
             print("aborted")
             conn.close()
             return 1
-    # A database no proxy of this version has opened yet lacks the table
-    # the delete retires the sessions' numbers in.
-    conn.execute(_RETIRED_TABLE)
+    # A database no proxy of this version has opened yet lacks the tables
+    # the delete retires the sessions' numbers in and drops their handles
+    # from.
+    ensure_side_tables(conn)
     # The idle check is repeated inside the delete's write transaction: a
     # session used since the listing above is kept.
     deleted = prune_idle_sessions(conn, days)

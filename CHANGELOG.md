@@ -12,6 +12,29 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- A durable Live resumption handle map for plugins: the sqlite and RDBMS vault managers
+  offer the OPTIONAL members `record_handle_session(handle_digest, session_id, *,
+  replaces=())` and `lookup_handle_session(handle_digest)` (documented on
+  `plugin_api.VaultManager`; llm-redact-pro uses them so a Gemini / Vertex AI Live
+  resumption handle survives a restart and works on every replica sharing the vault).
+  Only the plugin's digest of a handle is stored, never a handle. A new table
+  (sqlite `handle_sessions`, RDBMS `llm_redact_handle_sessions`) is created on open; an
+  RDBMS user that may not create it refuses to start naming the table, its DDL and the
+  privileges it needs (`SELECT, INSERT, DELETE`: every whole-session delete empties it;
+  each missing RDBMS table's refusal now names its grants).
+  Rows are trimmed in insertion order (a 64-bit counter), never by timestamp: each
+  session keeps its newest 1,024, and beyond 10,000 rows in all only rows of sessions
+  holding no mappings go, so another session's traffic never strands a live session's
+  newest handles; the
+  `replaces` digests (the same connection's superseded handles, same session only) are
+  deleted in the write's own transaction. Every whole-session delete (TTL prune, `POST
+  /__llm-redact/sessions/prune`, `llm-redact sessions prune`, `SessionStore.forget`)
+  removes the session's rows in its own transaction, so a handle into a
+  pruned-and-recreated session is unknown. A fault is contained: a failed write records
+  nothing, a failed read answers None (counted as `bookkeeping_errors_total{stage=
+  "handle_map"}`, logged once per outage by exception type; reads and writes are separate
+  outages, so failing writes beside working reads never log a false recovery). The
+  in-memory manager keeps no durable map (its members record nothing and answer None).
 - `WriteAheadAudit` (re-exported from `plugin_api`) documents an OPTIONAL member
   `amend(token, entry) -> None`, read once at startup via `getattr`. With `[audit]
   required`, an upload whose binary parts go to the upload inspector writes its START row

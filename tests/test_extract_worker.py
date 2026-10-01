@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import types
 import zipfile
 from typing import Any
 
@@ -1642,8 +1643,12 @@ def test_main_reads_stdin_and_writes_one_json_object(monkeypatch: pytest.MonkeyP
 
 
 def test_apply_limits_sets_each_cap_and_skips_refused_ones(monkeypatch: pytest.MonkeyPatch) -> None:
-    import resource
-
+    # A stand-in `resource` module (POSIX only: the real one is absent on
+    # Windows, where the full suite runs too).
+    resource = types.SimpleNamespace(
+        RLIMIT_AS=1, RLIMIT_DATA=2, RLIMIT_CPU=3, RLIMIT_FSIZE=4, RLIMIT_CORE=5, RLIMIT_NOFILE=6
+    )
+    monkeypatch.setitem(sys.modules, "resource", resource)
     calls: list[tuple[int, tuple[int, int]]] = []
 
     def setrlimit(which: int, value: tuple[int, int]) -> None:
@@ -1651,13 +1656,14 @@ def test_apply_limits_sets_each_cap_and_skips_refused_ones(monkeypatch: pytest.M
         if which == resource.RLIMIT_AS:
             raise ValueError("not on this platform")
 
-    monkeypatch.setattr(resource, "setrlimit", setrlimit)
+    resource.setrlimit = setrlimit
     apply_limits(256 << 20, 7)
     limits = dict(calls)
     assert limits[resource.RLIMIT_CPU] == (7, 7)
     assert limits[resource.RLIMIT_FSIZE] == (0, 0)
     assert limits[resource.RLIMIT_DATA] == (256 << 20, 256 << 20)
     assert resource.RLIMIT_AS in limits  # attempted, refused, skipped
+    assert len(limits) == 6  # RLIMIT_NPROC absent from this module: skipped
 
 
 def test_apply_limits_applies_none_without_resource_limits(monkeypatch: pytest.MonkeyPatch) -> None:

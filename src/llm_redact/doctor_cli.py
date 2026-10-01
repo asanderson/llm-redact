@@ -762,7 +762,8 @@ def _check_overrides_off(report: _Report, counts: dict[str, int], path: Path, en
             f"refusal overrides are off, but their store ({path}) still holds"
             f" {counts['always']} every-time rule(s) and {counts['once']} one-time"
             f" grant(s): inert now, applied again if {enable} — review them with"
-            " `llm-redact override list`, or delete the file to drop them",
+            " `llm-redact override list` and drop them with `llm-redact override revoke ID`"
+            " (it works while off), or delete the file to drop them all",
         )
         return False
     report.line(

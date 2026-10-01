@@ -413,10 +413,11 @@ def _store_digest(db: Path) -> str:
 def test_every_form_names_the_setting_while_overrides_are_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Off (a config that does not opt in): approve and revoke exit 1 naming
-    `[overrides] enabled`, never ask the terminal and touch nothing; list
+    """Off (a config that does not opt in): approve exits 1 naming
+    `[overrides] enabled`, never asks the terminal and touches nothing; list
     prints what the store holds (value-free) with a line saying it is inert,
-    and exits 1 too; a config that cannot be parsed exits 2."""
+    and exits 1 too; a config that cannot be parsed exits 2. (Revoke:
+    test_revoke_narrows_while_overrides_are_off.)"""
     off = tmp_path / "off.toml"
     off.write_text("")  # the default: overrides off
     db = tmp_path / "o.db"
@@ -440,11 +441,6 @@ def test_every_form_names_the_setting_while_overrides_are_off(
         assert "[overrides] enabled = true" in err and "off" in err
         assert code not in err and EMAIL not in err
     assert asked == []
-    (rule,) = [e for e in OverrideStore(db, read_only=True).entries() if e.state == "always"]
-    assert _run("revoke", rule.id, "--config", str(off), "--db", str(db)) == 1
-    assert "[overrides] enabled = true" in capsys.readouterr().err
-    assert _run("revoke", "--config", str(off), "--db", str(db)) == 1
-    capsys.readouterr()
 
     assert _run("list", "--config", str(off), "--db", str(db)) == 1
     listed = capsys.readouterr()
@@ -497,6 +493,7 @@ def test_doctor_warns_about_approvals_kept_while_overrides_are_off(tmp_path: Pat
     assert warn["level"] == "WARN" and "inert" in warn["message"]
     assert "1 every-time rule(s) and 1 one-time grant(s)" in warn["message"]
     assert str(db) in warn["message"] and "[overrides] enabled = true" in warn["message"]
+    assert "override revoke ID" in warn["message"]
     assert EMAIL not in warn["message"]
     assert _check_overrides(_Report(json_mode=True), off) is False
     report = _Report(json_mode=True)
@@ -578,3 +575,47 @@ async def test_off_names_the_config_it_read_not_the_running_proxy(
     assert _run(code, "--once", "--config", str(team)) == 0
     assert asked == [True]
     assert [e.state for e in OverrideStore(db, read_only=True).entries()] == ["once"]
+
+
+def test_revoke_narrows_while_overrides_are_off(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Off, a store's every-time rules are inert — but they all apply again
+    the moment overrides are turned on. Revoking one must not need that
+    window (every kept rule live, the ones meant to go included): revoke
+    drops exactly the named record while off, says overrides are off, exits
+    1 like list, and never creates a missing store."""
+    off = tmp_path / "off.toml"
+    off.write_text("")
+    db = tmp_path / "o.db"
+    writer = OverrideStore(db)
+    for value in ("a@corp.example", "b@corp.example"):
+        code = writer.record_pending("block", "", "openai", "POST", "/v1/x", [("EMAIL", value)])
+        writer.approve("always", approver=None, code=code)
+    writer.record_pending("block", "", "openai", "POST", "/v1/x", [("EMAIL", EMAIL)])
+    writer.close()
+    entries = OverrideStore(db, read_only=True).entries()
+    drop, keep = [e for e in entries if e.state == "always"]
+    (code_entry,) = [e for e in entries if e.state == "pending"]
+    capsys.readouterr()
+
+    assert _run("revoke", drop.id, "--config", str(off), "--db", str(db)) == 1
+    done = capsys.readouterr()
+    assert f"revoked {drop.id}" in done.out
+    assert "[overrides] enabled = true" in done.err and "made all the same" in done.err
+    assert _run("revoke", code_entry.id, "--config", str(off), "--db", str(db)) == 1
+    assert f"revoked {code_entry.id}" in capsys.readouterr().out
+    assert [e.id for e in OverrideStore(db, read_only=True).entries()] == [keep.id]
+    # An unknown id, a missing id and a missing store: nothing revoked, nothing created.
+    assert _run("revoke", drop.id, "--config", str(off), "--db", str(db)) == 1
+    assert "no override" in capsys.readouterr().err
+    assert _run("revoke", "--config", str(off), "--db", str(db)) == 2
+    capsys.readouterr()
+    missing = tmp_path / "none.db"
+    assert _run("revoke", "r1", "--config", str(off), "--db", str(missing)) == 1
+    assert not missing.exists()
+    # On, the same command exits 0.
+    on = tmp_path / "on.toml"
+    on.write_text("[overrides]\nenabled = true\n")
+    assert _run("revoke", keep.id, "--config", str(on), "--db", str(db)) == 0
+    assert OverrideStore(db, read_only=True).entries() == []

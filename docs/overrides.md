@@ -214,15 +214,19 @@ Off is the default, and turning them off again later is the same state:
   approved while overrides were on) are **inert**: the proxy never reads
   them, so the values they cover are refused like any other. They stay on
   disk and apply again the moment `enabled = true` is set and the proxy
-  restarts (a one-time grant only within its `ttl_minutes`). `llm-redact doctor` WARNs while the store still holds any; delete
-  the store file to drop them for good.
+  restarts (a one-time grant only within its `ttl_minutes`). `llm-redact doctor` WARNs while the store still holds any; drop
+  them one by one with `llm-redact override revoke ID` (it works while off:
+  a revocation only narrows, so clearing one never needs a window with every
+  kept rule live), or all at once by deleting the store file.
 - `GET` and `POST /__llm-redact/overrides…` answer a local 404 naming
   `[overrides] enabled`.
-- `llm-redact override CODE --once|--always` and `llm-redact override revoke
-  ID` exit 1 naming the setting and touch nothing. `llm-redact override list
-  [--json]` still prints what the store holds (value-free, read-only) so you
-  can see what would apply again, then says on stderr that a proxy running
-  with that config applies none of those records, and exits 1. The CLI
+- `llm-redact override CODE --once|--always` exits 1 naming the setting and
+  touches nothing. `llm-redact override list [--json]` still prints what the
+  store holds (value-free, read-only) so you can see what would apply again,
+  then says on stderr that a proxy running with that config applies none of
+  those records, and exits 1. `llm-redact override revoke ID` still drops
+  the record (and never creates a missing store), then says the same on
+  stderr and exits 1 too. The CLI
   reads its config the way `serve` does (`--config`, `LLM_REDACT_CONFIG`,
   the default search) and names the file it read, or that it found none; a
   config it cannot parse exits 2.

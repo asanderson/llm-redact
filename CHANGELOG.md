@@ -51,9 +51,11 @@ and tags `vX.Y.Z`.
   the proxy opens and writes no override store, and approvals a store kept from an
   earlier opt-in are inert (never applied; they apply again once overrides are turned
   back on). `/__llm-redact/overrides*` answer a local 404 naming `[overrides] enabled`;
-  `llm-redact override CODE|revoke` exit 1 naming the setting and touch nothing;
+  `llm-redact override CODE` exits 1 naming the setting and touches nothing;
   `override list` still prints what the store holds (value-free) with a line saying a
-  proxy on that config applies none of it, and exits 1 — each names the config file it
+  proxy on that config applies none of it, and exits 1; `override revoke ID` still
+  drops the record (a revocation only narrows: clearing an inert rule never needs a
+  window with every kept rule live) and exits 1 the same way — each names the config file it
   read (or that it found none) and points at `--config PATH`, never claiming what a
   proxy started with another file does; a config the command cannot parse exits 2;
   `/status` reports `{"enabled": false}`; `doctor` prints an informational line, or a

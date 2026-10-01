@@ -27,8 +27,8 @@ configured with mode = "block"; to allow: llm-redact override 7K3M9QX2HD4P --onc
 When the proxy was started with an explicit config file that the command
 would not find by its own default search — `serve --config PATH`, or
 `LLM_REDACT_CONFIG` set for the proxy (your shell may not set it) — the hint
-names that file, so the command reads the same config, and the same override
-store, as the running proxy:
+names that file, so the command reads the same config file as the running
+proxy:
 
 ```
 to allow: llm-redact override --config /srv/llm-redact/proxy.toml 7K3M9QX2HD4P --once | --always
@@ -44,6 +44,17 @@ path only when the whole reason still fits 123 bytes (about 49 characters of
 path, after shortening the wording and dropping the detector type); a longer
 path falls back to the plain hint there — the HTTP refusal of the same value
 carries it whole. A path that is not valid UTF-8 is never put in a hint.
+
+The hint names the config file, not the override store. The command reaches
+the store the proxy uses when that file's `[overrides] path` is an absolute
+path; an unset `path` (the XDG data directory), a `~` path or a relative one
+is resolved by each process against its own HOME/XDG_DATA_HOME or working
+directory. Run the command as the proxy's user from the same directory, or
+give `[overrides] path` an absolute path, when the proxy runs as a service
+account. Likewise "the default search would not find it" is judged with the
+proxy's own HOME and XDG_CONFIG_HOME: a proxy running as another user may
+print a `--config` your own search would also find (harmless), or none where
+yours finds another file — then pass `--config` yourself.
 
 A **person** approves it, on the terminal:
 

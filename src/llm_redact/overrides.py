@@ -152,7 +152,9 @@ def allow_hint(code: str, config_arg: str | None = None) -> str:
     """The CLI hint for the local operator. ``config_arg`` (``hint_config``)
     names the config file the proxy was started with when the CLI's own
     default search would not find it: the command then reads the same
-    config — and so the same store — as the running proxy."""
+    config file as the running proxy (the same store when its ``[overrides]
+    path`` is absolute: an unset, ``~`` or relative one resolves against
+    each process's own home or working directory)."""
     if config_arg is None:
         return f"to allow: llm-redact override {code} --once | --always"
     return f"to allow: llm-redact override --config {config_arg} {code} --once | --always"

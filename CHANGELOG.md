@@ -66,10 +66,11 @@ and tags `vX.Y.Z`.
   with an explicit one (`serve --config PATH`, or `LLM_REDACT_CONFIG`) that the CLI's
   default search (the XDG file, else `/etc/llm-redact/config.toml`) would not find:
   `to allow: llm-redact override --config PATH CODE --once | --always` (absolute,
-  shell-quoted), so the command reads the same config and override store as the running
-  proxy. A realtime close reason carries the path only when the reason still fits 123
-  bytes (else the plain hint); a path that is not UTF-8 is never put in a hint. Logs are
-  unchanged.
+  shell-quoted), so the command reads the same config file as the running proxy (the
+  same override store when that file's `[overrides] path` is absolute; an unset, `~` or
+  relative path resolves against each process's own home or working directory). A
+  realtime close reason carries the path only when the reason still fits 123 bytes (else
+  the plain hint); a path that is not UTF-8 is never put in a hint. Logs are unchanged.
 - `redactor._resolve_overlaps` finds each candidate's deny-span overlap with
   `bisect_right` over the chosen deny spans' ends (same results): the old forward walk
   had a mutant that never terminated, costing the mutation job about half an hour.

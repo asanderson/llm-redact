@@ -4,8 +4,9 @@ find it.
 A proxy started with an explicit config file (``serve --config PATH``, or
 ``LLM_REDACT_CONFIG``) that is not what ``llm-redact override`` finds by its
 default search prints ``to allow: llm-redact override --config PATH CODE
---once | --always``: run as printed, the CLI reads the same config — and so
-the same override store — as the proxy. Otherwise the plain hint. A
+--once | --always``: run as printed, the CLI reads the same config file as
+the proxy (and so the same store for an absolute ``[overrides] path``).
+Otherwise the plain hint. A
 realtime close reason carries the path only when it fits the 123 bytes,
 else the plain hint."""
 
@@ -306,3 +307,19 @@ def test_a_lost_working_directory_gives_the_plain_hint(
     monkeypatch.setattr(os, "getcwd", gone)
     assert hint_config(Path("rel.toml"), {}) is None
     assert hint_config(tmp_path / "abs.toml", {}) == str(tmp_path / "abs.toml")
+
+
+def test_the_docs_promise_the_same_store_only_where_it_holds() -> None:
+    # The hint names the config FILE. The store it names is the same file
+    # for both processes only for an absolute ``[overrides] path``: an unset,
+    # relative or ``~`` path resolves against each process's own data
+    # directory, working directory or home. And the default-search
+    # comparison is the proxy's own (its HOME/XDG_CONFIG_HOME).
+    root = Path(__file__).resolve().parents[1]
+    overrides_doc = " ".join((root / "docs/overrides.md").read_text().split())
+    changelog = " ".join((root / "CHANGELOG.md").read_text().split())
+    for text in (overrides_doc, changelog):
+        assert "same config, and the same override store, as" not in text
+        assert "same config and override store as the running" not in text
+    assert re.search(r"`\[overrides\] path`[^.]*absolute", overrides_doc)
+    assert re.search(r"proxy's own[^.]*HOME", overrides_doc)

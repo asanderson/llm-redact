@@ -629,10 +629,11 @@ async def test_an_amendment_that_cannot_commit_refuses(
 async def test_an_amend_that_returns_an_awaitable_refuses(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # ``amend`` is synchronous: an ``async def`` one returns a coroutine the
-    # core never awaits, so nothing would be durable before the send. That
-    # is no amendment: the coroutine is closed unrun and the request refused
-    # 503 before any upstream contact, like an amendment that cannot commit.
+    # ``amend`` is synchronous: one answering a coroutine (an ``async def``
+    # amend is refused at startup) hands back what the core never awaits,
+    # so nothing would be durable before the send. That is no amendment:
+    # the coroutine is closed unrun and the request refused 503 before any
+    # upstream contact, like an amendment that cannot commit.
     class AsyncAmend(AmendingAudit):
         unawaited = Unawaited()
 

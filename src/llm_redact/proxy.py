@@ -225,6 +225,27 @@ def _synchronous_audit_answer(answer: object, member: str) -> None:
         raise AuditWriteError(f"write-ahead audit {member}() returned an awaitable")
 
 
+def _require_synchronous_audit(log: WriteAheadAudit, amend: object) -> None:
+    """Refuse at startup a write-ahead log whose ``begin``/``finalize``/
+    ``amend`` is declared ``async def`` (a coroutine or async-generator
+    function): its every answer would be refused per request
+    (``_synchronous_audit_answer``) — a 503 for every request, or a CRITICAL
+    END-row fault for every answer — so the deploy gate (``serve --check``)
+    must report it rather than call it OK. A synchronous member that answers
+    an awaitable is still refused per request."""
+    members = (("begin", log.begin), ("finalize", log.finalize), ("amend", amend))
+    asynchronous = [
+        f"{name}()"
+        for name, member in members
+        if inspect.iscoroutinefunction(member) or inspect.isasyncgenfunction(member)
+    ]
+    if asynchronous:
+        raise ConfigError(
+            "[audit] required = true needs synchronous write-ahead audit members;"
+            f" async def: {', '.join(asynchronous)}"
+        )
+
+
 def _finalize_audit(log: WriteAheadAudit, token: object, entry: AuditRecord) -> None:
     """Commit the END row ``token`` names; raises :class:`AuditWriteError`
     on a write fault, an awaitable answer included (closed unrun)."""
@@ -807,6 +828,7 @@ class ProxyState:
             self.write_ahead_audit = self.audit
             amend = getattr(self.audit, "amend", None)
             self.write_ahead_amend = amend if callable(amend) else None
+            _require_synchronous_audit(self.audit, self.write_ahead_amend)
         self.audit_s3: S3AuditSink | None
         self.audit_azure: AzureAuditSink | None
         self.audit_s3, self.audit_azure = registry.build_audit_sinks(config.audit)

@@ -357,8 +357,10 @@ and tags `vX.Y.Z`.
 ### Fixed
 - `[audit] required`: the write-ahead log's `begin` and `finalize` are synchronous, like
   `amend`. An `async def begin` returned a coroutine that counted as a valid START-row
-  token, so the request reached the upstream with no START row ever written; an
-  awaitable answer from `begin` is now closed unrun and refuses the request with the
+  token, so the request reached the upstream with no START row ever written. A member
+  declared `async def` (`begin`, `finalize` or `amend`) now refuses `[audit] required`
+  at startup (a ConfigError naming it, reported by `serve --check`); an awaitable
+  answer from a synchronous `begin` is closed unrun and refuses the request with the
   provider-shaped 503 of a START row that cannot be committed (HTTP, and realtime
   accept-then-close 1011, recorded, before any upstream contact). An awaitable answer
   from `finalize` is closed unrun and logged CRITICAL by type like any other END-row

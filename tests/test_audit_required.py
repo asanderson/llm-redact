@@ -15,6 +15,7 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Coroutine
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -23,6 +24,7 @@ import pytest
 import llm_redact.registry as registry_mod
 from license_fixtures import resolved
 from llm_redact.audit import AuditRecord, AuditWriteError
+from llm_redact.cli import main
 from llm_redact.config import AuditConfig, Config, ConfigError, ProviderConfig, parse_config
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
@@ -267,9 +269,9 @@ class Unawaited:
 
 
 class AsyncBeginAudit(FakeAudit):
-    """A write-ahead log whose ``begin`` answers a coroutine (what an
-    ``async def begin`` returns), which once counted as a valid token: no
-    START row written."""
+    """A write-ahead log whose SYNC ``begin`` answers a coroutine, which once
+    counted as a valid token: no START row written. (An ``async def begin``
+    is refused at startup: ``test_an_async_def_member_refuses_startup``.)"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -406,3 +408,49 @@ async def test_a_task_from_finalize_is_cancelled_and_logged(
     assert [task.cancelled() for task in fake.tasks] == [True]
     assert fake.late_rows == []  # never an END row after CRITICAL said it failed
     assert "audit write failed AFTER response (POST /v1/messages): AuditWriteError" in caplog.text
+
+
+# ------------------------------------------- async def members refuse startup
+
+
+def _async_member_audit(member: str) -> FakeAudit:
+    """A write-ahead log with ``member`` declared ``async def`` (an async
+    generator for ``amend``: ``async def`` with a ``yield`` is as unusable)."""
+
+    class AsyncMember(FakeAudit):
+        pass
+
+    async def coroutine_member(self: Any, *args: Any) -> object:
+        return 1
+
+    async def async_gen_member(self: Any, *args: Any) -> Any:
+        yield 1
+
+    setattr(AsyncMember, member, async_gen_member if member == "amend" else coroutine_member)
+    return AsyncMember()
+
+
+@pytest.mark.parametrize("member", ["begin", "finalize", "amend"])
+def test_an_async_def_member_refuses_startup(fake_registry: Registry, member: str) -> None:
+    # Every request would be refused 503 (or log CRITICAL at every END row):
+    # an ``async def`` member is a startup ConfigError naming the member, so
+    # `serve --check` — the deploy gate — reports it.
+    fake = _async_member_audit(member)
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    with pytest.raises(ConfigError, match=rf"synchronous.*\b{member}\(\)"):
+        create_app(_config(required=True))
+    # Without [audit] required the members are never called: no refusal.
+    create_app(_config(required=False))
+
+
+def test_serve_check_fails_on_an_async_begin(
+    fake_registry: Registry, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _async_member_audit("begin")
+    fake_registry.build_audit = lambda cfg: fake if cfg.enabled else None
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[audit]\nenabled = true\nrequired = true\n")
+    with pytest.raises(SystemExit) as exited:
+        main(["serve", "--check", "--config", str(config_file)])
+    assert exited.value.code == 1
+    assert "serve --check: FAIL:" in capsys.readouterr().err

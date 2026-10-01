@@ -20,7 +20,7 @@ and tags `vX.Y.Z`.
   stalls other requests. Until a write lands every lookup answers from the writer's
   in-process overlay (a `previous_response_id` or a Live resumption right after the
   answer is served as before); a whole-session delete erases its sessions' queued
-  writes; a failed write reads as unknown, counted under its stage (`response_id`,
+  and in-flight writes without ever waiting for the writer; a failed write reads as unknown, counted under its stage (`response_id`,
   `object_ids`, `handle_map`) and logged once per outage by exception type; at most
   10,000 writes wait (past that a record is kept in memory only, counted — after a
   restart it reads as unknown, refused or sealed, never a wrong value); shutdown waits

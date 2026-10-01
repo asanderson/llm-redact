@@ -26,12 +26,17 @@ hands them to a ``MapWriter`` instead:
   ``MAX_UNWRITTEN`` such records, the oldest forgotten first), so THIS
   process still answers for it — after a restart (or on another replica)
   it reads as unknown: refused or sealed, never a wrong value;
-- SESSION DELETES stay exact: a whole-session delete (prune, forget) runs
-  while holding the writer's ``deleting`` lock — so no write is in flight —
-  and turns every queued write of a deleted session into an ERASE of its
-  key, the overlay answering "absent" meanwhile: the map then reads exactly
-  as if those writes had landed before the delete removed them (a handle
-  or chain into a pruned-and-recreated session stays unknown);
+- SESSION DELETES stay exact and NEVER wait for the writer: a
+  whole-session delete (prune, forget — on the event loop) runs inside
+  ``deleting``, which only marks it active. Once it committed, every
+  queued write of a deleted session becomes an ERASE of its key, the write
+  IN FLIGHT is erased again right after it ran, and the overlay answers
+  "absent" meanwhile; the writer settles a write only while no delete is
+  active, so a delete that committed before (or while) the write ran is
+  always seen. The map then reads exactly as if those writes had landed
+  before the delete removed them (a handle or chain into a
+  pruned-and-recreated session stays unknown) — and a hung writer
+  connection never holds a delete, nor the loop it runs on;
 - FAULTS are contained and counted in the proxy's ``bookkeeping_errors``
   under the write's own stage (``response_id``, ``object_ids``,
   ``handle_map``), logged once per outage by exception TYPE only: the
@@ -177,9 +182,11 @@ class MapWriter:
         self._unwritten: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._thread: threading.Thread | None = None
         self._closed = False
-        # Held by the writer thread while it applies a write, and by a
-        # whole-session delete (``deleting``): never both at once.
-        self._write_lock = threading.Lock()
+        # Whole-session deletes inside ``deleting`` (the writer settles a
+        # write only while none is), and whether the write in flight must
+        # be erased after it ran (its session was deleted meanwhile).
+        self._deletes = 0
+        self._erase_in_flight = False
         # The event loop outcomes are posted to (the submitter's).
         self._loop: asyncio.AbstractEventLoop | None = None
         # Whether the queue is full (logged once per episode; loop only).
@@ -263,22 +270,32 @@ class MapWriter:
 
     @contextmanager
     def deleting(self) -> Iterator[Callable[[Iterable[str]], None]]:
-        """Hold the writer still for a whole-session delete: no write is in
-        flight inside the block. Call the yielded function with the
-        sessions the delete removed (after its COMMIT): their queued writes
-        become erases of their keys, and their overlay records read as
-        absent — exactly as if they had landed before the delete."""
-        with self._write_lock:
+        """Mark a whole-session delete active — never waiting for the
+        writer (a write may be in flight on its own connection meanwhile).
+        Call the yielded function with the sessions the delete removed
+        (after its COMMIT): their queued writes become erases of their
+        keys, a write of theirs in flight is erased again once it ran, and
+        their overlay records read as absent — exactly as if they had
+        landed before the delete. The writer settles no write while a
+        delete is active, so none slips between the two."""
+        with self._cond:
+            self._deletes += 1
+        try:
             yield self._deleted
+        finally:
+            with self._cond:
+                self._deletes -= 1
+                self._cond.notify_all()
 
     def _deleted(self, sessions: Iterable[str]) -> None:
         gone = set(sessions)
-        if not gone:
-            return
         with self._cond:
             for write in self._queue:
                 if write.session in gone:
                     write.run = write.erase
+            in_flight = self._in_flight
+            if in_flight is not None and in_flight.session in gone:
+                self._erase_in_flight = True
             for entry in self._overlay.values():
                 if isinstance(entry.value, str) and entry.value in gone:
                     entry.value = None
@@ -367,44 +384,65 @@ class MapWriter:
             return False
 
     def _apply_next(self, connection: Any) -> Any:
-        """Apply the oldest queued write (holding the write lock, so no
-        whole-session delete runs meanwhile), settle its overlay keys and
-        post its outcome; returns the connection (opened on first use)."""
+        """Apply the oldest queued write, erase it again when its session
+        was deleted while it ran, settle its overlay keys and post its
+        outcome; returns the connection (opened on first use)."""
+        with self._cond:
+            if not self._queue:
+                return connection
+            write = self._queue.popleft()
+            self._in_flight = write
+            self._erase_in_flight = False
+        run = write.run
         error: Exception | None = None
-        with self._write_lock:
-            with self._cond:
-                if not self._queue:
-                    return connection
-                write = self._queue.popleft()
-                self._in_flight = write
-            run = write.run
-            try:
-                if connection is None:
-                    connection = self._open_connection()
-                run(connection)
-            except Exception as exc:  # noqa: BLE001 — contained: counted, logged by type
-                error = exc
-            finally:
-                # Landed or not, the database answers for its keys now (a
-                # write that failed reads as unknown, as it did written
-                # synchronously).
-                with self._cond:
-                    for key in write.keys:
-                        entry = self._overlay.get(key)
-                        if entry is not None and entry.write is write:
-                            del self._overlay[key]
-        faults = write.faults
         try:
-            if error is not None:
-                self._post(faults.failed, error)
-            elif faults.failing:
-                self._post(faults.succeeded)
-        finally:
-            # Only now is it done: a drain that returns has its outcome posted.
-            with self._cond:
-                self._in_flight = None
-                self._cond.notify_all()
+            while True:
+                try:
+                    if connection is None:
+                        connection = self._open_connection()
+                    run(connection)
+                except Exception as exc:  # noqa: BLE001 — contained: counted, logged by type
+                    error = exc
+                if self._settled(write):
+                    break
+                # Its session was deleted while it ran: erase what it wrote.
+                run = write.erase
+        except BaseException:
+            self._settle(write)
+            raise
+        faults = write.faults
+        if error is not None:
+            self._post(faults.failed, error)
+        elif faults.failing:
+            self._post(faults.succeeded)
+        # Only now is it done: a drain that returns has its outcome posted.
+        with self._cond:
+            self._in_flight = None
+            self._cond.notify_all()
         return connection
+
+    def _settled(self, write: MapWrite) -> bool:
+        """After ``write`` ran: wait until no whole-session delete is
+        active, then settle its overlay keys — or, when a delete removed its
+        session meanwhile, answer False (it must be erased first)."""
+        with self._cond:
+            while self._deletes:
+                self._cond.wait()
+            if self._erase_in_flight:
+                self._erase_in_flight = False
+                return False
+            self._settle(write)
+            return True
+
+    def _settle(self, write: MapWrite) -> None:
+        """Landed or not, the database answers for ``write``'s keys now (a
+        write that failed reads as unknown, as it did written
+        synchronously)."""
+        with self._cond:
+            for key in write.keys:
+                entry = self._overlay.get(key)
+                if entry is not None and entry.write is write:
+                    del self._overlay[key]
 
     def _post(self, outcome: Callable[..., None], *args: Any) -> None:
         """Run ``outcome`` on the submitting event loop (the counters and

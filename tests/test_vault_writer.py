@@ -248,6 +248,121 @@ def test_a_session_deleted_before_its_writes_land_stays_unknown(
     assert other.lookup_response_session("resp_keep") == "keep"
 
 
+def _delete(how: str, manager: Any) -> None:
+    if how == "forget":
+        assert manager.forget_sessions(["s"]) == 1
+    else:
+        _backdate(manager)
+        assert manager.prune_sessions(30, exclude=frozenset({"keep"})) == 1
+
+
+def _held_after_run(writer: MapWriter) -> tuple[threading.Event, threading.Event]:
+    """Hold the OLDEST queued write once it ran (committed) and before the
+    writer settles it: ``ran`` is set then; the write finishes once
+    ``release`` is set. Call while the writer is ``_paused``."""
+    ran, release = threading.Event(), threading.Event()
+    write = writer._queue[0]
+    inner = write.run
+
+    def run(conn: Any) -> None:
+        inner(conn)
+        ran.set()
+        assert release.wait(30)
+
+    write.run = run
+    return ran, release
+
+
+@pytest.mark.parametrize("how", ["forget", "prune"])
+def test_a_delete_never_waits_for_a_write_in_flight(how: str, open_instance: Factory) -> None:
+    """A whole-session delete runs on the event loop (the TTL prune, POST
+    /sessions/prune, a purge): a write held up on the writer's own
+    connection (a slow disk, a hung RDBMS lane) must never hold it — and
+    the write, landing after the delete, is erased again."""
+    manager = open_instance()
+    other = open_instance()
+    manager.get("s").placeholder_for("EMAIL", "ada@corp.example")
+    manager.get("keep").placeholder_for("EMAIL", "bob@corp.example")
+    writer = _background(manager)
+    gate = _gate(writer)
+    manager.record_response_session("resp_1", "s")
+    manager.record_handle_session(H + "a", "s")
+    manager.record_response_session("resp_keep", "keep")
+    deadline = time.monotonic() + 10
+    while writer._in_flight is None:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    # A safety net only: before the fix the delete waited for this.
+    safety = threading.Timer(15, gate.set)
+    safety.start()
+    try:
+        _delete(how, manager)
+        assert not gate.is_set()  # the delete returned while the write was held
+        assert _records(manager)["resp"] is None
+        assert manager.lookup_handle_session(H + "a") is None
+    finally:
+        safety.cancel()
+        gate.set()
+    assert manager.drain_map_writes(10) == 0
+    # The held write ran after the delete committed: erased, never resurrected.
+    assert other.lookup_response_session("resp_1") is None
+    assert other.lookup_handle_session(H + "a") is None
+    assert other.lookup_response_session("resp_keep") == "keep"
+
+
+@pytest.mark.parametrize("how", ["forget", "prune"])
+def test_a_session_deleted_after_its_write_ran_stays_deleted(
+    how: str, open_instance: Factory
+) -> None:
+    manager = open_instance()
+    other = open_instance()
+    manager.get("s").placeholder_for("EMAIL", "ada@corp.example")
+    manager.get("keep").placeholder_for("EMAIL", "bob@corp.example")
+    writer = _background(manager)
+    with _paused(writer):
+        manager.record_response_session("resp_1", "s")
+        ran, release = _held_after_run(writer)
+    safety = threading.Timer(15, release.set)
+    safety.start()
+    try:
+        assert ran.wait(10)  # committed, not yet settled
+        _delete(how, manager)
+        assert not release.is_set()
+        assert manager.lookup_response_session("resp_1") is None
+    finally:
+        safety.cancel()
+        release.set()
+    assert manager.drain_map_writes(10) == 0
+    assert manager.lookup_response_session("resp_1") is None
+    assert other.lookup_response_session("resp_1") is None
+
+
+def test_the_writer_settles_no_write_while_a_delete_is_active(tmp_path: Path) -> None:
+    """A delete is marked active before it commits and reports its sessions
+    after: a write that ran meanwhile (its row possibly written AFTER the
+    delete's COMMIT) waits for the report, then is erased — never settled
+    in between, where its row would outlive the delete."""
+    manager = SqliteVaultManager(tmp_path / "vault.db")
+    writer = _background(manager)
+    with _paused(writer):
+        manager.record_response_session("resp_1", "s")
+        manager.record_response_session("resp_2", "t")
+        ran, release = _held_after_run(writer)
+    release.set()
+    with writer.deleting() as deleted:
+        assert ran.wait(10)
+        time.sleep(0.05)  # room for a writer that would not wait
+        with writer._cond:
+            assert writer._in_flight is not None  # ran, but not settled
+            assert ("row", "resp_1") in writer._overlay
+        deleted(["s"])
+    assert manager.drain_map_writes(10) == 0
+    with sqlite3.connect(tmp_path / "vault.db") as conn:
+        rows = conn.execute("SELECT response_id FROM response_sessions").fetchall()
+    assert rows == [("resp_2",)]
+    manager.close()
+
+
 def _backdate(manager: Any) -> None:
     from test_vault_deletion import _age_all
 

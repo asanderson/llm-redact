@@ -168,20 +168,45 @@ def hint_config(loaded: Path | None, env: Mapping[str, str]) -> str | None:
     default search without that variable (the XDG file, else
     /etc/llm-redact/config.toml). A path that does not encode as UTF-8 is
     left out (the hint could not carry it; the plain hint stands). Computed
-    once at startup: overrides are restart-only."""
+    once at startup: overrides are restart-only.
+
+    The default search is this process's own (its HOME/XDG_CONFIG_HOME, as
+    ``serve`` searched); ``env`` supplies ``LLM_REDACT_CONFIG`` only. A
+    search this process cannot check (EACCES on an unreadable HOME) never
+    stops startup — ``serve --config`` never needed it: the explicit file is
+    named (a redundant ``--config`` is harmless, a missing one is not)."""
     env_path = env.get("LLM_REDACT_CONFIG")
     explicit = loaded if loaded is not None else (Path(env_path) if env_path else None)
     if explicit is None:
         return None
-    searched = next((p for p in (default_config_path(), ETC_CONFIG_PATH) if p.exists()), None)
-    if searched is not None and searched.resolve() == explicit.resolve():
+    if _searched_config(explicit):
         return None
-    text = str(explicit.absolute())
+    try:
+        text = str(explicit.absolute())
+    except OSError:
+        # A working directory gone from under a relative path leaves no
+        # absolute path to print: the plain hint (the off note names
+        # --config).
+        return None
     try:
         text.encode("utf-8")
     except UnicodeEncodeError:
         return None
     return shlex.quote(text)
+
+
+def _searched_config(explicit: Path) -> bool:
+    """Whether the CLI's default search (without LLM_REDACT_CONFIG) finds
+    ``explicit``. A search this process cannot check — a candidate it may
+    not stat, a path it cannot resolve — reads as another file: the hint
+    then names the explicit one, which the CLI reads without searching."""
+    try:
+        for candidate in (default_config_path(), ETC_CONFIG_PATH):
+            if candidate.exists():
+                return candidate.resolve() == explicit.resolve()
+    except OSError:
+        pass
+    return False
 
 
 # Refusal overrides are OFF by default: an operator opts in with this

@@ -37,7 +37,9 @@ to allow: llm-redact override --config /srv/llm-redact/proxy.toml 7K3M9QX2HD4P -
 The path is absolute (as the proxy resolved it) and shell-quoted when it
 holds spaces. A proxy started with the file the default search finds (the
 XDG `~/.config/llm-redact/config.toml`, else `/etc/llm-redact/config.toml`),
-or with none, prints the plain hint. A realtime close reason carries the
+or with none, prints the plain hint; a proxy that cannot check that search
+(a HOME it may not read) names its file all the same, and never refuses to
+start over it. A realtime close reason carries the
 path only when the whole reason still fits 123 bytes (about 49 characters of
 path, after shortening the wording and dropping the detector type); a longer
 path falls back to the plain hint there — the HTTP refusal of the same value

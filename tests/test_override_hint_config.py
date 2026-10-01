@@ -251,3 +251,58 @@ async def test_a_realtime_close_reason_names_the_config(
     reason = closed.value.rcvd.reason
     assert len(reason.encode()) <= 123 and EMAIL not in reason
     assert f"llm-redact override --config {config_file} " in reason
+
+
+# ------------------------------------------------------- unreadable search
+
+
+def _unreadable_default_search(monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Stat of the XDG candidate fails with EACCES, as for a proxy whose
+    HOME it may not read (``sudo -u svc`` keeping HOME=/root)."""
+    searched = default_config_path()
+    real_stat = Path.stat
+
+    def stat(self: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        if self == searched:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    return searched
+
+
+def test_an_unreadable_default_search_names_the_explicit_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The CLI's default search cannot be checked: the explicit file is named
+    # (a redundant --config is harmless; a missing one points elsewhere).
+    _unreadable_default_search(monkeypatch)
+    explicit = tmp_path / "proxy.toml"
+    assert hint_config(explicit, {}) == str(explicit)
+    assert hint_config(None, {"LLM_REDACT_CONFIG": str(explicit)}) == str(explicit)
+
+
+def test_serve_check_starts_with_an_unreadable_default_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `serve --config X` never needed the default search to start; the hint
+    # must not make an unreadable HOME a startup traceback.
+    config_file = _write_config(tmp_path / "proxy.toml", tmp_path / "overrides.db")
+    _unreadable_default_search(monkeypatch)
+    with pytest.raises(SystemExit) as exited:
+        main(["serve", "--check", "--config", str(config_file)])
+    assert exited.value.code in (0, None)
+    assert "serve --check: OK" in capsys.readouterr().out
+
+
+def test_a_lost_working_directory_gives_the_plain_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A relative explicit path with no working directory to resolve it
+    # against has no absolute form to print: the plain hint, no traceback.
+    def gone() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "getcwd", gone)
+    assert hint_config(Path("rel.toml"), {}) is None
+    assert hint_config(tmp_path / "abs.toml", {}) == str(tmp_path / "abs.toml")

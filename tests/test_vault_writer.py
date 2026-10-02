@@ -172,6 +172,7 @@ def test_writes_run_on_the_writers_own_thread_and_connection(tmp_path: Path) -> 
     assert manager.drain_map_writes(10) == 0
     ((thread, conn),) = seen  # one connection for both writes
     assert thread == "llm-redact-vault-maps"
+    assert writer._thread is not None and writer._thread.daemon  # never holds the exit
     assert conn is not manager._conn
     manager.close()
 
@@ -193,6 +194,42 @@ def test_a_superseded_handle_reads_as_unknown_before_the_write_lands(
         assert writer.verdict(("handle", H + "old")) == Removed(frozenset({"s"}))
     assert manager.drain_map_writes(10) == 0
     assert {d: manager.lookup_handle_session(H + d) for d in ("old", "new", "x", "z")} == known
+    # Every verdict was the queued write's own: all settled once they landed.
+    assert writer._overlay == {} and writer._unwritten == {}
+
+
+def test_a_landed_write_never_clears_a_newer_writes_verdict(open_instance: Factory) -> None:
+    """H1 is recorded (W0), then superseded by H2 (W1, ``replaces=[H1]``):
+    once W0 landed, H1's verdict is still W1's ("removed") until W1 lands —
+    the older write must not settle a key a newer one owns, or H1 would
+    read its session from the database in between (a superseded handle
+    served)."""
+    manager = open_instance()
+    writer = _background(manager)
+    with _paused(writer):
+        manager.record_handle_session(H + "1", "s")
+        manager.record_handle_session(H + "2", "s", replaces=[H + "1"])
+        assert len(writer._queue) == 2
+        ran = threading.Event()
+        release = threading.Event()
+        newer = writer._queue[1]
+        inner = newer.run
+
+        def held(conn: Any) -> None:
+            ran.set()
+            assert release.wait(30)
+            inner(conn)
+
+        newer.run = held
+    try:
+        assert ran.wait(10)  # W0 landed and settled; W1 in flight, not run
+        assert manager.lookup_handle_session(H + "1") is None
+        assert manager.lookup_handle_session(H + "2") == "s"
+    finally:
+        release.set()
+    assert manager.drain_map_writes(10) == 0
+    assert manager.lookup_handle_session(H + "1") is None
+    assert manager.lookup_handle_session(H + "2") == "s"
 
 
 def test_a_removal_pending_for_another_session_keeps_the_verdict(tmp_path: Path) -> None:
@@ -208,6 +245,12 @@ def test_a_removal_pending_for_another_session_keeps_the_verdict(tmp_path: Path)
         assert writer.verdict(("handle", H + "nothing")) is MISS
     assert manager.drain_map_writes(10) == 0
     assert manager.lookup_handle_session(H + "a") == "t"
+    assert writer._overlay == {} and writer._unwritten == {}
+    # So the database answers again: a later write elsewhere is seen.
+    other = SqliteVaultManager(tmp_path / "vault.db")
+    other.record_handle_session(H + "gone", "s")
+    assert manager.lookup_handle_session(H + "gone") == "s"
+    other.close()
     manager.close()
 
 
@@ -320,6 +363,14 @@ def test_a_session_deleted_after_its_write_ran_stays_deleted(
     manager.get("s").placeholder_for("EMAIL", "ada@corp.example")
     manager.get("keep").placeholder_for("EMAIL", "bob@corp.example")
     writer = _background(manager)
+    opened: list[Any] = []
+    opening = writer._open_connection
+
+    def counting() -> Any:
+        opened.append(opening())
+        return opened[-1]
+
+    writer._open_connection = counting
     with _paused(writer):
         manager.record_response_session("resp_1", "s")
         ran, release = _held_after_run(writer)
@@ -336,6 +387,7 @@ def test_a_session_deleted_after_its_write_ran_stays_deleted(
     assert manager.drain_map_writes(10) == 0
     assert manager.lookup_response_session("resp_1") is None
     assert other.lookup_response_session("resp_1") is None
+    assert len(opened) == 1  # the erase ran on the writer's own connection
 
 
 def test_the_writer_settles_no_write_while_a_delete_is_active(tmp_path: Path) -> None:
@@ -531,21 +583,160 @@ def test_closing_drains_again_after_an_earlier_drain_completed(
 
 
 def test_a_write_landing_after_a_timed_out_drain_lets_close_drain_again(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(writer_mod, "STOP_JOIN_SECONDS", 0.01)
     manager = SqliteVaultManager(tmp_path / "vault.db")
     manager._maps = writer = MapWriter(manager._open_map_connection, idle_seconds=0.01)
     gate = _gate(writer)
     manager.record_response_session("resp_1", "s")
     assert manager.drain_map_writes(0.01) == 1  # held up: stalled
     gate.set()
-    assert manager.drain_map_writes(10) == 0  # landed: no longer stalled
+    deadline = time.monotonic() + 10
+    while True:  # landed (no drain: the landing itself clears "stalled")
+        with writer._cond:
+            if writer._in_flight is None and not writer._queue:
+                break
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    slow = _gate(writer)
     with _paused(writer):
         manager.record_response_session("resp_2", "s")
+    threading.Timer(0.3, slow.set).start()
     manager.close()  # drains
     other = SqliteVaultManager(tmp_path / "vault.db")
     assert other.lookup_response_session("resp_2") == "s"
     other.close()
+
+
+def test_closing_directly_drains_for_a_bounded_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A direct ``close`` (no drain beforehand) drains for its ``timeout``
+    only: a write held up past it is given up on and counted."""
+    monkeypatch.setattr(writer_mod, "STOP_JOIN_SECONDS", 0.01)
+    manager = SqliteVaultManager(tmp_path / "vault.db")
+    counter: Counter[str] = Counter()
+    manager.bind_fault_counter(counter)
+    writer = _background(manager)
+    gate = _gate(writer)
+    manager.record_response_session("resp_1", "s")
+    try:
+        assert writer.close(timeout=0.05) == 1
+    finally:
+        gate.set()
+    assert counter == {"response_id": 1}
+    manager._conn.close()
+
+
+def test_close_waits_for_the_write_in_flight_to_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even after a drain ran out of time, ``close`` gives the write in
+    flight ``STOP_JOIN_SECONDS`` to finish before giving up on it."""
+    monkeypatch.setattr(writer_mod, "STOP_JOIN_SECONDS", 10)
+    manager = SqliteVaultManager(tmp_path / "vault.db")
+    counter: Counter[str] = Counter()
+    manager.bind_fault_counter(counter)
+    gate = _gate(_background(manager))
+    manager.record_response_session("resp_1", "s")
+    assert manager.drain_map_writes(0.01) == 1  # stalled: close will not drain
+    threading.Timer(0.1, gate.set).start()
+    manager.close()
+    assert counter == {}
+    other = SqliteVaultManager(tmp_path / "vault.db")
+    assert other.lookup_response_session("resp_1") == "s"
+    other.close()
+
+
+class _Watched:
+    """A connection whose ``close`` is recorded — and raises."""
+
+    def __init__(self, conn: sqlite3.Connection, closed: list[str]) -> None:
+        self._conn = conn
+        self._closed = closed
+
+    def execute(self, *args: Any) -> Any:
+        return self._conn.execute(*args)
+
+    def close(self) -> None:
+        self._closed.append("closed")
+        self._conn.close()
+        raise sqlite3.OperationalError("close failed")
+
+
+def test_an_idle_writer_waits_then_exits_closing_its_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    died: list[Any] = []
+    monkeypatch.setattr(threading, "excepthook", died.append)
+    manager = SqliteVaultManager(tmp_path / "vault.db")
+    closed: list[str] = []
+    manager._maps = writer = MapWriter(
+        lambda: _Watched(manager._open_map_connection(), closed), idle_seconds=0.05
+    )
+    manager.record_response_session("resp_1", "s")
+    assert manager.drain_map_writes(10) == 0
+    with writer._cond:
+        thread = writer._thread  # it waits for more work first
+    assert thread is not None
+    thread.join(10)
+    assert not thread.is_alive() and writer._thread is None
+    assert closed == ["closed"]  # its connection closed once; the fault contained
+    assert died == []
+    manager.close()
+
+
+def test_outcomes_are_counted_on_the_event_loop(tmp_path: Path) -> None:
+    """The writer posts each outcome to the loop that submitted the write:
+    the counters and the outage state are only ever touched there."""
+    threads: list[str] = []
+
+    class Spying(Counter[str]):
+        def __setitem__(self, key: str, value: int) -> None:
+            threads.append(threading.current_thread().name)
+            super().__setitem__(key, value)
+
+    async def main() -> None:
+        manager = SqliteVaultManager(tmp_path / "vault.db")
+        manager.bind_fault_counter(Spying())
+        writer = _background(manager)
+
+        def broken() -> Any:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        writer._open_connection = broken
+        manager.record_handle_session(H + "a", "s")
+        await _until(lambda: bool(threads))
+        manager.close()
+
+    asyncio.run(main())
+    assert threads == ["MainThread"]
+
+
+def test_overflow_and_recovery_are_logged_once_per_episode(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    manager = SqliteVaultManager(tmp_path / "vault.db")
+    manager._maps = writer = MapWriter(manager._open_map_connection, max_pending=1)
+    caplog.set_level(logging.INFO, logger="llm_redact")
+    waiting = (
+        "vault map writer: 1 writes are waiting; further records are kept in"
+        " memory only (after a restart they read as unknown)"
+    )
+    caught_up = "vault map writer: caught up; writes are queued again"
+    with _paused(writer):
+        manager.record_response_session("resp_1", "s")  # queued: nothing logged
+        assert caplog.messages == []
+        for episode in (1, 2):
+            manager.record_response_session(f"over_{episode}a", "s")
+            manager.record_response_session(f"over_{episode}b", "s")
+            writer._queue.clear()  # room again
+            manager.record_response_session(f"resp_{episode}", "s")
+            with writer._cond:
+                writer._queue.clear()
+    assert caplog.messages == [waiting, caught_up, waiting, caught_up]
+    manager.close()
 
 
 def test_a_write_given_up_on_at_close_is_counted_once(
@@ -568,9 +759,14 @@ def test_a_write_given_up_on_at_close_is_counted_once(
     caplog.set_level(logging.WARNING, logger="llm_redact")
     manager.record_handle_session(H + "a", "s")
     assert manager.drain_map_writes(0.01) == 1
+    # Stalled: close waits no further (a drain would see this write fail).
+    threading.Timer(1.0, gate.set).start()
     assert writer.close() == 1
     assert counter == {"handle_map": 1}
-    assert "1 write(s) were not written at shutdown" in caplog.text
+    assert caplog.messages == [
+        "vault map writer: 1 write(s) were not written at shutdown"
+        " (their records read as unknown after the restart)"
+    ]
     gate.set()
     deadline = time.monotonic() + 10
     while writer._in_flight is not None:
@@ -649,6 +845,7 @@ def test_a_writer_thread_that_dies_is_replaced_by_the_next_write(
     while writer._thread is not None:
         assert time.monotonic() < deadline
         time.sleep(0.01)
+    assert writer._in_flight is None  # a drain does not wait for it
     assert manager.lookup_response_session("resp_1") is None  # lost: unknown
     manager.record_response_session("resp_2", "s")
     assert manager.drain_map_writes(10) == 0

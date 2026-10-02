@@ -28,6 +28,8 @@ spec:
       {{- if or .Values.serviceAccount.create .Values.serviceAccount.name }}
       serviceAccountName: {{ .Values.serviceAccount.name | default (include "llm-redact.fullname" .) }}
       {{- end }}
+      # The proxy's shutdown budget (values.yaml, docs/resilience.md).
+      terminationGracePeriodSeconds: {{ int64 .Values.terminationGracePeriodSeconds }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:

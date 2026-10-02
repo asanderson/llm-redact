@@ -8,6 +8,7 @@ updating the dashboard fails CI.
 """
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -343,6 +344,120 @@ def test_helm_allowed_hosts_render_and_parse() -> None:
     assert _rendered_config().allowed_hosts == ()
     extra = _rendered_config("allowedHosts[0]=Redact.Example", "mode=sidecar")
     assert extra.allowed_hosts == ("redact.example",)
+
+
+# --- Helm termination grace period (the proxy's shutdown budget) ------------
+
+
+def _shutdown_budget_seconds() -> int:
+    """The most the proxy's BOUNDED shutdown steps take once its in-flight
+    requests have finished (docs/resilience.md, "Shutdown order"), from the
+    constants themselves: the vault's map drain, the sinks' final-flush
+    deadline and cancel grace, then the vault close's own drain (it drains
+    again when a write landed since the first one) and its thread join."""
+    from llm_redact.proxy import _SINK_CANCEL_GRACE_SECONDS, _SINK_CLOSE_TIMEOUT_SECONDS
+    from llm_redact.vault_writer import SHUTDOWN_DRAIN_SECONDS, STOP_JOIN_SECONDS
+
+    return math.ceil(
+        SHUTDOWN_DRAIN_SECONDS
+        + _SINK_CLOSE_TIMEOUT_SECONDS
+        + _SINK_CANCEL_GRACE_SECONDS
+        + SHUTDOWN_DRAIN_SECONDS
+        + STOP_JOIN_SECONDS
+    )
+
+
+def _default_grace_seconds() -> int:
+    text = (HELM_CHART / "values.yaml").read_text()
+    (value,) = re.findall(r"^terminationGracePeriodSeconds:\s*(\d+)\s*$", text, re.MULTILINE)
+    return int(value)
+
+
+def test_helm_grace_period_default_covers_the_shutdown_budget() -> None:
+    # Kubernetes' own default (30 s) SIGKILLs a pod whose audit sink is slow
+    # before the audit database and the vault close. The chart's default must
+    # cover the bounded steps AND leave room for in-flight requests (the
+    # drain before them has no bound of its own) — raising the 45 s sink
+    # deadline fails here until the chart follows.
+    budget = _shutdown_budget_seconds()
+    assert budget == 57  # the number values.yaml, NOTES and the docs quote
+    assert _default_grace_seconds() > budget
+    assert _default_grace_seconds() == 90
+
+
+def test_helm_grace_period_is_wired_and_validated() -> None:
+    # Stdlib needles: the pod spec renders it in both modes (one template,
+    # outside any mode branch), the guardrail validates it, and the NOTES
+    # warning's threshold is the same budget the test derives.
+    deployment = (HELM_CHART / "templates" / "deployment.yaml").read_text()
+    assert (
+        "terminationGracePeriodSeconds: {{ int64 .Values.terminationGracePeriodSeconds }}"
+        in deployment
+    )
+    helpers = (HELM_CHART / "templates" / "_helpers.tpl").read_text()
+    assert "terminationGracePeriodSeconds must be a non-negative integer" in helpers
+    (budget,) = re.findall(
+        r'define "llm-redact.shutdownBudgetSeconds" -}}\s*(\d+)\s*{{- end', helpers
+    )
+    assert int(budget) == _shutdown_budget_seconds()
+    notes = (HELM_CHART / "templates" / "NOTES.txt").read_text()
+    assert 'include "llm-redact.shutdownBudgetSeconds"' in notes
+    resilience = (DEPLOY.parent / "docs" / "resilience.md").read_text()
+    assert "terminationGracePeriodSeconds" in resilience
+    assert f"defaults to {_default_grace_seconds()} s" in resilience
+
+
+def _pod_spec(*set_args: str) -> dict[str, object]:
+    yaml = pytest.importorskip("yaml")
+    result = _helm_template(*set_args)
+    assert result.returncode == 0, result.stderr
+    [deployment] = [d for d in yaml.safe_load_all(result.stdout) if d and d["kind"] == "Deployment"]
+    spec: dict[str, object] = deployment["spec"]["template"]["spec"]
+    return spec
+
+
+@_needs_helm
+@pytest.mark.parametrize(
+    "preset",
+    [
+        (),
+        ("tool.enabled=true",),
+        ("mode=standalone", "vault.backend=postgresql"),
+        ("mode=standalone", "autoscaling.enabled=true", "vault.backend=postgresql"),
+    ],
+)
+def test_helm_renders_the_grace_period_in_both_modes(preset: tuple[str, ...]) -> None:
+    grace = _pod_spec(*preset)["terminationGracePeriodSeconds"]
+    assert grace == _default_grace_seconds()
+    assert isinstance(grace, int) and grace >= _shutdown_budget_seconds()
+
+
+@_needs_helm
+def test_helm_grace_period_is_overridable() -> None:
+    assert _pod_spec("terminationGracePeriodSeconds=120")["terminationGracePeriodSeconds"] == 120
+    # 0 is a legal (if unwise) Kubernetes value: allowed, NOTES warns.
+    assert _pod_spec("terminationGracePeriodSeconds=0")["terminationGracePeriodSeconds"] == 0
+
+
+@_needs_helm
+@pytest.mark.parametrize(
+    "flag",
+    [
+        ("--set", "terminationGracePeriodSeconds=-1"),
+        ("--set", "terminationGracePeriodSeconds=1.5"),
+        ("--set", "terminationGracePeriodSeconds=abc"),
+        ("--set", "terminationGracePeriodSeconds=null"),
+        ("--set-string", "terminationGracePeriodSeconds=90"),
+    ],
+)
+def test_helm_grace_period_rejects_a_non_integer(flag: tuple[str, str]) -> None:
+    # A quoted or fractional value would only fail at apply time, and a
+    # deleted one would silently fall back to Kubernetes' 30 s: fail the render.
+    result = subprocess.run(
+        ["helm", "template", "rel", str(HELM_CHART), *flag], capture_output=True, text=True
+    )
+    assert result.returncode != 0
+    assert "non-negative integer" in result.stderr
 
 
 def test_the_image_ships_the_extras_its_features_need() -> None:

@@ -97,6 +97,20 @@ and standalone modes, optional HPA autoscaling) at
 `deploy/helm/llm-redact/` — its `NOTES.txt` and `values.yaml` document
 the modes and guardrails.
 
+The chart sets the pod's `terminationGracePeriodSeconds` (value
+`terminationGracePeriodSeconds`, default 90, both modes): Kubernetes'
+own default of 30 s can SIGKILL the proxy while the off-machine audit
+sinks are still doing their final flush (up to 45 s), before the audit
+database and the vault close. 90 s covers the proxy's bounded shutdown
+steps (57 s) plus 33 s for requests still running; the pod goes away as
+soon as the proxy exits, so a fast stop never waits for it. Raise it if
+your clients hold long streams open (the request drain has no bound of
+its own); the render fails on anything but a non-negative integer, and
+NOTES warns below 57 s. In sidecar mode the value covers the whole pod,
+your tool container included. `deploy/k8s-sidecar.yaml` keeps
+Kubernetes' default; set it there yourself. See docs/resilience.md,
+"Shutdown order".
+
 Replicas sharing one vault issue consistent tokens, but the durable maps
 (Responses chains, stored-object owners, Live resumption handles) are
 written in the background after each answer: a follow-up

@@ -138,6 +138,24 @@ resources:
     cpu: 500m
     memory: 512Mi
 
+# Seconds Kubernetes waits after SIGTERM before it SIGKILLs the pod
+# (`terminationGracePeriodSeconds`, rendered on the pod spec in BOTH modes;
+# in sidecar mode it covers the whole pod, the tool container included).
+# Kubernetes' own default, 30 s, is shorter than the proxy's shutdown: once
+# its in-flight requests have finished (a wait with no bound of its own — a
+# streamed answer still running holds it), the bounded steps take at most
+# 57 s — the vault's background map writes (5 s), the off-machine audit
+# sinks' final flush (one 45 s deadline + 1 s cancel grace) and the vault
+# close (a second map drain of up to 5 s when writes were still landing,
+# + 1 s thread join). A pod killed sooner loses the sinks' in-memory
+# START/AMEND rows and closes no database cleanly (committed rows survive).
+# 90 = those 57 s + 33 s for in-flight requests, the same as systemd's
+# default stop timeout. The pod goes away as soon as the proxy exits, so a
+# fast stop never waits for it. Lower it only if you run no audit sink and
+# no long streams; NOTES.txt warns below 57. A non-negative integer — the
+# render fails otherwise. docs/resilience.md, "Shutdown order".
+terminationGracePeriodSeconds: 90
+
 # Persist the sqlite vault/audit across restarts (sidecar / single replica).
 # never-wrong-value depends on the dense counter surviving.
 persistence:

@@ -12,6 +12,17 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- The Helm chart sets the pod's `terminationGracePeriodSeconds` (new value
+  `terminationGracePeriodSeconds`, default 90, both modes; in sidecar mode it covers the
+  whole pod, the tool container included). Kubernetes' default of 30 s could SIGKILL the
+  proxy while the off-machine audit sinks were still doing their final flush (up to 45 s),
+  before the audit database and the vault closed — losing the sinks' in-memory START/AMEND
+  rows. 90 s = the proxy's bounded shutdown steps after the request drain (57 s: map-write
+  drain, sink flush deadline + cancel grace, the vault close's drain and thread join) plus
+  33 s for requests still running; the pod still goes away as soon as the proxy exits. The
+  render fails on anything but a non-negative integer, and NOTES warns below 57 s. The
+  chart test recomputes the budget from the proxy's constants. docs/deployment.md and
+  docs/resilience.md ("Shutdown order") now quote the budget (drain plus ~60 s, was ~50 s).
 - The vault's durable maps are written off the event loop: the Responses chain rows,
   stored-object owner records and Live resumption handles the proxy (and
   llm-redact-pro) records after the provider answered go to one background writer

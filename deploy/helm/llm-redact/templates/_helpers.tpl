@@ -37,12 +37,32 @@ vault: with a per-pod memory/sqlite vault, replicas would issue divergent
 «TYPE_NNN» tokens and one pod could rehydrate another's secret. Fail the render.
 */}}
 {{- define "llm-redact.validate" -}}
+{{- $grace := .Values.terminationGracePeriodSeconds -}}
+{{- if not (or (kindIs "int" $grace) (kindIs "int64" $grace) (kindIs "float64" $grace)) -}}
+{{- fail "llm-redact: terminationGracePeriodSeconds must be a non-negative integer (seconds) — the proxy's shutdown budget; see values.yaml." -}}
+{{- end -}}
+{{- if or (lt (float64 $grace) 0.0) (ne (float64 $grace) (float64 (int64 $grace))) -}}
+{{- fail "llm-redact: terminationGracePeriodSeconds must be a non-negative integer (seconds) — the proxy's shutdown budget; see values.yaml." -}}
+{{- end -}}
 {{- if eq .Values.mode "standalone" -}}
 {{- $multi := or .Values.autoscaling.enabled (gt (int .Values.replicaCount) 1) -}}
 {{- if and $multi (or (eq .Values.vault.backend "memory") (eq .Values.vault.backend "sqlite")) -}}
 {{- fail "llm-redact: a standalone autoscaled/multi-replica proxy needs a SHARED vault (vault.backend must be postgresql/mysql/oracle/dbapi) — a per-pod memory/sqlite vault would issue inconsistent tokens across replicas (never-wrong-value). Set vault.backend to a server backend, or set autoscaling.enabled=false and replicaCount=1." -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+SHUTDOWN BUDGET — the most the proxy's BOUNDED shutdown steps take after its
+in-flight requests have finished (docs/resilience.md, "Shutdown order"):
+SHUTDOWN_DRAIN_SECONDS (5) + _SINK_CLOSE_TIMEOUT_SECONDS (45) +
+_SINK_CANCEL_GRACE_SECONDS (1) + the vault close's second map drain
+SHUTDOWN_DRAIN_SECONDS (5) + STOP_JOIN_SECONDS (1). NOTES.txt warns when
+terminationGracePeriodSeconds is below it; test_deploy_assets.py recomputes
+it from those constants, so changing one fails the test until this follows.
+*/}}
+{{- define "llm-redact.shutdownBudgetSeconds" -}}
+57
 {{- end -}}
 
 {{/*

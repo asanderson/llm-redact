@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import isolation
+import mutation_limits
 from llm_redact.detection.engine import DetectionConfig, build_allowlist, build_detectors
 from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import Rehydrator
@@ -39,6 +40,9 @@ def pytest_configure(config: pytest.Config) -> None:
     _REAL_BEFORE = isolation.snapshot(_REAL_WATCHED)
     ISOLATION_ROOT = Path(tempfile.mkdtemp(prefix="llm-redact-tests-home-"))
     isolation.isolate(os.environ, ISOLATION_ROOT)
+    # Under mutmut, a mutant's test process gets a memory ceiling, so an
+    # allocating endless loop is killed instead of exhausting the CI runner.
+    mutation_limits.apply(os.environ)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:

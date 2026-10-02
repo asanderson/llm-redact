@@ -298,8 +298,6 @@ jobs:
           "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[mysql]"
           "tests/test_vault_writer.py::test_background_writes_on_a_real_server[postgresql]"
           "tests/test_vault_writer.py::test_background_writes_on_a_real_server[mysql]"
-          "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[postgresql]"
-          "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[mysql]"
 
   bench:
     name: detection bench (report artifact)

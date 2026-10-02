@@ -1116,6 +1116,10 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
 # justification above.
 OSCILLATING_MUTANTS: frozenset[str] = frozenset(
     {
+        # _unwritten[key] = entry -> None (equivalent: the dict's values are
+        # never read): survives when run alone, but CI once left it off the
+        # survivor list (a timing-based timeout or a selection artifact).
+        "llm_redact.vault_writer.xǁMapWriterǁ_place__mutmut_5",
         "llm_redact.eventstream.x__parse_headers__mutmut_81",
         "llm_redact.placeholders.x_viable_prefix_start__mutmut_10",
         "llm_redact.rehydrate.x_substitute_tokens__mutmut_19",

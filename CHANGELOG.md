@@ -37,7 +37,9 @@ and tags `vX.Y.Z`.
 - A plugin's own gauges: the access gate's OPTIONAL `metrics_samples()` (plugin_api, pinned in
   OPTIONAL_MEMBERS) is rendered on `/__llm-redact/metrics` under value-free rules (an
   `llm_redact_` name no core family uses, at most 4 labels from `[a-z0-9_]`, a finite value,
-  at most 256 samples), read in a worker thread bounded at 2 s, never two calls at once;
+  at most 256 samples), read in a worker thread bounded at 2 s, never two calls at once
+  (scrapes arriving together share the call in flight until its bound, so an HA pair of
+  Prometheus servers never loses the gauges or counts a fault);
   faults, timeouts and invalid samples count under the bookkeeping stage `plugin_metrics`.
   llm-redact-pro reports users and seats through it.
 - The Helm chart sets the pod's `terminationGracePeriodSeconds` (new value

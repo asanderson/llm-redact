@@ -964,9 +964,11 @@ class ProxyState:
         self.metrics.map_writes_mode = self.map_writes
         # The access gate's own gauges (its optional metrics_samples, read
         # off the event loop by ``plugin_metric_text``): the call in flight,
-        # which a scrape never starts a second of, and whether the last one
-        # failed (logged once per episode).
+        # which a scrape never starts a second of (a concurrent scrape waits
+        # for it until its deadline, the loop time its bound ends), and
+        # whether the last one failed (logged once per episode).
         self._plugin_metrics_call: asyncio.Future[list[object]] | None = None
+        self._plugin_metrics_deadline = 0.0
         self._plugin_metrics_failing = False
         # Last-N request summaries for the dashboard's recent table: memory
         # only, metadata only (types and counts — never values), available
@@ -2145,25 +2147,37 @@ class ProxyState:
         as exposition lines under the core's rules (``plugin_metric_lines``):
         asked in a worker thread, at most ``PLUGIN_METRICS_TIMEOUT_SECONDS``
         — a slow or hung plugin never blocks the event loop or the scrape,
-        and a scrape never starts a second call while one is still running.
-        A fault, a timeout, an answer that is not iterable and every dropped
-        sample count under the bookkeeping stage ``plugin_metrics`` (logged
-        once per episode, by exception TYPE only); the core's own metrics
-        are rendered either way."""
+        and a scrape never starts a second call while one is still running:
+        a concurrent scrape shares the call in flight, waiting for it only
+        until that call's own deadline (two scrapes at once — an HA pair of
+        Prometheus servers — both get the gauges and count nothing); a call
+        still running past its deadline (an earlier scrape gave up on it)
+        is not waited for again. A fault, a timeout, a call still running
+        past its bound, an answer that is not iterable and every dropped
+        sample count under the bookkeeping stage ``plugin_metrics`` — once
+        per scrape rendered without them (logged once per episode, by
+        exception TYPE only); the core's own metrics are rendered either
+        way."""
         samples = getattr(self.access_gate, "metrics_samples", None)
         if not callable(samples):
             return ""
-        running = self._plugin_metrics_call
-        if running is not None and not running.done():
-            self._plugin_metrics_fault("still running")
-            return ""
-        call = asyncio.ensure_future(asyncio.to_thread(_listed_samples, samples))
-        # A call the scrape stopped waiting for still ends: its outcome is
-        # retrieved then (never an unretrieved exception), and discarded.
-        call.add_done_callback(_retrieve)
-        self._plugin_metrics_call = call
+        now = asyncio.get_running_loop().time()
+        call = self._plugin_metrics_call
+        if call is not None and not call.done():
+            if now >= self._plugin_metrics_deadline:
+                self._plugin_metrics_fault("still running")
+                return ""
+        else:
+            call = asyncio.ensure_future(asyncio.to_thread(_listed_samples, samples))
+            # A call the scrape stopped waiting for still ends: its outcome is
+            # retrieved then (never an unretrieved exception), and discarded.
+            call.add_done_callback(_retrieve)
+            self._plugin_metrics_call = call
+            self._plugin_metrics_deadline = now + PLUGIN_METRICS_TIMEOUT_SECONDS
         try:
-            answer = await asyncio.wait_for(asyncio.shield(call), PLUGIN_METRICS_TIMEOUT_SECONDS)
+            answer = await asyncio.wait_for(
+                asyncio.shield(call), self._plugin_metrics_deadline - now
+            )
             lines, dropped = plugin_metric_lines(answer)
         except TimeoutError:
             self._plugin_metrics_fault("TimeoutError")

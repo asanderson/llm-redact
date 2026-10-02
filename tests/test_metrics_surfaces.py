@@ -418,6 +418,45 @@ async def test_a_slow_gate_is_bounded_and_never_asked_twice_at_once(
     assert "llm_redact_seats_used 1" in await _scrape(app)
 
 
+async def _scrapes_at_once(app: Any, n: int = 2) -> list[str]:
+    async with _client(app) as client:
+        answers = await asyncio.gather(*(client.get("/__llm-redact/metrics") for _ in range(n)))
+    assert all(answer.status_code == 200 for answer in answers)
+    return [answer.text for answer in answers]
+
+
+async def test_concurrent_scrapes_share_the_call_in_flight(
+    install_gate: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Two scrapes at once (an HA pair of Prometheus servers): the second
+    # once found the first's call running, rendered without the gauges and
+    # counted a fault — anyone reaching /metrics could make it flap.
+    caplog.set_level(logging.INFO, logger="llm_redact")
+    gate = MeteredGate([("llm_redact_seats_used", {}, 1)], delay=0.1)
+    app = install_gate(gate)
+    texts = await _scrapes_at_once(app)
+    assert all("llm_redact_seats_used 1" in text for text in texts)
+    assert gate.calls == 1
+    assert app.state.proxy.bookkeeping_errors == Counter()
+    assert "metrics samples were not read" not in caplog.text
+
+
+async def test_a_joined_scrape_waits_only_until_the_calls_own_deadline(
+    install_gate: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(proxy, "PLUGIN_METRICS_TIMEOUT_SECONDS", 0.05)
+    gate = MeteredGate([("llm_redact_seats_used", {}, 1)], delay=0.5)
+    app = install_gate(gate)
+    started = time.monotonic()
+    texts = await _scrapes_at_once(app)
+    assert time.monotonic() - started < 0.45
+    assert not any("llm_redact_seats_used" in text for text in texts)
+    assert gate.calls == 1
+    # Once per scrape rendered without the gauges.
+    assert app.state.proxy.bookkeeping_errors[PLUGIN_METRICS_STAGE] == 2
+    await asyncio.sleep(0.6)
+
+
 async def test_a_gate_without_the_member_adds_nothing(install_gate: Any) -> None:
     app = install_gate(FakeGate())
     text = await _scrape(app)

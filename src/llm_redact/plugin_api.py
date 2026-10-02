@@ -777,7 +777,8 @@ class AccessGate(Protocol):
     - OPTIONAL ``metrics_samples() -> Iterable[tuple[str, Mapping[str, str], float]]``
       — the gate's own gauges for ``/__llm-redact/metrics`` (llm-redact-pro:
       users by state, licensed and used seats), as ``(name, labels, value)``
-      triples. Called in a worker thread, at most once at a time, bounded by
+      triples. Called in a worker thread, at most once at a time (scrapes
+      arriving together share the call in flight), bounded by
       ``proxy.PLUGIN_METRICS_TIMEOUT_SECONDS`` (2 s): it must answer from
       memory or a cheap cached read, never block on the network. Each
       sample must be VALUE-FREE: a name under ``llm_redact_`` that no core

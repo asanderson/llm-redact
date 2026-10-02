@@ -129,8 +129,10 @@ decides when the client gets the answer. With a shared database backend
 `"before_answer"`: an answer that recorded something waits (bounded, off
 the event loop) until its write landed, so a follow-up
 (`previous_response_id`, a Live resumption, a stored-object read) may reach
-ANY replica — no session affinity needed. Past the 5 s bound (a database
-stall) the answer is sent anyway and counted (`map_write_wait`); a
+ANY replica — no session affinity needed. Past the bound
+(`[vault] map_write_wait_seconds`, default 5 s; a database stall) the
+answer is sent anyway and counted (`llm_redact_map_write_wait_timeouts_total`;
+the wait is part of a request, not of the shutdown budget above); a
 follow-up reaching another replica before the write landed is then refused
 or sealed, never restored wrong. `map_writes = "background"` sends answers
 at once (one write's latency less on those answers) and brings that window

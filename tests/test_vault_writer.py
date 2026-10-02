@@ -551,11 +551,17 @@ def test_closing_directly_drains_first(tmp_path: Path) -> None:
 
 def test_drain_reports_what_has_not_landed_in_time(tmp_path: Path) -> None:
     manager = SqliteVaultManager(tmp_path / "vault.db")
+    assert manager.map_writes_pending() == 0  # no background writer yet
     gate = _gate(_background(manager))
+    assert manager.map_writes_pending() == 0
     manager.record_response_session("resp_1", "s")
     assert manager.drain_map_writes(0.05) == 1  # in flight, held up
+    manager.record_response_session("resp_2", "s")
+    # The gauge: one in flight plus one queued behind it, never waiting.
+    assert manager.map_writes_pending() == 2
     gate.set()
     assert manager.drain_map_writes(10) == 0
+    assert manager.map_writes_pending() == 0
     manager.close()
 
 

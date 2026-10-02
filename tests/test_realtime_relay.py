@@ -24,6 +24,7 @@ import websockets.asyncio.server
 from llm_redact import realtime
 from llm_redact.config import Config, ProviderConfig
 from llm_redact.proxy import create_app
+from local_refusals import refused_once_scraped
 
 pytestmark = pytest.mark.asyncio
 
@@ -193,6 +194,9 @@ async def test_missing_websockets_package_refused(monkeypatch: pytest.MonkeyPatc
             await client.recv()
         assert closed.value.rcvd is not None
         assert "realtime" in closed.value.rcvd.reason
+        async with httpx.AsyncClient() as http:
+            scraped = (await http.get(f"http://{proxy_host}/__llm-redact/metrics")).text
+        refused_once_scraped(scraped, "realtime_unavailable", "openai")
     assert fake.paths == []
 
 

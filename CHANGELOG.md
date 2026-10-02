@@ -12,6 +12,34 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- `llm_redact_local_refusals_total{kind,provider}`: every response the proxy generates ITSELF
+  instead of forwarding the request (or, realtime, the connection or a frame) is counted once,
+  under one of a fixed set of kinds (`metrics.LOCAL_REFUSAL_KINDS`, documented in
+  docs/observability.md: `blocked_value`, `scanned_body`, `vault_fault`, `audit_unavailable`,
+  `request_origin`, `upstream_fault` …); an upstream's own answer never is. Every
+  `record_request` call states its `refusal=` (pinned by an AST test), conftest checks every
+  request of the suite for at most one refusal with a status its kind answers, and a test
+  enumerates each kind's end-to-end assertion. `/status` `local_refusals_total` (by kind),
+  `llm-redact status` prints them.
+- `llm_redact_proxy_overhead_seconds{provider}`: the proxy's own time per HTTP request — the
+  request duration minus the waits on the upstream (send, answer headers and body, each
+  streamed chunk, a routed retry delay) and on the client (its body, a stream's consumer).
+- `llm_redact_audit_sink_batches_total{sink}` / `llm_redact_audit_sink_rows_dropped_total{sink}`
+  (the sinks' existing counters), `llm_redact_map_write_queue_depth` (the vault's optional
+  `map_writes_pending()`, new on the sqlite and RDBMS managers and `MapWriter.pending()`),
+  `llm_redact_map_write_wait_timeouts_total{cause}` (`bound` / `stuck`; the bookkeeping stage
+  `map_write_wait` is kept) and the info gauge `llm_redact_map_writes_mode{mode}`. `/status`
+  `vault.map_writes_pending`, `vault.map_write_wait_timeouts_total`.
+- `[vault] map_write_wait_seconds` (above 0, at most 60, default 5; restart-only with
+  `[vault]`): the bound of a `map_writes = "before_answer"` wait, previously the fixed
+  `MAP_WRITE_WAIT_SECONDS` (kept as the default). Parsed, emitted when not the default, in
+  `/status` and doctor. A request-path wait: the Helm shutdown budget is unaffected.
+- A plugin's own gauges: the access gate's OPTIONAL `metrics_samples()` (plugin_api, pinned in
+  OPTIONAL_MEMBERS) is rendered on `/__llm-redact/metrics` under value-free rules (an
+  `llm_redact_` name no core family uses, at most 4 labels from `[a-z0-9_]`, a finite value,
+  at most 256 samples), read in a worker thread bounded at 2 s, never two calls at once;
+  faults, timeouts and invalid samples count under the bookkeeping stage `plugin_metrics`.
+  llm-redact-pro reports users and seats through it.
 - The Helm chart sets the pod's `terminationGracePeriodSeconds` (new value
   `terminationGracePeriodSeconds`, default 90, both modes; in sidecar mode it covers the
   whole pod, the tool container included). Kubernetes' default of 30 s could SIGKILL the
@@ -139,6 +167,15 @@ and tags `vX.Y.Z`.
   treat an extension naming another format than the file's bytes as incomplete.
 
 ### Changed
+- `deploy/prometheus-alerts.yml`: `LlmRedactHighLatencyP95` read the END-TO-END request
+  duration — which includes the provider's own time and a stream's length — and fired on
+  ordinary LLM traffic. It is replaced by `LlmRedactHighProxyOverheadP95` (p95 of
+  `llm_redact_proxy_overhead_seconds` above 0.25 s for 10 minutes); new
+  `LlmRedactLocalFaultRefusals` (critical) pages on `audit_unavailable`/`vault_fault`
+  refusals. The Grafana dashboard relabels the duration panel as end-to-end and adds proxy
+  overhead, local refusals by kind and the map writer panels. docs/observability.md
+  wrongly said the duration excluded upstream time; it now says what each measures.
+
 - The Helm chart's NOTES no longer say Kubernetes needs a Team-tier license (the FOSS
   core is ungated there, as everywhere: a license key matters only to llm-redact-pro
   subsystems), nor that a non-loopback bind is Pro; values.yaml's license and

@@ -50,6 +50,7 @@ from llm_redact.proxy import (
     _stream_rehydrated_ndjson,
     create_app,
 )
+from local_refusals import refused_once
 
 EMAIL = "jane.doe@corp.example"
 TOKEN = "«EMAIL_001»"  # the first email the static session sees
@@ -210,6 +211,7 @@ async def test_plan_refusal_no_route(
     }
     # Refused BEFORE redaction (decision 2): nothing was redacted or minted.
     assert row["detections"] == {} and state.detection_counts == Counter()
+    refused_once(state, "no_route", "anthropic")
     assert (
         "POST /v1/messages -> 502 rule=- upstream=- hops=0 auth=none class=no_route reissue=no"
         in caplog.text
@@ -253,6 +255,7 @@ async def test_begin_refusal_carries_audit_token(monkeypatch: pytest.MonkeyPatch
     # The 402 is an ATTEMPT: the write-ahead START row exists and the refusal
     # finalized it with the token (never an orphaned START row).
     assert len(audit.begun) == 1 and audit.begun[0].detections == {"EMAIL": 1}
+    refused_once(state, "budget", "anthropic")
     assert [token for token, _entry in audit.finalized] == [1]
     assert audit.finalized[0][1].status == 402
     row = state.recent[-1]["route"]
@@ -481,6 +484,7 @@ async def test_local_refusal_precedes_audit_start(monkeypatch: pytest.MonkeyPatc
     # Never an attempt: no START row was written; the classic row records it.
     assert audit.begun == [] and audit.finalized == []
     assert len(audit.recorded) == 1 and audit.recorded[0].status == 404
+    refused_once(state, "route_unsupported", "anthropic")
     assert state.recent[-1]["route"]["class"] == "404"
     assert router.plans[0].begun == []
 

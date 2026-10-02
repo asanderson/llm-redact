@@ -5,11 +5,112 @@ metric names, detector types, providers, status codes — consistent with the
 proxy's never-log-values posture.
 """
 
+import math
+import re
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Literal, get_args
 
 _BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
+# The proxy's own share of a request is milliseconds on healthy hardware:
+# finer buckets than the end-to-end duration's, which include the provider.
+_OVERHEAD_BUCKETS = (0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0)
+
+# Every response the PROXY ITSELF generates instead of forwarding the request
+# (or, for a realtime connection, instead of relaying it or a frame), one kind
+# each — ``llm_redact_local_refusals_total{kind,provider}``. An upstream's own
+# answer, whatever its status, is never one. docs/observability.md documents
+# each (``LOCAL_REFUSAL_KINDS`` is pinned against it); a refusal site passes
+# its kind to ``ProxyState.record_request(refusal=)`` — or, for a refusal that
+# is never recorded (its path may hold a key), counts it alone
+# (``ProxyState.count_local_refusal``).
+LocalRefusal = Literal[
+    "access_gate",
+    "audit_unavailable",
+    "binary_values",
+    "blocked_value",
+    "budget",
+    "credential_protocol",
+    "delivery_fault",
+    "disabled_provider",
+    "identity_path",
+    "identity_route",
+    "method_override",
+    "misaddressed",
+    "no_route",
+    "no_upstream",
+    "object_access",
+    "override_fault",
+    "override_raced",
+    "placeholder_limit",
+    "realtime_unavailable",
+    "redirect_refused",
+    "reload",
+    "request_origin",
+    "request_target",
+    "route_unsupported",
+    "scanned_body",
+    "sealed_session",
+    "too_large",
+    "too_many_strings",
+    "unattributed",
+    "unchecked_body",
+    "unredactable",
+    "unscanned_upload",
+    "unsupported_encoding",
+    "upstream_auth",
+    "upstream_fault",
+    "vault_fault",
+    "verbatim_field",
+]
+LOCAL_REFUSAL_KINDS: tuple[str, ...] = get_args(LocalRefusal)
+
+# A plugin's own gauges (``plugin_metric_lines``): a name under the core's
+# prefix, label names and values from a small fixed charset — enum-like by
+# construction, so neither can carry a value, a path, an e-mail address or a
+# key — and at most a bounded number of samples and labels.
+PLUGIN_METRIC_PREFIX = "llm_redact_"
+_PLUGIN_METRIC_NAME = re.compile(r"llm_redact_[a-z][a-z0-9_]{0,62}")
+_PLUGIN_LABEL_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
+_PLUGIN_LABEL_VALUE = re.compile(r"[a-z0-9_]{1,32}")
+# Label names Prometheus itself gives meaning to (the histogram bound, the
+# target labels a scrape attaches): never a plugin's.
+_RESERVED_LABELS = frozenset({"le", "quantile", "job", "instance"})
+MAX_PLUGIN_SAMPLES = 256
+MAX_PLUGIN_LABELS = 4
+# Metric families the core renders itself: a plugin sample never shadows one.
+CORE_METRIC_FAMILIES = frozenset(
+    {
+        "llm_redact_info",
+        "llm_redact_detections_total",
+        "llm_redact_rehydrations_total",
+        "llm_redact_warnings_total",
+        "llm_redact_blocked_total",
+        "llm_redact_requests_total",
+        "llm_redact_request_duration_seconds",
+        "llm_redact_proxy_overhead_seconds",
+        "llm_redact_local_refusals_total",
+        "llm_redact_compaction_forks_total",
+        "llm_redact_upstream_errors_total",
+        "llm_redact_bookkeeping_errors_total",
+        "llm_redact_connections_closed_total",
+        "llm_redact_overrides_used_total",
+        "llm_redact_unscanned_uploads_total",
+        "llm_redact_inspected_uploads_total",
+        "llm_redact_routed_requests_total",
+        "llm_redact_reissues_total",
+        "llm_redact_audit_sink_batches_total",
+        "llm_redact_audit_sink_rows_dropped_total",
+        "llm_redact_map_write_queue_depth",
+        "llm_redact_map_write_wait_timeouts_total",
+        "llm_redact_map_writes_mode",
+        "llm_redact_vault_entries",
+        "llm_redact_vault_sessions",
+        "llm_redact_start_time_seconds",
+        "llm_redact_uptime_seconds",
+    }
+)
 
 
 def _escape_label(value: str) -> str:
@@ -69,6 +170,18 @@ class Metrics:
         # never request-derived.
         self.routed: Counter[tuple[str, str]] = Counter()
         self.reissues: Counter[tuple[str, str]] = Counter()
+        # (kind, provider) -> responses the proxy generated itself instead
+        # of forwarding (LOCAL_REFUSAL_KINDS): both label sets are bounded —
+        # a fixed enum and the configured provider names.
+        self.local_refusals: Counter[tuple[str, str]] = Counter()
+        # provider -> the proxy's own share of each HTTP request's duration
+        # (``observe_overhead``): the end-to-end duration minus the time it
+        # waited on the upstream and on the client.
+        self._overheads: dict[str, DurationHistogram] = {}
+        # The effective [vault] map_writes (restart-only, set once by the
+        # proxy at startup): rendered as an info-style gauge. None: not set
+        # (a bare Metrics, as in tests) — nothing rendered.
+        self.map_writes_mode: str | None = None
 
     def observe_request(
         self, provider: str | None, status: int | None, seconds: float, streamed: bool = False
@@ -77,6 +190,20 @@ class Metrics:
         self.requests[(prov, str(status or 0))] += 1
         key = (prov, "true" if streamed else "false")
         self._durations.setdefault(key, DurationHistogram()).observe(seconds)
+
+    def observe_overhead(self, provider: str | None, seconds: float) -> None:
+        """The proxy's own time for one HTTP request (never negative)."""
+        prov = provider or "passthrough"
+        histogram = self._overheads.get(prov)
+        if histogram is None:
+            histogram = self._overheads[prov] = DurationHistogram(_OVERHEAD_BUCKETS)
+        histogram.observe(max(seconds, 0.0))
+
+    def count_local_refusal(self, kind: LocalRefusal, provider: str | None) -> None:
+        """One response the proxy generated itself (``kind``), by the
+        provider the request was attributed to ("passthrough" when none:
+        the ``llm_redact_requests_total`` label)."""
+        self.local_refusals[(kind, provider or "passthrough")] += 1
 
     def render(
         self,
@@ -94,6 +221,10 @@ class Metrics:
         unscanned_uploads: "Counter[str] | None" = None,
         inspected_uploads: "Counter[tuple[str, str]] | None" = None,
         overrides_used: "Counter[str] | None" = None,
+        audit_sink_batches: "Counter[str] | None" = None,
+        audit_sink_rows_dropped: "Counter[str] | None" = None,
+        map_write_queue_depth: int = 0,
+        map_write_wait_timeouts: "Counter[str] | None" = None,
     ) -> str:
         lines: list[str] = []
         lines.append("# HELP llm_redact_info Build information.")
@@ -136,6 +267,29 @@ class Metrics:
             labels = f'provider="{_escape_label(provider)}",streamed="{streamed}"'
             lines.extend(histogram.series(duration_name, labels))
 
+        overhead_name = "llm_redact_proxy_overhead_seconds"
+        lines.append(
+            f"# HELP {overhead_name} The proxy's own time per HTTP request, by provider: the"
+            " request duration minus the time spent waiting on the upstream (sending, its"
+            " answer's headers and body) and on the client (its request body, a stream's"
+            " consumer). Realtime connections are not observed."
+        )
+        lines.append(f"# TYPE {overhead_name} histogram")
+        for provider, histogram in sorted(self._overheads.items()):
+            lines.extend(histogram.series(overhead_name, f'provider="{_escape_label(provider)}"'))
+
+        lines.append(
+            "# HELP llm_redact_local_refusals_total Responses the proxy generated itself instead"
+            " of forwarding the request (realtime: instead of relaying the connection or a"
+            " frame), by kind and provider. An upstream's own answer is never counted here."
+        )
+        lines.append("# TYPE llm_redact_local_refusals_total counter")
+        for (kind, provider), count in sorted(self.local_refusals.items()):
+            lines.append(
+                f'llm_redact_local_refusals_total{{kind="{_escape_label(kind)}",'
+                f'provider="{_escape_label(provider)}"}} {count}'
+            )
+
         lines.append(
             "# HELP llm_redact_compaction_forks_total New per-conversation sessions whose"
             " first message already carried placeholders (history compaction signature)."
@@ -162,7 +316,9 @@ class Metrics:
             " (issuing a request's placeholders failed — a recorded 503, a realtime frame"
             " closes 1011); vault_check (a vault view's staleness check could not read its"
             " database — contained, the cache kept); recheck (an open connection's access"
-            " re-check failed — the connection closed)."
+            " re-check failed — the connection closed); map_write_wait (an answer sent"
+            " before its map writes landed); plugin_metrics (a plugin's metrics samples"
+            " unreadable or dropped as invalid)."
         )
         lines.append("# TYPE llm_redact_bookkeeping_errors_total counter")
         for stage, count in sorted((bookkeeping_errors or Counter()).items()):
@@ -241,6 +397,53 @@ class Metrics:
                 f'to_upstream="{_escape_label(to_upstream)}"}} {count}'
             )
 
+        for name, help_text, sink_counter in (
+            (
+                "llm_redact_audit_sink_batches_total",
+                "Audit row batches an off-machine audit sink uploaded, by sink (s3, azure).",
+                audit_sink_batches,
+            ),
+            (
+                "llm_redact_audit_sink_rows_dropped_total",
+                "Audit rows an off-machine audit sink dropped (an upload failed, its buffer"
+                " was full, credentials or the batch key were missing), by sink.",
+                audit_sink_rows_dropped,
+            ),
+        ):
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} counter")
+            for sink, count in sorted((sink_counter or Counter()).items()):
+                lines.append(f'{name}{{sink="{_escape_label(sink)}"}} {count}')
+
+        lines.append(
+            "# HELP llm_redact_map_write_queue_depth Durable vault map writes (Responses"
+            " chains, stored-object owners, Live resumption handles) queued or in flight on"
+            " the background writer; 0 without one."
+        )
+        lines.append("# TYPE llm_redact_map_write_queue_depth gauge")
+        lines.append(f"llm_redact_map_write_queue_depth {map_write_queue_depth}")
+        lines.append(
+            '# HELP llm_redact_map_write_wait_timeouts_total [vault] map_writes = "before_answer"'
+            " answers sent before their map writes landed, by cause: bound (the wait reached"
+            " map_write_wait_seconds) or stuck (not waited for: an earlier write the writer"
+            " is stuck on has not landed)."
+        )
+        lines.append("# TYPE llm_redact_map_write_wait_timeouts_total counter")
+        for cause, count in sorted((map_write_wait_timeouts or Counter()).items()):
+            lines.append(
+                f'llm_redact_map_write_wait_timeouts_total{{cause="{_escape_label(cause)}"}}'
+                f" {count}"
+            )
+        lines.append(
+            "# HELP llm_redact_map_writes_mode The effective [vault] map_writes (value 1):"
+            " before_answer, background or synchronous."
+        )
+        lines.append("# TYPE llm_redact_map_writes_mode gauge")
+        if self.map_writes_mode is not None:
+            lines.append(
+                f'llm_redact_map_writes_mode{{mode="{_escape_label(self.map_writes_mode)}"}} 1'
+            )
+
         for name, help_text, value in (
             ("llm_redact_vault_entries", "Placeholder mappings held.", vault_entries),
             ("llm_redact_vault_sessions", "Vault sessions in use.", vault_sessions),
@@ -252,3 +455,85 @@ class Metrics:
             lines.append(f"{name} {value}")
 
         return "\n".join(lines) + "\n"
+
+
+def plugin_metric_lines(samples: Iterable[object]) -> tuple[list[str], int]:
+    """A plugin's gauge samples — ``(name, labels, value)`` triples — as
+    exposition lines (one HELP/TYPE per name, in first-seen order), and how
+    many were dropped as invalid: a name outside ``llm_redact_[a-z0-9_]``
+    or one the core renders itself, labels that are not a mapping of names
+    and values from the fixed charsets (more than ``MAX_PLUGIN_LABELS``, a
+    reserved name), a value that is not a finite number (a bool is not one),
+    a duplicate series, or anything past ``MAX_PLUGIN_SAMPLES``. Nothing of
+    a dropped sample is ever echoed."""
+    families: dict[str, list[str]] = {}
+    seen: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+    dropped = 0
+    taken = 0
+    for sample in samples:
+        if taken >= MAX_PLUGIN_SAMPLES:
+            dropped += 1
+            continue
+        line = _plugin_sample_line(sample, seen)
+        if line is None:
+            dropped += 1
+            continue
+        taken += 1
+        families.setdefault(line[0], []).append(line[1])
+    lines: list[str] = []
+    for name, series in families.items():
+        lines.append(f"# HELP {name} Reported by a plugin (llm-redact-pro).")
+        lines.append(f"# TYPE {name} gauge")
+        lines.extend(series)
+    return lines, dropped
+
+
+def _finite(value: float) -> bool:
+    """A finite number a float can hold (an int past it is not one)."""
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _shadows_core(name: str) -> bool:
+    """Whether ``name`` is a core family or one of its series (a
+    histogram's ``_bucket``/``_sum``/``_count``)."""
+    return any(name == family or name.startswith(family + "_") for family in CORE_METRIC_FAMILIES)
+
+
+def _plugin_sample_line(
+    sample: object, seen: set[tuple[str, tuple[tuple[str, str], ...]]]
+) -> tuple[str, str] | None:
+    """(family, exposition line) for one valid sample, else None."""
+    if not isinstance(sample, tuple) or len(sample) != 3:
+        return None
+    name, labels, value = sample
+    if (
+        not isinstance(name, str)
+        or not _PLUGIN_METRIC_NAME.fullmatch(name)
+        or _shadows_core(name)
+        or not isinstance(labels, Mapping)
+        or len(labels) > MAX_PLUGIN_LABELS
+        or isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not _finite(value)
+    ):
+        return None
+    pairs: list[tuple[str, str]] = []
+    for label, label_value in labels.items():
+        if (
+            not isinstance(label, str)
+            or not isinstance(label_value, str)
+            or not _PLUGIN_LABEL_NAME.fullmatch(label)
+            or label in _RESERVED_LABELS
+            or not _PLUGIN_LABEL_VALUE.fullmatch(label_value)
+        ):
+            return None
+        pairs.append((label, label_value))
+    key = (name, tuple(sorted(pairs)))
+    if key in seen:
+        return None
+    seen.add(key)
+    rendered = ",".join(f'{label}="{label_value}"' for label, label_value in key[1])
+    return name, f"{name}{{{rendered}}} {value}" if rendered else f"{name} {value}"

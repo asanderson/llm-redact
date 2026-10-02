@@ -32,6 +32,7 @@ from llm_redact.providers.custom import build_custom_adapters
 from llm_redact.providers.gemini import GeminiAdapter
 from llm_redact.providers.vertex import VertexAdapter
 from llm_redact.proxy import ProxyState, create_app
+from local_refusals import refused_once
 from test_api_coverage import MATRIX
 from test_upstream_auth import (
     AZURE,
@@ -409,6 +410,7 @@ async def test_an_unrecognized_path_is_still_refused(
     assert 'auth = "identity"' in response.json()["error"]
     assert built[0].calls == [] and upstream.requests == []
     assert state.recent[-1]["status"] == 403
+    refused_once(state, "identity_route", provider)
 
 
 async def test_an_encoded_guardrail_arn_is_matched_and_forwarded_raw(

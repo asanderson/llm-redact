@@ -363,6 +363,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``approves_overrides(subject: str) -> bool``",
         "``override_subject(subject: str) -> str``",
         "``browser_signed_in(conn: HTTPConnection, subject: str) -> bool``",
+        "``metrics_samples() -> Iterable[tuple[str, Mapping[str, str], float]]``",
     ),
     "SessionRouter": (
         "``is_durable(session_id) -> bool``",
@@ -383,6 +384,7 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``lookup_handle_session(handle_digest) -> str | None``",
         "``write_maps_in_background() -> None``",
         "``drain_map_writes(timeout) -> int``",
+        "``map_writes_pending() -> int``",
     ),
     "WriteAheadAudit": ("``amend(token, entry) -> None``",),
 }

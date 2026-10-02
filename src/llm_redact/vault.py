@@ -1154,6 +1154,10 @@ class VaultManager(Protocol):
       which counts and drops what is still queued (and a write still in
       flight); a drain earlier in the manager's life never stops ``close``
       from draining again.
+    - OPTIONAL ``map_writes_pending() -> int`` — the background writes
+      queued or in flight now, never waiting for the writer (the proxy's
+      ``llm_redact_map_write_queue_depth`` gauge and /status
+      ``vault.map_writes_pending``); 0 without a background writer.
 
     A manager whose ``durable_response_map`` is False (the in-memory one)
     keeps no durable map: its handle-map members record nothing and answer
@@ -1346,6 +1350,11 @@ class SqliteVaultManager:
         """Wait up to ``timeout`` seconds for the background writes to land
         (blocking); how many have not."""
         return self._maps.drain(timeout) if self._maps is not None else 0
+
+    def map_writes_pending(self) -> int:
+        """The background writes queued or in flight now (0 without a
+        background writer)."""
+        return self._maps.pending() if self._maps is not None else 0
 
     def get(self, session_id: str) -> Vault:
         # Every view the LRU holds is live, so the registry answers for both.

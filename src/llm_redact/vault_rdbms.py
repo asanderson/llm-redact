@@ -1657,6 +1657,10 @@ class RdbmsVaultManager:
         """``SqliteVaultManager.drain_map_writes``."""
         return self._maps.drain(timeout) if self._maps is not None else 0
 
+    def map_writes_pending(self) -> int:
+        """``SqliteVaultManager.map_writes_pending``."""
+        return self._maps.pending() if self._maps is not None else 0
+
     def get(self, session_id: str) -> Vault:
         # Every view the LRU holds is live, so the registry answers for both.
         view = self._live.get(session_id)

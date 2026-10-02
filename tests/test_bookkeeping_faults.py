@@ -32,6 +32,7 @@ import pytest
 from license_fixtures import resolved
 from llm_redact.config import AuditConfig, ProviderConfig
 from llm_redact.registry import Registry
+from local_refusals import refused_once
 from test_audit_required import FakeAudit
 from test_object_access_seams import ScriptedRouter, Upstream, _app, _client
 
@@ -270,6 +271,7 @@ async def test_a_fault_restoring_the_answer_is_a_recorded_502(
     _assert_one_row(app, audit, 502)
     assert app.state.proxy.bookkeeping_errors == {"delivery": 1}
     assert "ValueError" in caplog.text and SECRET_ID not in caplog.text
+    refused_once(app.state.proxy, "delivery_fault", "openai")
 
 
 # --- streams: a restore fault cuts the stream, counted, booked as a 502 ---------

@@ -65,7 +65,8 @@
     },
     {
       "type": "timeseries",
-      "title": "In-proxy duration (p50 / p95)",
+      "title": "End-to-end request duration incl. the provider (p50 / p95)",
+      "description": "llm_redact_request_duration_seconds: from admission to the last byte, so it INCLUDES the provider's own time (and a stream's whole length). Not a proxy-health signal: the Proxy overhead panel is the proxy's own share.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
@@ -185,6 +186,70 @@
         {
           "expr": "sum by (provider) (rate(llm_redact_unscanned_uploads_total[5m]))",
           "legendFormat": "{{provider}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Proxy health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Proxy overhead (p50 / p95)",
+      "description": "llm_redact_proxy_overhead_seconds: the proxy's OWN time per HTTP request, the request duration minus the waits on the upstream (sending, the answer's headers and body, each streamed chunk) and on the client (its body, a stream's consumer). Redaction, rehydration, vault and audit writes and an upload inspection are included. The LlmRedactHighProxyOverheadP95 alert reads it.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(llm_redact_proxy_overhead_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(llm_redact_proxy_overhead_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Local refusals by kind (the proxy's own answers)",
+      "description": "llm_redact_local_refusals_total: responses the proxy generated ITSELF instead of forwarding (a block, a body it cannot scan, an origin or access refusal, a vault or audit fault). The provider's own answers are never counted here; the Error responses panel mixes both.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 },
+      "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (kind) (rate(llm_redact_local_refusals_total[5m]))",
+          "legendFormat": "{{kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Vault map writes queued",
+      "description": "llm_redact_map_write_queue_depth: durable vault map writes (Responses chains, stored-object owners, Live resumption handles) queued or in flight on the background writer. A depth that keeps growing means the vault database is slower than the traffic.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 51 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [{ "expr": "max(llm_redact_map_write_queue_depth)", "legendFormat": "depth", "refId": "A" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Answers sent before their map writes landed",
+      "description": "llm_redact_map_write_wait_timeouts_total ([vault] map_writes = \"before_answer\"): bound = the wait reached map_write_wait_seconds; stuck = not waited for, the writer is stuck behind an earlier write. Another replica may read the record as unknown a little longer (refused or sealed, never a wrong value).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 51 },
+      "fieldConfig": { "defaults": { "unit": "cps", "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (cause) (rate(llm_redact_map_write_wait_timeouts_total[5m]))",
+          "legendFormat": "{{cause}}",
           "refId": "A"
         }
       ]

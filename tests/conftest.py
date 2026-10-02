@@ -3,6 +3,7 @@ import shutil
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -92,3 +93,51 @@ def redactor(vault: InMemoryVault) -> Redactor:
 @pytest.fixture
 def rehydrator(vault: InMemoryVault) -> Rehydrator:
     return Rehydrator(vault)
+
+
+@pytest.fixture(autouse=True)
+def _local_refusals_counted_once(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every request any test sends through ``create_app`` counts at most
+    ONE local refusal, and every refusal recorded with a row names a kind
+    that answers its status (tests/local_refusals.py) — so a refusal site
+    counted twice, or under the wrong kind, fails whichever test drives it."""
+    import local_refusals
+    from llm_redact import proxy
+    from llm_redact.metrics import LOCAL_REFUSAL_KINDS, Metrics
+
+    real_handle = proxy.handle
+    real_count = Metrics.count_local_refusal
+    real_record = proxy.ProxyState.record_request
+
+    async def handle(request: Any) -> Any:
+        counted: list[str] = []
+        token = local_refusals.REQUEST_REFUSALS.set(counted)
+        try:
+            return await real_handle(request)
+        finally:
+            local_refusals.REQUEST_REFUSALS.reset(token)
+            assert len(counted) <= 1, f"one request counted {counted}"
+
+    log = os.environ.get("LLM_REDACT_TEST_REFUSAL_LOG")
+
+    def count(self: Metrics, kind: Any, provider: str | None) -> None:
+        assert kind in LOCAL_REFUSAL_KINDS, kind
+        if log:
+            with open(log, "a", encoding="utf-8") as out:
+                out.write(f"{kind}\t{os.environ.get('PYTEST_CURRENT_TEST', '')}\n")
+        counted = local_refusals.REQUEST_REFUSALS.get()
+        if counted is not None:
+            counted.append(kind)
+        real_count(self, kind, provider)
+
+    def record(self: Any, **row: Any) -> None:
+        kind = row.get("refusal")
+        if kind is not None:
+            allowed = local_refusals.KIND_STATUSES[kind]
+            assert row["status"] in allowed, f"{kind} recorded with status {row['status']}"
+        real_record(self, **row)
+
+    monkeypatch.setattr(proxy, "handle", handle)
+    monkeypatch.setattr(Metrics, "count_local_refusal", count)
+    monkeypatch.setattr(proxy.ProxyState, "record_request", record)
+    yield

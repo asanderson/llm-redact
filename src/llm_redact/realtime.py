@@ -84,11 +84,18 @@ from llm_redact.jsonwalk import (
     loads_bounded,
     transform_strings,
 )
+from llm_redact.metrics import LocalRefusal
 from llm_redact.placeholders import json_floors, may_carry_tokens, token_floors
 from llm_redact.plugin_api import UpstreamAuthError
 from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
 from llm_redact.providers.gemini import StreamedText
-from llm_redact.redactor import BlockedRequest, Redactor, TooManyStrings, UnredactableRequest
+from llm_redact.redactor import (
+    BlockedRequest,
+    PlaceholderLimitReached,
+    Redactor,
+    TooManyStrings,
+    UnredactableRequest,
+)
 from llm_redact.rehydrate import RehydratorPool
 from llm_redact.vault import run_batched
 
@@ -923,6 +930,7 @@ def _record_ws_refusal(
     status: int,
     started: float,
     *,
+    kind: LocalRefusal,
     session: str | None = None,
 ) -> None:
     """The recorded row for a connection refused before any upstream
@@ -939,6 +947,7 @@ def _record_ws_refusal(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal=kind,
     )
 
 
@@ -949,6 +958,7 @@ def _record_refused(
     path: str,
     started: float,
     *,
+    kind: LocalRefusal,
     audit_token: object | None = None,
     status: int = 502,
 ) -> None:
@@ -967,7 +977,14 @@ def _record_refused(
         detections={},
         rehydrations={},
         audit_token=audit_token,
+        refusal=kind,
     )
+
+
+def _revoked_kind(relay: "RealtimeRelay") -> LocalRefusal:
+    """A connection revoked before it was relayed: by the access gate, or
+    by a reload that changed its admission."""
+    return "access_gate" if relay.revoked == ACCESS_REVOKED else "reload"
 
 
 # The close code a reload closes a relay with: 1012 Service Restart (the IANA
@@ -1172,7 +1189,7 @@ async def _authorize_upgrade(
         # Belt and braces behind origin_form_target and the exact
         # identity_paths: the proxy's identity goes to exactly the
         # configured upstream path it was matched on.
-        _record_ws_refusal(state, adapter, path, 400, started)
+        _record_ws_refusal(state, adapter, path, 400, started, kind="request_target")
         await _reject(websocket, "the request target must be a path")
         return None
     try:
@@ -1183,7 +1200,7 @@ async def _authorize_upgrade(
         logger.warning(
             "WS %s -> upstream credentials unavailable for %s (%s)", path, provider, source
         )
-        _record_refused(state, ctx, adapter, path, started)
+        _record_refused(state, ctx, adapter, path, started, kind="upstream_auth")
         await _reject(
             websocket,
             f"the proxy could not obtain its own {provider} cloud credentials ({source});"
@@ -1198,10 +1215,12 @@ async def ws_handle(websocket: WebSocket) -> None:
     from llm_redact.proxy import has_dot_segment, origin_form_target
 
     if not origin_form_target(websocket.scope):
+        state.count_local_refusal("request_target", None)
         await _reject(websocket, "the request target must be a path")
         return
     if has_dot_segment(websocket.scope):
         # The HTTP rule: never forwarded, recorded, or logged with its path.
+        state.count_local_refusal("request_target", None)
         await _reject(websocket, "the request path must not contain '.' or '..' segments")
         return
     path = websocket.url.path
@@ -1220,11 +1239,13 @@ async def ws_handle(websocket: WebSocket) -> None:
         # An identity prefix still present after admission: its next segment
         # is a key, so the path is never logged (the HTTP rule), and no
         # realtime route exists under it anyway.
+        state.count_local_refusal("identity_path", None)
         await _reject(websocket, admission.refusal or "no realtime route for this path")
         return
     if path.startswith("/__llm-redact"):
         # Reached through a stripped prefix: never served here, never
         # recorded (the HTTP rule — before the gate's refusal is applied).
+        state.count_local_refusal("identity_path", None)
         await _reject(websocket, "reserved path")
         return
     # Attribute the connection's record_request row — a refusal's below,
@@ -1252,28 +1273,29 @@ async def ws_handle(websocket: WebSocket) -> None:
     if origin_refusal is not None:
         state.request_origin_refusals[origin_refusal] += 1
         logger.info("WS %s -> refused (request origin: %s)", path, origin_refusal)
-        _record_ws_refusal(state, adapter, path, 403, started)
+        _record_ws_refusal(state, adapter, path, 403, started, kind="request_origin")
         await _reject(websocket, REQUEST_ORIGIN_REFUSALS[origin_refusal], code=1008)
         return
     if admission.refusal is not None:
         logger.info("WS %s -> refused by the access gate", path)
-        _record_ws_refusal(state, adapter, path, 403, started)
+        _record_ws_refusal(state, adapter, path, 403, started, kind="access_gate")
         await _reject(websocket, admission.refusal)
         return
     if adapter is None:
         # Unlike unmatched HTTP traffic there is no default upstream to
         # forward an unknown WS path to; refusing is the only safe answer.
+        state.count_local_refusal("unattributed", None)
         await _reject(websocket, "no realtime route for this path")
         return
     if provider_config is None or not provider_config.upstream_base_url:
-        _record_ws_refusal(state, adapter, path, 502, started)
+        _record_ws_refusal(state, adapter, path, 502, started, kind="no_upstream")
         await _reject(websocket, f"[providers.{adapter.provider}] upstream not configured")
         return
     if not provider_config.enabled:
         # Same fail-closed stance as HTTP: a disabled provider must never
         # fall through to any forwarding path.
         logger.info("WS %s -> refused (provider %s disabled)", path, adapter.provider)
-        _record_ws_refusal(state, adapter, path, 502, started)
+        _record_ws_refusal(state, adapter, path, 502, started, kind="disabled_provider")
         await _reject(websocket, f"provider {adapter.provider} disabled in llm-redact config")
         return
     upstream_auth = state.upstream_auth.get(adapter.provider)
@@ -1286,7 +1308,7 @@ async def ws_handle(websocket: WebSocket) -> None:
         # is refused: forwarding the client's credential (or none) would
         # silently break the configured contract.
         logger.info("WS %s -> refused (provider %s uses identity auth)", path, adapter.provider)
-        _record_ws_refusal(state, adapter, path, 403, started)
+        _record_ws_refusal(state, adapter, path, 403, started, kind="identity_route")
         await _reject(
             websocket,
             f'[providers.{adapter.provider}] auth = "identity": only the realtime routes'
@@ -1294,6 +1316,7 @@ async def ws_handle(websocket: WebSocket) -> None:
         )
         return
     if not websockets_available():
+        state.count_local_refusal("realtime_unavailable", adapter.provider)
         await _reject(
             websocket,
             "realtime support requires the websockets package;"
@@ -1314,14 +1337,14 @@ async def ws_handle(websocket: WebSocket) -> None:
             path,
             type(fault).__name__,
         )
-        _record_ws_refusal(state, adapter, path, 503, started)
+        _record_ws_refusal(state, adapter, path, 503, started, kind="vault_fault")
         await _reject(websocket, "llm-redact could not open this connection's vault session")
         return
     if static_ctx.sealed:
         # A session the router says must stay empty cannot carry a
         # conversation whose every message is redacted into it.
         logger.info("WS %s -> refused (sealed session)", path)
-        _record_ws_refusal(state, adapter, path, 403, started)
+        _record_ws_refusal(state, adapter, path, 403, started, kind="sealed_session")
         await _reject(websocket, "the session router sealed this connection's vault session")
         return
     # The connection's admission: its provider's settings and authorizer
@@ -1395,7 +1418,7 @@ async def _relay(
     if not _same_upstream(http_url, provider_config.upstream_base_url):
         # The HTTP rule: whatever the path holds, the connection goes to the
         # configured upstream (host AND base path) or nowhere.
-        _record_ws_refusal(state, adapter, path, 400, started)
+        _record_ws_refusal(state, adapter, path, 400, started, kind="request_target")
         await _reject(websocket, "the request target must be a path")
         return
     headers = _filtered_headers(websocket)
@@ -1425,7 +1448,7 @@ async def _relay(
             # gate's 403.
             logger.info("WS %s -> refused (%s)", path, relay.revocation_log())
             refused = 403 if relay.revoked == ACCESS_REVOKED else 503
-            _record_ws_refusal(state, adapter, path, refused, started)
+            _record_ws_refusal(state, adapter, path, refused, started, kind=_revoked_kind(relay))
             await _reject(websocket, relay.close_reason, code=relay.close_code)
             return
     url = _ws_form(http_url)
@@ -1450,7 +1473,9 @@ async def _relay(
             path,
             type(problem).__name__,
         )
-        _record_ws_refusal(state, adapter, path, 503, started, session=ctx.session_id)
+        _record_ws_refusal(
+            state, adapter, path, 503, started, kind="audit_unavailable", session=ctx.session_id
+        )
         await _reject(websocket, "audit log unavailable and [audit] required is enabled")
         return
 
@@ -1468,7 +1493,9 @@ async def _relay(
         # row, if any, gets its END row here).
         logger.warning("WS %s -> upstream connect failed (%s)", path, type(problem).__name__)
         state.upstream_errors[adapter.provider] += 1
-        _record_refused(state, ctx, adapter, path, started, audit_token=audit_token)
+        _record_refused(
+            state, ctx, adapter, path, started, kind="upstream_fault", audit_token=audit_token
+        )
         await _reject(websocket, "upstream websocket connect failed")
         return
 
@@ -1480,7 +1507,16 @@ async def _relay(
         with contextlib.suppress(Exception):
             await upstream.close(code=1000)
         refused = 403 if relay.revoked == ACCESS_REVOKED else 503
-        _record_refused(state, ctx, adapter, path, started, audit_token=audit_token, status=refused)
+        _record_refused(
+            state,
+            ctx,
+            adapter,
+            path,
+            started,
+            kind=_revoked_kind(relay),
+            audit_token=audit_token,
+            status=refused,
+        )
         await _reject(websocket, relay.close_reason, code=relay.close_code)
         return
     await websocket.accept(subprotocol=upstream.subprotocol)
@@ -1492,6 +1528,9 @@ async def _relay(
             adapter.provider,
         )
     status: int | None = 101
+    # The local-refusal kind of a frame the proxy refused (the connection
+    # then closes), counted once in the connection's row.
+    refusal: LocalRefusal | None = None
     # Under the proxy's own identity a frame the adapter cannot walk is
     # refused, never relayed verbatim (the HTTP body rule). detection = false
     # relays frames untouched — unless the session router checks frames
@@ -1531,7 +1570,7 @@ async def _relay(
             await close_on_policy(relay.close_reason, code=relay.close_code)
 
     async def client_to_upstream() -> None:
-        nonlocal status, override_marker
+        nonlocal status, override_marker, refusal
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
@@ -1628,14 +1667,14 @@ async def _relay(
                 # without it — closed 1008 with the router's fixed reason
                 # (never logged here); the row records the HTTP 403.
                 logger.info("WS %s -> refused (the session router's frame check)", path)
-                status = 403
+                status, refusal = 403, "object_access"
                 await close_on_policy(refused.reason)
                 return
             except TooManyStrings as refused:
                 # Too many strings to redact in one frame: never relayed
                 # (1009, message too big); the row records the HTTP 413.
                 logger.info("WS %s -> refused (%s)", path, refused)
-                status = 413
+                status, refusal = 413, "too_many_strings"
                 await close_on_policy(f"refused by llm-redact ({refused})", code=1009)
                 return
             except UnredactableRequest as refused:
@@ -1644,6 +1683,11 @@ async def _relay(
                 # records 400 (the HTTP refusal status).
                 logger.info("WS %s -> refused (%s)", path, refused)
                 status = 400
+                refusal = (
+                    "placeholder_limit"
+                    if isinstance(refused, PlaceholderLimitReached)
+                    else "unredactable"
+                )
                 await close_on_policy(f"refused by llm-redact ({refused})")
                 return
             except BlockedRequest as blocked:
@@ -1654,6 +1698,7 @@ async def _relay(
                 # reason carries the refusal's code when it can: approved,
                 # it lets the value through on the next connection.
                 logger.info("WS %s -> blocked (%s)", path, blocked)
+                refusal = "blocked_value"
                 allow_code = (
                     frame_scope.refusal_code("block", adapter.provider, "WS", path)
                     if frame_scope is not None
@@ -1671,6 +1716,7 @@ async def _relay(
             except _OverrideRaced as raced:
                 logger.info("WS %s -> refused (a one-time override could not be used)", path)
                 status = 400
+                refusal = "override_fault" if raced.fault else "override_raced"
                 await close_on_policy(
                     OVERRIDE_FAULT_REASON if raced.fault else OVERRIDE_RACED_REASON
                 )
@@ -1688,7 +1734,7 @@ async def _relay(
                     path,
                     type(fault).__name__,
                 )
-                status = 503
+                status, refusal = 503, "vault_fault"
                 await close_on_policy(
                     "llm-redact could not record this frame's placeholders", code=1011
                 )
@@ -1763,7 +1809,7 @@ async def _relay(
             ):
                 raise exc
     except Exception as problem:
-        status = 500
+        status, refusal = 500, "delivery_fault"
         logger.warning("WS %s -> relay error (%s)", path, type(problem).__name__)
     finally:
         with contextlib.suppress(Exception):
@@ -1783,6 +1829,7 @@ async def _relay(
             rehydrations=dict(pool.counts),
             audit_token=audit_token,
             override=override_marker,
+            refusal=refusal,
         )
 
 

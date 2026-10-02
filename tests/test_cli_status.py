@@ -177,6 +177,22 @@ def test_status_omits_licensed_features_line_on_old_proxy(
     assert "licensed-features package" not in capsys.readouterr().out
 
 
+def test_status_prints_local_refusals_and_queued_map_writes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = _full_status_payload()
+    payload["vault"]["map_writes_pending"] = 3
+    payload["local_refusals_total"] = {"scanned_body": 2, "blocked_value": 1}
+    _status_run(monkeypatch, payload)
+    out = capsys.readouterr().out
+    assert "vault map writes queued: 3" in out
+    assert "local refusals: blocked_value×1 scanned_body×2" in out
+    # Nothing queued, nothing refused, or an older proxy: no line at all.
+    _status_run(monkeypatch, _full_status_payload())
+    out = capsys.readouterr().out
+    assert "map writes queued" not in out and "local refusals" not in out
+
+
 def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
     from llm_redact import __version__
 

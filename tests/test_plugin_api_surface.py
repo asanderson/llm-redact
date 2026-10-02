@@ -381,6 +381,8 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``record_object_session(object_id, session_id) -> None``",
         "``record_handle_session(handle_digest, session_id, *, replaces=()) -> None``",
         "``lookup_handle_session(handle_digest) -> str | None``",
+        "``write_maps_in_background() -> None``",
+        "``drain_map_writes(timeout) -> int``",
     ),
     "WriteAheadAudit": ("``amend(token, entry) -> None``",),
 }

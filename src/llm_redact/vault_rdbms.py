@@ -69,17 +69,25 @@ from llm_redact.vault import (
     _RESPONSE_KIND,
     _RESPONSE_PRUNE_EVERY,
     CACHE_CHECK_SECONDS,
+    HANDLE,
     LOOKUP_CHUNK,
     MAX_HANDLE_ROWS,
     MAX_SESSION_HANDLES,
+    ROW,
     CheckFaults,
     HandleReadFaults,
     HandleWriteFaults,
+    ObjectMapWriteFaults,
     PlaceholderSpaceExhausted,
+    ResponseMapWriteFaults,
     Vault,
     VaultKeyError,
+    handle_answer,
     next_number,
+    overlaid_rows,
+    row_verdict,
 )
+from llm_redact.vault_writer import MISS, MapWrite, MapWriter, holding
 
 if TYPE_CHECKING:
     from llm_redact.config import VaultConfig
@@ -693,17 +701,26 @@ class RdbmsStore:
         with suppress(Exception):
             conn.rollback()
 
-    def _run(self, op: Callable[[Any], Any]) -> Any:
+    def _run(self, op: Callable[[Any], Any], lane: MapLane | None = None) -> Any:
+        """Run ``op`` on the store's connection — or on ``lane``'s, the
+        background map writer's own (``open_lane``)."""
+        holder: Any = self if lane is None else lane
         try:
-            return op(self._conn)
+            return op(holder._conn)
         except self._retryable:
             # Dropped/unusable connection: reconnect once and retry the
             # whole (self-contained) operation. A genuine fault fails again
             # and propagates — fail closed, one extra round trip.
             with suppress(Exception):
-                self._conn.close()
-            self._conn = self._connect()
-            return op(self._conn)
+                holder._conn.close()
+            holder._conn = self._connect()
+            return op(holder._conn)
+
+    def open_lane(self) -> MapLane:
+        """A second connection for the durable maps' background writer
+        (``vault_writer.MapWriter``; opened and used on its thread only —
+        a DB-API connection is never shared across threads)."""
+        return MapLane(self._connect())
 
     # -- schema -----------------------------------------------------------
 
@@ -1220,16 +1237,44 @@ class RdbmsStore:
             f"RDBMS vault session delete kept colliding after {_ALLOCATION_ATTEMPTS} attempts"
         )
 
-    def record_response_session(self, response_id: str, session_id: str) -> None:
+    def record_response_session(
+        self, response_id: str, session_id: str, lane: MapLane | None = None
+    ) -> None:
         """Map a Responses chain's response id to its session."""
-        self._record(response_id, session_id, _RESPONSE_KIND, _MAX_RESPONSE_ROWS)
+        self._record(response_id, session_id, _RESPONSE_KIND, _MAX_RESPONSE_ROWS, lane)
 
-    def record_object_session(self, object_id: str, session_id: str) -> None:
+    def record_object_session(
+        self, object_id: str, session_id: str, lane: MapLane | None = None
+    ) -> None:
         """Record the session that created a stored object; bounded apart
         from the Responses rows (see llm_redact.vault)."""
-        self._record(object_id, session_id, _OBJECT_KIND, _MAX_OBJECT_ROWS)
+        self._record(object_id, session_id, _OBJECT_KIND, _MAX_OBJECT_ROWS, lane)
 
-    def _record(self, row_id: str, session_id: str, kind: str, cap: int) -> None:
+    def erase_row(self, row_id: str, lane: MapLane) -> None:
+        """Delete one response map row whichever session it names: a queued
+        write whose session was deleted before it ran (``vault_writer``)."""
+        self._erase("DELETE FROM llm_redact_response_sessions WHERE response_id = :k", row_id, lane)
+
+    def erase_handle(self, handle_digest: str, lane: MapLane) -> None:
+        """``erase_row`` for a handle map row."""
+        self._erase(
+            "DELETE FROM llm_redact_handle_sessions WHERE handle_digest = :k", handle_digest, lane
+        )
+
+    def _erase(self, sql: str, key: str, lane: MapLane) -> None:
+        def op(conn: Any) -> None:
+            try:
+                self._execute(conn, sql, {"k": key})
+                conn.commit()
+            except self._module.Error:
+                self._rollback(conn)
+                raise
+
+        self._run(op, lane)
+
+    def _record(
+        self, row_id: str, session_id: str, kind: str, cap: int, lane: MapLane | None
+    ) -> None:
         if not self._row_kinds:  # a schema that could not gain the column
             kind, cap = _RESPONSE_KIND, _MAX_RESPONSE_ROWS
         self._inserts[kind] += 1
@@ -1289,7 +1334,7 @@ class RdbmsStore:
                 self._rollback(conn)
                 raise
 
-        self._run(op)
+        self._run(op, lane)
 
     def _nth_newest_handle(self, conn: Any, offset: int, session: str | None) -> int | None:
         """The ``seq`` of the handle row ``offset`` places below the newest
@@ -1383,6 +1428,7 @@ class RdbmsStore:
         replaces: list[str],
         *,
         trim_all: bool,
+        lane: MapLane | None = None,
     ) -> None:
         """Map a Live resumption handle's digest to its session in ONE
         transaction (``_write_handle``). Two writers numbering the same
@@ -1406,7 +1452,7 @@ class RdbmsStore:
                 f"RDBMS vault handle write kept colliding after {_ALLOCATION_ATTEMPTS} attempts"
             )
 
-        self._run(op)
+        self._run(op, lane)
 
     def lookup_handle(self, handle_digest: str) -> str | None:
         """The session a recorded handle digest names, or None."""
@@ -1458,6 +1504,20 @@ class RdbmsStore:
 
         result: dict[str, str] = self._run(op)
         return result
+
+    def close(self) -> None:
+        with suppress(Exception):
+            self._conn.close()
+
+
+class MapLane:
+    """The background map writer's own connection (``RdbmsStore.open_lane``):
+    ``RdbmsStore._run`` reconnects it in place, as it does the store's."""
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
 
     def close(self) -> None:
         with suppress(Exception):
@@ -1569,14 +1629,33 @@ class RdbmsVaultManager:
         self._handle_writes = 0
         self._handle_write_faults = HandleWriteFaults()
         self._handle_read_faults = HandleReadFaults()
+        self._response_write_faults = ResponseMapWriteFaults()
+        self._object_write_faults = ObjectMapWriteFaults()
+        # SqliteVaultManager's background map writer: None until the proxy
+        # asks for it (``write_maps_in_background``).
+        self._maps: MapWriter | None = None
 
     def bind_fault_counter(self, counter: Counter[str]) -> None:
-        """Count this manager's failed staleness checks and handle-map reads
-        and writes in ``counter`` (the proxy's ``bookkeeping_errors``;
-        optional, read via getattr)."""
+        """Count this manager's failed staleness checks, handle-map reads
+        and writes and background map writes in ``counter`` (the proxy's
+        ``bookkeeping_errors``; optional, read via getattr)."""
         self._store.check_faults.counter = counter
         self._handle_write_faults.counter = counter
         self._handle_read_faults.counter = counter
+        self._response_write_faults.counter = counter
+        self._object_write_faults.counter = counter
+
+    def write_maps_in_background(self) -> None:
+        """``SqliteVaultManager.write_maps_in_background``: the durable
+        maps written on a background thread over the store's second
+        connection (``RdbmsStore.open_lane``) — a remote round trip never
+        stalls the event loop."""
+        if self._maps is None:
+            self._maps = MapWriter(self._store.open_lane)
+
+    def drain_map_writes(self, timeout: float) -> int:
+        """``SqliteVaultManager.drain_map_writes``."""
+        return self._maps.drain(timeout) if self._maps is not None else 0
 
     def get(self, session_id: str) -> Vault:
         # Every view the LRU holds is live, so the registry answers for both.
@@ -1610,7 +1689,9 @@ class RdbmsVaultManager:
         return self._store.fault_types
 
     def prune_sessions(self, days: int, *, exclude: frozenset[str] = frozenset()) -> int:
-        doomed = self._store.prune_sessions(days, exclude=exclude)
+        with holding(self._maps) as deleted:
+            doomed = self._store.prune_sessions(days, exclude=exclude)
+            deleted(doomed)
         self._drop_views(doomed)
         return len(doomed)
 
@@ -1618,7 +1699,9 @@ class RdbmsVaultManager:
         wanted = sorted(set(session_ids))
         if not wanted:
             return 0
-        present = self._store.forget_sessions(wanted)
+        with holding(self._maps) as deleted:
+            present = self._store.forget_sessions(wanted)
+            deleted(wanted)
         self._drop_views(wanted)
         return present
 
@@ -1631,12 +1714,37 @@ class RdbmsVaultManager:
                 view._load()
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
-        self._store.record_response_session(response_id, session_id)
+        self._record_row(response_id, session_id, _RESPONSE_KIND)
 
     def record_object_session(self, object_id: str, session_id: str) -> None:
-        self._store.record_object_session(object_id, session_id)
+        self._record_row(object_id, session_id, _OBJECT_KIND)
+
+    def _record_row(self, row_id: str, session_id: str, kind: str) -> None:
+        """``SqliteVaultManager._record_row``: written now, or queued."""
+        store = self._store
+        record, faults = (
+            (store.record_object_session, self._object_write_faults)
+            if kind == _OBJECT_KIND
+            else (store.record_response_session, self._response_write_faults)
+        )
+        maps = self._maps
+        if maps is None:
+            record(row_id, session_id)
+            return
+        maps.submit(
+            MapWrite(
+                session_id,
+                lambda lane: record(row_id, session_id, lane),
+                lambda lane: store.erase_row(row_id, lane),
+                faults,
+            ),
+            sets=((ROW, row_id),),
+        )
 
     def lookup_response_session(self, response_id: str) -> str | None:
+        verdict = row_verdict(self._maps, response_id)
+        if verdict is not MISS:
+            return verdict  # type: ignore[return-value]  # a row is never Removed
         return self._store.lookup_response_session(response_id)
 
     def record_handle_session(
@@ -1644,19 +1752,42 @@ class RdbmsVaultManager:
     ) -> None:
         """``SqliteVaultManager.record_handle_session``: one transaction,
         bounded, a fault contained (``HandleWriteFaults``; the handle reads
-        as unknown)."""
-        trim_all = self._handle_writes + 1 >= _RESPONSE_PRUNE_EVERY
-        try:
-            self._store.record_handle(handle_digest, session_id, list(replaces), trim_all=trim_all)
-        except Exception as exc:  # noqa: BLE001 — contained: the handle stays unknown
-            self._handle_write_faults.failed(exc)
+        as unknown); queued with a background writer."""
+        superseded = list(replaces)
+        maps = self._maps
+        if maps is None:
+            try:
+                self._write_handle(handle_digest, session_id, superseded, None)
+            except Exception as exc:  # noqa: BLE001 — contained: the handle stays unknown
+                self._handle_write_faults.failed(exc)
+                return
+            self._handle_write_faults.succeeded()
             return
-        self._handle_write_faults.succeeded()
+        maps.submit(
+            MapWrite(
+                session_id,
+                lambda lane: self._write_handle(handle_digest, session_id, superseded, lane),
+                lambda lane: self._store.erase_handle(handle_digest, lane),
+                self._handle_write_faults,
+            ),
+            sets=((HANDLE, handle_digest),),
+            removes=tuple((HANDLE, digest) for digest in superseded),
+        )
+
+    def _write_handle(
+        self, handle_digest: str, session_id: str, replaces: list[str], lane: MapLane | None
+    ) -> None:
+        trim_all = self._handle_writes + 1 >= _RESPONSE_PRUNE_EVERY
+        self._store.record_handle(handle_digest, session_id, replaces, trim_all=trim_all, lane=lane)
         self._handle_writes = 0 if trim_all else self._handle_writes + 1
 
     def lookup_handle_session(self, handle_digest: str) -> str | None:
         """``SqliteVaultManager.lookup_handle_session``: a fault reads as
-        None (unknown)."""
+        None (unknown); a queued write answers from the overlay."""
+        verdict = MISS if self._maps is None else self._maps.verdict((HANDLE, handle_digest))
+        return handle_answer(verdict, lambda: self._read_handle(handle_digest))
+
+    def _read_handle(self, handle_digest: str) -> str | None:
         try:
             session = self._store.lookup_handle(handle_digest)
         except Exception as exc:  # noqa: BLE001 — fail closed: unknown
@@ -1666,10 +1797,14 @@ class RdbmsVaultManager:
         return session
 
     def lookup_response_sessions(self, response_ids: Iterable[str]) -> dict[str, str]:
-        wanted = list(dict.fromkeys(response_ids))
-        return self._store.lookup_response_sessions(wanted) if wanted else {}
+        return overlaid_rows(
+            self._maps, list(dict.fromkeys(response_ids)), self._store.lookup_response_sessions
+        )
 
     def close(self) -> None:
+        """``SqliteVaultManager.close``: the writer stopped, then the store."""
+        if self._maps is not None:
+            self._maps.close()
         self._store.close()
 
 

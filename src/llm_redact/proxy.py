@@ -170,6 +170,7 @@ from llm_redact.upload_view import read_upload, read_upload_metadata
 from llm_redact.vault import Vault, VaultManager, run_batched
 from llm_redact.vault_crypto import key_source as vault_key_source
 from llm_redact.vault_crypto import require_vault_key_source
+from llm_redact.vault_writer import SHUTDOWN_DRAIN_SECONDS
 
 # Local endpoints under this prefix are answered by the proxy itself and are
 # never forwarded upstream (see the first statement of handle()).
@@ -727,6 +728,15 @@ class ProxyState:
         bind_fault_counter = getattr(self.vault_manager, "bind_fault_counter", None)
         if callable(bind_fault_counter):
             bind_fault_counter(self.bookkeeping_errors)
+        # The durable maps (Responses chains, owner records, Live handles)
+        # are written after the provider answered: a background writer
+        # (llm_redact.vault_writer) keeps a slow disk or a remote database
+        # round trip off the event loop, its overlay answering lookups until
+        # each write lands. Optional (getattr): a manager without it writes
+        # synchronously, as before.
+        background = getattr(self.vault_manager, "write_maps_in_background", None)
+        if callable(background):
+            background()
         # Requests refused as a web page's (request_origin_refusal), by kind:
         # "host" (a name the proxy does not answer to — DNS rebinding, or an
         # alias not in allowed_hosts), "origin", "fetch_site". Kinds only.
@@ -7092,6 +7102,16 @@ async def _handle_routed(
     )
 
 
+async def _drain_map_writes(state: ProxyState) -> None:
+    """At shutdown, before the vault closes: wait (off the loop, at most
+    ``SHUTDOWN_DRAIN_SECONDS``) for the durable map writes still queued to
+    land; ``close`` then counts and drops what has not, logging their
+    number only."""
+    drain = getattr(state.vault_manager, "drain_map_writes", None)
+    if callable(drain):
+        await asyncio.to_thread(drain, SHUTDOWN_DRAIN_SECONDS)
+
+
 def create_app(
     config: Config,
     *,
@@ -7172,7 +7192,8 @@ def create_app(
             # every request finalizer has written its END row. Then: stop
             # the background work, close what serves requests, give the
             # sinks their final flush from the STILL-OPEN audit database,
-            # close the audit database, and the vault last.
+            # close the audit database, and the vault last (its background
+            # map writes drained before the sinks' flush).
             await state.connections.stop()
             if sighup_registered:
                 loop.remove_signal_handler(signal.SIGHUP)
@@ -7184,6 +7205,9 @@ def create_app(
                 if isinstance(outcome, Exception):
                     logger.warning("a background task had failed (%s)", type(outcome).__name__)
             await state.client.aclose()
+            # The vault's background map writes land now (bounded): nothing
+            # submits another once the requests have finished.
+            await _drain_map_writes(state)
             if state.router is not None:
                 _close_contained("router", state.router.close)
             _close_upstream_auths(state.upstream_auth)

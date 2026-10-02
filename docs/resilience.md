@@ -85,6 +85,30 @@ with `synchronous=FULL` and WAL so a committed mapping survives a crash.
 | Wrong / missing encryption key | Fails closed **at open** — never silently issues fresh tokens against an unreadable store. | `test_vault_sqlite.py` |
 | Corrupted at-rest ciphertext on a cold cache | `original_for` fails closed (raises) rather than returning a wrong or partial plaintext. | `test_vault_faults.py` |
 
+## Durable map writes off the event loop
+
+After the provider answered, the proxy records which session a Responses
+chain, a stored object (its owner record) and — for llm-redact-pro — a Live
+resumption handle belong to (`record_response_session`,
+`record_object_session`, `record_handle_session`). Each is a database write
+(an fsync on sqlite, a round trip on a remote RDBMS). The proxy no longer
+makes them on the event loop: the sqlite and RDBMS vault managers hand them
+to one background writer thread per manager (`vault_writer.MapWriter`,
+switched on at startup by the manager's optional `write_maps_in_background`),
+which writes over its OWN connection — never the proxy's shared one, never
+inside a request's open `run_batched` transaction — in submission order.
+
+| Fault / situation | Behavior | Pinned by |
+| --- | --- | --- |
+| The map's database is slow (a slow disk, a remote RDBMS round trip) | Other requests are answered while the write is still held up: the event loop only queues it. A client that sends `previous_response_id`, or resumes a Live handle, right after the answer is served exactly as before — until the write lands, every lookup (`lookup_response_session[s]`, `lookup_handle_session`) answers from the writer's in-process overlay (a superseded handle already reads as unknown). The writer's sqlite connection runs `synchronous=NORMAL`: a map row lost to a power failure reads as unknown (refused or sealed), never as a wrong value — unlike a mapping. A sqlite redaction transaction may still wait on the writer's write lock for the length of one map write. | `test_vault_writer.py` |
+| A map write fails (disk full, I/O error, an RDBMS blip, a collision past its retries) | Contained in the writer: nothing is written, the record reads as unknown — as a failed synchronous write did (an orphan session for a Responses chain, the router's unknown-object case, a refused Live resumption), never a wrong value. Counted under the write's own stage (`llm_redact_bookkeeping_errors_total{stage="response_id"|"object_ids"|"handle_map"}`) and logged once per outage and on recovery, by exception type only. Outcomes are posted to the event loop, so counters are only touched there. | `test_vault_writer.py` |
+| A session is deleted (TTL prune, the prune endpoint, `SessionStore.forget`) while its writes are queued | The delete never waits for the writer (it runs on the event loop; a write held up on the writer's own connection never holds it). It turns every queued write of a deleted session into an ERASE of its key, erases a write of that session still in flight again right after it ran, and the overlay answers "absent" at once; the writer settles no write while a delete is in progress. The map reads exactly as if the writes had landed before the delete: a chain or handle into a pruned-and-recreated session stays unknown. | `test_vault_writer.py` |
+| The writer falls behind (more than 10,000 writes waiting) | Bounded: the write is not queued — counted under its stage, logged once per episode — and kept in the overlay only (at most 10,000 such records, the oldest forgotten first), so this process still answers for it. After a restart, or on another replica, it reads as unknown: refused or sealed, never a wrong value. | `test_vault_writer.py` |
+| Several replicas share one vault (the Helm standalone mode with autoscaling, any load-balanced set) | Read-your-writes holds within ONE process only. Another replica (or the database itself) sees a record once its write landed — normally milliseconds after the answer, but a buffered answer's row is no longer committed before the client receives the bytes. A `previous_response_id` continuation or a Live resumption that reaches another replica first reads the record as unknown: refused or sealed (an orphan session, a refused resumption), never a wrong value. A record past the 10,000-write bound is never written, so for every other replica it stays unknown for good. Route a conversation's follow-ups to the replica that answered (session affinity) where that availability matters. | `test_vault_writer.py`, llm-redact-pro `test_vault_background_writes_e2e.py` |
+| Shutdown with writes queued | The lifespan waits (off the loop, at most 5 s) for them to land before the vault closes; what is still queued then is dropped, and a write still in flight is given up on once its thread has not finished within 1 s more — each counted under its write's stage (once: a given-up write's own late outcome is never counted again) and logged by NUMBER only — and reads as unknown after the restart. A drain run earlier (mid-life) never stops the final close from draining: only a drain that ran out of time with no write landing since (a stuck writer) is not waited for twice. | `test_vault_writer.py` |
+
+Lookups (the reads) still run on the event loop; only the writes moved.
+
 ## Audit write faults (`[audit] required`, Pro)
 
 The default audit trail is fail-open (a write fault warns and continues —
@@ -121,7 +145,10 @@ A clean stop (SIGTERM / Ctrl-C) drains in this order:
    had already died is logged by exception type and never cuts the
    shutdown short); the upstream client, router, upstream authorizers,
    access gate and upload inspector close (a plugin's close that fails is
-   logged by exception type and never skips the steps below).
+   logged by exception type and never skips the steps below). The vault's
+   background map writes (Responses chains, stored-object owners, Live
+   handles) are drained, for at most 5 s; what is still unwritten then is
+   counted and dropped when the vault closes (step 5).
 4. **The off-machine audit sinks flush from the still-open audit
    database** (`aclose()` of `[audit.s3]` and `[audit.azure]`,
    concurrently): the rows spooled since the last upload, including the
@@ -167,7 +194,7 @@ must not undo an answer the provider already produced — and billed.
 
 | Fault | Behavior | Pinned by |
 | --- | --- | --- |
-| Recording a response id or stored object fails (router or durable map) | Contained: the answer is delivered (buffered or streamed — the stream is never cut), the fault logged by stage and exception type and counted (`llm_redact_bookkeeping_errors_total{stage}`, `/status` `bookkeeping_errors_total`). The object stays unattributed — the router's unknown-object case (an empty session: placeholders pass through), never a wrong value. | `test_bookkeeping_faults.py` |
+| Recording a response id or stored object fails (router or durable map; a background map write's fault: see Durable map writes off the event loop) | Contained: the answer is delivered (buffered or streamed — the stream is never cut), the fault logged by stage and exception type and counted (`llm_redact_bookkeeping_errors_total{stage}`, `/status` `bookkeeping_errors_total`). The object stays unattributed — the router's unknown-object case (an empty session: placeholders pass through), never a wrong value. | `test_bookkeeping_faults.py` |
 | An open connection's access re-check fails (the access gate's recheck raises — a `CancelledError` from an awaitable another path cancelled included —, times out after min(`recheck_interval`, 10 s), or answers neither a bool, None nor a string) | Fail closed: the realtime relay closes its client with 1008 and its upstream with 1000 (its row stays 101), or the live-events stream ends. Logged by exception type only (never the gate's reason, a grant or a subject), and counted as `llm_redact_bookkeeping_errors_total{stage="recheck"}` and `llm_redact_connections_closed_total{cause="recheck_error"}`. Checks run concurrently, one pass at a time, and a pass that fails never stops the next one: only the backstop's own cancellation (shutdown) ends it, and a backstop task that ended anyway is started again with the next connection that carries a recheck. | `test_connection_control.py` |
 | The session router's realtime frame check fails (`realtime_frame_refusal` raises, or answers anything but None or a non-empty string) | Fail closed: the relay closes its client with 1008 and the core's fixed reason and its upstream with 1000; nothing of the frame is redacted, numbered or sent; the connection's row records 403. Logged by exception (or answer) type only, counted as `llm_redact_bookkeeping_errors_total{stage="realtime_frame"}`. | `test_realtime_frame_check.py` |
 | The session router's realtime server-frame observer fails (`realtime_server_frame` raises) | Contained: the upstream frame is restored and delivered as usual (the observer only ever holds its own parse of the provider's bytes, before restoration) and the connection stays open. Logged by exception type only, counted as `llm_redact_bookkeeping_errors_total{stage="realtime_server_frame"}`. What the router would have recorded stays unknown — its fail-closed case (llm-redact-pro refuses a Live `setup` resuming a handle it never recorded). | `test_realtime_server_frame.py` |

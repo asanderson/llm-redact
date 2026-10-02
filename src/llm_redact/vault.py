@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol, TypeVar
 
 from llm_redact.placeholders import MAX_TOKEN_NUMBER, format_placeholder
+from llm_redact.vault_writer import MISS, MapWrite, MapWriter, Removed, holding
 
 if TYPE_CHECKING:
     from llm_redact.config import VaultConfig
@@ -110,6 +111,85 @@ class HandleReadFaults(CheckFaults):
         " until the database answers again"
     )
     recovery_message = "vault handle map: reads succeed again"
+
+
+class ResponseMapWriteFaults(CheckFaults):
+    """Failed BACKGROUND writes of Responses chain rows (``vault_writer``;
+    stage ``response_id``, the proxy's own for a lost mapping): the response
+    id reads as unknown — an orphan session, never a wrong value."""
+
+    __slots__ = ()
+
+    stage = "response_id"
+    outage_message = (
+        "vault response map write failed (%s): Responses chains go unrecorded"
+        " (read as unknown) until a write succeeds again"
+    )
+    recovery_message = "vault response map: writes succeed again"
+
+
+class ObjectMapWriteFaults(CheckFaults):
+    """Failed BACKGROUND writes of stored-object owner records
+    (``vault_writer``; stage ``object_ids``): the object reads as unknown
+    (the router's unknown-object case)."""
+
+    __slots__ = ()
+
+    stage = "object_ids"
+    outage_message = (
+        "vault owner record write failed (%s): stored objects go unrecorded"
+        " (read as unknown) until a write succeeds again"
+    )
+    recovery_message = "vault owner records: writes succeed again"
+
+
+# The overlay keyspaces of a manager's background writer (``vault_writer``):
+# a response map row (Responses chain or owner record: one primary key) and
+# a handle map row.
+ROW = "row"
+HANDLE = "handle"
+
+
+def row_verdict(writer: MapWriter | None, row_id: str) -> "str | None | object":
+    """What a manager's background writer says of a response map row:
+    its pending session, None (deleted with its session), or ``MISS``
+    (nothing pending: the database answers)."""
+    if writer is None:
+        return MISS
+    return writer.verdict((ROW, row_id))
+
+
+def overlaid_rows(
+    writer: MapWriter | None, row_ids: list[str], read: Callable[[list[str]], dict[str, str]]
+) -> dict[str, str]:
+    """A batched response map lookup: the ids a pending write answers for
+    from the writer's overlay, the rest from ``read`` (the database)."""
+    found: dict[str, str] = {}
+    rest = row_ids
+    if writer is not None:
+        rest = []
+        for row_id in row_ids:
+            verdict = writer.verdict((ROW, row_id))
+            if verdict is MISS:
+                rest.append(row_id)
+            elif isinstance(verdict, str):
+                found[row_id] = verdict
+    if rest:
+        found.update(read(rest))
+    return found
+
+
+def handle_answer(verdict: object, read: Callable[[], str | None]) -> str | None:
+    """A handle map lookup under a background writer's ``verdict``: a
+    pending session (or None: its row is gone) answers alone; otherwise the
+    database (``read``) does — None where the overlay holds its row as
+    superseded (``Removed``) for the session it names."""
+    if verdict is None or isinstance(verdict, str):
+        return verdict
+    session = read()
+    if isinstance(verdict, Removed) and session in verdict.sessions:
+        return None
+    return session
 
 
 class VaultKeyError(RuntimeError):
@@ -1061,6 +1141,19 @@ class VaultManager(Protocol):
       session a recorded digest names, None when absent (the truth: a
       deleted session's rows are gone) or when the read fails (unknown,
       fail closed).
+    - OPTIONAL ``write_maps_in_background() -> None`` — called once by the
+      proxy at startup: from then on the three durable maps above (and
+      ``record_response_session``) are written off the event loop
+      (``vault_writer.MapWriter``: one thread, its own connection, bounded),
+      every lookup answering from the writer's overlay until each write
+      lands (read-your-writes), a whole-session delete erasing its
+      sessions' queued writes. A manager without it writes synchronously.
+    - OPTIONAL ``drain_map_writes(timeout) -> int`` — blocking: wait up to
+      ``timeout`` seconds for the queued writes to land; how many have not.
+      The proxy's shutdown runs it (in a worker thread) before ``close``,
+      which counts and drops what is still queued (and a write still in
+      flight); a drain earlier in the manager's life never stops ``close``
+      from draining again.
 
     A manager whose ``durable_response_map`` is False (the in-memory one)
     keeps no durable map: its handle-map members record nothing and answer
@@ -1202,10 +1295,16 @@ class SqliteVaultManager:
         # Every live view, wherever it is held (weakly: the LRU above and the
         # holders keep them alive).
         self._live: weakref.WeakValueDictionary[str, SqliteVault] = weakref.WeakValueDictionary()
+        self._path = path
         self._inserts = {_RESPONSE_KIND: 0, _OBJECT_KIND: 0}
         self._handle_writes = 0
         self._handle_write_faults = HandleWriteFaults()
         self._handle_read_faults = HandleReadFaults()
+        self._response_write_faults = ResponseMapWriteFaults()
+        self._object_write_faults = ObjectMapWriteFaults()
+        # The durable maps' background writer (``write_maps_in_background``),
+        # None while they are written synchronously (the CLI, tests).
+        self._maps: MapWriter | None = None
 
     @property
     def _conn(self) -> sqlite3.Connection:
@@ -1216,12 +1315,37 @@ class SqliteVaultManager:
         self._shared.conn = conn
 
     def bind_fault_counter(self, counter: Counter[str]) -> None:
-        """Count this manager's failed staleness checks and handle-map reads
-        and writes in ``counter`` (the proxy's ``bookkeeping_errors``;
-        optional, read via getattr)."""
+        """Count this manager's failed staleness checks, handle-map reads
+        and writes and background map writes in ``counter`` (the proxy's
+        ``bookkeeping_errors``; optional, read via getattr)."""
         self._shared.check_faults.counter = counter
         self._handle_write_faults.counter = counter
         self._handle_read_faults.counter = counter
+        self._response_write_faults.counter = counter
+        self._object_write_faults.counter = counter
+
+    def write_maps_in_background(self) -> None:
+        """From now on, write the durable maps (response rows, owner
+        records, handles) on a background thread with its own connection
+        (``vault_writer.MapWriter``), answering lookups from its overlay
+        until each write lands. The proxy calls it once at startup."""
+        if self._maps is None:
+            self._maps = MapWriter(self._open_map_connection)
+
+    def _open_map_connection(self) -> sqlite3.Connection:
+        """The background writer's own connection (opened on its thread).
+        ``synchronous=NORMAL``: a map row lost to a power failure reads as
+        unknown (refused or sealed), never as a wrong value — unlike a
+        mapping, whose loss could reissue a number."""
+        conn = sqlite3.connect(self._path, isolation_level=None)
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
+    def drain_map_writes(self, timeout: float) -> int:
+        """Wait up to ``timeout`` seconds for the background writes to land
+        (blocking); how many have not."""
+        return self._maps.drain(timeout) if self._maps is not None else 0
 
     def get(self, session_id: str) -> Vault:
         # Every view the LRU holds is live, so the registry answers for both.
@@ -1268,7 +1392,9 @@ class SqliteVaultManager:
         view still holding one of its tokens can never see the number issued
         to another value. Callers exclude the always-live static session.
         """
-        doomed = prune_idle_sessions(self._conn, days, exclude=exclude)
+        with holding(self._maps) as deleted:
+            doomed = prune_idle_sessions(self._conn, days, exclude=exclude)
+            deleted(doomed)
         self._drop_views(doomed)
         return len(doomed)
 
@@ -1279,14 +1405,16 @@ class SqliteVaultManager:
         wanted = sorted(set(session_ids))
         if not wanted:
             return 0
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            present = delete_sessions(self._conn, wanted)
-            self._conn.execute("COMMIT")
-        except BaseException:
-            with suppress(sqlite3.Error):
-                self._conn.execute("ROLLBACK")
-            raise
+        with holding(self._maps) as deleted:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                present = delete_sessions(self._conn, wanted)
+                self._conn.execute("COMMIT")
+            except BaseException:
+                with suppress(sqlite3.Error):
+                    self._conn.execute("ROLLBACK")
+                raise
+            deleted(wanted)
         self._drop_views(wanted)
         return present
 
@@ -1303,15 +1431,35 @@ class SqliteVaultManager:
 
     def record_response_session(self, response_id: str, session_id: str) -> None:
         """Map a Responses chain's response id to its session."""
-        self._record(response_id, session_id, _RESPONSE_KIND, _MAX_RESPONSE_ROWS)
+        self._record_row(response_id, session_id, _RESPONSE_KIND)
 
     def record_object_session(self, object_id: str, session_id: str) -> None:
         """Record the session that created a stored object (the router's
         ownership record); bounded apart from the Responses rows."""
-        self._record(object_id, session_id, _OBJECT_KIND, _MAX_OBJECT_ROWS)
+        self._record_row(object_id, session_id, _OBJECT_KIND)
 
-    def _record(self, row_id: str, session_id: str, kind: str, cap: int) -> None:
-        self._conn.execute(
+    def _record_row(self, row_id: str, session_id: str, kind: str) -> None:
+        """One response map row: written now, or — with a background writer
+        — queued (its lookups answered from the writer's overlay meanwhile;
+        a fault counted under the kind's stage)."""
+        maps = self._maps
+        if maps is None:
+            self._record(self._conn, row_id, session_id, kind)
+            return
+
+        def run(conn: sqlite3.Connection) -> None:
+            self._record(conn, row_id, session_id, kind)
+
+        def erase(conn: sqlite3.Connection) -> None:
+            conn.execute("DELETE FROM response_sessions WHERE response_id = ?", (row_id,))
+
+        faults = (
+            self._response_write_faults if kind == _RESPONSE_KIND else self._object_write_faults
+        )
+        maps.submit(MapWrite(session_id, run, erase, faults), sets=((ROW, row_id),))
+
+    def _record(self, conn: sqlite3.Connection, row_id: str, session_id: str, kind: str) -> None:
+        conn.execute(
             "INSERT OR REPLACE INTO response_sessions (response_id, session_id, kind)"
             " VALUES (?, ?, ?)",
             (row_id, session_id, kind),
@@ -1326,16 +1474,19 @@ class SqliteVaultManager:
             # «EMAIL_001» for a new value while the provider's history still
             # means the old one. Live sessions' rows leave with the session.
             # Each kind keeps its own newest rows.
-            self._conn.execute(
+            conn.execute(
                 "DELETE FROM response_sessions WHERE kind = ? AND response_id NOT IN"
                 " (SELECT response_id FROM response_sessions WHERE kind = ?"
                 " ORDER BY created_at DESC LIMIT ?)"
                 " AND NOT EXISTS"
                 " (SELECT 1 FROM mappings m WHERE m.session_id = response_sessions.session_id)",
-                (kind, kind, cap),
+                (kind, kind, _MAX_OBJECT_ROWS if kind == _OBJECT_KIND else _MAX_RESPONSE_ROWS),
             )
 
     def lookup_response_session(self, response_id: str) -> str | None:
+        verdict = row_verdict(self._maps, response_id)
+        if verdict is not MISS:
+            return verdict  # type: ignore[return-value]  # a row is never Removed
         row = self._conn.execute(
             "SELECT session_id FROM response_sessions WHERE response_id = ?", (response_id,)
         ).fetchone()
@@ -1348,28 +1499,62 @@ class SqliteVaultManager:
         handle's digest, dropping the ``replaces`` digests it supersedes in
         the same transaction (``write_handle``: bounded per session and in
         all, in insertion order). A fault is contained (``HandleWriteFaults``):
-        nothing is written, and the handle reads as unknown."""
-        trim_all = self._handle_writes + 1 >= _RESPONSE_PRUNE_EVERY
-        conn = self._conn
-        try:
-            conn.execute("BEGIN IMMEDIATE")
+        nothing is written, and the handle reads as unknown. With a
+        background writer the write is queued (its lookups answered from the
+        writer's overlay until it lands)."""
+        superseded = tuple(replaces)
+        maps = self._maps
+        if maps is None:
             try:
-                write_handle(conn, handle_digest, session_id, replaces, trim_all=trim_all)
-                conn.execute("COMMIT")
-            except BaseException:
-                with suppress(sqlite3.Error):
-                    conn.execute("ROLLBACK")
-                raise
-        except Exception as exc:  # noqa: BLE001 — contained: the handle stays unknown
-            self._handle_write_faults.failed(exc)
+                self._write_handle(self._conn, handle_digest, session_id, superseded)
+            except Exception as exc:  # noqa: BLE001 — contained: the handle stays unknown
+                self._handle_write_faults.failed(exc)
+                return
+            self._handle_write_faults.succeeded()
             return
-        self._handle_write_faults.succeeded()
+
+        def run(conn: sqlite3.Connection) -> None:
+            self._write_handle(conn, handle_digest, session_id, superseded)
+
+        def erase(conn: sqlite3.Connection) -> None:
+            conn.execute("DELETE FROM handle_sessions WHERE handle_digest = ?", (handle_digest,))
+
+        maps.submit(
+            MapWrite(session_id, run, erase, self._handle_write_faults),
+            sets=((HANDLE, handle_digest),),
+            removes=tuple((HANDLE, digest) for digest in superseded),
+        )
+
+    def _write_handle(
+        self,
+        conn: sqlite3.Connection,
+        handle_digest: str,
+        session_id: str,
+        replaces: Sequence[str],
+    ) -> None:
+        """One handle write as one transaction (raising on a fault, rolled
+        back); the total trim runs every ``_RESPONSE_PRUNE_EVERY`` writes
+        that succeeded."""
+        trim_all = self._handle_writes + 1 >= _RESPONSE_PRUNE_EVERY
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            write_handle(conn, handle_digest, session_id, replaces, trim_all=trim_all)
+            conn.execute("COMMIT")
+        except BaseException:
+            with suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            raise
         self._handle_writes = 0 if trim_all else self._handle_writes + 1
 
     def lookup_handle_session(self, handle_digest: str) -> str | None:
         """The session a recorded handle digest was issued in, or None — its
         absence is the truth (a deleted session's rows left with it). A
-        fault reads as None: unknown, never a guess."""
+        fault reads as None: unknown, never a guess. A write still queued
+        answers from the background writer's overlay."""
+        verdict = MISS if self._maps is None else self._maps.verdict((HANDLE, handle_digest))
+        return handle_answer(verdict, lambda: self._read_handle(handle_digest))
+
+    def _read_handle(self, handle_digest: str) -> str | None:
         try:
             row = self._conn.execute(
                 "SELECT session_id FROM handle_sessions WHERE handle_digest = ?",
@@ -1385,8 +1570,10 @@ class SqliteVaultManager:
         """``lookup_response_session`` for many ids at once — one query per
         ``LOOKUP_CHUNK`` distinct ids, not one per id (a listing names
         thousands): the recorded ids with their sessions, an unknown id
-        simply absent."""
-        wanted = list(dict.fromkeys(response_ids))
+        simply absent (a write still queued answers from the overlay)."""
+        return overlaid_rows(self._maps, list(dict.fromkeys(response_ids)), self._read_rows)
+
+    def _read_rows(self, wanted: list[str]) -> dict[str, str]:
         found: dict[str, str] = {}
         for start in range(0, len(wanted), LOOKUP_CHUNK):
             chunk = wanted[start : start + LOOKUP_CHUNK]
@@ -1400,6 +1587,13 @@ class SqliteVaultManager:
         return found
 
     def close(self) -> None:
+        """Stop the background writer (``MapWriter.close``: drained first,
+        bounded, unless the last drain ran out of time with nothing landing
+        since; what is left — the write in flight included — is counted and
+        dropped),
+        then close the connection."""
+        if self._maps is not None:
+            self._maps.close()
         self._conn.close()
 
 

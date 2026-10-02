@@ -1708,14 +1708,23 @@ async def _relay(
                     # records from it is on record before the client can
                     # present it back. Its own parse — it never changes the
                     # frame — and a failure is contained (the frame is sent).
-                    _observe_server_frame(
-                        state,
-                        adapter,
-                        path,
-                        frame,
-                        identity=require_json,
-                        session_id=ctx.session_id,
-                    )
+                    with state.map_write_barrier() as map_writes:
+                        _observe_server_frame(
+                            state,
+                            adapter,
+                            path,
+                            frame,
+                            identity=require_json,
+                            session_id=ctx.session_id,
+                        )
+                    if map_writes:
+                        # [vault] map_writes = "before_answer": a frame whose
+                        # observation queued a durable map write (a Live
+                        # resumption handle's owner) is held until it landed,
+                        # so the client can resume on any replica. The
+                        # revoked check before each send below follows this
+                        # await: nothing is sent once the relay is revoked.
+                        await state.await_map_writes(map_writes, f"WS {path}")
                 for out in adapter.rehydrate_message(frame, pool):
                     if relay.revoked is not None:
                         return

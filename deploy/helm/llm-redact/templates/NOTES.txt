@@ -1,8 +1,8 @@
 llm-redact {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}".
 
-Kubernetes deployment requires a Team-tier-or-higher license — the proxy refuses
-to start on k8s below Team. Provide it via the Secret named
-"{{ .Values.license.secretName }}" (key: license-key).
+The FOSS core needs no license, on Kubernetes or anywhere else. A license key
+matters only to llm-redact-pro subsystems; when you use them, provide it via
+the Secret named "{{ .Values.license.secretName }}" (key: license-key, optional).
 
 {{ if eq .Values.mode "standalone" -}}
 Mode: STANDALONE — a shared in-cluster proxy (Deployment + Service{{ if .Values.autoscaling.enabled }} + HorizontalPodAutoscaler{{ end }}).
@@ -24,13 +24,15 @@ Mode: STANDALONE — a shared in-cluster proxy (Deployment + Service{{ if .Value
   (CPU target {{ .Values.autoscaling.targetCPUUtilizationPercentage }}%). Every replica shares one
   vault backend "{{ .Values.vault.backend }}" so all pods issue consistent «TYPE_NNN» tokens —
   a per-pod vault would let one pod rehydrate another's secret (never-wrong-value).
-  Chain / owner / Live-handle records are written in the background: a follow-up
-  (previous_response_id, a Live resumption) reaching another pod before its write
-  landed (normally milliseconds; never, past the writer's 10,000-write bound) is
-  refused or sealed, never wrong — use session affinity where that matters.
+  Chain / owner / Live-handle records are written in the background; with this
+  shared backend the default [vault] map_writes = "before_answer" holds an answer
+  that recorded something until its write landed, so a follow-up (previous_response_id,
+  a Live resumption) may reach any pod — no session affinity needed. Past the 5 s
+  bound, or with map_writes = "background", a follow-up reaching another pod before
+  its write landed is refused or sealed, never wrong (then use session affinity).
 {{ end -}}
   SECURITY: a standalone proxy serves other pods over the network, i.e. a
-  NON-LOOPBACK bind (Pro). Prefer real mutual TLS — mount the cert Secret via
+  NON-LOOPBACK bind. Prefer real mutual TLS — mount the cert Secret via
   extraVolumes/extraVolumeMounts and set [tls] certfile/keyfile/client_ca via
   `extraConfig`. insecureBind={{ .Values.insecureBind }} is the documented hatch for a
   TRUSTED in-cluster network only — pair it with networkPolicy.enabled=true
@@ -68,6 +70,19 @@ kubelet httpGet would need a pod-IP bind).
   a second container (tool.enabled=true + tool.image), or exec in to test:
     kubectl exec -it deploy/{{ include "llm-redact.fullname" . }} -c llm-redact -- llm-redact preview --text "test@corp.example"
 {{- end }}
+{{- end }}
+{{- $grace := int64 (include "llm-redact.terminationGracePeriodSeconds" .) }}
+{{- $budget := int64 (include "llm-redact.shutdownBudgetSeconds" .) }}
+{{- $preStop := int64 0 }}
+{{- if eq .Values.mode "standalone" }}{{ $preStop = int64 (include "llm-redact.preStopSleepSeconds" .) }}{{ end }}
+{{- if lt $grace (add $budget $preStop) }}
+
+*** WARNING: terminationGracePeriodSeconds={{ $grace }} is below the proxy's
+bounded shutdown ({{ $budget }} s after in-flight requests finish: vault map
+writes, the audit sinks' final flush, the vault close){{ if $preStop }} plus the
+preStop delay ({{ $preStop }} s, preStopSleepSeconds){{ end }}. A pod killed sooner
+loses the sinks' in-memory START/AMEND rows and closes no database cleanly.
+See docs/resilience.md, "Shutdown order".
 {{- end }}
 {{- if and (eq .Values.vault.backend "sqlite") (not .Values.persistence.enabled) }}
 

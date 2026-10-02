@@ -62,13 +62,18 @@ publish it to loopback:**
 ```bash
 docker run -d --name llm-redact \
   -p 127.0.0.1:8787:8787 \
+  --stop-timeout 90 \
   -v llm-redact-data:/data \
   -e ANTHROPIC_BASE_URL=… \
   ghcr.io/asanderson/llm-redact:latest
 ```
 
 `-p 127.0.0.1:8787:8787` — never `-p 8787:8787`, which would expose the
-proxy on every interface with client auth disabled. The image ships the
+proxy on every interface with client auth disabled. `--stop-timeout 90`
+replaces Docker's 10 s stop timeout, which would SIGKILL the proxy during
+its shutdown (the off-machine audit sinks' final flush alone may take 45 s;
+docs/resilience.md, "Shutdown order"); a compose service sets
+`stop_grace_period: 90s`. The image ships the
 `perf` (uvloop), `realtime` (WebSocket) and `extract` (pypdf) extras, so it
 runs on uvloop, can relay OpenAI Realtime / Gemini Live, and can read PDFs
 for `[extraction]` (docs/extraction.md). `XDG_DATA_HOME=/data` holds
@@ -97,15 +102,40 @@ and standalone modes, optional HPA autoscaling) at
 `deploy/helm/llm-redact/` — its `NOTES.txt` and `values.yaml` document
 the modes and guardrails.
 
-Replicas sharing one vault issue consistent tokens, but the durable maps
+The chart sets the pod's `terminationGracePeriodSeconds` (value
+`terminationGracePeriodSeconds`, default 90, both modes): Kubernetes'
+own default of 30 s can SIGKILL the proxy while the off-machine audit
+sinks are still doing their final flush (up to 45 s), before the audit
+database and the vault close. 90 s covers the proxy's bounded shutdown
+steps (57 s) plus 33 s for requests still running; the pod goes away as
+soon as the proxy exits, so a fast stop never waits for it. Raise it if
+your clients hold long streams open (the request drain has no bound of
+its own); the render fails on anything but a non-negative integer, an
+absent value (`helm upgrade --reuse-values` from a release made before
+it existed) renders 90, and NOTES warns below 57 s. In sidecar mode the value covers the whole pod,
+your tool container included. The plain manifest
+`deploy/k8s-sidecar.yaml` sets the same 90 s; set it in a manifest of
+your own. In standalone mode a `preStop` delay (`preStopSleepSeconds`,
+default 5; 0 removes it) keeps the proxy serving until the Service stops
+routing new connections to a terminating pod, so a rolling update refuses
+none; it counts against the grace period. See docs/resilience.md,
+"Shutdown order".
+
+Replicas sharing one vault issue consistent tokens. The durable maps
 (Responses chains, stored-object owners, Live resumption handles) are
-written in the background after each answer: a follow-up
-(`previous_response_id`, a Live resumption) that reaches ANOTHER replica
-before the write landed — normally milliseconds — is refused or sealed,
-never restored wrong, and a record past the writer's 10,000-write bound
-never reaches the other replicas at all. Use session affinity at the load
-balancer where that matters (docs/resilience.md, "Durable map writes off
-the event loop").
+written on a background thread after each answer, and `[vault] map_writes`
+decides when the client gets the answer. With a shared database backend
+(`postgresql`, `mysql`, `oracle`, `dbapi`) the default is
+`"before_answer"`: an answer that recorded something waits (bounded, off
+the event loop) until its write landed, so a follow-up
+(`previous_response_id`, a Live resumption, a stored-object read) may reach
+ANY replica — no session affinity needed. Past the 5 s bound (a database
+stall) the answer is sent anyway and counted (`map_write_wait`); a
+follow-up reaching another replica before the write landed is then refused
+or sealed, never restored wrong. `map_writes = "background"` sends answers
+at once (one write's latency less on those answers) and brings that window
+back for every answer: use session affinity at the load balancer then
+(docs/resilience.md, "Durable map writes off the event loop").
 
 ## Host names the proxy answers to (`allowed_hosts`)
 

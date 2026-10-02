@@ -57,7 +57,8 @@ vault:
   dsnSecretKey: dsn
 
 license:
-  # Secret holding key `license-key` (llmr1...). k8s requires Team+.
+  # Secret holding key `license-key` (llmr1...), optional: the FOSS core
+  # needs none on k8s; only llm-redact-pro subsystems read it.
   # Create it: kubectl create secret generic llm-redact-license \
   #   --from-literal=license-key="llmr1...."
   secretName: llm-redact-license
@@ -115,8 +116,8 @@ podDisruptionBudget:
   minAvailable: 1
 
 # ServiceAccount for the proxy pod. Cloud features (managed-DBMS vault via IAM
-# auth and S3/GCS audit sinks via IRSA / Workload Identity — both Pro; the LLM
-# cloud adapters — Team) need an annotatable ServiceAccount; keep create=false
+# auth and S3/GCS audit sinks via IRSA / Workload Identity, and the LLM cloud
+# adapters' `auth = "identity"` — all llm-redact-pro) need an annotatable ServiceAccount; keep create=false
 # to use the namespace default.
 serviceAccount:
   create: false
@@ -137,6 +138,39 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
+
+# Seconds Kubernetes waits after SIGTERM before it SIGKILLs the pod
+# (`terminationGracePeriodSeconds`, rendered on the pod spec in BOTH modes;
+# in sidecar mode it covers the whole pod, the tool container included).
+# Kubernetes' own default, 30 s, is shorter than the proxy's shutdown: once
+# its in-flight requests have finished (a wait with no bound of its own — a
+# streamed answer still running holds it), the bounded steps take at most
+# 57 s — the vault's background map writes (5 s), the off-machine audit
+# sinks' final flush (one 45 s deadline + 1 s cancel grace) and the vault
+# close (a second map drain of up to 5 s when writes were still landing,
+# + 1 s thread join); an [otel] telemetry flush runs after the vault close
+# and is outside those 57 s. A pod killed sooner loses the sinks' in-memory
+# START/AMEND rows and closes no database cleanly (committed rows survive).
+# 90 = those 57 s + 33 s for in-flight requests (28 s in standalone mode,
+# after its 5 s preStop delay, preStopSleepSeconds), the same as systemd's
+# default stop timeout. The pod goes away as soon as the proxy exits, so a
+# fast stop never waits for it. Lower it only if you run no audit sink and
+# no long streams; NOTES.txt warns below 57. A non-negative integer — the
+# render fails otherwise; ABSENT (`helm upgrade --reuse-values` from a
+# release made before this value existed, or `--set ...=null`) renders 90,
+# never Kubernetes' 30 s. docs/resilience.md, "Shutdown order".
+terminationGracePeriodSeconds: 90
+
+# STANDALONE ONLY: seconds the proxy waits, still serving, after its pod turns
+# Terminating and before Kubernetes sends it SIGTERM (a preStop hook), so the
+# Service's endpoints and any Ingress stop sending it NEW connections first —
+# without it a rolling update can refuse a few connections while the endpoint
+# removal propagates. Availability only: the shutdown drain needs no hook.
+# It counts against terminationGracePeriodSeconds (90 = 5 + the 57 s budget +
+# 28 s for in-flight requests); NOTES warns when the two leave less than the
+# budget. 0 renders no hook; absent renders 5; a non-negative integer — the
+# render fails otherwise. Sidecar mode never renders one (no Service).
+preStopSleepSeconds: 5
 
 # Persist the sqlite vault/audit across restarts (sidecar / single replica).
 # never-wrong-value depends on the dense counter surviving.

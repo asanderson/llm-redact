@@ -163,6 +163,17 @@ encryption = "none"
 # `llm-redact sessions prune --older-than 90d` is the manual equivalent.
 # session_ttl_days = 0
 
+# When an answer's durable map records (Responses chains, stored-object
+# owners, Live resumption handles — written on a background thread) must
+# have landed. "before_answer": an answer that recorded something waits for
+# its writes (bounded, 5 s; off the event loop) before the client gets the
+# id, so a follow-up may reach ANY replica sharing this vault. "background":
+# the answer goes out at once; another replica reads the record a moment
+# later (sooner: refused or sealed, never a wrong value). Unset (default):
+# "before_answer" for postgresql/mysql/oracle/dbapi, "background" for
+# sqlite and memory. Restart-only.
+# map_writes = "before_answer"
+
 # Server-RDBMS connection (backend = "postgresql"/"mysql"/"oracle"/"dbapi"
 # only). Install the driver extra: vault-postgres / vault-mysql /
 # vault-oracle; "dbapi" imports whatever DB-API 2.0 module you name and

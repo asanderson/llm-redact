@@ -289,6 +289,9 @@ def _check_vault(report: _Report, config: Config) -> None:
         else:
             report.line("WARN", "vault", f"{path} not created yet (first request creates it)")
 
+    if config.vault.backend != "memory":
+        _check_map_writes(report, config)
+
     if config.vault.encryption == "fernet":
         if importlib.util.find_spec("cryptography") is None:
             report.line(
@@ -308,6 +311,29 @@ def _check_vault(report: _Report, config: Config) -> None:
             )
         elif importlib.util.find_spec("cryptography") is not None:
             _check_vault_key_matches(report, config)
+
+
+def _check_map_writes(report: _Report, config: Config) -> None:
+    """The effective ``[vault] map_writes`` of a persistent vault (the
+    in-memory one keeps no durable map): informational, never a WARN — both
+    modes are safe (a record another replica cannot read yet is refused or
+    sealed there, never a wrong value); they differ in what a follow-up
+    reaching another replica meets."""
+    from llm_redact.config import map_writes_mode
+
+    mode = map_writes_mode(config.vault)
+    origin = "set" if config.vault.map_writes is not None else "default"
+    if mode == "before_answer":
+        detail = (
+            "an answer waits (bounded) for its durable map writes, so a follow-up"
+            " reaching any replica sharing the vault finds the record"
+        )
+    else:
+        detail = (
+            "durable map writes land after the answer: this process answers at once,"
+            " another replica sharing the vault reads the record once its write landed"
+        )
+    report.line("PASS", "vault", f"map_writes = {mode} ({origin}): {detail}")
 
 
 def _check_vault_kms(report: _Report, config: Config) -> None:

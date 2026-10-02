@@ -108,6 +108,11 @@ dev = [
     # The complexity-coverage gate (scripts/complexity_gate.py): every
     # branching function must be executed by the suite.
     "coverage>=7.6",
+    # The k8s/Helm structural tests parse rendered manifests with it. Direct,
+    # not inherited: libcst (via mutmut) pulls pyyaml-ft instead on 3.13 — the
+    # CI helm job's Python — whose module is `yaml_ft`, so the render tests
+    # once skipped there unseen.
+    "pyyaml>=6",
 ]
 
 [tool.hatch.version]
@@ -218,5 +223,5 @@ only_mutate = [
 # so those must be copied alongside the tests/ and pyproject.toml mutmut
 # copies by default — a path missing here fails the BASELINE run and every
 # mutant reports "not checked".
-also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", "config.example.toml", "README.md", "CHANGELOG.md", "Dockerfile"]
+also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", "config.example.toml", "README.md", "CHANGELOG.md", "Dockerfile", "uv.lock"]
 pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]

@@ -11,6 +11,40 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-02
+
+Observability, document extraction in the free core, and stricter upload reading.
+The proxy now counts every response it generates itself and its own overhead apart from
+the provider's time; document extraction moved here from llm-redact-pro and needs no
+key; shared-database vaults give read-your-writes across replicas; refusal overrides
+arrive, off by default; and uploads are read by content, with every part read one way
+only. llm-redact-pro 0.15 requires this release.
+
+**Upgrading** (behaviour that changed for an unchanged config):
+- A BINARY file upload (PDF, image, archive) sent with the client's own key is now
+  forwarded unscanned and counted (`unscanned_uploads_total`) instead of refused. Set
+  `[detection] binary_uploads = "refuse"` to keep refusing them, or enable
+  `[extraction]` to read them first. Under a credential the proxy holds they are still
+  refused unless an inspection clears them.
+- Uploads the proxy cannot read one way are refused `400` wherever redaction applies:
+  ambiguous multipart part headers or boundaries, and a Gemini upload whose metadata
+  part is not JSON. A recognized route carrying an HTTP method override
+  (`X-HTTP-Method-Override` and similar) is refused `400`.
+- Anthropic Files and Gemini Files uploads larger than `max_body_bytes` (default 10 MiB)
+  are refused `413`; raise `max_body_bytes` for larger files.
+- Shared-database vaults (`postgresql`, `mysql`, `oracle`, `dbapi`) default to
+  `[vault] map_writes = "before_answer"`: an answer that records a Responses id, a
+  stored-object owner or a Live handle waits for that write, at most
+  `map_write_wait_seconds` (default 5). Set `map_writes = "background"` for the previous
+  behaviour.
+- `deploy/prometheus-alerts.yml`: `LlmRedactHighLatencyP95` is replaced by
+  `LlmRedactHighProxyOverheadP95`, and `LlmRedactLocalFaultRefusals` is new; update
+  routes or silences that name the old rule.
+- Helm chart: the pod's `terminationGracePeriodSeconds` defaults to 90 in both modes,
+  and standalone mode adds a 5 s preStop delay (`preStopSleepSeconds`).
+- `[extraction]` is now a core section. Use llm-redact-pro 0.15 or later with this
+  release.
+
 ### Added
 - `llm_redact_local_refusals_total{kind,provider}`: every response the proxy generates ITSELF
   instead of forwarding the request (or, realtime, the connection or a frame) is counted once,
@@ -169,142 +203,6 @@ and tags `vX.Y.Z`.
 - `plugin_api.UploadPart.extension` (the file name's lower-cased extension, `""` when
   the part's names disagree) and `plugin_api.Inspection.convert_text`; the extractors
   treat an extension naming another format than the file's bytes as incomplete.
-
-### Changed
-- `deploy/prometheus-alerts.yml`: `LlmRedactHighLatencyP95` read the END-TO-END request
-  duration — which includes the provider's own time and a stream's length — and fired on
-  ordinary LLM traffic. It is replaced by `LlmRedactHighProxyOverheadP95` (p95 of
-  `llm_redact_proxy_overhead_seconds` above 0.25 s for 10 minutes); new
-  `LlmRedactLocalFaultRefusals` (critical) pages on `audit_unavailable`/`vault_fault`
-  refusals. The Grafana dashboard relabels the duration panel as end-to-end and adds proxy
-  overhead, local refusals by kind and the map writer panels. docs/observability.md
-  wrongly said the duration excluded upstream time; it now says what each measures.
-
-- The Helm chart's NOTES no longer say Kubernetes needs a Team-tier license (the FOSS
-  core is ungated there, as everywhere: a license key matters only to llm-redact-pro
-  subsystems), nor that a non-loopback bind is Pro; values.yaml's license and
-  ServiceAccount comments say the same.
-- Shutdown drains the audit trail in order: the off-machine audit sinks' final flush now
-  runs while the audit database is still open (after the server has drained its
-  in-flight requests), so the END rows spooled since the last upload ship at shutdown
-  instead of waiting for the next start; the audit database closes after it and the
-  vault last. The flush is bounded: both sinks share one 45 s deadline (above the sinks'
-  own 30 s upload timeout, so a slow but working store is never cut short), a flush still
-  running is cancelled (its unshipped rows stay in the database for the next start)
-  and one ignoring the cancellation is abandoned after a second, so a hanging store
-  never keeps the databases from closing (the process exit still waits for such a
-  flush until the supervisor's kill: the event loop's teardown awaits it). A failing
-  final flush, a router or access gate whose close fails, or a sink flush loop that
-  had died, is logged by exception type and no longer cuts the rest of the shutdown
-  short (docs/resilience.md, "Shutdown order").
-- `serve` ends the dashboard's open `/__llm-redact/events` streams as shutdown starts:
-  the server waits for every open response before the application's shutdown runs,
-  and that stream never ends on its own, so an open dashboard kept a SIGTERM from
-  ever reaching the audit sinks' final flush and the database closes (the supervisor
-  killed the process instead).
-- CI: a new `rdbms` job runs the RDBMS vault's real-server tests (the store battery,
-  the Live resumption handle map and the background map writer) against PostgreSQL 16 and MySQL 8.4 service
-  containers; before, no DSN was set anywhere and those env-gated tests always skipped.
-  `LLM_REDACT_TEST_REAL_DB_REQUIRED` makes a missing DSN fail the job instead of
-  skipping it.
-- Docs and the `llm-redact status` posture line now describe the required-mode audit
-  sinks as llm-redact-pro ships them: END, interrupted and classic rows spool from
-  the audit database and are never dropped, while the START and AMEND rows the sinks
-  also ship travel through a bounded in-memory buffer (lost on a crash, a kill or a
-  failed final upload; past 10,000 queued rows dropped oldest-first, counted in
-  `rows_dropped`, which the posture line now calls "not uploaded in time"). The
-  `browser_signed_in` contract and docs/overrides.md say a gate may count an
-  administrator's browser-presented client certificate as a person's sign-in.
-- `llm-redact override revoke ID` exits 0 when it revoked the record while refusal
-  overrides are off in the config it read (it still prints the off note on stderr); it
-  exits 1 only when nothing was revoked (an unknown id, a missing store) or on an error.
-  `override list` and `override CODE` keep exiting 1 while overrides are off.
-- The refusal-override hint names the proxy's config file when the proxy was started
-  with an explicit one (`serve --config PATH`, or `LLM_REDACT_CONFIG`) that the CLI's
-  default search (the XDG file, else `/etc/llm-redact/config.toml`) would not find:
-  `to allow: llm-redact override --config PATH CODE --once | --always` (absolute,
-  shell-quoted), so the command reads the same config file as the running proxy (the
-  same override store when that file's `[overrides] path` is absolute; an unset, `~` or
-  relative path resolves against each process's own home or working directory). A
-  realtime close reason carries the path only when the reason still fits 123 bytes (else
-  the plain hint); a path that is not UTF-8 is never put in a hint. Logs are unchanged.
-- `redactor._resolve_overlaps` finds each candidate's deny-span overlap with
-  `bisect_right` over the chosen deny spans' ends (same results): the old forward walk
-  had a mutant that never terminated, costing the mutation job about half an hour.
-- docs/extraction.md says what a Document AI service configured with `token_env`
-  does when its static token expires (it is never refreshed): that service fails
-  closed — no reading — until the operator rotates the token and restarts the proxy.
-- An upload whose binary parts go to the upload inspector is now refused BEFORE the
-  inspection — never after it — for what refuses it whatever the redaction finds: a
-  provider with no upstream configured (the 502), a routing layer's local refusal, and
-  a `[audit] required` write-ahead START row that cannot be committed (the 503). For
-  such an upload the START row is written right before the inspection (with no
-  detections; the END row carries the request's own). When the redaction then finds
-  values — warn-mode values are forwarded — a second START row carrying the counts is
-  committed before any upstream contact and the early row is ended (status none, no
-  detections), so the record durable before contact always says what leaves (its
-  failure refuses 503); such a request has two START rows. Every refusal after the
-  inspection — a value found in the file, a block, the upstream authorizer, a routing
-  budget, a send that fails — is its END row; a way out that records nothing still
-  closes it, so START and END rows stay paired. The upstream authorizer stays after
-  the inspection (it signs the final, redacted bytes). Requests without an inspector,
-  and uploads with no binary part to inspect, keep the previous order. These refusals
-  no longer count an inspected part as `clean_refused`: nothing is inspected.
-- The stored-object check (`SessionRouter.object_access_refusal`, llm-redact-pro's named
-  users) now sees the METADATA part of the Gemini API's single-request upload
-  (`POST /upload/v1beta/files`, a `multipart/related` body): it is handed that part's
-  JSON object — what Google reads as the create's body, a chosen `file.name` included —
-  exactly as it is handed the metadata-only JSON create's body, before anything is
-  sent, under the client's own key and a credential the proxy holds alike. It is read
-  like a JSON body (strict UTF-8, repeated keys last-wins, at most 128 levels deep); a
-  metadata part repeating a key is sent re-serialized, exactly as checked (only its JSON
-  text is rewritten: an empty header block's CRLF, whitespace and a byte-order mark
-  around it stay, so the part keeps its shape). Metadata the
-  check cannot read (lenient or non-UTF-8 JSON, a transfer encoding, a foreign charset,
-  no JSON metadata first) is refused 400 under a credential the proxy holds and, with
-  the client's own key, wherever redaction applies; only with `detection = false` and
-  the client's own key does it go out unchecked, as an unparseable JSON body does.
-  New adapter hook `ProviderAdapter.upload_metadata_boundary`.
-- Multipart part headers are read with one reading only: a header line carrying a
-  bare CR or LF (or any other control but a tab) is refused like any other ambiguous
-  header, since a reader accepting a bare LF as a line break ends the header block
-  there and reads what follows as the part's content — a Gemini upload's metadata (a
-  chosen file name) the stored-object check never saw, or file lines redaction never
-  scanned. Such an upload is refused 400 wherever redaction applies and under a
-  credential the proxy holds, on every multipart route. So is a part with no header
-  block that does not open with an empty one (see Fixed).
-- A multipart request's boundary is read only when its Content-Type has one reading:
-  a repeated `boundary` parameter (`boundary=a; boundary=b`, which a reader taking
-  the last one parses with `b`), a quoted value holding `;` or an escape (which a
-  naive split reads differently), a control, or a boundary outside the RFC 2046
-  characters now leaves the body unreadable, so it is refused 400 wherever redaction
-  applies and under a credential the proxy holds, like any other multipart body the
-  proxy cannot parse. A non-ASCII boundary used to be read with its non-ASCII
-  characters dropped. Applies to form uploads and the Gemini API's multipart/related
-  upload alike.
-- The Gemini API upload's metadata part is read as JSON only when it declares
-  `application/json` (parameters allowed) or no type at all: a first part declaring
-  another type is metadata the check cannot read (a server parsing by the declared type
-  could read a form-encoded `file.name=…` out of a strict-JSON string), and a
-  `multipart/related` naming its root part with `start` (the metadata then need not be
-  the first part) is a body llm-redact cannot read. Both are refused 400 wherever
-  redaction applies (the metadata is redacted as the value the check reads — see
-  Fixed) and under a credential the proxy holds; with `detection = false` there, the
-  declared type only where a session router's stored-object check reads the upload
-  (llm-redact-pro).
-- File uploads (OpenAI/Azure/custom `…/files`) are read by CONTENT
-  (`upload_content.classify_file`): JSONL is redacted per line as before, any other
-  text file (UTF-8, or UTF-16/32 with a BOM) is redacted as one text and re-encoded as
-  it came, and a BINARY file (a PDF, image or archive — a known signature or a NUL
-  byte means binary even when the bytes decode) is no longer refused under the
-  client's own key: it is forwarded UNSCANNED, its file name still redacted, and
-  counted. Under a credential the proxy holds (cloud identity, a routed operator key)
-  a binary file is still refused 400 — unless an upload inspector cleared it (see
-  Added: only when the inspection allows that credential). Downloads of text files
-  (`GET …/files/{id}/content`) are restored line by line; binary downloads are
-  untouched.
-
-### Added
 - Refusal overrides (`docs/overrides.md`), **off by default**: an operator
   opts in with `[overrides] enabled = true` (restart-only). With them on, a
   detection refusal carries a single-use code:
@@ -507,6 +405,138 @@ and tags `vX.Y.Z`.
   an opaque byte range; documented in docs/api-coverage.md).
 
 ### Changed
+- `deploy/prometheus-alerts.yml`: `LlmRedactHighLatencyP95` read the END-TO-END request
+  duration — which includes the provider's own time and a stream's length — and fired on
+  ordinary LLM traffic. It is replaced by `LlmRedactHighProxyOverheadP95` (p95 of
+  `llm_redact_proxy_overhead_seconds` above 0.25 s for 10 minutes); new
+  `LlmRedactLocalFaultRefusals` (critical) pages on `audit_unavailable`/`vault_fault`
+  refusals. The Grafana dashboard relabels the duration panel as end-to-end and adds proxy
+  overhead, local refusals by kind and the map writer panels. docs/observability.md
+  wrongly said the duration excluded upstream time; it now says what each measures.
+
+- The Helm chart's NOTES no longer say Kubernetes needs a Team-tier license (the FOSS
+  core is ungated there, as everywhere: a license key matters only to llm-redact-pro
+  subsystems), nor that a non-loopback bind is Pro; values.yaml's license and
+  ServiceAccount comments say the same.
+- Shutdown drains the audit trail in order: the off-machine audit sinks' final flush now
+  runs while the audit database is still open (after the server has drained its
+  in-flight requests), so the END rows spooled since the last upload ship at shutdown
+  instead of waiting for the next start; the audit database closes after it and the
+  vault last. The flush is bounded: both sinks share one 45 s deadline (above the sinks'
+  own 30 s upload timeout, so a slow but working store is never cut short), a flush still
+  running is cancelled (its unshipped rows stay in the database for the next start)
+  and one ignoring the cancellation is abandoned after a second, so a hanging store
+  never keeps the databases from closing (the process exit still waits for such a
+  flush until the supervisor's kill: the event loop's teardown awaits it). A failing
+  final flush, a router or access gate whose close fails, or a sink flush loop that
+  had died, is logged by exception type and no longer cuts the rest of the shutdown
+  short (docs/resilience.md, "Shutdown order").
+- `serve` ends the dashboard's open `/__llm-redact/events` streams as shutdown starts:
+  the server waits for every open response before the application's shutdown runs,
+  and that stream never ends on its own, so an open dashboard kept a SIGTERM from
+  ever reaching the audit sinks' final flush and the database closes (the supervisor
+  killed the process instead).
+- CI: a new `rdbms` job runs the RDBMS vault's real-server tests (the store battery,
+  the Live resumption handle map and the background map writer) against PostgreSQL 16 and MySQL 8.4 service
+  containers; before, no DSN was set anywhere and those env-gated tests always skipped.
+  `LLM_REDACT_TEST_REAL_DB_REQUIRED` makes a missing DSN fail the job instead of
+  skipping it.
+- Docs and the `llm-redact status` posture line now describe the required-mode audit
+  sinks as llm-redact-pro ships them: END, interrupted and classic rows spool from
+  the audit database and are never dropped, while the START and AMEND rows the sinks
+  also ship travel through a bounded in-memory buffer (lost on a crash, a kill or a
+  failed final upload; past 10,000 queued rows dropped oldest-first, counted in
+  `rows_dropped`, which the posture line now calls "not uploaded in time"). The
+  `browser_signed_in` contract and docs/overrides.md say a gate may count an
+  administrator's browser-presented client certificate as a person's sign-in.
+- `llm-redact override revoke ID` exits 0 when it revoked the record while refusal
+  overrides are off in the config it read (it still prints the off note on stderr); it
+  exits 1 only when nothing was revoked (an unknown id, a missing store) or on an error.
+  `override list` and `override CODE` keep exiting 1 while overrides are off.
+- The refusal-override hint names the proxy's config file when the proxy was started
+  with an explicit one (`serve --config PATH`, or `LLM_REDACT_CONFIG`) that the CLI's
+  default search (the XDG file, else `/etc/llm-redact/config.toml`) would not find:
+  `to allow: llm-redact override --config PATH CODE --once | --always` (absolute,
+  shell-quoted), so the command reads the same config file as the running proxy (the
+  same override store when that file's `[overrides] path` is absolute; an unset, `~` or
+  relative path resolves against each process's own home or working directory). A
+  realtime close reason carries the path only when the reason still fits 123 bytes (else
+  the plain hint); a path that is not UTF-8 is never put in a hint. Logs are unchanged.
+- `redactor._resolve_overlaps` finds each candidate's deny-span overlap with
+  `bisect_right` over the chosen deny spans' ends (same results): the old forward walk
+  had a mutant that never terminated, costing the mutation job about half an hour.
+- docs/extraction.md says what a Document AI service configured with `token_env`
+  does when its static token expires (it is never refreshed): that service fails
+  closed — no reading — until the operator rotates the token and restarts the proxy.
+- An upload whose binary parts go to the upload inspector is now refused BEFORE the
+  inspection — never after it — for what refuses it whatever the redaction finds: a
+  provider with no upstream configured (the 502), a routing layer's local refusal, and
+  a `[audit] required` write-ahead START row that cannot be committed (the 503). For
+  such an upload the START row is written right before the inspection (with no
+  detections; the END row carries the request's own). When the redaction then finds
+  values — warn-mode values are forwarded — a second START row carrying the counts is
+  committed before any upstream contact and the early row is ended (status none, no
+  detections), so the record durable before contact always says what leaves (its
+  failure refuses 503); such a request has two START rows. Every refusal after the
+  inspection — a value found in the file, a block, the upstream authorizer, a routing
+  budget, a send that fails — is its END row; a way out that records nothing still
+  closes it, so START and END rows stay paired. The upstream authorizer stays after
+  the inspection (it signs the final, redacted bytes). Requests without an inspector,
+  and uploads with no binary part to inspect, keep the previous order. These refusals
+  no longer count an inspected part as `clean_refused`: nothing is inspected.
+- The stored-object check (`SessionRouter.object_access_refusal`, llm-redact-pro's named
+  users) now sees the METADATA part of the Gemini API's single-request upload
+  (`POST /upload/v1beta/files`, a `multipart/related` body): it is handed that part's
+  JSON object — what Google reads as the create's body, a chosen `file.name` included —
+  exactly as it is handed the metadata-only JSON create's body, before anything is
+  sent, under the client's own key and a credential the proxy holds alike. It is read
+  like a JSON body (strict UTF-8, repeated keys last-wins, at most 128 levels deep); a
+  metadata part repeating a key is sent re-serialized, exactly as checked (only its JSON
+  text is rewritten: an empty header block's CRLF, whitespace and a byte-order mark
+  around it stay, so the part keeps its shape). Metadata the
+  check cannot read (lenient or non-UTF-8 JSON, a transfer encoding, a foreign charset,
+  no JSON metadata first) is refused 400 under a credential the proxy holds and, with
+  the client's own key, wherever redaction applies; only with `detection = false` and
+  the client's own key does it go out unchecked, as an unparseable JSON body does.
+  New adapter hook `ProviderAdapter.upload_metadata_boundary`.
+- Multipart part headers are read with one reading only: a header line carrying a
+  bare CR or LF (or any other control but a tab) is refused like any other ambiguous
+  header, since a reader accepting a bare LF as a line break ends the header block
+  there and reads what follows as the part's content — a Gemini upload's metadata (a
+  chosen file name) the stored-object check never saw, or file lines redaction never
+  scanned. Such an upload is refused 400 wherever redaction applies and under a
+  credential the proxy holds, on every multipart route. So is a part with no header
+  block that does not open with an empty one (see Fixed).
+- A multipart request's boundary is read only when its Content-Type has one reading:
+  a repeated `boundary` parameter (`boundary=a; boundary=b`, which a reader taking
+  the last one parses with `b`), a quoted value holding `;` or an escape (which a
+  naive split reads differently), a control, or a boundary outside the RFC 2046
+  characters now leaves the body unreadable, so it is refused 400 wherever redaction
+  applies and under a credential the proxy holds, like any other multipart body the
+  proxy cannot parse. A non-ASCII boundary used to be read with its non-ASCII
+  characters dropped. Applies to form uploads and the Gemini API's multipart/related
+  upload alike.
+- The Gemini API upload's metadata part is read as JSON only when it declares
+  `application/json` (parameters allowed) or no type at all: a first part declaring
+  another type is metadata the check cannot read (a server parsing by the declared type
+  could read a form-encoded `file.name=…` out of a strict-JSON string), and a
+  `multipart/related` naming its root part with `start` (the metadata then need not be
+  the first part) is a body llm-redact cannot read. Both are refused 400 wherever
+  redaction applies (the metadata is redacted as the value the check reads — see
+  Fixed) and under a credential the proxy holds; with `detection = false` there, the
+  declared type only where a session router's stored-object check reads the upload
+  (llm-redact-pro).
+- File uploads (OpenAI/Azure/custom `…/files`) are read by CONTENT
+  (`upload_content.classify_file`): JSONL is redacted per line as before, any other
+  text file (UTF-8, or UTF-16/32 with a BOM) is redacted as one text and re-encoded as
+  it came, and a BINARY file (a PDF, image or archive — a known signature or a NUL
+  byte means binary even when the bytes decode) is no longer refused under the
+  client's own key: it is forwarded UNSCANNED, its file name still redacted, and
+  counted. Under a credential the proxy holds (cloud identity, a routed operator key)
+  a binary file is still refused 400 — unless an upload inspector cleared it (see
+  Added: only when the inspection allows that credential). Downloads of text files
+  (`GET …/files/{id}/content`) are restored line by line; binary downloads are
+  untouched.
 - Recognized upload routes are capped by `max_body_bytes` (default 10 MiB):
   Anthropic Files and Gemini Files uploads over the cap sent with the client's own
   key used to pass through unscanned and are now refused 413 — raise

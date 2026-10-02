@@ -53,6 +53,7 @@ from llm_redact.plugin_api import UpstreamAuthError
 from llm_redact.proxy import ProxyState, create_app
 from llm_redact.realtime import RealtimeRelay
 from llm_redact.registry import Registry
+from local_refusals import refused_once
 from test_realtime_identity import (
     AZURE_GA,
     EMAIL,
@@ -469,6 +470,7 @@ async def test_a_reload_while_the_upgrade_is_authorized_is_never_dialled(
             closed = await _closed(client)
             row = await _recent(proxy.host, lambda r: r["method"] == "WS")
             await _until(lambda: not proxy.state.realtime_relays)
+            refused_once(proxy.state, "reload", "azure")
     _reload_close(closed, "[providers.azure] settings")
     # The credential minted under the withdrawn identity is never used.
     assert fake.paths == []

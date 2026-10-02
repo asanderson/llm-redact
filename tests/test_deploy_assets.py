@@ -64,6 +64,21 @@ async def test_deploy_assets_reference_only_real_metrics() -> None:
         assert not unknown, f"{asset} references metrics the proxy does not emit: {sorted(unknown)}"
 
 
+def test_no_alert_reads_the_end_to_end_duration() -> None:
+    # llm_redact_request_duration_seconds includes the provider's own time
+    # (a model thinking, a stream's length): an alert on it fires on
+    # ordinary LLM traffic. Latency is alerted on the proxy's own share.
+    rules = yaml.safe_load((DEPLOY / "prometheus-alerts.yml").read_text())["groups"][0]["rules"]
+    by_name = {rule["alert"]: rule for rule in rules}
+    assert not [r for r in rules if "llm_redact_request_duration_seconds" in r["expr"]]
+    overhead = by_name["LlmRedactHighProxyOverheadP95"]
+    assert "llm_redact_proxy_overhead_seconds_bucket" in overhead["expr"]
+    assert "LlmRedactHighLatencyP95" not in by_name
+    storage = by_name["LlmRedactLocalFaultRefusals"]
+    assert storage["labels"]["severity"] == "critical"
+    assert 'kind=~"audit_unavailable|vault_fault"' in storage["expr"]
+
+
 def test_prometheus_scrape_targets_reserved_path() -> None:
     text = (DEPLOY / "prometheus-scrape.yml").read_text()
     assert "/__llm-redact/metrics" in text

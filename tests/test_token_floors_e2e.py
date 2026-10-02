@@ -29,6 +29,7 @@ from llm_redact.config import Config, ProviderConfig, VaultConfig
 from llm_redact.placeholders import MAX_TOKEN_NUMBER, canonicalize, token_floors
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
+from local_refusals import refused_once
 
 UPSTREAM = "https://upstream.test"
 BOB = "bob@corp.example"
@@ -378,6 +379,7 @@ async def test_a_token_at_the_limit_refuses_only_a_request_that_needs_a_number(
                 "messages": [{"role": "user", "content": f"{at_limit} and {BOB}"}],
             },
         )
+        refused_once(app.state.proxy, "placeholder_limit", "openai")
         served = await client.post(
             "/v1/chat/completions",
             json={"model": "gpt-4o", "messages": [{"role": "user", "content": f"{at_limit} ok"}]},

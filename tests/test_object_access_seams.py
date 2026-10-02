@@ -35,6 +35,7 @@ from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
 from llm_redact.vault import InMemoryVaultManager
+from local_refusals import refused_once
 
 UPSTREAM = "https://upstream.test"
 AZURE = "https://res.openai.azure.com"
@@ -255,6 +256,7 @@ async def test_a_failing_router_refuses_and_logs_the_type_only(
     assert response.status_code == 403 and upstream.requests == []
     assert "ownership check failed" in response.json()["error"]["message"]
     assert "LookupError" in caplog.text and "file-secret-id" not in caplog.text
+    refused_once(app.state.proxy, "object_access", "openai")
 
 
 async def test_identity_is_reported_and_a_refusal_never_reaches_the_authorizer_or_audit(

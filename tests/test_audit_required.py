@@ -28,6 +28,7 @@ from llm_redact.cli import main
 from llm_redact.config import AuditConfig, Config, ConfigError, ProviderConfig, parse_config
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
+from local_refusals import refused_once
 
 UPSTREAM = "http://upstream.test"
 
@@ -205,6 +206,7 @@ async def test_begin_fault_refuses_503_without_upstream_contact(
     assert "audit log unavailable" in str(body)
     # Metrics/recent still saw the refusal even though the audit row failed.
     assert state.recent[-1]["status"] == 503
+    refused_once(state, "audit_unavailable", "anthropic")
 
 
 async def test_begin_returning_no_token_is_a_write_fault(fake_registry: Registry) -> None:

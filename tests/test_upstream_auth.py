@@ -32,6 +32,7 @@ from llm_redact.proxy import (
     strip_client_credentials,
 )
 from llm_redact.registry import Registry
+from local_refusals import refused_once
 
 EMAIL = "jane.doe@corp.example"
 TOKEN = "«EMAIL_001»"
@@ -452,6 +453,7 @@ async def test_credential_failure_is_a_recorded_502_and_nothing_is_forwarded(
     row = state.recent[-1]
     assert (row["status"], row["provider"]) == (502, "bedrock")
     assert row["detections"] == {"EMAIL": 1}
+    refused_once(state, "upstream_auth", "bedrock")
     assert "upstream credentials unavailable for bedrock" in caplog.text
     for secret in ("secret-bearing", "client-secret", EMAIL):
         assert secret not in caplog.text

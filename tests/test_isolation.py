@@ -184,7 +184,7 @@ def test_writes_into_the_real_data_dir():
 def test_a_session_that_writes_to_a_real_location_fails(tmp_path: Path, allow: bool) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    for helper in ("conftest.py", "isolation.py", "mutation_limits.py"):
+    for helper in ("conftest.py", "isolation.py", "mutation_limits.py", "local_refusals.py"):
         shutil.copy(TESTS / helper, project / helper)
     (project / "test_writer.py").write_text(_WRITER)
     real_home = tmp_path / "real-home"

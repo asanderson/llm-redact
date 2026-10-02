@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from llm_redact.config import (
+    DEFAULT_MAP_WRITE_WAIT_SECONDS,
     EXTRACTION_CLASSES,
     EXTRACTION_DEFAULT_SERVICE_FORMATS,
     EXTRACTION_FORMATS,
@@ -473,6 +474,8 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
     if config.vault.map_writes is not None:
         # Only an explicit choice: unset keeps following the backend.
         lines.append(f"map_writes = {_toml_str(config.vault.map_writes)}")
+    if config.vault.map_write_wait_seconds != DEFAULT_MAP_WRITE_WAIT_SECONDS:
+        lines.append(f"map_write_wait_seconds = {_toml_value(config.vault.map_write_wait_seconds)}")
 
     if config.vault.rdbms != RdbmsConfig():
         # Like [audit.s3]: an all-defaults section is omitted. Subtable

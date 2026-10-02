@@ -56,6 +56,7 @@ from llm_redact.upload_inspection import (
     inspect_parts,
 )
 from llm_redact.vault import InMemoryVault
+from local_refusals import refused_once
 from test_upstream_auth import AZURE, _identity
 from test_upstream_auth import _install as install_auth
 
@@ -467,6 +468,7 @@ async def test_one_dirty_part_refuses_the_whole_upload(
         ("openai", "clean_refused"): 2,
         ("openai", "detected"): 1,
     }
+    refused_once(app.state.proxy, "binary_values", "openai")
     from llm_redact.cli import _print_posture
 
     async with _client(app) as client:

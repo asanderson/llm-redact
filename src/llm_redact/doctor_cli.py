@@ -325,7 +325,8 @@ def _check_map_writes(report: _Report, config: Config) -> None:
     origin = "set" if config.vault.map_writes is not None else "default"
     if mode == "before_answer":
         detail = (
-            "an answer waits (bounded) for its durable map writes, so a follow-up"
+            f"an answer waits (at most {config.vault.map_write_wait_seconds:g} s,"
+            " map_write_wait_seconds) for its durable map writes, so a follow-up"
             " reaching any replica sharing the vault finds the record"
         )
     else:

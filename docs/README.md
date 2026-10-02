@@ -71,6 +71,7 @@ reference and enforcement internals ship with it.
 | [versioning.md](versioning.md) | SemVer policy: what counts as breaking, deprecation windows, release verification. |
 | [ner-landscape.md](ner-landscape.md) | The FOSS NER landscape survey behind the optional backends. |
 | [compaction-relink.md](compaction-relink.md) | The rejected design record for relinking history-compaction session forks — read before re-attempting — and the token floor that keeps a fork (or any request carrying tokens its session never issued) from giving one token two meanings, with its exact residual. |
+| [browser-extension.md](browser-extension.md) | The planned browser extension (Phase 0 — nothing is implemented yet): its design, the decision record D1–D12 — gateway read-back modes, extension-origin admission, Windows through containers or WSL2, the Apache-2.0 `extension/` directory — and the Phase 0 spike register. |
 
 ## Contributing and releasing
 

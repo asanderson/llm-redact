@@ -24,6 +24,11 @@ config shape, a user-facing surface, or a guard — ask the owner first**,
 explaining why it belongs here. Never add authentication, user or seat
 logic here.
 
+Browser extension (planned; Phase 0, nothing implemented yet): decisions
+D1–D12 in docs/browser-extension.md, accepted 2026-10-02, are binding,
+including their core / llm-redact-pro placement; ask the owner before
+deviating from one.
+
 ## Commands
 
 ```bash

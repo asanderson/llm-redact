@@ -11,6 +11,15 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+- Browser-extension design and decision record (`docs/browser-extension.md`, listed in
+  the docs index's engineering record): the planned extension's architecture (one
+  Apache-2.0 WXT extension whose chat-site and browser API traffic is redacted through
+  opt-in "site gateway" endpoints while the page sends the redacted request itself, so
+  the proxy forwards no browser traffic), the decisions D1–D12 accepted on 2026-10-02,
+  and the Phase 0 spike register. Planning only: nothing is implemented, and every key,
+  endpoint and command it names is a proposal until it ships.
+
 ## [1.10.0] - 2026-10-02
 
 Observability, document extraction in the free core, and stricter upload reading.

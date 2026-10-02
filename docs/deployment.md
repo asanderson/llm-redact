@@ -62,13 +62,18 @@ publish it to loopback:**
 ```bash
 docker run -d --name llm-redact \
   -p 127.0.0.1:8787:8787 \
+  --stop-timeout 90 \
   -v llm-redact-data:/data \
   -e ANTHROPIC_BASE_URL=… \
   ghcr.io/asanderson/llm-redact:latest
 ```
 
 `-p 127.0.0.1:8787:8787` — never `-p 8787:8787`, which would expose the
-proxy on every interface with client auth disabled. The image ships the
+proxy on every interface with client auth disabled. `--stop-timeout 90`
+replaces Docker's 10 s stop timeout, which would SIGKILL the proxy during
+its shutdown (the off-machine audit sinks' final flush alone may take 45 s;
+docs/resilience.md, "Shutdown order"); a compose service sets
+`stop_grace_period: 90s`. The image ships the
 `perf` (uvloop), `realtime` (WebSocket) and `extract` (pypdf) extras, so it
 runs on uvloop, can relay OpenAI Realtime / Gemini Live, and can read PDFs
 for `[extraction]` (docs/extraction.md). `XDG_DATA_HOME=/data` holds

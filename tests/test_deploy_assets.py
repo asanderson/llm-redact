@@ -523,6 +523,19 @@ def test_shutdown_budget_docs_name_the_telemetry_tail_outside_it() -> None:
     assert "telemetry flush runs after the vault close and is outside those 57 s" in values
 
 
+def test_shutdown_budget_docs_name_dockers_stop_timeout() -> None:
+    # Docker's default stop timeout (10 s) is shorter still than Kubernetes'
+    # 30 s: the docs that advise a supervisor stop timeout must name it, and
+    # the documented `docker run` must set one covering the budget.
+    resilience = " ".join((DEPLOY.parent / "docs" / "resilience.md").read_text().split())
+    assert "--stop-timeout 90" in resilience
+    assert "stop_grace_period: 90s" in resilience
+    deployment = (DEPLOY.parent / "docs" / "deployment.md").read_text()
+    (stop,) = re.findall(r"^\s*--stop-timeout (\d+) \\$", deployment, re.MULTILINE)
+    assert int(stop) >= _shutdown_budget_seconds()
+    assert "stop_grace_period: 90s" in " ".join(deployment.split())
+
+
 def _pod_spec(*set_args: str) -> dict[str, object]:
     result = _helm_template(*set_args)
     assert result.returncode == 0, result.stderr

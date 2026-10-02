@@ -194,7 +194,10 @@ is 30 s: the Helm chart (`deploy/helm/llm-redact`) sets its own,
 mode the pod's tool container shares it), validated as a non-negative
 integer, with a NOTES warning below 57 s. The pod goes away as soon as the
 proxy exits, so a fast stop never waits for it. systemd's default
-`TimeoutStopSec` is the same 90 s. A plain manifest such as
+`TimeoutStopSec` is the same 90 s. Docker's is 10 s: `docker stop` and
+`docker compose` SIGKILL the container 10 s after SIGTERM unless told
+otherwise — run it with `docker run --stop-timeout 90` (or `docker stop
+-t 90`), and give a compose service `stop_grace_period: 90s`. A plain manifest such as
 `deploy/k8s-sidecar.yaml` keeps Kubernetes' 30 s unless you set it. No
 `preStop` hook is needed for the drain: the proxy acts on SIGTERM itself.
 

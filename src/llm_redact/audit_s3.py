@@ -81,7 +81,23 @@ def required_credential_env(
 
 
 class S3AuditSink(Protocol):
-    """The S3/GCS audit-sink surface the proxy runs (concrete impl in pro)."""
+    """The S3/GCS audit-sink surface the proxy runs (concrete impl in pro).
+
+    Lifecycle (both sinks): ``run()`` is the flush loop, started as a task in
+    the lifespan; ``add(row)`` is handed each request's row. At shutdown,
+    after the server has drained its in-flight requests (every request's END
+    row written), the core cancels ``run()`` and then awaits ``aclose()`` —
+    the final flush — while the audit database is STILL OPEN, so rows
+    spooled since the last upload ship now; the audit database closes after
+    it, the vault last. ``aclose()`` of both sinks runs concurrently under
+    one deadline (``proxy._SINK_CLOSE_TIMEOUT_SECONDS``, 45 s — above one
+    upload's own 30 s timeout, so a slow but working upload is never cut
+    short): a flush still running then is cancelled (its unshipped spooled
+    rows wait in the database for the next start), one ignoring the
+    cancellation is abandoned after a short grace (the databases close; the
+    process exit still waits for it), and an exception is logged by type
+    only.
+    """
 
     batches_uploaded: int
     rows_dropped: int
@@ -94,7 +110,10 @@ class S3AuditSink(Protocol):
 
 
 class AzureAuditSink(Protocol):
-    """The Azure Blob audit-sink surface the proxy runs (concrete impl in pro)."""
+    """The Azure Blob audit-sink surface the proxy runs (concrete impl in pro).
+
+    Same lifecycle as :class:`S3AuditSink`: the bounded final flush
+    (``aclose()``) runs before the audit database closes."""
 
     batches_uploaded: int
     rows_dropped: int

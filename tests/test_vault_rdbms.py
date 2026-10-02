@@ -893,13 +893,29 @@ def test_doctor_rdbms_offbox_plaintext_fails(
 # The driver-level RdbmsStore battery above is tier-independent and stays here.
 
 
-# --- real servers (env-gated; the CI real-DB job sets the DSNs) ---------------
+# --- real servers (env-gated; the CI `rdbms` job sets the DSNs) ---------------
 
-_REAL_DSNS = {
-    "postgresql": os.environ.get("LLM_REDACT_TEST_PG_DSN"),
-    "mysql": os.environ.get("LLM_REDACT_TEST_MYSQL_DSN"),
-    "oracle": os.environ.get("LLM_REDACT_TEST_ORACLE_DSN"),
+_REAL_DSN_ENV = {
+    "postgresql": "LLM_REDACT_TEST_PG_DSN",
+    "mysql": "LLM_REDACT_TEST_MYSQL_DSN",
+    "oracle": "LLM_REDACT_TEST_ORACLE_DSN",
 }
+_REAL_DSNS = {backend: os.environ.get(env) for backend, env in _REAL_DSN_ENV.items()}
+# Comma-separated backends whose real-server tests must RUN: the CI `rdbms`
+# job sets it so a missing or misspelled DSN fails the job instead of
+# skipping every test into a green run.
+_REAL_REQUIRED_ENV = "LLM_REDACT_TEST_REAL_DB_REQUIRED"
+
+
+def _real_dsn(backend: str) -> str:
+    """The backend's real-server DSN, or skip (fail when it is required)."""
+    dsn = _REAL_DSNS[backend]
+    if dsn:
+        return dsn
+    required = os.environ.get(_REAL_REQUIRED_ENV, "").split(",")
+    if backend in (name.strip() for name in required):
+        pytest.fail(f"{_REAL_REQUIRED_ENV} names {backend} but {_REAL_DSN_ENV[backend]} is not set")
+    pytest.skip(f"{_REAL_DSN_ENV[backend]} not set")
 
 
 def _drop_tables(config: VaultConfig) -> None:
@@ -926,12 +942,7 @@ def _drop_tables(config: VaultConfig) -> None:
 
 @pytest.mark.parametrize("backend", ["postgresql", "mysql", "oracle"])
 def test_battery_real_server(backend: str) -> None:
-    dsn = _REAL_DSNS[backend]
-    if not dsn:
-        pytest.skip(
-            f"LLM_REDACT_TEST_{backend.upper() if backend != 'postgresql' else 'PG'}_DSN not set"
-        )
-    config = VaultConfig(backend=backend, rdbms=RdbmsConfig(dsn=dsn))
+    config = VaultConfig(backend=backend, rdbms=RdbmsConfig(dsn=_real_dsn(backend)))
     _drop_tables(config)
     _battery(lambda: RdbmsStore(config, None))
 
@@ -1500,3 +1511,19 @@ def test_batched_response_lookups_bind_one_chunk_per_query(
     assert manager.lookup_response_sessions(ids) == dict.fromkeys(ids[::2], "s")
     assert len(statements) == 2  # LOOKUP_CHUNK ids, then the one left over
     store.close()
+
+
+def test_a_required_real_server_without_its_dsn_fails_instead_of_skipping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The CI `rdbms` job's guard: a misspelled DSN variable must not turn
+    # every real-server test into a skip and the job green.
+    monkeypatch.setitem(_REAL_DSNS, "mysql", None)
+    monkeypatch.setenv(_REAL_REQUIRED_ENV, "postgresql, mysql")
+    with pytest.raises(pytest.fail.Exception, match="LLM_REDACT_TEST_MYSQL_DSN is not set"):
+        _real_dsn("mysql")
+    monkeypatch.setenv(_REAL_REQUIRED_ENV, "postgresql")
+    with pytest.raises(pytest.skip.Exception, match="LLM_REDACT_TEST_MYSQL_DSN not set"):
+        _real_dsn("mysql")
+    monkeypatch.setitem(_REAL_DSNS, "mysql", "mysql://u@127.0.0.1/d")
+    assert _real_dsn("mysql") == "mysql://u@127.0.0.1/d"

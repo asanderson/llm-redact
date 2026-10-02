@@ -170,6 +170,7 @@ from llm_redact.upload_view import read_upload, read_upload_metadata
 from llm_redact.vault import Vault, VaultManager, run_batched
 from llm_redact.vault_crypto import key_source as vault_key_source
 from llm_redact.vault_crypto import require_vault_key_source
+from llm_redact.vault_writer import SHUTDOWN_DRAIN_SECONDS
 
 # Local endpoints under this prefix are answered by the proxy itself and are
 # never forwarded upstream (see the first statement of handle()).
@@ -191,6 +192,23 @@ DASHBOARD_PATHS = frozenset(
 # work negligible.
 _TTL_PRUNE_INTERVAL_SECONDS = 3600.0
 _LICENSE_REFRESH_INTERVAL_SECONDS = 86400.0
+
+# The llm-redact-pro sinks' own bound on one upload (their HTTP client's
+# timeout): the shutdown deadline below must never be the one that cuts a
+# slow but working upload short — the final flush uploads the sink's
+# in-memory START/AMEND rows first, and rows it could not ship then are lost
+# from the off-machine copy (spooled database rows are not: they wait).
+_SINK_UPLOAD_TIMEOUT_SECONDS = 30.0
+# Shutdown bound on the off-machine audit sinks' final flush (their aclose(),
+# both sinks concurrently, from the still-open audit database): past it the
+# flushes are cancelled — unshipped spooled rows stay in the database and ship
+# at the next start — so a hanging store never keeps the audit database and
+# the vault from closing. Above one upload's own timeout (plus slack for the
+# client close), so only a stuck sink or a long backlog drain reaches it.
+_SINK_CLOSE_TIMEOUT_SECONDS = _SINK_UPLOAD_TIMEOUT_SECONDS + 15.0
+# How long a cancelled flush gets to unwind (close its HTTP client) before
+# shutdown abandons it and closes the audit database anyway.
+_SINK_CANCEL_GRACE_SECONDS = 1.0
 
 # The inbound request's W3C traceparent, captured at the top of handle() and
 # read at finalization time so the OTel span (built then) can parent into the
@@ -710,6 +728,15 @@ class ProxyState:
         bind_fault_counter = getattr(self.vault_manager, "bind_fault_counter", None)
         if callable(bind_fault_counter):
             bind_fault_counter(self.bookkeeping_errors)
+        # The durable maps (Responses chains, owner records, Live handles)
+        # are written after the provider answered: a background writer
+        # (llm_redact.vault_writer) keeps a slow disk or a remote database
+        # round trip off the event loop, its overlay answering lookups until
+        # each write lands. Optional (getattr): a manager without it writes
+        # synchronously, as before.
+        background = getattr(self.vault_manager, "write_maps_in_background", None)
+        if callable(background):
+            background()
         # Requests refused as a web page's (request_origin_refusal), by kind:
         # "host" (a name the proxy does not answer to — DNS rebinding, or an
         # alias not in allowed_hosts), "origin", "fetch_site". Kinds only.
@@ -1997,6 +2024,65 @@ def identity_exposure_warning(state: ProxyState, host: str) -> str | None:
     )
 
 
+def _sink_close_outcome(task: asyncio.Future[None]) -> None:
+    """Retrieve one audit sink's final-flush outcome: a fault is logged by
+    exception TYPE only (its message may quote a URL or a SAS), never
+    raised — the rest of the shutdown must run."""
+    if task.cancelled():
+        return
+    problem = task.exception()
+    if problem is not None:
+        logger.warning("an audit sink's final flush failed (%s)", type(problem).__name__)
+
+
+async def _close_audit_sinks(sinks: Sequence[S3AuditSink | AzureAuditSink], timeout: float) -> None:
+    """The sinks' final flush at shutdown, bounded (``_SINK_CLOSE_TIMEOUT_SECONDS``).
+
+    Runs every sink's ``aclose()`` concurrently while the audit database is
+    still open, so the END rows the last requests committed reach the
+    off-machine copy. A flush still running at the deadline is cancelled
+    (its spooled rows stay unshipped in the database for the next start); one
+    that ignores the cancellation for ``_SINK_CANCEL_GRACE_SECONDS`` is
+    abandoned — its outcome retrieved whenever it ends — and the shutdown
+    goes on to close the audit database. Abandoning bounds those closes,
+    not the process exit: the event loop's teardown still awaits a task
+    that keeps ignoring its cancellation (the supervisor's kill ends it)."""
+    if not sinks:
+        return
+    tasks = {asyncio.ensure_future(sink.aclose()) for sink in sinks}
+    done, pending = await asyncio.wait(tasks, timeout=timeout)
+    for task in done:
+        _sink_close_outcome(task)
+    if not pending:
+        return
+    logger.warning(
+        "%d audit sink(s) did not finish the final flush within %g s; cancelled"
+        " (unshipped spooled rows upload at the next start)",
+        len(pending),
+        timeout,
+    )
+    for task in pending:
+        task.cancel()
+    unwound, stuck = await asyncio.wait(pending, timeout=_SINK_CANCEL_GRACE_SECONDS)
+    for task in unwound:
+        _sink_close_outcome(task)
+    for task in stuck:
+        task.add_done_callback(_sink_close_outcome)
+    if stuck:
+        logger.warning("%d audit sink(s) ignored the cancellation; abandoned", len(stuck))
+
+
+def _close_contained(what: str, close: Callable[[], object]) -> None:
+    """Close one plugin-supplied object at shutdown: a fault is logged by
+    exception TYPE only (a plugin's message may quote a URL or a credential)
+    and never stops the rest of the shutdown — the sinks' final flush and
+    the audit database and vault closes come after it."""
+    try:
+        close()
+    except Exception as problem:
+        logger.warning("closing the %s failed (%s)", what, type(problem).__name__)
+
+
 def _close_upstream_auths(auths: Mapping[str, UpstreamAuth]) -> None:
     for name, auth in auths.items():
         try:
@@ -2710,8 +2796,10 @@ async def _handle_local(
                         continue
                     if stream.closed:
                         # Its admission ended: the stream ends here (the
-                        # dashboard reconnects, and the gate decides again).
-                        logger.info("events stream closed (its access was revoked)")
+                        # dashboard reconnects, and the gate decides again)
+                        # — or the server is shutting down.
+                        if not stream.at_shutdown:
+                            logger.info("events stream closed (its access was revoked)")
                         return
                     yield b"data: " + json_bytes(row) + b"\n\n"
             finally:
@@ -7014,6 +7102,16 @@ async def _handle_routed(
     )
 
 
+async def _drain_map_writes(state: ProxyState) -> None:
+    """At shutdown, before the vault closes: wait (off the loop, at most
+    ``SHUTDOWN_DRAIN_SECONDS``) for the durable map writes still queued to
+    land; ``close`` then counts and drops what has not, logging their
+    number only."""
+    drain = getattr(state.vault_manager, "drain_map_writes", None)
+    if callable(drain):
+        await asyncio.to_thread(drain, SHUTDOWN_DRAIN_SECONDS)
+
+
 def create_app(
     config: Config,
     *,
@@ -7067,8 +7165,9 @@ def create_app(
                 # Windows event loops / non-main threads (uvloop raises
                 # ValueError there, asyncio RuntimeError): reload unavailable.
                 logger.debug("SIGHUP reload unavailable on this platform")
-        # Each active off-machine audit sink gets a flush-loop task; both are
-        # cancelled and given a final flush at shutdown so no tail is lost.
+        # Each active off-machine audit sink gets a flush-loop task; at
+        # shutdown the loops are cancelled and each sink gets a bounded final
+        # flush BEFORE the audit database closes, so no tail is lost.
         # The optional session-ttl prune loop rides in the same task list.
         audit_sinks = [s for s in (state.audit_s3, state.audit_azure) if s is not None]
         background_tasks = [asyncio.create_task(sink.run()) for sink in audit_sinks]
@@ -7088,16 +7187,32 @@ def create_app(
         try:
             yield
         finally:
+            # Drain order (docs/resilience.md, "Shutdown order"): the server
+            # has stopped accepting and waited for in-flight requests, so
+            # every request finalizer has written its END row. Then: stop
+            # the background work, close what serves requests, give the
+            # sinks their final flush from the STILL-OPEN audit database,
+            # close the audit database, and the vault last (its background
+            # map writes drained before the sinks' flush).
             await state.connections.stop()
             if sighup_registered:
                 loop.remove_signal_handler(signal.SIGHUP)
+            for task in background_tasks:
+                task.cancel()
+            # A task that had already died (a sink's run() raising) must not
+            # cut the shutdown short before the databases close.
+            for outcome in await asyncio.gather(*background_tasks, return_exceptions=True):
+                if isinstance(outcome, Exception):
+                    logger.warning("a background task had failed (%s)", type(outcome).__name__)
             await state.client.aclose()
-            state.vault_manager.close()
+            # The vault's background map writes land now (bounded): nothing
+            # submits another once the requests have finished.
+            await _drain_map_writes(state)
             if state.router is not None:
-                state.router.close()
+                _close_contained("router", state.router.close)
             _close_upstream_auths(state.upstream_auth)
             if state.access_gate is not None:
-                state.access_gate.close()
+                _close_contained("access gate", state.access_gate.close)
             if state.upload_inspector is not None:
                 # Its worker processes and HTTP clients; a fault closing them
                 # never stops the rest of the shutdown.
@@ -7105,17 +7220,14 @@ def create_app(
                     await state.upload_inspector.aclose()
                 except Exception:
                     logger.exception("closing the upload inspector failed")
+            # Final flush so shutdown never silently drops the tail; bounded,
+            # so a hanging store never keeps the databases open.
+            await _close_audit_sinks(audit_sinks, _SINK_CLOSE_TIMEOUT_SECONDS)
             if state.audit is not None:
                 state.audit.close()
             if state.overrides is not None:
                 state.overrides.close()
-            for task in background_tasks:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            for sink in audit_sinks:
-                # Final flush so shutdown never silently drops the tail.
-                await sink.aclose()
+            state.vault_manager.close()
             if state.telemetry is not None:
                 # Flush the batched exporters; telemetry buffered at shutdown
                 # would otherwise be dropped.

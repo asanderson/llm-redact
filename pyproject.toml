@@ -207,6 +207,10 @@ only_mutate = [
     # What an uploaded file is (JSONL / text / binary): the decision that
     # lets a binary file part leave unscanned.
     "src/llm_redact/upload_content.py",
+    # The durable maps' background writer: its overlay answers every
+    # Responses-chain / owner-record / Live-handle lookup until a write
+    # lands, and its delete handling keeps a pruned session's rows gone.
+    "src/llm_redact/vault_writer.py",
 ]
 # mutmut runs pytest from a mutants/ copy; the suite reads repo data by path
 # (docs/api-coverage.md, deploy/*, bench/fp_corpus/*, the checked-in agent

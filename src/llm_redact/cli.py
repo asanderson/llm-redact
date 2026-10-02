@@ -400,8 +400,7 @@ def main(argv: list[str] | None = None) -> None:
     if plugin_command is not None:
         raise SystemExit(plugin_command.run(args))
     if args.command == "serve":
-        import uvicorn
-
+        from llm_redact import serving
         from llm_redact.proxy import create_app, identity_exposure_warning
 
         if args.check:
@@ -455,7 +454,9 @@ def main(argv: list[str] | None = None) -> None:
         exposure = identity_exposure_warning(app.state.proxy, config.host)
         if exposure is not None:
             logging.getLogger("llm_redact").warning("%s", exposure)
-        uvicorn.run(
+        # uvicorn.run, with a shutdown that first ends the dashboard's
+        # never-ending events streams (serving.ProxyServer).
+        serving.run_server(
             app,
             host=config.host,
             port=config.port,
@@ -468,7 +469,7 @@ def main(argv: list[str] | None = None) -> None:
             # FORWARDED_ALLOW_IPS=*), letting a client claim loopback or a
             # trusted load balancer's address to an access gate.
             proxy_headers=False,
-            **run_kwargs,  # type: ignore[arg-type]
+            **run_kwargs,
         )
     elif args.command == "status":
         raise SystemExit(run_status(args))

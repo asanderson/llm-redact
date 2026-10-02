@@ -234,10 +234,72 @@ jobs:
       # only runs when the extra and the model are both present — i.e. here.
       - run: uv run pytest tests/test_ner.py tests/test_presidio.py -v
 
-  # NOTE (R4 open-core split): the real-PostgreSQL+MySQL RDBMS-vault job moved
-  # to the private llm-redact-pro repo's CI (the server RDBMS vault is a Pro
-  # feature). The Free `test` job still runs test_vault_rdbms.py's fake-driver
-  # battery over stdlib sqlite3-as-dbapi, which proves the portable dialect SQL.
+  rdbms:
+    # The RDBMS vault's SQL on REAL engines. The `test` job proves the
+    # portable dialect over stdlib sqlite3-as-dbapi and fake drivers; this
+    # job runs the env-gated real-server tests (the store battery, the Live
+    # resumption handle map and the background map writer's own connection)
+    # against PostgreSQL 16 and MySQL 8.4.
+    # LLM_REDACT_TEST_REAL_DB_REQUIRED makes a missing DSN a failure, never
+    # a skip into a green run. Throwaway service-container credentials only
+    # (no secrets); the DSNs are never echoed. Oracle stays the opt-in
+    # scripts/oracle_smoke.sh.
+    name: rdbms vault (real PostgreSQL + MySQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_USER: vault
+          POSTGRES_PASSWORD: ci-throwaway
+          POSTGRES_DB: llmredact
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U vault -d llmredact"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8.4@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
+        env:
+          MYSQL_ROOT_PASSWORD: ci-throwaway-root
+          MYSQL_DATABASE: llmredact
+          MYSQL_USER: vault
+          MYSQL_PASSWORD: ci-throwaway
+        ports:
+          - 3306:3306
+        # TCP, not the socket: the image's init server listens on the socket
+        # only, so a socket ping would report healthy too early.
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u vault -pci-throwaway --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      LLM_REDACT_TEST_PG_DSN: postgresql://vault:ci-throwaway@127.0.0.1:5432/llmredact
+      LLM_REDACT_TEST_MYSQL_DSN: mysql://vault:ci-throwaway@127.0.0.1:3306/llmredact
+      LLM_REDACT_TEST_REAL_DB_REQUIRED: postgresql,mysql
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen --extra vault-postgres --extra vault-mysql
+      - run: >-
+          uv run pytest -v --tb=short
+          "tests/test_vault_rdbms.py::test_battery_real_server[postgresql]"
+          "tests/test_vault_rdbms.py::test_battery_real_server[mysql]"
+          "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[postgresql]"
+          "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[mysql]"
+          "tests/test_vault_writer.py::test_background_writes_on_a_real_server[postgresql]"
+          "tests/test_vault_writer.py::test_background_writes_on_a_real_server[mysql]"
+          "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[postgresql]"
+          "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[mysql]"
 
   bench:
     name: detection bench (report artifact)

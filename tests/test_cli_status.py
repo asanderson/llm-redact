@@ -190,7 +190,7 @@ def test_serve_port_override_reaches_config(monkeypatch: pytest.MonkeyPatch) -> 
     """--port must be baked into the config so /status reports the real port,
     and access logging stays off (access-log lines carry query strings,
     which can include provider API keys)."""
-    import uvicorn
+    from llm_redact import serving
 
     captured: dict[str, Any] = {}
 
@@ -198,7 +198,7 @@ def test_serve_port_override_reaches_config(monkeypatch: pytest.MonkeyPatch) -> 
         captured.update(kwargs)
         captured["config"] = app.state.proxy.config
 
-    monkeypatch.setattr(uvicorn, "run", fake_run)
+    monkeypatch.setattr(serving, "run_server", fake_run)
     main(["serve", "--port", "19999"])
     assert captured["port"] == 19999
     assert captured["config"].port == 19999  # /status reads this

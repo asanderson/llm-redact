@@ -38,11 +38,13 @@ vault: with a per-pod memory/sqlite vault, replicas would issue divergent
 */}}
 {{- define "llm-redact.validate" -}}
 {{- $grace := .Values.terminationGracePeriodSeconds -}}
+{{- if not (kindIs "invalid" $grace) -}}
 {{- if not (or (kindIs "int" $grace) (kindIs "int64" $grace) (kindIs "float64" $grace)) -}}
 {{- fail "llm-redact: terminationGracePeriodSeconds must be a non-negative integer (seconds) — the proxy's shutdown budget; see values.yaml." -}}
 {{- end -}}
 {{- if or (lt (float64 $grace) 0.0) (ne (float64 $grace) (float64 (int64 $grace))) -}}
 {{- fail "llm-redact: terminationGracePeriodSeconds must be a non-negative integer (seconds) — the proxy's shutdown budget; see values.yaml." -}}
+{{- end -}}
 {{- end -}}
 {{- if eq .Values.mode "standalone" -}}
 {{- $multi := or .Values.autoscaling.enabled (gt (int .Values.replicaCount) 1) -}}
@@ -63,6 +65,23 @@ it from those constants, so changing one fails the test until this follows.
 */}}
 {{- define "llm-redact.shutdownBudgetSeconds" -}}
 57
+{{- end -}}
+
+{{/*
+The pod's terminationGracePeriodSeconds: the value (validated above), or the
+chart default when the key is ABSENT — `helm upgrade --reuse-values` from a
+release made before the value existed carries no such key, and neither does
+`--set terminationGracePeriodSeconds=null`. Never Kubernetes' 30 s, and not
+`default`, which would also turn an explicit 0 into 90. The fallback equals
+values.yaml's default (test_deploy_assets.py pins both).
+*/}}
+{{- define "llm-redact.terminationGracePeriodSeconds" -}}
+{{- $grace := .Values.terminationGracePeriodSeconds -}}
+{{- if kindIs "invalid" $grace -}}
+90
+{{- else -}}
+{{ int64 $grace }}
+{{- end -}}
 {{- end -}}
 
 {{/*

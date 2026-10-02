@@ -69,9 +69,10 @@ kubelet httpGet would need a pod-IP bind).
     kubectl exec -it deploy/{{ include "llm-redact.fullname" . }} -c llm-redact -- llm-redact preview --text "test@corp.example"
 {{- end }}
 {{- end }}
-{{- if lt (int64 .Values.terminationGracePeriodSeconds) (int64 (include "llm-redact.shutdownBudgetSeconds" .)) }}
+{{- $grace := int64 (include "llm-redact.terminationGracePeriodSeconds" .) }}
+{{- if lt $grace (int64 (include "llm-redact.shutdownBudgetSeconds" .)) }}
 
-*** WARNING: terminationGracePeriodSeconds={{ .Values.terminationGracePeriodSeconds }} is below the proxy's
+*** WARNING: terminationGracePeriodSeconds={{ $grace }} is below the proxy's
 bounded shutdown ({{ include "llm-redact.shutdownBudgetSeconds" . }} s after in-flight requests finish: vault map
 writes, the audit sinks' final flush, the vault close). A pod killed sooner
 loses the sinks' in-memory START/AMEND rows and closes no database cleanly.

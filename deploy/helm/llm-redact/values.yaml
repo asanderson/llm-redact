@@ -153,7 +153,9 @@ resources:
 # default stop timeout. The pod goes away as soon as the proxy exits, so a
 # fast stop never waits for it. Lower it only if you run no audit sink and
 # no long streams; NOTES.txt warns below 57. A non-negative integer — the
-# render fails otherwise. docs/resilience.md, "Shutdown order".
+# render fails otherwise; ABSENT (`helm upgrade --reuse-values` from a
+# release made before this value existed, or `--set ...=null`) renders 90,
+# never Kubernetes' 30 s. docs/resilience.md, "Shutdown order".
 terminationGracePeriodSeconds: 90
 
 # Persist the sqlite vault/audit across restarts (sidecar / single replica).

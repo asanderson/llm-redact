@@ -398,7 +398,7 @@ def test_helm_grace_period_is_wired_and_validated() -> None:
     # warning's threshold is the same budget the test derives.
     deployment = (HELM_CHART / "templates" / "deployment.yaml").read_text()
     assert (
-        "terminationGracePeriodSeconds: {{ int64 .Values.terminationGracePeriodSeconds }}"
+        'terminationGracePeriodSeconds: {{ include "llm-redact.terminationGracePeriodSeconds" . }}'
         in deployment
     )
     helpers = (HELM_CHART / "templates" / "_helpers.tpl").read_text()
@@ -412,6 +412,85 @@ def test_helm_grace_period_is_wired_and_validated() -> None:
     resilience = (DEPLOY.parent / "docs" / "resilience.md").read_text()
     assert "terminationGracePeriodSeconds" in resilience
     assert f"defaults to {_default_grace_seconds()} s" in resilience
+
+
+def _grace_fallback_seconds() -> int:
+    helpers = (HELM_CHART / "templates" / "_helpers.tpl").read_text()
+    (value,) = re.findall(
+        r'define "llm-redact.terminationGracePeriodSeconds" -}}.*?kindIs "invalid" \$grace -}}\s*'
+        r"(\d+)\s*{{- else",
+        helpers,
+        re.DOTALL,
+    )
+    return int(value)
+
+
+def test_helm_grace_period_fallback_is_the_chart_default() -> None:
+    # An ABSENT value (`helm upgrade --reuse-values` from a release made
+    # before it existed) renders the chart default, never Kubernetes' 30 s.
+    assert _grace_fallback_seconds() == _default_grace_seconds()
+
+
+def _chart_copy(tmp_path: Path, values: str | None = None) -> Path:
+    chart = tmp_path / "chart"
+    shutil.copytree(HELM_CHART, chart)
+    if values is not None:
+        (chart / "values.yaml").write_text(values)
+    # `helm template` does not render NOTES.txt: render a copy of it as the
+    # value of a ConfigMap through `tpl`, with the chart's own helpers.
+    (chart / "notes.src").write_text((chart / "templates" / "NOTES.txt").read_text())
+    (chart / "templates" / "zz-notes.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata: { name: rendered-notes }\n"
+        'data:\n  notes: {{ tpl (.Files.Get "notes.src") . | quote }}\n'
+    )
+    return chart
+
+
+def _render_copy(chart: Path, *set_args: str) -> list[dict[str, object]]:
+    cmd = ["helm", "template", "rel", str(chart)]
+    for kv in set_args:
+        cmd += ["--set", kv]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return [d for d in yaml.safe_load_all(result.stdout) if d]
+
+
+def _copy_grace_and_notes(chart: Path, *set_args: str) -> tuple[object, str]:
+    docs = _render_copy(chart, *set_args)
+    [deployment] = [d for d in docs if d["kind"] == "Deployment"]
+    [notes] = [
+        d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "rendered-notes"
+    ]
+    return deployment["spec"]["template"]["spec"]["terminationGracePeriodSeconds"], notes["data"][
+        "notes"
+    ]
+
+
+@_needs_helm
+def test_helm_reuse_values_from_an_older_release_renders_the_default(tmp_path: Path) -> None:
+    # `helm upgrade --reuse-values` hands the new chart the OLD release's
+    # values, which carry no terminationGracePeriodSeconds: the upgrade must
+    # render (it once failed the guardrail) and with the chart default.
+    old = (HELM_CHART / "values.yaml").read_text()
+    old = re.sub(r"^terminationGracePeriodSeconds:.*\n", "", old, flags=re.MULTILINE)
+    assert "terminationGracePeriodSeconds:" not in old
+    grace, notes = _copy_grace_and_notes(_chart_copy(tmp_path, old))
+    assert grace == _default_grace_seconds()
+    assert "WARNING: terminationGracePeriodSeconds" not in notes
+    # An explicit null is the same absence.
+    assert _pod_spec("terminationGracePeriodSeconds=null")["terminationGracePeriodSeconds"] == 90
+
+
+@_needs_helm
+@pytest.mark.parametrize(
+    ("grace", "warns"), [(30, True), (56, True), (0, True), (57, False), (90, False)]
+)
+def test_helm_notes_warn_below_the_shutdown_budget(tmp_path: Path, grace: int, warns: bool) -> None:
+    rendered, notes = _copy_grace_and_notes(
+        _chart_copy(tmp_path), f"terminationGracePeriodSeconds={grace}"
+    )
+    assert rendered == grace
+    assert (f"WARNING: terminationGracePeriodSeconds={grace} is below" in notes) is warns
 
 
 def _pod_spec(*set_args: str) -> dict[str, object]:
@@ -452,13 +531,12 @@ def test_helm_grace_period_is_overridable() -> None:
         ("--set", "terminationGracePeriodSeconds=-1"),
         ("--set", "terminationGracePeriodSeconds=1.5"),
         ("--set", "terminationGracePeriodSeconds=abc"),
-        ("--set", "terminationGracePeriodSeconds=null"),
+        ("--set", "terminationGracePeriodSeconds=true"),
         ("--set-string", "terminationGracePeriodSeconds=90"),
     ],
 )
 def test_helm_grace_period_rejects_a_non_integer(flag: tuple[str, str]) -> None:
-    # A quoted or fractional value would only fail at apply time, and a
-    # deleted one would silently fall back to Kubernetes' 30 s: fail the render.
+    # A quoted or fractional value would only fail at apply time: fail the render.
     result = subprocess.run(
         ["helm", "template", "rel", str(HELM_CHART), *flag], capture_output=True, text=True
     )

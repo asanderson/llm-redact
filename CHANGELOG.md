@@ -20,7 +20,9 @@ and tags `vX.Y.Z`.
   rows. 90 s = the proxy's bounded shutdown steps after the request drain (57 s: map-write
   drain, sink flush deadline + cancel grace, the vault close's drain and thread join) plus
   33 s for requests still running; the pod still goes away as soon as the proxy exits. The
-  render fails on anything but a non-negative integer, and NOTES warns below 57 s. The
+  render fails on anything but a non-negative integer; an absent value (`helm upgrade
+  --reuse-values` from a release made before it existed) renders the default 90, so such
+  an upgrade still renders and never falls back to 30 s. NOTES warns below 57 s. The
   chart test recomputes the budget from the proxy's constants. docs/deployment.md and
   docs/resilience.md ("Shutdown order") now quote the budget (drain plus ~60 s, was ~50 s).
 - The vault's durable maps are written off the event loop: the Responses chain rows,

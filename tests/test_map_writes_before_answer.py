@@ -111,6 +111,19 @@ def test_a_reload_reports_the_setting_restart_only(tmp_path: Path) -> None:
     state.vault_manager.close()
 
 
+@pytest.mark.parametrize("mode", [None, *MAP_WRITES_MODES])
+async def test_status_reports_synchronous_without_a_background_writer(mode: str | None) -> None:
+    # The in-memory manager (like a third-party one without
+    # write_maps_in_background) writes its maps synchronously: nothing is
+    # ever awaited, so /status never claims a mode the proxy does not run.
+    app = create_app(Config(vault=VaultConfig(map_writes=mode)))
+    state = app.state.proxy
+    assert state.awaits_map_writes is False
+    async with _client(app) as client:
+        status = (await client.get("/__llm-redact/status")).json()
+    assert status["vault"]["map_writes"] == "synchronous"
+
+
 def test_doctor_shows_the_effective_mode(tmp_path: Path) -> None:
     from llm_redact.doctor_cli import _check_vault, _Report
 

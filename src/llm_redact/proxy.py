@@ -753,9 +753,10 @@ class ProxyState:
         # the vault finds the record as soon as the client can cite it
         # (``map_write_barrier`` / ``await_map_writes``). Nothing is awaited
         # for a manager that writes synchronously (no background writer):
-        # its writes have landed when the call returns.
-        self.map_writes = map_writes_mode(config.vault)
-        self.awaits_map_writes = self.map_writes == "before_answer" and callable(background)
+        # its writes have landed when the call returns — reported as
+        # "synchronous", the mode it actually runs (never a claimed wait).
+        self.map_writes = map_writes_mode(config.vault) if callable(background) else "synchronous"
+        self.awaits_map_writes = self.map_writes == "before_answer"
         self.map_write_wait_seconds = MAP_WRITE_WAIT_SECONDS
         # Whether the last wait ran out of time (logged once per episode).
         self._map_writes_lagging = False
@@ -2629,7 +2630,9 @@ async def _handle_local(
             # The effective [vault] map_writes: "before_answer" (an answer
             # waits for its durable map writes: every replica reads them) or
             # "background" (this process answers from the writer's overlay
-            # at once; another replica once the write landed).
+            # at once; another replica once the write landed) — or
+            # "synchronous" (no background writer: each write landed before
+            # its call returned, e.g. the in-memory vault).
             "map_writes": state.map_writes,
         }
         if config.vault.backend in RDBMS_BACKENDS:

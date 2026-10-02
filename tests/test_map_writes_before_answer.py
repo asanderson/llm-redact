@@ -641,6 +641,47 @@ async def test_a_wait_past_its_bound_sends_anyway_and_is_counted_once_per_episod
     assert state.bookkeeping_errors == {MAP_WRITE_WAIT_STAGE: 2}
 
 
+async def test_a_stuck_writer_costs_one_wait_per_episode_not_one_per_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A hung database (a network blackhole: no driver timeout) holds the
+    # writer on one write and queues every later one behind it. The first
+    # answer pays the bound; while no write has left the writer since,
+    # waiting again is futile (one writer, in submission order), so later
+    # answers are sent at once — still counted. A write leaving the writer
+    # ends the episode: the next answer waits again.
+    _install(monkeypatch)
+    caplog.set_level(logging.INFO, logger="llm_redact")
+    with _replicas(1, _shared_vault(tmp_path), Responses()) as (a,):
+        state = a.state.proxy
+        state.map_write_wait_seconds = 1.0
+        gate = _gate(state.vault_manager._maps)
+        took: list[float] = []
+        try:
+            async with _client(a) as client:
+                for text in ("one", "two", "three"):
+                    started = time.monotonic()
+                    answer = await asyncio.wait_for(
+                        client.post("/v1/responses", json=_first(text)), 10
+                    )
+                    assert answer.status_code == 200
+                    took.append(time.monotonic() - started)
+                assert state.bookkeeping_errors == {MAP_WRITE_WAIT_STAGE: 3}
+                gate.set()
+                assert await asyncio.to_thread(state.vault_manager.drain_map_writes, 10) == 0
+                # The episode ended: the next answer waits for its write again.
+                state.map_write_wait_seconds = 10
+                assert (await client.post("/v1/responses", json=_first("four"))).status_code == 200
+                assert state.vault_manager.lookup_response_session("resp_4") is not None
+        finally:
+            gate.set()
+    assert took[0] >= 0.95
+    assert max(took[1:]) < 0.5, took
+    assert caplog.text.count(WAIT_MESSAGE) == 1
+    assert "vault map writes land in time again" in caplog.text
+    assert state.bookkeeping_errors == {MAP_WRITE_WAIT_STAGE: 3}
+
+
 async def test_a_failed_write_releases_the_answer_at_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

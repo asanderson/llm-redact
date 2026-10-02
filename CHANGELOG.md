@@ -24,6 +24,9 @@ and tags `vX.Y.Z`.
   request carry on, and only answers that recorded something wait. The wait is bounded
   (5 s): past it the bytes go out anyway — only lag, never a wrong value — counted under
   the new bookkeeping stage `map_write_wait` and logged once per episode (never an id);
+  while the write a timed-out wait gave up on is still stuck in the writer (a hung
+  database), later answers are sent at once (counted), so one answer per episode pays
+  the bound;
   a failed write releases it at once; an overflowed write is not waited for.
   `"background"` (the default for sqlite and memory) keeps the previous behaviour. The
   effective mode is in `/status` (`vault.map_writes`), `llm-redact status` and

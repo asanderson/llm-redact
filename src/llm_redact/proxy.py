@@ -759,6 +759,11 @@ class ProxyState:
         self.map_write_wait_seconds = MAP_WRITE_WAIT_SECONDS
         # Whether the last wait ran out of time (logged once per episode).
         self._map_writes_lagging = False
+        # A write the last timed-out wait gave up on, while it has not left
+        # the writer: one writer applies writes in submission order, so
+        # every later write is queued behind it and waiting again is futile
+        # (a hung database would otherwise cost EVERY answer the bound).
+        self._map_write_stuck: Future[None] | None = None
         # Requests refused as a web page's (request_origin_refusal), by kind:
         # "host" (a name the proxy does not answer to — DNS rebinding, or an
         # alias not in allowed_hosts), "origin", "fetch_site". Kinds only.
@@ -1166,12 +1171,22 @@ class ProxyState:
         record as unknown a little longer — refused or sealed, never a wrong
         value), counted under the ``map_write_wait`` bookkeeping stage and
         logged once per episode; ``where`` (method and path, or "WS path")
-        names the request, never an id."""
+        names the request, never an id. While a write a timed-out wait gave
+        up on has still not left the writer, the answer is sent at once
+        (counted the same): the writer is stuck behind it, so one answer per
+        episode pays the bound, not every answer."""
+        stuck = self._map_write_stuck
+        if stuck is not None and not stuck.done():
+            self.bookkeeping_errors[MAP_WRITE_WAIT_STAGE] += 1
+            return
+        self._map_write_stuck = None
+        # The writes are not cancelled when the wait gives up (a cancelled
+        # future would read as left the writer): their wrappers simply
+        # complete unobserved once they do.
         waits = [asyncio.wrap_future(future) for future in pending]
         _done, late = await asyncio.wait(waits, timeout=self.map_write_wait_seconds)
         if late:
-            for wait in late:
-                wait.cancel()  # the write still lands; nobody waits for it now
+            self._map_write_stuck = next((f for f in pending if not f.done()), None)
             self.bookkeeping_errors[MAP_WRITE_WAIT_STAGE] += 1
             if not self._map_writes_lagging:
                 self._map_writes_lagging = True

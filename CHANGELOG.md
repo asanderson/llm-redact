@@ -113,6 +113,10 @@ and tags `vX.Y.Z`.
   treat an extension naming another format than the file's bytes as incomplete.
 
 ### Changed
+- The Helm chart's NOTES no longer say Kubernetes needs a Team-tier license (the FOSS
+  core is ungated there, as everywhere: a license key matters only to llm-redact-pro
+  subsystems), nor that a non-loopback bind is Pro; values.yaml's license and
+  ServiceAccount comments say the same.
 - Shutdown drains the audit trail in order: the off-machine audit sinks' final flush now
   runs while the audit database is still open (after the server has drained its
   in-flight requests), so the END rows spooled since the last upload ship at shutdown

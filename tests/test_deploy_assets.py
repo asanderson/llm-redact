@@ -172,6 +172,20 @@ def test_helm_chart_hardening_and_guardrail_present() -> None:
     assert "never-wrong-value" in helpers
 
 
+def test_helm_chart_claims_no_license_gate() -> None:
+    # The FOSS core is ungated on Kubernetes and beyond loopback
+    # (test_no_gates.py): the chart's NOTES and values must not claim a tier
+    # requirement the proxy does not enforce (NOTES once said k8s needed Team).
+    notes = (HELM_CHART / "templates" / "NOTES.txt").read_text()
+    values = (HELM_CHART / "values.yaml").read_text()
+    for text in (notes, values):
+        flat = " ".join(text.split())
+        assert not re.search(r"\bTeam\b", flat)
+        assert "refuses to start on k8s" not in flat
+        assert "bind (Pro)" not in flat
+    assert "The FOSS core needs no license" in " ".join(notes.split())
+
+
 def test_helm_standalone_lists_its_service_names_as_allowed_hosts() -> None:
     # Stdlib needle: a standalone proxy is dialled by its Service's DNS
     # names, and a request spending a credential the proxy holds (identity

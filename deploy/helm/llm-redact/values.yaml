@@ -57,7 +57,8 @@ vault:
   dsnSecretKey: dsn
 
 license:
-  # Secret holding key `license-key` (llmr1...). k8s requires Team+.
+  # Secret holding key `license-key` (llmr1...), optional: the FOSS core
+  # needs none on k8s; only llm-redact-pro subsystems read it.
   # Create it: kubectl create secret generic llm-redact-license \
   #   --from-literal=license-key="llmr1...."
   secretName: llm-redact-license
@@ -115,8 +116,8 @@ podDisruptionBudget:
   minAvailable: 1
 
 # ServiceAccount for the proxy pod. Cloud features (managed-DBMS vault via IAM
-# auth and S3/GCS audit sinks via IRSA / Workload Identity — both Pro; the LLM
-# cloud adapters — Team) need an annotatable ServiceAccount; keep create=false
+# auth and S3/GCS audit sinks via IRSA / Workload Identity, and the LLM cloud
+# adapters' `auth = "identity"` — all llm-redact-pro) need an annotatable ServiceAccount; keep create=false
 # to use the namespace default.
 serviceAccount:
   create: false

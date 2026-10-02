@@ -1,8 +1,8 @@
 llm-redact {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}".
 
-Kubernetes deployment requires a Team-tier-or-higher license — the proxy refuses
-to start on k8s below Team. Provide it via the Secret named
-"{{ .Values.license.secretName }}" (key: license-key).
+The FOSS core needs no license, on Kubernetes or anywhere else. A license key
+matters only to llm-redact-pro subsystems; when you use them, provide it via
+the Secret named "{{ .Values.license.secretName }}" (key: license-key, optional).
 
 {{ if eq .Values.mode "standalone" -}}
 Mode: STANDALONE — a shared in-cluster proxy (Deployment + Service{{ if .Values.autoscaling.enabled }} + HorizontalPodAutoscaler{{ end }}).
@@ -30,7 +30,7 @@ Mode: STANDALONE — a shared in-cluster proxy (Deployment + Service{{ if .Value
   refused or sealed, never wrong — use session affinity where that matters.
 {{ end -}}
   SECURITY: a standalone proxy serves other pods over the network, i.e. a
-  NON-LOOPBACK bind (Pro). Prefer real mutual TLS — mount the cert Secret via
+  NON-LOOPBACK bind. Prefer real mutual TLS — mount the cert Secret via
   extraVolumes/extraVolumeMounts and set [tls] certfile/keyfile/client_ca via
   `extraConfig`. insecureBind={{ .Values.insecureBind }} is the documented hatch for a
   TRUSTED in-cluster network only — pair it with networkPolicy.enabled=true

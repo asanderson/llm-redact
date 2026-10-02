@@ -12,10 +12,12 @@ import math
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 from llm_redact import __version__
 from llm_redact.config import Config
@@ -82,8 +84,19 @@ def test_k8s_sidecar_hardening_strings_present() -> None:
         assert needle in text, f"k8s manifest missing hardening directive: {needle!r}"
 
 
+def test_pyyaml_is_a_direct_dev_dependency() -> None:
+    # The structural k8s/Helm tests parse YAML. PyYAML once arrived only
+    # through libcst (via mutmut), which on Python 3.13 — the CI helm job's —
+    # pulls pyyaml-ft (module `yaml_ft`) instead, so every render test there
+    # skipped on importorskip and the chart was never checked rendered.
+    pyproject = tomllib.loads((DEPLOY.parent / "pyproject.toml").read_text())
+    dev = pyproject["dependency-groups"]["dev"]
+    assert any(re.match(r"pyyaml\b", dep, re.IGNORECASE) for dep in dev)
+    lock = (DEPLOY.parent / "uv.lock").read_text()
+    assert '{ name = "pyyaml", specifier = ">=6" }' in lock
+
+
 def test_k8s_sidecar_is_hardened_and_probes_real_endpoints() -> None:
-    yaml = pytest.importorskip("yaml")
     doc = next(yaml.safe_load_all((DEPLOY / "k8s-sidecar.yaml").read_text()))
     assert doc["kind"] == "Deployment"
     spec = doc["spec"]["template"]["spec"]
@@ -108,8 +121,8 @@ def test_k8s_sidecar_is_hardened_and_probes_real_endpoints() -> None:
 #
 # The needle + appVersion tests are stdlib-only and always run. The rendering
 # tests shell out to `helm` and skip when it is absent (the CI `helm` job runs
-# them for real); they parse the output with PyYAML, importorskip'd like the
-# k8s structural test above.
+# them for real); they parse the output with PyYAML, a direct dev dependency
+# (never importorskip'd: a missing module must fail, not skip unseen).
 
 _HELM = shutil.which("helm")
 _needs_helm = pytest.mark.skipif(_HELM is None, reason="helm not installed")
@@ -184,7 +197,6 @@ def test_helm_lint_passes() -> None:
 
 @_needs_helm
 def test_helm_sidecar_preset_renders() -> None:
-    yaml = pytest.importorskip("yaml")
     result = _helm_template()
     assert result.returncode == 0, result.stderr
     docs = {d["kind"]: d for d in yaml.safe_load_all(result.stdout) if d}
@@ -209,7 +221,6 @@ def test_helm_sidecar_preset_renders() -> None:
 
 @_needs_helm
 def test_helm_standalone_binds_wide_with_httpget_probes() -> None:
-    yaml = pytest.importorskip("yaml")
     result = _helm_template("mode=standalone", "vault.backend=postgresql")
     assert result.returncode == 0, result.stderr
     docs = {d["kind"]: d for d in yaml.safe_load_all(result.stdout) if d}
@@ -226,7 +237,6 @@ def test_helm_standalone_binds_wide_with_httpget_probes() -> None:
 
 @_needs_helm
 def test_helm_optional_hardening_templates_render() -> None:
-    yaml = pytest.importorskip("yaml")
     result = _helm_template(
         "mode=standalone",
         "vault.backend=postgresql",
@@ -243,7 +253,6 @@ def test_helm_optional_hardening_templates_render() -> None:
 def test_helm_extra_volumes_wire_through() -> None:
     # extraVolumes/extraVolumeMounts exist so the chart's own "prefer mTLS"
     # advice is actually wireable — a [tls] cert Secret must be mountable.
-    yaml = pytest.importorskip("yaml")
     result = _helm_template(
         "extraVolumes[0].name=tls",
         "extraVolumes[0].secret.secretName=llm-redact-tls",
@@ -260,7 +269,6 @@ def test_helm_extra_volumes_wire_through() -> None:
 
 @_needs_helm
 def test_helm_standalone_autoscaling_preset_renders() -> None:
-    yaml = pytest.importorskip("yaml")
     result = _helm_template(
         "mode=standalone",
         "autoscaling.enabled=true",
@@ -321,7 +329,6 @@ def _rendered_config(*set_args: str) -> Config:
 
     from llm_redact.config import parse_config
 
-    yaml = pytest.importorskip("yaml")
     cmd = ["helm", "template", "rel", str(HELM_CHART), "--namespace", "team"]
     for kv in set_args:
         cmd += ["--set", kv]
@@ -408,7 +415,6 @@ def test_helm_grace_period_is_wired_and_validated() -> None:
 
 
 def _pod_spec(*set_args: str) -> dict[str, object]:
-    yaml = pytest.importorskip("yaml")
     result = _helm_template(*set_args)
     assert result.returncode == 0, result.stderr
     [deployment] = [d for d in yaml.safe_load_all(result.stdout) if d and d["kind"] == "Deployment"]

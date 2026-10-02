@@ -147,7 +147,8 @@ resources:
 # 57 s — the vault's background map writes (5 s), the off-machine audit
 # sinks' final flush (one 45 s deadline + 1 s cancel grace) and the vault
 # close (a second map drain of up to 5 s when writes were still landing,
-# + 1 s thread join). A pod killed sooner loses the sinks' in-memory
+# + 1 s thread join); an [otel] telemetry flush runs after the vault close
+# and is outside those 57 s. A pod killed sooner loses the sinks' in-memory
 # START/AMEND rows and closes no database cleanly (committed rows survive).
 # 90 = those 57 s + 33 s for in-flight requests, the same as systemd's
 # default stop timeout. The pod goes away as soon as the proxy exits, so a

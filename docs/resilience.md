@@ -180,7 +180,11 @@ SAS).
 bounded steps take at most 57 s: the map-write drain (5 s), the sinks'
 final flush (45 s + 1 s cancel grace) and the vault close (which drains
 the map writes once more, for up to 5 s, only when a write landed after
-the first drain, and then waits 1 s for the writer thread). Allow at least
+the first drain, and then waits 1 s for the writer thread). The budget
+ends at the vault close: with `[otel]` enabled the telemetry exporters'
+flush runs after it, bounded only by the OpenTelemetry SDK's own export
+timeouts, and is outside the 57 s — no database is open by then, but give
+that flush its own margin when you enable OTel. Allow at least
 the request drain plus ~60 s in a supervisor's stop timeout so the final
 flush is not killed before the databases close; the request drain itself
 has no bound (step 2). Kubernetes' default `terminationGracePeriodSeconds`

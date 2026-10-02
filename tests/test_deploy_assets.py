@@ -7,6 +7,7 @@ the histogram `_bucket`/`_sum`/`_count` suffixes), so renaming a metric without
 updating the dashboard fails CI.
 """
 
+import inspect
 import json
 import math
 import re
@@ -19,7 +20,7 @@ import httpx
 import pytest
 import yaml
 
-from llm_redact import __version__
+from llm_redact import __version__, proxy
 from llm_redact.config import Config
 from llm_redact.proxy import create_app
 
@@ -491,6 +492,21 @@ def test_helm_notes_warn_below_the_shutdown_budget(tmp_path: Path, grace: int, w
     )
     assert rendered == grace
     assert (f"WARNING: terminationGracePeriodSeconds={grace} is below" in notes) is warns
+
+
+def test_shutdown_budget_docs_name_the_telemetry_tail_outside_it() -> None:
+    # The telemetry exporters flush AFTER the vault close (lifespan order),
+    # so "at most 57 s" holds only up to the vault close: the docs must say
+    # the OTel flush is outside the budget.
+    lifespan = inspect.getsource(proxy)
+    assert lifespan.index("state.vault_manager.close()") < lifespan.index(
+        "state.telemetry.shutdown()"
+    )
+    resilience = " ".join((DEPLOY.parent / "docs" / "resilience.md").read_text().split())
+    assert "The budget ends at the vault close" in resilience
+    assert "is outside the 57 s" in resilience
+    values = " ".join((HELM_CHART / "values.yaml").read_text().replace("#", " ").split())
+    assert "telemetry flush runs after the vault close and is outside those 57 s" in values
 
 
 def _pod_spec(*set_args: str) -> dict[str, object]:

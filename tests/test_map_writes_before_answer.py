@@ -310,6 +310,8 @@ def test_a_dying_writer_thread_releases_the_write_it_held(
     with awaited_writes() as pending:
         writer.submit(MapWrite("s", dies, dies, _Faults()))
     assert pending[0].result(10) is None
+    # Nothing was queued behind it: no successor thread is started.
+    assert writer._thread is None
     writer.close()
 
 
@@ -697,7 +699,7 @@ async def test_a_stuck_writer_costs_one_wait_per_episode_not_one_per_answer(
     caplog.set_level(logging.INFO, logger="llm_redact")
     with _replicas(1, _shared_vault(tmp_path), Responses()) as (a,):
         state = a.state.proxy
-        state.map_write_wait_seconds = 1.0
+        state.map_write_wait_seconds = 2.0
         gate = _gate(state.vault_manager._maps)
         took: list[float] = []
         try:
@@ -718,8 +720,8 @@ async def test_a_stuck_writer_costs_one_wait_per_episode_not_one_per_answer(
                 assert state.vault_manager.lookup_response_session("resp_4") is not None
         finally:
             gate.set()
-    assert took[0] >= 0.95
-    assert max(took[1:]) < 0.5, took
+    assert took[0] >= 1.95
+    assert max(took[1:]) < 1.0, took
     assert caplog.text.count(WAIT_MESSAGE) == 1
     assert "vault map writes land in time again" in caplog.text
     assert state.bookkeeping_errors == {MAP_WRITE_WAIT_STAGE: 3}

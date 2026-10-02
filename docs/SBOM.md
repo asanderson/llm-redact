@@ -74,7 +74,8 @@ path — detectors only read strings and return spans.
 `pytest`, `pytest-asyncio`, `ruff`, `mypy`, `hypothesis` (property
 tests), `mutmut` (mutation assurance), `coverage` (complexity-coverage
 gate), plus `cryptography`, `websockets` and `pypdf` so the crypto,
-realtime and document-extraction paths are always exercised by the suite.
+realtime and document-extraction paths are always exercised by the suite,
+and `pyyaml` for the k8s manifest and Helm chart render tests.
 
 ## Verifying a release
 

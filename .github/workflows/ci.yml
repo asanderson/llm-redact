@@ -237,8 +237,9 @@ jobs:
   rdbms:
     # The RDBMS vault's SQL on REAL engines. The `test` job proves the
     # portable dialect over stdlib sqlite3-as-dbapi and fake drivers; this
-    # job runs the env-gated real-server tests (the store battery and the
-    # Live resumption handle map) against PostgreSQL 16 and MySQL 8.4.
+    # job runs the env-gated real-server tests (the store battery, the Live
+    # resumption handle map and the background map writer's own connection)
+    # against PostgreSQL 16 and MySQL 8.4.
     # LLM_REDACT_TEST_REAL_DB_REQUIRED makes a missing DSN a failure, never
     # a skip into a green run. Throwaway service-container credentials only
     # (no secrets); the DSNs are never echoed. Oracle stays the opt-in
@@ -293,6 +294,10 @@ jobs:
           uv run pytest -v --tb=short
           "tests/test_vault_rdbms.py::test_battery_real_server[postgresql]"
           "tests/test_vault_rdbms.py::test_battery_real_server[mysql]"
+          "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[postgresql]"
+          "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[mysql]"
+          "tests/test_vault_writer.py::test_background_writes_on_a_real_server[postgresql]"
+          "tests/test_vault_writer.py::test_background_writes_on_a_real_server[mysql]"
           "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[postgresql]"
           "tests/test_vault_handles.py::test_the_handle_map_on_a_real_server[mysql]"
 

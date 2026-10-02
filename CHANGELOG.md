@@ -118,8 +118,8 @@ and tags `vX.Y.Z`.
   and that stream never ends on its own, so an open dashboard kept a SIGTERM from
   ever reaching the audit sinks' final flush and the database closes (the supervisor
   killed the process instead).
-- CI: a new `rdbms` job runs the RDBMS vault's real-server tests (the store battery and
-  the Live resumption handle map) against PostgreSQL 16 and MySQL 8.4 service
+- CI: a new `rdbms` job runs the RDBMS vault's real-server tests (the store battery,
+  the Live resumption handle map and the background map writer) against PostgreSQL 16 and MySQL 8.4 service
   containers; before, no DSN was set anywhere and those env-gated tests always skipped.
   `LLM_REDACT_TEST_REAL_DB_REQUIRED` makes a missing DSN fail the job instead of
   skipping it.

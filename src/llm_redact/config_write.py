@@ -470,6 +470,9 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
     lines.append(f"encryption = {_toml_str(config.vault.encryption)}")
     if config.vault.session_ttl_days:
         lines.append(f"session_ttl_days = {config.vault.session_ttl_days}")
+    if config.vault.map_writes is not None:
+        # Only an explicit choice: unset keeps following the backend.
+        lines.append(f"map_writes = {_toml_str(config.vault.map_writes)}")
 
     if config.vault.rdbms != RdbmsConfig():
         # Like [audit.s3]: an all-defaults section is omitted. Subtable

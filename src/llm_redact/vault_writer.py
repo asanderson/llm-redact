@@ -51,6 +51,19 @@ hands them to a ``MapWriter`` instead:
 
 The writer thread exits after ``IDLE_SECONDS`` without work (closing its
 connection) and starts again with the next write.
+
+WAITING FOR A WRITE (``[vault] map_writes = "before_answer"``): the overlay
+answers for THIS process only — another replica sharing the vault reads a
+record once its write landed. A caller that must not hand a client the id a
+write records before every replica can read it collects the writes it
+submits inside ``awaited_writes()``: each queued write then carries a
+``concurrent.futures.Future`` (``MapWrite.landed``) set once the write left
+the writer — landed, failed (the record reads as unknown, as it did
+written synchronously), dropped at ``close`` or lost with a dying writer
+thread — so the waiter is always released, and the proxy awaits those
+futures, bounded, before it sends the answer on. A write that is not
+queued (the queue is full, the writer closed) carries none: nothing would
+ever land to wait for. Outside ``awaited_writes()`` nothing is created.
 """
 
 from __future__ import annotations
@@ -60,7 +73,9 @@ import logging
 import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, InvalidStateError
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 if TYPE_CHECKING:
@@ -83,6 +98,26 @@ SHUTDOWN_DRAIN_SECONDS = 5.0
 # How long ``close`` waits for the writer thread to finish the write it is
 # in (a daemon thread: a write stuck past it never holds the exit).
 STOP_JOIN_SECONDS = 1.0
+
+
+# The futures of the writes submitted inside ``awaited_writes()`` (None:
+# nobody waits, no future is created).
+_AWAITED: ContextVar[list[Future[None]] | None] = ContextVar(
+    "llm_redact_awaited_map_writes", default=None
+)
+
+
+@contextmanager
+def awaited_writes() -> Iterator[list[Future[None]]]:
+    """Collect, in the yielded list, a future for every write queued
+    inside the block (in this context): each is set once its write left
+    the writer, however it ended (``MapWrite.landed``)."""
+    pending: list[Future[None]] = []
+    token = _AWAITED.set(pending)
+    try:
+        yield pending
+    finally:
+        _AWAITED.reset(token)
 
 
 class Faults(Protocol):
@@ -124,7 +159,16 @@ class MapWrite:
     (raising on failure), ``erase`` removes its key instead once its
     session was deleted before it ran, ``faults`` counts its outcome."""
 
-    __slots__ = ("abandoned", "erase", "erase_after", "faults", "keys", "run", "session")
+    __slots__ = (
+        "abandoned",
+        "erase",
+        "erase_after",
+        "faults",
+        "keys",
+        "landed",
+        "run",
+        "session",
+    )
 
     def __init__(
         self,
@@ -145,6 +189,16 @@ class MapWrite:
         # ``close`` gave up on it while in flight (and counted it): its own
         # late outcome is not posted.
         self.abandoned = False
+        # Set once it left the writer, however it ended (``awaited_writes``:
+        # created only for a write somebody waits for).
+        self.landed: Future[None] | None = None
+
+    def release(self) -> None:
+        """Release whoever waits for this write (thread-safe; a second
+        release, or one after the waiter gave up and cancelled, is a no-op)."""
+        if self.landed is not None:
+            with suppress(InvalidStateError):
+                self.landed.set_result(None)
 
 
 class _Entry:
@@ -225,6 +279,10 @@ class MapWriter:
             for key in removes:
                 self._remove(key, write.session, owner)
             if queued:
+                awaited = _AWAITED.get()
+                if awaited is not None:
+                    write.landed = Future()
+                    awaited.append(write.landed)
                 self._queue.append(write)
                 self._ensure_thread()
                 self._cond.notify_all()
@@ -352,6 +410,7 @@ class MapWriter:
                 dropped.append(self._in_flight)
         for write in dropped:
             _count(write.faults)
+            write.release()
         if dropped:
             logger.warning(
                 "vault map writer: %d write(s) were not written at shutdown"
@@ -375,14 +434,17 @@ class MapWriter:
             while (write := self._next_write()) is not None:
                 connection = self._apply(write, connection)
         finally:
+            lost = None
             with self._cond:
                 # Only reached with the thread still registered when it died
-                # (a BaseException): its write is lost (read as unknown) and
-                # the next submit starts another thread.
+                # (a BaseException): its write is lost (read as unknown, its
+                # waiter released) and the next submit starts another thread.
                 if self._thread is threading.current_thread():
                     self._thread = None
-                    self._in_flight = None
+                    lost, self._in_flight = self._in_flight, None
                 self._cond.notify_all()
+            if lost is not None:
+                lost.release()
             if connection is not None:
                 with suppress(Exception):
                     connection.close()
@@ -418,6 +480,9 @@ class MapWriter:
                 self._post(faults.failed, error)
             elif faults.failing:
                 self._post(faults.succeeded)
+        # Its keys are settled (the database answers for them) and its
+        # outcome is posted ahead of the waiter's wake-up: release it.
+        write.release()
         # Only now is it done: a drain that returns has its outcome posted.
         with self._cond:
             self._in_flight = None

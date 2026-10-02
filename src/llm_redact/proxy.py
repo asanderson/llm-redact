@@ -33,7 +33,8 @@ import unicodedata
 import urllib.parse
 from collections import Counter, deque
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
-from contextlib import asynccontextmanager, suppress
+from concurrent.futures import Future
+from contextlib import AbstractContextManager, asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -65,6 +66,7 @@ from llm_redact.config import (
     default_config_path,
     identity_upstream_problem,
     load_config,
+    map_writes_mode,
     normalize_origin,
     resolve_config_path,
     resolve_credentials,
@@ -170,7 +172,7 @@ from llm_redact.upload_view import read_upload, read_upload_metadata
 from llm_redact.vault import Vault, VaultManager, run_batched
 from llm_redact.vault_crypto import key_source as vault_key_source
 from llm_redact.vault_crypto import require_vault_key_source
-from llm_redact.vault_writer import SHUTDOWN_DRAIN_SECONDS
+from llm_redact.vault_writer import SHUTDOWN_DRAIN_SECONDS, awaited_writes
 
 # Local endpoints under this prefix are answered by the proxy itself and are
 # never forwarded upstream (see the first statement of handle()).
@@ -186,6 +188,15 @@ DASHBOARD_PATHS = frozenset(
         f"{RESERVED_PREFIX}/preview",
     }
 )
+
+# [vault] map_writes = "before_answer": how long an answer waits for the
+# durable map writes it caused to land (``ProxyState.await_map_writes``).
+# Past it the answer is sent anyway — another replica may then read the
+# record as unknown a moment longer (refused or sealed, never a wrong
+# value) — and the lag is counted (bookkeeping stage ``map_write_wait``).
+MAP_WRITE_WAIT_SECONDS = 5.0
+# The bookkeeping stage an answer sent before its map writes landed counts in.
+MAP_WRITE_WAIT_STAGE = "map_write_wait"
 
 # How often the [vault] session_ttl_days background task sweeps for idle
 # sessions. Retention is a slow signal; hourly is ample and keeps the sqlite
@@ -737,6 +748,17 @@ class ProxyState:
         background = getattr(self.vault_manager, "write_maps_in_background", None)
         if callable(background):
             background()
+        # [vault] map_writes (restart-only): "before_answer" holds an answer
+        # until the map writes it caused landed, so another replica sharing
+        # the vault finds the record as soon as the client can cite it
+        # (``map_write_barrier`` / ``await_map_writes``). Nothing is awaited
+        # for a manager that writes synchronously (no background writer):
+        # its writes have landed when the call returns.
+        self.map_writes = map_writes_mode(config.vault)
+        self.awaits_map_writes = self.map_writes == "before_answer" and callable(background)
+        self.map_write_wait_seconds = MAP_WRITE_WAIT_SECONDS
+        # Whether the last wait ran out of time (logged once per episode).
+        self._map_writes_lagging = False
         # Requests refused as a web page's (request_origin_refusal), by kind:
         # "host" (a name the proxy does not answer to — DNS rebinding, or an
         # alias not in allowed_hosts), "origin", "fetch_site". Kinds only.
@@ -1125,6 +1147,44 @@ class ProxyState:
         if isinstance(verdict, str) and verdict:
             return verdict
         return _SEALED_REFUSAL if verdict else None
+
+    def map_write_barrier(self) -> AbstractContextManager[list[Future[None]] | None]:
+        """Around the synchronous bookkeeping of an answer (or of one
+        streamed event, or realtime frame): with ``map_writes =
+        "before_answer"``, collects a future for each durable map write the
+        block queues (``vault_writer.awaited_writes``) — the caller awaits
+        them (``await_map_writes``) before it sends what carries the
+        recorded id. Otherwise None: nothing to wait for."""
+        return awaited_writes() if self.awaits_map_writes else nullcontext(None)
+
+    async def await_map_writes(self, pending: Sequence[Future[None]], where: str) -> None:
+        """Wait — on the event loop, never blocking it: each write runs on
+        the vault's writer thread — until the ``pending`` map writes left the
+        writer (landed, or failed: a failed write reads as unknown, as it
+        did written synchronously), at most ``map_write_wait_seconds``. Past
+        that the answer goes on anyway (only lag: another replica reads the
+        record as unknown a little longer — refused or sealed, never a wrong
+        value), counted under the ``map_write_wait`` bookkeeping stage and
+        logged once per episode; ``where`` (method and path, or "WS path")
+        names the request, never an id."""
+        waits = [asyncio.wrap_future(future) for future in pending]
+        _done, late = await asyncio.wait(waits, timeout=self.map_write_wait_seconds)
+        if late:
+            for wait in late:
+                wait.cancel()  # the write still lands; nobody waits for it now
+            self.bookkeeping_errors[MAP_WRITE_WAIT_STAGE] += 1
+            if not self._map_writes_lagging:
+                self._map_writes_lagging = True
+                logger.warning(
+                    "%s -> sent before its vault map writes landed (waited %ss); another"
+                    " replica may read the record as unknown until they do",
+                    where,
+                    self.map_write_wait_seconds,
+                )
+            return
+        if self._map_writes_lagging:
+            self._map_writes_lagging = False
+            logger.info("vault map writes land in time again; answers wait for them")
 
     def record_response_id(self, response_id: str, session_id: str) -> None:
         if self.session_router.mode == "static":
@@ -2218,34 +2278,43 @@ async def _stream_rehydrated(
     try:
         async for chunk in upstream.aiter_bytes():
             for event in parser.feed(chunk):
-                if not response_id_seen:
-                    response_id = adapter.response_id_from_event(event)
-                    if response_id is not None:
-                        # Session bookkeeping never cuts the stream (contained,
-                        # counted); the first id suffices either way.
-                        _contained(
-                            state,
-                            "response_id",
-                            method,
-                            path,
-                            state.record_response_id,
-                            response_id,
-                            ctx.session_id,
-                        )
-                        response_id_seen = True
-                if objects is not None and objects.report(state, ctx, event):
-                    objects = None  # nothing more to read from this stream
-                if observe is not None:
-                    observe = _observe(state, observe, method, path, event.data)
+                with state.map_write_barrier() as map_writes:
+                    if not response_id_seen:
+                        response_id = adapter.response_id_from_event(event)
+                        if response_id is not None:
+                            # Session bookkeeping never cuts the stream
+                            # (contained, counted); the first id suffices
+                            # either way.
+                            _contained(
+                                state,
+                                "response_id",
+                                method,
+                                path,
+                                state.record_response_id,
+                                response_id,
+                                ctx.session_id,
+                            )
+                            response_id_seen = True
+                    if objects is not None and objects.report(state, ctx, event):
+                        objects = None  # nothing more to read from this stream
+                    if observe is not None:
+                        observe = _observe(state, observe, method, path, event.data)
+                if map_writes:
+                    # map_writes = "before_answer": the event naming the id
+                    # waits until every replica can read its record.
+                    await state.await_map_writes(map_writes, f"{method} {path}")
                 for out in adapter.rehydrate_event(event, pool):
                     if route is not None:
                         out = route.observe_event(out)
                     yield serialize(out)
         for event in parser.close():
-            if objects is not None:
-                objects.report(state, ctx, event)
-            if observe is not None:
-                observe = _observe(state, observe, method, path, event.data)
+            with state.map_write_barrier() as map_writes:
+                if objects is not None:
+                    objects.report(state, ctx, event)
+                if observe is not None:
+                    observe = _observe(state, observe, method, path, event.data)
+            if map_writes:
+                await state.await_map_writes(map_writes, f"{method} {path}")
             for out in adapter.rehydrate_event(event, pool):
                 if route is not None:
                     out = route.observe_event(out)
@@ -2410,7 +2479,7 @@ async def _stream_rehydrated_eventstream(
                 continue
             for frame in frames:
                 if observe is not None:
-                    observe = _observe(state, observe, method, path, frame.payload)
+                    observe = await _observed(state, observe, method, path, frame.payload)
                 for out in adapter.rehydrate_eventstream_message(frame, pool):
                     yield serialize_eventstream(out)
         if not degraded:
@@ -2542,6 +2611,11 @@ async def _handle_local(
             # "kms:<provider>" | "local" (env / key command / keychain) |
             # None (unencrypted). Posture only: never the key or key id.
             "key_source": vault_key_source(config.vault),
+            # The effective [vault] map_writes: "before_answer" (an answer
+            # waits for its durable map writes: every replica reads them) or
+            # "background" (this process answers from the writer's overlay
+            # at once; another replica once the write landed).
+            "map_writes": state.map_writes,
         }
         if config.vault.backend in RDBMS_BACKENDS:
             from llm_redact.vault_rdbms import (
@@ -3158,7 +3232,7 @@ async def _stream_rehydrated_ndjson(
         async for chunk in upstream.aiter_bytes():
             for line in parser.feed(chunk):
                 if observe is not None:
-                    observe = _observe(state, observe, method, path, line)
+                    observe = await _observed(state, observe, method, path, line)
                 out = adapter.rehydrate_ndjson_line(line, pool)
                 if route is not None:
                     out = route.observe_line(out)
@@ -3168,7 +3242,7 @@ async def _stream_rehydrated_ndjson(
             # A stream that ended without a final newline: the tail may
             # still be one complete JSON object.
             if observe is not None:
-                observe = _observe(state, observe, method, path, tail)
+                observe = await _observed(state, observe, method, path, tail)
             out = adapter.rehydrate_ndjson_line(tail, pool)
             if route is not None:
                 out = route.observe_line(out)
@@ -6184,36 +6258,43 @@ async def _deliver(
 
     received = raw  # the provider's own bytes: what an observer reads
     rehydration_counts_before = dict(state.rehydration_counts)
-    try:
-        raw = _restore_buffered(
-            request,
-            state,
-            ctx,
-            adapter,
-            kind,
-            route,
-            raw,
-            path=path,
-            content_type=content_type,
-            status=upstream.status_code,
-            request_body=request_body,
-        )
-    except Exception as exc:  # noqa: BLE001 — never a bare 500 once the provider answered
-        return _delivery_fault_response(
-            state,
-            ctx,
-            adapter,
-            exc,
-            request=request,
-            path=path,
-            started=started,
-            new_counts=new_counts,
-            new_warned=new_warned,
-            audit_token=audit_token,
-            route=route,
-        )
-    if observe is not None and received and "application/json" in content_type:
-        _observe(state, observe, request.method, path, received)
+    with state.map_write_barrier() as map_writes:
+        try:
+            raw = _restore_buffered(
+                request,
+                state,
+                ctx,
+                adapter,
+                kind,
+                route,
+                raw,
+                path=path,
+                content_type=content_type,
+                status=upstream.status_code,
+                request_body=request_body,
+            )
+        except Exception as exc:  # noqa: BLE001 — never a bare 500 once the provider answered
+            return _delivery_fault_response(
+                state,
+                ctx,
+                adapter,
+                exc,
+                request=request,
+                path=path,
+                started=started,
+                new_counts=new_counts,
+                new_warned=new_warned,
+                audit_token=audit_token,
+                route=route,
+            )
+        if observe is not None and received and "application/json" in content_type:
+            _observe(state, observe, request.method, path, received)
+    # This answer's share of the process-wide counts, taken before any await.
+    rehydrations = _count_delta(state.rehydration_counts, rehydration_counts_before)
+    if map_writes:
+        # [vault] map_writes = "before_answer": the ids this answer recorded
+        # reach the client only once every replica can read their records.
+        await state.await_map_writes(map_writes, f"{request.method} {path}")
 
     # Every request is recorded — pass-through included (provider=None maps
     # to the "passthrough" metrics label); audit rows likewise when enabled.
@@ -6226,7 +6307,7 @@ async def _deliver(
         started=started,
         streamed=False,
         detections=new_counts,
-        rehydrations=_count_delta(state.rehydration_counts, rehydration_counts_before),
+        rehydrations=rehydrations,
         warned=new_warned,
         audit_token=audit_token,
         route=(state.finish_route(route, upstream.status_code) if route is not None else None),
@@ -6519,6 +6600,19 @@ def _observe(
     except ValueError:
         return observe
     return observe if _contained(state, _OBSERVER_STAGE, method, path, observe, payload) else None
+
+
+async def _observed(
+    state: ProxyState, observe: ResponseObserver, method: str, path: str, data: bytes | str
+) -> ResponseObserver | None:
+    """``_observe`` one streamed value — then, with ``[vault] map_writes =
+    "before_answer"``, wait for the map writes the observer queued (a
+    record it made of this value) before the value is sent on."""
+    with state.map_write_barrier() as map_writes:
+        observe_next = _observe(state, observe, method, path, data)
+    if map_writes:
+        await state.await_map_writes(map_writes, f"{method} {path}")
+    return observe_next
 
 
 def _delivery_fault_response(

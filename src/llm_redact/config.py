@@ -176,6 +176,17 @@ class RehydrationConfig:
 # operator names the driver module and the store uses its portable SQL subset.
 RDBMS_BACKENDS = ("postgresql", "mysql", "oracle", "dbapi")
 
+# [vault] map_writes: when the durable maps' background writes (Responses
+# chains, stored-object owner records, Live resumption handles) must have
+# landed. "background": the answer is sent at once — this process answers
+# from the writer's overlay, another replica sharing the vault reads a
+# record once its write landed. "before_answer": the proxy waits (bounded,
+# off the event loop) for an answer's writes to land before sending the
+# bytes that carry the recorded id, so a follow-up reaching ANY replica
+# finds it. Unset: before_answer for the shared-database backends,
+# background for sqlite and memory (``map_writes_mode``).
+MAP_WRITES_MODES = ("background", "before_answer")
+
 # Config sections a hot reload (SIGHUP / the pro dashboard's editor) pins to
 # their running values: changing them requires a restart. The single source
 # of truth for apply_config and the editor's read-only set (README.md and
@@ -559,6 +570,19 @@ class VaultConfig:
     # [vault.kms]: the fernet key is KMS-wrapped (llm-redact-pro unwraps it
     # at startup). None = the local sources (env / key command / keychain).
     kms: VaultKmsConfig | None = None
+    # MAP_WRITES_MODES, or None (unset): the backend's default
+    # (``map_writes_mode``).
+    map_writes: str | None = None
+
+
+def map_writes_mode(vault: VaultConfig) -> str:
+    """The effective ``[vault] map_writes``: as set, else "before_answer"
+    for a shared-database backend (RDBMS_BACKENDS: replicas share it, and a
+    follow-up may reach any of them) and "background" for sqlite and
+    memory."""
+    if vault.map_writes is not None:
+        return vault.map_writes
+    return "before_answer" if vault.backend in RDBMS_BACKENDS else "background"
 
 
 @dataclass(frozen=True)
@@ -2522,6 +2546,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
             "session_mode",
             "encryption",
             "session_ttl_days",
+            "map_writes",
             "rdbms",
             "kms",
         },
@@ -2587,6 +2612,11 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     session_ttl_days = int(vault_raw.get("session_ttl_days", 0))
     if session_ttl_days < 0:
         raise ConfigError("[vault] session_ttl_days must be >= 0 (0 disables auto-prune)")
+    map_writes = str(vault_raw["map_writes"]) if "map_writes" in vault_raw else None
+    if map_writes is not None and map_writes not in MAP_WRITES_MODES:
+        raise ConfigError(
+            f"[vault] map_writes must be one of {MAP_WRITES_MODES}, got {map_writes!r}"
+        )
     kms: VaultKmsConfig | None = None
     if "kms" in vault_raw:
         kms = parse_vault_kms(vault_raw["kms"])
@@ -2603,6 +2633,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         session_ttl_days=session_ttl_days,
         rdbms=rdbms,
         kms=kms,
+        map_writes=map_writes,
     )
 
     audit_raw = raw.get("audit", {})

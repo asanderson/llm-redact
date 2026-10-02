@@ -12,6 +12,23 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- `[vault] map_writes = "background" | "before_answer"` restores cross-replica
+  read-your-writes for the durable maps. With `"before_answer"` — the default for the
+  shared-database backends (`postgresql`, `mysql`, `oracle`, `dbapi`) — an answer whose
+  bookkeeping recorded a Responses chain, a stored-object owner or a Live resumption
+  handle waits until that write landed before the client gets the id: a buffered
+  answer before it is returned, a stream before the event (SSE), line (NDJSON) or frame
+  (eventstream) that recorded it, a realtime server frame (a Live handle) before it is
+  sent. The write still runs on the vault's writer thread; the proxy awaits its
+  completion future (`vault_writer.awaited_writes`), so the event loop and every other
+  request carry on, and only answers that recorded something wait. The wait is bounded
+  (5 s): past it the bytes go out anyway — only lag, never a wrong value — counted under
+  the new bookkeeping stage `map_write_wait` and logged once per episode (never an id);
+  a failed write releases it at once; an overflowed write is not waited for.
+  `"background"` (the default for sqlite and memory) keeps the previous behaviour. The
+  effective mode is in `/status` (`vault.map_writes`), `llm-redact status` and
+  `llm-redact doctor`; restart-only with the rest of `[vault]`. Deployment docs and the
+  Helm NOTES no longer ask for session affinity on a shared RDBMS vault.
 - The vault's durable maps are written off the event loop: the Responses chain rows,
   stored-object owner records and Live resumption handles the proxy (and
   llm-redact-pro) records after the provider answered go to one background writer

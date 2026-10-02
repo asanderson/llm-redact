@@ -97,15 +97,21 @@ and standalone modes, optional HPA autoscaling) at
 `deploy/helm/llm-redact/` — its `NOTES.txt` and `values.yaml` document
 the modes and guardrails.
 
-Replicas sharing one vault issue consistent tokens, but the durable maps
+Replicas sharing one vault issue consistent tokens. The durable maps
 (Responses chains, stored-object owners, Live resumption handles) are
-written in the background after each answer: a follow-up
-(`previous_response_id`, a Live resumption) that reaches ANOTHER replica
-before the write landed — normally milliseconds — is refused or sealed,
-never restored wrong, and a record past the writer's 10,000-write bound
-never reaches the other replicas at all. Use session affinity at the load
-balancer where that matters (docs/resilience.md, "Durable map writes off
-the event loop").
+written on a background thread after each answer, and `[vault] map_writes`
+decides when the client gets the answer. With a shared database backend
+(`postgresql`, `mysql`, `oracle`, `dbapi`) the default is
+`"before_answer"`: an answer that recorded something waits (bounded, off
+the event loop) until its write landed, so a follow-up
+(`previous_response_id`, a Live resumption, a stored-object read) may reach
+ANY replica — no session affinity needed. Past the 5 s bound (a database
+stall) the answer is sent anyway and counted (`map_write_wait`); a
+follow-up reaching another replica before the write landed is then refused
+or sealed, never restored wrong. `map_writes = "background"` sends answers
+at once (one write's latency less on those answers) and brings that window
+back for every answer: use session affinity at the load balancer then
+(docs/resilience.md, "Durable map writes off the event loop").
 
 ## Host names the proxy answers to (`allowed_hosts`)
 

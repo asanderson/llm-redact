@@ -1091,7 +1091,7 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "(`if not self._stalled` in `close`; `drain` assigns it a bool), and None is falsy exactly"
         " like False."
     ),
-    "llm_redact.vault_writer.xǁMapWriterǁsubmit__mutmut_20": (
+    "llm_redact.vault_writer.xǁMapWriterǁsubmit__mutmut_24": (
         "`_overflowing = None` when the queue drains below its bound: the flag starts False and is"
         " only ever read for truth (`if self._overflowing` / `if not self._overflowing` in "
         "`submit`), and None is falsy exactly like False."

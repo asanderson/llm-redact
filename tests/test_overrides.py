@@ -40,6 +40,7 @@ from llm_redact.overrides import (
 from llm_redact.plugin_api import Admission
 from llm_redact.proxy import CSRF_HEADER, create_app
 from llm_redact.registry import Registry
+from local_refusals import refused_once
 
 EMAIL = "jane.doe@corp.example"
 OTHER = "john.roe@corp.example"
@@ -311,6 +312,7 @@ async def test_an_always_rule_writes_nothing_and_passes_a_locked_store(
                 )
                 assert reply.status_code == 200
             assert writes == []
+            app.state.proxy.metrics.local_refusals.clear()  # the earlier blocks
             busy = await client.post(
                 "/v1/chat/completions", json=_chat(f"mail {OTHER}"), headers=KEY
             )
@@ -320,6 +322,7 @@ async def test_an_always_rule_writes_nothing_and_passes_a_locked_store(
         assert busy.status_code == 400
         message = busy.json()["error"]["message"]
         assert "could not be recorded" in message and "already used" not in message
+        refused_once(app.state.proxy, "override_fault", "openai")
         # The grant is still there for the next request.
         passed = await client.post("/v1/chat/completions", json=_chat(f"mail {OTHER}"), headers=KEY)
         assert passed.status_code == 200
@@ -369,11 +372,13 @@ async def test_the_race_is_refused_through_the_app(
         refused = await client.post(
             "/v1/chat/completions", json=_chat(f"mail {EMAIL}"), headers=KEY
         )
+        app.state.proxy.metrics.local_refusals.clear()  # the block that minted the code
         _store(tmp_path).approve("once", approver=None, code=_code(refused))
         raced = await client.post("/v1/chat/completions", json=_chat(f"mail {EMAIL}"), headers=KEY)
     assert raced.status_code == 400
     assert "already used" in raced.json()["error"]["message"]
     assert not upstream.requests
+    refused_once(app.state.proxy, "override_raced", "openai")
 
 
 # --- codes ----------------------------------------------------------------------------

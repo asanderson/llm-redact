@@ -3,6 +3,7 @@ import shutil
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -92,3 +93,77 @@ def redactor(vault: InMemoryVault) -> Redactor:
 @pytest.fixture
 def rehydrator(vault: InMemoryVault) -> Rehydrator:
     return Rehydrator(vault)
+
+
+@pytest.fixture(autouse=True)
+def _local_refusals_counted_once(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+    """Every request any test sends through ``create_app`` — an HTTP
+    request until its answer was sent (a stream's finalizer included) and a
+    realtime connection until its handler ended — counts at most ONE local
+    refusal, and every refusal recorded with a row names a kind that
+    answers its status (tests/local_refusals.py) — so a refusal site counted
+    twice, or under the wrong kind, fails whichever test drives it.
+    Violations are collected (a server thread's request cannot raise into
+    the test) and fail the test at teardown; ``refusal_guard`` reads them."""
+    import local_refusals
+    from llm_redact import proxy
+    from llm_redact.metrics import LOCAL_REFUSAL_KINDS, Metrics
+
+    guard = local_refusals.RefusalGuard()
+    real_handle = proxy.handle
+    real_ws_handle = proxy.ws_handle
+    real_count = Metrics.count_local_refusal
+    real_record = proxy.ProxyState.record_request
+
+    async def handle(request: Any) -> Any:
+        counted: list[str] = []
+        token = local_refusals.REQUEST_REFUSALS.set(counted)
+        try:
+            response = await real_handle(request)
+        except BaseException:
+            guard.check("request", counted)
+            raise
+        finally:
+            local_refusals.REQUEST_REFUSALS.reset(token)
+        return local_refusals.CheckedResponse(response, counted, guard)
+
+    async def ws_handle(websocket: Any) -> None:
+        counted: list[str] = []
+        token = local_refusals.REQUEST_REFUSALS.set(counted)
+        try:
+            await real_ws_handle(websocket)
+        finally:
+            local_refusals.REQUEST_REFUSALS.reset(token)
+            guard.check("realtime connection", counted)
+
+    log = os.environ.get("LLM_REDACT_TEST_REFUSAL_LOG")
+
+    def count(self: Metrics, kind: Any, provider: str | None) -> None:
+        if kind not in LOCAL_REFUSAL_KINDS:
+            guard.violations.append(f"unknown kind {kind!r}")
+        if log:
+            with open(log, "a", encoding="utf-8") as out:
+                out.write(f"{kind}\t{os.environ.get('PYTEST_CURRENT_TEST', '')}\n")
+        counted = local_refusals.REQUEST_REFUSALS.get()
+        if counted is not None:
+            counted.append(kind)
+        real_count(self, kind, provider)
+
+    def record(self: Any, **row: Any) -> None:
+        kind = row.get("refusal")
+        if kind is not None and row["status"] not in local_refusals.KIND_STATUSES[kind]:
+            guard.violations.append(f"{kind} recorded with status {row['status']}")
+        real_record(self, **row)
+
+    monkeypatch.setattr(proxy, "handle", handle)
+    monkeypatch.setattr(proxy, "ws_handle", ws_handle)
+    monkeypatch.setattr(Metrics, "count_local_refusal", count)
+    monkeypatch.setattr(proxy.ProxyState, "record_request", record)
+    yield guard
+    assert not guard.violations, guard.violations
+
+
+@pytest.fixture
+def refusal_guard(_local_refusals_counted_once: Any) -> Any:
+    """The suite-wide local-refusal guard (tests/local_refusals.RefusalGuard)."""
+    return _local_refusals_counted_once

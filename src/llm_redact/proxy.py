@@ -21,6 +21,7 @@ import functools
 import importlib.resources
 import importlib.util
 import inspect
+import itertools
 import json
 import logging
 import os
@@ -32,13 +33,21 @@ import time
 import unicodedata
 import urllib.parse
 from collections import Counter, deque
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from concurrent.futures import Future
 from contextlib import AbstractContextManager, asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeVar
 
 import httpx
 from starlette.applications import Starlette
@@ -56,6 +65,7 @@ from llm_redact.audit import (
 )
 from llm_redact.audit_s3 import AzureAuditSink, S3AuditSink
 from llm_redact.config import (
+    DEFAULT_MAP_WRITE_WAIT_SECONDS,
     RDBMS_BACKENDS,
     RESTART_ONLY_KEYS,
     Config,
@@ -90,7 +100,12 @@ from llm_redact.jsonwalk import (
     loads_request,
 )
 from llm_redact.licensing import ResolvedLicense, resolve_license
-from llm_redact.metrics import Metrics
+from llm_redact.metrics import (
+    MAX_PLUGIN_SAMPLES,
+    LocalRefusal,
+    Metrics,
+    plugin_metric_lines,
+)
 from llm_redact.multipart import parse as parse_multipart
 from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
@@ -194,9 +209,36 @@ DASHBOARD_PATHS = frozenset(
 # Past it the answer is sent anyway — another replica may then read the
 # record as unknown a moment longer (refused or sealed, never a wrong
 # value) — and the lag is counted (bookkeeping stage ``map_write_wait``).
-MAP_WRITE_WAIT_SECONDS = 5.0
+# The default of ``[vault] map_write_wait_seconds``, which sets it.
+MAP_WRITE_WAIT_SECONDS = DEFAULT_MAP_WRITE_WAIT_SECONDS
 # The bookkeeping stage an answer sent before its map writes landed counts in.
 MAP_WRITE_WAIT_STAGE = "map_write_wait"
+# The bookkeeping stage a plugin's metrics samples count in when they cannot
+# be read (a fault, a timeout, a call still running) or a sample is invalid.
+PLUGIN_METRICS_STAGE = "plugin_metrics"
+# How long a /metrics scrape waits for the access gate's samples (read in a
+# worker thread): past it the core's own metrics are rendered without them.
+PLUGIN_METRICS_TIMEOUT_SECONDS = 2.0
+
+
+def _retrieve(future: "asyncio.Future[Any]") -> None:
+    if not future.cancelled():
+        future.exception()
+
+
+def _listed_samples(samples: Callable[[], object]) -> list[object]:
+    """``samples()`` read in full (in a worker thread): a lazy iterable is
+    consumed there too, never on the event loop. At most one sample past
+    ``MAX_PLUGIN_SAMPLES`` is taken, so an endless iterable is bounded
+    (``plugin_metric_lines`` drops the extra one, counted). TypeError when
+    the answer is not iterable."""
+    answer = samples()
+    if inspect.isawaitable(answer):
+        if inspect.iscoroutine(answer):
+            answer.close()
+        raise TypeError("metrics_samples answered an awaitable")
+    return list(itertools.islice(answer, MAX_PLUGIN_SAMPLES + 1))  # type: ignore[call-overload]
+
 
 # How often the [vault] session_ttl_days background task sweeps for idle
 # sessions. Retention is a slow signal; hourly is ample and keeps the sqlite
@@ -230,6 +272,84 @@ _INBOUND_TRACEPARENT: ContextVar[str | None] = ContextVar("llm_redact_traceparen
 # by record_request — the same task-context trick as the traceparent, so the
 # streaming finalizers attribute without threading a parameter through.
 _REQUEST_USER: ContextVar[str | None] = ContextVar("llm_redact_user", default=None)
+
+
+class _RequestTiming:
+    """How long one HTTP request waited on something other than the proxy
+    itself: the upstream (sending it, its answer's headers and body, each
+    streamed chunk, a routed retry's delay) and the client (its request
+    body, a stream's consumer). ``record_request`` subtracts it from the
+    request's duration: ``llm_redact_proxy_overhead_seconds``. Set fresh by
+    handle() for every HTTP request (the task-context trick again: the
+    streaming finalizers read the same object)."""
+
+    __slots__ = ("waited",)
+
+    def __init__(self) -> None:
+        self.waited = 0.0
+
+
+_REQUEST_TIMING: ContextVar[_RequestTiming | None] = ContextVar(
+    "llm_redact_request_timing", default=None
+)
+
+_T = TypeVar("_T")
+
+
+async def _waited(awaitable: Awaitable[_T]) -> _T:
+    """Await ``awaitable`` — a wait on the upstream or the client — and
+    charge its time to the current request's ``_RequestTiming``."""
+    timing = _REQUEST_TIMING.get()
+    started = time.perf_counter()
+    try:
+        return await awaitable
+    finally:
+        if timing is not None:
+            timing.waited += time.perf_counter() - started
+
+
+class _UpstreamPaced:
+    """An upstream body's chunks, the wait for each charged to the request
+    (``_RequestTiming``). An iterator object, not a generator: nothing of
+    its own to finalize."""
+
+    def __init__(self, chunks: AsyncIterable[bytes]) -> None:
+        self._chunks = aiter(chunks)
+        self._timing = _REQUEST_TIMING.get()
+
+    def __aiter__(self) -> "_UpstreamPaced":
+        return self
+
+    async def __anext__(self) -> bytes:
+        started = time.perf_counter()
+        try:
+            return await anext(self._chunks)
+        finally:
+            if self._timing is not None:
+                self._timing.waited += time.perf_counter() - started
+
+
+class _ClientPaced:
+    """A streamed answer handed to the client: the time between yielding a
+    chunk and being asked for the next — the client (and the server
+    writing to it) taking it — charged to the request. The stream's own
+    finalizer (``record_request``) runs inside the last ``__anext__``,
+    after every such wait was charged."""
+
+    def __init__(self, stream: AsyncIterator[bytes]) -> None:
+        self._stream = stream
+        self._timing = _REQUEST_TIMING.get()
+        self._handed: float | None = None
+
+    def __aiter__(self) -> "_ClientPaced":
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._handed is not None and self._timing is not None:
+            self._timing.waited += time.perf_counter() - self._handed
+        chunk = await anext(self._stream)
+        self._handed = time.perf_counter()
+        return chunk
 
 
 def _synchronous_audit_answer(answer: object, member: str) -> None:
@@ -377,6 +497,7 @@ class _EarlyAudit:
                 detections={},
                 rehydrations={},
                 audit_token=token,
+                refusal=None,
             )
 
 
@@ -757,7 +878,12 @@ class ProxyState:
         # "synchronous", the mode it actually runs (never a claimed wait).
         self.map_writes = map_writes_mode(config.vault) if callable(background) else "synchronous"
         self.awaits_map_writes = self.map_writes == "before_answer"
-        self.map_write_wait_seconds = MAP_WRITE_WAIT_SECONDS
+        self.map_write_wait_seconds = config.vault.map_write_wait_seconds
+        # Answers sent before their map writes landed, by cause: "bound"
+        # (the wait reached map_write_wait_seconds) or "stuck" (not waited
+        # for: the writer is stuck behind an earlier write a wait gave up
+        # on). Also counted under the bookkeeping stage MAP_WRITE_WAIT_STAGE.
+        self.map_write_wait_timeouts: Counter[str] = Counter()
         # Whether the last wait ran out of time (logged once per episode).
         self._map_writes_lagging = False
         # A write the last timed-out wait gave up on, while it has not left
@@ -835,6 +961,15 @@ class ProxyState:
             transport=upstream_transport, timeout=httpx.Timeout(600.0, connect=10.0)
         )
         self.metrics = Metrics(__version__)
+        self.metrics.map_writes_mode = self.map_writes
+        # The access gate's own gauges (its optional metrics_samples, read
+        # off the event loop by ``plugin_metric_text``): the call in flight,
+        # which a scrape never starts a second of (a concurrent scrape waits
+        # for it until its deadline, the loop time its bound ends), and
+        # whether the last one failed (logged once per episode).
+        self._plugin_metrics_call: asyncio.Future[list[object]] | None = None
+        self._plugin_metrics_deadline = 0.0
+        self._plugin_metrics_failing = False
         # Last-N request summaries for the dashboard's recent table: memory
         # only, metadata only (types and counts — never values), available
         # whether or not the audit DB is enabled.
@@ -1154,6 +1289,20 @@ class ProxyState:
             return verdict
         return _SEALED_REFUSAL if verdict else None
 
+    def map_writes_pending(self) -> int:
+        """The durable map writes queued or in flight on the vault's
+        background writer (its OPTIONAL ``map_writes_pending``); 0 without
+        one, or when the manager's answer is not a count."""
+        pending = getattr(self.vault_manager, "map_writes_pending", None)
+        if not callable(pending):
+            return 0
+        try:
+            count = pending()
+        except Exception as exc:  # noqa: BLE001 — a gauge never fails the scrape
+            logger.warning("vault map writer depth unreadable (%s)", type(exc).__name__)
+            return 0
+        return count if isinstance(count, int) and not isinstance(count, bool) else 0
+
     def map_write_barrier(self) -> AbstractContextManager[list[Future[None]] | None]:
         """Around the synchronous bookkeeping of an answer (or of one
         streamed event, or realtime frame): with ``map_writes =
@@ -1179,6 +1328,7 @@ class ProxyState:
         stuck = self._map_write_stuck
         if stuck is not None and not stuck.done():
             self.bookkeeping_errors[MAP_WRITE_WAIT_STAGE] += 1
+            self.map_write_wait_timeouts["stuck"] += 1
             return
         self._map_write_stuck = None
         # The writes are not cancelled when the wait gives up (a cancelled
@@ -1189,6 +1339,7 @@ class ProxyState:
         if late:
             self._map_write_stuck = next((f for f in pending if not f.done()), None)
             self.bookkeeping_errors[MAP_WRITE_WAIT_STAGE] += 1
+            self.map_write_wait_timeouts["bound"] += 1
             if not self._map_writes_lagging:
                 self._map_writes_lagging = True
                 logger.warning(
@@ -1889,13 +2040,17 @@ class ProxyState:
         audit_token: object | None = None,
         route: dict[str, Any] | None = None,
         override: str | None = None,
+        refusal: LocalRefusal | None = None,
     ) -> None:
         """Always update in-memory metrics and the recent buffer; write an
         audit row when enabled (finalizing the write-ahead START row when
         ``begin_audit`` issued a token for this request — or an upload wrote
         its START row before its inspection: ``_EarlyAudit``). ``override`` (else
         the request's own, _REQUEST_OVERRIDE) marks a request that passed a
-        refusal on an approved override: "once" or "always"."""
+        refusal on an approved override: "once" or "always". ``refusal``: the
+        response is the proxy's own instead of the upstream's — counted once
+        under that kind (``llm_redact_local_refusals_total``); every call
+        site states it, None included (pinned by test)."""
         override = override or _REQUEST_OVERRIDE.get()
         if audit_token is None:
             early = _EARLY_AUDIT.get()
@@ -1903,6 +2058,11 @@ class ProxyState:
                 audit_token = early.take()
         duration_seconds = time.perf_counter() - started
         self.metrics.observe_request(provider, status, duration_seconds, streamed)
+        if refusal is not None:
+            self.metrics.count_local_refusal(refusal, provider)
+        timing = _REQUEST_TIMING.get()
+        if timing is not None and method != "WS":
+            self.metrics.observe_overhead(provider, duration_seconds - timing.waited)
         row = {
             "ts": datetime.now(tz=UTC).isoformat(timespec="seconds"),
             "session": session,
@@ -1975,6 +2135,68 @@ class ProxyState:
             logger.critical(
                 "audit write failed AFTER response (%s %s): %s", method, path, type(exc).__name__
             )
+
+    def count_local_refusal(self, kind: LocalRefusal, provider: str | None) -> None:
+        """A refusal the proxy answers WITHOUT recording a row (its path may
+        hold a key, or there is no request to attribute): counted alone,
+        exactly once (``record_request(refusal=)`` counts every other)."""
+        self.metrics.count_local_refusal(kind, provider)
+
+    async def plugin_metric_text(self) -> str:
+        """The access gate's own gauges (its OPTIONAL ``metrics_samples``),
+        as exposition lines under the core's rules (``plugin_metric_lines``):
+        asked in a worker thread, at most ``PLUGIN_METRICS_TIMEOUT_SECONDS``
+        — a slow or hung plugin never blocks the event loop or the scrape,
+        and a scrape never starts a second call while one is still running:
+        a concurrent scrape shares the call in flight, waiting for it only
+        until that call's own deadline (two scrapes at once — an HA pair of
+        Prometheus servers — both get the gauges and count nothing); a call
+        still running past its deadline (an earlier scrape gave up on it)
+        is not waited for again. A fault, a timeout, a call still running
+        past its bound, an answer that is not iterable and every dropped
+        sample count under the bookkeeping stage ``plugin_metrics`` — once
+        per scrape rendered without them (logged once per episode, by
+        exception TYPE only); the core's own metrics are rendered either
+        way."""
+        samples = getattr(self.access_gate, "metrics_samples", None)
+        if not callable(samples):
+            return ""
+        now = asyncio.get_running_loop().time()
+        call = self._plugin_metrics_call
+        if call is not None and not call.done():
+            if now >= self._plugin_metrics_deadline:
+                self._plugin_metrics_fault("still running")
+                return ""
+        else:
+            call = asyncio.ensure_future(asyncio.to_thread(_listed_samples, samples))
+            # A call the scrape stopped waiting for still ends: its outcome is
+            # retrieved then (never an unretrieved exception), and discarded.
+            call.add_done_callback(_retrieve)
+            self._plugin_metrics_call = call
+            self._plugin_metrics_deadline = now + PLUGIN_METRICS_TIMEOUT_SECONDS
+        try:
+            answer = await asyncio.wait_for(
+                asyncio.shield(call), self._plugin_metrics_deadline - now
+            )
+            lines, dropped = plugin_metric_lines(answer)
+        except TimeoutError:
+            self._plugin_metrics_fault("TimeoutError")
+            return ""
+        except Exception as exc:  # noqa: BLE001 — a plugin's fault never fails the scrape
+            self._plugin_metrics_fault(type(exc).__name__)
+            return ""
+        if dropped:
+            self.bookkeeping_errors[PLUGIN_METRICS_STAGE] += dropped
+        if self._plugin_metrics_failing:
+            self._plugin_metrics_failing = False
+            logger.info("the access gate's metrics samples are read again")
+        return "".join(line + "\n" for line in lines)
+
+    def _plugin_metrics_fault(self, kind: str) -> None:
+        self.bookkeeping_errors[PLUGIN_METRICS_STAGE] += 1
+        if not self._plugin_metrics_failing:
+            self._plugin_metrics_failing = True
+            logger.warning("the access gate's metrics samples were not read (%s)", kind)
 
     def finish_route(self, delivery: RouteDelivery, status: int | None) -> dict[str, Any]:
         """Close the books on a routed request: the routed-requests metric
@@ -2291,8 +2513,9 @@ async def _stream_rehydrated(
         else None
     )
     status = upstream.status_code  # 502 when the proxy itself cut the stream
+    cut = False  # whether it did (a delivery_fault local refusal)
     try:
-        async for chunk in upstream.aiter_bytes():
+        async for chunk in _UpstreamPaced(upstream.aiter_bytes()):
             for event in parser.feed(chunk):
                 with state.map_write_barrier() as map_writes:
                     if not response_id_seen:
@@ -2354,6 +2577,7 @@ async def _stream_rehydrated(
         raise
     except Exception as exc:
         status = _stream_delivery_fault(state, method, path, exc)
+        cut = True
         if route is not None:
             route.mark_failed("stream_error")
         raise
@@ -2377,6 +2601,7 @@ async def _stream_rehydrated(
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
+            refusal="delivery_fault" if cut else None,
             route=(state.finish_route(route, status) if route is not None else None),
         )
 
@@ -2479,8 +2704,9 @@ async def _stream_rehydrated_eventstream(
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
     degraded = False
     status = upstream.status_code  # 502 when the proxy itself cut the stream
+    cut = False  # whether it did (a delivery_fault local refusal)
     try:
-        async for chunk in upstream.aiter_bytes():
+        async for chunk in _UpstreamPaced(upstream.aiter_bytes()):
             if degraded:
                 yield chunk
                 continue
@@ -2510,6 +2736,7 @@ async def _stream_rehydrated_eventstream(
         raise
     except Exception as exc:
         status = _stream_delivery_fault(state, method, path, exc)
+        cut = True
         raise
     finally:
         with suppress(Exception):
@@ -2531,7 +2758,28 @@ async def _stream_rehydrated_eventstream(
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
+            refusal="delivery_fault" if cut else None,
         )
+
+
+def _refusals_by_kind(refusals: Counter[tuple[str, str]]) -> dict[str, int]:
+    by_kind: Counter[str] = Counter()
+    for (kind, _provider), count in refusals.items():
+        by_kind[kind] += count
+    return dict(sorted(by_kind.items()))
+
+
+def _sink_counts(state: ProxyState, attribute: str) -> Counter[str]:
+    """One counter of the enabled off-machine audit sinks, by sink ("s3",
+    "azure"): the sink seam's ``batches_uploaded`` / ``rows_dropped``
+    (audit_s3's Protocols), read defensively — a sink without the attribute
+    (or with a non-integer one) is left out, never a failed scrape."""
+    counts: Counter[str] = Counter()
+    for name, sink in (("s3", state.audit_s3), ("azure", state.audit_azure)):
+        value = getattr(sink, attribute, None) if sink is not None else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            counts[name] = value
+    return counts
 
 
 def _dashboard_unavailable(state: ProxyState) -> str:
@@ -2634,6 +2882,14 @@ async def _handle_local(
             # "synchronous" (no background writer: each write landed before
             # its call returned, e.g. the in-memory vault).
             "map_writes": state.map_writes,
+            # How long an answer waits for them ([vault]
+            # map_write_wait_seconds), the writes queued or in flight now,
+            # and the answers sent before theirs landed, by cause ("bound":
+            # the wait ran out; "stuck": not waited for, the writer is stuck
+            # behind an earlier write). Counts only.
+            "map_write_wait_seconds": state.map_write_wait_seconds,
+            "map_writes_pending": state.map_writes_pending(),
+            "map_write_wait_timeouts_total": dict(state.map_write_wait_timeouts),
         }
         if config.vault.backend in RDBMS_BACKENDS:
             from llm_redact.vault_rdbms import (
@@ -2680,6 +2936,10 @@ async def _handle_local(
                 "overrides": _overrides_status(state),
                 "upstream_errors_total": dict(state.upstream_errors),
                 "bookkeeping_errors_total": dict(state.bookkeeping_errors),
+                # Responses the proxy generated itself instead of forwarding
+                # (metrics.LOCAL_REFUSAL_KINDS), by kind — summed over
+                # providers (/metrics carries the provider label).
+                "local_refusals_total": _refusals_by_kind(state.metrics.local_refusals),
                 # Open long-lived connections (realtime relays, live-events
                 # streams) by kind, and those closed because their admission
                 # ended, by cause: the access gate revoked them ("revoked"),
@@ -2839,6 +3099,10 @@ async def _handle_local(
         )
 
     if path == f"{RESERVED_PREFIX}/metrics":
+        # The access gate's own gauges first (awaited off the loop, bounded):
+        # a sample it drops counts under the bookkeeping stage the core's
+        # render then shows.
+        plugin_text = await state.plugin_metric_text()
         return Response(
             content=state.metrics.render(
                 detections=state.detection_counts,
@@ -2854,7 +3118,12 @@ async def _handle_local(
                 unscanned_uploads=state.unscanned_uploads,
                 inspected_uploads=state.inspected_uploads,
                 overrides_used=state.overrides.used if state.overrides is not None else None,
-            ),
+                audit_sink_batches=_sink_counts(state, "batches_uploaded"),
+                audit_sink_rows_dropped=_sink_counts(state, "rows_dropped"),
+                map_write_queue_depth=state.map_writes_pending(),
+                map_write_wait_timeouts=state.map_write_wait_timeouts,
+            )
+            + plugin_text,
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 
@@ -3221,6 +3490,7 @@ def _request_origin_refused(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal="request_origin",
     )
     logger.info("%s %s -> 403 refused (request origin: %s)", request.method, path, kind)
     return JSONResponse(error, status_code=403)
@@ -3246,8 +3516,9 @@ async def _stream_rehydrated_ndjson(
     parser = NDJSONParser()
     pool = RehydratorPool(ctx.vault, fuzzy=state.config.rehydration.fuzzy)
     status = upstream.status_code  # 502 when the proxy itself cut the stream
+    cut = False  # whether it did (a delivery_fault local refusal)
     try:
-        async for chunk in upstream.aiter_bytes():
+        async for chunk in _UpstreamPaced(upstream.aiter_bytes()):
             for line in parser.feed(chunk):
                 if observe is not None:
                     observe = await _observed(state, observe, method, path, line)
@@ -3282,6 +3553,7 @@ async def _stream_rehydrated_ndjson(
         raise
     except Exception as exc:
         status = _stream_delivery_fault(state, method, path, exc)
+        cut = True
         if route is not None:
             route.mark_failed("stream_error")
         raise
@@ -3305,6 +3577,7 @@ async def _stream_rehydrated_ndjson(
             rehydrations=dict(pool.counts),
             warned=warned,
             audit_token=audit_token,
+            refusal="delivery_fault" if cut else None,
             route=(state.finish_route(route, status) if route is not None else None),
         )
 
@@ -3571,6 +3844,7 @@ def _body_too_large(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal="too_large" if cap == "max_body_bytes" else "too_many_strings",
     )
     return Response(
         content=json.dumps(
@@ -3638,6 +3912,23 @@ class _Unreadable(NamedTuple):
     # False: refused whatever credential the request spends (the message
     # then names no credential).
     credential_bound: bool = True
+    # The local-refusal kind when the status does not name it
+    # (``_unreadable_kind``): a 413 says which cap.
+    kind: LocalRefusal | None = None
+
+
+def _unreadable_kind(unreadable: "_Unreadable", default: LocalRefusal) -> LocalRefusal:
+    """The local-refusal kind of an unreadable body: its own when it names
+    one, a content coding's 415 ``unsupported_encoding``, else ``default``."""
+    if unreadable.kind is not None:
+        return unreadable.kind
+    return "unsupported_encoding" if unreadable.status == 415 else default
+
+
+def _raced_kind(scope: "OverrideScope | None") -> LocalRefusal:
+    """A one-time override that could not be used: lost to another request
+    (``override_raced``) or not recorded by the store (``override_fault``)."""
+    return "override_fault" if scope is not None and scope.fault else "override_raced"
 
 
 _NOT_JSON_OBJECT = "the request body is not a JSON object llm-redact can redact"
@@ -3904,7 +4195,9 @@ def _ownership_body(
         # the event loop per part. Under the proxy's credential it cannot be
         # checked, so it is refused.
         too_many = _Unreadable(
-            413, f"the upload has more parts than llm-redact max_body_strings ({max_parts})"
+            413,
+            f"the upload has more parts than llm-redact max_body_strings ({max_parts})",
+            kind="too_many_strings",
         )
         return None, None, too_many if proxy_credential else None
     view = (
@@ -3915,7 +4208,9 @@ def _ownership_body(
     unreadable = None
     if view.oversized:
         unreadable = _Unreadable(
-            413, f"the upload carries more than llm-redact max_body_bytes ({max_body_bytes})"
+            413,
+            f"the upload carries more than llm-redact max_body_bytes ({max_body_bytes})",
+            kind="too_large",
         )
     elif view.too_many_lines:
         # Counted before each is parsed: the check never parses more lines
@@ -3923,6 +4218,7 @@ def _ownership_body(
         unreadable = _Unreadable(
             413,
             f"the upload has more JSON lines than llm-redact max_body_strings ({max_parts})",
+            kind="too_many_strings",
         )
     elif view.problem is not None:
         unreadable = _Unreadable(400, view.problem)
@@ -4147,6 +4443,7 @@ def _misaddressed_refused(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal="misaddressed",
     )
     logger.info(
         "%s %s -> %d refused (%s)", request.method, path, misaddressed.status, misaddressed.why
@@ -4184,6 +4481,7 @@ def _method_override_refused(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal="method_override",
     )
     logger.info("%s %s -> 400 refused (method override %s)", request.method, path, kind)
     message = (
@@ -4213,6 +4511,7 @@ def _unattributed_refused(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal="unattributed",
     )
     logger.info("%s %s -> 404 no provider attributable (%s)", request.method, path, reason)
     message = (
@@ -4253,6 +4552,7 @@ def _unrecognized_route_refused(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal="identity_route",
     )
     logger.info(
         "%s %s -> 403 unrecognized route for a credential the proxy holds", request.method, path
@@ -4288,6 +4588,7 @@ def _credential_protocol_refused(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal="credential_protocol",
     )
     logger.info(
         "%s %s -> 403 protocol not served with a credential the proxy holds", request.method, path
@@ -4535,6 +4836,8 @@ async def handle(request: Request) -> Response:
     upload = _UploadFate()
     early_audit = _EarlyAudit()
     reset = _EARLY_AUDIT.set(early_audit)
+    # Never reset: a stream's finalizer, after handle() returned, reads it.
+    _REQUEST_TIMING.set(_RequestTiming())
     status: int | None = None
     try:
         response = await _handle(request, upload)
@@ -4550,11 +4853,13 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     state: ProxyState = request.app.state.proxy
     if not origin_form_target(request.scope):
         # Never routed, forwarded, recorded or logged with its target.
+        state.count_local_refusal("request_target", None)
         return JSONResponse({"error": "the request target must be a path"}, status_code=400)
     if has_dot_segment(request.scope):
         # Refused before routing, admission or any upstream contact (and,
         # like the target check above, never recorded or logged: the path
         # may still hold an identity-prefix key).
+        state.count_local_refusal("request_target", None)
         return JSONResponse(
             {"error": "the request path must not contain '.' or '..' segments"}, status_code=400
         )
@@ -4563,6 +4868,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         # forwarding must address the same resource (never recorded or
         # logged with its path — it may still hold an identity-prefix key).
         logger.info("%s -> 400 empty path segment (path withheld)", request.method)
+        state.count_local_refusal("request_target", None)
         return JSONResponse(
             {
                 "error": "the request path must not contain an empty segment ('//');"
@@ -4602,11 +4908,13 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     if path.startswith(RESERVED_PREFIX):
         # Only reachable through a stripped prefix (/u/<key>/__llm-redact/…):
         # reserved endpoints are served at their own path, never forwarded.
+        state.count_local_refusal("identity_path", None)
         return JSONResponse({"error": "not found"}, status_code=404)
     if path.startswith(IDENTITY_PATH_PREFIX):
         # An identity prefix no gate claimed: its next segment is a key, so
         # the request is neither forwarded nor recorded (both would carry it).
         logger.info("%s /u/... -> 404 unclaimed identity path prefix", request.method)
+        state.count_local_refusal("identity_path", None)
         return JSONResponse(
             {"error": "this proxy does not accept /u/<key>/ identity paths (no access gate)"},
             status_code=404,
@@ -4689,6 +4997,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             streamed=False,
             detections={},
             rehydrations={},
+            refusal="no_upstream",
         )
         logger.info("%s %s -> 502 unknown custom provider", request.method, path)
         return JSONResponse(
@@ -4716,6 +5025,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             streamed=False,
             detections={},
             rehydrations={},
+            refusal="disabled_provider",
         )
         logger.info("%s %s -> 502 provider %s disabled", request.method, path, provider_name)
         return JSONResponse(error, status_code=502)
@@ -4741,6 +5051,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             streamed=False,
             detections={},
             rehydrations={},
+            refusal="access_gate",
         )
         logger.info("%s %s -> 403 refused by the access gate", request.method, path)
         return JSONResponse(error, status_code=403)
@@ -4805,6 +5116,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 request=request,
                 path=path,
                 started=started,
+                kind="no_route",
             )
         plan = planned
         if plan is not None and _lends_credential(plan):
@@ -4830,7 +5142,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         # Redactable routes fail closed on oversized bodies: the proxy must
         # buffer the whole body to redact it, and forwarding unredacted is
         # never acceptable. Pass-through routes below are unaffected.
-        capped = await _read_capped(request, max_body_bytes)
+        capped = await _waited(_read_capped(request, max_body_bytes))
         if capped is None:
             return _body_too_large(
                 state,
@@ -4844,7 +5156,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             )
         body_bytes = capped
     else:
-        body_bytes = await request.body()
+        body_bytes = await _waited(request.body())
 
     parsed: Any = None
     # A repeated JSON key: the parse keeps the last occurrence, so the walk
@@ -4897,6 +5209,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 request=request,
                 path=path,
                 started=started,
+                kind="no_route",
             )
         plan = planned
 
@@ -5122,6 +5435,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             streamed=False,
             detections={exc.detector_type: 1},
             rehydrations={},
+            refusal="blocked_value",
         )
         return JSONResponse(
             blocked_adapter.error_body(
@@ -5132,7 +5446,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             status_code=400,
         )
 
-    def refused_response(message: str, refused_adapter: ProviderAdapter, why: str) -> JSONResponse:
+    def refused_response(
+        message: str, refused_adapter: ProviderAdapter, why: str, kind: LocalRefusal
+    ) -> JSONResponse:
         # A body the proxy cannot redact (or, under identity auth, cannot
         # vouch for) fails closed before any upstream contact: 400,
         # recorded, the message naming the field or format only.
@@ -5147,6 +5463,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             streamed=False,
             detections={},
             rehydrations={},
+            refusal=kind,
         )
         return JSONResponse(refused_adapter.error_body(message, status=400), status_code=400)
 
@@ -5165,6 +5482,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             streamed=False,
             detections={},
             rehydrations={},
+            refusal="sealed_session",
         )
         reason = ctx.sealed or _SEALED_REFUSAL
         return JSONResponse(sealed_adapter.error_body(reason, status=403), status_code=403)
@@ -5249,13 +5567,18 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         except TooManyStrings:
             return too_many_strings(adapter)
         except PlaceholderLimitReached as exc:
-            return refused_response(str(exc), adapter, "no placeholder number left")
+            return refused_response(
+                str(exc), adapter, "no placeholder number left", "placeholder_limit"
+            )
         except VerbatimFieldRedacted as exc:
             return refused_response(
-                str(exc) + allow_suffix("verbatim_field"), adapter, "verbatim field"
+                str(exc) + allow_suffix("verbatim_field"),
+                adapter,
+                "verbatim field",
+                "verbatim_field",
             )
         except UnredactableRequest as exc:
-            return refused_response(str(exc), adapter, "undecodable field")
+            return refused_response(str(exc), adapter, "undecodable field", "unredactable")
         except SealedSessionError:
             return sealed_response(adapter)
         except state.vault_faults as exc:
@@ -5264,7 +5587,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             )
         if not _commit_overrides(scope, upload):
             assert scope is not None  # nothing to commit without one
-            return refused_response(raced_message(scope), adapter, "one-time override")
+            return refused_response(
+                raced_message(scope), adapter, "one-time override", _raced_kind(scope)
+            )
         outbound_obj = prepared
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
@@ -5374,7 +5699,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                         )
                         is None
                     ):
-                        raise _RefusedBeforeInspection(_target_refused())
+                        raise _RefusedBeforeInspection(_target_refused(state, provider_name))
                 else:
                     local = plan.local_refusal()
                     if local is not None:
@@ -5387,6 +5712,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                                 request=request,
                                 path=path,
                                 started=started,
+                                kind="route_unsupported",
                             )
                         )
                 token, audit_refusal = _begin_audit_guarded(
@@ -5462,7 +5788,10 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 # Values the proxy would redact, inside a file it cannot
                 # rewrite: refused, naming their types only.
                 return refused_response(
-                    str(exc) + allow_suffix("binary_values"), adapter, "values in a binary upload"
+                    str(exc) + allow_suffix("binary_values"),
+                    adapter,
+                    "values in a binary upload",
+                    "binary_values",
                 )
             except BlockedRequest as exc:
                 # One leaking line in an uploaded file is a leak: the
@@ -5471,7 +5800,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             except TooManyStrings:
                 return too_many_strings(adapter)
             except PlaceholderLimitReached as exc:
-                return refused_response(str(exc), adapter, "no placeholder number left")
+                return refused_response(
+                    str(exc), adapter, "no placeholder number left", "placeholder_limit"
+                )
             except UnredactableRequest as exc:
                 clause = _scanned_body_clause(
                     identity=upstream_auth is not None, proxy_credential=proxy_credential
@@ -5486,6 +5817,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                     + (allow_suffix("binary_upload") if overridable else ""),
                     adapter,
                     "unscanned multipart content",
+                    "unscanned_upload",
                 )
             except SealedSessionError:
                 return sealed_response(adapter)
@@ -5503,7 +5835,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 scope.use_route(binary_rules[0])  # type: ignore[union-attr]
             if not _commit_overrides(scope, upload):
                 assert scope is not None  # nothing to commit without one
-                return refused_response(raced_message(scope), adapter, "one-time override")
+                return refused_response(
+                    raced_message(scope), adapter, "one-time override", _raced_kind(scope)
+                )
             if rewritten is not None:
                 outbound = rewritten
             elif checked_upload is not None:
@@ -5543,7 +5877,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         request, path, provider_name, upstream_base, upstream_auth, matched=adapter is not None
     )
     if target is None:
-        return _target_refused()
+        return _target_refused(state, provider_name)
     url, headers = target
     if upstream_auth is not None:
         # The proxy's own cloud identity (the client's credentials stripped
@@ -5601,7 +5935,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     # Handed to the upstream: an upload's parts now count as forwarded.
     upload.settle(sent=True)
     try:
-        upstream = await state.client.send(upstream_request, stream=True)
+        upstream = await _waited(state.client.send(upstream_request, stream=True))
     except httpx.TransportError as exc:
         # Connect/handshake/header fault: no response body was produced, so
         # there is nothing to close and the streaming generators (which own
@@ -5705,6 +6039,7 @@ def _vault_fault_refused(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal="vault_fault",
     )
     message = (
         "llm-redact: the vault could not open this request's session; the request was not forwarded"
@@ -5801,12 +6136,16 @@ def _upstream_unconfigured(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal="no_upstream",
     )
     logger.info("%s %s -> 502 upstream not configured", request.method, path)
     return JSONResponse(error, status_code=502)
 
 
-def _target_refused() -> JSONResponse:
+def _target_refused(state: ProxyState, provider_name: str | None) -> JSONResponse:
+    """The built upstream URL would not address the configured upstream: a
+    400, never recorded or logged with its path — counted alone."""
+    state.count_local_refusal("request_target", provider_name)
     return JSONResponse({"error": "the request target must be a path"}, status_code=400)
 
 
@@ -5989,6 +6328,7 @@ def _audit_unavailable(
         detections=new_counts,
         rehydrations={},
         warned=new_warned,
+        refusal="audit_unavailable",
     )
     message = "llm-redact: audit log unavailable and [audit] required is enabled"
     body = adapter.error_body(message, status=503) if adapter is not None else {"error": message}
@@ -6034,6 +6374,7 @@ def _upstream_auth_failure(
         detections=new_counts,
         rehydrations={},
         warned=new_warned,
+        refusal="upstream_auth",
     )
     message = (
         f"llm-redact: the proxy could not obtain its own {provider_name} cloud"
@@ -6091,6 +6432,7 @@ def _fault_response(
         warned=new_warned,
         audit_token=audit_token,
         route=row,
+        refusal="upstream_fault",
     )
     body = (
         adapter.error_body("llm-redact: upstream request failed", status=502)
@@ -6189,27 +6531,29 @@ async def _deliver(
 
     if streamed and adapter is not None and "text/event-stream" in content_type:
         return StreamingResponse(
-            _stream_rehydrated(
-                upstream,
-                adapter,
-                state,
-                ctx,
-                request_meta=request_meta,
-                route=route,
-                object_tracker=(
-                    state.object_tracker(
-                        adapter,
-                        request.method,
-                        path,
-                        request.headers,
-                        body=request_body,
-                        query=request.url.query,
-                    )
-                    if 200 <= upstream.status_code < 300
-                    else None
-                ),
-                request_body=request_body,
-                observe=observe,
+            _ClientPaced(
+                _stream_rehydrated(
+                    upstream,
+                    adapter,
+                    state,
+                    ctx,
+                    request_meta=request_meta,
+                    route=route,
+                    object_tracker=(
+                        state.object_tracker(
+                            adapter,
+                            request.method,
+                            path,
+                            request.headers,
+                            body=request_body,
+                            query=request.url.query,
+                        )
+                        if 200 <= upstream.status_code < 300
+                        else None
+                    ),
+                    request_body=request_body,
+                    observe=observe,
+                )
             ),
             status_code=upstream.status_code,
             headers=headers,
@@ -6224,8 +6568,10 @@ async def _deliver(
     ):
         # Bedrock only — never a routed protocol, so no route wrapper.
         return StreamingResponse(
-            _stream_rehydrated_eventstream(
-                upstream, adapter, state, ctx, request_meta=request_meta, observe=observe
+            _ClientPaced(
+                _stream_rehydrated_eventstream(
+                    upstream, adapter, state, ctx, request_meta=request_meta, observe=observe
+                )
             ),
             status_code=upstream.status_code,
             headers=headers,
@@ -6239,14 +6585,16 @@ async def _deliver(
         and any(t in content_type for t in _JSONL_CONTENT_TYPES)
     ):
         return StreamingResponse(
-            _stream_rehydrated_ndjson(
-                upstream,
-                adapter,
-                state,
-                ctx,
-                request_meta=request_meta,
-                route=route,
-                observe=observe,
+            _ClientPaced(
+                _stream_rehydrated_ndjson(
+                    upstream,
+                    adapter,
+                    state,
+                    ctx,
+                    request_meta=request_meta,
+                    route=route,
+                    observe=observe,
+                )
             ),
             status_code=upstream.status_code,
             headers=headers,
@@ -6254,7 +6602,7 @@ async def _deliver(
         )
 
     try:
-        raw = await upstream.aread()
+        raw = await _waited(upstream.aread())
     except httpx.TransportError as exc:
         # Upstream dropped mid-body on a buffered response: close the
         # connection we opened (else it leaks) and fail closed with a 502.
@@ -6329,6 +6677,7 @@ async def _deliver(
         warned=new_warned,
         audit_token=audit_token,
         route=(state.finish_route(route, upstream.status_code) if route is not None else None),
+        refusal=None,
     )
 
     return Response(content=raw, status_code=upstream.status_code, headers=headers)
@@ -6390,6 +6739,7 @@ def _redirect_refused(
         warned=new_warned,
         audit_token=audit_token,
         route=row,
+        refusal="redirect_refused",
     )
     message = (
         f"llm-redact: the upstream answered a redirect ({status}), which llm-redact does not"
@@ -6675,6 +7025,7 @@ def _delivery_fault_response(
         warned=new_warned,
         audit_token=audit_token,
         route=row,
+        refusal="delivery_fault",
     )
     message = "llm-redact: the upstream answer could not be restored; nothing was delivered"
     body = adapter.error_body(message, status=502) if adapter is not None else {"error": message}
@@ -6707,6 +7058,7 @@ def _object_access_refused(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal="object_access",
     )
     logger.info("%s %s -> 403 refused by the session router (stored object)", request.method, path)
     return JSONResponse(error, status_code=403)
@@ -6750,6 +7102,7 @@ def _unchecked_body_refused(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal=_unreadable_kind(unreadable, "unchecked_body"),
     )
     logger.info(
         "%s %s -> %d refused (%s)",
@@ -6802,6 +7155,7 @@ def _unscanned_body_refused(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal=_unreadable_kind(unreadable, "scanned_body"),
     )
     logger.info(
         "%s %s -> %d refused (a request body llm-redact cannot redact)",
@@ -6893,6 +7247,7 @@ def _route_refusal(
     adapter: ProviderAdapter | None,
     refusal: RouteRefusal,
     *,
+    kind: LocalRefusal,
     request: Request,
     path: str,
     started: float,
@@ -6901,8 +7256,9 @@ def _route_refusal(
     audit_token: object | None = None,
 ) -> JSONResponse:
     """A proxy-generated routing refusal (the router's 502 no_route, 404
-    count_tokens, 402 budget): provider-shaped, recorded with its route
-    row, no upstream contact."""
+    count_tokens, 402 budget — ``kind``: which of the three the router
+    answered, by where it answered it): provider-shaped, recorded with its
+    route row, no upstream contact."""
     row = dict(refusal.row)
     logger.info("%s %s -> %d%s", request.method, path, refusal.status, _route_log_suffix(row))
     state.record_request(
@@ -6918,6 +7274,7 @@ def _route_refusal(
         warned=new_warned,
         audit_token=audit_token,
         route=row,
+        refusal=kind,
     )
     body = (
         adapter.error_body(refusal.message, status=refusal.status)
@@ -6946,6 +7303,7 @@ def _answer_locally(
         streamed=False,
         detections={},
         rehydrations={},
+        refusal=None,
     )
     logger.info(
         "%s %s -> %d answered locally (%s)", request.method, path, answer.status, answer.reason
@@ -6996,7 +7354,7 @@ async def _read_buffered(response: httpx.Response) -> str | None:
     if _streams_to_client(response.headers.get("content-type", "")):
         return None
     try:
-        await response.aread()
+        await _waited(response.aread())
     except httpx.TransportError as exc:
         return type(exc).__name__
     return None
@@ -7026,7 +7384,7 @@ async def _issue_hop(
         timeout=_hop_timeout(deadline - time.monotonic()),
     )
     try:
-        response = await state.client.send(upstream_request, stream=True)
+        response = await _waited(state.client.send(upstream_request, stream=True))
     except httpx.TransportError as exc:
         logger.warning(
             "%s %s upstream %s fault (%s)", method, path, hop.upstream, type(exc).__name__
@@ -7113,6 +7471,7 @@ async def _handle_routed(
                 request=request,
                 path=path,
                 started=started,
+                kind="route_unsupported",
                 new_counts=new_counts,
                 new_warned=new_warned,
             )
@@ -7142,6 +7501,7 @@ async def _handle_routed(
             request=request,
             path=path,
             started=started,
+            kind="budget",
             new_counts=new_counts,
             new_warned=new_warned,
             audit_token=audit_token,
@@ -7160,7 +7520,7 @@ async def _handle_routed(
         await _discard(response)
         response = None
         if decision.wait_seconds > 0:
-            await plan.wait(decision.wait_seconds)
+            await _waited(plan.wait(decision.wait_seconds))
         hop = decision.next
     route = plan.delivery()
     if response is None:
@@ -7181,6 +7541,7 @@ async def _handle_routed(
             warned=new_warned,
             audit_token=audit_token,
             route=row,
+            refusal="upstream_fault",
         )
         message = "llm-redact: upstream request failed"
         error = (

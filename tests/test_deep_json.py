@@ -39,6 +39,7 @@ from llm_redact.proxy import CSRF_HEADER, create_app
 from llm_redact.realtime import GeminiLiveWs, OpenAIRealtimeWs
 from llm_redact.redactor import UnredactableRequest
 from llm_redact.rehydrate import RehydratorPool
+from local_refusals import refused_once
 from test_realtime_relay import _relay_setup
 
 EMAIL = "jane.doe@corp.example"
@@ -476,6 +477,7 @@ async def test_under_identity_with_detection_off_an_upload_nested_too_deep_is_ne
     message = response.json()["error"]["message"]
     assert TOO_DEEP in message and "proxy's own identity" in message
     assert upstream.requests == [] and auth.calls == 0 and router.checks == []
+    refused_once(app.state.proxy, "unchecked_body", "azure")
 
 
 # --- detector validators reading client JSON ------------------------------------------------

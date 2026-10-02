@@ -23,6 +23,7 @@ from llm_redact.config import Config, ProviderConfig, VaultConfig
 from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.proxy import _SEALED_REFUSAL, create_app
 from llm_redact.registry import Registry
+from local_refusals import refused_once
 
 UPSTREAM = "https://upstream.test"
 EMAIL = "jane.doe@corp.example"
@@ -96,6 +97,7 @@ async def test_a_value_to_redact_into_a_sealed_session_is_refused_untouched(
     assert len(state.vault_manager.get(SEALED)) == 0  # nothing was written
     (row,) = state.recent
     assert row["status"] == 403 and row["session"] == SEALED and row["detections"] == {}
+    refused_once(state, "sealed_session", "openai")
 
 
 async def test_nothing_to_redact_is_served_and_restores_nothing(

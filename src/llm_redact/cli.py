@@ -751,12 +751,21 @@ def run_status(args: argparse.Namespace) -> int:
         + (f", map writes: {map_writes}" if map_writes else "")
         + ")"
     )
+    pending = payload["vault"].get("map_writes_pending")
+    if pending:
+        # Older proxies omit it; nothing queued prints nothing.
+        print(f"vault map writes queued: {pending}")
     detections = payload["detections_total"] or {}
     rehydrations = payload["rehydrations_total"] or {}
     print("detections:  " + (" ".join(f"{k}×{v}" for k, v in sorted(detections.items())) or "none"))
     print(
         "rehydrations: " + (" ".join(f"{k}×{v}" for k, v in sorted(rehydrations.items())) or "none")
     )
+    refusals = payload.get("local_refusals_total")
+    if refusals:
+        # The proxy's own answers instead of forwarding, by kind (older
+        # proxies omit the field; none prints nothing).
+        print("local refusals: " + " ".join(f"{k}×{v}" for k, v in sorted(refusals.items())))
     audit = payload["audit"]
     print(
         f"audit: {'enabled, ' + str(audit['rows']) + ' rows' if audit['enabled'] else 'disabled'}"

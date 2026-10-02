@@ -30,6 +30,7 @@ import websockets
 
 from llm_redact.config import Config, DetectionConfig, ProviderConfig, VaultConfig
 from llm_redact.proxy import create_app
+from local_refusals import refused_once
 from test_vault_faults import _FlakyConn
 
 
@@ -172,6 +173,7 @@ async def test_a_failed_commit_refuses_the_request_with_nothing_forwarded(
     assert state.bookkeeping_errors == {"vault": 1}
     (row,) = state.recent
     assert row["status"] == 503 and row["provider"] == "anthropic"
+    refused_once(state, "vault_fault", "anthropic")
     # Logged by exception TYPE only: never a value, never the SQL error text.
     assert "OperationalError" in caplog.text
     assert "disk is full" not in caplog.text

@@ -2,10 +2,12 @@
 
 The proxy exposes Prometheus metrics at `/__llm-redact/metrics` (always on,
 no config). Everything there is **metadata only** — request counts by
-provider and status, detection / warning / block / rehydration counts by
-detector *type*, vault entry/session gauges, compaction-fork counts,
-routing decisions and re-issues by upstream and rule name, and
-build info. It never carries secret values or placeholder ids (see
+provider and status, the proxy's own refusals by kind, detection /
+warning / block / rehydration counts by detector *type*, request duration
+and the proxy's own overhead, vault entry/session gauges and its map
+writer, audit-sink batches, compaction-fork counts, routing decisions and
+re-issues by upstream and rule name, a plugin's own gauges (llm-redact-pro:
+users and seats), and build info. It never carries secret values or placeholder ids (see
 [threat-model.md](threat-model.md) § Logging posture), so scraping it is safe.
 
 Ready-to-use assets live in [`deploy/`](../deploy):
@@ -13,15 +15,17 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | File | What it is |
 |---|---|
 | `deploy/prometheus-scrape.yml` | A `scrape_configs` job to merge into your `prometheus.yml`. |
-| `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, high p95). |
-| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, latency, detections/warnings/blocks by type, vault + compaction). |
+| `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage). |
+| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes). |
 
 ## Metrics reference
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `llm_redact_requests_total` | counter | `provider`, `status` | Requests proxied. |
-| `llm_redact_request_duration_seconds` | histogram | `provider`, `streamed` | In-proxy duration (redact + forward + rehydrate), NOT upstream RTT. |
+| `llm_redact_requests_total` | counter | `provider`, `status` | Requests proxied — the provider's answers AND the proxy's own refusals under one `status` label (`llm_redact_local_refusals_total` separates the latter). |
+| `llm_redact_request_duration_seconds` | histogram | `provider`, `streamed` | END-TO-END duration: from admission until the answer is handed to the server (a buffered answer or a local refusal: when its whole body is handed over, before the server writes it; a stream: when the server has taken its last chunk), so it INCLUDES the provider's own time (a model thinking, a long stream) and, on a stream, the client's pace. Not a proxy-health signal on its own: alert on `llm_redact_proxy_overhead_seconds`. |
+| `llm_redact_proxy_overhead_seconds` | histogram | `provider` | The proxy's OWN time per HTTP request: the request duration minus every wait on the upstream (sending the request, its answer's headers and body, each streamed chunk, a routed retry's delay) and on the client (reading its request body, a stream's consumer taking each chunk). What remains is redaction, rehydration, vault and audit writes, a `[vault] map_writes = "before_answer"` wait, an upload inspection and an identity authorizer's credential fetch, plus event-loop scheduling under load. Buckets from 1 ms to 5 s. Realtime connections are not observed (their duration is the connection's life). |
+| `llm_redact_local_refusals_total` | counter | `kind`, `provider` | Responses the PROXY ITSELF generated instead of forwarding the request (realtime: instead of relaying the connection or a frame), once per request, by kind (the table below) and provider (`passthrough` when none was attributed, as in `llm_redact_requests_total`). An upstream's own answer is never counted, whatever its status. Also `/status` `local_refusals_total` (by kind). |
 | `llm_redact_detections_total` | counter | `type` | Values redacted, by placeholder type. |
 | `llm_redact_warnings_total` | counter | `type` | Warn-mode hits — **the value was forwarded upstream**. |
 | `llm_redact_blocked_total` | counter | `type` | Requests rejected 400 by block-mode rules. |
@@ -31,13 +35,69 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | `llm_redact_inspected_uploads_total` | counter | `provider`, `outcome` | Binary file parts read as text by an upload inspector (the core's `[extraction]`, docs/extraction.md), one outcome each: `clean` (sent byte-identical after a clean scan of the EXTRACTED text only — counted once the upload was handed to the upstream), `clean_refused` (scanned clean, the upload refused before any upstream contact), `converted`/`converted_refused` (replaced by its redacted extracted text in convert mode; sent or refused), `overridden`/`overridden_refused` (clean only because an approved refusal override let its values through: sent byte-identical WITH them, or refused — never counted `clean`), `detected`, `blocked`, `incomplete`, `not_inspected`, `timeout`, `error`. Also `/status` `inspected_uploads_total`. |
 | `llm_redact_overrides_used_total` | counter | `kind` | Requests (and realtime frames) that passed a refusal on an approved refusal override (docs/overrides.md), by `once`/`always` — **the overridden value, body or file part was forwarded upstream as sent**, like a warn-mode value. Also `/status` `overrides`. |
 | `llm_redact_upstream_errors_total` | counter | `provider` | Transport faults failed closed as 502 (by upstream name when routing is enabled). |
-| `llm_redact_bookkeeping_errors_total` | counter | `stage` | Faults in the proxy's own bookkeeping. After the upstream answered: session bookkeeping (`response_id`, `object_ids`, `listing`, and `response_observer` — a session router observing the answer — contained, the answer is still delivered) and `delivery` (restoring the answer failed: a buffered one is a recorded 502, a stream is cut). Before any upstream contact: `vault` (issuing a request's placeholders failed — a recorded 503; a realtime frame closes the connection 1011). `vault_check`: a vault view's staleness check could not read its database (contained: the view keeps serving its cache — a cached token only ever restores its own value — and checks again a second later). `recheck`: an open realtime relay's or live-events stream's access re-check raised, timed out or gave an answer that makes no sense (fail closed: the connection is closed). `realtime_frame`: the session router's per-frame realtime check (`realtime_frame_refusal`) raised or gave an answer that makes no sense (fail closed: the connection is closed 1008, the frame never sent). `realtime_server_frame`: the session router's observation of a realtime UPSTREAM frame (`realtime_server_frame`) raised (contained: the frame is delivered; what the router would have recorded stays unknown — llm-redact-pro then refuses a Live resumption it cannot attribute). `handle_map`: the vault's Live resumption handle map (written and read by llm-redact-pro) could not be written or read (contained: a failed write records nothing, a failed read answers unknown — the resumption is refused; logged once per outage, by exception type). |
+| `llm_redact_bookkeeping_errors_total` | counter | `stage` | Faults in the proxy's own bookkeeping. After the upstream answered: session bookkeeping (`response_id`, `object_ids`, `listing`, and `response_observer` — a session router observing the answer — contained, the answer is still delivered) and `delivery` (restoring the answer failed: a buffered one is a recorded 502, a stream is cut). Before any upstream contact: `vault` (issuing a request's placeholders failed — a recorded 503; a realtime frame closes the connection 1011). `vault_check`: a vault view's staleness check could not read its database (contained: the view keeps serving its cache — a cached token only ever restores its own value — and checks again a second later). `recheck`: an open realtime relay's or live-events stream's access re-check raised, timed out or gave an answer that makes no sense (fail closed: the connection is closed). `realtime_frame`: the session router's per-frame realtime check (`realtime_frame_refusal`) raised or gave an answer that makes no sense (fail closed: the connection is closed 1008, the frame never sent). `realtime_server_frame`: the session router's observation of a realtime UPSTREAM frame (`realtime_server_frame`) raised (contained: the frame is delivered; what the router would have recorded stays unknown — llm-redact-pro then refuses a Live resumption it cannot attribute). `handle_map`: the vault's Live resumption handle map (written and read by llm-redact-pro) could not be written or read (contained: a failed write records nothing, a failed read answers unknown — the resumption is refused; logged once per outage, by exception type). `map_write_wait`: a `before_answer` answer sent before its map writes landed (the same answers as `llm_redact_map_write_wait_timeouts_total`, which says why). `plugin_metrics`: a plugin's metrics samples could not be read (a fault, a timeout, a call still running) or a sample was invalid and dropped. |
 | `llm_redact_connections_closed_total` | counter | `cause` | Open long-lived connections (realtime relays, the dashboard's live-events stream) closed because their admission ended: `revoked` (the access gate revoked the user, a key or a sign-in session and closed them at once), `recheck` (the periodic access re-check refused them), `recheck_error` (the re-check failed or timed out, so the connection was closed anyway). Non-zero only with an access gate (llm-redact-pro). `/status` `connections` carries the same counts, the open connections by kind, and the re-check interval. |
 | `llm_redact_routed_requests_total` | counter | `upstream`, `rule` | Requests delivered through the routing layer, by the upstream that produced the response and the rule that chose it (emitted by the core; non-zero only with the llm-redact-pro routing layer). |
 | `llm_redact_reissues_total` | counter | `from_upstream`, `to_upstream` | Fallback re-issues to the next chain member (emitted by the core; non-zero only with the llm-redact-pro routing layer). |
+| `llm_redact_audit_sink_batches_total` | counter | `sink` | Audit row batches an off-machine audit sink uploaded (`s3`, `azure`; `[audit.s3]`/`[audit.azure]`, llm-redact-pro). Also `/status` `audit.s3/azure.batches_uploaded`. |
+| `llm_redact_audit_sink_rows_dropped_total` | counter | `sink` | Audit rows a sink dropped (an upload failed, its buffer was full, credentials or the batch key were missing) — rows missing from the off-machine copy. Also `/status` `audit.s3/azure.rows_dropped`. |
+| `llm_redact_map_write_queue_depth` | gauge | — | Durable vault map writes (Responses chains, stored-object owner records, Live resumption handles) queued or in flight on the vault's background writer; 0 without one (the in-memory vault). Also `/status` `vault.map_writes_pending`. |
+| `llm_redact_map_write_wait_timeouts_total` | counter | `cause` | `[vault] map_writes = "before_answer"` answers sent before their map writes landed: `bound` (the wait reached `[vault] map_write_wait_seconds`) or `stuck` (not waited for: the writer is stuck behind an earlier write a wait gave up on — one bound per episode, not per answer). Another replica may then read the record as unknown a little longer (refused or sealed, never a wrong value). The same answers also count under the bookkeeping stage `map_write_wait` (kept for existing alerts). Also `/status` `vault.map_write_wait_timeouts_total`. |
+| `llm_redact_map_writes_mode` | gauge | `mode` | The effective `[vault] map_writes` (value 1): `before_answer`, `background` or `synchronous` (no background writer). Also `/status` `vault.map_writes`. |
 | `llm_redact_vault_entries` / `_sessions` | gauge | — | Vault size. |
 | `llm_redact_uptime_seconds` / `_start_time_seconds` | gauge | — | Process liveness. |
 | `llm_redact_info` | gauge | `version` | Build info (value 1). |
+| a plugin's own gauges | gauge | the plugin's | Rendered after the core's from an access gate's optional `metrics_samples` (llm-redact-pro: `llm_redact_users{state}`, `llm_redact_seats_licensed`, `llm_redact_seats_used` — see its docs/observability.md). The core enforces the SHAPE: a name under `llm_redact_` that no core family uses, at most 4 labels whose names and values are from `[a-z0-9_]` (a value at most 32 characters, with no run of 8 or more hexadecimal characters holding a digit — the shape of a key, hash, id or long number), a finite value, at most 256 samples; anything else is dropped and counted under the bookkeeping stage `plugin_metrics`. A shape check cannot tell a fixed state name from a user name that fits it (`alice_smith`): keeping every label value to a small fixed set is the plugin's obligation (llm-redact-pro's are fixed enums), and the samples are served on the open `/metrics` path. Read in a worker thread, at most 2 s per call, never two at once — scrapes arriving together (an HA pair of Prometheus servers) share the call in flight until its own 2 s bound: a slow or failing plugin never delays or fails the scrape (each scrape rendered without the gauges is counted under `plugin_metrics`, logged once per episode by exception type). |
+
+## Local refusal kinds
+
+`llm_redact_local_refusals_total{kind}` — one per response the proxy
+generated itself. Statuses are the HTTP ones; a realtime connection refused
+before it was relayed is closed (1008/1011) and recorded with the same
+status, a frame refused on an open relay closes it.
+
+| Kind | Status | The proxy answered itself because |
+|---|---|---|
+| `request_target` | 400 | The request target is not a plain path, holds a `.`/`..` or empty segment, or would not address the configured upstream (counted without a row when the path may hold a key). |
+| `identity_path` | 404 | An unclaimed `/u/<key>/` identity prefix, or a reserved path reached through a stripped one (never recorded: the path holds a key). |
+| `request_origin` | 403 | A web page's request (Origin / Sec-Fetch-*), or a request lending a credential the proxy holds addressed to a host name it does not answer to. |
+| `access_gate` | 403 | The access gate (llm-redact-pro) refused the client — or revoked a realtime connection before it was relayed. |
+| `misaddressed` | 400/404 | Another spelling of a recognized route, the route without its `/v1`, or under an extra prefix. |
+| `unattributed` | 404 | No provider can be attributed to the request (realtime: no realtime route for the path). |
+| `no_upstream` | 502 | No upstream configured: an unknown `/custom/NAME/`, or a provider without a default upstream (Azure, Vertex, Bedrock) not yet set. |
+| `disabled_provider` | 502 | `[providers.NAME] enabled = false`. |
+| `method_override` | 400 | A matched route carrying an HTTP method override. |
+| `identity_route` | 403 | An unrecognized route that would spend a credential the proxy holds (its cloud identity, or a routed plan's operator key). |
+| `credential_protocol` | 403 | A recognized route whose protocol is not served with a credential the proxy holds (a resumable upload). |
+| `too_large` | 413 | A redactable body over `max_body_bytes`. |
+| `too_many_strings` | 413 | A body (or realtime frame) with more strings, parts or lines than `max_body_strings`. |
+| `scanned_body` | 400 | The scanned-body rule: a body the proxy cannot read to redact (not a JSON object, invalid UTF-8, non-canonical multipart …). |
+| `unsupported_encoding` | 415 | A content-encoded request body. |
+| `unchecked_body` | 400 | A body the stored-object check cannot read under a credential the proxy holds, or an upload its re-reading would change. |
+| `object_access` | 403 | The session router refused a stored object of another namespace (realtime: its per-frame check). |
+| `sealed_session` | 403 | The session router sealed the request's session and redaction would write to it. |
+| `blocked_value` | 400 | A block-mode rule matched (realtime: the frame is refused and the connection closed 1008; the row keeps its 101). |
+| `verbatim_field` | 400 | An identifier field that must be sent verbatim holds a value to redact. |
+| `binary_values` | 400 | An upload inspector found values to redact in a binary file the proxy cannot rewrite. |
+| `unscanned_upload` | 400 | An upload part the proxy cannot scan (a binary file under `binary_uploads = "refuse"` or a credential the proxy holds, a framing or header rule). |
+| `unredactable` | 400 | A field the proxy cannot decode to redact (an undecodable Bedrock count-tokens blob; realtime: a non-JSON frame under the proxy's identity). |
+| `placeholder_limit` | 400 | No placeholder number left for a new value. |
+| `override_raced` / `override_fault` | 400 | A one-time refusal override another request used first, or the override store could not record the use. |
+| `vault_fault` | 503 | The vault could not issue the request's placeholders or open its session. |
+| `audit_unavailable` | 503 | `[audit] required`: the write-ahead START row could not be committed. |
+| `upstream_auth` | 502 | The proxy's own cloud identity produced no credential. |
+| `upstream_fault` | 502 | No upstream answer at all: a transport fault (connect, timeout, a drop before the answer was delivered), every routed hop failed, or a realtime dial failed. |
+| `redirect_refused` | 502 | The upstream answered a redirect the proxy does not relay. |
+| `delivery_fault` | 502 | Restoring the upstream's answer failed: a buffered answer is replaced by the 502, a stream is cut (its row records 502) — or a realtime relay failed (row 500). |
+| `no_route` | 502 | The routing layer (llm-redact-pro) has no rule and no default for the request. |
+| `route_unsupported` | 404 | The routing layer does not serve the endpoint (count_tokens). |
+| `budget` | 402 | The routing layer's monthly budget is exhausted. |
+| `reload` | 503 | A config reload changed a realtime connection's admission before it was relayed (an open relay is closed 1012 instead and not counted). |
+| `realtime_unavailable` | — | A realtime upgrade without the `realtime` extra (never recorded). |
+
+Not counted: answers to the proxy's own reserved paths (`/__llm-redact/*`),
+`GET /` liveness answers, and the routing layer's local model-discovery
+answers — none of them is a request the proxy refused to forward.
 
 ## Wiring it up
 
@@ -50,7 +110,14 @@ Ready-to-use assets live in [`deploy/`](../deploy):
    at your Alertmanager. The load-bearing one is
    **`LlmRedactWarnModeForwardingValues`**: warn mode is observation-only and
    sends the matched value upstream, so a sustained warn rate is a real leak
-   signal, not noise.
+   signal, not noise. **`LlmRedactHighProxyOverheadP95`** reads the proxy's
+   own time (above 0.25 s p95 for 10 minutes): it does not fire on a slow
+   provider or a long stream, which the end-to-end
+   `llm_redact_request_duration_seconds` includes — there is deliberately no
+   end-to-end latency rule here (a provider-realistic threshold depends on
+   your models; llm-redact-pro's package carries one at 30 s).
+   **`LlmRedactLocalFaultRefusals`** pages when the proxy refuses requests
+   because its own vault or audit storage fails.
 3. **Visualize.** Import `deploy/grafana-dashboard.json` (Dashboards → Import),
    pick your Prometheus data source. The warn/block panels are colored to stand
    out because they represent values leaving the box or traffic being rejected.

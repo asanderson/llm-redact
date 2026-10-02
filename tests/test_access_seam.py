@@ -25,6 +25,7 @@ from llm_redact.config import Config, ConfigError, ProviderConfig
 from llm_redact.plugin_api import Admission, DashboardHost
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
+from local_refusals import refused_once
 
 UPSTREAM = "https://upstream.test"
 BODY = {
@@ -173,6 +174,7 @@ async def test_gate_refusal_is_a_recorded_provider_shaped_403(gate: FakeGate) ->
     assert received == []
     rows = (await _call(app, "GET", "/__llm-redact/recent")).json()["entries"]
     assert rows[0]["status"] == 403
+    refused_once(app.state.proxy, "access_gate", "anthropic")
 
 
 async def test_disabled_provider_502_precedes_the_refusal(gate: FakeGate) -> None:

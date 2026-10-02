@@ -774,6 +774,27 @@ class AccessGate(Protocol):
       refusal-override approve and
       revoke POSTs are served only when it is True. It may return an
       awaitable; absent, anything but True, or an exception: refused (403).
+    - OPTIONAL ``metrics_samples() -> Iterable[tuple[str, Mapping[str, str], float]]``
+      — the gate's own gauges for ``/__llm-redact/metrics`` (llm-redact-pro:
+      users by state, licensed and used seats), as ``(name, labels, value)``
+      triples. Called in a worker thread, at most once at a time (scrapes
+      arriving together share the call in flight), bounded by
+      ``proxy.PLUGIN_METRICS_TIMEOUT_SECONDS`` (2 s): it must answer from
+      memory or a cheap cached read, never block on the network. Each
+      sample must be VALUE-FREE: a name under ``llm_redact_`` that no core
+      metric family uses, at most 4 labels whose names and values come
+      from small fixed sets — never a user name, e-mail address, path, key
+      or id — and a finite number. The core enforces only the SHAPE
+      (``[a-z0-9_]``, at most 32 characters, no run of 8+ hexadecimal
+      characters with a digit among them) and the caps: a user name such
+      as ``alice_smith`` fits that shape, so keeping every label value to a
+      small fixed set is the PLUGIN's obligation (the samples are served on
+      the open ``/metrics`` probe path). An invalid sample is
+      dropped (counted under the bookkeeping stage ``plugin_metrics``, never
+      echoed), as is everything past 256 samples; an exception, a timeout,
+      a non-iterable or awaitable answer drops them all (counted, logged
+      once per episode by exception TYPE). The core's own metrics are
+      rendered either way.
     - ``recheck_interval: float`` — seconds between the core's re-checks
       of every open long-lived connection's ``Admission.recheck`` (read
       once at startup; default 30; anything but a number from 5 to 3600 is

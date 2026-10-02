@@ -377,6 +377,12 @@ class MapWriter:
             self._stalled = left > 0
             return left
 
+    def pending(self) -> int:
+        """How many writes are queued or in flight now (a gauge: never
+        waits for the writer)."""
+        with self._cond:
+            return len(self._queue) + (self._in_flight is not None)
+
     def _idle(self) -> bool:
         """Whether nothing is left to wait for: no write queued or in
         flight — or no writer thread to apply them (under ``_cond``)."""

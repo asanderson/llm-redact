@@ -148,8 +148,9 @@ def test_doctor_shows_the_effective_mode(tmp_path: Path) -> None:
         " record once its write landed"
     ]
     assert lines["set"] == [
-        "PASS map_writes = before_answer (set): an answer waits (bounded) for its durable"
-        " map writes, so a follow-up reaching any replica sharing the vault finds the record"
+        "PASS map_writes = before_answer (set): an answer waits (at most 5 s,"
+        " map_write_wait_seconds) for its durable map writes, so a follow-up reaching any"
+        " replica sharing the vault finds the record"
     ]
     assert lines["memory"] == []  # the in-memory vault keeps no durable map
 
@@ -669,11 +670,24 @@ async def test_a_wait_past_its_bound_sends_anyway_and_is_counted_once_per_episod
                     )
                     assert answer.status_code == 200
                 assert state.bookkeeping_errors == {MAP_WRITE_WAIT_STAGE: 2}
+                # The dedicated counter says why: the first answer's wait ran
+                # out, the second was not waited for (the writer is stuck).
+                assert state.map_write_wait_timeouts == {"bound": 1, "stuck": 1}
                 status = (await client.get("/__llm-redact/status")).json()
                 assert status["bookkeeping_errors_total"] == {MAP_WRITE_WAIT_STAGE: 2}
                 assert status["vault"]["map_writes"] == "before_answer"
+                assert status["vault"]["map_write_wait_timeouts_total"] == {"bound": 1, "stuck": 1}
+                assert status["vault"]["map_writes_pending"] >= 1  # held by the gate
+                metrics = (await client.get("/__llm-redact/metrics")).text
+                assert 'llm_redact_map_write_wait_timeouts_total{cause="bound"} 1' in metrics
+                assert 'llm_redact_map_write_wait_timeouts_total{cause="stuck"} 1' in metrics
+                assert 'llm_redact_map_writes_mode{mode="before_answer"} 1' in metrics
+                assert "llm_redact_map_write_queue_depth 0" not in metrics
                 gate.set()
                 assert await asyncio.to_thread(state.vault_manager.drain_map_writes, 10) == 0
+                assert state.map_writes_pending() == 0
+                metrics = (await client.get("/__llm-redact/metrics")).text
+                assert "llm_redact_map_write_queue_depth 0" in metrics
                 state.map_write_wait_seconds = 10
                 assert (await client.post("/v1/responses", json=_first("three"))).status_code == 200
         finally:
@@ -722,6 +736,7 @@ async def test_a_stuck_writer_costs_one_wait_per_episode_not_one_per_answer(
             gate.set()
     assert took[0] >= 1.95
     assert max(took[1:]) < 1.0, took
+    assert state.map_write_wait_timeouts == {"bound": 1, "stuck": 2}
     assert caplog.text.count(WAIT_MESSAGE) == 1
     assert "vault map writes land in time again" in caplog.text
     assert state.bookkeeping_errors == {MAP_WRITE_WAIT_STAGE: 3}

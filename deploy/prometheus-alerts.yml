@@ -66,13 +66,28 @@ groups:
           summary: "llm-redact is seeing upstream transport faults"
           description: "upstream faults at {{ $value | printf \"%.2f\" }}/s over 5m (failed closed as 502) — check provider reachability and the network path (llm_redact_upstream_errors_total by provider)."
 
-      # p95 in-proxy latency ceiling. The proxy adds a few ms on healthy
-      # hardware; a sustained high p95 points at giant bodies or a slow host.
-      - alert: LlmRedactHighLatencyP95
-        expr: histogram_quantile(0.95, sum(rate(llm_redact_request_duration_seconds_bucket[5m])) by (le)) > 1
+      # The proxy's OWN time per request (llm_redact_proxy_overhead_seconds:
+      # the request duration minus the waits on the upstream and the client),
+      # so it never fires on a slow provider or a long stream. A few ms on
+      # healthy hardware; a sustained high p95 points at giant bodies, a slow
+      # vault or audit database, a slow upload inspector, or a starved host.
+      - alert: LlmRedactHighProxyOverheadP95
+        expr: histogram_quantile(0.95, sum(rate(llm_redact_proxy_overhead_seconds_bucket[5m])) by (le)) > 0.25
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "llm-redact p95 request duration is high"
-          description: "p95 in-proxy duration is {{ $value | printf \"%.2f\" }}s over 5m (redaction + rehydration + forwarding); check body sizes and host load."
+          summary: "llm-redact's own per-request time is high"
+          description: "p95 of the proxy's own time (redaction, rehydration, vault, audit — upstream and client waits excluded) is {{ $value | printf \"%.3f\" }}s over 5m; check body sizes, vault/audit storage latency and host load."
+
+      # Responses the proxy generated ITSELF because it could not serve the
+      # request (no upstream answered at all): its audit log or vault refused
+      # a write, so nothing is forwarded. Upstream answers are never counted.
+      - alert: LlmRedactLocalFaultRefusals
+        expr: sum(rate(llm_redact_local_refusals_total{kind=~"audit_unavailable|vault_fault"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "llm-redact is refusing requests because its own storage fails"
+          description: "the proxy answered {{ $value | printf \"%.2f\" }}/s requests itself with a 503 over 5m (kind audit_unavailable or vault_fault, llm_redact_local_refusals_total) — check the audit and vault databases (disk, permissions, the RDBMS)."

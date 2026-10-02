@@ -41,6 +41,7 @@ from llm_redact.providers.gemini import GeminiAdapter
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator
 from llm_redact.vault import InMemoryVault
+from local_refusals import refused_once
 
 EMAIL = "jane.doe@corp.example"
 OTHER = "sam.roe@corp.example"
@@ -520,6 +521,7 @@ async def test_a_resumable_upload_is_never_started_with_the_proxys_credential(
     app, router = lent_app(monkeypatch, "gemini", GEMINI, files)
     async with client(app) as http:
         started = await http.post(UPLOAD, json={"file": {"display_name": EMAIL}}, headers=start)
+        refused_once(app.state.proxy, "credential_protocol", "gemini")
         chunked = await http.post(f"{UPLOAD}?upload_id=X", content=b"hello", headers=chunk)
     assert started.status_code == 403, started.text
     assert "resumable upload" in started.json()["error"]["message"]

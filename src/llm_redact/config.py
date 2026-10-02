@@ -186,6 +186,12 @@ RDBMS_BACKENDS = ("postgresql", "mysql", "oracle", "dbapi")
 # finds it. Unset: before_answer for the shared-database backends,
 # background for sqlite and memory (``map_writes_mode``).
 MAP_WRITES_MODES = ("background", "before_answer")
+# [vault] map_write_wait_seconds: how long a "before_answer" answer waits for
+# its map writes before it is sent anyway (a request-path wait, counted in
+# llm_redact_map_write_wait_timeouts_total): above 0, at most the maximum —
+# a longer hold is a stalled client, not a slower replica.
+DEFAULT_MAP_WRITE_WAIT_SECONDS = 5.0
+MAX_MAP_WRITE_WAIT_SECONDS = 60.0
 
 # Config sections a hot reload (SIGHUP / the pro dashboard's editor) pins to
 # their running values: changing them requires a restart. The single source
@@ -573,6 +579,25 @@ class VaultConfig:
     # MAP_WRITES_MODES, or None (unset): the backend's default
     # (``map_writes_mode``).
     map_writes: str | None = None
+    # How long a "before_answer" answer waits for its map writes (seconds,
+    # 0 < x <= MAX_MAP_WRITE_WAIT_SECONDS).
+    map_write_wait_seconds: float = DEFAULT_MAP_WRITE_WAIT_SECONDS
+
+
+def _map_write_wait_seconds(vault_raw: Mapping[str, Any]) -> float:
+    """``[vault] map_write_wait_seconds``: a number above 0, at most
+    ``MAX_MAP_WRITE_WAIT_SECONDS`` (a bool is not a number)."""
+    raw = vault_raw.get("map_write_wait_seconds", DEFAULT_MAP_WRITE_WAIT_SECONDS)
+    if (
+        isinstance(raw, bool)
+        or not isinstance(raw, (int, float))
+        or not 0 < raw <= MAX_MAP_WRITE_WAIT_SECONDS
+    ):
+        raise ConfigError(
+            "[vault] map_write_wait_seconds must be a number above 0 and at most"
+            f" {MAX_MAP_WRITE_WAIT_SECONDS:g}"
+        )
+    return float(raw)
 
 
 def map_writes_mode(vault: VaultConfig) -> str:
@@ -2547,6 +2572,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
             "encryption",
             "session_ttl_days",
             "map_writes",
+            "map_write_wait_seconds",
             "rdbms",
             "kms",
         },
@@ -2617,6 +2643,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         raise ConfigError(
             f"[vault] map_writes must be one of {MAP_WRITES_MODES}, got {map_writes!r}"
         )
+    map_write_wait_seconds = _map_write_wait_seconds(vault_raw)
     kms: VaultKmsConfig | None = None
     if "kms" in vault_raw:
         kms = parse_vault_kms(vault_raw["kms"])
@@ -2634,6 +2661,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         rdbms=rdbms,
         kms=kms,
         map_writes=map_writes,
+        map_write_wait_seconds=map_write_wait_seconds,
     )
 
     audit_raw = raw.get("audit", {})

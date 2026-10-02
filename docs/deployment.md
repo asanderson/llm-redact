@@ -113,8 +113,9 @@ your clients hold long streams open (the request drain has no bound of
 its own); the render fails on anything but a non-negative integer, an
 absent value (`helm upgrade --reuse-values` from a release made before
 it existed) renders 90, and NOTES warns below 57 s. In sidecar mode the value covers the whole pod,
-your tool container included. `deploy/k8s-sidecar.yaml` keeps
-Kubernetes' default; set it there yourself. See docs/resilience.md,
+your tool container included. The plain manifest
+`deploy/k8s-sidecar.yaml` sets the same 90 s; set it in a manifest of
+your own. See docs/resilience.md,
 "Shutdown order".
 
 Replicas sharing one vault issue consistent tokens, but the durable maps

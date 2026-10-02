@@ -536,6 +536,15 @@ def test_shutdown_budget_docs_name_dockers_stop_timeout() -> None:
     assert "stop_grace_period: 90s" in " ".join(deployment.split())
 
 
+def test_k8s_sidecar_sets_the_charts_grace_period() -> None:
+    # The plain manifest is the same pod as the chart's sidecar preset: it
+    # sets the same grace period, which covers the shutdown budget.
+    doc = next(yaml.safe_load_all((DEPLOY / "k8s-sidecar.yaml").read_text()))
+    grace = doc["spec"]["template"]["spec"]["terminationGracePeriodSeconds"]
+    assert grace == _default_grace_seconds()
+    assert grace >= _shutdown_budget_seconds()
+
+
 def _pod_spec(*set_args: str) -> dict[str, object]:
     result = _helm_template(*set_args)
     assert result.returncode == 0, result.stderr

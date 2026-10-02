@@ -454,3 +454,141 @@ async def test_an_upstream_redirect_is_a_redirect_refusal() -> None:
     response = await _send(app, "POST", "/v1/chat/completions", json=_chat(f"mail {EMAIL}"))
     assert response.status_code == 502
     refused_once(_state(app), "redirect_refused", "openai")
+
+
+# ------------------------------------------------- the suite-wide guard --
+#
+# conftest's autouse guard once reset a request's refusal list when the
+# handler RETURNED: a stream's finalizer (which runs while the body is sent)
+# counted against no request, and realtime connections were never checked.
+
+TOKEN = "«EMAIL_001»"
+
+
+def _cut_stream_app(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """An app whose SSE answer the proxy cuts: restoring its placeholder
+    fails, so the stream's finalizer books a delivery_fault."""
+    delta = {"choices": [{"index": 0, "delta": {"content": f"hi {TOKEN}"}}]}
+    body = b"data: " + json.dumps(delta).encode() + b"\n\ndata: [DONE]\n\n"
+    upstream = _Upstream(
+        httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+    )
+    app = _app(Config(providers=_openai()), upstream)
+
+    def unreadable(placeholder: str) -> str | None:
+        raise ValueError("does not decrypt")
+
+    monkeypatch.setattr(_state(app)._static_context.vault, "original_for", unreadable)  # noqa: SLF001
+    return app
+
+
+async def _stream(app: Any) -> None:
+    with pytest.raises(ValueError):  # the proxy cuts the body (raised through ASGITransport)
+        await _send(app, "POST", "/v1/chat/completions", json={**_chat(), "stream": True})
+
+
+async def test_a_cut_stream_counts_against_its_own_request(
+    refusal_guard: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import local_refusals
+
+    lists: list[list[str] | None] = []
+    counting = Metrics.count_local_refusal
+
+    def spy(self: Metrics, kind: Any, provider: str | None) -> None:
+        lists.append(local_refusals.REQUEST_REFUSALS.get())
+        counting(self, kind, provider)
+
+    monkeypatch.setattr(Metrics, "count_local_refusal", spy)
+    app = _cut_stream_app(monkeypatch)
+    await _stream(app)
+    refused_once(_state(app), "delivery_fault", "openai")
+    assert lists == [["delivery_fault"]]  # the request's own list, not none
+    assert refusal_guard.violations == []
+
+
+async def test_the_guard_catches_a_stream_counting_twice(
+    refusal_guard: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recording = ProxyState.record_request
+
+    def twice(self: ProxyState, **row: Any) -> None:
+        recording(self, **row)
+        if row.get("refusal") == "delivery_fault":
+            self.count_local_refusal("delivery_fault", "openai")
+
+    monkeypatch.setattr(ProxyState, "record_request", twice)
+    await _stream(_cut_stream_app(monkeypatch))
+    assert refusal_guard.violations == ["one request counted ['delivery_fault', 'delivery_fault']"]
+    refusal_guard.violations.clear()
+
+
+async def _ws_refused(app: Any) -> list[dict[str, Any]]:
+    """A realtime upgrade whose target is not origin-form, over raw ASGI."""
+    sent: list[dict[str, Any]] = []
+    incoming = [{"type": "websocket.connect"}]
+
+    async def receive() -> dict[str, Any]:
+        return incoming.pop(0) if incoming else {"type": "websocket.disconnect", "code": 1000}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "websocket",
+        "asgi": {"version": "3.0"},
+        "scheme": "ws",
+        "path": "/v1/realtime",
+        "raw_path": b"v1/realtime",
+        "query_string": b"",
+        "headers": [(b"host", b"127.0.0.1")],
+        "server": ("127.0.0.1", 8787),
+        "client": ("127.0.0.1", 50000),
+        "subprotocols": [],
+    }
+    await app(scope, receive, send)
+    return sent
+
+
+async def test_the_guard_checks_every_realtime_connection(
+    refusal_guard: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _app()
+    sent = await _ws_refused(app)
+    assert [m["type"] for m in sent] == ["websocket.accept", "websocket.close"]
+    refused_once(_state(app), "request_target", "passthrough")
+    assert refusal_guard.violations == []
+    counting = ProxyState.count_local_refusal
+
+    def twice(self: ProxyState, kind: Any, provider: str | None) -> None:
+        counting(self, kind, provider)
+        counting(self, kind, provider)
+
+    monkeypatch.setattr(ProxyState, "count_local_refusal", twice)
+    await _ws_refused(app)
+    assert refusal_guard.violations == [
+        "one realtime connection counted ['request_target', 'request_target']"
+    ]
+    refusal_guard.violations.clear()
+
+
+def test_the_guard_collects_unknown_kinds_and_wrong_statuses(refusal_guard: Any) -> None:
+    state = _state(_app())
+    state.count_local_refusal("no_such_kind", None)  # type: ignore[arg-type]
+    state.record_request(
+        session="default",
+        provider="openai",
+        method="POST",
+        path="/v1/x",
+        status=200,
+        started=0.0,
+        streamed=False,
+        detections={},
+        rehydrations={},
+        refusal="vault_fault",
+    )
+    assert refusal_guard.violations == [
+        "unknown kind 'no_such_kind'",
+        "vault_fault recorded with status 200",
+    ]
+    refusal_guard.violations.clear()

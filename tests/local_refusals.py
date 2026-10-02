@@ -3,9 +3,11 @@
 
 ``llm_redact_local_refusals_total{kind,provider}`` counts each response the
 proxy generates itself instead of forwarding, ONCE per request, under the
-kind its refusal site names. The fixture wraps the app's catch-all handler
-and the metrics counter for the whole suite: every HTTP request any test
-sends through ``create_app`` is checked to count at most one refusal, and
+kind its refusal site names. The fixture wraps the app's catch-all HTTP
+handler (through the answer's sending, so a stream's finalizer counts
+against its request), the realtime handler and the metrics counter for the
+whole suite: every HTTP request and realtime connection any test sends
+through ``create_app`` is checked to count at most one refusal, and
 every refusal counted with a row is checked against the statuses its kind
 can answer — so a refusal site that counts twice (or under the wrong kind)
 fails whichever test exercises it.
@@ -64,8 +66,48 @@ KIND_STATUSES: dict[str, frozenset[int | None]] = {
 }
 assert set(KIND_STATUSES) == set(LOCAL_REFUSAL_KINDS)
 
-# The refusals the current request counted (set by the wrapped handler).
+# The refusals the current request counted (set by the wrapped handlers:
+# for an HTTP request until its answer was sent, a stream's finalizer
+# included; for a realtime connection until its handler ended).
 REQUEST_REFUSALS: ContextVar[list[str] | None] = ContextVar("test_request_refusals", default=None)
+
+
+class RefusalGuard:
+    """The violations conftest's autouse fixture collected: a request or
+    connection that counted more than one refusal, an unknown kind, a kind
+    recorded with a status it never answers. Collected rather than raised
+    (a request served by a uvicorn thread cannot raise into the test); the
+    fixture fails the test at teardown when any is left."""
+
+    def __init__(self) -> None:
+        self.violations: list[str] = []
+
+    def check(self, what: str, counted: list[str]) -> None:
+        if len(counted) > 1:
+            self.violations.append(f"one {what} counted {counted}")
+
+
+class CheckedResponse:
+    """The handler's answer, sent with the request's refusal list still
+    current — a stream's finalizer (which runs while the body is sent, after
+    the handler returned) counts against the request it belongs to — and
+    checked once the answer was sent."""
+
+    def __init__(self, response: Any, counted: list[str], guard: RefusalGuard) -> None:
+        self.response = response
+        self.counted = counted
+        self.guard = guard
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.response, name)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        token = REQUEST_REFUSALS.set(self.counted)
+        try:
+            await self.response(scope, receive, send)
+        finally:
+            REQUEST_REFUSALS.reset(token)
+            self.guard.check("request", self.counted)
 
 
 def refused_once(state: Any, kind: str, provider: str) -> None:

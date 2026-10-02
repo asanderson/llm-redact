@@ -18,7 +18,8 @@ and tags `vX.Y.Z`.
   docs/observability.md: `blocked_value`, `scanned_body`, `vault_fault`, `audit_unavailable`,
   `request_origin`, `upstream_fault` …); an upstream's own answer never is. Every
   `record_request` call states its `refusal=` (pinned by an AST test), conftest checks every
-  request of the suite for at most one refusal with a status its kind answers, and a test
+  request of the suite (through its answer's sending, a stream's finalizer included) and every
+  realtime connection for at most one refusal with a status its kind answers, and a test
   enumerates each kind's end-to-end assertion. `/status` `local_refusals_total` (by kind),
   `llm-redact status` prints them.
 - `llm_redact_proxy_overhead_seconds{provider}`: the proxy's own time per HTTP request — the

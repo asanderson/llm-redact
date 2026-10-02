@@ -742,10 +742,13 @@ def run_status(args: argparse.Namespace) -> int:
             else:
                 print("licensed-features package: not installed (FOSS core is complete)")
     key_source = payload["vault"].get("key_source")
+    # Older proxies omit map_writes: printed only when reported.
+    map_writes = payload["vault"].get("map_writes")
     print(
         f"session: {payload['session']}  vault: {payload['vault']['backend']}"
         f" ({payload['vault']['entries']} entries"
         + (f", key: {key_source}" if key_source else "")
+        + (f", map writes: {map_writes}" if map_writes else "")
         + ")"
     )
     detections = payload["detections_total"] or {}

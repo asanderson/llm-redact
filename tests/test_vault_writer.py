@@ -1148,18 +1148,25 @@ def test_the_writers_dropped_connection_reconnects_once(
 # --- what the docs promise replicas -----------------------------------------------
 
 
-def test_the_docs_say_another_replica_reads_a_record_only_once_written() -> None:
-    """Read-your-writes holds within one process: replicas sharing a vault
-    see a record once its background write landed (a follow-up reaching
-    another replica sooner is refused or sealed). Every place that tells
-    an operator about replicas must say so."""
+def test_the_docs_say_what_another_replica_reads_in_each_mode() -> None:
+    """The writer's overlay answers within one process; ``[vault]
+    map_writes`` decides what another replica sharing the vault reads:
+    "before_answer" (the shared-database default) holds an answer until
+    its records landed, "background" lets a follow-up reach another replica
+    first (refused or sealed there). Every place that tells an operator
+    about replicas must say so."""
     root = Path(__file__).resolve().parent.parent
     resilience = (root / "docs" / "resilience.md").read_text()
     assert "Several replicas share one vault" in resilience
-    assert "Read-your-writes holds within ONE process only" in resilience
+    assert "Read-your-writes then holds within ONE process only" in resilience
+    assert '**`"before_answer"`** — the default for the shared-database backends' in resilience
     deployment = (root / "docs" / "deployment.md").read_text()
-    assert "reaches ANOTHER replica" in deployment and "session affinity" in deployment
+    assert "ANY replica — no session affinity needed" in deployment
+    assert "use session affinity at the load balancer then" in deployment
     notes = (root / "deploy" / "helm" / "llm-redact" / "templates" / "NOTES.txt").read_text()
-    assert "reaching another pod before its write" in notes
+    assert 'map_writes = "before_answer" holds an answer' in notes
+    assert "reaching another pod before" in notes
     how = " ".join((root / "docs" / "how-it-works.md").read_text().split())
-    assert "on every replica sharing the vault once its write landed" in how
+    assert "the frame carrying the handle is held until it landed" in how
+    example = (root / "config.example.toml").read_text()
+    assert '# map_writes = "before_answer"' in example

@@ -367,8 +367,12 @@ while the vault row is the secret store and is never exported.
   issued in, bounded per session and in all, deleted with its session on
   every prune), so a handle can be honoured after a restart and on every
   replica sharing the vault once its write landed (the map is written in
-  the background: another replica asked sooner reads it as unknown and
-  refuses — docs/resilience.md) — and never once its session was deleted.
+  the background; with `[vault] map_writes = "before_answer"`, the default
+  for the shared-database backends, the frame carrying the handle is held
+  until it landed, so every replica already knows it when the client can
+  present it; with `"background"` another replica asked sooner reads it
+  as unknown and refuses — docs/resilience.md) — and never once its
+  session was deleted.
   On an OpenAI-shaped listing
   (`GET` files, batches, video jobs, stored chat completions — OpenAI,
   Azure and `/custom/<name>/` alike) the router may name the session

@@ -12,6 +12,25 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- The Helm chart sets the pod's `terminationGracePeriodSeconds` (new value
+  `terminationGracePeriodSeconds`, default 90, both modes; in sidecar mode it covers the
+  whole pod, the tool container included). Kubernetes' default of 30 s could SIGKILL the
+  proxy while the off-machine audit sinks were still doing their final flush (up to 45 s),
+  before the audit database and the vault closed — losing the sinks' in-memory START/AMEND
+  rows. 90 s = the proxy's bounded shutdown steps after the request drain (57 s: map-write
+  drain, sink flush deadline + cancel grace, the vault close's drain and thread join) plus
+  33 s for requests still running; the pod still goes away as soon as the proxy exits. The
+  render fails on anything but a non-negative integer; an absent value (`helm upgrade
+  --reuse-values` from a release made before it existed) renders the default 90, so such
+  an upgrade still renders and never falls back to 30 s. NOTES warns below 57 s. The
+  chart test recomputes the budget from the proxy's constants. docs/deployment.md and
+  docs/resilience.md ("Shutdown order") now quote the budget (drain plus ~60 s, was ~50 s).
+  The plain manifest `deploy/k8s-sidecar.yaml` sets the same 90 s. In standalone mode the
+  chart also renders a `preStop` delay (new value `preStopSleepSeconds`, default 5, 0 = no
+  hook, validated like the grace period, absent = 5): the proxy keeps serving while the
+  Service's endpoints stop routing new connections to a terminating pod, so a rolling
+  update no longer refuses a few connections; it counts against the grace period, and the
+  NOTES warning counts it.
 - The vault's durable maps are written off the event loop: the Responses chain rows,
   stored-object owner records and Live resumption handles the proxy (and
   llm-redact-pro) records after the provider answered go to one background writer
@@ -100,6 +119,10 @@ and tags `vX.Y.Z`.
   treat an extension naming another format than the file's bytes as incomplete.
 
 ### Changed
+- The Helm chart's NOTES no longer say Kubernetes needs a Team-tier license (the FOSS
+  core is ungated there, as everywhere: a license key matters only to llm-redact-pro
+  subsystems), nor that a non-loopback bind is Pro; values.yaml's license and
+  ServiceAccount comments say the same.
 - Shutdown drains the audit trail in order: the off-machine audit sinks' final flush now
   runs while the audit database is still open (after the server has drained its
   in-flight requests), so the END rows spooled since the last upload ship at shutdown

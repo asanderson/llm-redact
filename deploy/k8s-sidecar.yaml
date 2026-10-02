@@ -21,6 +21,13 @@ spec:
     metadata:
       labels: { app: agentic-tool }
     spec:
+      # The proxy's shutdown budget: Kubernetes' 30 s default can SIGKILL it
+      # during the off-machine audit sinks' final flush (up to 45 s), before
+      # the audit database and the vault close. 90 s = its bounded shutdown
+      # steps (57 s) + 33 s for requests still running; the pod goes as soon
+      # as the proxy exits. Covers the whole pod, your tool container too.
+      # Same default as the Helm chart (docs/resilience.md, "Shutdown order").
+      terminationGracePeriodSeconds: 90
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

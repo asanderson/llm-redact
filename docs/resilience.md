@@ -174,13 +174,46 @@ an abandoned flush that keeps ignoring its cancellation holds the process
 open until the supervisor kills it — with both databases already closed,
 nothing is lost then beyond what that flush had not shipped. A flush that
 fails is logged by exception type only (its message may quote a URL or a
-SAS). Allow at least the drain time plus ~50 s in a supervisor's stop
-timeout (Kubernetes `terminationGracePeriodSeconds`, default 30 s;
-systemd `TimeoutStopSec`, default 90 s) so the final flush is not killed;
-the drain itself has no bound (step 2). Pinned by
-`test_shutdown_order.py` (order, the END row of a request in flight at
-shutdown reaching the sink, an open events stream, a hanging sink, a
-failing flush).
+SAS).
+
+**Shutdown budget.** Once the in-flight requests have finished, the
+bounded steps take at most 57 s: the map-write drain (5 s), the sinks'
+final flush (45 s + 1 s cancel grace) and the vault close (which drains
+the map writes once more, for up to 5 s, only when a write landed after
+the first drain, and then waits 1 s for the writer thread). The budget
+ends at the vault close: with `[otel]` enabled the telemetry exporters'
+flush runs after it, bounded only by the OpenTelemetry SDK's own export
+timeouts, and is outside the 57 s — no database is open by then, but give
+that flush its own margin when you enable OTel. Allow at least
+the request drain plus ~60 s in a supervisor's stop timeout so the final
+flush is not killed before the databases close; the request drain itself
+has no bound (step 2). Kubernetes' default `terminationGracePeriodSeconds`
+is 30 s: the Helm chart (`deploy/helm/llm-redact`) sets its own,
+`terminationGracePeriodSeconds`, which defaults to 90 s — the 57 s plus
+33 s for requests still running — on the pod in both modes (in sidecar
+mode the pod's tool container shares it), validated as a non-negative
+integer, with a NOTES warning below 57 s. The pod goes away as soon as the
+proxy exits, so a fast stop never waits for it. systemd's default
+`TimeoutStopSec` is the same 90 s. Docker's is 10 s: `docker stop` and
+`docker compose` SIGKILL the container 10 s after SIGTERM unless told
+otherwise — run it with `docker run --stop-timeout 90` (or `docker stop
+-t 90`), and give a compose service `stop_grace_period: 90s`. The plain manifest `deploy/k8s-sidecar.yaml`
+sets the same 90 s; a manifest of your own keeps Kubernetes' 30 s unless
+you set it. No
+`preStop` hook is needed for the drain: the proxy acts on SIGTERM itself.
+In standalone mode the chart adds a short one anyway, for availability:
+`preStopSleepSeconds` (default 5) keeps the proxy serving after its pod
+turns Terminating so the Service's endpoints (and an Ingress) stop sending
+it new connections before SIGTERM closes its listener. That delay counts
+against the grace period (90 = 5 + 57 + 28 s for requests still running),
+and NOTES counts it in its warning; 0 removes the hook. Sidecar mode has
+no Service and renders none.
+
+The order is pinned by `test_shutdown_order.py` (order, the END row of a
+request in flight at shutdown reaching the sink, an open events stream, a
+hanging sink, a failing flush); the budget by `test_deploy_assets.py`,
+which recomputes it from the constants in `proxy.py` and `vault_writer.py`
+and fails when the chart's default or its NOTES threshold falls behind.
 
 ## Faults after the upstream answered
 

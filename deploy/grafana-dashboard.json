@@ -66,7 +66,7 @@
     {
       "type": "timeseries",
       "title": "End-to-end request duration incl. the provider (p50 / p95)",
-      "description": "llm_redact_request_duration_seconds: from admission to the last byte, so it INCLUDES the provider's own time (and a stream's whole length). Not a proxy-health signal: the Proxy overhead panel is the proxy's own share.",
+      "description": "llm_redact_request_duration_seconds: from admission until the answer is handed to the server (a stream: its last chunk), so it INCLUDES the provider's own time (and a stream's whole length). Not a proxy-health signal: the Proxy overhead panel is the proxy's own share.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },

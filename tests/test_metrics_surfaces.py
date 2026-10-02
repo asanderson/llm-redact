@@ -585,6 +585,23 @@ def _toml(text: str) -> dict[str, Any]:
     return tomllib.loads(text)
 
 
+def test_the_duration_docs_say_where_it_ends() -> None:
+    # record_request runs in _deliver before Starlette writes a buffered
+    # body, so the duration ends at the hand-off, never at the "last byte
+    # sent to the client" the docs once claimed.
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    doc = (root / "docs" / "observability.md").read_text(encoding="utf-8")
+    row = next(
+        line for line in doc.splitlines() if "`llm_redact_request_duration_seconds` |" in line
+    )
+    panel = (root / "deploy" / "grafana-dashboard.json").read_text(encoding="utf-8")
+    for text in (row, panel):
+        assert "last byte" not in text
+        assert "handed to the server" in text
+
+
 async def test_every_core_family_is_known_and_documented() -> None:
     # CORE_METRIC_FAMILIES is what a plugin sample may never shadow: it must
     # be exactly what the core renders (a new metric added without it would

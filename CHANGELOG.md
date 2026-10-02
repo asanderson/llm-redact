@@ -35,9 +35,10 @@ and tags `vX.Y.Z`.
   `MAP_WRITE_WAIT_SECONDS` (kept as the default). Parsed, emitted when not the default, in
   `/status` and doctor. A request-path wait: the Helm shutdown budget is unaffected.
 - A plugin's own gauges: the access gate's OPTIONAL `metrics_samples()` (plugin_api, pinned in
-  OPTIONAL_MEMBERS) is rendered on `/__llm-redact/metrics` under value-free rules (an
-  `llm_redact_` name no core family uses, at most 4 labels from `[a-z0-9_]`, a finite value,
-  at most 256 samples), read in a worker thread bounded at 2 s, never two calls at once
+  OPTIONAL_MEMBERS) is rendered on `/__llm-redact/metrics` under shape rules (an
+  `llm_redact_` name no core family uses, at most 4 labels from `[a-z0-9_]` with no
+  id-like run of 8+ hexadecimal characters holding a digit, a finite value, at most 256
+  samples; keeping label values to fixed sets is the plugin's obligation), read in a worker thread bounded at 2 s, never two calls at once
   (scrapes arriving together share the call in flight until its bound, so an HA pair of
   Prometheus servers never loses the gauges or counts a fault);
   faults, timeouts and invalid samples count under the bookkeeping stage `plugin_metrics`.

@@ -67,13 +67,19 @@ LocalRefusal = Literal[
 LOCAL_REFUSAL_KINDS: tuple[str, ...] = get_args(LocalRefusal)
 
 # A plugin's own gauges (``plugin_metric_lines``): a name under the core's
-# prefix, label names and values from a small fixed charset — enum-like by
-# construction, so neither can carry a value, a path, an e-mail address or a
-# key — and at most a bounded number of samples and labels.
+# prefix, label names and values from a small fixed charset — so neither can
+# carry a path, an e-mail address or a key in its usual spelling — and at
+# most a bounded number of samples and labels. The charset is a SHAPE check
+# only: a user name such as ``alice_smith`` fits it, so keeping label values
+# to small fixed sets is the plugin's obligation. The core also drops a label
+# value holding a run of ``_ID_LIKE_RUN`` hexadecimal characters with a digit
+# among them (a key, a hash, an id, a long number) — a backstop, not a proof.
 PLUGIN_METRIC_PREFIX = "llm_redact_"
 _PLUGIN_METRIC_NAME = re.compile(r"llm_redact_[a-z][a-z0-9_]{0,62}")
 _PLUGIN_LABEL_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 _PLUGIN_LABEL_VALUE = re.compile(r"[a-z0-9_]{1,32}")
+_ID_LIKE_RUN = 8
+_HEX_RUN = re.compile(rf"[0-9a-f]{{{_ID_LIKE_RUN},}}")
 # Label names Prometheus itself gives meaning to (the histogram bound, the
 # target labels a scrape attaches): never a plugin's.
 _RESERVED_LABELS = frozenset({"le", "quantile", "job", "instance"})
@@ -463,9 +469,9 @@ def plugin_metric_lines(samples: Iterable[object]) -> tuple[list[str], int]:
     many were dropped as invalid: a name outside ``llm_redact_[a-z0-9_]``
     or one the core renders itself, labels that are not a mapping of names
     and values from the fixed charsets (more than ``MAX_PLUGIN_LABELS``, a
-    reserved name), a value that is not a finite number (a bool is not one),
-    a duplicate series, or anything past ``MAX_PLUGIN_SAMPLES``. Nothing of
-    a dropped sample is ever echoed."""
+    reserved name, an id-like value — ``_id_like``), a value that is not a
+    finite number (a bool is not one), a duplicate series, or anything past
+    ``MAX_PLUGIN_SAMPLES``. Nothing of a dropped sample is ever echoed."""
     families: dict[str, list[str]] = {}
     seen: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
     dropped = 0
@@ -494,6 +500,13 @@ def _finite(value: float) -> bool:
         return math.isfinite(value)
     except OverflowError:
         return False
+
+
+def _id_like(label_value: str) -> bool:
+    """Whether a label value holds a run of at least ``_ID_LIKE_RUN``
+    hexadecimal characters with a digit among them: the shape of a key, a
+    hash, an id or a long number, never of a fixed state name."""
+    return any(any(char.isdigit() for char in run) for run in _HEX_RUN.findall(label_value))
 
 
 def _shadows_core(name: str) -> bool:
@@ -528,6 +541,7 @@ def _plugin_sample_line(
             or not _PLUGIN_LABEL_NAME.fullmatch(label)
             or label in _RESERVED_LABELS
             or not _PLUGIN_LABEL_VALUE.fullmatch(label_value)
+            or _id_like(label_value)
         ):
             return None
         pairs.append((label, label_value))

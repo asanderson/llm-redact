@@ -353,6 +353,30 @@ def test_the_sample_bounds() -> None:
 
 
 @pytest.mark.parametrize(
+    "value",
+    [
+        "9f86d081884c7d659a2feaa0c55ad015",  # a 128-bit key or id
+        "user_12345678",  # a long number
+        "a1b2c3d4",  # the shortest id-like run
+        "conv_0f3e9a2bdeadbeef",
+    ],
+)
+def test_an_id_like_label_value_is_dropped(value: str) -> None:
+    # The charset alone once rendered a hex key on the open /metrics path.
+    assert plugin_metric_lines([("llm_redact_x", {"key": value}, 1)]) == ([], 1)
+
+
+@pytest.mark.parametrize(
+    "value", ["verified", "invited", "revoked", "deadbeef", "a1b2c3d", "v2", "tier_10_users"]
+)
+def test_a_state_name_label_value_is_kept(value: str) -> None:
+    # Only a run of 8+ hex characters WITH a digit is id-like; the core's
+    # check is a shape backstop, never a proof the value is a fixed state.
+    lines, dropped = plugin_metric_lines([("llm_redact_x", {"state": value}, 1)])
+    assert dropped == 0 and lines[-1] == f'llm_redact_x{{state="{value}"}} 1'
+
+
+@pytest.mark.parametrize(
     ("answer", "kind"),
     [(RuntimeError("store unreadable"), "RuntimeError"), (42, "TypeError")],
 )

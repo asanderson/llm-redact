@@ -783,8 +783,13 @@ class AccessGate(Protocol):
       memory or a cheap cached read, never block on the network. Each
       sample must be VALUE-FREE: a name under ``llm_redact_`` that no core
       metric family uses, at most 4 labels whose names and values come
-      from small fixed sets (``[a-z0-9_]``; never a user name, e-mail
-      address, path, key or id), and a finite number. An invalid sample is
+      from small fixed sets — never a user name, e-mail address, path, key
+      or id — and a finite number. The core enforces only the SHAPE
+      (``[a-z0-9_]``, at most 32 characters, no run of 8+ hexadecimal
+      characters with a digit among them) and the caps: a user name such
+      as ``alice_smith`` fits that shape, so keeping every label value to a
+      small fixed set is the PLUGIN's obligation (the samples are served on
+      the open ``/metrics`` probe path). An invalid sample is
       dropped (counted under the bookkeeping stage ``plugin_metrics``, never
       echoed), as is everything past 256 samples; an exception, a timeout,
       a non-iterable or awaitable answer drops them all (counted, logged

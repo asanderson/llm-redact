@@ -1131,5 +1131,10 @@ OSCILLATING_MUTANTS: frozenset[str] = frozenset(
         # by a test that coverage-based selection attached to it.
         "llm_redact.vault.xǁSqliteVaultManagerǁget__mutmut_20",
         "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_33",
+        # " ORDER BY created_at DESC LIMIT ?)" -> lower case (equivalent:
+        # SQLite keywords are case-insensitive): survived on the PR run, but
+        # main's run of the same tree reported it killed (a selection
+        # artifact).
+        "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_27",
     }
 )

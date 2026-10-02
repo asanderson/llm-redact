@@ -438,10 +438,13 @@ class MapWriter:
             with self._cond:
                 # Only reached with the thread still registered when it died
                 # (a BaseException): its write is lost (read as unknown, its
-                # waiter released) and the next submit starts another thread.
+                # waiter released) and another thread takes what is still
+                # queued — its waiters are not left pending until a submit.
                 if self._thread is threading.current_thread():
                     self._thread = None
                     lost, self._in_flight = self._in_flight, None
+                    if self._queue and not self._closed:
+                        self._ensure_thread()
                 self._cond.notify_all()
             if lost is not None:
                 lost.release()

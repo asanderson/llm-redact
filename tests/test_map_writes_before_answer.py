@@ -300,6 +300,36 @@ def test_a_dying_writer_thread_releases_the_write_it_held(
     writer.close()
 
 
+def test_writes_queued_behind_a_dying_writer_thread_land_without_another_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The thread dies (a BaseException) while more writes are queued: it
+    # starts its successor, so their waiters are released when they land —
+    # not left pending until the wait bound, or a submit that may never come.
+    monkeypatch.setattr(threading, "excepthook", lambda args: None)
+    writer = _writer()
+    rows: list[str] = []
+    running = threading.Event()
+    release = threading.Event()
+
+    class Died(BaseException):
+        pass
+
+    def dies(conn: Any) -> None:
+        running.set()
+        release.wait(10)
+        raise Died
+
+    with awaited_writes() as pending:
+        writer.submit(MapWrite("s", dies, dies, _Faults()))
+        assert running.wait(10)
+        writer.submit(_write(rows, "after"))
+    release.set()
+    assert pending[1].result(10) is None
+    assert rows == ["after"]
+    writer.close()
+
+
 def test_a_waiter_that_gave_up_never_breaks_the_writer() -> None:
     writer = _writer()
     rows: list[str] = []

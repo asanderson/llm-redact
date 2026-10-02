@@ -1066,6 +1066,46 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "case-insensitive, so the statement is byte-for-byte equivalent to the "
         "engine."
     ),
+    "llm_redact.vault_writer.xǁMapWriteǁ__init____mutmut_6": (
+        "`erase_after = None`: the flag starts False and is only ever read for truth "
+        "(`_deleted_meanwhile` returns it into `if self._deleted_meanwhile(write)`; `_deleted` "
+        "only sets it True), and None is falsy exactly like False."
+    ),
+    "llm_redact.vault_writer.xǁMapWriteǁ__init____mutmut_8": (
+        "`abandoned = None`: the flag starts False and is only ever read for truth (`if not "
+        "write.abandoned` in `_apply`; `close` only sets it True), and None is falsy exactly like "
+        "False."
+    ),
+    "llm_redact.vault_writer.xǁMapWriterǁ__init____mutmut_11": (
+        "`_closed = None`: the flag starts False and is only ever read for truth (`if "
+        "self._closed` in `submit`, `not self._closed` in `_next_write`; `close` only sets it "
+        "True), and None is falsy exactly like False."
+    ),
+    "llm_redact.vault_writer.xǁMapWriterǁ__init____mutmut_16": (
+        "`_overflowing = None` at construction: the flag starts False and is only ever read for "
+        "truth (`if self._overflowing` / `if not self._overflowing` in `submit`), and None is "
+        "falsy exactly like False."
+    ),
+    "llm_redact.vault_writer.xǁMapWriterǁ__init____mutmut_18": (
+        "`_stalled = None` at construction: the flag starts False and is only ever read for truth "
+        "(`if not self._stalled` in `close`; `drain` assigns it a bool), and None is falsy exactly"
+        " like False."
+    ),
+    "llm_redact.vault_writer.xǁMapWriterǁsubmit__mutmut_20": (
+        "`_overflowing = None` when the queue drains below its bound: the flag starts False and is"
+        " only ever read for truth (`if self._overflowing` / `if not self._overflowing` in "
+        "`submit`), and None is falsy exactly like False."
+    ),
+    "llm_redact.vault_writer.xǁMapWriterǁ_apply__mutmut_22": (
+        "`_stalled = None` once a write landed: the flag starts False and is only ever read for "
+        "truth (`if not self._stalled` in `close`), and None is falsy exactly like False."
+    ),
+    "llm_redact.vault_writer.xǁMapWriterǁ_place__mutmut_5": (
+        "`_unwritten[key] = None`: the dict's VALUES are never read - `_unwritten` is used only "
+        "for its keys (membership, insertion order via `next(iter(...))`, `len`, `del`, `clear`); "
+        "the overlay entry itself lives in `_overlay`. The value stored cannot change any "
+        "observable behavior."
+    ),
 }
 
 # Reviewed-equivalent ids that flip between survived/killed across mutmut runs

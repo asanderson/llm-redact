@@ -25,7 +25,12 @@ and tags `vX.Y.Z`.
   an upgrade still renders and never falls back to 30 s. NOTES warns below 57 s. The
   chart test recomputes the budget from the proxy's constants. docs/deployment.md and
   docs/resilience.md ("Shutdown order") now quote the budget (drain plus ~60 s, was ~50 s).
-  The plain manifest `deploy/k8s-sidecar.yaml` sets the same 90 s.
+  The plain manifest `deploy/k8s-sidecar.yaml` sets the same 90 s. In standalone mode the
+  chart also renders a `preStop` delay (new value `preStopSleepSeconds`, default 5, 0 = no
+  hook, validated like the grace period, absent = 5): the proxy keeps serving while the
+  Service's endpoints stop routing new connections to a terminating pod, so a rolling
+  update no longer refuses a few connections; it counts against the grace period, and the
+  NOTES warning counts it.
 - The vault's durable maps are written off the event loop: the Responses chain rows,
   stored-object owner records and Live resumption handles the proxy (and
   llm-redact-pro) records after the provider answered go to one background writer

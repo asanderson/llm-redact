@@ -115,7 +115,10 @@ absent value (`helm upgrade --reuse-values` from a release made before
 it existed) renders 90, and NOTES warns below 57 s. In sidecar mode the value covers the whole pod,
 your tool container included. The plain manifest
 `deploy/k8s-sidecar.yaml` sets the same 90 s; set it in a manifest of
-your own. See docs/resilience.md,
+your own. In standalone mode a `preStop` delay (`preStopSleepSeconds`,
+default 5; 0 removes it) keeps the proxy serving until the Service stops
+routing new connections to a terminating pod, so a rolling update refuses
+none; it counts against the grace period. See docs/resilience.md,
 "Shutdown order".
 
 Replicas sharing one vault issue consistent tokens, but the durable maps

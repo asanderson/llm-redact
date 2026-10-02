@@ -70,11 +70,15 @@ kubelet httpGet would need a pod-IP bind).
 {{- end }}
 {{- end }}
 {{- $grace := int64 (include "llm-redact.terminationGracePeriodSeconds" .) }}
-{{- if lt $grace (int64 (include "llm-redact.shutdownBudgetSeconds" .)) }}
+{{- $budget := int64 (include "llm-redact.shutdownBudgetSeconds" .) }}
+{{- $preStop := int64 0 }}
+{{- if eq .Values.mode "standalone" }}{{ $preStop = int64 (include "llm-redact.preStopSleepSeconds" .) }}{{ end }}
+{{- if lt $grace (add $budget $preStop) }}
 
 *** WARNING: terminationGracePeriodSeconds={{ $grace }} is below the proxy's
-bounded shutdown ({{ include "llm-redact.shutdownBudgetSeconds" . }} s after in-flight requests finish: vault map
-writes, the audit sinks' final flush, the vault close). A pod killed sooner
+bounded shutdown ({{ $budget }} s after in-flight requests finish: vault map
+writes, the audit sinks' final flush, the vault close){{ if $preStop }} plus the
+preStop delay ({{ $preStop }} s, preStopSleepSeconds){{ end }}. A pod killed sooner
 loses the sinks' in-memory START/AMEND rows and closes no database cleanly.
 See docs/resilience.md, "Shutdown order".
 {{- end }}

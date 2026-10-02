@@ -201,6 +201,13 @@ otherwise — run it with `docker run --stop-timeout 90` (or `docker stop
 sets the same 90 s; a manifest of your own keeps Kubernetes' 30 s unless
 you set it. No
 `preStop` hook is needed for the drain: the proxy acts on SIGTERM itself.
+In standalone mode the chart adds a short one anyway, for availability:
+`preStopSleepSeconds` (default 5) keeps the proxy serving after its pod
+turns Terminating so the Service's endpoints (and an Ingress) stop sending
+it new connections before SIGTERM closes its listener. That delay counts
+against the grace period (90 = 5 + 57 + 28 s for requests still running),
+and NOTES counts it in its warning; 0 removes the hook. Sidecar mode has
+no Service and renders none.
 
 The order is pinned by `test_shutdown_order.py` (order, the END row of a
 request in flight at shutdown reaching the sink, an open events stream, a

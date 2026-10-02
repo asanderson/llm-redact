@@ -46,6 +46,15 @@ vault: with a per-pod memory/sqlite vault, replicas would issue divergent
 {{- fail "llm-redact: terminationGracePeriodSeconds must be a non-negative integer (seconds) — the proxy's shutdown budget; see values.yaml." -}}
 {{- end -}}
 {{- end -}}
+{{- $preStop := .Values.preStopSleepSeconds -}}
+{{- if not (kindIs "invalid" $preStop) -}}
+{{- if not (or (kindIs "int" $preStop) (kindIs "int64" $preStop) (kindIs "float64" $preStop)) -}}
+{{- fail "llm-redact: preStopSleepSeconds must be a non-negative integer (seconds) — the standalone pod's delay before SIGTERM; see values.yaml." -}}
+{{- end -}}
+{{- if or (lt (float64 $preStop) 0.0) (ne (float64 $preStop) (float64 (int64 $preStop))) -}}
+{{- fail "llm-redact: preStopSleepSeconds must be a non-negative integer (seconds) — the standalone pod's delay before SIGTERM; see values.yaml." -}}
+{{- end -}}
+{{- end -}}
 {{- if eq .Values.mode "standalone" -}}
 {{- $multi := or .Values.autoscaling.enabled (gt (int .Values.replicaCount) 1) -}}
 {{- if and $multi (or (eq .Values.vault.backend "memory") (eq .Values.vault.backend "sqlite")) -}}
@@ -81,6 +90,27 @@ values.yaml's default (test_deploy_assets.py pins both).
 90
 {{- else -}}
 {{ int64 $grace }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+STANDALONE preStop delay: seconds the proxy container waits, still serving,
+between the pod turning Terminating and its SIGTERM, so the Service's
+endpoints (kube-proxy, an Ingress) stop sending NEW connections to it first —
+without it a rolling update can refuse a few connections while the endpoint
+removal propagates. Availability only: the drain itself needs no hook (uvicorn
+acts on SIGTERM). The delay counts against terminationGracePeriodSeconds
+(NOTES warns when the two leave less than the shutdown budget). Absent (an
+older release's values under --reuse-values, or null) = the chart default;
+0 renders no hook. Sidecar mode never renders one (the tool dials loopback,
+there is no Service to drain).
+*/}}
+{{- define "llm-redact.preStopSleepSeconds" -}}
+{{- $preStop := .Values.preStopSleepSeconds -}}
+{{- if kindIs "invalid" $preStop -}}
+5
+{{- else -}}
+{{ int64 $preStop }}
 {{- end -}}
 {{- end -}}
 
@@ -181,6 +211,15 @@ binds 0.0.0.0 (cross-pod reach is the point) and keeps httpGet probes.
   livenessProbe:
     httpGet: { path: /__llm-redact/healthz, port: 8787 }
     periodSeconds: 20
+  {{- $preStop := int64 (include "llm-redact.preStopSleepSeconds" .) }}
+  {{- if gt $preStop 0 }}
+  # Keep serving while the Service stops routing new connections here
+  # (values.yaml preStopSleepSeconds); python, as the exec probes use.
+  lifecycle:
+    preStop:
+      exec:
+        command: ["python", "-c", "import time; time.sleep({{ $preStop }})"]
+  {{- end }}
   {{- else }}
   readinessProbe:
     exec:

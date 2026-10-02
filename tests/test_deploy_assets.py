@@ -596,6 +596,111 @@ def test_helm_grace_period_rejects_a_non_integer(flag: tuple[str, str]) -> None:
     assert "non-negative integer" in result.stderr
 
 
+# --- Helm standalone preStop delay (endpoint removal before SIGTERM) ---------
+
+
+def _default_prestop_seconds() -> int:
+    text = (HELM_CHART / "values.yaml").read_text()
+    (value,) = re.findall(r"^preStopSleepSeconds:\s*(\d+)\s*$", text, re.MULTILINE)
+    return int(value)
+
+
+def test_helm_prestop_default_fits_inside_the_grace_period() -> None:
+    # The preStop delay runs BEFORE SIGTERM and counts against the grace
+    # period: the defaults must still leave the whole shutdown budget.
+    helpers = (HELM_CHART / "templates" / "_helpers.tpl").read_text()
+    (fallback,) = re.findall(
+        r'define "llm-redact.preStopSleepSeconds" -}}.*?kindIs "invalid" \$preStop -}}\s*'
+        r"(\d+)\s*{{- else",
+        helpers,
+        re.DOTALL,
+    )
+    assert int(fallback) == _default_prestop_seconds() == 5
+    assert _default_grace_seconds() >= _default_prestop_seconds() + _shutdown_budget_seconds()
+    assert "preStopSleepSeconds must be a non-negative integer" in helpers
+
+
+def _proxy_prestop(*set_args: str) -> object:
+    spec = _pod_spec(*set_args)
+    containers = spec["containers"]
+    assert isinstance(containers, list)
+    [proxy_container] = [c for c in containers if c["name"] == "llm-redact"]
+    lifecycle = proxy_container.get("lifecycle")
+    return None if lifecycle is None else lifecycle["preStop"]["exec"]["command"]
+
+
+_STANDALONE = ("mode=standalone", "vault.backend=postgresql")
+
+
+@_needs_helm
+def test_helm_standalone_renders_a_prestop_delay_sidecar_none() -> None:
+    sleep = ["python", "-c", "import time; time.sleep(5)"]
+    assert _proxy_prestop(*_STANDALONE) == sleep
+    assert _proxy_prestop(*_STANDALONE, "autoscaling.enabled=true") == sleep
+    # Sidecar: the tool dials loopback and there is no Service to drain.
+    assert _proxy_prestop() is None
+    assert _proxy_prestop("tool.enabled=true") is None
+    assert _proxy_prestop("preStopSleepSeconds=9") is None
+
+
+@_needs_helm
+def test_helm_prestop_is_overridable_and_absent_means_default() -> None:
+    assert _proxy_prestop(*_STANDALONE, "preStopSleepSeconds=12") == [
+        "python",
+        "-c",
+        "import time; time.sleep(12)",
+    ]
+    assert _proxy_prestop(*_STANDALONE, "preStopSleepSeconds=0") is None
+    assert _proxy_prestop(*_STANDALONE, "preStopSleepSeconds=null") == [
+        "python",
+        "-c",
+        "import time; time.sleep(5)",
+    ]
+
+
+@_needs_helm
+@pytest.mark.parametrize("value", ["-1", "1.5", "abc", "true"])
+def test_helm_prestop_rejects_a_non_integer(value: str) -> None:
+    result = _helm_template(*_STANDALONE, f"preStopSleepSeconds={value}")
+    assert result.returncode != 0
+    assert "preStopSleepSeconds must be a non-negative integer" in result.stderr
+
+
+@_needs_helm
+def test_helm_reuse_values_from_an_older_release_renders_the_prestop(tmp_path: Path) -> None:
+    old = (HELM_CHART / "values.yaml").read_text()
+    old = re.sub(
+        r"^(terminationGracePeriodSeconds|preStopSleepSeconds):.*\n", "", old, flags=re.MULTILINE
+    )
+    assert "preStopSleepSeconds:" not in old
+    docs = _render_copy(_chart_copy(tmp_path, old), *_STANDALONE)
+    [deployment] = [d for d in docs if d["kind"] == "Deployment"]
+    spec = deployment["spec"]["template"]["spec"]
+    [proxy_container] = [c for c in spec["containers"] if c["name"] == "llm-redact"]
+    assert (
+        proxy_container["lifecycle"]["preStop"]["exec"]["command"][-1]
+        == "import time; time.sleep(5)"
+    )
+    assert spec["terminationGracePeriodSeconds"] == 90
+
+
+@_needs_helm
+def test_helm_notes_count_the_prestop_delay_in_standalone_only(tmp_path: Path) -> None:
+    chart = _chart_copy(tmp_path)
+    # 60 covers the 57 s budget, but not the budget + the 5 s preStop delay.
+    _, notes = _copy_grace_and_notes(chart, *_STANDALONE, "terminationGracePeriodSeconds=60")
+    assert "WARNING: terminationGracePeriodSeconds=60 is below" in notes
+    assert "preStop delay (5 s" in " ".join(notes.split())
+    _, notes = _copy_grace_and_notes(chart, "terminationGracePeriodSeconds=60")
+    assert "WARNING: terminationGracePeriodSeconds" not in notes
+    _, notes = _copy_grace_and_notes(
+        chart, *_STANDALONE, "terminationGracePeriodSeconds=60", "preStopSleepSeconds=0"
+    )
+    assert "WARNING: terminationGracePeriodSeconds" not in notes
+    _, notes = _copy_grace_and_notes(chart, *_STANDALONE)
+    assert "WARNING: terminationGracePeriodSeconds" not in notes
+
+
 def test_the_image_ships_the_extras_its_features_need() -> None:
     # Without extract, [extraction] with its default formats (pdf included)
     # refuses to start inside the image.

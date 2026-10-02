@@ -116,7 +116,7 @@ class EventStream:
     (the dashboard reconnects, and its gate then decides again)."""
 
     kind = "events"
-    __slots__ = ("_lock", "_loop", "closed", "grant", "queue", "recheck", "subject")
+    __slots__ = ("_lock", "_loop", "at_shutdown", "closed", "grant", "queue", "recheck", "subject")
 
     # Put on the queue to wake the stream so it sees ``closed`` (compared
     # by identity: never a row).
@@ -135,6 +135,9 @@ class EventStream:
         self.grant = grant
         self.recheck = recheck
         self.closed = False
+        # Ended because the server is shutting down (``end_for_shutdown``),
+        # not because its admission ended.
+        self.at_shutdown = False
         self._lock = threading.Lock()
         self._loop = asyncio.get_running_loop()
 
@@ -143,10 +146,20 @@ class EventStream:
         return self.closed
 
     def close_for_access(self, reason: str) -> bool:
+        return self._end(shutdown=False)
+
+    def end_for_shutdown(self) -> bool:
+        """End the stream because the server is shutting down: the server
+        waits for every open response before the app's shutdown runs, and
+        this one would otherwise never end."""
+        return self._end(shutdown=True)
+
+    def _end(self, *, shutdown: bool) -> bool:
         with self._lock:
             if self.closed:
                 return False
             self.closed = True
+            self.at_shutdown = shutdown
         # Thread-safe, and fine from the loop's own thread. A closed loop
         # has no stream left to end.
         with contextlib.suppress(RuntimeError):
@@ -251,6 +264,19 @@ class LiveConnections:
     def untrack(self, connection: TrackedConnection) -> None:
         with self._lock:
             self._connections.discard(connection)
+
+    def end_event_streams(self) -> int:
+        """Server shutdown starts (``serving.ProxyServer``): end every open
+        ``/__llm-redact/events`` stream, which would otherwise keep the
+        server's drain — and so the app's shutdown — waiting for as long as
+        its client stays connected. Realtime relays are closed by the server
+        itself (1012). Not a close cause: nothing was revoked."""
+        with self._lock:
+            streams = [c for c in self._connections if isinstance(c, EventStream)]
+        ended = sum(1 for stream in streams if stream.end_for_shutdown())
+        if ended:
+            logger.info("ended %d events stream(s): the server is shutting down", ended)
+        return ended
 
     def open_counts(self) -> dict[str, int]:
         """Open connections by kind (``/status``): counts only — one already

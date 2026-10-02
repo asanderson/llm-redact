@@ -286,11 +286,10 @@ def test_vault_liveness_probe_dials_the_configured_proxy(
 def test_serve_banner_names_the_bind_and_the_dialed_status_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    import uvicorn
-
+    from llm_redact import serving
     from llm_redact.cli import main
 
-    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: None)
+    monkeypatch.setattr(serving, "run_server", lambda app, **kwargs: None)
     monkeypatch.setenv("LLM_REDACT_HOST", "::")
     monkeypatch.setenv("LLM_REDACT_INSECURE_BIND", "1")
     monkeypatch.setenv("LLM_REDACT_CONFIG", str(_config(tmp_path, "127.0.0.1")))

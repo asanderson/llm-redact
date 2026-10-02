@@ -81,6 +81,29 @@ and tags `vX.Y.Z`.
   treat an extension naming another format than the file's bytes as incomplete.
 
 ### Changed
+- Shutdown drains the audit trail in order: the off-machine audit sinks' final flush now
+  runs while the audit database is still open (after the server has drained its
+  in-flight requests), so the END rows spooled since the last upload ship at shutdown
+  instead of waiting for the next start; the audit database closes after it and the
+  vault last. The flush is bounded: both sinks share one 45 s deadline (above the sinks'
+  own 30 s upload timeout, so a slow but working store is never cut short), a flush still
+  running is cancelled (its unshipped rows stay in the database for the next start)
+  and one ignoring the cancellation is abandoned after a second, so a hanging store
+  never keeps the databases from closing (the process exit still waits for such a
+  flush until the supervisor's kill: the event loop's teardown awaits it). A failing
+  final flush, a router or access gate whose close fails, or a sink flush loop that
+  had died, is logged by exception type and no longer cuts the rest of the shutdown
+  short (docs/resilience.md, "Shutdown order").
+- `serve` ends the dashboard's open `/__llm-redact/events` streams as shutdown starts:
+  the server waits for every open response before the application's shutdown runs,
+  and that stream never ends on its own, so an open dashboard kept a SIGTERM from
+  ever reaching the audit sinks' final flush and the database closes (the supervisor
+  killed the process instead).
+- CI: a new `rdbms` job runs the RDBMS vault's real-server tests (the store battery and
+  the Live resumption handle map) against PostgreSQL 16 and MySQL 8.4 service
+  containers; before, no DSN was set anywhere and those env-gated tests always skipped.
+  `LLM_REDACT_TEST_REAL_DB_REQUIRED` makes a missing DSN fail the job instead of
+  skipping it.
 - Docs and the `llm-redact status` posture line now describe the required-mode audit
   sinks as llm-redact-pro ships them: END, interrupted and classic rows spool from
   the audit database and are never dropped, while the START and AMEND rows the sinks

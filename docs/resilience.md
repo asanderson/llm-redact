@@ -99,6 +99,62 @@ required = true` inverts that deliberately; its fault behavior:
 | Crash or kill between START and END | The next startup adopts every orphaned START as a synthetic chained `interrupted` row — a served request can lose its details, never its existence. Idempotent. | pro `test_audit_required_pro.py` |
 | Off-machine sink upload fails / credentials or encryption key missing | Batches spool from the audit DB and the per-sink high-water mark does NOT advance — retained and retried (byte-identical), never dropped; `max_rows` pruning never deletes unshipped rows. The START and AMEND rows the sinks also ship travel through a bounded in-memory buffer instead: a crash, a kill or a failed final upload can lose them, and past 10,000 queued rows they drop oldest-first, counted in `rows_dropped`. | pro `test_audit_required_pro.py` |
 
+## Shutdown order
+
+A clean stop (SIGTERM / Ctrl-C) drains in this order:
+
+1. **Stop accepting.** The server closes its listening socket.
+2. **In-flight requests finish.** uvicorn waits for every open connection
+   to end before it runs the application's shutdown (`serve` sets no
+   graceful-shutdown timeout, so a request is never cut short to make
+   room for it), so every request finalizer — buffered, streaming,
+   realtime — has written its END audit row first. Open realtime relays
+   are closed by the server (1012), and the dashboard's
+   `/__llm-redact/events` streams, which never end on their own, are
+   ended by the proxy as shutdown starts (`serving.ProxyServer`; before,
+   an open dashboard held the drain until the supervisor killed the
+   process). This wait has no limit of its own: a streamed answer still
+   running holds it until it ends. The connection re-check backstop then
+   stops.
+3. **Background work stops.** The sinks' periodic flush loops, the
+   session-TTL prune and the license refresh are cancelled (a loop that
+   had already died is logged by exception type and never cuts the
+   shutdown short); the upstream client, router, upstream authorizers,
+   access gate and upload inspector close (a plugin's close that fails is
+   logged by exception type and never skips the steps below).
+4. **The off-machine audit sinks flush from the still-open audit
+   database** (`aclose()` of `[audit.s3]` and `[audit.azure]`,
+   concurrently): the rows spooled since the last upload, including the
+   END rows of the last requests, ship now instead of at the next start.
+5. **The audit database closes**, then the overrides store, then **the
+   vault**, and the telemetry exporters flush last.
+
+Step 4 is bounded so a hanging store never keeps the databases open: both
+flushes share one 45 s deadline. Each upload keeps the sink's own 30 s
+HTTP timeout, and the deadline sits above it on purpose: the final flush
+uploads the sink's in-memory START/AMEND rows first, and rows it could
+not ship then are lost from the off-machine copy, so a slow but working
+store is never cut short by the core — only a stuck sink, or a long
+backlog drain whose spooled rows wait in the database anyway, reaches the
+deadline. A flush still running then is cancelled — logged as a
+WARNING with the count only — and its unshipped spooled rows stay in the
+audit database for the next start (the per-sink mark advances only after a
+confirmed upload); a flush that ignores the cancellation for another
+second is abandoned and the audit database and the vault close anyway.
+What is bounded is reaching those closes, not the process exit: Python's
+event-loop teardown cancels and then awaits every task still running, so
+an abandoned flush that keeps ignoring its cancellation holds the process
+open until the supervisor kills it — with both databases already closed,
+nothing is lost then beyond what that flush had not shipped. A flush that
+fails is logged by exception type only (its message may quote a URL or a
+SAS). Allow at least the drain time plus ~50 s in a supervisor's stop
+timeout (Kubernetes `terminationGracePeriodSeconds`, default 30 s;
+systemd `TimeoutStopSec`, default 90 s) so the final flush is not killed;
+the drain itself has no bound (step 2). Pinned by
+`test_shutdown_order.py` (order, the END row of a request in flight at
+shutdown reaching the sink, an open events stream, a hanging sink, a
+failing flush).
+
 ## Faults after the upstream answered
 
 Once the provider has answered, the proxy still restores the answer and

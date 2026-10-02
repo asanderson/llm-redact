@@ -706,12 +706,9 @@ def test_the_handle_map_on_a_real_server(
     # battery: LLM_REDACT_TEST_PG_DSN / _MYSQL_DSN / _ORACLE_DSN).
     from llm_redact.config import RdbmsConfig
     from llm_redact.vault_rdbms import RdbmsVaultManager
-    from test_vault_rdbms import _REAL_DSNS, _drop_tables
+    from test_vault_rdbms import _drop_tables, _real_dsn
 
-    dsn = _REAL_DSNS[backend_name]
-    if not dsn:
-        pytest.skip(f"no real {backend_name} server configured")
-    config = VaultConfig(backend=backend_name, rdbms=RdbmsConfig(dsn=dsn))
+    config = VaultConfig(backend=backend_name, rdbms=RdbmsConfig(dsn=_real_dsn(backend_name)))
     _drop_tables(config)
     _bound(monkeypatch, per_session=2, total=2)
     manager = RdbmsVaultManager(RdbmsStore(config, None))

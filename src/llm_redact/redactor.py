@@ -180,6 +180,7 @@ class Redactor:
         budget: StringBudget | None = None,
         overrides: OverrideCheck | None = None,
         added_deny: DetectorPlan | None = None,
+        final_blocks: frozenset[str] = frozenset(),
     ) -> None:
         # The detector list compiled for string-at-a-time detection (same
         # output, gated per string), taken as it is now: plan_for shares the
@@ -212,6 +213,12 @@ class Redactor:
         # gate's detection overlay, authorization.py), detected apart from
         # it so that they can only tighten it (``_absorb``); None for none.
         self._added_deny = added_deny
+        # The detector types whose block mode that overlay ADDED, past their
+        # configured mode: refusing one of those values is final — no
+        # approved override passes it and its refusal mints no code — since
+        # the configured policy would have redacted (or forwarded) it, an
+        # approval would forward as sent a value it never would have.
+        self._final_blocks = final_blocks
 
     def with_floors(self, floors: Mapping[str, int]) -> "Redactor":
         """This redactor numbering new placeholders above ``floors`` as well
@@ -249,10 +256,21 @@ class Redactor:
             budget=budget,
             overrides=self._overrides,
             added_deny=self._added_deny,
+            final_blocks=self._final_blocks,
         )
 
     def _overridden(self, d: Detection) -> bool:
-        return self._overrides is not None and self._overrides.allows(d.detector_type, d.value)
+        """Whether the requester's approved overrides let this refusing
+        value through (forwarded as sent). A block the detection overlay
+        added is never put to them: the refusal is final
+        (``OverrideCheck.unoverridable``) — no grant is consulted or
+        consumed, no code minted."""
+        if self._overrides is None:
+            return False
+        if d.detector_type in self._final_blocks:
+            self._overrides.unoverridable()
+            return False
+        return self._overrides.allows(d.detector_type, d.value)
 
     def _winners(self, text: str) -> list[Detection]:
         """The detections redaction acts on in ``text``: the configured

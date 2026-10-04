@@ -35,8 +35,10 @@ and tags `vX.Y.Z`.
     extra deny string is detected apart from the configured detectors: where it overlaps a
     value the configured policy redacts or denies, their union is redacted as one
     placeholder; it beats only a value the policy forwards as sent (warn mode, an approved
-    refusal override). A relaxation, an unknown rule name or a malformed value refuses the
-    request (403 / 1008) instead of being dropped. Each distinct overlay is built once (at
+    refusal override). A block the overlay adds past the configured mode is final: no refusal
+    override is consulted or used for it, and its refusal carries no code. A relaxation, an
+    unknown rule name or a malformed value refuses the request (403 / 1008) instead of being
+    dropped. Each distinct overlay is built once (at
     most 64 kept; a reload that changes `[detection]` drops them).
   - New local refusal kind `authorization` (`llm_redact_local_refusals_total`) and
     bookkeeping stage `authorization`; `/status` `access` reports `authorizes_requests` and

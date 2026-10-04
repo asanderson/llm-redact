@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -270,3 +271,25 @@ async def test_a_refused_upgrade_writes_no_audit_start_row(
     assert closed.code == 1008
     assert audit.begun == [] and fake.paths == []
     assert [entry.status for entry in audit.recorded] == [403]
+
+
+async def test_a_block_the_overlay_added_closes_with_no_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The configured policy redacts the email; the overlay blocks it — a
+    # refusal no approval passes: the close reason carries no code.
+    _install(monkeypatch, OverlayGate(DetectionOverlay(modes=(("email", "block"),))))
+    store = tmp_path / "overrides.db"
+    async with Upstream() as fake:
+        config = _cfg(
+            {"openai": {"upstream_base_url": fake.url()}},
+            overrides={"enabled": True, "path": str(store)},
+        )
+        with _serve(config) as proxy:
+            async with websockets.connect(f"ws://{proxy.host}/v1/realtime") as client:
+                await client.send(_frame("openai", f"mail {EMAIL}"))
+                closed = await _closed(client)
+            row = await _recent(proxy.host, lambda r: r["method"] == "WS")
+    assert closed is not None and closed.code == 1008 and "EMAIL" in closed.reason
+    assert "llm-redact override" not in closed.reason and "dashboard" not in closed.reason
+    assert fake.texts() == [] and row["override"] is None

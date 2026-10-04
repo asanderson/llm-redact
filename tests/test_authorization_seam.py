@@ -19,6 +19,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -914,6 +915,23 @@ def test_tightening_is_per_type_and_takes_the_strictest() -> None:
     assert builds.modes == {"GITHUB_TOKEN": "warn"}  # never mutated
 
 
+def test_the_blocks_an_overlay_adds_are_final() -> None:
+    # A block past the configured mode (redact or warn) is the overlay's own:
+    # its refusals take no override. One the configured policy already has
+    # stays the configured policy's.
+    config = DetectionConfig(modes=(("email", "block"), ("github_token", "warn")))
+    built = _builds(config).build(
+        DetectionOverlay(
+            modes=(("email", "block"), ("github_token", "block"), ("phone_number", "block"))
+        )
+    )
+    assert built is not None
+    assert built.modes == {"EMAIL": "block", "GITHUB_TOKEN": "block", "PHONE": "block"}
+    assert built.final_blocks == frozenset({"GITHUB_TOKEN", "PHONE"})
+    redacting = _builds(config).build(DetectionOverlay(modes=(("phone_number", "redact"),)))
+    assert redacting is None  # redact is the default: nothing tightens
+
+
 def test_a_custom_rule_is_known_by_name() -> None:
     from llm_redact.detection.engine import CustomRule
 
@@ -938,3 +956,50 @@ def test_a_failed_build_is_not_kept() -> None:
     with pytest.raises(OverlayError, match="unknown rule"):
         builds.build(DetectionOverlay(modes=(("nope", "block"),)))
     assert len(builds) == 0
+
+
+async def test_a_block_the_overlay_added_takes_no_refusal_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Under the configured policy the email is REDACTED, which never mints a
+    # code; the overlay's block on it must not open a path to plaintext: no
+    # code is minted, and an approval of the same value (made for a
+    # configured block) is never consulted.
+    import re
+
+    from llm_redact.config import OverridesConfig
+    from llm_redact.overrides import OverrideStore
+
+    code_re = re.compile(r"llm-redact override ([0-9A-Z]{12}) --once \| --always")
+    store = tmp_path / "overrides.db"
+    overrides = OverridesConfig(enabled=True, path=str(store))
+    gate = OverlayGate(None)
+    _registry(monkeypatch, gate)
+    configured = _app(
+        Upstream(), detection=DetectionConfig(modes=(("email", "block"),)), overrides=overrides
+    )
+    refused = await _post(configured, "/v1/messages", _messages(f"mail {EMAIL}"), ANTHROPIC)
+    match = code_re.search(refused.json()["error"]["message"])
+    assert refused.status_code == 400 and match is not None
+    OverrideStore(store).approve("always", approver=None, code=match.group(1))
+    approved_upstream = Upstream()
+    approved = _app(
+        approved_upstream,
+        detection=DetectionConfig(modes=(("email", "block"),)),
+        overrides=overrides,
+    )
+    assert (
+        await _post(approved, "/v1/messages", _messages(f"mail {EMAIL}"), ANTHROPIC)
+    ).status_code == 200
+    assert EMAIL in approved_upstream.sent()  # the rule works for the configured block
+
+    gate.overlay = DetectionOverlay(modes=(("email", "block"),))
+    upstream = Upstream()
+    app = _app(upstream, overrides=overrides)
+    refused = await _post(app, "/v1/messages", _messages(f"mail {EMAIL}"), ANTHROPIC)
+    assert refused.status_code == 400 and "EMAIL" in refused.text
+    assert "llm-redact override" not in refused.text
+    assert upstream.requests == []
+    # No new pending code; the approved rule is still the only record.
+    assert [entry.state for entry in OverrideStore(store).entries()] == ["always"]
+    refused_once(app.state.proxy, "blocked_value", "anthropic")

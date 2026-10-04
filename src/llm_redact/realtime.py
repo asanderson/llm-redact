@@ -1503,6 +1503,7 @@ async def _relay(
             modes=overlay.modes if overlay is not None else relay.modes,
             warn_counts=state.warn_counts,
             added_deny=overlay.deny if overlay is not None else None,
+            final_blocks=overlay.final_blocks if overlay is not None else frozenset(),
         ),
         static_ctx.rehydrator,
     )

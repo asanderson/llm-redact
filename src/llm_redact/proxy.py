@@ -1285,6 +1285,7 @@ class ProxyState:
             modes=overlay.modes if overlay is not None else self.modes,
             warn_counts=self.warn_counts,
             added_deny=overlay.deny if overlay is not None else None,
+            final_blocks=overlay.final_blocks if overlay is not None else frozenset(),
         )
         rehydrator = Rehydrator(
             vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
@@ -1306,6 +1307,7 @@ class ProxyState:
             modes=overlay.modes,
             warn_counts=self.warn_counts,
             added_deny=overlay.deny,
+            final_blocks=overlay.final_blocks,
         )
         return RequestContext(ctx.session_id, ctx.vault, redactor, ctx.rehydrator)
 

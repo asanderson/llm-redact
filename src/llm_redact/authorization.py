@@ -60,12 +60,16 @@ class OverlayError(Exception):
 class OverlayBuild:
     """One overlay applied to the configured policy it was built against: the
     type-keyed modes a request's redactor runs with instead of the configured
-    ones, and the overlay's deny strings — detected apart from the configured
+    ones; the overlay's deny strings — detected apart from the configured
     detectors (``Redactor(added_deny=...)``), so that they can only tighten
-    what the configured policy does, never displace it."""
+    what the configured policy does, never displace it; and the detector
+    types whose block mode the overlay ADDED (``Redactor(final_blocks=...)``):
+    their refusals take no refusal override, since the configured policy
+    would have redacted or forwarded those values, never refused them."""
 
     modes: Mapping[str, str]
     deny: DetectorPlan | None = None
+    final_blocks: frozenset[str] = frozenset()
 
 
 def _require_shape(overlay: object) -> DetectionOverlay:
@@ -133,8 +137,13 @@ class OverlayBuilds:
         for value in overlay.deny:
             if not value or any(mark in value for mark in _GUILLEMETS):
                 raise OverlayError("a deny string is empty or holds a guillemet")
+        final = frozenset(
+            detector_type
+            for detector_type, mode in modes.items()
+            if mode == "block" and self.modes.get(detector_type) != "block"
+        )
         if not overlay.deny:
-            return None if modes is self.modes else OverlayBuild(modes)
+            return None if modes is self.modes else OverlayBuild(modes, final_blocks=final)
         # One case-insensitive DenyDetector over the overlay's strings, run
         # beside the configured detectors — never among them: in their
         # overlap resolution a deny string wins every overlap, and the
@@ -142,7 +151,7 @@ class OverlayBuilds:
         # fired). The redactor takes the added matches in on top of the
         # configured winners (``Redactor._absorb``).
         entries = [DenyEntry(value) for value in dict.fromkeys(overlay.deny)]
-        return OverlayBuild(modes, DetectorPlan([DenyDetector(entries)]))
+        return OverlayBuild(modes, DetectorPlan([DenyDetector(entries)]), final)
 
     def _tightened(self, pairs: tuple[tuple[str, str], ...]) -> Mapping[str, str]:
         """The configured type-keyed modes with ``pairs`` applied: the same

@@ -765,7 +765,11 @@ class DetectionOverlay:
       (built-in and custom rule names), each mode ``"redact"`` or
       ``"block"``. A mode must be at least as strict as the rule's
       configured one (warn < redact < block). Modes dispatch per detector
-      TYPE, so a rule sharing its type with another tightens both.
+      TYPE, so a rule sharing its type with another tightens both. A block
+      the overlay ADDS (past the configured mode) is final: no refusal
+      override is consulted or used for it and its refusal carries no code
+      — an approval would forward as sent a value the configured policy
+      redacts (a rule the configured policy blocks stays overridable).
     - ``deny``: extra literal deny strings (case-insensitive, non-empty, no
       guillemets), redacted wherever they occur. Unlike ``[detection]
       deny``, which wins every overlap among the configured detectors, they

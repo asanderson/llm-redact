@@ -1003,3 +1003,45 @@ async def test_a_block_the_overlay_added_takes_no_refusal_override(
     # No new pending code; the approved rule is still the only record.
     assert [entry.state for entry in OverrideStore(store).entries()] == ["always"]
     refused_once(app.state.proxy, "blocked_value", "anthropic")
+
+
+def test_a_rule_not_built_tightens_its_type_when_a_built_rule_emits_it() -> None:
+    # github_token is disabled, but github_fine_grained_pat (built) emits the
+    # same GITHUB_TOKEN type: tightening one rule tightens its type, as
+    # [detection.modes] does — never silently dropped.
+    without = tuple(name for name in DetectionConfig().enabled if name != "github_token")
+    built = _builds(DetectionConfig(enabled=without)).build(
+        DetectionOverlay(modes=(("github_token", "block"),))
+    )
+    assert built is not None and built.modes == {"GITHUB_TOKEN": "block"}
+    assert built.final_blocks == frozenset({"GITHUB_TOKEN"})
+
+
+def test_a_custom_rule_emitting_a_builtin_type_builds_that_type() -> None:
+    from llm_redact.detection.engine import CustomRule
+
+    without = tuple(name for name in DetectionConfig().enabled if name != "email")
+    config = DetectionConfig(
+        enabled=without,
+        custom_rules=(
+            CustomRule(name="corp_mail", pattern=r"\w+@corp\.example", detector_type="EMAIL"),
+        ),
+    )
+    built = _builds(config).build(DetectionOverlay(modes=(("email", "block"),)))
+    assert built is not None and built.modes == {"EMAIL": "block"}
+
+
+async def test_a_disabled_rules_overlay_block_reaches_its_built_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pat = "github_pat_11ABCDEFG0123456789abc_" + "a" * 59
+    without = tuple(name for name in DetectionConfig().enabled if name != "github_token")
+    app, upstream, _gate = _overlay_app(
+        monkeypatch,
+        DetectionOverlay(modes=(("github_token", "block"),)),
+        DetectionConfig(enabled=without),
+    )
+    response = await _post(app, "/v1/messages", _messages(f"token {pat}"), ANTHROPIC)
+    assert response.status_code == 400 and "GITHUB_TOKEN" in response.text
+    assert upstream.requests == []
+    refused_once(app.state.proxy, "blocked_value", "anthropic")

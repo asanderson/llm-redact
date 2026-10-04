@@ -784,8 +784,10 @@ class DetectionOverlay:
     The core refuses the request (403) rather than drop anything it cannot
     apply: a relaxation (checked against the configured mode even for a
     rule not built here), an unknown rule name, a malformed mode or deny
-    string. A rule that exists but is not built (disabled, or scoped out by
-    ``[detection] languages``) is otherwise a no-op. An empty overlay is the
+    string. A rule whose detector type no built rule emits (disabled, or
+    scoped out by ``[detection] languages``, with no built rule sharing its
+    type) is otherwise a no-op; one that is not built while a built rule
+    shares its type tightens that type. An empty overlay is the
     configured policy. Hashable: the core keeps one build per distinct
     overlay (``authorization.OVERLAY_CACHE_SIZE``, least recently used
     dropped), so a gate should hand out few distinct values — one per role

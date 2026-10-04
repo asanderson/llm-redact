@@ -110,7 +110,12 @@ class OverlayBuilds:
         self._type_by_rule = {rule.name: rule.detector_type for rule in BUILTIN_RULES}
         custom = {rule.name: rule.detector_type for rule in config.custom_rules}
         self._type_by_rule.update(custom)
-        self._built = frozenset(active_rule_names(config)) | frozenset(custom)
+        # The detector types a built rule emits: tightening a rule tightens
+        # its TYPE (modes dispatch per type, as [detection.modes] does), so a
+        # rule that is not built still tightens a type a built sibling emits.
+        self._built_types = frozenset(
+            self._type_by_rule[name] for name in active_rule_names(config)
+        ) | frozenset(custom.values())
         self._cache: OrderedDict[DetectionOverlay, OverlayBuild | None] = OrderedDict()
 
     def __len__(self) -> int:
@@ -168,8 +173,8 @@ class OverlayBuilds:
             current = (tightened if tightened is not None else self.modes).get(
                 detector_type, "redact"
             )
-            if rule not in self._built or _STRICTNESS[mode] <= _STRICTNESS[current]:
-                continue
+            if detector_type not in self._built_types or _STRICTNESS[mode] <= _STRICTNESS[current]:
+                continue  # no built rule emits the type, or nothing tightens
             if tightened is None:
                 tightened = dict(self.modes)
             if mode == "redact":

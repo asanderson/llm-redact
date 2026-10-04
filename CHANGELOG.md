@@ -24,9 +24,10 @@ and tags `vX.Y.Z`.
     and may select the model — such a base belongs in `upstream_base_url`; on realtime the
     `model` or Azure preview `deployment` query parameter; None when unknown),
     whether a credential the proxy holds is spent —
-    after the routing plan, the scanned-body rule and the stored-object check, and before
-    the session, redaction, the `[audit] required` START row, the upstream authorizer and
-    any upstream contact. A string refuses with that reason (a recorded provider-shaped
+    after the routing plan, the scanned-body rule and the stored-object check (an
+    unrecognized route before its body is read; a routing layer's local answer before it is
+    given), and before the session, redaction, the `[audit] required` START row, the
+    upstream authorizer and any upstream contact. A string refuses with that reason (a recorded provider-shaped
     403; realtime: close 1008); an exception, a timeout (5 s for an awaitable) or any other
     answer refuses with the core's own text. Without the member nothing is asked and no
     await is added; a member that is present but cannot be called refuses every request.

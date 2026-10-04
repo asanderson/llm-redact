@@ -899,15 +899,17 @@ class AccessGate(Protocol):
       rendered either way.
     - OPTIONAL ``authorize_request(request: AuthorizationRequest) -> str | None``
       — whether this admitted requester may make this request (roles,
-      attributes): asked for EVERY forwarded HTTP request — a matched route
-      once its body is parsed, after the routing plan, the scanned-body
-      rule and the stored-object check; an unrecognized route at the same
-      place, right before it is forwarded — and EVERY realtime upgrade
-      (after admission and adapter resolution), always BEFORE the session
-      is opened, anything is redacted, the ``[audit] required`` START row,
-      the upstream authorizer and any upstream contact, in the request's
-      own context (what ``admit`` set in context variables is visible).
-      None allows; a non-empty string refuses with that FIXED reason
+      attributes): asked once for EVERY forwarded HTTP request — a matched
+      route once its body is parsed, after the routing plan, the
+      scanned-body rule and the stored-object check; an unrecognized route
+      after its routing plan and BEFORE its body is read (nothing in it
+      decides); a request a routing layer answers locally (model discovery)
+      before that answer is given — and for EVERY realtime upgrade (after
+      admission and adapter resolution), always BEFORE the session is
+      opened, anything is redacted, the ``[audit] required`` START row, the
+      upstream authorizer and any upstream contact, in the request's own
+      context (what ``admit`` set in context variables is visible). None
+      allows; a non-empty string refuses with that FIXED reason
       (value-free: never a user name, a key or a path) — a recorded
       provider-shaped 403, or on a realtime upgrade an accept-then-close
       1008 with the reason cut to 123 bytes; the core never logs it. It may

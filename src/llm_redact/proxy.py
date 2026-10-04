@@ -5145,7 +5145,25 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # where every other proxy-generated reply for a real API path sits —
             # AFTER the disabled-provider 502 and the named-user 403, so an
             # unauthenticated client on a team deployment learns nothing the
-            # gates would refuse. It needs nothing from the body.
+            # gates would refuse. It needs nothing from the body — and it is
+            # given only once the access gate's request authorization allows
+            # it, like any request (nothing read, nothing forwarded).
+            if state.authorization.authorizes:
+                refused = await _authorization_check(
+                    state,
+                    request,
+                    adapter,
+                    kind,
+                    provider_name=provider_name,
+                    path=path,
+                    model=adapter.request_model(request.method, path, None)
+                    if adapter is not None
+                    else None,
+                    identity=upstream_auth is not None,
+                    started=started,
+                )
+                if refused is not None:
+                    return refused
             return _answer_locally(state, request, answer, path=path, started=started)
 
     # Routing (the llm-redact-pro routing layer) plans an UNRECOGNIZED route
@@ -5207,6 +5225,25 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             )
         body_bytes = capped
     else:
+        if state.authorization.authorizes:
+            # Pass-through: its facts are all known before the body (none of
+            # it is read for them, no model), so the access gate decides
+            # before the unbounded read — and with the client's own credential
+            # only (one the proxy holds was refused above, the identity and
+            # lending-plan 403s).
+            refused = await _authorization_check(
+                state,
+                request,
+                None,
+                kind,
+                provider_name=provider_name,
+                path=path,
+                model=None,
+                identity=False,
+                started=started,
+            )
+            if refused is not None:
+                return refused
         body_bytes = await _waited(request.body())
 
     parsed: Any = None
@@ -5428,40 +5465,28 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             started=started,
         )
 
-    # The access gate's authorization (llm-redact-pro roles): asked with the
-    # request's facts — matched or pass-through, once everything above that
-    # may refuse it has — before the session, redaction, the audit START
-    # row, the upstream authorizer and any upstream contact. Without the
-    # member: one attribute test, no await.
+    # The access gate's authorization (llm-redact-pro roles) of a MATCHED
+    # route: asked with the request's facts once everything above that may
+    # refuse it has (its body parsed, its plan made) — before the session,
+    # redaction, the audit START row, the upstream authorizer and any
+    # upstream contact. (A pass-through route was asked before its body was
+    # read, a local answer before it was given.) Without the member: one
+    # attribute test, no await.
     authorization = state.authorization
-    if authorization.authorizes:
-        verdict = authorization.refusal(
-            AuthorizationRequest(
-                surface="http",
-                provider=provider_name,
-                adapter=adapter.name if adapter is not None else None,
-                kind=kind.value,
-                method=request.method,
-                path=path,
-                model=adapter.request_model(request.method, path, parsed)
-                if adapter is not None
-                else None,
-                identity=proxy_credential,
-            ),
-            f"{request.method} {path}",
+    if authorization.authorizes and adapter is not None:
+        refused = await _authorization_check(
+            state,
+            request,
+            adapter,
+            kind,
+            provider_name=provider_name,
+            path=path,
+            model=adapter.request_model(request.method, path, parsed),
+            identity=proxy_credential,
+            started=started,
         )
-        if inspect.isawaitable(verdict):
-            verdict = await verdict
-        if verdict is not None:
-            return _authorization_refused(
-                state,
-                adapter,
-                verdict,
-                provider_name=provider_name,
-                request=request,
-                path=path,
-                started=started,
-            )
+        if refused is not None:
+            return refused
     # The requester's detection overlay (tighten-only), read in the same
     # synchronous stretch as the session below, so it extends exactly the
     # detection objects the request redacts with.
@@ -7166,6 +7191,50 @@ def _object_access_refused(
     )
     logger.info("%s %s -> 403 refused by the session router (stored object)", request.method, path)
     return JSONResponse(error, status_code=403)
+
+
+async def _authorization_check(
+    state: ProxyState,
+    request: Request,
+    adapter: ProviderAdapter | None,
+    kind: RouteKind,
+    *,
+    provider_name: str,
+    path: str,
+    model: str | None,
+    identity: bool,
+    started: float,
+) -> JSONResponse | None:
+    """The access gate's optional ``authorize_request`` on this request's
+    FACTS (``plugin_api.AuthorizationRequest``; asked only when the gate has
+    the member): None when it allows the request, else the recorded 403
+    refusing it. A synchronous answer adds no event-loop turn."""
+    verdict = state.authorization.refusal(
+        AuthorizationRequest(
+            surface="http",
+            provider=provider_name,
+            adapter=adapter.name if adapter is not None else None,
+            kind=kind.value,
+            method=request.method,
+            path=path,
+            model=model,
+            identity=identity,
+        ),
+        f"{request.method} {path}",
+    )
+    if inspect.isawaitable(verdict):
+        verdict = await verdict
+    if verdict is None:
+        return None
+    return _authorization_refused(
+        state,
+        adapter,
+        verdict,
+        provider_name=provider_name,
+        request=request,
+        path=path,
+        started=started,
+    )
 
 
 def _authorization_refused(

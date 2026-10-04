@@ -333,7 +333,9 @@ own answer decides whether the page may read a response).
   adapter, routing kind, method, path, the model the upstream runs, and
   whether a credential the proxy holds is spent — for every forwarded
   request and realtime upgrade, before the session, redaction, the audit
-  START row and any upstream contact, and refuses (403 / close 1008) on the
+  START row and any upstream contact (a pass-through request before its
+  body is read, a routing layer's local answer before it is given), and
+  refuses (403 / close 1008) on the
   gate's reason, an exception, a timeout or a nonsense answer. The model
   is the matched adapter's reading, never a value the upstream ignores: a
   body `model` only where the upstream reads it, the path's where the

@@ -1082,3 +1082,65 @@ async def test_a_member_that_cannot_be_called_refuses_every_request(
         status = (await client.get("/__llm-redact/status")).json()
     assert status["access"][flag] is True
     refused_once(state, "authorization", "anthropic")
+
+
+async def test_a_local_answer_is_authorized_before_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The routing layer's model discovery answers locally: the gate decides
+    # whether that answer reaches the requester, like any request.
+    from llm_redact.plugin_api import LocalAnswer
+
+    listing = {"object": "list", "data": [{"id": "routed-model", "object": "model"}]}
+    router = FakeRouter(
+        local={"/v1/models": LocalAnswer(200, listing, provider="routing", reason="models")}
+    )
+    reg, _calls = install(monkeypatch, router)
+    gate = AuthorizingGate(lambda request: REASON)
+    _registry(monkeypatch, gate, reg)
+    upstream = Upstream()
+    app = create_app(routed_config(), upstream_transport=httpx.MockTransport(upstream))
+    async with _client(app) as client:
+        refused = await client.get("/v1/models", headers=KEY)
+        gate.decide = lambda request: None
+        answered = await client.get("/v1/models", headers=KEY)
+    assert refused.status_code == 403 and refused.json()["error"]["message"] == REASON
+    assert answered.status_code == 200 and answered.json() == listing
+    facts = [(r.adapter, r.kind, r.method, r.model, r.identity) for r in gate.requests]
+    assert facts == [("openai", "redact_only", "GET", None, False)] * 2
+    assert upstream.requests == [] and router.inbounds == []
+    refused_once(app.state.proxy, "authorization", "openai")
+
+
+async def test_a_pass_through_request_is_asked_before_its_body_is_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = AuthorizingGate(lambda request: REASON)
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    app = _app(upstream)
+    read: list[bytes] = []
+
+    async def body() -> Any:
+        read.append(b"chunk")
+        yield b'{"content": "hi"}'
+
+    headers = {**KEY, "content-type": "application/json"}
+    async with _client(app) as client:
+        refused = await client.post(
+            "/v1/threads/thread_abc/messages", content=body(), headers=headers
+        )
+        gate.decide = lambda request: None
+        forwarded = await client.post(
+            "/v1/threads/thread_abc/messages", content=body(), headers=headers
+        )
+    assert refused.status_code == 403 and refused.json() == {"error": REASON}
+    # Refused before its body was read; the allowed one read and forwarded
+    # as sent — and each asked once.
+    assert read == [b"chunk"]
+    assert forwarded.status_code == 200
+    (sent,) = upstream.requests
+    assert sent.content == b'{"content": "hi"}'
+    facts = [(r.adapter, r.kind, r.model, r.identity) for r in gate.requests]
+    assert facts == [(None, "none", None, False)] * 2
+    refused_once(app.state.proxy, "authorization", "openai")

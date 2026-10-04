@@ -340,10 +340,18 @@ own answer decides whether the page may read a response).
   extracted, and a pass-through body is never read (`model` is None), so a
   policy that restricts models must treat an unknown model as refused. A
   gate's per-requester DETECTION OVERLAY can only tighten the configured
-  policy (a stricter mode per rule, extra deny strings); the core refuses
-  the request rather than drop an overlay it cannot apply, and an overlay
-  never turns detection back on for a provider configured
-  `detection = false`.
+  policy (a stricter mode per rule, extra deny strings): with it, every
+  character the configured policy redacts is still redacted and every
+  configured block still refuses. An extra deny string is detected apart
+  from the configured detectors and taken in on top of what they decided:
+  where it overlaps a value the configured policy redacts or denies, the
+  UNION of both spans is redacted as one placeholder, so neither leaves in
+  part; a value the policy blocks refuses the request as before; it beats
+  only a value the policy forwards as sent (warn mode, an approved
+  refusal override) — its own span is redacted, the rest goes as it would
+  have. The core refuses the request rather than drop an overlay it cannot
+  apply, and an overlay never turns detection back on for a provider
+  configured `detection = false`.
 - Status/metrics/audit — and the `/events` live feed, which streams the
   same rows `/recent` serves — expose **types and counts only**: never
   values, never placeholder ids, never allowlist contents (the

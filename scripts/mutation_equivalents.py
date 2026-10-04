@@ -90,33 +90,33 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "The first comparison `d.start >= last_end` is True for both, so no valid "
         "detection stream distinguishes them."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_11": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_7": (
         "cursor = 0 -> cursor = None: cursor is used only as a slice start, and "
         "text[None:i] == text[0:i]. It is reassigned to an int (d.end) after the "
         "first detection, so None only ever stands in for 0 at the first slice."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_14": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_10": (
         "tier-0 mode literal 'redact' -> 'XXredactXX': mode is only compared to "
         "'block' and 'warn'; any other value takes the redact branch, so the "
         "exact spelling is irrelevant."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_15": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_11": (
         "tier-0 mode literal 'redact' -> 'REDACT': same — only 'block'/'warn' are "
         "matched; every other value redacts."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_19": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_15": (
         "_modes.get(type, 'redact') -> .get(type, None): the default is only used "
         "for a type absent from _modes, and None (like 'redact') is neither "
         "'block' nor 'warn', so it takes the redact branch identically."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_21": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_17": (
         "_modes.get(type, 'redact') -> .get(type): dropping the default makes it "
-        "None, which redacts exactly as 'redact' does (see mutmut_19)."
+        "None, which redacts exactly as 'redact' does (see mutmut_15)."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_22": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_18": (
         "default 'redact' -> 'XXredactXX': a non-'block'/'warn' default redacts identically."
     ),
-    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_23": (
+    "llm_redact.redactor.xǁRedactorǁredact_text__mutmut_19": (
         "default 'redact' -> 'REDACT': a non-'block'/'warn' default redacts identically."
     ),
     "llm_redact.rehydrate.x_escape_prefix_start__mutmut_24": (

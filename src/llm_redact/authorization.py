@@ -21,7 +21,6 @@ from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from llm_redact.detection.base import Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.engine import DetectionConfig, DetectorPlan, active_rule_names
 from llm_redact.detection.regex_rules import BUILTIN_RULES
@@ -59,11 +58,14 @@ class OverlayError(Exception):
 
 @dataclass(frozen=True)
 class OverlayBuild:
-    """One overlay applied to the detection objects it was built against:
-    what a request's redactor runs with instead of the configured ones."""
+    """One overlay applied to the configured policy it was built against: the
+    type-keyed modes a request's redactor runs with instead of the configured
+    ones, and the overlay's deny strings — detected apart from the configured
+    detectors (``Redactor(added_deny=...)``), so that they can only tighten
+    what the configured policy does, never displace it."""
 
-    detectors: Sequence[Detector] | DetectorPlan
     modes: Mapping[str, str]
+    deny: DetectorPlan | None = None
 
 
 def _require_shape(overlay: object) -> DetectionOverlay:
@@ -95,12 +97,10 @@ class OverlayBuilds:
     def __init__(
         self,
         config: DetectionConfig,
-        detectors: Sequence[Detector],
         modes: Mapping[str, str],
         *,
         size: int = OVERLAY_CACHE_SIZE,
     ) -> None:
-        self.detectors = detectors
         self.modes = modes
         self.size = size
         self._type_by_rule = {rule.name: rule.detector_type for rule in BUILTIN_RULES}
@@ -133,13 +133,16 @@ class OverlayBuilds:
         for value in overlay.deny:
             if not value or any(mark in value for mark in _GUILLEMETS):
                 raise OverlayError("a deny string is empty or holds a guillemet")
-        if modes is self.modes and not overlay.deny:
-            return None
-        detectors: Sequence[Detector] | DetectorPlan = self.detectors
-        if overlay.deny:
-            deny = DenyDetector([DenyEntry(value) for value in dict.fromkeys(overlay.deny)])
-            detectors = DetectorPlan([*self.detectors, deny])
-        return OverlayBuild(detectors, modes)
+        if not overlay.deny:
+            return None if modes is self.modes else OverlayBuild(modes)
+        # One case-insensitive DenyDetector over the overlay's strings, run
+        # beside the configured detectors — never among them: in their
+        # overlap resolution a deny string wins every overlap, and the
+        # value it cut into would leave in part (a configured block never
+        # fired). The redactor takes the added matches in on top of the
+        # configured winners (``Redactor._absorb``).
+        entries = [DenyEntry(value) for value in dict.fromkeys(overlay.deny)]
+        return OverlayBuild(modes, DetectorPlan([DenyDetector(entries)]))
 
     def _tightened(self, pairs: tuple[tuple[str, str], ...]) -> Mapping[str, str]:
         """The configured type-keyed modes with ``pairs`` applied: the same

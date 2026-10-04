@@ -1463,12 +1463,13 @@ async def _relay(
         static_ctx.session_id,
         static_ctx.vault,
         Redactor(
-            overlay.detectors if overlay is not None else relay.detectors,
+            relay.detectors,
             static_ctx.vault,
             relay.allowlist,
             counts=connection_counts,
             modes=overlay.modes if overlay is not None else relay.modes,
             warn_counts=state.warn_counts,
+            added_deny=overlay.deny if overlay is not None else None,
         ),
         static_ctx.rehydrator,
     )

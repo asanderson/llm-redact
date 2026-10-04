@@ -839,7 +839,7 @@ class ProxyState:
         self.modes = build_modes(config.detection)
         # The access gate's detection overlays (authorization.py), built per
         # distinct overlay against exactly these detection objects.
-        self.overlay_builds = OverlayBuilds(config.detection, self.detectors, self.modes)
+        self.overlay_builds = OverlayBuilds(config.detection, self.modes)
         # Process-lifetime totals by type (for /status), shared across all
         # per-session redactors/rehydrators.
         self.detection_counts: Counter[str] = Counter()
@@ -1245,9 +1245,9 @@ class ProxyState:
         """The request's session objects. ``overlay``: the requester's
         detection overlay (``authorization.OverlayBuilds.build``, against
         this generation's detection objects — read in the same synchronous
-        stretch), which the request's redactor runs with instead of the
-        configured detectors and modes; None keeps the shared static context
-        (the fast path)."""
+        stretch): the request's redactor runs its modes instead of the
+        configured ones, and its deny strings on top of the configured
+        detectors; None keeps the shared static context (the fast path)."""
         if self.session_router.mode == "static":
             return self._overlaid(self._static_context, overlay)
         session_id = self.session_router.resolve(
@@ -1283,12 +1283,13 @@ class ProxyState:
         # Thin per-request wrappers over the shared detectors, allowlist and
         # counters: object construction only — no regex compilation, no DB open.
         redactor = Redactor(
-            overlay.detectors if overlay is not None else self.detectors,
+            self.detectors,
             _SealedVault(vault) if sealed is not None else vault,
             self.allowlist,
             counts=self.detection_counts,
             modes=overlay.modes if overlay is not None else self.modes,
             warn_counts=self.warn_counts,
+            added_deny=overlay.deny if overlay is not None else None,
         )
         rehydrator = Rehydrator(
             vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
@@ -1297,17 +1298,19 @@ class ProxyState:
 
     def _overlaid(self, ctx: RequestContext, overlay: OverlayBuild | None) -> RequestContext:
         """``ctx`` (an unsealed shared context) itself, or — with an overlay
-        — a thin copy whose redactor runs the overlay's detectors and modes
-        over the same vault, allowlist, counters and rehydrator."""
+        — a thin copy whose redactor runs the overlay's modes and added deny
+        strings over the same detectors, vault, allowlist, counters and
+        rehydrator."""
         if overlay is None:
             return ctx
         redactor = Redactor(
-            overlay.detectors,
+            self.detectors,
             ctx.vault,
             self.allowlist,
             counts=self.detection_counts,
             modes=overlay.modes,
             warn_counts=self.warn_counts,
+            added_deny=overlay.deny,
         )
         return RequestContext(ctx.session_id, ctx.vault, redactor, ctx.rehydrator)
 
@@ -1761,7 +1764,7 @@ class ProxyState:
             allowlist = build_allowlist(effective.detection)
             modes = build_modes(effective.detection)
             # Every cached overlay build dies with the objects it extended.
-            overlay_builds = OverlayBuilds(effective.detection, detectors, modes)
+            overlay_builds = OverlayBuilds(effective.detection, modes)
         redactor = Redactor(
             detectors,
             self.vault,

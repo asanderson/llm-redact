@@ -158,6 +158,22 @@ async def test_the_overlay_holds_for_every_frame(
     assert closed.code == 1008 and "EMAIL" in closed.reason
 
 
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+async def test_an_extra_deny_string_inside_a_redacted_value_keeps_its_token(
+    monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    # The overlay only tightens: the email keeps its own token over the
+    # union with the deny string inside it, never a placeholder cut into it.
+    _install(monkeypatch, OverlayGate(DetectionOverlay(deny=("acme",))))
+    async with Upstream() as fake:
+        with _serve(_config(provider, fake.url())) as proxy:
+            async with websockets.connect(f"ws://{proxy.host}{PATHS[provider]}") as client:
+                await client.send(_frame(provider, "mail bob.private@acme-corp.example"))
+                await client.recv()
+    [sent] = fake.texts()
+    assert "bob.private" not in sent and "acme" not in sent and "«EMAIL_001»" in sent
+
+
 async def test_an_overlay_the_core_cannot_apply_refuses_the_upgrade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

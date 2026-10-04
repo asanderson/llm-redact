@@ -741,7 +741,9 @@ class AuthorizationRequest:
 @dataclass(frozen=True)
 class DetectionOverlay:
     """Detection a requester gets ON TOP OF the configured policy (the access
-    gate's optional ``detection_overlay``): it can only TIGHTEN it.
+    gate's optional ``detection_overlay``): it can only TIGHTEN it — with an
+    overlay, every character the configured policy redacts stays redacted
+    and every configured block still refuses.
 
     - ``modes``: ``(rule name, mode)`` pairs, named like ``[detection.modes]``
       (built-in and custom rule names), each mode ``"redact"`` or
@@ -749,8 +751,15 @@ class DetectionOverlay:
       configured one (warn < redact < block). Modes dispatch per detector
       TYPE, so a rule sharing its type with another tightens both.
     - ``deny``: extra literal deny strings (case-insensitive, non-empty, no
-      guillemets) — always redacted, winning every overlap, exactly like
-      ``[detection] deny``.
+      guillemets), redacted wherever they occur. Unlike ``[detection]
+      deny``, which wins every overlap among the configured detectors, they
+      are detected APART from those and taken in on top of what they
+      decided, so they never displace it: where one overlaps a value the
+      configured policy redacts or denies, the UNION of both spans is
+      redacted as one placeholder (neither leaves in part); a value the
+      policy blocks still refuses the request; only a value the policy
+      forwards as sent (warn mode, an approved refusal override) yields to
+      it — the deny string's span is redacted, the rest sent as before.
 
     The core refuses the request (403) rather than drop anything it cannot
     apply: a relaxation (checked against the configured mode even for a

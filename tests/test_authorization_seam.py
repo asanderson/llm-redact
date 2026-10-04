@@ -41,7 +41,7 @@ from llm_redact.authorization import (
     query_model,
 )
 from llm_redact.config import AuditConfig, Config, ProviderConfig
-from llm_redact.detection.engine import DetectionConfig, build_detectors, build_modes
+from llm_redact.detection.engine import DetectionConfig, build_modes
 from llm_redact.plugin_api import Admission, AuthorizationRequest, DetectionOverlay
 from llm_redact.proxy import create_app
 from llm_redact.registry import Registry
@@ -563,29 +563,135 @@ async def test_redact_is_tightened_to_block(monkeypatch: pytest.MonkeyPatch) -> 
     refused_once(app.state.proxy, "blocked_value", "anthropic")
 
 
-async def test_extra_deny_strings_are_redacted_and_win_every_overlap(
+# An email the configured policy redacts, holding the overlay's deny string.
+OVERLAPPED = "bob.private@acme-corp.example"
+
+
+async def test_extra_deny_strings_only_tighten_the_configured_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Redacted wherever they occur — and where one overlaps a value the
+    # configured policy redacts, that value keeps its own token over their
+    # union: never a placeholder cut into it, the rest sent as it was.
     app, upstream, _gate = _overlay_app(
-        monkeypatch, DetectionOverlay(deny=(DENIED.lower(), DENIED.lower()))
+        monkeypatch, DetectionOverlay(deny=(DENIED.lower(), DENIED.lower(), "acme"))
     )
-    response = await _post(app, "/v1/messages", _messages(f"about {DENIED} and {EMAIL}"), ANTHROPIC)
+    text = f"about {DENIED}, mail {OVERLAPPED} or {EMAIL}, ask acme"
+    response = await _post(app, "/v1/messages", _messages(text), ANTHROPIC)
     assert response.status_code == 200
     sent = upstream.sent()
-    assert DENIED not in sent and "«DENY_001»" in sent and "«EMAIL_001»" in sent
+    assert "about «DENY_001», mail «EMAIL_001» or «EMAIL_002», ask «DENY_002»" in sent
+    assert DENIED not in sent and "bob.private" not in sent and "acme" not in sent
     # Only this requester's: the configured policy is untouched.
     assert app.state.proxy.redactor.redact_text(DENIED) == DENIED
 
 
+async def test_an_extra_deny_string_never_lets_a_configured_block_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, upstream, _gate = _overlay_app(
+        monkeypatch,
+        DetectionOverlay(deny=("acme",)),
+        DetectionConfig(modes=(("email", "block"),)),
+    )
+    response = await _post(app, "/v1/messages", _messages(f"mail {OVERLAPPED}"), ANTHROPIC)
+    assert response.status_code == 400 and "EMAIL" in response.text
+    assert upstream.requests == [] and len(app.state.proxy.vault) == 0
+    refused_once(app.state.proxy, "blocked_value", "anthropic")
+
+
+async def test_an_extra_deny_string_beats_only_a_value_forwarded_as_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # warn mode forwards the email as sent: the deny string inside it is
+    # redacted, the rest goes as the configured policy sends it (honest:
+    # warn mode protects nothing).
+    app, upstream, _gate = _overlay_app(
+        monkeypatch,
+        DetectionOverlay(deny=("acme",)),
+        DetectionConfig(modes=(("email", "warn"),)),
+    )
+    response = await _post(app, "/v1/messages", _messages(f"mail {OVERLAPPED}"), ANTHROPIC)
+    assert response.status_code == 200
+    assert "mail bob.private@«DENY_001»-corp.example" in upstream.sent()
+
+
+async def test_an_extra_deny_string_and_a_configured_one_are_redacted_as_their_union(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_redact.detection.deny import DenyEntry
+
+    app, upstream, _gate = _overlay_app(
+        monkeypatch,
+        DetectionOverlay(deny=("acme corp",)),
+        DetectionConfig(deny_strings=(DenyEntry("corp secret plan"),)),
+    )
+    text = "status of acme corp secret plan today"
+    response = await _post(app, "/v1/messages", _messages(text), ANTHROPIC)
+    assert response.status_code == 200
+    assert "status of «DENY_001» today" in upstream.sent()
+    assert app.state.proxy.vault.original_for("«DENY_001»") == "acme corp secret plan"
+
+
 async def test_an_overlay_applies_to_an_upload(monkeypatch: pytest.MonkeyPatch) -> None:
-    app, upstream, _gate = _overlay_app(monkeypatch, DetectionOverlay(deny=(DENIED,)))
+    app, upstream, _gate = _overlay_app(monkeypatch, DetectionOverlay(deny=(DENIED, "acme")))
     async with _client(app) as client:
         response = await client.post(
-            "/v1/files", content=_upload(f"notes on {DENIED}".encode()), headers=FORM
+            "/v1/files",
+            content=_upload(f"notes on {DENIED} for {OVERLAPPED}".encode()),
+            headers=FORM,
         )
     assert response.status_code == 200
-    assert DENIED.encode() not in upstream.requests[0].content
-    assert b"\xc2\xabDENY_001\xc2\xbb" in upstream.requests[0].content
+    sent = upstream.requests[0].content
+    assert DENIED.encode() not in sent and b"bob.private" not in sent
+    assert "notes on «DENY_001» for «EMAIL_001»".encode() in sent
+
+
+async def test_an_uploaded_value_a_configured_block_refuses_stays_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, upstream, _gate = _overlay_app(
+        monkeypatch,
+        DetectionOverlay(deny=("acme",)),
+        DetectionConfig(modes=(("email", "block"),)),
+    )
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/files", content=_upload(f"notes for {OVERLAPPED}".encode()), headers=FORM
+        )
+    assert response.status_code == 400 and "EMAIL" in response.text
+    assert upstream.requests == []
+    refused_once(app.state.proxy, "blocked_value", "openai")
+
+
+async def test_a_converted_document_keeps_the_configured_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Convert mode scans the extracted text and sends the document as its
+    # redacted text: an extra deny string inside the email is redacted with
+    # it, never cut into it.
+    from document_fixtures import pdf
+    from llm_redact.config import parse_config
+    from test_extraction_convert import _file_part
+    from test_extraction_convert import _upload as _document
+
+    _registry(monkeypatch, OverlayGate(DetectionOverlay(deny=("acme",))))
+    upstream = Upstream()
+    config = parse_config(
+        {
+            "extraction": {"enabled": True, "convert": True},
+            "providers": {"openai": {"upstream_base_url": UPSTREAM}},
+        },
+        "t",
+    )
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    document = _document(pdf([f"payroll contact {OVERLAPPED}"]))
+    async with _client(app) as client:
+        response = await client.post("/v1/files", content=document, headers=FORM)
+    assert response.status_code == 200
+    _headers, sent = _file_part(upstream.requests[0])
+    assert b"bob.private" not in sent and b"acme" not in sent
+    assert "payroll contact «EMAIL_001»".encode() in sent
 
 
 async def test_an_overlay_applies_to_the_inspected_text_of_a_binary_upload(
@@ -787,7 +893,7 @@ async def test_builds_are_cached_bounded_and_dropped_by_a_reload(
 
 
 def _builds(config: DetectionConfig, size: int = OVERLAY_CACHE_SIZE) -> OverlayBuilds:
-    return OverlayBuilds(config, build_detectors(config), build_modes(config), size=size)
+    return OverlayBuilds(config, build_modes(config), size=size)
 
 
 def test_tightening_is_per_type_and_takes_the_strictest() -> None:
@@ -804,7 +910,7 @@ def test_tightening_is_per_type_and_takes_the_strictest() -> None:
         )
     )
     assert built is not None and built.modes == {"GITHUB_TOKEN": "block"}
-    assert built.detectors is builds.detectors  # modes only: the same detectors
+    assert built.deny is None  # modes only: no deny strings added
     redacted = builds.build(DetectionOverlay(modes=(("github_token", "redact"),)))
     assert redacted is not None and redacted.modes == {}
     assert builds.modes == {"GITHUB_TOKEN": "warn"}  # never mutated

@@ -27,10 +27,14 @@ and tags `vX.Y.Z`.
   - `detection_overlay() -> plugin_api.DetectionOverlay | None`: per-requester rule modes
     and extra deny strings that can only TIGHTEN the configured policy (warn < redact <
     block), applied to everything the request's redaction does (JSON bodies, uploads and
-    their inspected text, every frame of a realtime connection). A relaxation, an unknown
-    rule name or a malformed value refuses the request (403 / 1008) instead of being
-    dropped. Each distinct overlay is built once (at most 64 kept; a reload that changes
-    `[detection]` drops them).
+    their inspected text, every frame of a realtime connection): every character the
+    configured policy redacts stays redacted and every configured block still refuses. An
+    extra deny string is detected apart from the configured detectors: where it overlaps a
+    value the configured policy redacts or denies, their union is redacted as one
+    placeholder; it beats only a value the policy forwards as sent (warn mode, an approved
+    refusal override). A relaxation, an unknown rule name or a malformed value refuses the
+    request (403 / 1008) instead of being dropped. Each distinct overlay is built once (at
+    most 64 kept; a reload that changes `[detection]` drops them).
   - New local refusal kind `authorization` (`llm_redact_local_refusals_total`) and
     bookkeeping stage `authorization`; `/status` `access` reports `authorizes_requests` and
     `detection_overlays`.

@@ -916,7 +916,10 @@ class AccessGate(Protocol):
       awaited again). An exception, a timeout or any other answer refuses
       with the core's fixed text (counted under the bookkeeping stage
       ``authorization``, logged by exception TYPE). A synchronous answer
-      costs the request no await; without the member nothing is asked.
+      costs the request no await; without the member nothing is asked. A
+      realtime connection is held — revocable through ``ConnectionControl``
+      and by a reload — while its check runs: one closed meanwhile is
+      refused right after it (1008 with the gate's reason), never dialled.
     - OPTIONAL ``detection_overlay() -> DetectionOverlay | None`` — the
       detection this requester gets on top of the configured policy,
       tighten-only (``DetectionOverlay``): asked synchronously once per

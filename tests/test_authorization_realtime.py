@@ -293,3 +293,50 @@ async def test_a_block_the_overlay_added_closes_with_no_code(
     assert closed is not None and closed.code == 1008 and "EMAIL" in closed.reason
     assert "llm-redact override" not in closed.reason and "dashboard" not in closed.reason
     assert fake.texts() == [] and row["override"] is None
+
+
+async def test_an_access_revocation_during_an_awaited_check_is_never_dialled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The relay is held — revocable — from admission on, the awaited check
+    # included: the gate ending the user's access while it decides refuses
+    # the connection right after (1008 with the gate's reason, row 403),
+    # never dialled.
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def decide(request: AuthorizationRequest) -> None:
+        entered.set()
+        while not release.is_set():
+            await asyncio.sleep(0.005)
+
+    _install(monkeypatch, AuthorizingGate(decide))
+    async with Upstream() as fake:
+        with _serve(_config("openai", fake.url())) as proxy:
+            connecting = asyncio.ensure_future(_connect(f"ws://{proxy.host}/v1/realtime"))
+            await _until(entered.is_set)
+            closed_now = proxy.state.connections.close(subject="ada", reason="access revoked")
+            release.set()
+            client = await connecting
+            closed = await _closed(client)
+            row = await _recent(proxy.host, lambda r: r["method"] == "WS")
+            refused_once(proxy.state, "access_gate", "openai")
+            await _until(lambda: not proxy.state.realtime_relays)
+            tracked = proxy.state.connections.open_counts()
+    assert closed_now == 1
+    assert closed is not None and (closed.code, closed.reason) == (1008, "access revoked")
+    assert row["status"] == 403 and fake.paths == []
+    assert tracked == {}
+
+
+async def test_a_refused_upgrade_leaves_nothing_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, AuthorizingGate(lambda request: REASON))
+    async with Upstream() as fake:
+        with _serve(_config("openai", fake.url())) as proxy:
+            client = await _connect(f"ws://{proxy.host}/v1/realtime")
+            closed = await _closed(client)
+            await _recent(proxy.host, lambda r: r["method"] == "WS")
+            await _until(lambda: not proxy.state.realtime_relays)
+            tracked = proxy.state.connections.open_counts()
+    assert closed is not None and closed.code == 1008
+    assert tracked == {} and fake.paths == []

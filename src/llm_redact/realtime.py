@@ -1258,9 +1258,11 @@ async def _authorize_connection(
     detection overlay (its optional ``authorize_request`` and
     ``detection_overlay``), before the session is opened, the audit START row
     and any dial. Returns the overlay build and None, or None and the
-    refusal: (row status, kind, close reason, close code). An awaited check
-    re-checks the relay's admission after it: a reload that changed it
-    meanwhile refuses the connection like a reload before the dial (1012)."""
+    refusal: (row status, kind, close reason, close code). ``relay`` is
+    already held (revocable) while the check runs: one a reload or the
+    access gate revoked meanwhile is refused like a revocation before the
+    dial — 1012 and row 503 for a reload, 1008 with the gate's reason and
+    row 403 for its access."""
     from llm_redact.plugin_api import AuthorizationRequest
 
     authorization = state.authorization
@@ -1280,13 +1282,13 @@ async def _authorize_connection(
         )
         if inspect.isawaitable(verdict):
             verdict = await verdict
-            changed = relay.stale(state)
-            if changed is not None and verdict is None:
-                logger.info("WS %s -> refused (a config reload changed its %s)", path, changed)
-                return None, (503, "reload", _reload_reason(changed), RELOAD_CLOSE_CODE)
         if verdict is not None:
             logger.info("WS %s -> refused by the access gate (authorization)", path)
             return None, (403, "authorization", verdict, ACCESS_CLOSE_CODE)
+        if relay.revoked is not None:
+            logger.info("WS %s -> refused (%s)", path, relay.revocation_log())
+            refused = 403 if relay.revoked == ACCESS_REVOKED else 503
+            return None, (refused, _revoked_kind(relay), relay.close_reason, relay.close_code)
     if not authorization.overlays:
         return None, None
     overlay, refusal = authorization.overlay(state.overlay_builds, f"WS {path}")
@@ -1412,11 +1414,10 @@ async def ws_handle(websocket: WebSocket) -> None:
 
     # The connection's admission: its provider's settings and authorizer
     # (read above) and the detection policy, all read since admission with
-    # no await in between, and the access gate's verdict. An awaited
-    # authorization check below re-checks it (``stale``) before anything
-    # uses it. Held by ProxyState while the connection is open, so a reload
-    # that changes it, or the gate ending it, revokes the relay
-    # (RealtimeRelay).
+    # no await in between, and the access gate's verdict. Held by ProxyState
+    # from here on — the awaited authorization check included — so a reload
+    # that changes it, or the gate ending it, revokes the relay at any point
+    # (RealtimeRelay); every way out releases it.
     relay = RealtimeRelay(
         adapter.provider,
         provider_config,
@@ -1428,8 +1429,27 @@ async def ws_handle(websocket: WebSocket) -> None:
         grant=getattr(admission, "grant", None),
         recheck=getattr(admission, "recheck", None),
     )
+    state.realtime_relays.add(relay)
+    state.connections.track(relay)
+    try:
+        await _admitted(state, websocket, adapter, relay, path, started)
+    finally:
+        state.connections.untrack(relay)
+        state.realtime_relays.discard(relay)
+
+
+async def _admitted(
+    state: "ProxyState",
+    websocket: WebSocket,
+    adapter: WsAdapter,
+    relay: RealtimeRelay,
+    path: str,
+    started: float,
+) -> None:
+    """One admitted connection, its relay held: the access gate's
+    authorization, the connection's session, then the relay itself."""
     overlay, refusal = await _authorize_connection(
-        state, websocket, adapter, relay, path, upstream_auth is not None
+        state, websocket, adapter, relay, path, relay.upstream_auth is not None
     )
     if refusal is not None:
         _record_ws_refusal(state, adapter, path, refusal[0], started, kind=refusal[1])
@@ -1459,13 +1479,7 @@ async def ws_handle(websocket: WebSocket) -> None:
         _record_ws_refusal(state, adapter, path, 403, started, kind="sealed_session")
         await _reject(websocket, "the session router sealed this connection's vault session")
         return
-    state.realtime_relays.add(relay)
-    state.connections.track(relay)
-    try:
-        await _relay(state, websocket, adapter, relay, static_ctx, path, started, overlay)
-    finally:
-        state.connections.untrack(relay)
-        state.realtime_relays.discard(relay)
+    await _relay(state, websocket, adapter, relay, static_ctx, path, started, overlay)
 
 
 async def _relay(

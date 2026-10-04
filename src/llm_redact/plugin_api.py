@@ -701,6 +701,72 @@ class Admission:
     recheck: ConnectionRecheck | None = field(default=None, compare=False, repr=False)
 
 
+@dataclass(frozen=True)
+class AuthorizationRequest:
+    """The FACTS of one request, as the access gate's optional
+    ``authorize_request`` is asked about it: what the core itself resolved,
+    never a value from the body beyond the model name, never a credential.
+
+    - ``surface``: ``"http"`` or ``"websocket"`` (a realtime upgrade).
+    - ``provider``: the provider the request is attributed to (the core's
+      own attribution: ``"openai"``, ``"custom:vllm"``, …), or None.
+    - ``adapter``: the matched adapter's name (``"anthropic"``,
+      ``"openai-responses"``, ``"openai-realtime"``, …); None for an
+      unrecognized route forwarded as it came (pass-through).
+    - ``kind``: the routing kind — ``"chat"`` (redacted and restored),
+      ``"redact_only"`` or ``"none"`` (pass-through); a realtime upgrade is
+      ``"chat"``.
+    - ``method``: the HTTP method (``"GET"`` for an upgrade).
+    - ``path``: the request path after admission (the gate's own prefix
+      removed). Not part of the dataclass's repr.
+    - ``model``: the top-level ``"model"`` of a JSON body when it is a
+      string; on a realtime upgrade the ``model`` query parameter (None when
+      it is absent or repeated); else None — a Gemini, Vertex or Bedrock
+      model named in the PATH is not extracted, nor a Gemini Live model
+      named in its first frame.
+    - ``identity``: True when the request spends a credential the proxy
+      holds (its cloud identity, or a routed plan's operator key).
+    """
+
+    surface: str
+    provider: str | None
+    adapter: str | None
+    kind: str
+    method: str
+    path: str = field(repr=False)
+    model: str | None
+    identity: bool
+
+
+@dataclass(frozen=True)
+class DetectionOverlay:
+    """Detection a requester gets ON TOP OF the configured policy (the access
+    gate's optional ``detection_overlay``): it can only TIGHTEN it.
+
+    - ``modes``: ``(rule name, mode)`` pairs, named like ``[detection.modes]``
+      (built-in and custom rule names), each mode ``"redact"`` or
+      ``"block"``. A mode must be at least as strict as the rule's
+      configured one (warn < redact < block). Modes dispatch per detector
+      TYPE, so a rule sharing its type with another tightens both.
+    - ``deny``: extra literal deny strings (case-insensitive, non-empty, no
+      guillemets) — always redacted, winning every overlap, exactly like
+      ``[detection] deny``.
+
+    The core refuses the request (403) rather than drop anything it cannot
+    apply: a relaxation (checked against the configured mode even for a
+    rule not built here), an unknown rule name, a malformed mode or deny
+    string. A rule that exists but is not built (disabled, or scoped out by
+    ``[detection] languages``) is otherwise a no-op. An empty overlay is the
+    configured policy. Hashable: the core keeps one build per distinct
+    overlay (``authorization.OVERLAY_CACHE_SIZE``, least recently used
+    dropped), so a gate should hand out few distinct values — one per role
+    set, not per user.
+    """
+
+    modes: tuple[tuple[str, str], ...] = ()
+    deny: tuple[str, ...] = field(default=(), repr=False)
+
+
 class AccessGate(Protocol):
     """Client admission (``Registry.build_access_gate``).
 
@@ -795,6 +861,39 @@ class AccessGate(Protocol):
       a non-iterable or awaitable answer drops them all (counted, logged
       once per episode by exception TYPE). The core's own metrics are
       rendered either way.
+    - OPTIONAL ``authorize_request(request: AuthorizationRequest) -> str | None``
+      — whether this admitted requester may make this request (roles,
+      attributes): asked for EVERY forwarded HTTP request — a matched route
+      once its body is parsed, after the routing plan, the scanned-body
+      rule and the stored-object check; an unrecognized route at the same
+      place, right before it is forwarded — and EVERY realtime upgrade
+      (after admission and adapter resolution), always BEFORE the session
+      is opened, anything is redacted, the ``[audit] required`` START row,
+      the upstream authorizer and any upstream contact, in the request's
+      own context (what ``admit`` set in context variables is visible).
+      None allows; a non-empty string refuses with that FIXED reason
+      (value-free: never a user name, a key or a path) — a recorded
+      provider-shaped 403, or on a realtime upgrade an accept-then-close
+      1008 with the reason cut to 123 bytes; the core never logs it. It may
+      return an awaitable, which gets at most
+      ``authorization.AUTHORIZE_TIMEOUT_SECONDS`` (5 s; then cancelled, never
+      awaited again). An exception, a timeout or any other answer refuses
+      with the core's fixed text (counted under the bookkeeping stage
+      ``authorization``, logged by exception TYPE). A synchronous answer
+      costs the request no await; without the member nothing is asked.
+    - OPTIONAL ``detection_overlay() -> DetectionOverlay | None`` — the
+      detection this requester gets on top of the configured policy,
+      tighten-only (``DetectionOverlay``): asked synchronously once per
+      HTTP request, right after ``authorize_request``, and once per realtime
+      connection at the upgrade (fixed for the connection's life), in the
+      request's context. It applies to everything that request's redaction
+      does — JSON bodies, uploads and their inspected text, realtime
+      frames. None or an empty overlay: the configured policy. An
+      exception, an awaitable, a value that is no ``DetectionOverlay`` or
+      one the core cannot apply refuses the request (403 / 1008) with the
+      core's fixed text (bookkeeping stage ``authorization``, type-only
+      log). A provider configured ``detection = false`` stays unredacted:
+      an overlay never turns detection back on.
     - ``recheck_interval: float`` — seconds between the core's re-checks
       of every open long-lived connection's ``Admission.recheck`` (read
       once at startup; default 30; anything but a number from 5 to 3600 is
@@ -1071,6 +1170,7 @@ class ConfigSection(Protocol):
 __all__ = [
     "AccessGate",
     "Admission",
+    "AuthorizationRequest",
     "CliCommand",
     "ConfigSection",
     "ConnectionControl",
@@ -1078,6 +1178,7 @@ __all__ = [
     "Dashboard",
     "DashboardHost",
     "DbPasswordProvider",
+    "DetectionOverlay",
     "HopDecision",
     "HopRequest",
     "HopResult",

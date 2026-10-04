@@ -328,6 +328,22 @@ own answer decides whether the page may read a response).
   revocation, and a closed feed simply ends. Streaming HTTP responses are
   not cut: each is one answer to a request that was admitted when it was
   made, and the next request is refused.
+- An access gate may also AUTHORIZE each request (llm-redact-pro roles):
+  the core hands it the facts it resolved itself — provider, matched
+  adapter, routing kind, method, path, the body's top-level `model`, and
+  whether a credential the proxy holds is spent — for every forwarded
+  request and realtime upgrade, before the session, redaction, the audit
+  START row and any upstream contact, and refuses (403 / close 1008) on the
+  gate's reason, an exception, a timeout or a nonsense answer. The facts
+  are only as complete as the request makes them: a model named in a path
+  (Gemini, Vertex, Bedrock) or in a Gemini Live first frame is not
+  extracted, and a pass-through body is never read (`model` is None), so a
+  policy that restricts models must treat an unknown model as refused. A
+  gate's per-requester DETECTION OVERLAY can only tighten the configured
+  policy (a stricter mode per rule, extra deny strings); the core refuses
+  the request rather than drop an overlay it cannot apply, and an overlay
+  never turns detection back on for a provider configured
+  `detection = false`.
 - Status/metrics/audit — and the `/events` live feed, which streams the
   same rows `/recent` serves — expose **types and counts only**: never
   values, never placeholder ids, never allowlist contents (the

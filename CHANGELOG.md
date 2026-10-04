@@ -11,6 +11,30 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+- Two optional access-gate seams for role- and attribute-based access control (the policy
+  itself is llm-redact-pro's; the core holds no user, role or group logic):
+  - `authorize_request(request: plugin_api.AuthorizationRequest)`: the gate is handed the
+    facts of every forwarded HTTP request (matched or pass-through) and every realtime
+    upgrade — surface, provider, adapter, routing kind, method, path, top-level `model`
+    (realtime: the `model` query parameter), whether a credential the proxy holds is spent —
+    after the routing plan, the scanned-body rule and the stored-object check, and before
+    the session, redaction, the `[audit] required` START row, the upstream authorizer and
+    any upstream contact. A string refuses with that reason (a recorded provider-shaped
+    403; realtime: close 1008); an exception, a timeout (5 s for an awaitable) or any other
+    answer refuses with the core's own text. Without the member nothing is asked and no
+    await is added.
+  - `detection_overlay() -> plugin_api.DetectionOverlay | None`: per-requester rule modes
+    and extra deny strings that can only TIGHTEN the configured policy (warn < redact <
+    block), applied to everything the request's redaction does (JSON bodies, uploads and
+    their inspected text, every frame of a realtime connection). A relaxation, an unknown
+    rule name or a malformed value refuses the request (403 / 1008) instead of being
+    dropped. Each distinct overlay is built once (at most 64 kept; a reload that changes
+    `[detection]` drops them).
+  - New local refusal kind `authorization` (`llm_redact_local_refusals_total`) and
+    bookkeeping stage `authorization`; `/status` `access` reports `authorizes_requests` and
+    `detection_overlays`.
+
 ## [1.10.0] - 2026-10-02
 
 Observability, document extraction in the free core, and stricter upload reading.

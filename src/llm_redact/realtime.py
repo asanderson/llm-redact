@@ -62,6 +62,7 @@ it reads after the swap under the configuration it was opened with.
 import asyncio
 import contextlib
 import functools
+import inspect
 import json
 import logging
 import threading
@@ -100,6 +101,7 @@ from llm_redact.rehydrate import RehydratorPool
 from llm_redact.vault import run_batched
 
 if TYPE_CHECKING:
+    from llm_redact.authorization import OverlayBuild
     from llm_redact.config import ProviderConfig
     from llm_redact.detection.base import Detector
     from llm_redact.detection.engine import Allowlist
@@ -1210,6 +1212,57 @@ async def _authorize_upgrade(
     return http_url, headers, subprotocols
 
 
+async def _authorize_connection(
+    state: "ProxyState",
+    websocket: WebSocket,
+    adapter: WsAdapter,
+    relay: RealtimeRelay,
+    path: str,
+    identity: bool,
+) -> tuple["OverlayBuild | None", tuple[int, LocalRefusal, str, int] | None]:
+    """The access gate's authorization of this upgrade and the requester's
+    detection overlay (its optional ``authorize_request`` and
+    ``detection_overlay``), before the session is opened, the audit START row
+    and any dial. Returns the overlay build and None, or None and the
+    refusal: (row status, kind, close reason, close code). An awaited check
+    re-checks the relay's admission after it: a reload that changed it
+    meanwhile refuses the connection like a reload before the dial (1012)."""
+    from llm_redact.authorization import query_model
+    from llm_redact.plugin_api import AuthorizationRequest
+
+    authorization = state.authorization
+    if authorization.authorizes:
+        verdict = authorization.refusal(
+            AuthorizationRequest(
+                surface="websocket",
+                provider=adapter.provider,
+                adapter=adapter.name,
+                kind="chat",
+                method="GET",
+                path=path,
+                model=query_model(websocket.query_params.getlist("model")),
+                identity=identity,
+            ),
+            f"WS {path}",
+        )
+        if inspect.isawaitable(verdict):
+            verdict = await verdict
+            changed = relay.stale(state)
+            if changed is not None and verdict is None:
+                logger.info("WS %s -> refused (a config reload changed its %s)", path, changed)
+                return None, (503, "reload", _reload_reason(changed), RELOAD_CLOSE_CODE)
+        if verdict is not None:
+            logger.info("WS %s -> refused by the access gate (authorization)", path)
+            return None, (403, "authorization", verdict, ACCESS_CLOSE_CODE)
+    if not authorization.overlays:
+        return None, None
+    overlay, refusal = authorization.overlay(state.overlay_builds, f"WS {path}")
+    if refusal is not None:
+        logger.info("WS %s -> refused by the access gate (detection overlay)", path)
+        return None, (403, "authorization", refusal, ACCESS_CLOSE_CODE)
+    return overlay, None
+
+
 async def ws_handle(websocket: WebSocket) -> None:
     state: ProxyState = websocket.app.state.proxy
     from llm_redact.proxy import has_dot_segment, origin_form_target
@@ -1324,6 +1377,32 @@ async def ws_handle(websocket: WebSocket) -> None:
         )
         return
 
+    # The connection's admission: its provider's settings and authorizer
+    # (read above) and the detection policy, all read since admission with
+    # no await in between, and the access gate's verdict. An awaited
+    # authorization check below re-checks it (``stale``) before anything
+    # uses it. Held by ProxyState while the connection is open, so a reload
+    # that changes it, or the gate ending it, revokes the relay
+    # (RealtimeRelay).
+    relay = RealtimeRelay(
+        adapter.provider,
+        provider_config,
+        upstream_auth,
+        state.detectors,
+        state.allowlist,
+        state.modes,
+        subject=admission.subject,
+        grant=getattr(admission, "grant", None),
+        recheck=getattr(admission, "recheck", None),
+    )
+    overlay, refusal = await _authorize_connection(
+        state, websocket, adapter, relay, path, upstream_auth is not None
+    )
+    if refusal is not None:
+        _record_ws_refusal(state, adapter, path, refusal[0], started, kind=refusal[1])
+        await _reject(websocket, refusal[2], code=refusal[3])
+        return
+
     try:
         static_ctx = state.context_for(None, "GET", path, None)
     except state.vault_faults as fault:
@@ -1347,26 +1426,10 @@ async def ws_handle(websocket: WebSocket) -> None:
         _record_ws_refusal(state, adapter, path, 403, started, kind="sealed_session")
         await _reject(websocket, "the session router sealed this connection's vault session")
         return
-    # The connection's admission: its provider's settings and authorizer
-    # (read above) and the detection policy, all read since admission with
-    # no await in between, and the access gate's verdict. Held by ProxyState
-    # while the connection is open, so a reload that changes it, or the gate
-    # ending it, revokes the relay (RealtimeRelay).
-    relay = RealtimeRelay(
-        adapter.provider,
-        provider_config,
-        upstream_auth,
-        state.detectors,
-        state.allowlist,
-        state.modes,
-        subject=admission.subject,
-        grant=getattr(admission, "grant", None),
-        recheck=getattr(admission, "recheck", None),
-    )
     state.realtime_relays.add(relay)
     state.connections.track(relay)
     try:
-        await _relay(state, websocket, adapter, relay, static_ctx, path, started)
+        await _relay(state, websocket, adapter, relay, static_ctx, path, started, overlay)
     finally:
         state.connections.untrack(relay)
         state.realtime_relays.discard(relay)
@@ -1380,9 +1443,11 @@ async def _relay(
     static_ctx: "RequestContext",
     path: str,
     started: float,
+    overlay: "OverlayBuild | None" = None,
 ) -> None:
     """Dial, relay and record one admitted connection, under ``relay``'s
-    admission until a reload revokes it."""
+    admission until a reload revokes it — with the requester's detection
+    overlay (built against the relay's own detection objects), if any."""
     import websockets
 
     from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
@@ -1398,11 +1463,11 @@ async def _relay(
         static_ctx.session_id,
         static_ctx.vault,
         Redactor(
-            relay.detectors,
+            overlay.detectors if overlay is not None else relay.detectors,
             static_ctx.vault,
             relay.allowlist,
             counts=connection_counts,
-            modes=relay.modes,
+            modes=overlay.modes if overlay is not None else relay.modes,
             warn_counts=state.warn_counts,
         ),
         static_ctx.rehydrator,

@@ -138,10 +138,17 @@ class OverlayBuilds:
         return built
 
     def _build(self, overlay: DetectionOverlay) -> OverlayBuild | None:
-        modes = self._tightened(overlay.modes)
+        modes, moot = self._tightened(overlay.modes)
         for value in overlay.deny:
             if not value or any(mark in value for mark in _GUILLEMETS):
                 raise OverlayError("a deny string is empty or holds a guillemet")
+        if moot:
+            # Once per distinct overlay (a build is kept): the configured
+            # mode stands for these, the overlay's other entries apply.
+            logger.warning(
+                "detection overlay entries not stricter than the configured policy (no effect): %s",
+                ", ".join(moot),
+            )
         final = frozenset(
             detector_type
             for detector_type, mode in modes.items()
@@ -158,18 +165,28 @@ class OverlayBuilds:
         entries = [DenyEntry(value) for value in dict.fromkeys(overlay.deny)]
         return OverlayBuild(modes, DetectorPlan([DenyDetector(entries)]), final)
 
-    def _tightened(self, pairs: tuple[tuple[str, str], ...]) -> Mapping[str, str]:
-        """The configured type-keyed modes with ``pairs`` applied: the same
-        object when nothing tightens."""
+    def _tightened(self, pairs: tuple[tuple[str, str], ...]) -> tuple[Mapping[str, str], list[str]]:
+        """The configured type-keyed modes with ``pairs`` applied — per type
+        the STRICTER of the configured mode and the overlay's (warn < redact
+        < block), so never looser; the same object when nothing tightens —
+        and the entries that had no effect because they are not stricter
+        than the configured mode (``rule=mode (configured mode)``: rule
+        names and modes only). Such an entry is never refused: role
+        definitions are restart-only while [detection] is hot, so a reload
+        that tightens the configured policy must not turn a role's former
+        tightening into a refusal of every request its users make."""
         tightened: dict[str, str] | None = None
+        moot: list[str] = []
         for rule, mode in pairs:
             if mode not in OVERLAY_MODES:
                 raise OverlayError("a mode is not redact or block")
             detector_type = self._type_by_rule.get(rule)
             if detector_type is None:
                 raise OverlayError("an unknown rule name")
-            if _STRICTNESS[mode] < _STRICTNESS[self.modes.get(detector_type, "redact")]:
-                raise OverlayError("a relaxation of the configured mode")
+            configured = self.modes.get(detector_type, "redact")
+            if _STRICTNESS[mode] <= _STRICTNESS[configured]:
+                moot.append(f"{rule}={mode} (configured {configured})")
+                continue
             current = (tightened if tightened is not None else self.modes).get(
                 detector_type, "redact"
             )
@@ -181,7 +198,7 @@ class OverlayBuilds:
                 del tightened[detector_type]  # the default: stored as absent
             else:
                 tightened[detector_type] = mode
-        return tightened if tightened is not None else self.modes
+        return (tightened if tightened is not None else self.modes), moot
 
 
 def _close_unrun(answer: object) -> None:

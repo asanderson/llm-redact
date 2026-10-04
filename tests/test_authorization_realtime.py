@@ -206,7 +206,7 @@ async def test_an_extra_deny_string_inside_a_redacted_value_keeps_its_token(
 async def test_an_overlay_the_core_cannot_apply_refuses_the_upgrade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(monkeypatch, OverlayGate(DetectionOverlay(modes=(("email", "redact"),))))
+    _install(monkeypatch, OverlayGate(DetectionOverlay(modes=(("no_such_rule", "block"),))))
     async with Upstream() as fake:
         rules = {"modes": {"email": "block"}}
         with _serve(_config("openai", fake.url(), rules)) as proxy:

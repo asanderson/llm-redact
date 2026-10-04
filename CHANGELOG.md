@@ -43,9 +43,12 @@ and tags `vX.Y.Z`.
     value the configured policy redacts or denies, their union is redacted as one
     placeholder; it beats only a value the policy forwards as sent (warn mode, an approved
     refusal override). A block the overlay adds past the configured mode is final: no refusal
-    override is consulted or used for it, and its refusal carries no code. A relaxation, an
-    unknown rule name or a malformed value refuses the request (403 / 1008) instead of being
-    dropped. Each distinct overlay is built once (at
+    override is consulted or used for it, and its refusal carries no code. Per detector type
+    the stricter of the configured mode and the overlay's applies: an entry that is not
+    stricter has no effect (logged once per distinct overlay, rule names and modes only) —
+    never a refusal, so a reload that tightens `[detection]` cannot turn a role's former
+    tightening into refused requests. An unknown rule name or a malformed value refuses the
+    request (403 / 1008) instead of being dropped. Each distinct overlay is built once (at
     most 64 kept; a reload that changes `[detection]` drops them).
   - New local refusal kind `authorization` (`llm_redact_local_refusals_total`) and
     bookkeeping stage `authorization`; `/status` `access` reports `authorizes_requests` and

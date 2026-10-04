@@ -718,7 +718,6 @@ async def test_an_overlay_applies_to_the_inspected_text_of_a_binary_upload(
 @pytest.mark.parametrize(
     "overlay",
     [
-        DetectionOverlay(modes=(("email", "redact"),)),  # the configured block, relaxed
         DetectionOverlay(modes=(("no_such_rule", "block"),)),
         DetectionOverlay(modes=(("email", "warn"),)),
         DetectionOverlay(modes=(("email", "drop"),)),
@@ -731,7 +730,6 @@ async def test_an_overlay_applies_to_the_inspected_text_of_a_binary_upload(
         {"modes": ()},
     ],
     ids=[
-        "relaxation",
         "unknown-rule",
         "warn",
         "unknown-mode",
@@ -940,15 +938,6 @@ def test_a_custom_rule_is_known_by_name() -> None:
     )
     built = _builds(config).build(DetectionOverlay(modes=(("ticket", "block"),)))
     assert built is not None and built.modes == {"TICKET": "block"}
-
-
-def test_a_relaxation_is_refused_even_for_a_rule_that_is_not_built() -> None:
-    config = DetectionConfig(
-        enabled=tuple(n for n in DetectionConfig().enabled if n != "email"),
-        modes=(("email", "block"),),
-    )
-    with pytest.raises(OverlayError, match="relaxation"):
-        _builds(config).build(DetectionOverlay(modes=(("email", "redact"),)))
 
 
 def test_a_failed_build_is_not_kept() -> None:
@@ -1183,3 +1172,68 @@ async def test_without_request_authorization_a_pass_through_override_is_forwarde
     )
     assert response.status_code == 200
     assert upstream.requests[0].headers["x-http-method-override"] == "DELETE"
+
+
+def test_an_entry_not_stricter_than_the_configured_mode_is_a_no_op(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The effective mode is the stricter of the configured one and the
+    # overlay's: an entry that is not stricter changes nothing — never a
+    # refusal (a reload may tighten the configured policy under a role) —
+    # and is logged once per distinct overlay, rule names and modes only.
+    config = DetectionConfig(modes=(("email", "block"), ("github_token", "warn")))
+    builds = _builds(config)
+    caplog.set_level(logging.WARNING, logger="llm_redact")
+    mixed = DetectionOverlay(modes=(("email", "redact"), ("github_token", "block")))
+    built = builds.build(mixed)
+    assert built is not None and built.modes == {"EMAIL": "block", "GITHUB_TOKEN": "block"}
+    assert built.final_blocks == frozenset({"GITHUB_TOKEN"})
+    assert builds.build(mixed) is built  # kept: logged once
+    assert builds.build(DetectionOverlay(modes=(("email", "redact"),))) is None
+    assert builds.build(DetectionOverlay(modes=(("email", "block"),))) is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    prefix = "detection overlay entries not stricter than the configured policy (no effect): "
+    assert warnings == [
+        prefix + "email=redact (configured block)",
+        prefix + "email=redact (configured block)",
+        prefix + "email=block (configured block)",
+    ]
+
+
+def test_a_relaxation_of_a_rule_that_is_not_built_is_a_no_op_too() -> None:
+    config = DetectionConfig(
+        enabled=tuple(n for n in DetectionConfig().enabled if n != "email"),
+        modes=(("email", "block"),),
+    )
+    assert _builds(config).build(DetectionOverlay(modes=(("email", "redact"),))) is None
+
+
+async def test_a_reload_that_tightens_the_configured_mode_never_refuses_the_overlay(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A role's tightening (email warn -> redact), then a reload that blocks
+    # emails outright: the role's entry is a no-op now — every request is
+    # served under the stricter configured block, none refused for it.
+    app, upstream, _gate = _overlay_app(
+        monkeypatch,
+        DetectionOverlay(modes=(("email", "redact"),)),
+        DetectionConfig(modes=(("email", "warn"),)),
+    )
+    first = await _post(app, "/v1/messages", _messages(f"mail {EMAIL}"), ANTHROPIC)
+    assert first.status_code == 200 and "«EMAIL_001»" in upstream.requests[-1].content.decode()
+    state = app.state.proxy
+    caplog.set_level(logging.WARNING, logger="llm_redact")
+    state.apply_config(
+        Config(
+            providers=state.config.providers,
+            detection=DetectionConfig(modes=(("email", "block"),)),
+        )
+    )
+    clean = await _post(app, "/v1/messages", _messages("hello"), ANTHROPIC)
+    blocked = await _post(app, "/v1/messages", _messages(f"mail {EMAIL}"), ANTHROPIC)
+    assert clean.status_code == 200
+    assert blocked.status_code == 400 and "EMAIL" in blocked.text
+    assert state.bookkeeping_errors[AUTHORIZATION_STAGE] == 0
+    assert caplog.text.count("not stricter than the configured policy (no effect)") == 1
+    assert EMAIL not in caplog.text
+    refused_once(state, "blocked_value", "anthropic")

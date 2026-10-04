@@ -771,13 +771,17 @@ class DetectionOverlay:
 
     - ``modes``: ``(rule name, mode)`` pairs, named like ``[detection.modes]``
       (built-in and custom rule names), each mode ``"redact"`` or
-      ``"block"``. A mode must be at least as strict as the rule's
-      configured one (warn < redact < block). Modes dispatch per detector
-      TYPE, so a rule sharing its type with another tightens both. A block
-      the overlay ADDS (past the configured mode) is final: no refusal
-      override is consulted or used for it and its refusal carries no code
-      — an approval would forward as sent a value the configured policy
-      redacts (a rule the configured policy blocks stays overridable).
+      ``"block"``. Per detector TYPE the STRICTER of the configured mode and
+      the overlay's applies (warn < redact < block), so never a looser one;
+      a rule sharing its type with another tightens both. An entry that is
+      not stricter than the configured mode has no effect — logged once
+      per distinct overlay at WARNING (rule names and modes only), never a
+      refusal: a reload may tighten the configured policy while a gate's
+      role definitions stay as they were. A block the overlay ADDS (past
+      the configured mode) is final: no refusal override is consulted or
+      used for it and its refusal carries no code — an approval would
+      forward as sent a value the configured policy redacts (a rule the
+      configured policy blocks stays overridable).
     - ``deny``: extra literal deny strings (case-insensitive, non-empty, no
       guillemets), redacted wherever they occur. Unlike ``[detection]
       deny``, which wins every overlap among the configured detectors, they
@@ -790,16 +794,16 @@ class DetectionOverlay:
       it — the deny string's span is redacted, the rest sent as before.
 
     The core refuses the request (403) rather than drop anything it cannot
-    apply: a relaxation (checked against the configured mode even for a
-    rule not built here), an unknown rule name, a malformed mode or deny
-    string. A rule whose detector type no built rule emits (disabled, or
-    scoped out by ``[detection] languages``, with no built rule sharing its
-    type) is otherwise a no-op; one that is not built while a built rule
-    shares its type tightens that type. An empty overlay is the
-    configured policy. Hashable: the core keeps one build per distinct
-    overlay (``authorization.OVERLAY_CACHE_SIZE``, least recently used
-    dropped), so a gate should hand out few distinct values — one per role
-    set, not per user.
+    apply, since an intended tightening would be lost: an unknown rule
+    name, a malformed mode or deny string, a value of the wrong type. A
+    rule whose detector type no built rule emits (disabled, or scoped out
+    by ``[detection] languages``, with no built rule sharing its type) is
+    otherwise a no-op; one that is not built while a built rule shares its
+    type tightens that type. An empty overlay is the configured policy.
+    Hashable: the core keeps one build per distinct overlay
+    (``authorization.OVERLAY_CACHE_SIZE``, least recently used dropped), so
+    a gate should hand out few distinct values — one per role set, not per
+    user.
     """
 
     modes: tuple[tuple[str, str], ...] = ()

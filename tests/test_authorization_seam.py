@@ -1144,3 +1144,42 @@ async def test_a_pass_through_request_is_asked_before_its_body_is_read(
     facts = [(r.adapter, r.kind, r.model, r.identity) for r in gate.requests]
     assert facts == [(None, "none", None, False)] * 2
     refused_once(app.state.proxy, "authorization", "openai")
+
+
+@pytest.mark.parametrize(
+    ("headers", "query"),
+    [({"x-http-method-override": "DELETE"}, ""), ({}, "?_method=DELETE")],
+    ids=["header", "query"],
+)
+async def test_a_pass_through_method_override_is_refused_when_requests_are_authorized(
+    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str], query: str
+) -> None:
+    # The gate is asked about the request's method; an upstream honoring an
+    # override would run another — unknowable for a route the proxy does
+    # not recognize, so it is refused (the matched-route rule).
+    gate = AuthorizingGate()
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    app = _app(upstream)
+    response = await _post(
+        app, f"/v1/threads/thread_abc/messages{query}", {"content": "hi"}, {**KEY, **headers}
+    )
+    assert response.status_code == 400 and "method override" in response.json()["error"]
+    assert gate.requests == [] and upstream.requests == []
+    refused_once(app.state.proxy, "method_override", "openai")
+
+
+async def test_without_request_authorization_a_pass_through_override_is_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _registry(monkeypatch, OverlayGate(None))  # an overlay, but no authorize_request
+    upstream = Upstream()
+    app = _app(upstream)
+    response = await _post(
+        app,
+        "/v1/threads/thread_abc/messages",
+        {"content": "hi"},
+        {**KEY, "x-http-method-override": "DELETE"},
+    )
+    assert response.status_code == 200
+    assert upstream.requests[0].headers["x-http-method-override"] == "DELETE"

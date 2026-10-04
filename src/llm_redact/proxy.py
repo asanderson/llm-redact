@@ -4512,7 +4512,7 @@ def _misaddressed_refused(
 
 def _method_override_refused(
     state: ProxyState,
-    adapter: ProviderAdapter,
+    adapter: ProviderAdapter | None,
     kind: str,
     *,
     provider_name: str,
@@ -4520,8 +4520,10 @@ def _method_override_refused(
     path: str,
     started: float,
 ) -> JSONResponse:
-    """A matched route carrying a method override (``method_override``): a
-    recorded, provider-shaped 400 — never forwarded, no upstream contact."""
+    """A matched route carrying a method override (``method_override``) —
+    or, when the access gate authorizes requests, any route (pass-through:
+    adapter None): a recorded, provider-shaped 400 — never forwarded, no
+    upstream contact."""
     state.record_request(
         session=state.config.vault.session,
         provider=provider_name,
@@ -4535,6 +4537,14 @@ def _method_override_refused(
         refusal="method_override",
     )
     logger.info("%s %s -> 400 refused (method override %s)", request.method, path, kind)
+    if adapter is None:
+        message = (
+            f"llm-redact: the request carries an HTTP method override {kind}; this proxy"
+            " authorizes each request by its own method, so it refuses one asking the"
+            " upstream to run another. Send the request with the method it means; the"
+            " request was not forwarded"
+        )
+        return JSONResponse({"error": message}, status_code=400)
     message = (
         f"llm-redact: the request carries an HTTP method override {kind}; llm-redact reads"
         f" a {adapter.name} API request by its own method, so it refuses one asking the"
@@ -5107,12 +5117,19 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         logger.info("%s %s -> 403 refused by the access gate", request.method, path)
         return JSONResponse(error, status_code=403)
 
-    override = method_override(request.headers, query) if adapter is not None else None
-    if adapter is not None and override is not None:
-        # A matched route is read by the request line's method; an upstream
-        # that honors the override would run another (a create turned into a
-        # listing). Refused before the body is read, any credential or
-        # upstream contact; the message names the KIND only.
+    # A matched route is read by the request line's method, and so is every
+    # route the access gate authorizes (its `method` fact): an upstream that
+    # honors an override would run another (a create turned into a
+    # listing). Without the gate's authorize_request, pass-through forwards
+    # the override as sent.
+    override = (
+        method_override(request.headers, query)
+        if adapter is not None or state.authorization.authorizes
+        else None
+    )
+    if override is not None:
+        # Refused before the body is read, any credential or upstream
+        # contact; the message names the KIND only.
         return _method_override_refused(
             state,
             adapter,

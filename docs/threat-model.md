@@ -210,7 +210,10 @@ own answer decides whether the page may read a response).
   restored in the caller's session and its items reported as the
   caller's. Those headers are also never forwarded on a recognized route
   (HTTP and realtime). Unrecognized pass-through traffic, sent with the
-  client's own key and never read, forwards them as sent.
+  client's own key and never read, forwards them as sent — unless an
+  access gate authorizes requests (llm-redact-pro roles): the method it is
+  told must be the one the upstream runs, so such a request is refused the
+  same way.
 - A request no route matches is forwarded only to a provider it can be
   POSITIVELY attributed to — a path family, or the headers only one
   provider's clients send (`anthropic-version`, a Google key, …) — never

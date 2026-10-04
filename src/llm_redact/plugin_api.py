@@ -716,7 +716,10 @@ class AuthorizationRequest:
     - ``kind``: the routing kind — ``"chat"`` (redacted and restored),
       ``"redact_only"`` or ``"none"`` (pass-through); a realtime upgrade is
       ``"chat"``.
-    - ``method``: the HTTP method (``"GET"`` for an upgrade).
+    - ``method``: the HTTP method (``"GET"`` for an upgrade) — the one the
+      upstream runs: with this member present, a request carrying an HTTP
+      method override (a header or query parameter an upstream may honor)
+      is refused 400 before the gate is asked, pass-through included.
     - ``path``: the request path after admission (the gate's own prefix
       removed). Not part of the dataclass's repr.
     - ``model``: the model the UPSTREAM runs the request with, as the

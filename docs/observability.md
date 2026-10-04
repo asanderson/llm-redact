@@ -66,7 +66,7 @@ status, a frame refused on an open relay closes it.
 | `unattributed` | 404 | No provider can be attributed to the request (realtime: no realtime route for the path). |
 | `no_upstream` | 502 | No upstream configured: an unknown `/custom/NAME/`, or a provider without a default upstream (Azure, Vertex, Bedrock) not yet set. |
 | `disabled_provider` | 502 | `[providers.NAME] enabled = false`. |
-| `method_override` | 400 | A matched route carrying an HTTP method override. |
+| `method_override` | 400 | A matched route carrying an HTTP method override — or any route, pass-through included, when the access gate authorizes requests. |
 | `identity_route` | 403 | An unrecognized route that would spend a credential the proxy holds (its cloud identity, or a routed plan's operator key). |
 | `credential_protocol` | 403 | A recognized route whose protocol is not served with a credential the proxy holds (a resumable upload). |
 | `too_large` | 413 | A redactable body over `max_body_bytes`. |

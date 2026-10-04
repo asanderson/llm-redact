@@ -16,7 +16,6 @@ stand in for llm-redact-pro.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -37,8 +36,6 @@ from llm_redact.authorization import (
     GateAuthorization,
     OverlayBuilds,
     OverlayError,
-    body_model,
-    query_model,
 )
 from llm_redact.config import AuditConfig, Config, ProviderConfig
 from llm_redact.detection.engine import DetectionConfig, build_modes
@@ -268,21 +265,22 @@ async def test_identity_requests_say_so_and_a_refusal_never_reaches_the_authoriz
     from test_upstream_auth import _install as install_auth
 
     reg, built = install_auth(monkeypatch)
-    gate = AuthorizingGate(
-        lambda request: REASON if "refuse" in json.dumps(request.model) else None
-    )
+    # The deployment the path names is the model it runs (the body's is not).
+    gate = AuthorizingGate(lambda request: REASON if request.model == "refuse-me" else None)
     _registry(monkeypatch, gate, reg)
     upstream = Upstream()
     app = _app(upstream, providers={"azure": _identity(AZURE)})
-    body = {"model": "refuse-me", "messages": [{"role": "user", "content": f"mail {EMAIL}"}]}
-    path = f"{AZURE_PATH}?api-version=2024-10-21"
-    refused = await _post(app, path, body, {"api-key": "client-key"})
+    body = {"model": "gpt-4o", "messages": [{"role": "user", "content": f"mail {EMAIL}"}]}
+    query = "?api-version=2024-10-21"
+    refused_path = AZURE_PATH.replace("/gpt/", "/refuse-me/") + query
+    refused = await _post(app, refused_path, body, {"api-key": "client-key"})
     assert refused.status_code == 403
     assert built[0].calls == [] and upstream.requests == []
-    allowed = await _post(app, path, {**body, "model": "gpt-4o"}, {"api-key": "client-key"})
+    allowed = await _post(app, AZURE_PATH + query, body, {"api-key": "client-key"})
     assert allowed.status_code == 200
     assert [r.identity for r in gate.requests] == [True, True]
     assert [r.adapter for r in gate.requests] == ["azure", "azure"]
+    assert [r.model for r in gate.requests] == ["refuse-me", "gpt"]
     assert len(built[0].calls) == 1
 
 
@@ -940,13 +938,3 @@ def test_a_failed_build_is_not_kept() -> None:
     with pytest.raises(OverlayError, match="unknown rule"):
         builds.build(DetectionOverlay(modes=(("nope", "block"),)))
     assert len(builds) == 0
-
-
-def test_the_model_facts() -> None:
-    assert body_model({"model": "gpt-4o"}) == "gpt-4o"
-    assert body_model({"model": 4}) is None
-    assert body_model(["model"]) is None
-    assert body_model(None) is None
-    assert query_model(["gpt-realtime"]) == "gpt-realtime"
-    assert query_model([]) is None
-    assert query_model(["a", "b"]) is None  # repeated: an upstream may read either

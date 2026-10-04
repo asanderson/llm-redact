@@ -16,8 +16,11 @@ and tags `vX.Y.Z`.
   itself is llm-redact-pro's; the core holds no user, role or group logic):
   - `authorize_request(request: plugin_api.AuthorizationRequest)`: the gate is handed the
     facts of every forwarded HTTP request (matched or pass-through) and every realtime
-    upgrade — surface, provider, adapter, routing kind, method, path, top-level `model`
-    (realtime: the `model` query parameter), whether a credential the proxy holds is spent —
+    upgrade — surface, provider, adapter, routing kind, method, path, the `model` the upstream
+    runs as the matched adapter reads it (a body `model` only where the upstream reads it;
+    the path's on Azure deployments, Gemini, Vertex, Claude on Vertex and Bedrock; on
+    realtime the `model` or Azure preview `deployment` query parameter; None when unknown),
+    whether a credential the proxy holds is spent —
     after the routing plan, the scanned-body rule and the stored-object check, and before
     the session, redaction, the `[audit] required` START row, the upstream authorizer and
     any upstream contact. A string refuses with that reason (a recorded provider-shaped

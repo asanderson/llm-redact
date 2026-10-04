@@ -17,7 +17,7 @@ import asyncio
 import inspect
 import logging
 from collections import Counter, OrderedDict
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -272,15 +272,3 @@ class GateAuthorization:
             return builds.build(answer), None
         except OverlayError as exc:
             return None, self._fault(where, f"overlay: {exc}", OVERLAY_FAULT)
-
-
-def body_model(parsed: object) -> str | None:
-    """The top-level ``model`` of a parsed JSON body when it is a string."""
-    model = parsed.get("model") if isinstance(parsed, dict) else None
-    return model if isinstance(model, str) else None
-
-
-def query_model(values: Sequence[str]) -> str | None:
-    """A realtime upgrade's ``model`` query parameter: its one value, or None
-    when it is absent or repeated (an upstream may read either occurrence)."""
-    return values[0] if len(values) == 1 else None

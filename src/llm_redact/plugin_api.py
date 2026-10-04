@@ -711,7 +711,7 @@ class AuthorizationRequest:
     - ``provider``: the provider the request is attributed to (the core's
       own attribution: ``"openai"``, ``"custom:vllm"``, …), or None.
     - ``adapter``: the matched adapter's name (``"anthropic"``,
-      ``"openai-responses"``, ``"openai-realtime"``, …); None for an
+      ``"openai"``, ``"azure"``, ``"openai-realtime"``, …); None for an
       unrecognized route forwarded as it came (pass-through).
     - ``kind``: the routing kind — ``"chat"`` (redacted and restored),
       ``"redact_only"`` or ``"none"`` (pass-through); a realtime upgrade is
@@ -719,11 +719,27 @@ class AuthorizationRequest:
     - ``method``: the HTTP method (``"GET"`` for an upgrade).
     - ``path``: the request path after admission (the gate's own prefix
       removed). Not part of the dataclass's repr.
-    - ``model``: the top-level ``"model"`` of a JSON body when it is a
-      string; on a realtime upgrade the ``model`` query parameter (None when
-      it is absent or repeated); else None — a Gemini, Vertex or Bedrock
-      model named in the PATH is not extracted, nor a Gemini Live model
-      named in its first frame.
+    - ``model``: the model the UPSTREAM runs the request with, as the
+      matched adapter reads the request — never a value the upstream
+      ignores. A body ``model`` only on the routes whose upstream reads it
+      (OpenAI, Anthropic, Cohere, Ollama, custom providers, the Azure v1
+      and Responses APIs, the Gemini API's OpenAI-compatible surface, a
+      context cache's create); the model a PATH names where the upstream
+      takes it from there, whatever the body says: an Azure deployment, a
+      Gemini ``models/{m}`` as ``m`` (a tuned model as
+      ``tunedModels/{t}``), a Vertex publisher model's id (an endpoint as
+      ``endpoints/{e}``), Claude on Vertex, a Bedrock model id or ARN
+      (percent-decoded exactly as the routing reads it; StartAsyncInvoke's
+      body ``modelId``). On a realtime upgrade the ``model`` query parameter
+      (OpenAI, Azure GA) or ``deployment`` (the Azure preview). None —
+      unknown — when the request names none or the upstream takes it from
+      where the check cannot see it: a pass-through route, a multipart
+      body, a route that runs no model or names it elsewhere (a batch's
+      lines, a video remix), a Gemini Live setup frame, an OpenAI realtime
+      session set up by an ``intent`` or a SIP ``call_id``, a repeated
+      query parameter. A policy that restricts models must treat an unknown
+      model as refused. A routed request reports the model the client asked
+      for (the routing layer's rules map it).
     - ``identity``: True when the request spends a credential the proxy
       holds (its cloud identity, or a routed plan's operator key).
     """

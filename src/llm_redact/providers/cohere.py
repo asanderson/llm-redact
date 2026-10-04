@@ -25,7 +25,7 @@ from collections.abc import Hashable
 from typing import Any
 
 from llm_redact.jsonwalk import json_text, loads_bounded, transform_strings
-from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
+from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind, body_string
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
 from llm_redact.sse import SSEEvent
 
@@ -71,6 +71,12 @@ KNOWN_COHERE_EVENT_TYPES: frozenset[str] = frozenset(
 
 class CohereAdapter(ProviderAdapter):
     name = "cohere"
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        # Every route it recognizes runs the body's model.
+        if method == "POST" and (path in _CHAT_PATHS or path in _REDACT_ONLY_PATHS):
+            return body_string(parsed, "model")
+        return None
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method != "POST":

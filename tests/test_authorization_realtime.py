@@ -29,7 +29,7 @@ from llm_redact.plugin_api import AuthorizationRequest, DetectionOverlay
 from llm_redact.registry import Registry
 from local_refusals import refused_once
 from test_authorization_seam import AuthorizingGate, BothGate, OverlayGate
-from test_realtime_identity import EMAIL, FakeAuth, _recent
+from test_realtime_identity import AZURE_PREVIEW, EMAIL, GEMINI_LIVE, FakeAuth, _recent
 from test_realtime_reload import (
     PATHS,
     Upstream,
@@ -99,6 +99,34 @@ async def test_an_upgrade_is_asked_with_its_facts_and_a_refusal_is_never_dialled
     assert gate.users == ["ada"]
     # Never dialled, never authorized upstream, nothing numbered.
     assert fake.paths == [] and auth.calls == [] and stored == 0
+
+
+@pytest.mark.parametrize(
+    ("provider", "path", "model"),
+    [
+        # Azure's preview runs the deployment the query names, whatever
+        # `model` says.
+        ("azure", f"{AZURE_PREVIEW}?api-version=v&deployment=dep&model=other", "dep"),
+        # Gemini Live: the setup frame names the model, after the check.
+        ("gemini", f"{GEMINI_LIVE}?model=models/gemini-2.5-flash", None),
+        # A transcription session's model is set by its frames.
+        ("openai", "/v1/realtime?intent=transcription&model=gpt-realtime", None),
+    ],
+    ids=["azure-preview", "gemini-live", "openai-intent"],
+)
+async def test_an_upgrade_reports_the_model_its_upstream_runs(
+    monkeypatch: pytest.MonkeyPatch, provider: str, path: str, model: str | None
+) -> None:
+    gate = AuthorizingGate(lambda request: REASON)
+    _install(monkeypatch, gate)
+    async with Upstream() as fake:
+        with _serve(_config(provider, fake.url())) as proxy:
+            client = await _connect(f"ws://{proxy.host}{path}")
+            closed = await _closed(client)
+            await _recent(proxy.host, lambda r: r["method"] == "WS")
+    assert closed is not None and closed.code == 1008
+    (request,) = gate.requests
+    assert request.model == model
 
 
 async def test_an_allowed_upgrade_relays_and_reports_its_model(

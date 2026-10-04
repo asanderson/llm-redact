@@ -22,13 +22,14 @@ from that adapter's (rawPredict vs generateContent verbs).
 
 import re
 from collections.abc import Mapping
+from typing import Any
 
 from llm_redact.providers.anthropic import AnthropicAdapter
 from llm_redact.providers.base import RouteKind
 
 _CLAUDE_VERTEX_PATH = re.compile(
     r"/(?:v1|v1beta1)/(?:projects/[^/]+/locations/[^/]+/)?"
-    r"publishers/anthropic/models/[^/:]+"
+    r"publishers/anthropic/models/(?P<model>[^/:]+)"
     r":(rawPredict|streamRawPredict)"
 )
 
@@ -37,6 +38,12 @@ class ClaudeVertexAdapter(AnthropicAdapter):
     # Same upstream as the Gemini Vertex adapter (region-embedded host);
     # both resolve to [providers.vertex]. Matchers are proven disjoint.
     name = "vertex"
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        # The model the path names: the body carries none (a `model` in it
+        # is not what Vertex runs).
+        match = _CLAUDE_VERTEX_PATH.fullmatch(path) if method == "POST" else None
+        return match.group("model") if match is not None else None
 
     def matches(self, method: str, path: str) -> RouteKind:
         # rawPredict returns a JSON Messages object; streamRawPredict returns

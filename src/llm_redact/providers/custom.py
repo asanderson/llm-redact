@@ -17,6 +17,7 @@ are redacted and restored like OpenAI's (the raw path is forwarded).
 """
 
 from collections.abc import Iterable
+from typing import Any
 
 from llm_redact.providers.attribution import CUSTOM_ROUTE_PREFIX
 from llm_redact.providers.base import ProviderAdapter, RouteKind
@@ -155,6 +156,11 @@ class _PrefixedOpenAIMixin:
             return RouteKind.NONE
         canonical = self._canonical(path, method=method)
         return super().matches(method, canonical)  # type: ignore[misc,no-any-return]
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        # The OpenAI rules, on the endpoint the path's tail names.
+        canonical = self._canonical(path, method=method)
+        return super().request_model(method, canonical, parsed)  # type: ignore[misc,no-any-return]
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         canonical = self._canonical(path, kind=kind)

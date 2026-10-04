@@ -72,6 +72,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from starlette.datastructures import QueryParams
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from llm_redact.audit import AuditWriteError
@@ -199,6 +200,13 @@ class WsAdapter:
 
     def authorizable(self, path: str) -> bool:
         return path in self.identity_paths
+
+    def request_model(self, path: str, query: QueryParams) -> str | None:
+        """The model the upstream runs this connection with, as far as the
+        upgrade names it — the access gate's ``AuthorizationRequest.model``;
+        never a value the upstream ignores. None — unknown — by default (a
+        Gemini Live setup frame names its model only after the check)."""
+        return None
 
     def redact_message(
         self,
@@ -340,6 +348,19 @@ KNOWN_REALTIME_EVENT_TYPES: frozenset[str] = (
 )
 
 
+def _session_model(endpoint: bool, query: QueryParams, name: str) -> str | None:
+    """An OpenAI-vocabulary realtime session's model: the ``name`` query
+    parameter's one value on the realtime ``endpoint`` itself — None when it
+    is absent or repeated (an upstream may read either occurrence), on any
+    other path, and when the query sets the session up elsewhere (an
+    ``intent`` — its frames choose the model — or a SIP ``call_id``, whose
+    model was set when the call was accepted)."""
+    if not endpoint or "intent" in query or "call_id" in query:
+        return None
+    values = query.getlist(name)
+    return values[0] if len(values) == 1 and values[0] else None
+
+
 class OpenAIRealtimeWs(WsAdapter):
     """/v1/realtime (beta and GA vocabularies).
 
@@ -361,6 +382,12 @@ class OpenAIRealtimeWs(WsAdapter):
 
     def matches(self, path: str) -> bool:
         return path == "/v1/realtime" or path.startswith("/v1/realtime/")
+
+    def request_model(self, path: str, query: QueryParams) -> str | None:
+        # The `model` query parameter of the realtime endpoint — unless the
+        # session's model is set elsewhere: by its frames (a transcription
+        # `intent`) or when the call was accepted (a SIP `call_id`).
+        return _session_model(path == "/v1/realtime", query, "model")
 
     def redact_message(
         self,
@@ -534,6 +561,13 @@ class AzureRealtimeWs(OpenAIRealtimeWs):
         return path in _AZURE_REALTIME_PATHS or path.startswith(
             ("/openai/realtime/", "/openai/v1/realtime/")
         )
+
+    def request_model(self, path: str, query: QueryParams) -> str | None:
+        # The deployment the query names: `model` on the GA path,
+        # `deployment` on the preview one (its `model` is not what runs).
+        if path == "/openai/realtime":
+            return _session_model(True, query, "deployment")
+        return _session_model(path == "/openai/v1/realtime", query, "model")
 
 
 # Gemini Live adds mime/voice/config enums; base64 audio rides in `data`
@@ -1227,7 +1261,6 @@ async def _authorize_connection(
     refusal: (row status, kind, close reason, close code). An awaited check
     re-checks the relay's admission after it: a reload that changed it
     meanwhile refuses the connection like a reload before the dial (1012)."""
-    from llm_redact.authorization import query_model
     from llm_redact.plugin_api import AuthorizationRequest
 
     authorization = state.authorization
@@ -1240,7 +1273,7 @@ async def _authorize_connection(
                 kind="chat",
                 method="GET",
                 path=path,
-                model=query_model(websocket.query_params.getlist("model")),
+                model=adapter.request_model(path, websocket.query_params),
                 identity=identity,
             ),
             f"WS {path}",

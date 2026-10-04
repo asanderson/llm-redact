@@ -64,12 +64,7 @@ from llm_redact.audit import (
     WriteAheadAudit,
 )
 from llm_redact.audit_s3 import AzureAuditSink, S3AuditSink
-from llm_redact.authorization import (
-    GateAuthorization,
-    OverlayBuild,
-    OverlayBuilds,
-    body_model,
-)
+from llm_redact.authorization import GateAuthorization, OverlayBuild, OverlayBuilds
 from llm_redact.config import (
     DEFAULT_MAP_WRITE_WAIT_SECONDS,
     RDBMS_BACKENDS,
@@ -5446,7 +5441,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 kind=kind.value,
                 method=request.method,
                 path=path,
-                model=body_model(parsed),
+                model=adapter.request_model(request.method, path, parsed)
+                if adapter is not None
+                else None,
                 identity=proxy_credential,
             ),
             f"{request.method} {path}",

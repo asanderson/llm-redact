@@ -330,15 +330,21 @@ own answer decides whether the page may read a response).
   made, and the next request is refused.
 - An access gate may also AUTHORIZE each request (llm-redact-pro roles):
   the core hands it the facts it resolved itself — provider, matched
-  adapter, routing kind, method, path, the body's top-level `model`, and
+  adapter, routing kind, method, path, the model the upstream runs, and
   whether a credential the proxy holds is spent — for every forwarded
   request and realtime upgrade, before the session, redaction, the audit
   START row and any upstream contact, and refuses (403 / close 1008) on the
-  gate's reason, an exception, a timeout or a nonsense answer. The facts
-  are only as complete as the request makes them: a model named in a path
-  (Gemini, Vertex, Bedrock) or in a Gemini Live first frame is not
-  extracted, and a pass-through body is never read (`model` is None), so a
-  policy that restricts models must treat an unknown model as refused. A
+  gate's reason, an exception, a timeout or a nonsense answer. The model
+  is the matched adapter's reading, never a value the upstream ignores: a
+  body `model` only where the upstream reads it, the path's where the
+  upstream takes it from there (an Azure deployment, Gemini and Vertex,
+  Claude on Vertex, a Bedrock model id or ARN), on a realtime upgrade the
+  `model` (Azure preview: `deployment`) query parameter. It is None —
+  unknown — when the request names none or the upstream takes it from where
+  the check cannot see it (a pass-through route, whose body is never read
+  for it; a multipart body; a Gemini Live setup frame; an OpenAI realtime
+  session set up by an `intent` or a SIP `call_id`), so a policy that
+  restricts models must treat an unknown model as refused. A
   gate's per-requester DETECTION OVERLAY can only tighten the configured
   policy (a stricter mode per rule, extra deny strings): with it, every
   character the configured policy redacts is still redacted and every

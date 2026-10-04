@@ -399,6 +399,13 @@ class RouteKind(Enum):
     NONE = "none"  # not this adapter's route
 
 
+def body_string(parsed: Any, key: str) -> str | None:
+    """The top-level ``key`` of a parsed JSON body when it is a non-empty
+    string, else None (``ProviderAdapter.request_model``)."""
+    value = parsed.get(key) if isinstance(parsed, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 class UploadReading(Protocol):
     """An upload as its adapter reads it (``ProviderAdapter.read_multipart``):
     what the proxy needs of it before redaction."""
@@ -458,6 +465,20 @@ class ProviderAdapter(ABC):
         request it is (``providers.attribution.provider_markers``).
         """
         return self.matches(method, path)
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        """The model the UPSTREAM runs this recognized request with, as far
+        as the request itself names it — the access gate's
+        ``AuthorizationRequest.model``. ``parsed`` is the request's parsed
+        JSON body (None when it has none or it is not JSON).
+
+        Never a value the upstream ignores: an adapter reports a body
+        ``model`` only on the routes whose upstream reads it, and the model
+        a path (or another field) names where the upstream takes it from
+        there. None — unknown — when the request names none or the upstream
+        takes it from somewhere this check cannot see; this base: always
+        None, so an adapter that does not say reports an unknown model."""
+        return None
 
     @abstractmethod
     def inject_system_note(self, body: dict[str, Any]) -> dict[str, Any]:

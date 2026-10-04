@@ -158,8 +158,17 @@ class _PrefixedOpenAIMixin:
         return super().matches(method, canonical)  # type: ignore[misc,no-any-return]
 
     def request_model(self, method: str, path: str, parsed: Any) -> str | None:
-        # The OpenAI rules, on the endpoint the path's tail names.
+        """The OpenAI rules on the endpoint the path's tail names — but only
+        when the client put nothing between the prefix and that endpoint
+        except an optional lone ``/v1``. Any other segment it chose (an
+        Azure-shaped ``/openai/deployments/{d}``, a router's
+        ``/{provider}/models/{m}``, even a gateway prefix such as Groq's
+        ``/openai/v1``) reaches the upstream as sent and may select what it
+        runs, which the core cannot know: the model is unknown (None). A base
+        path, deployment or router prefix belongs in ``upstream_base_url``."""
         canonical = self._canonical(path, method=method)
+        if self._strip(path) not in (canonical, canonical.removeprefix("/v1")):
+            return None
         return super().request_model(method, canonical, parsed)  # type: ignore[misc,no-any-return]
 
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:

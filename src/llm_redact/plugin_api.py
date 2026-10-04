@@ -724,7 +724,12 @@ class AuthorizationRequest:
       ignores. A body ``model`` only on the routes whose upstream reads it
       (OpenAI, Anthropic, Cohere, Ollama, custom providers, the Azure v1
       and Responses APIs, the Gemini API's OpenAI-compatible surface, a
-      context cache's create); the model a PATH names where the upstream
+      context cache's create) — on a custom provider only when the client
+      put nothing between ``/custom/NAME`` and the OpenAI endpoint but an
+      optional lone ``/v1``: any other segment it adds (a deployment, a
+      router's model path, a gateway prefix) reaches the upstream and may
+      select the model, which is then unknown; a base path belongs in
+      ``upstream_base_url``. The model a PATH names where the upstream
       takes it from there, whatever the body says: an Azure deployment, a
       Gemini ``models/{m}`` as ``m`` (a tuned model as
       ``tunedModels/{t}``), a Vertex publisher model's id (an endpoint as

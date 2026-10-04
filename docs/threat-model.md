@@ -339,7 +339,12 @@ own answer decides whether the page may read a response).
   body `model` only where the upstream reads it, the path's where the
   upstream takes it from there (an Azure deployment, Gemini and Vertex,
   Claude on Vertex, a Bedrock model id or ARN), on a realtime upgrade the
-  `model` (Azure preview: `deployment`) query parameter. It is None —
+  `model` (Azure preview: `deployment`) query parameter. On a custom
+  provider the body's model counts only when the client added nothing
+  before the OpenAI endpoint but an optional `/v1` (any other segment it
+  chooses reaches the upstream and may select the model: a deployment, a
+  router's model path); a base path belongs in `upstream_base_url`. It is
+  None —
   unknown — when the request names none or the upstream takes it from where
   the check cannot see it (a pass-through route, whose body is never read
   for it; a multipart body; a Gemini Live setup frame; an OpenAI realtime

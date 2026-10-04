@@ -52,6 +52,13 @@ from llm_redact.realtime import (
 from test_authorization_seam import AuthorizingGate, _client, _registry
 
 M = {"model": "body-model"}
+# Client-chosen segments before the OpenAI endpoint (the reviewer's shapes):
+# an Azure-shaped resource behind a custom provider runs the deployment, the
+# Hugging Face router the model, the PATH names.
+CUSTOM_DEPLOYMENT = "/custom/x/openai/deployments/gpt-4o-prod/chat/completions"
+CUSTOM_ROUTER = (
+    "/custom/x/hf-inference/models/meta-llama/Llama-3.1-405B-Instruct/v1/chat/completions"
+)
 ARN = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-3-5-sonnet"
 VERTEX = "/v1/projects/p/locations/us-central1"
 
@@ -225,17 +232,23 @@ HTTP_CASES: list[tuple[ProviderAdapter, str, str, Any, str | None]] = [
     (OllamaAdapter(), "POST", "/api/embeddings", M, "body-model"),
     (OllamaAdapter(), "POST", "/api/show", M, None),
     (OllamaAdapter(), "GET", "/api/tags", None, None),
-    # Custom providers: the OpenAI rules on the endpoint the tail names.
+    # Custom providers: the OpenAI rules on the endpoint the tail names —
+    # only when nothing but an optional lone `v1` precedes it. Any other
+    # segment the client adds reaches the upstream as sent and may pick
+    # what it runs (an Azure-shaped deployment, a router's model path, a
+    # gateway prefix): unknown. A base path belongs in upstream_base_url.
     (CustomOpenAIAdapter("vllm"), "POST", "/custom/vllm/v1/chat/completions", M, "body-model"),
-    (
-        CustomOpenAIAdapter("groq"),
-        "POST",
-        "/custom/groq/openai/v1/chat/completions",
-        M,
-        "body-model",
-    ),
+    (CustomOpenAIAdapter("vllm"), "POST", "/custom/vllm/chat/completions", M, "body-model"),
+    (CustomOpenAIAdapter("vllm"), "POST", "/custom/vllm/v1/embeddings", M, "body-model"),
+    (CustomOpenAIAdapter("x"), "POST", CUSTOM_DEPLOYMENT, M, None),
+    (CustomOpenAIAdapter("x"), "POST", CUSTOM_ROUTER, M, None),
+    (CustomOpenAIAdapter("groq"), "POST", "/custom/groq/openai/v1/chat/completions", M, None),
+    (CustomOpenAIAdapter("vllm"), "POST", "/custom/vllm/v1/v1/chat/completions", M, None),
+    (CustomOpenAIAdapter("vllm"), "POST", "/custom/vllm/v2/chat/completions", M, None),
     (CustomOpenAIAdapter("vllm"), "POST", "/custom/vllm/v1/batches", M, None),
     (CustomResponsesAdapter("vllm"), "POST", "/custom/vllm/v1/responses", M, "body-model"),
+    (CustomResponsesAdapter("vllm"), "POST", "/custom/vllm/responses", M, "body-model"),
+    (CustomResponsesAdapter("vllm"), "POST", "/custom/vllm/team-a/v1/responses", M, None),
 ]
 
 
@@ -373,3 +386,45 @@ async def test_the_gate_is_handed_the_model_the_upstream_runs(
     # ...exactly what was forwarded.
     (url,) = upstream.urls
     assert sent in url
+
+
+@pytest.mark.parametrize(
+    ("path", "model", "sent"),
+    [
+        ("/custom/x/v1/chat/completions", "small-model", "/v1/chat/completions"),
+        ("/custom/x/chat/completions", "small-model", "/chat/completions"),
+        (CUSTOM_DEPLOYMENT, None, "/openai/deployments/gpt-4o-prod/chat/completions"),
+        (
+            CUSTOM_ROUTER,
+            None,
+            "/hf-inference/models/meta-llama/Llama-3.1-405B-Instruct/v1/chat/completions",
+        ),
+    ],
+    ids=["v1", "bare", "azure-shaped", "router"],
+)
+async def test_a_custom_provider_path_the_client_extends_names_no_model(
+    monkeypatch: pytest.MonkeyPatch, path: str, model: str | None, sent: str
+) -> None:
+    # The body names an allowed model in every case; where the client's own
+    # path segments reach the upstream before the endpoint, they may select
+    # another one: the gate is told the model is unknown, never the body's.
+    gate = AuthorizingGate()
+    _registry(monkeypatch, gate)
+    seen: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.raw_path.decode())
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    config = Config(
+        providers={**Config().providers, "custom:x": ProviderConfig("https://router.example")}
+    )
+    app = create_app(config, upstream_transport=httpx.MockTransport(upstream))
+    body = {"model": "small-model", "messages": [{"role": "user", "content": "hi"}]}
+    async with _client(app) as client:
+        response = await client.post(path, json=body, headers={"authorization": "Bearer own"})
+    assert response.status_code == 200
+    (request,) = gate.requests
+    assert (request.provider, request.adapter, request.kind) == ("custom:x", "custom:x", "chat")
+    assert request.model == model
+    assert seen == [sent]  # what the client spelled is what the upstream got

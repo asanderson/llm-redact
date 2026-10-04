@@ -176,6 +176,22 @@ HTTP_CASES: list[tuple[ProviderAdapter, str, str, Any, str | None]] = [
     (GeminiOpenAIAdapter(), "POST", "/v1beta/openai/chat/completions", M, "body-model"),
     (GeminiOpenAIAdapter(), "POST", "/v1beta/openai/embeddings", M, "body-model"),
     (GeminiOpenAIResponsesAdapter(), "POST", "/v1beta/openai/responses", M, "body-model"),
+    # … and reports a ``models/`` resource name as the bare id it runs.
+    (
+        GeminiOpenAIAdapter(),
+        "POST",
+        "/v1beta/openai/chat/completions",
+        {"model": "models/gemini-2.5-flash"},
+        "gemini-2.5-flash",
+    ),
+    (
+        GeminiOpenAIResponsesAdapter(),
+        "POST",
+        "/v1beta/openai/responses",
+        {"model": "models/gemini-2.5-pro"},
+        "gemini-2.5-pro",
+    ),
+    (GeminiOpenAIAdapter(), "POST", "/v1beta/openai/chat/completions", {"model": 3}, None),
     # Vertex: a publisher model's id (with or without a project), an
     # endpoint as such; a context cache's create reads its body.
     (

@@ -18,7 +18,8 @@ and tags `vX.Y.Z`.
     facts of every forwarded HTTP request (matched or pass-through) and every realtime
     upgrade — surface, provider, adapter, routing kind, method, path, the `model` the upstream
     runs as the matched adapter reads it (a body `model` only where the upstream reads it;
-    the path's on Azure deployments, Gemini, Vertex, Claude on Vertex and Bedrock; on a custom
+    the path's on Azure deployments, Gemini, Vertex, Claude on Vertex and Bedrock; a Gemini
+    model always as its bare id, `models/` dropped, on the OpenAI-compatible surface too; on a custom
     provider the body's only when the client adds nothing before the OpenAI endpoint but an
     optional `/v1`, since a base path, deployment or router prefix it adds reaches the upstream
     and may select the model — such a base belongs in `upstream_base_url`; on realtime the

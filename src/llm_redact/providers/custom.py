@@ -207,12 +207,22 @@ class CustomResponsesAdapter(_CustomPrefixMixin, OpenAIResponsesAdapter):
 GEMINI_OPENAI_PREFIX = "/v1beta/openai"
 
 
-class GeminiOpenAIAdapter(_PrefixedOpenAIMixin, OpenAIAdapter):
+class _GeminiModelIds:
+    """The body's model as the Gemini API runs it: the surface accepts
+    ``models/{m}`` as well as ``m``, both the same model — reported as the
+    bare id, the form the native ``generateContent`` path reports."""
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        model = super().request_model(method, path, parsed)  # type: ignore[misc]
+        return model.removeprefix("models/") if isinstance(model, str) else None
+
+
+class GeminiOpenAIAdapter(_GeminiModelIds, _PrefixedOpenAIMixin, OpenAIAdapter):
     name = "gemini"
     prefix = GEMINI_OPENAI_PREFIX
 
 
-class GeminiOpenAIResponsesAdapter(_PrefixedOpenAIMixin, OpenAIResponsesAdapter):
+class GeminiOpenAIResponsesAdapter(_GeminiModelIds, _PrefixedOpenAIMixin, OpenAIResponsesAdapter):
     """Only the POSTs — the create, a compaction and the input-token count:
     an answer is restored in the request's own session. A stored response
     read back by id is left alone (pass-through) — the session that created

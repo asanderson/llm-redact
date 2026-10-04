@@ -28,6 +28,7 @@ from llm_redact.metrics import LOCAL_REFUSAL_KINDS
 KIND_STATUSES: dict[str, frozenset[int | None]] = {
     "access_gate": frozenset({403}),
     "audit_unavailable": frozenset({503}),
+    "authorization": frozenset({403}),
     "binary_values": frozenset({400}),
     "blocked_value": frozenset({400, 101}),
     "budget": frozenset({402}),

@@ -169,3 +169,58 @@ def test_a_redactable_scan_puts_only_block_winners_to_the_overrides() -> None:
     with pytest.raises(BlockedRequest):
         redactor.scan("+1 212 555 0198", redactable=True)
     assert _redactor(()).scan(EMAIL, redactable=True) == (Counter({"EMAIL": 1}), False)
+
+
+# --- a block an access gate's detection overlay added ---------------------------------
+
+
+def _overlay_block(*final: str) -> Redactor:
+    """The configured policy redacts emails and blocks phones; an overlay
+    escalated ``final`` (detector types) to block on top of it."""
+    config = DetectionConfig(modes=(("phone_number", "block"),))
+    return Redactor(
+        build_detectors(config),
+        InMemoryVault(),
+        build_allowlist(config),
+        modes={**build_modes(config), "EMAIL": "block"},
+        final_blocks=frozenset(final),
+    )
+
+
+def test_a_block_the_overlay_added_is_never_put_to_the_overrides() -> None:
+    # An approval would forward, as sent, a value the configured policy
+    # REDACTS (which never mints a code): the refusal carries none, and no
+    # grant is consulted or consumed.
+    approved = Approved(EMAIL)
+    redactor = _overlay_block("EMAIL").with_overrides(approved)
+    with pytest.raises(BlockedRequest) as caught:
+        redactor.redact_text(f"mail {EMAIL}")
+    assert caught.value.detector_type == "EMAIL"
+    assert redactor.blocked_type(f"mail {EMAIL}") == "EMAIL"
+    for redactable in (False, True):
+        with pytest.raises(BlockedRequest):
+            redactor.scan(f"mail {EMAIL}", redactable=redactable)
+    assert approved.asked == [] and approved.final == 4
+
+
+def test_a_configured_block_beside_it_stays_overridable() -> None:
+    approved = Approved(PHONE)
+    redactor = _overlay_block("EMAIL").with_overrides(approved)
+    assert redactor.redact_text(f"call {PHONE}") == f"call {PHONE}"
+    assert redactor.blocked_type(f"call {PHONE}") is None
+    assert approved.asked == [("PHONE", PHONE), ("PHONE", PHONE)] and approved.final == 0
+
+
+def test_the_overlays_block_without_overrides_refuses_alike() -> None:
+    with pytest.raises(BlockedRequest):
+        _overlay_block("EMAIL").redact_text(f"mail {EMAIL}")
+    assert _overlay_block("EMAIL").blocked_type(f"mail {EMAIL}") == "EMAIL"
+
+
+def test_the_thin_copies_keep_the_overlays_blocks() -> None:
+    approved = Approved(EMAIL)
+    base = _overlay_block("EMAIL")
+    for copy in (base.with_budget(10), base.with_floors({"EMAIL": 5})):
+        with pytest.raises(BlockedRequest):
+            copy.with_overrides(approved).redact_text(f"mail {EMAIL}")
+    assert approved.asked == [] and approved.final == 2

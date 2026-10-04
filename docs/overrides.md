@@ -122,7 +122,14 @@ These refusals carry no code:
 
 - deny strings (`[detection] deny`): the operator's always-redact list. In a
   verbatim field or a binary upload they refuse the request, and no approval
-  lets them through;
+  lets them through — nor does one let through an access gate's extra deny
+  strings (its detection overlay), or the value one of them overlaps;
+- a block an access gate's detection overlay ADDED for its requester
+  (llm-redact-pro roles: a rule the configured policy redacts, or warns
+  about, blocked for them): no code is minted and no approval, an earlier
+  one for the same value included, is consulted or used — an approval would
+  forward as sent a value the configured policy itself would have redacted.
+  A rule the configured policy already blocks stays overridable as before;
 - access control: the stored-object ownership check, sealed sessions, storage
   allowlists, unknown owners, the access gate itself;
 - request origin and DNS rebinding (`allowed_hosts`, `allowed_origins`);

@@ -63,6 +63,7 @@ from llm_redact.providers.base import (
     RouteKind,
     UnscannedBinaryFile,
     UploadReading,
+    body_string,
 )
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
@@ -90,6 +91,22 @@ _STORED_COMPLETION_RE = re.compile(r"/v1/chat/completions/[^/]+")
 # JSONL-file-part handling.
 _PROMPT_FIELD_PATH_SUFFIXES = ("/images/edits", "/videos")
 _PROMPT_FIELDS = frozenset({"prompt"})
+
+# The POST routes whose upstream runs the model the body's top-level `model`
+# names (``request_model``): a video's remix runs the video's own model, a
+# batch its input file's lines', the stores and conversations none at all.
+_MODEL_ROUTES = frozenset(
+    {
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/embeddings",
+        "/v1/images/generations",
+        "/v1/images/edits",
+        "/v1/audio/speech",
+        "/v1/videos",
+        "/v1/fine_tuning/jobs",
+    }
+)
 
 # Plain form fields whose values are protocol, not content — the multipart
 # twin of jsonwalk.STRUCTURAL_KEYS: enums, sizes, counts and the model name
@@ -999,6 +1016,12 @@ def _match_containers(method: str, path: str) -> RouteKind:
 
 class OpenAIAdapter(ProviderAdapter):
     name = "openai"
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        # The body's model, where the upstream reads it (_MODEL_ROUTES).
+        if method == "POST" and path in _MODEL_ROUTES:
+            return body_string(parsed, "model")
+        return None
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "POST" and path == "/v1/chat/completions":

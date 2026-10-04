@@ -388,7 +388,15 @@ serves them — `/v1`, `/openai/v1`, `/api/v1`, `/inference`, `/models`,
 `/api/paas/v4`, a Cloudflare AI Gateway's `/v1/{account}/{gateway}/openai`
 — and the path after `/custom/NAME` is forwarded byte-for-byte: point the
 tool at `http://127.0.0.1:8787/custom/NAME` plus the base path the
-upstream's own docs give. Gemini's OpenAI-compatible surface needs no
+upstream's own docs give. With an access gate that authorizes requests by
+model (llm-redact-pro roles), put that base path in `upstream_base_url`
+instead and point the tool at `http://127.0.0.1:8787/custom/NAME/v1`: a
+segment the CLIENT puts between `/custom/NAME` and the OpenAI endpoint (an
+Azure-shaped `/openai/deployments/{name}`, a router's
+`/{provider}/models/{model}`, a gateway prefix such as Groq's `/openai/v1`)
+reaches the upstream as sent and may select the model it runs, so the
+gate is told the model is unknown, never the body's (only an optional
+lone `/v1` is the plain form). Gemini's OpenAI-compatible surface needs no
 custom provider: `http://127.0.0.1:8787/v1beta/openai/` reaches
 `[providers.gemini]`, redacted like OpenAI's.
 

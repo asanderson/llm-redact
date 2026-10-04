@@ -23,8 +23,9 @@ forwards only recognized routes, does not refuse them.
 """
 
 import re
+from typing import Any
 
-from llm_redact.providers.base import RouteKind
+from llm_redact.providers.base import RouteKind, body_string
 from llm_redact.providers.openai import OpenAIAdapter
 from llm_redact.providers.openai_responses import OpenAIResponsesAdapter
 from llm_redact.rehydrate import Rehydrator
@@ -40,6 +41,12 @@ _AZURE_PATH = re.compile(
 # Only chat bodies can carry the system note: legacy completions carry a bare
 # prompt, and the media/embeddings bodies have no system field at all.
 _CHAT_ROUTES = frozenset({"chat/completions", "completions"})
+# A deployment route: the deployment it names runs the request, whatever
+# the body's `model` says (``request_model``).
+_AZURE_DEPLOYMENT = re.compile(
+    r"/openai/deployments/([^/]+)/"
+    r"(?:chat/completions|completions|embeddings|images/generations|images/edits|audio/speech)"
+)
 # Files + Batches ride Azure's own path shapes on both families (api-version
 # stays in the query, untouched like every query).
 _AZURE_FILES = re.compile(r"/openai/(?:v1/)?files")
@@ -76,6 +83,24 @@ _AZURE_RESPONSE_INPUT_TOKENS = re.compile(r"/openai/(?:v1/)?responses/input_toke
 
 class AzureOpenAIAdapter(OpenAIAdapter):
     name = "azure"
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        # The deployment a deployment route names (the model it runs);
+        # elsewhere the OpenAI rules on the OpenAI-shaped path: the v1 API
+        # and fine-tuning read the body's `model` (a deployment's name, or
+        # the base model).
+        if method != "POST":
+            return None
+        deployment = _AZURE_DEPLOYMENT.fullmatch(path)
+        if deployment is not None:
+            return deployment.group(1)
+        stored = _AZURE_STORED.fullmatch(path)
+        if stored is not None:
+            inner = "/v1/" + (stored.group(1) or stored.group(2))
+            return super().request_model(method, inner, parsed)
+        if path.startswith("/openai/v1/"):
+            return super().request_model(method, path.removeprefix("/openai"), parsed)
+        return None
 
     def matches(self, method: str, path: str) -> RouteKind:
         # The content routes (chat, completions, embeddings, media, Files
@@ -187,6 +212,17 @@ class AzureResponsesAdapter(OpenAIResponsesAdapter):
     """
 
     name = "azure"
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        # A create, a compaction and an input-token count run the body's
+        # model (the deployment's name); every other route names none.
+        if method == "POST" and (
+            _AZURE_RESPONSES.fullmatch(path)
+            or _AZURE_RESPONSE_COMPACT.fullmatch(path)
+            or _AZURE_RESPONSE_INPUT_TOKENS.fullmatch(path)
+        ):
+            return body_string(parsed, "model")
+        return None
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "POST" and (

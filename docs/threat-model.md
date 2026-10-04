@@ -210,7 +210,10 @@ own answer decides whether the page may read a response).
   restored in the caller's session and its items reported as the
   caller's. Those headers are also never forwarded on a recognized route
   (HTTP and realtime). Unrecognized pass-through traffic, sent with the
-  client's own key and never read, forwards them as sent.
+  client's own key and never read, forwards them as sent — unless an
+  access gate authorizes requests (llm-redact-pro roles): the method it is
+  told must be the one the upstream runs, so such a request is refused the
+  same way.
 - A request no route matches is forwarded only to a provider it can be
   POSITIVELY attributed to — a path family, or the headers only one
   provider's clients send (`anthropic-version`, a Google key, …) — never
@@ -328,6 +331,46 @@ own answer decides whether the page may read a response).
   revocation, and a closed feed simply ends. Streaming HTTP responses are
   not cut: each is one answer to a request that was admitted when it was
   made, and the next request is refused.
+- An access gate may also AUTHORIZE each request (llm-redact-pro roles): the
+  core hands it the facts it resolved itself — provider, matched adapter,
+  routing kind, method, path, the model the upstream runs, and whether a
+  credential the proxy holds is spent — for every forwarded request and
+  realtime upgrade, before the session, redaction, the audit START row and
+  any upstream contact (a pass-through request before its body is read, a
+  routing layer's local answer before it is given), and refuses (403 / close
+  1008) on the gate's reason, an exception, a timeout or a nonsense answer.
+  The model is the matched adapter's reading, never a value the upstream
+  ignores: a body `model` only where the upstream reads it, the path's where
+  the upstream takes it from there (an Azure deployment, Gemini and Vertex,
+  Claude on Vertex, a Bedrock model id or ARN), on a realtime upgrade the
+  `model` (Azure preview: `deployment`) query parameter. On a custom
+  provider the body's model counts only when the client added nothing before
+  the OpenAI endpoint but an optional `/v1` (any other segment it chooses
+  reaches the upstream and may select the model: a deployment, a router's
+  model path); a base path belongs in `upstream_base_url`. It is None —
+  unknown — when the request names none or the upstream takes it from where
+  the check cannot see it (a pass-through route, whose body is never read
+  for it; a multipart body; a Gemini Live setup frame; an OpenAI realtime
+  session set up by an `intent` or a SIP `call_id`), so a policy that
+  restricts models must treat an unknown model as refused. A gate's
+  per-requester DETECTION OVERLAY can only tighten the configured policy (a
+  stricter mode per rule, extra deny strings): with it, every character the
+  configured policy redacts is still redacted and every configured block
+  still refuses. Per detector type the stricter of the configured mode and
+  the overlay's applies, so an overlay entry that is not stricter (the
+  configured policy was tightened by a reload under it) has no effect and is
+  logged — it never refuses requests. An extra deny string is detected apart
+  from the configured detectors and taken in on top of what they decided:
+  where it overlaps a value the configured policy redacts or denies, the
+  UNION of both spans is redacted as one placeholder, so neither leaves in
+  part; a value the policy blocks refuses the request as before; it beats
+  only a value the policy forwards as sent (warn mode, an approved refusal
+  override) — its own span is redacted, the rest goes as it would have. A
+  block the overlay adds is final: no refusal override is consulted or used
+  for it and its refusal carries no code — an approval would forward as sent
+  a value the configured policy redacts. The core refuses the request rather
+  than drop an overlay it cannot apply, and an overlay never turns detection
+  back on for a provider configured `detection = false`.
 - Status/metrics/audit — and the `/events` live feed, which streams the
   same rows `/recent` serves — expose **types and counts only**: never
   values, never placeholder ids, never allowlist contents (the

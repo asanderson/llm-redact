@@ -137,6 +137,36 @@ def _resolve_overlaps(detections: Sequence[Detection]) -> list[Detection]:
     return sorted(deny_chosen + _sweep(others), key=lambda d: d.start)
 
 
+def _unite(text: str, spans: list[Detection]) -> list[Detection]:
+    """``spans`` in start order, every run of overlapping spans joined into
+    ONE detection over their union (``_joined``); a span overlapping no other
+    is kept as it is. Linear: each span is looked at a fixed number of
+    times, and each union sliced from ``text`` once."""
+    runs: list[list[Detection]] = []
+    # Where each run ends so far.
+    ends: list[int] = []
+    for d in sorted(spans, key=lambda d: d.start):
+        if runs and d.start < ends[-1]:
+            runs[-1].append(d)
+            ends[-1] = max(ends[-1], d.end)
+        else:
+            runs.append([d])
+            ends.append(d.end)
+    return [_joined(text, run) for run in runs]
+
+
+def _joined(text: str, run: list[Detection]) -> Detection:
+    """One run of overlapping spans as what is redacted in their place: a
+    lone span itself; overlapping ones a tier-0 detection (always redacted,
+    never a mode or an override) over their union, typed after the run's
+    first span."""
+    first = run[0]
+    if len(run) == 1:
+        return first
+    end = max(d.end for d in run)
+    return Detection(first.start, end, first.detector_type, text[first.start : end], tier=0)
+
+
 class Redactor:
     def __init__(
         self,
@@ -149,6 +179,8 @@ class Redactor:
         floors: Mapping[str, int] | None = None,
         budget: StringBudget | None = None,
         overrides: OverrideCheck | None = None,
+        added_deny: DetectorPlan | None = None,
+        final_blocks: frozenset[str] = frozenset(),
     ) -> None:
         # The detector list compiled for string-at-a-time detection (same
         # output, gated per string), taken as it is now: plan_for shares the
@@ -177,6 +209,16 @@ class Redactor:
         # The requester's approved overrides (with_overrides), asked for a
         # value only where detection refuses the request; None asks nothing.
         self._overrides = overrides
+        # Deny strings ADDED on top of the configured policy (an access
+        # gate's detection overlay, authorization.py), detected apart from
+        # it so that they can only tighten it (``_absorb``); None for none.
+        self._added_deny = added_deny
+        # The detector types whose block mode that overlay ADDED, past their
+        # configured mode: refusing one of those values is final — no
+        # approved override passes it and its refusal mints no code — since
+        # the configured policy would have redacted (or forwarded) it, an
+        # approval would forward as sent a value it never would have.
+        self._final_blocks = final_blocks
 
     def with_floors(self, floors: Mapping[str, int]) -> "Redactor":
         """This redactor numbering new placeholders above ``floors`` as well
@@ -213,10 +255,59 @@ class Redactor:
             floors=floors,
             budget=budget,
             overrides=self._overrides,
+            added_deny=self._added_deny,
+            final_blocks=self._final_blocks,
         )
 
     def _overridden(self, d: Detection) -> bool:
-        return self._overrides is not None and self._overrides.allows(d.detector_type, d.value)
+        """Whether the requester's approved overrides let this refusing
+        value through (forwarded as sent). A block the detection overlay
+        added is never put to them: the refusal is final
+        (``OverrideCheck.unoverridable``) — no grant is consulted or
+        consumed, no code minted."""
+        if self._overrides is None:
+            return False
+        if d.detector_type in self._final_blocks:
+            self._overrides.unoverridable()
+            return False
+        return self._overrides.allows(d.detector_type, d.value)
+
+    def _winners(self, text: str) -> list[Detection]:
+        """The detections redaction acts on in ``text``: the configured
+        policy's (``_resolve_overlaps``), with the added deny strings'
+        matches taken in (``_absorb``)."""
+        winners = _resolve_overlaps(self._plan.detect(text, self._allowlist))
+        if self._added_deny is None:
+            return winners
+        return self._absorb(text, winners, self._added_deny.detect(text, self._allowlist))
+
+    def _absorb(
+        self, text: str, winners: list[Detection], added: list[Detection]
+    ) -> list[Detection]:
+        """The configured winners of ``text`` with the ADDED deny strings'
+        matches ``added`` taken in, so that they only ever TIGHTEN what the
+        configured policy does. A winner that refuses (block mode, no
+        approved override) refuses the text right here, as ``redact_text``
+        would. A winner the policy forwards as sent (warn mode, an approved
+        block) yields to an added match overlapping it: the match is
+        redacted, the rest of the value goes as it would have. A winner
+        that redacts (redact mode, a configured deny string) keeps its
+        effect, and the UNION of its span and every added match overlapping
+        it is redacted as one placeholder (``_unite``) — so neither the value
+        the policy redacts nor the added string leaves in part."""
+        redacting: list[Detection] = []
+        passing: list[Detection] = []
+        for d in winners:
+            mode = self._modes.get(d.detector_type, "redact") if d.tier else "redact"
+            if mode == "block" and not self._overridden(d):
+                raise BlockedRequest(d.detector_type)
+            (redacting if mode == "redact" else passing).append(d)
+        # Every united span an added match is part of is tier 0, so the
+        # configured resolution's own tier-0 rule drops each passing winner
+        # one overlaps; the other spans are disjoint from every winner (the
+        # configured winners are disjoint), so nothing else changes.
+        united = _unite(text, redacting + added)
+        return _resolve_overlaps(sorted(united + passing, key=lambda d: d.start))
 
     def charge(self, count: int) -> None:
         """Count ``count`` more pieces of the body (an uploaded file's JSONL
@@ -243,13 +334,14 @@ class Redactor:
         # Counted before any work on it: the string over the budget is
         # never scanned.
         self.charge(1)
-        detections = _resolve_overlaps(self._plan.detect(text, self._allowlist))
+        detections = self._winners(text)
         if not detections:
             return text
         parts: list[str] = []
         cursor = 0
         for d in detections:
-            # Tier-0 (deny) always redacts: keying modes by type could let a
+            # Tier-0 (deny, and an added deny string's union with what it
+            # overlaps) always redacts: keying modes by type could let a
             # user-chosen deny type accidentally inherit a warn/block mode
             # from a rule sharing that type.
             mode = "redact" if d.tier == 0 else self._modes.get(d.detector_type, "redact")
@@ -295,16 +387,18 @@ class Redactor:
         its file's place), so only a block-mode winner refuses — a value it
         returns is redacted, not refused, and is never put to the
         overrides. A deny string in text that is not ``redactable`` refuses
-        it for good (``OverrideCheck.unoverridable``). Charged against the
-        string budget as one string."""
+        it for good (``OverrideCheck.unoverridable``) — an added one too,
+        with the value it overlaps (``_absorb``: the proxy could not redact
+        their union). Charged against the string budget as one string."""
         self.charge(1)
         found: Counter[str] = Counter()
         overridden = False
-        for d in _resolve_overlaps(self._plan.detect(text, self._allowlist)):
+        for d in self._winners(text):
             if not d.tier:
                 # Deny strings (tier 0) take no mode, exactly as in
-                # redact_text, and are the operator's always-redact list:
-                # never put to the requester's overrides.
+                # redact_text, and are the operator's always-redact list —
+                # or an access gate's, added to it (with the value it
+                # overlaps): never put to the requester's overrides.
                 found[d.detector_type] += 1
                 if not redactable and self._overrides is not None:
                     self._overrides.unoverridable()
@@ -332,7 +426,8 @@ class Redactor:
         and overlap resolution — else None. Nothing is issued, counted or
         charged: a check AHEAD of the redaction that will scan ``text`` and
         count it (an upload's pieces, before its binary parts are handed to
-        an upload inspector)."""
+        an upload inspector). Added deny strings take no part: they never
+        block, nor take a block-mode winner's place (``_absorb``)."""
         for d in _resolve_overlaps(self._plan.detect(text, self._allowlist)):
             # Deny strings (tier 0) never block, exactly as in redact_text.
             if d.tier and self._modes.get(d.detector_type) == "block" and not self._overridden(d):

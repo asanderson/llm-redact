@@ -17,6 +17,7 @@ are redacted and restored like OpenAI's (the raw path is forwarded).
 """
 
 from collections.abc import Iterable
+from typing import Any
 
 from llm_redact.providers.attribution import CUSTOM_ROUTE_PREFIX
 from llm_redact.providers.base import ProviderAdapter, RouteKind
@@ -156,6 +157,20 @@ class _PrefixedOpenAIMixin:
         canonical = self._canonical(path, method=method)
         return super().matches(method, canonical)  # type: ignore[misc,no-any-return]
 
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        """The OpenAI rules on the endpoint the path's tail names — but only
+        when the client put nothing between the prefix and that endpoint
+        except an optional lone ``/v1``. Any other segment it chose (an
+        Azure-shaped ``/openai/deployments/{d}``, a router's
+        ``/{provider}/models/{m}``, even a gateway prefix such as Groq's
+        ``/openai/v1``) reaches the upstream as sent and may select what it
+        runs, which the core cannot know: the model is unknown (None). A base
+        path, deployment or router prefix belongs in ``upstream_base_url``."""
+        canonical = self._canonical(path, method=method)
+        if self._strip(path) not in (canonical, canonical.removeprefix("/v1")):
+            return None
+        return super().request_model(method, canonical, parsed)  # type: ignore[misc,no-any-return]
+
     def wants_system_note(self, kind: RouteKind, path: str) -> bool:
         canonical = self._canonical(path, kind=kind)
         return super().wants_system_note(kind, canonical)  # type: ignore[misc,no-any-return]
@@ -192,12 +207,22 @@ class CustomResponsesAdapter(_CustomPrefixMixin, OpenAIResponsesAdapter):
 GEMINI_OPENAI_PREFIX = "/v1beta/openai"
 
 
-class GeminiOpenAIAdapter(_PrefixedOpenAIMixin, OpenAIAdapter):
+class _GeminiModelIds:
+    """The body's model as the Gemini API runs it: the surface accepts
+    ``models/{m}`` as well as ``m``, both the same model — reported as the
+    bare id, the form the native ``generateContent`` path reports."""
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        model = super().request_model(method, path, parsed)  # type: ignore[misc]
+        return model.removeprefix("models/") if isinstance(model, str) else None
+
+
+class GeminiOpenAIAdapter(_GeminiModelIds, _PrefixedOpenAIMixin, OpenAIAdapter):
     name = "gemini"
     prefix = GEMINI_OPENAI_PREFIX
 
 
-class GeminiOpenAIResponsesAdapter(_PrefixedOpenAIMixin, OpenAIResponsesAdapter):
+class GeminiOpenAIResponsesAdapter(_GeminiModelIds, _PrefixedOpenAIMixin, OpenAIResponsesAdapter):
     """Only the POSTs — the create, a compaction and the input-token count:
     an answer is restored in the request's own session. A stored response
     read back by id is left alone (pass-through) — the session that created

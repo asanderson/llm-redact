@@ -40,7 +40,7 @@ like azure.
 import re
 from typing import Any
 
-from llm_redact.providers.base import RouteKind
+from llm_redact.providers.base import RouteKind, body_string
 from llm_redact.providers.gemini import GeminiAdapter, cache_object_ids
 
 _VERSION = r"/(?:v1|v1beta1)/"
@@ -74,9 +74,33 @@ _MODEL_METADATA = re.compile(
     r"/models(?:/[^/:]+)?"
 )
 
+# A Vertex resource name as the model it runs (``request_model``): a publisher
+# model's id, an endpoint (which runs whatever is deployed to it) as such.
+_PUBLISHER_MODEL = re.compile(r"(?:.*/)?publishers/[^/]+/models/([^/:]+)")
+_ENDPOINT = re.compile(r"(?:.*/)?(endpoints/[^/:]+)")
+
+
+def _vertex_model(name: str) -> str:
+    for pattern in (_PUBLISHER_MODEL, _ENDPOINT):
+        match = pattern.fullmatch(name)
+        if match is not None:
+            return match.group(1)
+    return name
+
 
 class VertexAdapter(GeminiAdapter):
     name = "vertex"
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        # The publisher model or endpoint the path names (with or without
+        # the project prefix); a context cache's create names its model in
+        # the body, a resource name read alike.
+        if method != "POST":
+            return None
+        if _VERTEX_PATH.fullmatch(path):
+            return _vertex_model(path.rpartition(":")[0])
+        model = body_string(parsed, "model") if _CACHED_COLLECTION.fullmatch(path) else None
+        return _vertex_model(model) if model is not None else None
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "GET":

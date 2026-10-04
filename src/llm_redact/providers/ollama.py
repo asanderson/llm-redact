@@ -26,7 +26,7 @@ note only weakens token preservation.
 from typing import Any
 
 from llm_redact.jsonwalk import json_bytes, loads_bounded, transform_strings
-from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
+from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind, body_string
 from llm_redact.rehydrate import RehydratorPool
 from llm_redact.sse import SSEEvent
 
@@ -36,9 +36,19 @@ _METADATA_GETS = frozenset({"/api/tags", "/api/ps", "/api/version"})
 _GENERATE_CHANNEL = ("ollama", "generate")
 
 
+# The routes that run the body's model (``request_model``); /api/show reads
+# a model's metadata, running nothing.
+_MODEL_ROUTES = frozenset({"/api/chat", "/api/generate", "/api/embed", "/api/embeddings"})
+
+
 class OllamaAdapter(ProviderAdapter):
     name = "ollama"
     handles_ndjson = True
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        if method == "POST" and path in _MODEL_ROUTES:
+            return body_string(parsed, "model")
+        return None
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "GET" and path in _METADATA_GETS:

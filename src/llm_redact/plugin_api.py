@@ -701,6 +701,115 @@ class Admission:
     recheck: ConnectionRecheck | None = field(default=None, compare=False, repr=False)
 
 
+@dataclass(frozen=True)
+class AuthorizationRequest:
+    """The FACTS of one request, as the access gate's optional
+    ``authorize_request`` is asked about it: what the core itself resolved,
+    never a value from the body beyond the model name, never a credential.
+
+    - ``surface``: ``"http"`` or ``"websocket"`` (a realtime upgrade).
+    - ``provider``: the provider the request is attributed to (the core's
+      own attribution: ``"openai"``, ``"custom:vllm"``, …), or None.
+    - ``adapter``: the matched adapter's name (``"anthropic"``,
+      ``"openai"``, ``"azure"``, ``"openai-realtime"``, …); None for an
+      unrecognized route forwarded as it came (pass-through).
+    - ``kind``: the routing kind — ``"chat"`` (redacted and restored),
+      ``"redact_only"`` or ``"none"`` (pass-through); a realtime upgrade is
+      ``"chat"``.
+    - ``method``: the HTTP method (``"GET"`` for an upgrade) — the one the
+      upstream runs: with this member present, a request carrying an HTTP
+      method override (a header or query parameter an upstream may honor)
+      is refused 400 before the gate is asked, pass-through included.
+    - ``path``: the request path after admission (the gate's own prefix
+      removed). Not part of the dataclass's repr.
+    - ``model``: the model the UPSTREAM runs the request with, as the
+      matched adapter reads the request — never a value the upstream
+      ignores. A body ``model`` only on the routes whose upstream reads it
+      (OpenAI, Anthropic, Cohere, Ollama, custom providers, the Azure v1
+      and Responses APIs, the Gemini API's OpenAI-compatible surface, a
+      context cache's create) — on a custom provider only when the client
+      put nothing between ``/custom/NAME`` and the OpenAI endpoint but an
+      optional lone ``/v1``: any other segment it adds (a deployment, a
+      router's model path, a gateway prefix) reaches the upstream and may
+      select the model, which is then unknown; a base path belongs in
+      ``upstream_base_url``. The model a PATH names where the upstream
+      takes it from there, whatever the body says: an Azure deployment, a
+      Gemini ``models/{m}`` as ``m`` (a tuned model as
+      ``tunedModels/{t}``), a Vertex publisher model's id (an endpoint as
+      ``endpoints/{e}``), Claude on Vertex, a Bedrock model id or ARN
+      (percent-decoded exactly as the routing reads it; StartAsyncInvoke's
+      body ``modelId``). On a realtime upgrade the ``model`` query parameter
+      (OpenAI, Azure GA) or ``deployment`` (the Azure preview). None —
+      unknown — when the request names none or the upstream takes it from
+      where the check cannot see it: a pass-through route, a multipart
+      body, a route that runs no model or names it elsewhere (a batch's
+      lines, a video remix), a Gemini Live setup frame, an OpenAI realtime
+      session set up by an ``intent`` or a SIP ``call_id``, a repeated
+      query parameter. A policy that restricts models must treat an unknown
+      model as refused. A routed request reports the model the client asked
+      for (the routing layer's rules map it).
+    - ``identity``: True when the request spends a credential the proxy
+      holds (its cloud identity, or a routed plan's operator key).
+    """
+
+    surface: str
+    provider: str | None
+    adapter: str | None
+    kind: str
+    method: str
+    path: str = field(repr=False)
+    model: str | None
+    identity: bool
+
+
+@dataclass(frozen=True)
+class DetectionOverlay:
+    """Detection a requester gets ON TOP OF the configured policy (the access
+    gate's optional ``detection_overlay``): it can only TIGHTEN it — with an
+    overlay, every character the configured policy redacts stays redacted
+    and every configured block still refuses.
+
+    - ``modes``: ``(rule name, mode)`` pairs, named like ``[detection.modes]``
+      (built-in and custom rule names), each mode ``"redact"`` or
+      ``"block"``. Per detector TYPE the STRICTER of the configured mode and
+      the overlay's applies (warn < redact < block), so never a looser one;
+      a rule sharing its type with another tightens both. An entry that is
+      not stricter than the configured mode has no effect — logged once
+      per distinct overlay at WARNING (rule names and modes only), never a
+      refusal: a reload may tighten the configured policy while a gate's
+      role definitions stay as they were. A block the overlay ADDS (past
+      the configured mode) is final: no refusal override is consulted or
+      used for it and its refusal carries no code — an approval would
+      forward as sent a value the configured policy redacts (a rule the
+      configured policy blocks stays overridable).
+    - ``deny``: extra literal deny strings (case-insensitive, non-empty, no
+      guillemets), redacted wherever they occur. Unlike ``[detection]
+      deny``, which wins every overlap among the configured detectors, they
+      are detected APART from those and taken in on top of what they
+      decided, so they never displace it: where one overlaps a value the
+      configured policy redacts or denies, the UNION of both spans is
+      redacted as one placeholder (neither leaves in part); a value the
+      policy blocks still refuses the request; only a value the policy
+      forwards as sent (warn mode, an approved refusal override) yields to
+      it — the deny string's span is redacted, the rest sent as before.
+
+    The core refuses the request (403) rather than drop anything it cannot
+    apply, since an intended tightening would be lost: an unknown rule
+    name, a malformed mode or deny string, a value of the wrong type. A
+    rule whose detector type no built rule emits (disabled, or scoped out
+    by ``[detection] languages``, with no built rule sharing its type) is
+    otherwise a no-op; one that is not built while a built rule shares its
+    type tightens that type. An empty overlay is the configured policy.
+    Hashable: the core keeps one build per distinct overlay
+    (``authorization.OVERLAY_CACHE_SIZE``, least recently used dropped), so
+    a gate should hand out few distinct values — one per role set, not per
+    user.
+    """
+
+    modes: tuple[tuple[str, str], ...] = ()
+    deny: tuple[str, ...] = field(default=(), repr=False)
+
+
 class AccessGate(Protocol):
     """Client admission (``Registry.build_access_gate``).
 
@@ -795,6 +904,47 @@ class AccessGate(Protocol):
       a non-iterable or awaitable answer drops them all (counted, logged
       once per episode by exception TYPE). The core's own metrics are
       rendered either way.
+    - OPTIONAL ``authorize_request(request: AuthorizationRequest) -> str | None``
+      — whether this admitted requester may make this request (roles,
+      attributes): asked once for EVERY forwarded HTTP request — a matched
+      route once its body is parsed, after the routing plan, the
+      scanned-body rule and the stored-object check; an unrecognized route
+      after its routing plan and BEFORE its body is read (nothing in it
+      decides); a request a routing layer answers locally (model discovery)
+      before that answer is given — and for EVERY realtime upgrade (after
+      admission and adapter resolution), always BEFORE the session is
+      opened, anything is redacted, the ``[audit] required`` START row, the
+      upstream authorizer and any upstream contact, in the request's own
+      context (what ``admit`` set in context variables is visible). None
+      allows; a non-empty string refuses with that FIXED reason
+      (value-free: never a user name, a key or a path) — a recorded
+      provider-shaped 403, or on a realtime upgrade an accept-then-close
+      1008 with the reason cut to 123 bytes; the core never logs it. It may
+      return an awaitable, which gets at most
+      ``authorization.AUTHORIZE_TIMEOUT_SECONDS`` (5 s; then cancelled, never
+      awaited again). An exception, a timeout or any other answer refuses
+      with the core's fixed text (counted under the bookkeeping stage
+      ``authorization``, logged by exception TYPE). A synchronous answer
+      costs the request no await; without the member nothing is asked — a
+      member that is present but cannot be called is no absent one: its
+      TypeError refuses every request (fail closed). A
+      realtime connection is held — revocable through ``ConnectionControl``
+      and by a reload — while its check runs: one closed meanwhile is
+      refused right after it (1008 with the gate's reason), never dialled.
+    - OPTIONAL ``detection_overlay() -> DetectionOverlay | None`` — the
+      detection this requester gets on top of the configured policy,
+      tighten-only (``DetectionOverlay``): asked synchronously once per
+      HTTP request, right after ``authorize_request``, and once per realtime
+      connection at the upgrade (fixed for the connection's life), in the
+      request's context. It applies to everything that request's redaction
+      does — JSON bodies, uploads and their inspected text, realtime
+      frames. None or an empty overlay: the configured policy. An
+      exception, an awaitable, a value that is no ``DetectionOverlay`` or
+      one the core cannot apply refuses the request (403 / 1008) with the
+      core's fixed text (bookkeeping stage ``authorization``, type-only
+      log) — as does the member itself when it is present but cannot be
+      called. A provider configured ``detection = false`` stays unredacted:
+      an overlay never turns detection back on.
     - ``recheck_interval: float`` — seconds between the core's re-checks
       of every open long-lived connection's ``Admission.recheck`` (read
       once at startup; default 30; anything but a number from 5 to 3600 is
@@ -1071,6 +1221,7 @@ class ConfigSection(Protocol):
 __all__ = [
     "AccessGate",
     "Admission",
+    "AuthorizationRequest",
     "CliCommand",
     "ConfigSection",
     "ConnectionControl",
@@ -1078,6 +1229,7 @@ __all__ = [
     "Dashboard",
     "DashboardHost",
     "DbPasswordProvider",
+    "DetectionOverlay",
     "HopDecision",
     "HopRequest",
     "HopResult",

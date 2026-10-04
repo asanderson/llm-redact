@@ -11,6 +11,50 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+- Two optional access-gate seams for role- and attribute-based access control (the policy
+  itself is llm-redact-pro's; the core holds no user, role or group logic):
+  - `authorize_request(request: plugin_api.AuthorizationRequest)`: the gate is handed the
+    facts of every forwarded HTTP request (matched or pass-through) and every realtime
+    upgrade — surface, provider, adapter, routing kind, method, path, the `model` the upstream
+    runs as the matched adapter reads it (a body `model` only where the upstream reads it;
+    the path's on Azure deployments, Gemini, Vertex, Claude on Vertex and Bedrock; a Gemini
+    model always as its bare id, `models/` dropped, on the OpenAI-compatible surface too; on a custom
+    provider the body's only when the client adds nothing before the OpenAI endpoint but an
+    optional `/v1`, since a base path, deployment or router prefix it adds reaches the upstream
+    and may select the model — such a base belongs in `upstream_base_url`; on realtime the
+    `model` or Azure preview `deployment` query parameter; None when unknown),
+    whether a credential the proxy holds is spent —
+    after the routing plan, the scanned-body rule and the stored-object check (an
+    unrecognized route before its body is read; a routing layer's local answer before it is
+    given), and before the session, redaction, the `[audit] required` START row, the
+    upstream authorizer and any upstream contact. A string refuses with that reason (a recorded provider-shaped
+    403; realtime: close 1008); an exception, a timeout (5 s for an awaitable) or any other
+    answer refuses with the core's own text. Without the member nothing is asked and no
+    await is added; a member that is present but cannot be called refuses every request.
+    With the member, a pass-through request carrying an HTTP method override is refused
+    (400, like a matched route): the method the gate is told must be the one the upstream
+    runs.
+  - `detection_overlay() -> plugin_api.DetectionOverlay | None`: per-requester rule modes
+    and extra deny strings that can only TIGHTEN the configured policy (warn < redact <
+    block), applied to everything the request's redaction does (JSON bodies, uploads and
+    their inspected text, every frame of a realtime connection): every character the
+    configured policy redacts stays redacted and every configured block still refuses. An
+    extra deny string is detected apart from the configured detectors: where it overlaps a
+    value the configured policy redacts or denies, their union is redacted as one
+    placeholder; it beats only a value the policy forwards as sent (warn mode, an approved
+    refusal override). A block the overlay adds past the configured mode is final: no refusal
+    override is consulted or used for it, and its refusal carries no code. Per detector type
+    the stricter of the configured mode and the overlay's applies: an entry that is not
+    stricter has no effect (logged once per distinct overlay, rule names and modes only) —
+    never a refusal, so a reload that tightens `[detection]` cannot turn a role's former
+    tightening into refused requests. An unknown rule name or a malformed value refuses the
+    request (403 / 1008) instead of being dropped. Each distinct overlay is built once (at
+    most 64 kept; a reload that changes `[detection]` drops them).
+  - New local refusal kind `authorization` (`llm_redact_local_refusals_total`) and
+    bookkeeping stage `authorization`; `/status` `access` reports `authorizes_requests` and
+    `detection_overlays`.
+
 ## [1.10.0] - 2026-10-02
 
 Observability, document extraction in the free core, and stricter upload reading.

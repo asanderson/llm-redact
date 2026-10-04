@@ -180,6 +180,13 @@ DATACLASSES: dict[str, str] = {
         " redirect: 'str | None' = None, grant: 'str | None' = None,"
         " recheck: 'ConnectionRecheck | None' = None) -> None"
     ),
+    "AuthorizationRequest": (
+        "(surface: 'str', provider: 'str | None', adapter: 'str | None', kind: 'str',"
+        " method: 'str', path: 'str', model: 'str | None', identity: 'bool') -> None"
+    ),
+    "DetectionOverlay": (
+        "(modes: 'tuple[tuple[str, str], ...]' = (), deny: 'tuple[str, ...]' = ()) -> None"
+    ),
     "RouteInbound": (
         "(adapter_name: 'str | None', provider_name: 'str', method: 'str', path: 'str',"
         " raw_path: 'str', query: 'str', headers: 'Mapping[str, str]', model: 'str | None')"
@@ -219,6 +226,7 @@ DATACLASSES: dict[str, str] = {
 ALL: tuple[str, ...] = (
     "AccessGate",
     "Admission",
+    "AuthorizationRequest",
     "CliCommand",
     "ConfigSection",
     "ConnectionControl",
@@ -226,6 +234,7 @@ ALL: tuple[str, ...] = (
     "Dashboard",
     "DashboardHost",
     "DbPasswordProvider",
+    "DetectionOverlay",
     "HopDecision",
     "HopRequest",
     "HopResult",
@@ -364,6 +373,8 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``override_subject(subject: str) -> str``",
         "``browser_signed_in(conn: HTTPConnection, subject: str) -> bool``",
         "``metrics_samples() -> Iterable[tuple[str, Mapping[str, str], float]]``",
+        "``authorize_request(request: AuthorizationRequest) -> str | None``",
+        "``detection_overlay() -> DetectionOverlay | None``",
     ),
     "SessionRouter": (
         "``is_durable(session_id) -> bool``",

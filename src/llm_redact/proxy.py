@@ -64,6 +64,7 @@ from llm_redact.audit import (
     WriteAheadAudit,
 )
 from llm_redact.audit_s3 import AzureAuditSink, S3AuditSink
+from llm_redact.authorization import GateAuthorization, OverlayBuild, OverlayBuilds
 from llm_redact.config import (
     DEFAULT_MAP_WRITE_WAIT_SECONDS,
     RDBMS_BACKENDS,
@@ -124,6 +125,7 @@ from llm_redact.placeholders import PLACEHOLDER_RE, json_floors, may_carry_token
 from llm_redact.plugin_api import (
     AccessGate,
     Admission,
+    AuthorizationRequest,
     Dashboard,
     HopRequest,
     HopResult,
@@ -830,6 +832,9 @@ class ProxyState:
         self.detectors = build_detectors(config.detection)
         self.allowlist = build_allowlist(config.detection)
         self.modes = build_modes(config.detection)
+        # The access gate's detection overlays (authorization.py), built per
+        # distinct overlay against exactly these detection objects.
+        self.overlay_builds = OverlayBuilds(config.detection, self.modes)
         # Process-lifetime totals by type (for /status), shared across all
         # per-session redactors/rehydrators.
         self.detection_counts: Counter[str] = Counter()
@@ -1037,6 +1042,10 @@ class ProxyState:
         self.public_origin: tuple[str, str, str] | None = (
             _parse_public_origin(self.access_gate) if self.guards_dashboard else None
         )
+        # Optional authorization members (authorize_request,
+        # detection_overlay), read once: without them a request pays one
+        # attribute test each.
+        self.authorization = GateAuthorization(self.access_gate, self.bookkeeping_errors)
         # Optional: the gate may drop a deleted user's sessions through the
         # live vault manager (plugin_api.SessionStore).
         bind_sessions = getattr(self.access_gate, "bind_sessions", None)
@@ -1221,16 +1230,27 @@ class ProxyState:
             return False
 
     def context_for(
-        self, adapter: ProviderAdapter | None, method: str, path: str, parsed_body: Any
+        self,
+        adapter: ProviderAdapter | None,
+        method: str,
+        path: str,
+        parsed_body: Any,
+        overlay: OverlayBuild | None = None,
     ) -> RequestContext:
+        """The request's session objects. ``overlay``: the requester's
+        detection overlay (``authorization.OverlayBuilds.build``, against
+        this generation's detection objects — read in the same synchronous
+        stretch): the request's redactor runs its modes instead of the
+        configured ones, and its deny strings on top of the configured
+        detectors; None keeps the shared static context (the fast path)."""
         if self.session_router.mode == "static":
-            return self._static_context
+            return self._overlaid(self._static_context, overlay)
         session_id = self.session_router.resolve(
             adapter.name if adapter is not None else None, method, path, parsed_body
         )
         sealed = self._session_sealed(session_id)
         if session_id == self._static_context.session_id and sealed is None:
-            return self._static_context
+            return self._overlaid(self._static_context, overlay)
         vault = self.vault_manager.get(session_id)
         if session_id not in self._known_sessions:
             self._known_sessions.add(session_id)
@@ -1262,13 +1282,34 @@ class ProxyState:
             _SealedVault(vault) if sealed is not None else vault,
             self.allowlist,
             counts=self.detection_counts,
-            modes=self.modes,
+            modes=overlay.modes if overlay is not None else self.modes,
             warn_counts=self.warn_counts,
+            added_deny=overlay.deny if overlay is not None else None,
+            final_blocks=overlay.final_blocks if overlay is not None else frozenset(),
         )
         rehydrator = Rehydrator(
             vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
         )
         return RequestContext(session_id, vault, redactor, rehydrator, sealed=sealed)
+
+    def _overlaid(self, ctx: RequestContext, overlay: OverlayBuild | None) -> RequestContext:
+        """``ctx`` (an unsealed shared context) itself, or — with an overlay
+        — a thin copy whose redactor runs the overlay's modes and added deny
+        strings over the same detectors, vault, allowlist, counters and
+        rehydrator."""
+        if overlay is None:
+            return ctx
+        redactor = Redactor(
+            self.detectors,
+            ctx.vault,
+            self.allowlist,
+            counts=self.detection_counts,
+            modes=overlay.modes,
+            warn_counts=self.warn_counts,
+            added_deny=overlay.deny,
+            final_blocks=overlay.final_blocks,
+        )
+        return RequestContext(ctx.session_id, ctx.vault, redactor, ctx.rehydrator)
 
     def _session_sealed(self, session_id: str) -> str | None:
         """The optional ``SessionRouter.sealed`` for the session this
@@ -1714,10 +1755,13 @@ class ProxyState:
             detectors = self.detectors
             allowlist = self.allowlist
             modes = self.modes
+            overlay_builds = self.overlay_builds
         else:
             detectors = build_detectors(effective.detection)
             allowlist = build_allowlist(effective.detection)
             modes = build_modes(effective.detection)
+            # Every cached overlay build dies with the objects it extended.
+            overlay_builds = OverlayBuilds(effective.detection, modes)
         redactor = Redactor(
             detectors,
             self.vault,
@@ -1776,6 +1820,7 @@ class ProxyState:
         self.detectors = detectors
         self.allowlist = allowlist
         self.modes = modes
+        self.overlay_builds = overlay_builds
         self.redactor = redactor
         self.rehydrator = rehydrator
         self._static_context = RequestContext(
@@ -3060,6 +3105,12 @@ async def _handle_local(
                 # cap, cloud entitlements, expiry — metadata only, never the
                 # key itself. Warnings surface invalid-key-fell-to-Free and
                 # the expiry grace window (never silent).
+                # The access gate's optional authorization seams: whether it
+                # authorizes requests and hands out detection overlays.
+                "access": {
+                    "authorizes_requests": state.authorization.authorizes,
+                    "detection_overlays": state.authorization.overlays,
+                },
                 # The access gate's own block (llm-redact-pro); without one,
                 # no registry and nothing enforced.
                 "users": (
@@ -4461,7 +4512,7 @@ def _misaddressed_refused(
 
 def _method_override_refused(
     state: ProxyState,
-    adapter: ProviderAdapter,
+    adapter: ProviderAdapter | None,
     kind: str,
     *,
     provider_name: str,
@@ -4469,8 +4520,10 @@ def _method_override_refused(
     path: str,
     started: float,
 ) -> JSONResponse:
-    """A matched route carrying a method override (``method_override``): a
-    recorded, provider-shaped 400 — never forwarded, no upstream contact."""
+    """A matched route carrying a method override (``method_override``) —
+    or, when the access gate authorizes requests, any route (pass-through:
+    adapter None): a recorded, provider-shaped 400 — never forwarded, no
+    upstream contact."""
     state.record_request(
         session=state.config.vault.session,
         provider=provider_name,
@@ -4484,6 +4537,14 @@ def _method_override_refused(
         refusal="method_override",
     )
     logger.info("%s %s -> 400 refused (method override %s)", request.method, path, kind)
+    if adapter is None:
+        message = (
+            f"llm-redact: the request carries an HTTP method override {kind}; this proxy"
+            " authorizes each request by its own method, so it refuses one asking the"
+            " upstream to run another. Send the request with the method it means; the"
+            " request was not forwarded"
+        )
+        return JSONResponse({"error": message}, status_code=400)
     message = (
         f"llm-redact: the request carries an HTTP method override {kind}; llm-redact reads"
         f" a {adapter.name} API request by its own method, so it refuses one asking the"
@@ -5056,12 +5117,19 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         logger.info("%s %s -> 403 refused by the access gate", request.method, path)
         return JSONResponse(error, status_code=403)
 
-    override = method_override(request.headers, query) if adapter is not None else None
-    if adapter is not None and override is not None:
-        # A matched route is read by the request line's method; an upstream
-        # that honors the override would run another (a create turned into a
-        # listing). Refused before the body is read, any credential or
-        # upstream contact; the message names the KIND only.
+    # A matched route is read by the request line's method, and so is every
+    # route the access gate authorizes (its `method` fact): an upstream that
+    # honors an override would run another (a create turned into a
+    # listing). Without the gate's authorize_request, pass-through forwards
+    # the override as sent.
+    override = (
+        method_override(request.headers, query)
+        if adapter is not None or state.authorization.authorizes
+        else None
+    )
+    if override is not None:
+        # Refused before the body is read, any credential or upstream
+        # contact; the message names the KIND only.
         return _method_override_refused(
             state,
             adapter,
@@ -5094,7 +5162,25 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # where every other proxy-generated reply for a real API path sits —
             # AFTER the disabled-provider 502 and the named-user 403, so an
             # unauthenticated client on a team deployment learns nothing the
-            # gates would refuse. It needs nothing from the body.
+            # gates would refuse. It needs nothing from the body — and it is
+            # given only once the access gate's request authorization allows
+            # it, like any request (nothing read, nothing forwarded).
+            if state.authorization.authorizes:
+                refused = await _authorization_check(
+                    state,
+                    request,
+                    adapter,
+                    kind,
+                    provider_name=provider_name,
+                    path=path,
+                    model=adapter.request_model(request.method, path, None)
+                    if adapter is not None
+                    else None,
+                    identity=upstream_auth is not None,
+                    started=started,
+                )
+                if refused is not None:
+                    return refused
             return _answer_locally(state, request, answer, path=path, started=started)
 
     # Routing (the llm-redact-pro routing layer) plans an UNRECOGNIZED route
@@ -5156,6 +5242,25 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             )
         body_bytes = capped
     else:
+        if state.authorization.authorizes:
+            # Pass-through: its facts are all known before the body (none of
+            # it is read for them, no model), so the access gate decides
+            # before the unbounded read — and with the client's own credential
+            # only (one the proxy holds was refused above, the identity and
+            # lending-plan 403s).
+            refused = await _authorization_check(
+                state,
+                request,
+                None,
+                kind,
+                provider_name=provider_name,
+                path=path,
+                model=None,
+                identity=False,
+                started=started,
+            )
+            if refused is not None:
+                return refused
         body_bytes = await _waited(request.body())
 
     parsed: Any = None
@@ -5377,6 +5482,47 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             started=started,
         )
 
+    # The access gate's authorization (llm-redact-pro roles) of a MATCHED
+    # route: asked with the request's facts once everything above that may
+    # refuse it has (its body parsed, its plan made) — before the session,
+    # redaction, the audit START row, the upstream authorizer and any
+    # upstream contact. (A pass-through route was asked before its body was
+    # read, a local answer before it was given.) Without the member: one
+    # attribute test, no await.
+    authorization = state.authorization
+    if authorization.authorizes and adapter is not None:
+        refused = await _authorization_check(
+            state,
+            request,
+            adapter,
+            kind,
+            provider_name=provider_name,
+            path=path,
+            model=adapter.request_model(request.method, path, parsed),
+            identity=proxy_credential,
+            started=started,
+        )
+        if refused is not None:
+            return refused
+    # The requester's detection overlay (tighten-only), read in the same
+    # synchronous stretch as the session below, so it extends exactly the
+    # detection objects the request redacts with.
+    overlay: OverlayBuild | None = None
+    if authorization.overlays:
+        overlay, overlay_refusal = authorization.overlay(
+            state.overlay_builds, f"{request.method} {path}"
+        )
+        if overlay_refusal is not None:
+            return _authorization_refused(
+                state,
+                adapter,
+                overlay_refusal,
+                provider_name=provider_name,
+                request=request,
+                path=path,
+                started=started,
+            )
+
     # Session resolution hashes the raw (pre-redaction) conversation anchor,
     # so it must happen before prepare_request. Opening a session this
     # process has not seen reads the vault (its view loads the rows; a
@@ -5384,7 +5530,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     # like every vault fault — the request has no session yet, so the row
     # carries the configured one.
     try:
-        ctx = state.context_for(adapter, request.method, path, parsed)
+        ctx = state.context_for(adapter, request.method, path, parsed, overlay)
     except state.vault_faults as exc:
         return _vault_fault_refused(
             state,
@@ -7061,6 +7207,81 @@ def _object_access_refused(
         refusal="object_access",
     )
     logger.info("%s %s -> 403 refused by the session router (stored object)", request.method, path)
+    return JSONResponse(error, status_code=403)
+
+
+async def _authorization_check(
+    state: ProxyState,
+    request: Request,
+    adapter: ProviderAdapter | None,
+    kind: RouteKind,
+    *,
+    provider_name: str,
+    path: str,
+    model: str | None,
+    identity: bool,
+    started: float,
+) -> JSONResponse | None:
+    """The access gate's optional ``authorize_request`` on this request's
+    FACTS (``plugin_api.AuthorizationRequest``; asked only when the gate has
+    the member): None when it allows the request, else the recorded 403
+    refusing it. A synchronous answer adds no event-loop turn."""
+    verdict = state.authorization.refusal(
+        AuthorizationRequest(
+            surface="http",
+            provider=provider_name,
+            adapter=adapter.name if adapter is not None else None,
+            kind=kind.value,
+            method=request.method,
+            path=path,
+            model=model,
+            identity=identity,
+        ),
+        f"{request.method} {path}",
+    )
+    if inspect.isawaitable(verdict):
+        verdict = await verdict
+    if verdict is None:
+        return None
+    return _authorization_refused(
+        state,
+        adapter,
+        verdict,
+        provider_name=provider_name,
+        request=request,
+        path=path,
+        started=started,
+    )
+
+
+def _authorization_refused(
+    state: ProxyState,
+    adapter: ProviderAdapter | None,
+    message: str,
+    *,
+    provider_name: str,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """The access gate's authorization refusal (or the core's fixed text
+    when its check or the requester's detection overlay failed): a recorded,
+    provider-shaped 403, sent before the session, redaction and any upstream
+    contact. The reason reaches the client only, never the log."""
+    error = adapter.error_body(message, status=403) if adapter is not None else {"error": message}
+    state.record_request(
+        session=state.config.vault.session,
+        provider=provider_name,
+        method=request.method,
+        path=path,
+        status=403,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+        refusal="authorization",
+    )
+    logger.info("%s %s -> 403 refused by the access gate (authorization)", request.method, path)
     return JSONResponse(error, status_code=403)
 
 

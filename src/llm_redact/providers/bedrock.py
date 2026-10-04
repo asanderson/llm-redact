@@ -53,7 +53,7 @@ from llm_redact.providers.anthropic import (
     inject_anthropic_system_note,
     rehydrate_messages_payload,
 )
-from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind
+from llm_redact.providers.base import SYSTEM_NOTE, ProviderAdapter, RouteKind, body_string
 from llm_redact.redactor import Redactor, UnredactableRequest
 from llm_redact.rehydrate import RehydratorPool
 from llm_redact.sse import SSEEvent
@@ -80,6 +80,14 @@ _APPLY_GUARDRAIL = re.compile(r"^/guardrail/" + _ID + r"/version/" + _SEG + r"/a
 # GetAsyncInvoke (GET, the invocation ARN — slash-bearing once decoded).
 _ASYNC_INVOKE = re.compile(r"^/async-invoke$")
 _ASYNC_INVOKE_ITEM = re.compile(r"^/async-invoke/" + _ID + r"$")
+# The model a runtime route names (``request_model``): the id ``_ROUTE`` and
+# ``_COUNT_TOKENS`` match, captured — on the decoded path, so a
+# percent-encoded ARN is read exactly as the matchers read it.
+_MODEL_ID = re.compile(
+    r"^/model/("
+    + _ID
+    + r")/(?:invoke|invoke-with-response-stream|converse|converse-stream|count-tokens)$"
+)
 
 # Every :event-type a ConverseStream response is known to carry. The live
 # drift test (tests/test_live.py) asserts observed types ⊆ this set: the
@@ -175,6 +183,16 @@ def _event_headers(event_type: str) -> list[tuple[str, int, object]]:
 class BedrockAdapter(ProviderAdapter):
     name = "bedrock"
     handles_eventstream = True
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        # The model id the runtime path names; StartAsyncInvoke names it in
+        # the body (`modelId`). A guardrail runs no model.
+        if method != "POST":
+            return None
+        match = _MODEL_ID.match(path)
+        if match is not None:
+            return match.group(1)
+        return body_string(parsed, "modelId") if _ASYNC_INVOKE.match(path) else None
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "GET":

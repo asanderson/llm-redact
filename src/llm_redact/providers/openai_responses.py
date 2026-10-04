@@ -17,6 +17,7 @@ from llm_redact.providers.base import (
     SYSTEM_NOTE,
     ProviderAdapter,
     RouteKind,
+    body_string,
     restore_mcp_tools,
     strip_mcp_tools,
 )
@@ -194,6 +195,13 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             stripped, redactor, inject_note=inject_note, mcp_exempt=mcp_exempt
         )
         return restore_mcp_tools(body, prepared)  # type: ignore[no-any-return]
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        # A create, a compaction and an input-token count run the body's
+        # model; every other Responses route names none.
+        if method == "POST" and path in ("/v1/responses", "/v1" + _COMPACT, "/v1" + _INPUT_TOKENS):
+            return body_string(parsed, "model")
+        return None
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "POST" and path == "/v1/responses":

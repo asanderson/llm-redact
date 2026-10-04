@@ -24,6 +24,7 @@ from llm_redact.providers.base import (
     ProviderAdapter,
     RouteKind,
     UploadReading,
+    body_string,
 )
 from llm_redact.providers.documents import (
     read_files_upload,
@@ -206,9 +207,20 @@ def rehydrate_messages_payload(
     return None
 
 
+# The routes that run the body's model (``request_model``).
+_MODEL_ROUTES = frozenset({"/v1/messages", "/v1/messages/count_tokens", "/v1/complete"})
+
+
 class AnthropicAdapter(ProviderAdapter):
     name = "anthropic"
     handles_ndjson = True  # batch results stream application/x-jsonl
+
+    def request_model(self, method: str, path: str, parsed: Any) -> str | None:
+        # Messages, token counting and the legacy completions run the body's
+        # model; a batch names one per request (not at the top level).
+        if method == "POST" and path in _MODEL_ROUTES:
+            return body_string(parsed, "model")
+        return None
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "POST":

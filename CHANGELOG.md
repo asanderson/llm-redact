@@ -29,7 +29,7 @@ and tags `vX.Y.Z`.
     any upstream contact. A string refuses with that reason (a recorded provider-shaped
     403; realtime: close 1008); an exception, a timeout (5 s for an awaitable) or any other
     answer refuses with the core's own text. Without the member nothing is asked and no
-    await is added.
+    await is added; a member that is present but cannot be called refuses every request.
   - `detection_overlay() -> plugin_api.DetectionOverlay | None`: per-requester rule modes
     and extra deny strings that can only TIGHTEN the configured policy (warn < redact <
     block), applied to everything the request's redaction does (JSON bodies, uploads and

@@ -1045,3 +1045,40 @@ async def test_a_disabled_rules_overlay_block_reaches_its_built_sibling(
     assert response.status_code == 400 and "GITHUB_TOKEN" in response.text
     assert upstream.requests == []
     refused_once(app.state.proxy, "blocked_value", "anthropic")
+
+
+@pytest.mark.parametrize(
+    ("member", "value", "text", "flag"),
+    [
+        ("authorize_request", "allow everyone", AUTHORIZATION_FAULT, "authorizes_requests"),
+        ("detection_overlay", DetectionOverlay(deny=("x",)), OVERLAY_FAULT, "detection_overlays"),
+    ],
+    ids=["authorize_request", "detection_overlay"],
+)
+async def test_a_member_that_cannot_be_called_refuses_every_request(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    member: str,
+    value: Any,
+    text: str,
+    flag: str,
+) -> None:
+    # Present but not callable is not absent: the seam stays on and fails
+    # closed (a gate that meant to restrict must never serve unrestricted).
+    gate = FakeGate()
+    setattr(gate, member, value)
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    app = _app(upstream)
+    caplog.set_level(logging.WARNING, logger="llm_redact")
+    response = await _post(app, "/v1/messages", _messages(f"mail {EMAIL}"), ANTHROPIC)
+    assert response.status_code == 403
+    assert response.json()["error"]["message"] == text
+    assert upstream.requests == []
+    state = app.state.proxy
+    assert state.bookkeeping_errors[AUTHORIZATION_STAGE] == 1
+    assert "TypeError" in caplog.text and EMAIL not in caplog.text
+    async with _client(app) as client:
+        status = (await client.get("/__llm-redact/status")).json()
+    assert status["access"][flag] is True
+    refused_once(state, "authorization", "anthropic")

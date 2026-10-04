@@ -202,7 +202,13 @@ def _discard(task: asyncio.Future[Any]) -> None:
 
 class GateAuthorization:
     """The access gate's optional authorization members, read ONCE (the gate
-    is restart-only). Without them every test here is one attribute read."""
+    is restart-only). Without them every test here is one attribute read.
+
+    A member that is present (not None) but cannot be called is NOT absent:
+    a gate that declares one means to restrict, so it is asked like any
+    other and its TypeError refuses every request with the core's fixed
+    text (fail closed, like the session router's optional members) —
+    never a seam silently switched off."""
 
     def __init__(
         self,
@@ -211,10 +217,8 @@ class GateAuthorization:
         *,
         timeout: float = AUTHORIZE_TIMEOUT_SECONDS,
     ) -> None:
-        authorize = getattr(gate, "authorize_request", None)
-        overlay = getattr(gate, "detection_overlay", None)
-        self._authorize = authorize if callable(authorize) else None
-        self._overlay = overlay if callable(overlay) else None
+        self._authorize = getattr(gate, "authorize_request", None)
+        self._overlay = getattr(gate, "detection_overlay", None)
         self.authorizes = self._authorize is not None
         self.overlays = self._overlay is not None
         self.timeout = timeout

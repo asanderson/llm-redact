@@ -916,7 +916,9 @@ class AccessGate(Protocol):
       awaited again). An exception, a timeout or any other answer refuses
       with the core's fixed text (counted under the bookkeeping stage
       ``authorization``, logged by exception TYPE). A synchronous answer
-      costs the request no await; without the member nothing is asked. A
+      costs the request no await; without the member nothing is asked — a
+      member that is present but cannot be called is no absent one: its
+      TypeError refuses every request (fail closed). A
       realtime connection is held — revocable through ``ConnectionControl``
       and by a reload — while its check runs: one closed meanwhile is
       refused right after it (1008 with the gate's reason), never dialled.
@@ -931,7 +933,8 @@ class AccessGate(Protocol):
       exception, an awaitable, a value that is no ``DetectionOverlay`` or
       one the core cannot apply refuses the request (403 / 1008) with the
       core's fixed text (bookkeeping stage ``authorization``, type-only
-      log). A provider configured ``detection = false`` stays unredacted:
+      log) — as does the member itself when it is present but cannot be
+      called. A provider configured ``detection = false`` stays unredacted:
       an overlay never turns detection back on.
     - ``recheck_interval: float`` — seconds between the core's re-checks
       of every open long-lived connection's ``Admission.recheck`` (read

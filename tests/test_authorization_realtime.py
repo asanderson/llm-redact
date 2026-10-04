@@ -340,3 +340,26 @@ async def test_a_refused_upgrade_leaves_nothing_tracked(monkeypatch: pytest.Monk
             tracked = proxy.state.connections.open_counts()
     assert closed is not None and closed.code == 1008
     assert tracked == {} and fake.paths == []
+
+
+@pytest.mark.parametrize(
+    ("member", "text"),
+    [("authorize_request", AUTHORIZATION_FAULT), ("detection_overlay", OVERLAY_FAULT)],
+    ids=["authorize_request", "detection_overlay"],
+)
+async def test_a_member_that_cannot_be_called_refuses_every_upgrade(
+    monkeypatch: pytest.MonkeyPatch, member: str, text: str
+) -> None:
+    from test_access_seam import FakeGate
+
+    gate = FakeGate()
+    setattr(gate, member, "not callable")
+    _install(monkeypatch, gate)
+    async with Upstream() as fake:
+        with _serve(_config("openai", fake.url())) as proxy:
+            client = await _connect(f"ws://{proxy.host}/v1/realtime")
+            closed = await _closed(client)
+            await _recent(proxy.host, lambda r: r["method"] == "WS")
+            refused_once(proxy.state, "authorization", "openai")
+    assert closed is not None and (closed.code, closed.reason) == (1008, text[:123])
+    assert fake.paths == []

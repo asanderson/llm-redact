@@ -1893,10 +1893,16 @@ class ProxyState:
         router's own checks — or, when the file enabled routing since
         startup, a build-and-close probe so a refusal (package absent,
         Free tier, bad price file) surfaces here rather than after a write.
+
+        An unchanged ``[detection]`` is not built: apply_config keeps the
+        live detectors for it, so a build here would only load a second
+        copy of every NER model on each editor save. (``[detection]`` has
+        no env override, so the candidate's is the one apply would use.)
         """
-        build_detectors(candidate.detection)
-        build_allowlist(candidate.detection)
-        build_modes(candidate.detection)
+        if candidate.detection != self.config.detection:
+            build_detectors(candidate.detection)
+            build_allowlist(candidate.detection)
+            build_modes(candidate.detection)
         effective = apply_env_overrides(candidate)
         resolved = _resolve_license_info(effective)
         resolve_credentials(candidate.routing, os.environ)

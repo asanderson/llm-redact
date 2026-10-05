@@ -318,6 +318,52 @@ def test_validate_config_rejects_what_a_hot_apply_would_fail_on(tmp_path: Path) 
     assert state.config == _config() or state.config.detection == _config().detection
 
 
+def test_validate_config_builds_detectors_only_for_a_changed_detection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # apply_config keeps the live detectors for an unchanged [detection];
+    # the dry run used to build them anyway, loading a second copy of every
+    # NER model on each editor save.
+    import dataclasses
+
+    app = create_app(_config(), upstream_transport=httpx.ASGITransport(app=_fake_upstream()))
+    state = _state(app)
+    live = (state.detectors, state.allowlist, state.modes)
+    builds: list[tuple[str, DetectionConfig]] = []
+
+    def counting(name: str) -> Any:
+        real = getattr(proxy_mod, name)
+
+        def build(detection: DetectionConfig) -> Any:
+            builds.append((name, detection))
+            return real(detection)
+
+        return build
+
+    for name in ("build_detectors", "build_allowlist", "build_modes"):
+        monkeypatch.setattr(proxy_mod, name, counting(name))
+
+    state.validate_config(_config())
+    # Other sections changed, [detection] did not: still nothing built.
+    other = dataclasses.replace(
+        _config(), rehydration=dataclasses.replace(_config().rehydration, fuzzy=False)
+    )
+    state.validate_config(other)
+    assert builds == []
+
+    detection = DetectionConfig()
+    changed = _config(dataclasses.replace(detection, enabled=detection.enabled[1:]))
+    state.validate_config(changed)
+    assert builds == [
+        ("build_detectors", changed.detection),
+        ("build_allowlist", changed.detection),
+        ("build_modes", changed.detection),
+    ]
+    # A dry run: the live objects are untouched.
+    assert (state.detectors, state.allowlist, state.modes) == live
+    assert state.config.detection == _config().detection
+
+
 def test_validate_config_hands_the_candidate_to_the_running_router(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

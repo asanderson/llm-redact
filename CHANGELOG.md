@@ -22,6 +22,9 @@ and tags `vX.Y.Z`.
   The fp-corpus README lists every corpus file under that license, and the `[detection.ner]`
   `model` and `score_threshold` docs (config.example.toml, docs/detection.md) cover the `hf`
   backend.
+- A config dry run (`ProxyState.validate_config`, which the llm-redact-pro config editor runs
+  before every save) no longer builds the detectors when `[detection]` did not change: the
+  apply keeps the live ones, so the dry run loaded a second copy of every NER model per save.
 
 ### Security
 - The `gliner`, `stanza` and `hf` extras require `torch>=2.6`, the release that fixed

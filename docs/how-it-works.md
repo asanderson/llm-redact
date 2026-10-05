@@ -39,9 +39,10 @@ position included:
 With NER enabled (`[detection.ner]`), the models are the one slow part
 of detection (milliseconds to seconds per string), and the redaction runs
 on the proxy's event loop, where every other request waits. So detection
-by a model runs ahead of the redaction, on a worker thread: for a JSON
-request body the proxy first walks it with a stand-in redactor that only
-records the strings the real redaction will scan, hands those strings to
+by a model runs ahead of the redaction, on a worker thread: for a request
+body (JSON, a multipart upload) or a realtime client frame the proxy first
+runs its redaction with a stand-in redactor that only records the strings
+the real redaction will scan, hands those strings to
 the NER models on one worker thread (one request's batch at a time, each
 model holding its lock for one string at a time), and only then runs the
 redaction itself — unchanged and synchronous, every new value written in
@@ -49,8 +50,10 @@ one vault transaction — taking the models' results from that table. A
 string the table lacks (or every string, when a configuration reload
 replaced the detectors meanwhile) is run through the models inline, so the
 result never depends on the table, and is counted (`inline_calls`,
-`prefetch_misses` in docs/detection.md "NER coverage counters"). Multipart
-uploads and realtime frames run their NER inline on the event loop.
+`prefetch_misses` in docs/detection.md "NER coverage counters"). An
+upload inspector's extracted texts are detected the same way once the
+inspector has read them, and a realtime frame read while a reload replaced
+the connection's detectors is closed (1012) without being sent.
 
 A request body with nothing to redact is forwarded as its original bytes
 (no parse-and-reserialize round trip). The one exception is a JSON object

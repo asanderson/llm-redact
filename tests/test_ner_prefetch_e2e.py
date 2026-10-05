@@ -161,13 +161,12 @@ async def test_the_event_loop_answers_while_a_request_runs_ner(
     assert _stats(app).inline_calls == 0
 
 
-async def test_an_inline_upload_waits_for_one_string_not_the_batch(
+async def test_an_upload_queues_behind_a_running_batch_off_the_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A multipart upload still runs NER inline on the event loop: while a
-    # JSON request's batch runs on the worker, its call waits for the
-    # string the worker is on, then runs — the loop is held up for at most
-    # one string's inference (plus its own), never the batch.
+    # A multipart upload's NER is prefetched too: while a JSON request's
+    # batch runs on the worker, the upload's batch waits its turn OFF the
+    # event loop, which keeps answering.
     delay = 0.2
     nlp = SlowNlp(delay)
     install_spacy(monkeypatch, nlp)
@@ -182,7 +181,6 @@ async def test_an_inline_upload_waits_for_one_string_not_the_batch(
             )
         )
         await asyncio.to_thread(nlp.started.wait, 5)
-        began = time.perf_counter()
         upload = asyncio.create_task(
             client.post(
                 "/v1/files",
@@ -191,19 +189,16 @@ async def test_an_inline_upload_waits_for_one_string_not_the_batch(
                 files={"file": ("notes.txt", f"fast {NAME}".encode(), "text/plain")},
             )
         )
+        await asyncio.sleep(0.05)  # the upload is waiting for its turn
+        began = time.perf_counter()
         health = await client.get("/__llm-redact/healthz")
-        health_waited = time.perf_counter() - began
-        uploaded = await upload
-        upload_waited = time.perf_counter() - began
-        assert not ner.done()
-        assert health.status_code == 200 and uploaded.status_code == 200
-        # The upload's strings (its purpose field, file name and text) ran
-        # inline, each after at most the one string the worker was on.
-        inline = _stats(app).inline_calls
-        assert inline == 3
-        assert upload_waited < (inline + 1) * delay
-        assert health_waited < (inline + 1) * delay
-        await ner
+        assert time.perf_counter() - began < delay / 2
+        assert health.status_code == 200
+        assert not upload.done()
+        assert (await ner).status_code == 200
+        assert (await upload).status_code == 200
+    assert _stats(app).inline_calls == 0
+    assert threading.get_ident() not in nlp.threads
 
 
 async def test_a_reload_between_prefetch_and_redaction_falls_back_inline(

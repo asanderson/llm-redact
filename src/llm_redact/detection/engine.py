@@ -570,16 +570,80 @@ GATED_MAX_CHARS = 1024
 # instead of calling the detector.
 PrecomputedTable = Mapping[str, Mapping[int, Sequence[Detection]]]
 
+
+class FairLock:
+    """A first-come, first-served lock: each ``acquire`` takes a ticket and
+    waits for its turn. A model's lock must be fair: ``threading.Lock``
+    lets the thread that just released it take it straight back, so the
+    NER worker thread, releasing it after one string and taking it again
+    for the next, could keep an inline caller on the event loop waiting
+    for a whole batch instead of one string. A waiter interrupted while it
+    waits gives its turn up (never left holding the queue)."""
+
+    __slots__ = ("_abandoned", "_cond", "_next", "_serving", "__weakref__")
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition(threading.Lock())
+        # The next ticket to hand out, and the ticket whose turn it is.
+        self._next = 0
+        self._serving = 0
+        # Tickets whose waiters gave up before their turn came.
+        self._abandoned: set[int] = set()
+
+    def acquire(self, blocking: bool = True) -> bool:
+        with self._cond:
+            if not blocking and self._next != self._serving:
+                return False
+            ticket = self._next
+            self._next += 1
+            try:
+                while self._serving != ticket:
+                    self._cond.wait()
+            except BaseException:
+                # Interrupted while waiting: the turn passes on, now if it
+                # had just come, else when it comes.
+                if self._serving == ticket:
+                    self._advance()
+                else:
+                    self._abandoned.add(ticket)
+                raise
+            return True
+
+    def release(self) -> None:
+        with self._cond:
+            if self._next == self._serving:
+                raise RuntimeError("release of an unlocked FairLock")
+            self._advance()
+
+    def locked(self) -> bool:
+        with self._cond:
+            return self._next != self._serving
+
+    def _advance(self) -> None:
+        """The next waiting ticket's turn (the condition is held)."""
+        self._serving += 1
+        while self._serving in self._abandoned:
+            self._abandoned.remove(self._serving)
+            self._serving += 1
+        self._cond.notify_all()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+
 # One lock per model-backed (heavy) detector, shared by every plan over it:
 # a model must never run two strings at once (a Hugging Face fast tokenizer
 # raises "Already borrowed"), and both the NER worker thread (ner_prefetch)
 # and the event loop's inline calls run it. Held weakly: a lock dies with
 # its detector.
-_HEAVY_LOCKS: "weakref.WeakKeyDictionary[object, threading.Lock]" = weakref.WeakKeyDictionary()
+_HEAVY_LOCKS: "weakref.WeakKeyDictionary[object, FairLock]" = weakref.WeakKeyDictionary()
 _HEAVY_LOCKS_GUARD = threading.Lock()
 
 
-def heavy_lock(det: Detector) -> threading.Lock:
+def heavy_lock(det: Detector) -> FairLock:
     """The lock ``det``'s model runs under: its unwrapped backend's, so a
     type filter shares its backend's. A detector that cannot key a weak map
     (unhashable, or not weakly referenceable) gets a new lock, which the
@@ -589,9 +653,9 @@ def heavy_lock(det: Detector) -> threading.Lock:
         try:
             lock = _HEAVY_LOCKS.get(inner)
             if lock is None:
-                lock = _HEAVY_LOCKS[inner] = threading.Lock()
+                lock = _HEAVY_LOCKS[inner] = FairLock()
         except TypeError:
-            lock = threading.Lock()
+            lock = FairLock()
     return lock
 
 
@@ -599,7 +663,7 @@ class _Heavy(NamedTuple):
     """A heavy detector of a plan: the lock its model runs under and its
     NER coverage counters (None for a detector without them)."""
 
-    lock: threading.Lock
+    lock: FairLock
     stats: NerStats | None
 
 

@@ -10,9 +10,12 @@ and warn count; a partial table, a table computed for another plan and the
 copies a request makes of its redactor are pinned alongside.
 """
 
+import asyncio
 import base64
 import copy
 import re
+import threading
+import time
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -26,13 +29,14 @@ from llm_redact.detection.engine import (
     Allowlist,
     DetectionConfig,
     DetectorPlan,
+    FairLock,
     TypeFilteredDetector,
     build_detectors,
     heavy_lock,
     plan_for,
 )
 from llm_redact.detection.stats import NerStats
-from llm_redact.ner_prefetch import CollectingRedactor, collect, collect_request_strings
+from llm_redact.ner_prefetch import CollectingRedactor, collect, collect_request_strings, prefetch
 from llm_redact.providers import ALL_ADAPTERS, ProviderAdapter, RouteKind
 from llm_redact.providers.base import prepare_route_request
 from llm_redact.providers.custom import build_custom_adapters
@@ -562,3 +566,194 @@ def test_a_collector_and_its_copies_share_one_record() -> None:
     collector.charge(2)
     with pytest.raises(TooManyStrings):
         collector.charge(1)
+
+
+# ---- the worker-thread prefetch ----
+
+
+class SlowModel(FakeModel):
+    """A model taking ``delay`` seconds on a text starting "slow" (none on
+    others), recording which thread ran it and how many ran at once."""
+
+    def __init__(self, delay: float, hold: threading.Event | None = None) -> None:
+        super().__init__()
+        self.delay = delay
+        self.hold = hold
+        self.started = threading.Event()
+        self.threads: set[int] = set()
+        self.slow_started = 0
+        self.slow_done = 0
+        self.slow_done_when_fast_ran: int | None = None
+        self.active = 0
+        self.peak = 0
+        self._guard = threading.Lock()
+
+    def detect(self, text: str) -> list[Detection]:
+        with self._guard:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        try:
+            self.threads.add(threading.get_ident())
+            if text.startswith("slow"):
+                self.slow_started += 1
+                self.started.set()
+                if self.hold is not None:
+                    self.hold.wait(5)
+                time.sleep(self.delay)
+                self.slow_done += 1
+            else:
+                self.slow_done_when_fast_ran = self.slow_done
+            return super().detect(text)
+        finally:
+            with self._guard:
+                self.active -= 1
+
+
+async def test_prefetch_detects_each_unique_string_once_off_the_loop() -> None:
+    model = SlowModel(0)
+    plan = DetectorPlan([*build_detectors(DetectionConfig()), model, Light()])
+    strings = ["Jane Doe", "x", "Jane Doe", "Bob Jones a@b.example", "x"]
+    table = await prefetch(plan, strings)
+    assert list(table) == ["Jane Doe", "x", "Bob Jones a@b.example"]
+    assert model.calls == list(table)  # each unique string once
+    assert threading.get_ident() not in model.threads  # never the loop's thread
+    assert table == {text: plan.detect_heavy(text) for text in table}
+    assert model.stats.inline_calls == 0
+    # Nothing to do: no strings, or no heavy detector.
+    assert await prefetch(plan, []) == {}
+    assert await prefetch(DetectorPlan(build_detectors(DetectionConfig())), ["x"]) == {}
+
+
+async def test_an_inline_call_waits_for_at_most_one_string() -> None:
+    delay = 0.2
+    model = SlowModel(delay)
+    plan = DetectorPlan([model])
+    batch = asyncio.create_task(prefetch(plan, [f"slow {i}" for i in range(10)]))
+    await asyncio.to_thread(model.started.wait, 5)  # the worker is on a string
+    started = model.slow_started
+    began = time.perf_counter()
+    plan.detect("fast", ALLOW)  # inline, on the event loop: takes the model's lock
+    waited = time.perf_counter() - began
+    # The inline call ran as soon as the string the worker was on ended
+    # (one more at most, had the worker just taken its next turn) — not
+    # after the batch.
+    assert model.slow_done_when_fast_ran is not None
+    assert model.slow_done_when_fast_ran <= started + 1
+    assert waited < delay * 2.5
+    assert not batch.done()
+    assert len(await batch) == 10
+    assert model.peak == 1  # never two strings at once
+    assert model.stats.inline_calls == 1
+
+
+async def test_a_detector_exception_reaches_the_caller() -> None:
+    class Broken(FakeModel):
+        def detect(self, text: str) -> list[Detection]:
+            raise RuntimeError("model fault")
+
+    model = Broken()
+    with pytest.raises(RuntimeError, match="model fault"):
+        await prefetch(DetectorPlan([model]), ["x"])
+    assert not heavy_lock(model).locked()
+    # The next prefetch is not held up by the failed one.
+    assert await prefetch(DetectorPlan([FakeModel()]), ["x"]) == {"x": {0: []}}
+
+
+async def test_one_prefetch_runs_at_a_time() -> None:
+    model = SlowModel(0.02)
+    plan = DetectorPlan([model])
+    first = [f"slow a{i}" for i in range(3)]
+    second = [f"slow b{i}" for i in range(3)]
+    await asyncio.gather(prefetch(plan, first), prefetch(plan, second))
+    # The second batch started only once the first was done.
+    assert model.calls == first + second
+    assert model.peak == 1
+
+
+async def test_a_cancelled_prefetch_stops_its_worker_after_the_current_string() -> None:
+    hold = threading.Event()
+    model = SlowModel(0, hold)
+    batch = asyncio.create_task(prefetch(DetectorPlan([model]), [f"slow {i}" for i in range(5)]))
+    await asyncio.to_thread(model.started.wait, 5)
+    batch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await batch
+    hold.set()  # the string the worker is on ends
+    await asyncio.sleep(0.2)
+    assert model.calls == ["slow 0"]
+
+
+def test_each_event_loop_has_its_own_prefetch_gate() -> None:
+    # An asyncio primitive belongs to one loop: two loops (a test's, a
+    # second app's) each contend on their own.
+    model = SlowModel(0.01)
+    plan = DetectorPlan([model])
+
+    async def two() -> None:
+        await asyncio.gather(prefetch(plan, ["slow 1"]), prefetch(plan, ["slow 2"]))
+
+    asyncio.run(two())
+    asyncio.run(two())
+    assert len(model.calls) == 4
+
+
+# ---- the fair lock ----
+
+
+def test_the_fair_lock_serves_waiters_in_order() -> None:
+    lock = FairLock()
+    assert lock.acquire()
+    assert lock.locked()
+    assert not lock.acquire(blocking=False)
+    order: list[str] = []
+
+    def waiter(name: str) -> None:
+        with lock:
+            order.append(name)
+
+    threads = []
+    for index, name in enumerate("abc"):
+        thread = threading.Thread(target=waiter, args=(name,))
+        thread.start()
+        threads.append(thread)
+        while lock._next != index + 2:  # wait until it holds its ticket
+            time.sleep(0.001)
+    lock.release()
+    for thread in threads:
+        thread.join(5)
+    assert order == ["a", "b", "c"]
+    assert not lock.locked()
+    with pytest.raises(RuntimeError):
+        lock.release()
+
+
+def test_an_interrupted_waiter_gives_its_turn_up() -> None:
+    lock = FairLock()
+    lock.acquire()
+
+    def interrupted(timeout: float | None = None) -> bool:
+        raise KeyboardInterrupt
+
+    lock._cond.wait = interrupted  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        lock.acquire()
+    del lock._cond.wait
+    assert lock._abandoned == {1}
+    lock.release()  # passes over the abandoned ticket
+    assert not lock.locked()
+    assert lock.acquire(blocking=False)
+    lock.release()
+
+    # Interrupted just as its turn came: the turn passes on at once.
+    lock.acquire()
+
+    def turn_came(timeout: float | None = None) -> bool:
+        lock._serving += 1  # the holder released
+        raise KeyboardInterrupt
+
+    lock._cond.wait = turn_came  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        lock.acquire()
+    del lock._cond.wait
+    assert not lock.locked()
+    assert not lock._abandoned

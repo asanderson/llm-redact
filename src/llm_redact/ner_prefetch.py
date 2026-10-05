@@ -25,10 +25,15 @@ request and never changes its outcome: the real pass meets the same body
 and refuses it on its own terms.
 """
 
+import asyncio
+import threading
+import weakref
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
+from llm_redact.detection.base import Detection
+from llm_redact.detection.engine import DetectorPlan
 from llm_redact.providers.base import ProviderAdapter, prepare_route_request
 from llm_redact.redactor import Redactor, StringBudget, TextScan
 
@@ -128,3 +133,57 @@ def collect_request_strings(
         ),
         limit=limit,
     )
+
+
+# One prefetch runs at a time (per event loop: the proxy runs one): models
+# are CPU-bound, so a second request's batch waits here, off the loop,
+# instead of competing for the same cores and the same model locks.
+_GATES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _gate() -> asyncio.Semaphore:
+    """The running event loop's prefetch semaphore (created on first use:
+    an asyncio primitive belongs to one loop)."""
+    loop = asyncio.get_running_loop()
+    gate = _GATES.get(loop)
+    if gate is None:
+        gate = _GATES[loop] = asyncio.Semaphore(1)
+    return gate
+
+
+async def prefetch(
+    plan: DetectorPlan, strings: Iterable[str]
+) -> dict[str, dict[int, list[Detection]]]:
+    """``plan``'s heavy detectors run over the unique ``strings`` on a worker
+    thread (``asyncio.to_thread``), one prefetch at a time: the table
+    ``Redactor.with_precomputed(table, plan)`` takes. Each model runs under
+    its own lock, held per string (``DetectorPlan.detect_heavy``), so an
+    inline caller on the event loop waits for at most the string the worker
+    is on. An exception a detector raises propagates to the caller. A
+    cancelled caller stops the worker after its current string."""
+    texts = list(dict.fromkeys(strings))
+    if not texts or not plan.heavy_indices:
+        return {}
+    stop = threading.Event()
+    async with _gate():
+        try:
+            return await asyncio.to_thread(_detect_all, plan, texts, stop)
+        finally:
+            # Done, failed or cancelled: a worker still running (its caller
+            # gave up) stops after the string it is on.
+            stop.set()
+
+
+def _detect_all(
+    plan: DetectorPlan, texts: list[str], stop: threading.Event
+) -> dict[str, dict[int, list[Detection]]]:
+    """The worker thread's batch: each text's heavy detections, until
+    ``stop`` is set."""
+    table: dict[str, dict[int, list[Detection]]] = {}
+    for text in texts:
+        if stop.is_set():
+            break
+        table[text] = plan.detect_heavy(text)
+    return table

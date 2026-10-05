@@ -17,7 +17,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from llm_redact.bench import ner_corpus
-from llm_redact.bench.datasets import nemotron, openpii
+from llm_redact.bench.datasets import mapa, nemotron, openpii, privy, pupa
 from llm_redact.bench.datasets.base import (
     DatasetError,
     DatasetSpec,
@@ -95,7 +95,18 @@ SYNTHETIC = DatasetSpec(
 )
 
 DATASETS: Mapping[str, DatasetSpec] = MappingProxyType(
-    {spec.name: spec for spec in (SYNTHETIC, RULES, openpii.SPEC, nemotron.SPEC)}
+    {
+        spec.name: spec
+        for spec in (
+            SYNTHETIC,
+            RULES,
+            openpii.SPEC,
+            nemotron.SPEC,
+            privy.SPEC,
+            pupa.SPEC,
+            mapa.SPEC,
+        )
+    }
 )
 
 

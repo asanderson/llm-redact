@@ -9,6 +9,7 @@ committed. They are used for EVALUATION only. Rows whose gold spans do not
 match their text are skipped and counted, never repaired.
 """
 
+import json
 import os
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -148,15 +149,29 @@ def checked_spans(
     """Gold spans from ``(start, end, label, value)`` entries, or None (the
     row is skipped and counted) when an offset is not an integer inside the
     text or a value — when the dataset gives one (not None) — differs from
-    the text at its offsets."""
+    the text at its offsets. Empty spans (start == end) are dropped."""
     gold = []
     for start, end, label, value in spans:
         # bool is an int subclass; an offset must be a plain int.
-        if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text):
+        if type(start) is not int or type(end) is not int or not 0 <= start <= end <= len(text):
             request.skipped[MALFORMED] += 1
             return None
         if value is not None and text[start:end] != str(value):
             request.skipped[SPAN_MISMATCH] += 1
             return None
-        gold.append(GoldSpan(start, end, str(label)))
+        if start < end:  # an empty span (an empty payload value) covers nothing
+            gold.append(GoldSpan(start, end, str(label)))
     return tuple(gold)
+
+
+def jsonl_rows(path: Path, request: LoadRequest) -> Iterator[object]:
+    """The JSON value of every non-blank line of a JSONL file; a line that
+    does not parse is skipped and counted."""
+    with path.open(encoding="utf-8") as lines:
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                yield json.loads(line)
+            except ValueError:
+                request.skipped[MALFORMED] += 1

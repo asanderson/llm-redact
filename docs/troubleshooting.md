@@ -512,3 +512,11 @@ repository.
 
 `--language` keeps the rows of one language and works only for datasets that
 record one (`--list-datasets` marks them). Drop it for the others.
+
+## NER bench: "privy: cannot read privy-dataset.zip: …" / "privy: a data file …" / "PUPA: cannot read FILE: …"
+
+A downloaded dataset file is not what its pinned revision holds: a truncated
+download, a damaged cache entry or a file edited by hand. Delete the
+dataset's entry under the cache directory
+(`${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets`, or your
+`--cache-dir`) and run again to download it afresh.

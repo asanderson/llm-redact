@@ -9,9 +9,7 @@ with ``license_name: cc-by-4.0``; its text grants CC BY 4.0), credit
 "Ai4Privacy / Ai Suisse SA". The bench uses it for evaluation only.
 """
 
-import json
 from collections.abc import Iterable, Iterator
-from pathlib import Path
 from types import MappingProxyType
 
 from llm_redact.bench.datasets.base import (
@@ -20,6 +18,7 @@ from llm_redact.bench.datasets.base import (
     LoadRequest,
     checked_spans,
     fetch,
+    jsonl_rows,
 )
 from llm_redact.bench.ner_metrics import LEAK, NerSample
 
@@ -50,19 +49,6 @@ LABELS = MappingProxyType(
         "ZIPCODE": None,
     }
 )
-
-
-def jsonl_rows(path: Path, request: LoadRequest) -> Iterator[object]:
-    """The JSON value of every non-blank line; a line that does not parse
-    is skipped and counted."""
-    with path.open(encoding="utf-8") as lines:
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                yield json.loads(line)
-            except ValueError:
-                request.skipped[MALFORMED] += 1
 
 
 def samples(rows: Iterable[object], request: LoadRequest) -> Iterator[NerSample]:

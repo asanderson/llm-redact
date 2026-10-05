@@ -185,6 +185,9 @@ the file when you are done.
 | `synthetic` (default) | Agent-traffic-shaped text generated from the seed at run time (below). | generated (part of llm-redact) | no |
 | `openpii` | [OpenPII 1.5M](https://huggingface.co/datasets/ai4privacy/pii-masking-openpii-1.5m): synthetic PII text in 30 languages; splits `validation` (default), `train`. | CC BY 4.0 — credit "Ai4Privacy / Ai Suisse SA" | no |
 | `nemotron` | [Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII): synthetic English documents (forms, invoices, emails, notes) across 50+ industries; splits `test` (default), `train`. | CC BY 4.0 — by NVIDIA Corporation | no |
+| `privy` | [beki/privy](https://huggingface.co/datasets/beki/privy): synthetic PII inside JSON, SQL, HTML and XML payloads generated from OpenAPI specifications — the closest public analogue of tool-call bodies; splits `test` (default), `dev`, `train` and their `-large` variants. | MIT — Benjamin Kilimnik | no |
+| `pupa` | [PUPA](https://huggingface.co/datasets/Columbia-NLP/PUPA): 901 real user prompts (WildChat) with the personal-data strings an LLM extracted from each; splits `all` (default), `tnb`, `new`. | MIT — Columbia NLP (PAPILLON, Li et al. 2024) | **yes** |
+| `mapa` | [MAPA](https://huggingface.co/datasets/joelniklaus/mapa): human-annotated EUR-Lex legal text in 21 languages; splits `test` (default), `validation`, `train`; `--language` filters it. | CC BY 4.0 — de Gibert Bonet et al. (LREC 2022), converted by Joel Niklaus and Veton Matoshi | **yes** |
 | `rules` | The regex bench's generated positives and decoys for every built-in rule, built from the seed at run time. Structured values only: it shows what a model costs the rules (structured regressions, over-redaction). | generated (part of llm-redact) | no |
 
 ### The synthetic corpus
@@ -220,6 +223,9 @@ A `--limit` slice reads the first rows of the split in file order.
 |---|---|---|---|
 | `openpii` | `ai4privacy/pii-masking-openpii-1.5m` at `a785eb528e28be2693c3718a27e066970de5dadb` | 2026-10-05 | `GIVENNAME`, `SURNAME` → `PERSON`; `STREET`, `BUILDINGNUM` → `ADDRESS`; `PASSPORTNUM` → `PASSPORT`; `DRIVERLICENSENUM` → `DRIVER_LICENSE`; `EMAIL` → `EMAIL`; `TELEPHONENUM` → `PHONE`; `CREDITCARDNUMBER` → `CREDIT_CARD`; `SOCIALNUM`, `TAXNUM`, `IDCARDNUM` → leak; `DATE`, `AGE`, `TITLE`, `GENDER`, `SEX`, `CITY`, `ZIPCODE` → not scored |
 | `nemotron` | `nvidia/Nemotron-PII` at `b70ffaf5ff39e079776134c5bf4381f00a9fd1ed` | 2026-10-05 | `first_name`, `last_name` → `PERSON`; `street_address` → `ADDRESS`; `date_of_birth` → `DATE_OF_BIRTH`; `user_name` → `USERNAME`; `account_number` → `ACCOUNT_NUMBER`; `email` → `EMAIL`; `phone_number` → `PHONE`; `ssn` → `SSN`; `credit_debit_card` → `CREDIT_CARD`; `ipv4` → `IPV4`; `ipv6` → `IPV6`; `password`, `api_key` → `SECRET`; the other 40 labels → not scored |
+| `privy` | `beki/privy` at `dc137a6a976f6b5bb8768e9bb51ec58df930ccd1` | 2026-10-05 | `PER`, `PERSON` → `PERSON`; `US_PASSPORT` → `PASSPORT`; `US_DRIVER_LICENSE` → `DRIVER_LICENSE`; `US_BANK_NUMBER` → `ACCOUNT_NUMBER`; `EMAIL_ADDRESS` → `EMAIL`; `PHONE_NUMBER` → `PHONE`; `US_SSN` → `SSN`; `IBAN_CODE` → `IBAN`; `CREDIT_CARD` → `CREDIT_CARD`; `PASSWORD` → `SECRET`; `US_ITIN`, `IP_ADDRESS` → leak; `O` → not personal data; the other 18 labels → not scored |
+| `pupa` | `Columbia-NLP/PUPA` at `9981b49b6ced0033988a224b6712895ebf119294` | 2026-10-05 | every PII unit → leak (the units carry no type) |
+| `mapa` | `joelniklaus/mapa` at `bbb2a0157b760465002fd12a61af81b475cd387a` | 2026-10-05 | fine-grained `FAMILY NAME`, `INITIAL NAME` → `PERSON`; the other 20 fine-grained labels → not scored |
 
 Facts found when the adapters were checked against the data (2026-10-05):
 
@@ -242,3 +248,28 @@ Facts found when the adapters were checked against the data (2026-10-05):
   text — so a `--limit` slice reads US-locale rows only. About 7% of rows
   have a span whose text differs from the text at its offsets (76 of the
   first 1,000); they are skipped and counted.
+- **privy** (`privy-dataset.zip`, about 300 MB, holding
+  `{train,dev,test}-{small,large}.json`, each one JSON array of rows with
+  `full_text` and `spans`). The repository's loading script is never run:
+  the archive is read directly and its arrays are parsed a row at a time.
+  The `small` files label people `PER`, the `large` ones `PERSON`; both
+  label non-PII payload values `O`, scored as not personal data, so a
+  detection on them is over-redaction. Empty values (an empty field in a
+  payload, start equal to end) are labelled too and are dropped.
+- **PUPA** (`PUPA_TNB.csv`, 237 rows; `PUPA_New.csv`, 664 rows). Real
+  prompts: `--dump-errors` needs `--allow-real-data-dump`. The
+  `pii_units` column holds lowercased, `||`-separated strings an LLM
+  extracted — no types, no offsets — so the adapter marks every whole-word,
+  case-insensitive occurrence of each unit in its prompt and scores them
+  with the leak metric only; per-type scores mean nothing here. A row with
+  a unit that does not occur in its prompt is skipped (77 of 901 at this
+  revision).
+- **MAPA** (`train.jsonl`, `validation.jsonl`, `test.jsonl`; `language`,
+  `tokens`, `coarse_grained`, `fine_grained` IOB tags). The rows hold
+  tokens without whitespace information, so the text is the tokens joined
+  with single spaces (`Article 3 ( 1 )`). The coarse `PERSON` tag also
+  covers roles, professions and nationalities, so only the fine-grained
+  family-name and initial tags are scored; the data carries no given-name,
+  street, email or identifier tags at this revision, although the card
+  lists some. EUR-Lex decisions name real parties, so the dataset is marked
+  as real data.

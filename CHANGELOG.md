@@ -52,6 +52,12 @@ and tags `vX.Y.Z`.
   (`huggingface_hub`, `pyarrow>=14.0.1`) carries the download and parquet reading. Rows
   whose gold spans do not match their text are skipped and counted; every report
   repeats the dataset's license and attribution, and `--list-datasets` lists them.
+- More NER bench datasets: `privy` (beki/privy, MIT: PII inside JSON, SQL, HTML and XML
+  payloads; values it marks non-PII count as over-redaction), `pupa` (PUPA, MIT: 901 real
+  user prompts with LLM-extracted PII units, scored by the leak metric only; real data)
+  and `mapa` (MAPA, CC BY 4.0: human-annotated EUR-Lex legal text in 21 languages,
+  `--language` filters it; real data). Empty gold spans are dropped rather than failing
+  their row.
 
 ### Changed
 - NER model labels become placeholder types through one label policy for every backend

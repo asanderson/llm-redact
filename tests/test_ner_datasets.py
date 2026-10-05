@@ -17,8 +17,11 @@ from llm_redact.bench.datasets import (
     LoadRequest,
     base,
     dataset_key,
+    mapa,
     nemotron,
     openpii,
+    privy,
+    pupa,
     resolve,
 )
 from llm_redact.bench.ner_metrics import LEAK, GoldSpan, NerSample, Pipeline, evaluate
@@ -128,6 +131,7 @@ def test_checked_spans_validates_offsets_and_values() -> None:
         GoldSpan(4, 7, "SURNAME"),
     )
     assert base.checked_spans(text, [], request) == ()
+    assert base.checked_spans(text, [(5, 5, "O", "")], request) == ()  # empty: dropped
     assert not request.skipped
     for entry in [
         (0, 3, "X", "Bob"),  # the value differs from the text
@@ -137,7 +141,7 @@ def test_checked_spans_validates_offsets_and_values() -> None:
     for entry in [
         (True, 3, "X", None),
         (0, "3", "X", None),
-        (5, 5, "X", None),
+        (6, 5, "X", None),
         (-1, 3, "X", None),
         (0, 99, "X", None),
     ]:
@@ -480,3 +484,275 @@ def test_list_datasets_names_licenses_and_attributions(
         "card: https://huggingface.co/datasets/nvidia/Nemotron-PII (checked 2026-10-05)" in printed
     )
     assert "--language filters its rows" in printed
+
+
+# --- beki/privy ---------------------------------------------------------------
+
+
+def test_iter_json_array_streams_across_chunk_boundaries() -> None:
+    import io
+
+    rows = [{"full_text": "x" * n, "spans": []} for n in (1, 50, 200, 3)]
+    text = " \n[\n" + ",\n ".join(json.dumps(r) for r in rows) + "\n]\n"
+    for read_chars in (1, 7, 64, 1 << 20):
+        assert list(privy.iter_json_array(io.StringIO(text), read_chars=read_chars)) == rows
+    assert list(privy.iter_json_array(io.StringIO("[]"))) == []
+    for bad, message in (
+        ("", "does not hold a JSON array"),
+        ('{"a": 1}', "does not hold a JSON array"),
+        ('[{"a": 1}, ', "ends inside its JSON array"),
+        ('[{"a": 1}, {"b": ', "ends inside an element"),
+    ):
+        with pytest.raises(base.DatasetError, match=message):
+            list(privy.iter_json_array(io.StringIO(bad), read_chars=4))
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ('{"name": "x"}', "json"),
+        ("[1]", "json"),
+        ("b'<?xml version=\"1.0\"?><a/>'", "xml"),
+        ("<?xml version='1.0'?>", "xml"),
+        ("<TABLE><TR></TR></TABLE>", "html"),
+        ("  select * from t", "sql"),
+        ("INSERT INTO t VALUES (1)", "sql"),
+        ("plain words", "other"),
+    ],
+)
+def test_privy_payload_kinds(text: str, kind: str) -> None:
+    assert privy.payload_kind(text) == kind
+
+
+def _privy_row(text: str, spans: list[tuple[str, str]]) -> dict[str, Any]:
+    entries = []
+    for value, label in spans:
+        start = text.index(value) if value else 0
+        entries.append(
+            {
+                "entity_type": label,
+                "entity_value": value,
+                "start_position": start,
+                "end_position": start + len(value),
+            }
+        )
+    return {"full_text": text, "spans": entries, "masked": "", "tags": [], "tokens": []}
+
+
+def _privy_archive(tmp_path: Path, rows: list[object]) -> Path:
+    import zipfile
+
+    path = tmp_path / "privy-dataset.zip"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("test-small.json", json.dumps(rows, indent=2))
+        archive.writestr("__MACOSX/._test-small.json", b"\x00")
+    return path
+
+
+def test_privy_adapter_reads_the_archive(tmp_path: Path) -> None:
+    rows: list[object] = [
+        _privy_row(
+            '{"full_name": "Ann Lee", "status": "active", "note": ""}',
+            [("Ann Lee", "PER"), ("active", "O"), ("", "O")],
+        ),
+        _privy_row("UPDATE t SET ssn = '123-45-6789'", [("123-45-6789", "US_SSN")]),
+        ["not", "a", "row"],
+        {"full_text": 3, "spans": []},
+        {"full_text": "x", "spans": ["not a dict"]},
+        {
+            "full_text": "Ann",
+            "spans": [
+                {
+                    "entity_type": "PER",
+                    "entity_value": "Bob",
+                    "start_position": 0,
+                    "end_position": 3,
+                }
+            ],
+        },
+    ]
+    path = _privy_archive(tmp_path, rows)
+    spec = DATASETS["privy"]
+    request = LoadRequest(split="test", download=lambda **kw: str(path))
+    samples = list(spec.adapter(spec, request))
+    assert [s.context for s in samples] == ["json", "sql"]
+    assert dict(request.skipped) == {base.MALFORMED: 3, base.SPAN_MISMATCH: 1}
+    rules = build_detectors(DetectionConfig())
+    result = evaluate(samples, spec.label_map, Pipeline.from_detectors(rules, rules))
+    assert result.exact["PERSON"].gold == 1
+    assert result.exact["SSN"].gold_hit == 1  # the rules find it
+    # "active" is marked not-PII: outside every gold span.
+    assert result.outside_chars == sum(len(s.text) for s in samples) - len("Ann Lee") - 11
+
+
+def test_privy_adapter_reports_unreadable_archives(tmp_path: Path) -> None:
+    spec = DATASETS["privy"]
+    broken = tmp_path / "broken.zip"
+    broken.write_bytes(b"not a zip")
+    request = LoadRequest(split="test", download=lambda **kw: str(broken))
+    with pytest.raises(base.DatasetError, match="cannot read privy-dataset.zip: BadZipFile"):
+        list(spec.adapter(spec, request))
+    path = _privy_archive(tmp_path, [])
+    request = LoadRequest(split="dev", download=lambda **kw: str(path))
+    with pytest.raises(base.DatasetError, match="KeyError"):
+        list(spec.adapter(spec, request))
+
+
+def test_privy_label_map() -> None:
+    labels = privy.LABELS
+    assert labels["PER"] == labels["PERSON"] == "PERSON"
+    assert labels["O"] == "@not-pii"
+    assert labels["IP_ADDRESS"] == LEAK
+    assert labels["NRP"] is None  # a sensitive attribute: never scored
+    assert set(DATASETS["privy"].splits) == {
+        "test",
+        "dev",
+        "train",
+        "test-large",
+        "dev-large",
+        "train-large",
+    }
+
+
+# --- PUPA ---------------------------------------------------------------------
+
+
+def test_pupa_unit_spans_are_whole_word_and_case_insensitive() -> None:
+    prompt = "Email Jane Roe, cc jane roe and JANEROE; Roe's file"
+    assert pupa.unit_spans(prompt, "jane roe") == [(6, 14), (19, 27)]
+    assert pupa.unit_spans(prompt, "roe") == [(11, 14), (24, 27), (41, 44)]
+    assert pupa.unit_spans(prompt, "ane") == []  # inside words only
+    assert pupa.unit_spans(prompt, "") == []
+    # Lowercasing that changes the length: offsets cannot be trusted.
+    assert pupa.unit_spans("İstanbul office", "office") == []
+
+
+def _pupa_csv(path: Path, rows: list[dict[str, str]]) -> Path:
+    import csv
+
+    fields = [
+        "conversation_hash",
+        "predicted_category",
+        "user_query",
+        "target_response",
+        "pii_units",
+        "redacted_query",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fields})
+    return path
+
+
+def test_pupa_adapter_locates_units_and_counts_misses(tmp_path: Path) -> None:
+    tnb = _pupa_csv(
+        tmp_path / "PUPA_TNB.csv",
+        [
+            {
+                "predicted_category": "job applications",
+                "user_query": "Write a cover letter for Mara Quint at Lumen Labs.",
+                "pii_units": "mara quint||lumen labs||mara quint",
+            },
+            {"predicted_category": "misc", "user_query": "Summarise this.", "pii_units": ""},
+        ],
+    )
+    new = _pupa_csv(
+        tmp_path / "PUPA_New.csv",
+        [{"user_query": "Ask Ola.", "pii_units": "ola||nobody"}],
+    )
+    files = {"PUPA_TNB.csv": tnb, "PUPA_New.csv": new}
+    spec = DATASETS["pupa"]
+    request = LoadRequest(split="all", download=lambda **kw: str(files[str(kw["filename"])]))
+    samples = list(spec.adapter(spec, request))
+    assert [s.context for s in samples] == ["job applications", "misc"]
+    assert [(g.start, g.end) for g in samples[0].spans] == [(25, 35), (39, 49)]
+    assert samples[1].spans == ()
+    assert dict(request.skipped) == {pupa.UNIT_NOT_FOUND: 1}
+    assert list(pupa.samples([{"user_query": None, "pii_units": "x"}], request)) == []
+    assert request.skipped[base.MALFORMED] == 1
+    assert spec.real_data
+    assert spec.label_map == {pupa.UNIT_LABEL: LEAK}
+
+
+def test_pupa_unreadable_csv(tmp_path: Path) -> None:
+    path = tmp_path / "bad.csv"
+    path.write_bytes(b"user_query,pii_units\n\xff\xfe,x\n")
+    with pytest.raises(base.DatasetError, match="cannot read bad.csv: UnicodeDecodeError"):
+        list(pupa.csv_rows(path))
+
+
+def test_pupa_dump_needs_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_transformers(monkeypatch, FakeHfPipe(findings=[]))
+    argv = ["--config", str(_config(tmp_path)), "--dataset", "pupa"]
+    argv += ["--dump-errors", str(tmp_path / "errors.jsonl")]
+    assert bench_ner.main(argv) == 2
+    assert "dataset 'pupa' holds real data" in capsys.readouterr().err
+
+
+# --- MAPA ---------------------------------------------------------------------
+
+
+def test_iob_spans_rebuild_text_and_spans() -> None:
+    tokens = ["Mr", "K.", "Muller", "v", "Rat", "der", "Stadt", "(", "1", ")"]
+    tags = [
+        "B-TITLE",
+        "B-INITIAL NAME",
+        "B-FAMILY NAME",
+        "O",
+        "I-ROLE",  # an I- without its B- starts a span
+        "I-ROLE",
+        "B-CITY",
+        "O",
+        "B-VALUE",
+        "O",
+    ]
+    text, spans = mapa.iob_spans(tokens, tags)
+    assert text == "Mr K. Muller v Rat der Stadt ( 1 )"
+    assert [(text[s.start : s.end], s.label) for s in spans] == [
+        ("Mr", "TITLE"),
+        ("K.", "INITIAL NAME"),
+        ("Muller", "FAMILY NAME"),
+        ("Rat der", "ROLE"),
+        ("Stadt", "CITY"),
+        ("1", "VALUE"),
+    ]
+    assert mapa.iob_spans(["A", "B"], ["B-FAMILY NAME", "I-FAMILY NAME"])[1] == [
+        GoldSpan(0, 3, "FAMILY NAME")
+    ]
+
+
+def test_mapa_adapter_filters_and_counts(tmp_path: Path) -> None:
+    def row(language: str, tokens: list[str], tags: list[str]) -> str:
+        return json.dumps(
+            {"language": language, "type": "EUR-LEX", "tokens": tokens, "fine_grained": tags}
+        )
+
+    path = tmp_path / "test.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                row("en", ["Mrs", "Okoro", "appealed"], ["B-TITLE", "B-FAMILY NAME", "O"]),
+                row("de", ["Herr", "Weber"], ["B-TITLE", "B-FAMILY NAME"]),
+                row("en", ["x"], ["O", "O"]),  # length mismatch
+                row("en", ["x", 3], ["O", "O"]),  # type: ignore[list-item]
+                json.dumps([1]),
+                "{broken",
+            ]
+        )
+    )
+    spec = DATASETS["mapa"]
+    request = LoadRequest(split="test", download=lambda **kw: str(path))
+    samples = list(spec.adapter(spec, request))
+    assert [s.context for s in samples] == ["en", "de"]
+    assert dict(request.skipped) == {base.MALFORMED: 4}
+    english = LoadRequest(split="test", language="en", download=lambda **kw: str(path))
+    assert [s.text for s in spec.adapter(spec, english)] == ["Mrs Okoro appealed"]
+    rules = build_detectors(DetectionConfig())
+    result = evaluate(samples, spec.label_map, Pipeline.from_detectors(rules, rules))
+    assert result.exact["PERSON"].gold == 2
+    assert result.unmapped == {}
+    assert spec.real_data and spec.filters_language

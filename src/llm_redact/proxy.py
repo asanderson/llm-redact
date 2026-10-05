@@ -119,6 +119,7 @@ from llm_redact.overrides import (
     OverrideStore,
     default_overrides_path,
     hint_config,
+    printable,
     raced_message,
 )
 from llm_redact.placeholders import PLACEHOLDER_RE, json_floors, may_carry_tokens
@@ -2852,6 +2853,47 @@ def _dashboard_unavailable(state: ProxyState) -> str:
     )
 
 
+# The access gate's optional posture lines in its /status ``users`` block
+# (``AccessGate.status``): at most this many, each at most this long.
+GATE_POSTURE_LINES = 8
+GATE_POSTURE_CHARS = 200
+
+
+def gate_posture(value: object) -> list[str] | None:
+    """The ``posture`` an access gate's ``status()`` reported, as /status
+    serves it: its first ``GATE_POSTURE_LINES`` non-empty strings, each with
+    every non-printable character escaped (``overrides.printable``) and cut
+    to ``GATE_POSTURE_CHARS``; any other entry dropped. None — the key is
+    dropped — for a value that is not a list (never a fault)."""
+    if not isinstance(value, list):
+        return None
+    lines = [entry for entry in value if isinstance(entry, str) and entry]
+    return [_posture_line(entry) for entry in lines[:GATE_POSTURE_LINES]]
+
+
+def _posture_line(text: str) -> str:
+    escaped = printable(text)
+    if len(escaped) > GATE_POSTURE_CHARS:
+        return escaped[: GATE_POSTURE_CHARS - 1] + "…"
+    return escaped
+
+
+def users_block(gate: AccessGate | None) -> dict[str, Any]:
+    """The /status ``users`` block: the access gate's ``status()`` (a copy),
+    its optional ``posture`` sanitized (``gate_posture``); without a gate, no
+    registry and nothing enforced."""
+    if gate is None:
+        return {"registry": False, "enforcement": False}
+    block = gate.status()
+    if not isinstance(block, dict) or "posture" not in block:
+        return block
+    block = dict(block)
+    posture = gate_posture(block.pop("posture"))
+    if posture is not None:
+        block["posture"] = posture
+    return block
+
+
 async def _handle_local(
     request: Request, state: ProxyState, admission: Admission | None = None
 ) -> Response:
@@ -3113,11 +3155,8 @@ async def _handle_local(
                 },
                 # The access gate's own block (llm-redact-pro); without one,
                 # no registry and nothing enforced.
-                "users": (
-                    state.access_gate.status()
-                    if state.access_gate is not None
-                    else {"registry": False, "enforcement": False}
-                ),
+                # Its optional `posture` lines sanitized (gate_posture).
+                "users": users_block(state.access_gate),
                 "license": {
                     "tier": state.license.tier,
                     "source": state.license.source,

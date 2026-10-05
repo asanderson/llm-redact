@@ -80,7 +80,7 @@ _PUBLISHER_MODEL = re.compile(r"(?:.*/)?publishers/[^/]+/models/([^/:]+)")
 _ENDPOINT = re.compile(r"(?:.*/)?(endpoints/[^/:]+)")
 
 
-def _vertex_model(name: str) -> str:
+def vertex_model(name: str) -> str:
     for pattern in (_PUBLISHER_MODEL, _ENDPOINT):
         match = pattern.fullmatch(name)
         if match is not None:
@@ -98,9 +98,9 @@ class VertexAdapter(GeminiAdapter):
         if method != "POST":
             return None
         if _VERTEX_PATH.fullmatch(path):
-            return _vertex_model(path.rpartition(":")[0])
+            return vertex_model(path.rpartition(":")[0])
         model = body_string(parsed, "model") if _CACHED_COLLECTION.fullmatch(path) else None
-        return _vertex_model(model) if model is not None else None
+        return vertex_model(model) if model is not None else None
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "GET":

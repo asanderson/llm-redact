@@ -739,17 +739,34 @@ class AuthorizationRequest:
       ``endpoints/{e}``), Claude on Vertex, a Bedrock model id or ARN
       (percent-decoded exactly as the routing reads it; StartAsyncInvoke's
       body ``modelId``). On a realtime upgrade the ``model`` query parameter
-      (OpenAI, Azure GA) or ``deployment`` (the Azure preview). None —
+      (OpenAI, Azure GA) or ``deployment`` (the Azure preview) — a later
+      ``session.update`` naming ``session.model`` is asked about again (see
+      ``AccessGate.authorize_request``). None —
       unknown — when the request names none or the upstream takes it from
       where the check cannot see it: a pass-through route, a multipart
       body, a route that runs no model or names it elsewhere (a batch's
-      lines, a video remix), a Gemini Live setup frame, an OpenAI realtime
-      session set up by an ``intent`` or a SIP ``call_id``, a repeated
-      query parameter. A policy that restricts models must treat an unknown
-      model as refused. A routed request reports the model the client asked
-      for (the routing layer's rules map it).
+      lines, a video remix), an OpenAI realtime session set up by an
+      ``intent`` or a SIP ``call_id``, a repeated query parameter — and a
+      Gemini or Vertex Live upgrade, whose model its setup frame names
+      (``model_in_frame``). A policy that restricts models must treat an
+      unknown model as refused (except where ``model_in_frame`` says the
+      core asks again with it). A routed request reports the model the
+      client asked for (the routing layer's rules map it).
     - ``identity``: True when the request spends a credential the proxy
       holds (its cloud identity, or a routed plan's operator key).
+    - ``model_in_frame``: True only on a realtime upgrade whose model the
+      upstream takes from a client FRAME (Gemini Live, Vertex Live: the
+      ``setup`` message's ``model``); ``model`` is then None. The core asks
+      ``authorize_request`` AGAIN, before anything of the connection is
+      forwarded, with the same facts but ``model`` = the model the setup
+      frame names (read as the HTTP adapters report it: Gemini
+      ``models/{m}`` as ``m``, ``tunedModels/{t}`` as is; Vertex a
+      publisher model's id, an endpoint as ``endpoints/{e}``) and
+      ``model_in_frame`` False — for the connection's first client frame,
+      which must be a setup naming a model, and for every later frame
+      holding a ``setup``. A model-restricting policy can therefore admit
+      the upgrade on its other facts and decide the model on that second
+      question. False on every other request.
     """
 
     surface: str
@@ -760,6 +777,7 @@ class AuthorizationRequest:
     path: str = field(repr=False)
     model: str | None
     identity: bool
+    model_in_frame: bool = False
 
 
 @dataclass(frozen=True)
@@ -821,7 +839,15 @@ class AccessGate(Protocol):
     or an awaitable of one (a method that must reach a directory or an
     identity provider awaits instead of blocking the event loop).
 
-    ``status`` is the ``users`` block of ``/status`` (metadata only).
+    ``status`` is the ``users`` block of ``/status`` (metadata only). It may
+    carry a ``posture`` key: a list of short, value-free, human-readable
+    lines the gate wants shown as posture warnings (llm-redact-pro: "[authz]
+    runs in audit mode: refusals are logged, not enforced") — printed in
+    ``llm-redact status``'s posture block. The core serves at most the first
+    ``proxy.GATE_POSTURE_LINES`` (8) non-empty strings, each with every
+    non-printable character escaped and cut to ``proxy.GATE_POSTURE_CHARS``
+    (200); it drops every other entry, and the key itself when its value is
+    not a list (never a fault).
     ``handle`` answers the core's fixed gate paths — ``ACCESS_PATHS`` (the
     admin endpoints), everything under ``AUTH_PREFIX`` (browser sign-in:
     ``AUTH_PATHS`` login, callback and sign-out, plus any page or JSON
@@ -931,6 +957,25 @@ class AccessGate(Protocol):
       realtime connection is held — revocable through ``ConnectionControl``
       and by a reload — while its check runs: one closed meanwhile is
       refused right after it (1008 with the gate's reason), never dialled.
+      A Gemini or Vertex Live upgrade names no model (its setup frame does:
+      ``AuthorizationRequest.model_in_frame``), so the gate is asked AGAIN
+      with that model for the connection's first client frame — which must
+      be a setup naming a model — and for every later frame holding a
+      setup: after the frame is read and BEFORE the session router's frame
+      check, its token floors, redaction and send. A refusal or a failed
+      check closes the connection 1008 (the gate's reason, or the core's
+      fixed text; recorded 403, kind ``authorization``), nothing of the
+      frame sent; so does a first frame that is no setup naming a model, a
+      later setup naming none, or a frame that is not JSON (the core's fixed
+      text). An awaitable answer is bounded as above, and a connection
+      revoked while it runs forwards nothing more. On an OpenAI or Azure
+      realtime connection (whose upgrade names its model) a client frame of
+      type ``session.update`` whose ``session`` carries a ``model`` key is
+      checked the same way, at the same point: a non-empty string is asked
+      about with ``model`` = that value and ``model_in_frame`` False; any
+      other value closes the connection 1008 with the core's fixed text.
+      Every other frame of such a connection, one that is not JSON
+      included, is never asked about and goes as before.
     - OPTIONAL ``detection_overlay() -> DetectionOverlay | None`` — the
       detection this requester gets on top of the configured policy,
       tighten-only (``DetectionOverlay``): asked synchronously once per

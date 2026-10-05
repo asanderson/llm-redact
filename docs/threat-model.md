@@ -343,14 +343,23 @@ own answer decides whether the page may read a response).
   ignores: a body `model` only where the upstream reads it, the path's where
   the upstream takes it from there (an Azure deployment, Gemini and Vertex,
   Claude on Vertex, a Bedrock model id or ARN), on a realtime upgrade the
-  `model` (Azure preview: `deployment`) query parameter. On a custom
+  `model` (Azure preview: `deployment`) query parameter, and again for a
+  `session.update` that names `session.model` (a non-empty string is put
+  to the gate before the frame is forwarded; any other value closes the
+  connection with 1008). A Gemini or Vertex
+  Live upgrade names no model (its setup frame does), so the gate is asked
+  again with the model the setup frame names, before anything of the
+  connection is forwarded: the first client frame must be a setup naming a
+  model, every later setup is checked alike, and a frame that is not JSON or
+  a setup naming none closes the connection (1008), as does a refusal.
+  On a custom
   provider the body's model counts only when the client added nothing before
   the OpenAI endpoint but an optional `/v1` (any other segment it chooses
   reaches the upstream and may select the model: a deployment, a router's
   model path); a base path belongs in `upstream_base_url`. It is None —
   unknown — when the request names none or the upstream takes it from where
   the check cannot see it (a pass-through route, whose body is never read
-  for it; a multipart body; a Gemini Live setup frame; an OpenAI realtime
+  for it; a multipart body; an OpenAI realtime
   session set up by an `intent` or a SIP `call_id`), so a policy that
   restricts models must treat an unknown model as refused. A gate's
   per-requester DETECTION OVERLAY can only tighten the configured policy (a

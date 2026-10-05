@@ -245,16 +245,12 @@ DASHBOARD_HINT = (
 SHOWN_CHARS = 120
 
 
-def shown(text: str) -> str:
-    """``text`` as it is safe to print to a terminal or a page: every
-    character that is not printable — C0 and C1 controls, DEL, bidi and
-    other format characters, line and paragraph separators — escaped
-    (``\\x1b``, ``\\u202e``), and at most ``SHOWN_CHARS`` of it, a longer
-    one cut with its length named. A route and a requester come from the
-    request: raw, an escape sequence in a path could rewrite or hide the
-    kind and types a person is asked to confirm, and a long one push them
-    off the screen."""
-    escaped = "".join(
+def printable(text: str) -> str:
+    """``text`` with every character that is not printable — C0 and C1
+    controls, DEL, bidi and other format characters, line and paragraph
+    separators — escaped (``\\x1b``, ``\\u202e``, ``\\U000e0001``), so it
+    is safe to print to a terminal or a page. Idempotent on its own output."""
+    return "".join(
         char
         if char.isprintable()
         else f"\\x{ord(char):02x}"
@@ -264,6 +260,18 @@ def shown(text: str) -> str:
         else f"\\U{ord(char):08x}"
         for char in text
     )
+
+
+def shown(text: str) -> str:
+    """``text`` as it is safe to print to a terminal or a page: every
+    character that is not printable — C0 and C1 controls, DEL, bidi and
+    other format characters, line and paragraph separators — escaped
+    (``\\x1b``, ``\\u202e``), and at most ``SHOWN_CHARS`` of it, a longer
+    one cut with its length named. A route and a requester come from the
+    request: raw, an escape sequence in a path could rewrite or hide the
+    kind and types a person is asked to confirm, and a long one push them
+    off the screen."""
+    escaped = printable(text)
     if len(escaped) > SHOWN_CHARS:
         return f"{escaped[:SHOWN_CHARS]}… ({len(escaped)} characters)"
     return escaped

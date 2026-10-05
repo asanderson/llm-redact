@@ -12,6 +12,24 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- `plugin_api.AuthorizationRequest.model_in_frame` (default False): a Gemini or Vertex Live
+  upgrade, whose model the setup frame names, is asked about with `model=None,
+  model_in_frame=True`; with the access gate's `authorize_request`, the core then asks again
+  with the model the setup frame names (`models/{m}` as `m`, Vertex as the publisher model's
+  id or `endpoints/{e}`, as the HTTP adapters report it) and `model_in_frame` False, before
+  the frame reaches the session router's frame check, redaction or the upstream. The first
+  client frame must be a setup naming a model and every later setup is checked alike; a
+  refusal, a failed check, a setup naming none or a frame that is not JSON closes the
+  connection 1008 (row 403, kind `authorization`), nothing of the frame sent. A connection
+  revoked (reload, access) while an awaited answer runs forwards nothing more. Without the
+  member nothing changes. On OpenAI and Azure realtime connections a `session.update` whose
+  `session` carries `model` is checked the same way (a non-empty string asked about as
+  `model`; any other value closes 1008); every other frame goes as before.
+- An access gate's `status()` may report a `posture` list in the `/status` `users` block:
+  short lines it wants shown as posture warnings (llm-redact-pro: roles in audit mode).
+  `llm-redact status` prints each in its posture block (`--json` shows the list). The core
+  sanitizes them: at most 8 non-empty strings, every non-printable character escaped, each
+  cut to 200 characters; anything else is dropped, a `posture` that is not a list too.
 - Two optional access-gate seams for role- and attribute-based access control (the policy
   itself is llm-redact-pro's; the core holds no user, role or group logic):
   - `authorize_request(request: plugin_api.AuthorizationRequest)`: the gate is handed the

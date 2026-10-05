@@ -74,7 +74,7 @@ status, a frame refused on an open relay closes it.
 | `scanned_body` | 400 | The scanned-body rule: a body the proxy cannot read to redact (not a JSON object, invalid UTF-8, non-canonical multipart …). |
 | `unsupported_encoding` | 415 | A content-encoded request body. |
 | `unchecked_body` | 400 | A body the stored-object check cannot read under a credential the proxy holds, or an upload its re-reading would change. |
-| `authorization` | 403 | The access gate's optional authorization (llm-redact-pro roles) refused the request or realtime upgrade (1008), its check failed, or the requester's detection overlay could not be applied. |
+| `authorization` | 403 | The access gate's optional authorization (llm-redact-pro roles) refused the request or realtime upgrade (1008) — or, on Gemini/Vertex Live, the model a setup frame names, or a first frame that is no setup naming a model; on OpenAI/Azure realtime, the model a `session.update` names, or one that names no string — its check failed, or the requester's detection overlay could not be applied. |
 | `object_access` | 403 | The session router refused a stored object of another namespace (realtime: its per-frame check). |
 | `sealed_session` | 403 | The session router sealed the request's session and redaction would write to it. |
 | `blocked_value` | 400 | A block-mode rule matched (realtime: the frame is refused and the connection closed 1008; the row keeps its 101). |
@@ -138,3 +138,14 @@ runtime-observed unpriced models — is the `routing` block of
 llm-redact-pro routing layer), one line per upstream in `llm-redact
 status`, and the `route` field of every `/recent` and `/events` row
 (`null` on the unrouted path); see the llm-redact-pro routing guide.
+
+An access gate (llm-redact-pro's named users) reports its own state as the
+`users` block of `GET /__llm-redact/status` (`{"registry": false,
+"enforcement": false}` without one). Its optional `posture` list holds short
+lines the gate wants seen as posture warnings (for instance `[authz] runs in
+audit mode: refusals are logged, not enforced`); `llm-redact status` prints
+each in its loud posture block, so the block is not silent while the gate
+reports one, and `--json` shows the list. The core serves at most 8 of them,
+non-empty strings only, every non-printable character escaped and each cut
+to 200 characters; anything else is dropped, and so is a `posture` that is
+not a list.

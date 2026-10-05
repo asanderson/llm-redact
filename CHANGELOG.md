@@ -12,6 +12,9 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- docs/how-it-works.md shows NER off the event loop in a new animated `ner-prefetch`
+  diagram; the `sequence-chat` and `security-gates` diagrams and the gate ⑤ row of
+  docs/security-dataflows.md include it.
 - `[detection.ner]` model-source keys: `allow_download` (default `false`), `allow_pickle_weights`
   (default `false`; `hf` only) and `[detection.ner.revisions]` (per `gliner`/`hf` backend, a full
   40-character commit id; a branch or tag name such as `main` is a config error because it moves).
@@ -32,6 +35,11 @@ and tags `vX.Y.Z`.
   backend; they restart from zero when a reload rebuilds the detectors). `llm-redact status`
   prints a posture line while a backend has skipped strings longer than `max_chars`, and one
   naming the entities no backend can emit.
+- Two more NER counters per backend, in `/status` `detection.ner` and on `/metrics`:
+  `inline_calls` (`llm_redact_ner_inline_calls_total`: strings a backend ran on the event
+  loop itself, holding up every other request for that string's inference) and
+  `prefetch_misses` (`llm_redact_ner_prefetch_misses_total`: strings a request's
+  precomputed NER results did not cover, run inline instead).
 - docs/detection.md "How NER runs" walks one string through an NER backend (the
   `max_chars` gate, windows, the label policy, the type guard, part merging, rule toggles,
   overlap resolution) beside a new `ner-pipeline` diagram.
@@ -50,6 +58,14 @@ and tags `vX.Y.Z`.
   `entities = ["PER"]` emitting `PER` once raw entities fold in 2.0.0.
 
 ### Changed
+- NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
+  upload inspector's extracted texts included) and a realtime client frame the proxy collects the
+  strings a request's redaction will scan, runs the NER models over them on a worker
+  thread (one request's batch at a time, each model locked per string), then redacts
+  synchronously with those results, so other requests (and `/__llm-redact/healthz`) are
+  answered while a large NER request is detected. What is sent upstream is unchanged
+  byte for byte; a string the precomputed results lack is detected inline and counted
+  (`inline_calls`, `prefetch_misses`).
 - NER model labels become placeholder types through one label policy for every backend
   (`detection/labels.py`, documented in docs/detection.md "Placeholder types from NER
   models"): labels are normalized (`B-PER` → `PER`, `"street address"` →

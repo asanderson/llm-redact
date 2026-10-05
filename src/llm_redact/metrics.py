@@ -113,6 +113,8 @@ CORE_METRIC_FAMILIES = frozenset(
         "llm_redact_ner_windows_truncated_total",
         "llm_redact_ner_labels_dropped_total",
         "llm_redact_ner_offsets_dropped_total",
+        "llm_redact_ner_inline_calls_total",
+        "llm_redact_ner_prefetch_misses_total",
         "llm_redact_routed_requests_total",
         "llm_redact_reissues_total",
         "llm_redact_audit_sink_batches_total",
@@ -520,6 +522,19 @@ def _ner_lines(backends: list[tuple[str, "NerStats"]]) -> list[str]:
             "offsets_dropped",
             "NER model entities of a requested type never redacted because the scanned"
             " string does not contain their span, by backend.",
+        ),
+        (
+            "llm_redact_ner_inline_calls_total",
+            "inline_calls",
+            "Strings an NER backend ran on the event loop (holding up every other request"
+            " for that string's inference) instead of ahead of the redaction on the NER"
+            " worker thread, by backend.",
+        ),
+        (
+            "llm_redact_ner_prefetch_misses_total",
+            "prefetch_misses",
+            "Strings a request's redaction did not find in its precomputed NER results and"
+            " ran inline instead, by backend.",
         ),
     ):
         lines.append(f"# HELP {name} {help_text}")

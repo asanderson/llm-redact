@@ -377,7 +377,7 @@ existing `detection.ner_enabled`):
       "revision": null, "catalog": null, "license": null,
       "counters": {"scanned_whole": 812, "scanned_windowed": 14, "skipped_max_chars": 3,
                    "windows": 61, "windows_truncated": 0, "labels_dropped": 0,
-                   "offsets_dropped": 0}
+                   "offsets_dropped": 0, "inline_calls": 0, "prefetch_misses": 0}
     }
   },
   "unmatched_entities": []
@@ -393,6 +393,8 @@ existing `detection.ner_enabled`):
 | `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`) |
 | `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |
 | `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
+| `inline_calls` | strings the backend ran on the event loop itself, holding up every other request for that string's inference, instead of ahead of the redaction on the NER worker thread |
+| `prefetch_misses` | strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced), run inline instead and counted in `inline_calls` too |
 
 Each string a backend is handed counts once, under `scanned_whole`,
 `scanned_windowed` or `skipped_max_chars`; with several backends each one
@@ -404,7 +406,8 @@ entities no active backend can ever emit (the startup warning above), and
 The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
 backend and outcome, `llm_redact_ner_windows_total`,
 `llm_redact_ner_windows_truncated_total`, `llm_redact_ner_labels_dropped_total`,
-`llm_redact_ner_offsets_dropped_total`;
+`llm_redact_ner_offsets_dropped_total`, `llm_redact_ner_inline_calls_total`,
+`llm_redact_ner_prefetch_misses_total`;
 see [observability.md](observability.md)), and `llm-redact status` prints a
 posture line while a backend has skipped strings longer than `max_chars` or an
 entity can never match:

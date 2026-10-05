@@ -1,5 +1,6 @@
 """Assemble the detector list from configuration."""
 
+import logging
 import re
 import weakref
 from collections.abc import Callable, Iterable, Sequence
@@ -7,6 +8,7 @@ from dataclasses import dataclass, field, replace
 
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
+from llm_redact.detection.labels import LabelPolicy
 from llm_redact.detection.regex_rules import BUILTIN_RULES, PreparedText, RegexDetector, RegexRule
 
 
@@ -157,30 +159,72 @@ class DetectionConfig:
 
 BINARY_UPLOAD_MODES = ("forward", "refuse")
 
+logger = logging.getLogger("llm_redact")
+
+
+def ner_entity_types(ner: NerConfig) -> set[str]:
+    """Every placeholder type the configured NER entities can be emitted
+    as, on any active backend: the requested types, each entity's own type
+    (a raw entity's normalized label while raw entities do not fold), and
+    the [detection.ner.labels] targets."""
+    types = {type_name for _label, type_name in ner.labels if type_name}
+    for backend in ner.active_backends():
+        policy = LabelPolicy(ner.entities, backend=backend, overrides=ner.labels)
+        types |= policy.requested
+        types |= {t for t in map(policy.classify, ner.entities) if t is not None}
+    return types
+
+
+def _allowlist_by_type(config: DetectionConfig) -> dict[str, frozenset[str]]:
+    """[detection.allowlist_by_type] keyed by the types detections carry.
+
+    A typo'd TYPE key was silently inert (the user believes the value is
+    allowlisted; it keeps being redacted), so every key must name a type
+    something can emit: a built-in rule, a custom rule, a deny entry, a
+    configured NER entity as written (always accepted), or a type the NER
+    entities are emitted as. A key no rule emits is read as the type NER
+    emits for it ("job title" -> JOB_TITLE; PER -> PERSON once raw entities
+    fold), so an allowlist written for a model label keeps matching; keys of
+    one type merge. Logged once, key names only.
+    """
+    rule_types = (
+        {rule.detector_type for rule in BUILTIN_RULES}
+        | {rule.detector_type for rule in config.custom_rules}
+        | {entry.detector_type for entry in config.deny_strings}
+    )
+    ner_types = ner_entity_types(config.ner)
+    policy = LabelPolicy(config.ner.entities, overrides=config.ner.labels)
+    by_type: dict[str, frozenset[str]] = {}
+    unknown: list[str] = []
+    renamed: list[str] = []
+    for key, values in config.allowlist_by_type:
+        detector_type = key
+        if key not in rule_types:
+            canonical = policy.entry_type(key)
+            if canonical is not None and canonical in ner_types:
+                detector_type = canonical
+            elif key not in config.ner.entities:
+                unknown.append(key)
+        if detector_type != key:
+            renamed.append(f"{key!r} -> {detector_type}")
+        by_type[detector_type] = by_type.get(detector_type, frozenset()) | frozenset(values)
+    if unknown:
+        known_types = rule_types | ner_types | set(config.ner.entities)
+        raise ValueError(
+            f"unknown placeholder type(s) {sorted(unknown)} in"
+            f" [detection.allowlist_by_type]; known types are"
+            f" {sorted(known_types)}"
+        )
+    if renamed:
+        logger.info(
+            "[detection.allowlist_by_type] keys read as the types NER emits: %s",
+            ", ".join(renamed),
+        )
+    return by_type
+
 
 def build_allowlist(config: DetectionConfig) -> Allowlist:
-    # A typo'd TYPE key was silently inert (the user believes the value is
-    # allowlisted; it keeps being redacted). Validate against every type that
-    # can actually be emitted: built-in rules, custom rules, deny entries,
-    # and the configured NER entity labels.
-    if config.allowlist_by_type:
-        known_types = (
-            {rule.detector_type for rule in BUILTIN_RULES}
-            | {rule.detector_type for rule in config.custom_rules}
-            | {entry.detector_type for entry in config.deny_strings}
-            | set(config.ner.entities)
-        )
-        unknown_types = sorted(
-            detector_type
-            for detector_type, _values in config.allowlist_by_type
-            if detector_type not in known_types
-        )
-        if unknown_types:
-            raise ValueError(
-                f"unknown placeholder type(s) {unknown_types} in"
-                f" [detection.allowlist_by_type]; known types are"
-                f" {sorted(known_types)}"
-            )
+    by_type = _allowlist_by_type(config) if config.allowlist_by_type else {}
     patterns = []
     for p in config.allowlist_patterns:
         try:
@@ -194,9 +238,7 @@ def build_allowlist(config: DetectionConfig) -> Allowlist:
     return Allowlist(
         exact=DEFAULT_ALLOWLIST | frozenset(config.allowlist),
         patterns=tuple(patterns),
-        by_type={
-            detector_type: frozenset(values) for detector_type, values in config.allowlist_by_type
-        },
+        by_type=by_type,
     )
 
 

@@ -38,6 +38,10 @@ and tags `vX.Y.Z`.
   than 28 characters) is no longer emitted: its tokens could never be restored.
 
 ### Fixed
+- `[detection.allowlist_by_type]` accepts the types NER entities are emitted as (`JOB_TITLE`
+  for the GLiNER entity `"job title"`, which it refused) and reads a key that names an
+  entity as written as the type NER emits for it (a `"job title"` key never matched).
+  Every key valid before stays valid.
 - A Presidio `entities` list naming nothing the analyzer supports failed every request
   (Presidio raises when asked only for unknown entities); it now stops the startup with
   an error naming what the analyzer supports, and unsupported entries beside supported

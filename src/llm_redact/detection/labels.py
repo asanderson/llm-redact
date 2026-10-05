@@ -324,6 +324,15 @@ class LabelPolicy:
                 return None
         return type_name if is_placeholder_type(type_name) else None
 
+    def entry_type(self, name: str) -> str | None:
+        """The placeholder type a configured NAME stands for (an entity, an
+        `[detection.allowlist_by_type]` key): its override, else — once raw
+        names fold — its fold, else its normalized self. None when the name
+        is dropped or cannot be a placeholder type."""
+        label = normalize_label(name)
+        type_name = self.fold(label) if self.fold_raw else self.overrides.get(label, label)
+        return type_name if type_name and is_placeholder_type(type_name) else None
+
     def classify_gliner(self, returned_label: str) -> str | None:
         """A GLiNER label: one of this policy's type-request prompts is
         emitted as its type directly; anything else goes through classify."""

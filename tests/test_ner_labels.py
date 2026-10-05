@@ -559,3 +559,123 @@ def test_an_override_target_outside_the_grammar_is_never_emitted(fold_raw: bool)
     # Programmatic configs skip the parser's check; the runtime guard holds.
     policy = LabelPolicy(("CITY",), overrides={"CITY": "city-name"})
     assert policy.classify("CITY") is None
+
+
+# --- [detection.allowlist_by_type] keys for NER types ------------------------------
+
+
+def _allowlist(
+    keys: tuple[tuple[str, tuple[str, ...]], ...], ner: NerConfig, **detection: object
+) -> "Allowlist":
+    from llm_redact.detection.engine import build_allowlist
+
+    return build_allowlist(
+        DetectionConfig(allowlist_by_type=keys, ner=ner, **detection)  # type: ignore[arg-type]
+    )
+
+
+def test_allowlist_accepts_the_type_gliner_emits(fold_raw: bool) -> None:
+    ner = NerConfig(backend="gliner", entities=("job title",))
+    allow = _allowlist((("JOB_TITLE", ("Engineer",)),), ner)
+    assert allow.allows_for("JOB_TITLE", "Engineer")
+    # The entity as written stays valid, and now matches what GLiNER emits.
+    as_written = _allowlist((("job title", ("Engineer",)),), ner)
+    assert as_written.allows_for("JOB_TITLE", "Engineer")
+    detector = GlinerDetector(FakeGliner([("Engineer", "job title", 0.9)]), frozenset(), 1000, 0.5)
+    from llm_redact.detection.engine import detect_all
+
+    assert detect_all([detector], "an Engineer", as_written) == []
+
+
+def test_allowlist_accepts_a_type_request(fold_raw: bool) -> None:
+    allow = _allowlist((("ADDRESS", ("1 Main St",)),), NerConfig(entities=("ADDRESS",)))
+    assert allow.allows_for("ADDRESS", "1 Main St")
+
+
+def test_allowlist_written_for_per_keeps_matching(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    from llm_redact.detection.engine import build_allowlist, detect_all
+
+    install_transformers(monkeypatch, FakeHfPipe([("Jane Doe", "PER", 0.9), ("Bob", "PER", 0.9)]))
+    config = DetectionConfig(
+        enabled=(),
+        allowlist_by_type=(("PER", ("Jane Doe",)),),
+        ner=NerConfig(enabled=True, backend="hf", entities=("PER",)),
+    )
+    allow = build_allowlist(config)
+    found = detect_all(build_detectors(config), "Jane Doe and Bob", allow)
+    assert [(d.detector_type, d.value) for d in found] == [("PERSON" if fold_raw else "PER", "Bob")]
+
+
+def test_allowlist_key_canonicalization_is_logged_without_values(
+    caplog: pytest.LogCaptureFixture, fold_raw: bool
+) -> None:
+    import logging
+
+    ner = NerConfig(entities=("PER", "job title"))
+    with caplog.at_level(logging.INFO, logger="llm_redact"):
+        allow = _allowlist((("PER", ("Jane Doe",)), ("job title", ("Engineer",))), ner)
+    assert allow.by_type == {
+        ("PERSON" if fold_raw else "PER"): frozenset({"Jane Doe"}),
+        "JOB_TITLE": frozenset({"Engineer"}),
+    }
+    (record,) = [r for r in caplog.records if "allowlist_by_type" in r.getMessage()]
+    message = record.getMessage()
+    assert "'job title' -> JOB_TITLE" in message
+    assert ("'PER' -> PERSON" in message) is fold_raw
+    assert "Jane" not in message and "Engineer" not in message
+
+
+def test_allowlist_keys_of_one_type_merge(fold_raw: bool) -> None:
+    ner = NerConfig(entities=("PERSON", "PER"), labels=(("PER", "PERSON"),))
+    allow = _allowlist((("PER", ("Jane",)), ("PERSON", ("Bob",))), ner)
+    assert allow.by_type == {"PERSON": frozenset({"Jane", "Bob"})}
+
+
+def test_allowlist_rule_types_are_never_renamed(fold_raw: bool) -> None:
+    # A custom rule may emit a type that is also a fold source (PASSWORD ->
+    # SECRET): its allowlist must keep matching the custom rule's type.
+    from llm_redact.detection.engine import CustomRule
+
+    allow = _allowlist(
+        (("PASSWORD", ("hunter2",)),),
+        NerConfig(entities=("PASSWORD",)),
+        custom_rules=(CustomRule(name="pw", detector_type="PASSWORD", pattern="pw:\\S+"),),
+    )
+    assert allow.by_type == {"PASSWORD": frozenset({"hunter2"})}
+
+
+def test_allowlist_keys_valid_before_stay_valid(fold_raw: bool) -> None:
+    from llm_redact.detection.deny import DenyEntry
+    from llm_redact.detection.engine import CustomRule
+
+    keys = (
+        ("EMAIL", ("a@corp.example",)),
+        ("TICKET", ("PROJ-1",)),
+        ("DENY", ("x",)),
+        ("job title", ("Engineer",)),
+        ("PER", ("Jane",)),
+        ("--", ("y",)),  # an entity as written that normalizes to nothing
+    )
+    allow = _allowlist(
+        keys,
+        NerConfig(entities=("job title", "PER", "--")),
+        custom_rules=(CustomRule(name="t", detector_type="TICKET", pattern="PROJ-\\d+"),),
+        deny_strings=(DenyEntry(value="x"),),
+    )
+    assert {"EMAIL", "TICKET", "DENY", "JOB_TITLE", "--"} <= set(allow.by_type)
+
+
+def test_allowlist_unknown_keys_still_refused(fold_raw: bool) -> None:
+    with pytest.raises(ValueError, match=r"unknown placeholder type\(s\) \['ADRESS', 'PERSON'\]"):
+        _allowlist(
+            (("ADRESS", ("x",)), ("PERSON", ("y",))),
+            NerConfig(entities=("ADDRESS",)),
+        )
+
+
+def test_allowlist_accepts_override_targets(fold_raw: bool) -> None:
+    ner = NerConfig(entities=("ADDRESS", "CITY"), labels=(("CITY", "LOCALITY"),))
+    allow = _allowlist((("LOCALITY", ("Springfield",)), ("CITY", ("Shelbyville",))), ner)
+    assert allow.by_type == {"LOCALITY": frozenset({"Springfield", "Shelbyville"})}

@@ -220,6 +220,13 @@ error, rather than failing every request.
 A type the token format cannot carry (one that does not start with a letter,
 or longer than 28 characters) is never emitted.
 
+`[detection.allowlist_by_type]` keys name the type a detection carries.
+Besides the rule and deny types, a key may name any type the NER entities are
+emitted as (`JOB_TITLE` for the GLiNER entity `"job title"`) or an entity as
+written; a key that only NER emits is read as the type NER emits for it
+(`"job title"` → `JOB_TITLE`; `PER` → `PERSON` once raw entities fold), and
+the startup log names each such key once.
+
 A folded built-in type follows its rule's toggle: with `generic_secret`
 disabled, a model's `PASSWORD` detections (type `SECRET`) are suppressed too,
 and with `email` disabled so are the `EMAIL_ADDRESS` ones.

@@ -519,6 +519,14 @@ policy the reload changed is closed on both sides with code 1012
 (reconnect), and no frame it reads after the reload is forwarded under the
 old configuration. A client that reconnects gets the new configuration and
 the same vault session ([details](deployment.md#reloads-and-open-realtime-connections)).
+With an access gate that authorizes requests (llm-redact-pro roles), the
+gate is asked about the model the upstream runs: the upgrade's `model`
+(Azure preview: `deployment`) query parameter for OpenAI and Azure, whose
+session model is fixed at connect; for Gemini and Vertex Live, whose
+upgrade names none, the model the setup frame names — the first client
+frame must then be a setup naming a model, every later setup is checked
+too, and a refused or missing model (or a frame that is not JSON) closes
+the connection with 1008 before anything of that frame is forwarded.
 The Azure and Vertex routes work with the proxy's own cloud identity
 ([above](#the-proxys-own-cloud-identity)); the full list of accepted
 WebSocket paths is in [api-coverage.md](api-coverage.md#realtime-websocket-routes).

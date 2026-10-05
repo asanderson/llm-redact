@@ -182,7 +182,8 @@ DATACLASSES: dict[str, str] = {
     ),
     "AuthorizationRequest": (
         "(surface: 'str', provider: 'str | None', adapter: 'str | None', kind: 'str',"
-        " method: 'str', path: 'str', model: 'str | None', identity: 'bool') -> None"
+        " method: 'str', path: 'str', model: 'str | None', identity: 'bool',"
+        " model_in_frame: 'bool' = False) -> None"
     ),
     "DetectionOverlay": (
         "(modes: 'tuple[tuple[str, str], ...]' = (), deny: 'tuple[str, ...]' = ()) -> None"

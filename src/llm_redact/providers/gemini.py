@@ -299,7 +299,7 @@ def _related_boundary(content_type: str) -> bytes | None:
     return parse_multipart_boundary(content_type, "multipart/related", refuse=_ROOT_ELSEWHERE)
 
 
-def _model_id(name: str) -> str:
+def gemini_model(name: str) -> str:
     """A Gemini API model resource name as the model it runs: ``models/{m}``
     → ``m`` (the id the path and the OpenAI-compatible surface name); a
     tuned model ``tunedModels/{t}`` as it is."""
@@ -316,9 +316,9 @@ class GeminiAdapter(ProviderAdapter):
         if method != "POST":
             return None
         if _GEMINI_PATH.fullmatch(path):
-            return _model_id(path.split("/", 2)[2].rpartition(":")[0])
+            return gemini_model(path.split("/", 2)[2].rpartition(":")[0])
         model = body_string(parsed, "model") if _GEMINI_CACHED_CREATE.fullmatch(path) else None
-        return _model_id(model) if model is not None else None
+        return gemini_model(model) if model is not None else None
 
     def matches(self, method: str, path: str) -> RouteKind:
         if method == "GET" and _GEMINI_MODELS.fullmatch(path):

@@ -51,6 +51,15 @@ frame that parses as JSON (its own parse, before the frame is restored or
 sent; read-only, a failure contained): llm-redact-pro records whose Live
 session a resumption handle belongs to.
 
+Setup-frame models: a Gemini or Vertex Live connection's model is named by
+its setup frame, not the upgrade (``WsAdapter.model_in_frame``). With an
+access gate that authorizes requests (its optional ``authorize_request``),
+the gate is asked again with that model for the connection's first client
+frame — which must be a setup naming one — and for every later setup, FIRST:
+before the session router's frame check, the frame's floors, redaction and
+send. A refusal closes the connection 1008, nothing of the frame sent; a
+connection revoked while an awaited answer runs forwards nothing more.
+
 Reloads: a connection is served under the admission it was opened with
 (``RealtimeRelay``). A reload that changes it — the provider's settings, the
 authorizer that opened its upstream session, the detection policy — revokes
@@ -61,6 +70,7 @@ it reads after the swap under the configuration it was opened with.
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import inspect
 import json
@@ -69,7 +79,7 @@ import threading
 import time
 import urllib.parse
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from starlette.datastructures import QueryParams
@@ -89,8 +99,14 @@ from llm_redact.jsonwalk import (
 from llm_redact.metrics import LocalRefusal
 from llm_redact.placeholders import json_floors, may_carry_tokens, token_floors
 from llm_redact.plugin_api import UpstreamAuthError
-from llm_redact.providers.base import SYSTEM_NOTE, restore_mcp_tools, strip_mcp_tools
-from llm_redact.providers.gemini import StreamedText
+from llm_redact.providers.base import (
+    SYSTEM_NOTE,
+    body_string,
+    restore_mcp_tools,
+    strip_mcp_tools,
+)
+from llm_redact.providers.gemini import StreamedText, gemini_model
+from llm_redact.providers.vertex import vertex_model
 from llm_redact.redactor import (
     BlockedRequest,
     PlaceholderLimitReached,
@@ -106,7 +122,7 @@ if TYPE_CHECKING:
     from llm_redact.config import ProviderConfig
     from llm_redact.detection.base import Detector
     from llm_redact.detection.engine import Allowlist
-    from llm_redact.plugin_api import ConnectionRecheck, UpstreamAuth
+    from llm_redact.plugin_api import AuthorizationRequest, ConnectionRecheck, UpstreamAuth
     from llm_redact.proxy import ProxyState, RequestContext
 
 logger = logging.getLogger("llm_redact")
@@ -201,11 +217,29 @@ class WsAdapter:
     def authorizable(self, path: str) -> bool:
         return path in self.identity_paths
 
+    # True when the upstream takes the connection's model from a client
+    # FRAME rather than the upgrade (Gemini/Vertex Live: the setup message):
+    # the upgrade's ``AuthorizationRequest`` says ``model_in_frame`` and, with
+    # an access gate that authorizes requests, the relay asks again with the
+    # model the frame names (``frame_model``) before forwarding anything.
+    model_in_frame = False
+
     def request_model(self, path: str, query: QueryParams) -> str | None:
         """The model the upstream runs this connection with, as far as the
         upgrade names it — the access gate's ``AuthorizationRequest.model``;
         never a value the upstream ignores. None — unknown — by default (a
-        Gemini Live setup frame names its model only after the check)."""
+        Gemini Live setup frame names its model after the upgrade:
+        ``model_in_frame``)."""
+        return None
+
+    def sets_model(self, payload: Any) -> bool:
+        """Whether this parsed client frame can choose the connection's model
+        (a ``model_in_frame`` adapter's setup message, whatever it holds)."""
+        return False
+
+    def frame_model(self, payload: Any) -> str | None:
+        """The model this parsed client frame's setup names, read as the HTTP
+        adapter reports a model; None when it names none."""
         return None
 
     def redact_message(
@@ -629,11 +663,28 @@ class GeminiLiveWs(WsAdapter):
 
     name = "gemini-live"
     provider = "gemini"
+    # The setup message (the connection's first) names the model.
+    model_in_frame = True
 
     def matches(self, path: str) -> bool:
         return path.startswith("/ws/google.ai.generativelanguage.") and path.endswith(
             ".GenerativeService.BidiGenerateContent"
         )
+
+    def sets_model(self, payload: Any) -> bool:
+        # `setup` is its own JSON name in both the camelCase and the proto
+        # field-name spelling.
+        return isinstance(payload, dict) and "setup" in payload
+
+    def frame_model(self, payload: Any) -> str | None:
+        setup = payload.get("setup") if isinstance(payload, dict) else None
+        model = body_string(setup, "model")
+        return self._model_name(model) if model is not None else None
+
+    @staticmethod
+    def _model_name(name: str) -> str:
+        # The Gemini API's reading (`models/{m}` → `m`), as on HTTP.
+        return gemini_model(name)
 
     def redact_message(
         self,
@@ -811,6 +862,13 @@ class VertexLiveWs(GeminiLiveWs):
 
     def matches(self, path: str) -> bool:
         return path in _VERTEX_LIVE_PATHS
+
+    @staticmethod
+    def _model_name(name: str) -> str:
+        # Vertex's reading, as on HTTP: a publisher model's id
+        # (`projects/{p}/locations/{l}/publishers/google/models/{m}` → `m`),
+        # an endpoint as `endpoints/{e}`.
+        return vertex_model(name)
 
 
 ALL_WS_ADAPTERS: tuple[type[WsAdapter], ...] = (
@@ -1246,40 +1304,46 @@ async def _authorize_upgrade(
     return http_url, headers, subprotocols
 
 
-async def _authorize_connection(
-    state: "ProxyState",
-    websocket: WebSocket,
-    adapter: WsAdapter,
-    relay: RealtimeRelay,
-    path: str,
-    identity: bool,
-) -> tuple["OverlayBuild | None", tuple[int, LocalRefusal, str, int] | None]:
-    """The access gate's authorization of this upgrade and the requester's
-    detection overlay (its optional ``authorize_request`` and
-    ``detection_overlay``), before the session is opened, the audit START row
-    and any dial. Returns the overlay build and None, or None and the
-    refusal: (row status, kind, close reason, close code). ``relay`` is
-    already held (revocable) while the check runs: one a reload or the
-    access gate revoked meanwhile is refused like a revocation before the
-    dial — 1012 and row 503 for a reload, 1008 with the gate's reason and
-    row 403 for its access."""
+def _upgrade_request(
+    adapter: WsAdapter, path: str, query: QueryParams, identity: bool
+) -> "AuthorizationRequest":
+    """The facts of a realtime upgrade, as the access gate's
+    ``authorize_request`` is asked about it: the model the upgrade names, or
+    — for an adapter whose setup frame names it — None and
+    ``model_in_frame`` (the relay asks again with the frame's model)."""
     from llm_redact.plugin_api import AuthorizationRequest
 
+    return AuthorizationRequest(
+        surface="websocket",
+        provider=adapter.provider,
+        adapter=adapter.name,
+        kind="chat",
+        method="GET",
+        path=path,
+        model=None if adapter.model_in_frame else adapter.request_model(path, query),
+        identity=identity,
+        model_in_frame=adapter.model_in_frame,
+    )
+
+
+async def _authorize_connection(
+    state: "ProxyState",
+    request: "AuthorizationRequest | None",
+    relay: RealtimeRelay,
+    path: str,
+) -> tuple["OverlayBuild | None", tuple[int, LocalRefusal, str, int] | None]:
+    """The access gate's authorization of this upgrade (``request``: its
+    facts, None without the gate's optional ``authorize_request``) and the
+    requester's detection overlay (its optional ``detection_overlay``),
+    before the session is opened, the audit START row and any dial. Returns
+    the overlay build and None, or None and the refusal: (row status, kind,
+    close reason, close code). ``relay`` is already held (revocable) while
+    the check runs: one a reload or the access gate revoked meanwhile is
+    refused like a revocation before the dial — 1012 and row 503 for a
+    reload, 1008 with the gate's reason and row 403 for its access."""
     authorization = state.authorization
-    if authorization.authorizes:
-        verdict = authorization.refusal(
-            AuthorizationRequest(
-                surface="websocket",
-                provider=adapter.provider,
-                adapter=adapter.name,
-                kind="chat",
-                method="GET",
-                path=path,
-                model=adapter.request_model(path, websocket.query_params),
-                identity=identity,
-            ),
-            f"WS {path}",
-        )
+    if request is not None:
+        verdict = authorization.refusal(request, f"WS {path}")
         if inspect.isawaitable(verdict):
             verdict = await verdict
         if verdict is not None:
@@ -1448,9 +1512,12 @@ async def _admitted(
 ) -> None:
     """One admitted connection, its relay held: the access gate's
     authorization, the connection's session, then the relay itself."""
-    overlay, refusal = await _authorize_connection(
-        state, websocket, adapter, relay, path, relay.upstream_auth is not None
+    request = (
+        _upgrade_request(adapter, path, websocket.query_params, relay.upstream_auth is not None)
+        if state.authorization.authorizes
+        else None
     )
+    overlay, refusal = await _authorize_connection(state, request, relay, path)
     if refusal is not None:
         _record_ws_refusal(state, adapter, path, refusal[0], started, kind=refusal[1])
         await _reject(websocket, refusal[2], code=refusal[3])
@@ -1479,7 +1546,12 @@ async def _admitted(
         _record_ws_refusal(state, adapter, path, 403, started, kind="sealed_session")
         await _reject(websocket, "the session router sealed this connection's vault session")
         return
-    await _relay(state, websocket, adapter, relay, static_ctx, path, started, overlay)
+    # A connection whose model a setup frame names: the gate is asked again
+    # with that model before any of its frames is forwarded.
+    frame_request = request if request is not None and request.model_in_frame else None
+    await _relay(
+        state, websocket, adapter, relay, static_ctx, path, started, overlay, frame_request
+    )
 
 
 async def _relay(
@@ -1491,10 +1563,14 @@ async def _relay(
     path: str,
     started: float,
     overlay: "OverlayBuild | None" = None,
+    frame_request: "AuthorizationRequest | None" = None,
 ) -> None:
     """Dial, relay and record one admitted connection, under ``relay``'s
     admission until a reload revokes it — with the requester's detection
-    overlay (built against the relay's own detection objects), if any."""
+    overlay (built against the relay's own detection objects), if any, and,
+    when ``frame_request`` is given (the upgrade's facts, its model in a
+    setup frame), the access gate asked again with the model each setup
+    frame names (``_FrameModels``)."""
     import websockets
 
     from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
@@ -1660,6 +1736,15 @@ async def _relay(
     # parsed for the router.
     observe_frames = state.observes_realtime_server_frames
 
+    # The access gate asked again with the model each setup frame names
+    # (its optional authorize_request; Gemini/Vertex Live): only with that
+    # member, so without it no frame is parsed for it.
+    frame_models = (
+        _FrameModels(state, adapter, frame_request, f"WS {path}")
+        if frame_request is not None
+        else None
+    )
+
     # "once" / "always" once a frame passed a refusal on its requester's
     # approved override (overrides.py): the connection's row says so.
     override_marker: str | None = None
@@ -1703,21 +1788,38 @@ async def _relay(
             else:
                 data = message.get("bytes") or b""
             try:
-                # The session router's frame check, FIRST and synchronously
-                # (still no await since the revoked check above): the frame
-                # as parsed — handed on to redaction, never parsed twice.
-                parsed = (
-                    _checked_frame(
+                parsed: tuple[Any, bool] | None = None
+                if frame_models is not None:
+                    # The access gate's check of the model a setup frame
+                    # names, FIRST: the connection's first frame must be a
+                    # setup naming one, a later setup is checked alike, and a
+                    # frame that is not JSON (its model unknowable) is
+                    # refused. Its parse is handed on, never parsed twice.
+                    parsed = parse_client_frame(data)
+                    verdict = frame_models.verdict(parsed)
+                    if inspect.isawaitable(verdict):
+                        verdict = await verdict
+                        if relay.revoked is not None:
+                            # Revoked while the gate decided: the frame is
+                            # neither checked further, redacted nor sent
+                            # under the admission it was read with.
+                            return
+                    if verdict is not None:
+                        raise _ModelRefused(verdict)
+                # The session router's frame check, then synchronously (no
+                # await since the revoked check above, or since the one
+                # after the gate's awaited answer): the frame as parsed —
+                # handed on to redaction, never parsed twice.
+                if check_frames:
+                    parsed = _checked_frame(
                         state,
                         adapter,
                         path,
                         data,
                         identity=require_json,
                         session_id=ctx.session_id,
+                        parsed=parsed,
                     )
-                    if check_frames
-                    else None
-                )
                 # The connection's running token floor, raised BEFORE this
                 # frame's values are numbered: the provider holds the whole
                 # conversation, so a token any earlier client frame carried
@@ -1774,6 +1876,15 @@ async def _relay(
                         # Handed to the upstream next, with no check between.
                         frame_scope.settle(sent=True)
                 await upstream.send(outbound)
+            except _ModelRefused as refused:
+                # The access gate refused the model a setup frame names (or
+                # its check failed), or the frame named none: never redacted
+                # or sent — closed 1008 with the gate's reason or the core's
+                # fixed text (never logged); the row records the HTTP 403.
+                logger.info("WS %s -> refused by the access gate (a setup frame's model)", path)
+                status, refusal = 403, "authorization"
+                await close_on_policy(refused.reason)
+                return
             except _FrameRefused as refused:
                 # The session router refused the frame (another user's stored
                 # object, a storage location, …) or its check failed: never
@@ -2007,6 +2118,61 @@ class _FrameRefused(Exception):
         self.reason = reason
 
 
+# The close reasons of a frame the core cannot put to the access gate's model
+# check (``_FrameModels``); each fits a close frame's 123 bytes.
+SETUP_FIRST = "llm-redact: the first frame must be a setup naming its model; nothing was forwarded"
+SETUP_MODEL = "llm-redact: a setup frame must name its model; the frame was not forwarded"
+FRAME_NOT_JSON = "llm-redact: a frame that is not JSON cannot be authorized; it was not forwarded"
+
+
+class _ModelRefused(Exception):
+    """The access gate refused the model a setup frame names, its check
+    failed, or the frame named none: ``reason`` is the close reason — the
+    gate's fixed text or the core's — and is never logged."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("refused by the access gate's model check")
+        self.reason = reason
+
+
+class _FrameModels:
+    """The access gate's ``authorize_request`` asked about the model a
+    realtime connection's setup frames name (an adapter with
+    ``model_in_frame``: Gemini and Vertex Live), with the upgrade's facts
+    and ``model`` = that model, ``model_in_frame`` False. The connection's
+    first client frame must be a setup naming a model; every later frame
+    holding a setup must name one too and is checked alike; a frame that is
+    not JSON is refused (it could name a model the check cannot read)."""
+
+    def __init__(
+        self,
+        state: "ProxyState",
+        adapter: WsAdapter,
+        request: "AuthorizationRequest",
+        where: str,
+    ) -> None:
+        self._authorization = state.authorization
+        self._adapter = adapter
+        self._request = request
+        self._where = where
+        self._first = True
+
+    def verdict(self, parsed: tuple[Any, bool] | None) -> "str | None | Awaitable[str | None]":
+        """None (forward the frame), a refusal's close reason, or an
+        awaitable of either (the gate's bounded answer)."""
+        first, self._first = self._first, False
+        if parsed is None:
+            return SETUP_FIRST if first else FRAME_NOT_JSON
+        payload = parsed[0]
+        if not self._adapter.sets_model(payload):
+            return SETUP_FIRST if first else None
+        model = self._adapter.frame_model(payload)
+        if model is None:
+            return SETUP_FIRST if first else SETUP_MODEL
+        request = dataclasses.replace(self._request, model=model, model_in_frame=False)
+        return self._authorization.refusal(request, self._where)
+
+
 def _checked_frame(
     state: "ProxyState",
     adapter: WsAdapter,
@@ -2015,6 +2181,7 @@ def _checked_frame(
     *,
     identity: bool,
     session_id: str,
+    parsed: tuple[Any, bool] | None = None,
 ) -> tuple[Any, bool] | None:
     """One client frame parsed and put to the session router's frame check
     (``ProxyState.realtime_frame_refusal``): the parse (payload, was_binary)
@@ -2022,8 +2189,10 @@ def _checked_frame(
     read, so it is refused under the proxy's own identity
     (``UnredactableRequest``, like a frame no adapter can walk) and relayed
     as it came under the client's own key. A frame nesting too deep is
-    refused whatever the credential; a refusal raises ``_FrameRefused``."""
-    parsed = parse_client_frame(data)
+    refused whatever the credential; a refusal raises ``_FrameRefused``.
+    ``parsed``: the frame's parse when the relay already has it."""
+    if parsed is None:
+        parsed = parse_client_frame(data)
     if parsed is None:
         _unparsed_frame(data, identity)
         return None

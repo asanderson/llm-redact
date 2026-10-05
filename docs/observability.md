@@ -74,7 +74,7 @@ status, a frame refused on an open relay closes it.
 | `scanned_body` | 400 | The scanned-body rule: a body the proxy cannot read to redact (not a JSON object, invalid UTF-8, non-canonical multipart …). |
 | `unsupported_encoding` | 415 | A content-encoded request body. |
 | `unchecked_body` | 400 | A body the stored-object check cannot read under a credential the proxy holds, or an upload its re-reading would change. |
-| `authorization` | 403 | The access gate's optional authorization (llm-redact-pro roles) refused the request or realtime upgrade (1008), its check failed, or the requester's detection overlay could not be applied. |
+| `authorization` | 403 | The access gate's optional authorization (llm-redact-pro roles) refused the request or realtime upgrade (1008) — or, on Gemini/Vertex Live, the model a setup frame names, or a first frame that is no setup naming a model — its check failed, or the requester's detection overlay could not be applied. |
 | `object_access` | 403 | The session router refused a stored object of another namespace (realtime: its per-frame check). |
 | `sealed_session` | 403 | The session router sealed the request's session and redaction would write to it. |
 | `blocked_value` | 400 | A block-mode rule matched (realtime: the frame is refused and the connection closed 1008; the row keeps its 101). |

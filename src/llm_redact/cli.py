@@ -956,12 +956,24 @@ def _print_posture(payload: dict[str, Any]) -> None:
         # Fail-closed, so protection is intact — noted for completeness.
         lines.append(f"providers disabled (fail closed): {', '.join(disabled)}")
     lines.extend(_routing_posture(payload.get("routing") or {}))
+    lines.extend(_gate_posture(payload.get("users")))
     if lines:
         print("posture:")
         for line in lines:
             print(f"  ⚠ {line}")
     else:
         print("posture: all traffic redacted (no coverage opt-outs)")
+
+
+def _gate_posture(users: object) -> list[str]:
+    """The access gate's own posture lines (the optional ``posture`` list of
+    the /status ``users`` block, llm-redact-pro: e.g. roles in audit mode).
+    The proxy sanitizes them; they are escaped and cut again here, since the
+    proxy queried may be any version."""
+    from llm_redact.proxy import gate_posture
+
+    posture = users.get("posture") if isinstance(users, dict) else None
+    return gate_posture(posture) or []
 
 
 def _routing_posture(routing: dict[str, Any]) -> list[str]:

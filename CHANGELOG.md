@@ -12,6 +12,11 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- An access gate's `status()` may report a `posture` list in the `/status` `users` block:
+  short lines it wants shown as posture warnings (llm-redact-pro: roles in audit mode).
+  `llm-redact status` prints each in its posture block (`--json` shows the list). The core
+  sanitizes them: at most 8 non-empty strings, every non-printable character escaped, each
+  cut to 200 characters; anything else is dropped, a `posture` that is not a list too.
 - Two optional access-gate seams for role- and attribute-based access control (the policy
   itself is llm-redact-pro's; the core holds no user, role or group logic):
   - `authorize_request(request: plugin_api.AuthorizationRequest)`: the gate is handed the

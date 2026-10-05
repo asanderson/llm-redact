@@ -138,3 +138,14 @@ runtime-observed unpriced models — is the `routing` block of
 llm-redact-pro routing layer), one line per upstream in `llm-redact
 status`, and the `route` field of every `/recent` and `/events` row
 (`null` on the unrouted path); see the llm-redact-pro routing guide.
+
+An access gate (llm-redact-pro's named users) reports its own state as the
+`users` block of `GET /__llm-redact/status` (`{"registry": false,
+"enforcement": false}` without one). Its optional `posture` list holds short
+lines the gate wants seen as posture warnings (for instance `[authz] runs in
+audit mode: refusals are logged, not enforced`); `llm-redact status` prints
+each in its loud posture block, so the block is not silent while the gate
+reports one, and `--json` shows the list. The core serves at most 8 of them,
+non-empty strings only, every non-printable character escaped and each cut
+to 200 characters; anything else is dropped, and so is a `posture` that is
+not a list.

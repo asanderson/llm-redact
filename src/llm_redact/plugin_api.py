@@ -821,7 +821,15 @@ class AccessGate(Protocol):
     or an awaitable of one (a method that must reach a directory or an
     identity provider awaits instead of blocking the event loop).
 
-    ``status`` is the ``users`` block of ``/status`` (metadata only).
+    ``status`` is the ``users`` block of ``/status`` (metadata only). It may
+    carry a ``posture`` key: a list of short, value-free, human-readable
+    lines the gate wants shown as posture warnings (llm-redact-pro: "[authz]
+    runs in audit mode: refusals are logged, not enforced") — printed in
+    ``llm-redact status``'s posture block. The core serves at most the first
+    ``proxy.GATE_POSTURE_LINES`` (8) non-empty strings, each with every
+    non-printable character escaped and cut to ``proxy.GATE_POSTURE_CHARS``
+    (200); it drops every other entry, and the key itself when its value is
+    not a list (never a fault).
     ``handle`` answers the core's fixed gate paths — ``ACCESS_PATHS`` (the
     admin endpoints), everything under ``AUTH_PREFIX`` (browser sign-in:
     ``AUTH_PATHS`` login, callback and sign-out, plus any page or JSON

@@ -58,6 +58,10 @@ and tags `vX.Y.Z`.
   and `mapa` (MAPA, CC BY 4.0: human-annotated EUR-Lex legal text in 21 languages,
   `--language` filters it; real data). Empty gold spans are dropped rather than failing
   their row.
+- `--dataset creddata --data-dir DIR` measures the secret rules on real code: a local
+  CredData checkout (Samsung; labels Apache-2.0, code under its projects' licenses),
+  prepared with CredData's own download script and never vendored; each labelled true
+  credential is scored by the leak metric, lines of false look-alikes by over-redaction.
 
 ### Changed
 - NER model labels become placeholder types through one label policy for every backend

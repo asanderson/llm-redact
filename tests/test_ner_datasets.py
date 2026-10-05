@@ -16,6 +16,7 @@ from llm_redact.bench.datasets import (
     DATASETS,
     LoadRequest,
     base,
+    creddata,
     dataset_key,
     mapa,
     nemotron,
@@ -756,3 +757,105 @@ def test_mapa_adapter_filters_and_counts(tmp_path: Path) -> None:
     assert result.exact["PERSON"].gold == 2
     assert result.unmapped == {}
     assert spec.real_data and spec.filters_language
+
+
+# --- CredData -----------------------------------------------------------------
+
+_CRED_HEADER = (
+    "Id,FileID,Domain,RepoName,FilePath,LineStart,LineEnd,GroundTruth,ValueStart,ValueEnd,"
+    "CryptographyKey,PredefinedPattern,Category\n"
+)
+
+
+def _cred_row(path: str, lines: tuple[int, int], truth: str, value: tuple[str, str]) -> str:
+    return f"1,f,GitHub,r,{path},{lines[0]},{lines[1]},{truth},{value[0]},{value[1]},,,Password\n"
+
+
+def _creddata_checkout(root: Path) -> Path:
+    code = root / "data" / "r" / "src"
+    code.mkdir(parents=True)
+    (root / "data" / "r" / "test").mkdir()
+    (code / "a.py").write_text(
+        "import os\n"
+        'TOKEN = "xxxx-not-a-real-value-xxxx"\n'
+        "KEY = (\n"
+        '    "yyyy-not-real"\n'
+        ")\n"
+        'password_hint = "see the vault"\n'
+    )
+    (root / "data" / "r" / "test" / "b.cfg").write_bytes(b"pw=\xe9t\xe9-not-real\r\n")
+    meta = root / "meta"
+    meta.mkdir()
+    rows = [
+        _cred_row("data/r/src/a.py", (2, 2), "T", ("9", "35")),
+        _cred_row("data/r/src/a.py", (2, 2), "F", ("0", "5")),  # same line: no gold
+        _cred_row("data/r/src/a.py", (6, 6), "F", ("", "")),  # a look-alike line
+        _cred_row("data/r/src/a.py", (3, 4), "T", ("6", "19")),  # spans two lines
+        _cred_row("data/r/test/b.cfg", (1, 1), "T", ("3", "")),  # to the end of the line
+        _cred_row("data/r/src/a.py", (1, 1), "T", ("-1", "")),  # true but no offsets
+        _cred_row("data/r/src/gone.py", (1, 1), "T", ("0", "1")),
+        _cred_row("data/r/src/a.py", (5, 9), "F", ("", "")),  # past the file's end
+        _cred_row("data/r/src/a.py", (5, 5), "T", ("40", "41")),  # past the line
+    ]
+    (meta / "r.csv").write_text(_CRED_HEADER + "".join(rows))
+    return root
+
+
+def test_creddata_reads_a_local_checkout(tmp_path: Path) -> None:
+    root = _creddata_checkout(tmp_path / "CredData")
+    spec = DATASETS["creddata"]
+    request = LoadRequest(split="all", data_dir=root)
+    samples = list(spec.adapter(spec, request))
+    values = [[sample.text[g.start : g.end] for g in sample.spans] for sample in samples]
+    assert values == [
+        ["xxxx-not-a-real-value-xxxx"],
+        [],  # the F-only line: a negative
+        ['(\n    "yyyy-not-real"'],  # from line 3's offset to line 4's
+        ["\xe9t\xe9-not-real"],  # a Latin-1 file; the value runs to the line's end
+    ]
+    assert [s.context for s in samples] == ["py", "py", "py", "cfg"]
+    assert dict(request.skipped) == {
+        creddata.NO_VALUE: 1,
+        creddata.MISSING_FILE: 1,
+        creddata.BAD_LINES: 2,
+    }
+    tests_only = LoadRequest(split="test", data_dir=root)
+    assert [s.context for s in spec.adapter(spec, tests_only)] == ["cfg"]
+    rules = build_detectors(DetectionConfig())
+    result = evaluate(samples, spec.label_map, Pipeline.from_detectors(rules, rules))
+    assert result.gold_chars == sum(len(g) for v in values for g in v)
+    assert spec.real_data and spec.needs_data_dir
+
+
+def test_creddata_needs_its_metadata(tmp_path: Path) -> None:
+    spec = DATASETS["creddata"]
+    with pytest.raises(base.DatasetError, match="meta/ directory"):
+        list(spec.adapter(spec, LoadRequest(split="all", data_dir=tmp_path)))
+    with pytest.raises(base.DatasetError, match="meta/ directory"):
+        list(spec.adapter(spec, LoadRequest(split="all")))
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "meta" / "r.csv").write_text("Id,FileID\n1,f\n")
+    with pytest.raises(base.DatasetError, match="cannot read meta/r.csv: KeyError"):
+        list(spec.adapter(spec, LoadRequest(split="all", data_dir=tmp_path)))
+
+
+def test_cli_creddata_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_transformers(monkeypatch, FakeHfPipe(findings=[]))
+    root = _creddata_checkout(tmp_path / "CredData")
+    config = ["--config", str(_config(tmp_path))]
+    assert bench_ner.main([*config, "--dataset", "creddata"]) == 2
+    assert "reads a local checkout: pass --data-dir" in capsys.readouterr().err
+    assert bench_ner.main([*config, "--data-dir", str(root)]) == 2
+    assert "--data-dir applies only to" in capsys.readouterr().err
+    dump = ["--dump-errors", str(tmp_path / "e.jsonl")]
+    argv = [*config, "--dataset", "creddata", "--data-dir", str(root)]
+    assert bench_ner.main([*argv, *dump]) == 2
+    assert "holds real data" in capsys.readouterr().err
+    assert bench_ner.main(argv) == 0
+    printed = capsys.readouterr().out
+    assert "Source: a local checkout (--data-dir)." in printed
+    assert "not-a-real" not in printed
+    assert bench_ner.main(["--list-datasets"]) == 0
+    assert "reads a local checkout: --data-dir DIR" in capsys.readouterr().out

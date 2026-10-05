@@ -30,6 +30,7 @@ uv run python -m llm_redact.bench.ner --config my-ner.toml --check   # gate agai
 | `--limit N` | Score at most N samples (default 2000; `0` = all). |
 | `--seed N` | Seed of generated datasets (same seed, same corpus). |
 | `--language CODE` | Keep only rows in that language (datasets that record one: `openpii`). The thresholds key becomes `NAME@CODE`. |
+| `--data-dir DIR` | The local checkout a dataset is read from (`creddata`: a CredData directory after its own download script ran). |
 | `--cache-dir DIR` | Where downloaded datasets are kept (default `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets`; refused inside a git work tree). |
 | `--out DIR` | Write `report.md` and `report.json` there instead of printing the report. |
 | `--thresholds PATH` | The gate file (default `bench/ner_thresholds.toml`). |
@@ -188,6 +189,7 @@ the file when you are done.
 | `privy` | [beki/privy](https://huggingface.co/datasets/beki/privy): synthetic PII inside JSON, SQL, HTML and XML payloads generated from OpenAPI specifications — the closest public analogue of tool-call bodies; splits `test` (default), `dev`, `train` and their `-large` variants. | MIT — Benjamin Kilimnik | no |
 | `pupa` | [PUPA](https://huggingface.co/datasets/Columbia-NLP/PUPA): 901 real user prompts (WildChat) with the personal-data strings an LLM extracted from each; splits `all` (default), `tnb`, `new`. | MIT — Columbia NLP (PAPILLON, Li et al. 2024) | **yes** |
 | `mapa` | [MAPA](https://huggingface.co/datasets/joelniklaus/mapa): human-annotated EUR-Lex legal text in 21 languages; splits `test` (default), `validation`, `train`; `--language` filters it. | CC BY 4.0 — de Gibert Bonet et al. (LREC 2022), converted by Joel Niklaus and Veton Matoshi | **yes** |
+| `creddata` | [CredData](https://github.com/Samsung/CredData): labelled (obfuscated) secrets in lines of real code and configuration, read from a local checkout (`--data-dir`); splits `all` (default), `src`, `test`, `other`. | labels Apache-2.0; each code file keeps its project's license | **yes** |
 | `rules` | The regex bench's generated positives and decoys for every built-in rule, built from the seed at run time. Structured values only: it shows what a model costs the rules (structured regressions, over-redaction). | generated (part of llm-redact) | no |
 
 ### The synthetic corpus
@@ -273,3 +275,35 @@ Facts found when the adapters were checked against the data (2026-10-05):
   street, email or identifier tags at this revision, although the card
   lists some. EUR-Lex decisions name real parties, so the dataset is marked
   as real data.
+
+### CredData
+
+[CredData](https://github.com/Samsung/CredData) measures the secret rules on
+real code. The repository ships only metadata — `meta/<repo>.csv`, one row
+per suspicious line with `FilePath`, `LineStart`, `LineEnd`, `GroundTruth`
+(`T` true, `F`/`X` false), `ValueStart`, `ValueEnd` and `Category` — plus
+its own `download_data.py`, which fetches the labelled files from their
+source repositories and obfuscates the credential values. The bench never
+runs or vendors any of it; prepare a checkout yourself, outside this
+repository (it fetches hundreds of repositories, several GB):
+
+```bash
+git clone https://github.com/Samsung/CredData ~/datasets/CredData
+cd ~/datasets/CredData   # its README: Linux, Python 3.10 recommended
+python download_data.py
+uv run python -m llm_redact.bench.ner --config my-ner.toml --dataset creddata \
+  --data-dir ~/datasets/CredData
+```
+
+Each distinct line range of the metadata becomes one sample (those lines,
+joined by newlines); every `T` row's value is gold and is scored by the
+character-leak metric only. The splits `src`, `test` and `other` keep the
+files of that directory. Lines whose rows are all `F`/`X` hold look-alikes, so a
+detection there counts as over-redaction. Rows whose file is missing,
+whose lines or value offsets fall outside the file, or that are true but
+carry no offsets are skipped and counted. The metadata format was checked
+on 2026-10-05 at commit `0b1940e171725ad8937311120b191602608a4801`.
+Licensing: the labels are Apache-2.0; every code file keeps its own
+project's license (the checkout's `license` directory holds them by
+repository), which is why nothing from it is ever committed here. The code
+is real, so `--dump-errors` needs `--allow-real-data-dump`.

@@ -520,3 +520,25 @@ download, a damaged cache entry or a file edited by hand. Delete the
 dataset's entry under the cache directory
 (`${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets`, or your
 `--cache-dir`) and run again to download it afresh.
+
+## NER bench: "dataset 'creddata' reads a local checkout: pass --data-dir" / "CredData: --data-dir must name a CredData checkout with a meta/ directory"
+
+CredData is not downloaded by the bench: clone it, run its own
+`download_data.py`, and pass the checkout with `--data-dir`
+([ner-bench.md](ner-bench.md#creddata)). `--data-dir` must point at the
+CredData directory itself (the one holding `meta/` and, after the
+download, `data/`). Rows whose files the download did not produce are
+skipped and counted.
+
+## NER bench: "--data-dir applies only to datasets read from a local checkout"
+
+Only `creddata` reads a local checkout; the other datasets are generated or
+downloaded. Drop `--data-dir`, or add `--dataset creddata`.
+
+## NER bench: "CredData: cannot read meta/FILE.csv: …"
+
+A CredData metadata file lacks the columns the adapter reads (`FilePath`,
+`LineStart`, `LineEnd`, `GroundTruth`, `ValueStart`, `ValueEnd`) or is not
+valid UTF-8 CSV — a checkout of a CredData version whose format changed, or
+a damaged file. Check out the commit named in
+[ner-bench.md](ner-bench.md#creddata).

@@ -208,6 +208,8 @@ def list_datasets(datasets: Mapping[str, DatasetSpec] = DATASETS) -> str:
             lines.append(f"  card: {spec.card} (checked {spec.checked})")
         if spec.filters_language:
             lines.append("  --language filters its rows")
+        if spec.needs_data_dir:
+            lines.append("  reads a local checkout: --data-dir DIR")
     return "\n".join(lines) + "\n"
 
 
@@ -227,6 +229,8 @@ def report_markdown(
     ]
     if spec.hub_id is not None:
         lines.append(f"Source: {spec.hub_id} at revision {spec.revision}.")
+    if request.data_dir is not None:
+        lines.append("Source: a local checkout (--data-dir).")
     if request.language is not None:
         lines.append(f"Rows in language {request.language} only.")
     if spec.real_data:
@@ -283,6 +287,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42, help="seed of generated datasets")
     parser.add_argument(
         "--language", help="keep only rows in this language (datasets that record one)"
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        help="the local checkout a dataset is read from (creddata: a CredData directory"
+        " after its download_data.py ran)",
     )
     parser.add_argument(
         "--cache-dir",
@@ -346,6 +356,12 @@ def _run(args: argparse.Namespace) -> int:
     if args.language is not None and (spec is None or not spec.filters_language):
         what = f"dataset {spec.name!r}" if spec is not None else "--fp-corpus"
         raise BenchError(f"--language: {what} has no language to filter on")
+    if spec is not None and spec.needs_data_dir and args.data_dir is None:
+        raise BenchError(
+            f"dataset {spec.name!r} reads a local checkout: pass --data-dir (docs/ner-bench.md)"
+        )
+    if args.data_dir is not None and (spec is None or not spec.needs_data_dir):
+        raise BenchError("--data-dir applies only to datasets read from a local checkout")
     cache_dir = args.cache_dir or default_cache_dir()
     tree = git_work_tree(cache_dir)
     if tree is not None:
@@ -375,7 +391,11 @@ def _run(args: argparse.Namespace) -> int:
         passed = f"[{_toml_key(config_name)}] in {args.ceilings}"
     else:
         request = LoadRequest(
-            split=split, seed=args.seed, language=args.language, cache_dir=cache_dir
+            split=split,
+            seed=args.seed,
+            language=args.language,
+            cache_dir=cache_dir,
+            data_dir=args.data_dir,
         )
         failures = _run_dataset(args, spec, request, pipeline, config_name, backends, errors)
         key = dataset_key(spec, split, args.language)

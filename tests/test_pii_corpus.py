@@ -16,7 +16,7 @@ from fake_ollama import APACHE, DIGEST, FakeOllama
 
 # The tooling is a dev-only package under scripts/, not part of llm_redact.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from pii_corpus import audit, generate, grounding, prompts, teacher  # noqa: E402
+from pii_corpus import audit, generate, grounding, prompts, review, teacher  # noqa: E402
 from pii_corpus.private_files import (  # noqa: E402
     CorpusError,
     default_data_dir,
@@ -681,3 +681,327 @@ def test_audit_with_a_config_and_a_failing_teacher(
     assert (
         "the teacher failed: the server answered HTTP 503 to /api/chat" in capsys.readouterr().err
     )
+
+
+# --- review.py --------------------------------------------------------------------
+
+
+def _generated(root: Path) -> Path:
+    rows = [
+        {
+            "id": "gemma4-e4b-7-000000",
+            "text": "author: Ann Lee <ann@example.com>",
+            "spans": [
+                {"start": 8, "end": 15, "type": "PERSON"},
+                {"start": 17, "end": 32, "type": "EMAIL"},
+            ],
+            "teacher": "gemma4:e4b",
+            "prompt_id": "commit",
+            "seed": 7,
+        },
+        {
+            "id": "gemma4-e4b-7-000001",
+            "text": '{"job": "JenkinsBuild"}',
+            "spans": [],
+            "teacher": "gemma4:e4b",
+            "prompt_id": "tool-result.negative",
+            "seed": 7,
+        },
+        {
+            "id": "gemma4-e4b-7-000002",
+            "text": "ship to 12 Elm Way for Bo",
+            "spans": [{"start": 8, "end": 18, "type": "ADDRESS"}],
+            "teacher": "gemma4:e4b",
+            "prompt_id": "chat",
+            "seed": 7,
+        },
+    ]
+    path = root / "corpus" / "generated.jsonl"
+    path.parent.mkdir()
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    manifest = {"teacher": {"model": "gemma4:e4b", "digest": DIGEST}, "catalog_sha256": "c" * 64}
+    generate.manifest_path(path).write_text(json.dumps(manifest))
+    return path
+
+
+class _Script:
+    """Scripted reviewer answers; records what was shown."""
+
+    def __init__(self, *answers: str) -> None:
+        self.answers = list(answers)
+        self.shown: list[str] = []
+
+    def ask(self, prompt: str) -> str:
+        assert prompt == review.PROMPT
+        if not self.answers:
+            raise EOFError
+        return self.answers.pop(0)
+
+    def show(self, text: str) -> None:
+        self.shown.append(text)
+
+
+def _edit_to(new: str) -> Any:
+    def edit(text: str) -> str:
+        assert "<pii type=" in text or text == '{"job": "JenkinsBuild"}'
+        return new
+
+    return edit
+
+
+def test_review_records_decisions_and_resumes(tmp_path: Path) -> None:
+    generated = _generated(tmp_path)
+    verified = review.verified_path(generated)
+    assert verified.name == "generated.verified.jsonl"
+    script = _Script("a", "x", "r", "e", "a")
+    edited = 'ship to <pii type="ADDRESS">12 Elm Way</pii> for <pii type="PERSON">Bo</pii>'
+    counts = review.review_file(
+        generated,
+        verified,
+        reviewer="rev1",
+        ask=script.ask,
+        show=script.show,
+        edit=_edit_to(edited),
+        today="2026-10-05",
+    )
+    assert counts == {"accepted": 1, "rejected": 1, "edited": 1}
+    assert "answer a, e, r, s or q" in script.shown
+    assert script.shown[0].startswith(
+        "--- [1/3] gemma4-e4b-7-000000  prompt commit  teacher gemma4:e4b"
+    )
+    assert '<pii type="PERSON">Ann Lee</pii>' in script.shown[0]
+    assert "  1. PERSON: Ann Lee" in script.shown[0]
+    assert any("no spans (a hard negative" in shown for shown in script.shown)
+    rows = [row for _, row in read_jsonl(verified)]
+    assert [row["review"]["decision"] for row in rows] == ["accepted", "edited"]
+    assert rows[1]["spans"] == [
+        {"start": 8, "end": 18, "type": "ADDRESS"},
+        {"start": 23, "end": 25, "type": "PERSON"},
+    ]
+    assert rows[0]["review"] == {
+        "reviewer": "rev1",
+        "decision": "accepted",
+        "guideline": review.GUIDELINE_VERSION,
+        "reviewed": "2026-10-05",
+        "source": {
+            "rows_file": "generated.jsonl",
+            "teacher_digest": DIGEST,
+            "catalog_sha256": "c" * 64,
+        },
+    }
+    rejected = [row for _, row in read_jsonl(review.rejected_path(verified))]
+    assert rejected == [{"id": "gemma4-e4b-7-000001", "reviewer": "rev1", "reviewed": "2026-10-05"}]
+    if os.name == "posix":
+        assert verified.stat().st_mode & 0o777 == 0o600
+    again = _Script()
+    counts = review.review_file(
+        generated,
+        verified,
+        reviewer="rev1",
+        ask=again.ask,
+        show=again.show,
+        edit=_edit_to(""),
+        today="x",
+    )
+    assert counts == {"already decided": 3}
+    assert again.shown == []
+
+
+def test_review_skip_quit_bad_edits_and_malformed_rows(tmp_path: Path) -> None:
+    generated = _generated(tmp_path)
+    with generated.open("a") as handle:
+        handle.write(
+            json.dumps(
+                {"id": "bad", "text": "x", "spans": [{"start": 0, "end": 9, "type": "PERSON"}]}
+            )
+            + "\n"
+        )
+        handle.write(
+            json.dumps(
+                {"id": 3, "text": "x", "spans": [], "teacher": "t", "prompt_id": "p", "seed": 1}
+            )
+            + "\n"
+        )
+    verified = tmp_path / "out" / "v.jsonl"
+    # A bad edit is not applied; the original row is accepted; then skip, then quit.
+    script = _Script("e", "a", "s", "q")
+    counts = review.review_file(
+        generated,
+        verified,
+        reviewer="rev2",
+        ask=script.ask,
+        show=script.show,
+        edit=_edit_to('<pii type="PERSON">Ann'),
+        today="2026-10-05",
+    )
+    assert counts == {"accepted": 1, "skipped": 1}
+    assert f"edit not applied: {grounding.MALFORMED}" in script.shown
+    rows = [row for _, row in read_jsonl(verified)]
+    assert rows[0]["review"]["decision"] == "accepted" and rows[0]["text"].startswith("author: Ann")
+    # Resuming: the skipped and later rows are asked again; EOF quits.
+    script = _Script("r", "a")
+    counts = review.review_file(
+        generated,
+        verified,
+        reviewer="rev2",
+        ask=script.ask,
+        show=script.show,
+        edit=_edit_to(""),
+        today="d",
+    )
+    assert counts == {"already decided": 1, "rejected": 1, "accepted": 1, "malformed": 2}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the editor command is split POSIX-style")
+def test_editor_edit_runs_the_editor_on_a_private_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "fake_editor.py"
+    script.write_text(
+        "import os, sys\n"
+        "path = sys.argv[1]\n"
+        "assert os.stat(path).st_mode & 0o777 == 0o600\n"
+        "text = open(path).read()\n"
+        "open(path, 'w').write(text.replace('Bo', 'Bea') + '\\n')\n"
+    )
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(temp))
+    edit = review.editor_edit(f"{sys.executable} {script}")
+    # The newline an editor adds is dropped unless the row ended with one.
+    assert edit("for Bo") == "for Bea"
+    assert edit("for Bo\n") == "for Bea\n\n"
+    assert list(temp.iterdir()) == []  # the private copy is removed
+
+
+def _verified(tmp_path: Path) -> Path:
+    generated = _generated(tmp_path)
+    verified = review.verified_path(generated)
+    script = _Script("a", "a", "a")
+    review.review_file(
+        generated,
+        verified,
+        reviewer="rev1",
+        ask=script.ask,
+        show=script.show,
+        edit=_edit_to(""),
+        today="2026-10-05",
+    )
+    return verified
+
+
+def test_freeze_writes_a_sorted_set_and_a_value_free_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from llm_redact.bench.datasets import DATASETS, LoadRequest
+    from llm_redact.bench.datasets.agent_eval import FORMAT, file_sha256, manifest_path
+
+    verified = _verified(tmp_path)
+    frozen = tmp_path / "private" / "agent-eval.jsonl"
+    assert review.main(["freeze", str(verified), "--out", str(frozen)], today="2026-10-06") == 0
+    printed = capsys.readouterr().out
+    assert "3 rows (1 hard negatives)" in printed and "Ann" not in printed
+    manifest = json.loads(manifest_path(frozen).read_text())
+    assert manifest == {
+        "format": FORMAT,
+        "rows_file": "agent-eval.jsonl",
+        "sha256": file_sha256(frozen),
+        "rows": 3,
+        "negatives": 1,
+        "spans": {"ADDRESS": 1, "EMAIL": 1, "PERSON": 1},
+        "prompt_ids": {"chat": 1, "commit": 1, "tool-result.negative": 1},
+        "teachers": {"gemma4:e4b": 3},
+        "teacher_digests": {DIGEST: 3},
+        "seeds": {"7": 3},
+        "reviewers": {"rev1": 3},
+        "decisions": {"accepted": 3},
+        "guideline": review.GUIDELINE_VERSION,
+        "frozen": "2026-10-06",
+    }
+    ids = [row["id"] for _, row in read_jsonl(frozen)]
+    assert ids == sorted(ids)
+    if os.name == "posix":
+        assert frozen.stat().st_mode & 0o777 == 0o600
+        assert manifest_path(frozen).stat().st_mode & 0o777 == 0o600
+    # The bench reads exactly what was frozen.
+    spec = DATASETS["agent-eval"]
+    samples = list(spec.adapter(spec, LoadRequest(split="all", path=frozen)))
+    assert [s.context for s in samples] == ["commit", "tool-result-negative", "chat"]
+    assert [(samples[0].text[g.start : g.end], g.label) for g in samples[0].spans] == [
+        ("Ann Lee", "PERSON"),
+        ("ann@example.com", "EMAIL"),
+    ]
+    # Freezing again needs --force.
+    assert review.main(["freeze", str(verified), "--out", str(frozen)]) == 2
+    assert "exists; pass --force" in capsys.readouterr().err
+    assert review.main(["freeze", str(verified), "--out", str(frozen), "--force"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda rows: rows + [rows[0]], "line 4: a duplicate id"),
+        (
+            lambda rows: [{k: v for k, v in rows[0].items() if k != "review"}],
+            "line 1: no review record",
+        ),
+        (lambda rows: [{k: v for k, v in rows[0].items() if k != "seed"}], "missing key 'seed'"),
+        (lambda rows: [{**rows[0], "id": ""}], "the id is not a non-empty string"),
+        (
+            lambda rows: [{**rows[0], "spans": [{"start": 0, "end": 99, "type": "PERSON"}]}],
+            "outside the text",
+        ),
+        (
+            lambda rows: [{**rows[0], "spans": [{"start": 0, "end": 2, "type": "COLOR"}]}],
+            "'COLOR' is not a placeholder type",
+        ),
+        (
+            lambda rows: [{**rows[0], "review": {**rows[0]["review"], "reviewer": ""}}],
+            "names no reviewer",
+        ),
+        (
+            lambda rows: [{**rows[0], "review": {**rows[0]["review"], "decision": "rejected"}}],
+            "neither accepted nor edited",
+        ),
+        (
+            lambda rows: [{**rows[0], "review": {**rows[0]["review"], "guideline": 0}}],
+            "guideline version 0",
+        ),
+        (lambda rows: [], "holds no verified row"),
+    ],
+)
+def test_freeze_refuses_unverifiable_rows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], change: Any, message: str
+) -> None:
+    verified = _verified(tmp_path)
+    rows = [row for _, row in read_jsonl(verified)]
+    verified.write_text("".join(json.dumps(row) + "\n" for row in change(rows)))
+    frozen = tmp_path / "frozen.jsonl"
+    assert review.main(["freeze", str(verified), "--out", str(frozen)]) == 2
+    assert message in capsys.readouterr().err
+    assert not frozen.exists()
+
+
+def test_review_command_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    generated = _generated(tmp_path)
+    argv = ["review", str(generated), "--reviewer", "rev3"]
+    # Decisions come from a terminal; piped input is refused.
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert review.main(argv) == 2
+    assert "reads each decision from a terminal" in capsys.readouterr().err
+    script = _Script("a", "r", "q")
+    assert review.main(argv, ask=script.ask, edit=_edit_to("")) == 0
+    printed = capsys.readouterr().out
+    assert printed.endswith("generated.verified.jsonl: accepted 1, rejected 1\n")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    out = ["--out", str(repo / "v.jsonl")]
+    assert review.main([*argv, *out], ask=script.ask, edit=_edit_to("")) == 2
+    assert "must never be committed" in capsys.readouterr().err
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "q")
+    monkeypatch.setenv("EDITOR", "true")
+    assert review.main(argv) == 0
+    assert "already decided 2" in capsys.readouterr().out

@@ -113,6 +113,14 @@ and tags `vX.Y.Z`.
   `audit.py` has the same teacher read `bench/fp_corpus` beside the detectors and lists
   candidate misses and false positives (file, offsets, type, reason; no text) for a human;
   it never edits `MANIFEST.toml` or `bench/ner_ceilings.toml`.
+- `--dataset agent-eval --path FILE` scores the NER bench on the private, hand-verified
+  agent-traffic evaluation set (docs/ner-bench.md): the file is read by path, never
+  committed, checked against the SHA-256 in its `FILE.manifest.json`, and marked as real
+  data. `scripts/pii_corpus/review.py` is the verification tooling: `review` shows each
+  generated row on the reviewer's terminal for accept, edit (in `$EDITOR`, grounded again)
+  or reject, resumably; `freeze` validates the verified rows and writes the frozen set with
+  a value-free provenance manifest (teachers and digests, seeds, reviewers, counts).
+  Labeling rules: `scripts/pii_corpus/GUIDELINES.md`.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

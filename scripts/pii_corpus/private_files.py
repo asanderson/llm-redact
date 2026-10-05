@@ -57,6 +57,23 @@ def open_private(path: Path, *, overwrite: bool) -> IO[str]:
     return os.fdopen(fd, "w", encoding="utf-8")
 
 
+def append_private(path: Path) -> IO[str]:
+    """A mode-0600 text file opened for appending (created mode 0600, its
+    directory mode 0700); never through a symlink."""
+    problem = output_problem(path)
+    if problem is not None:
+        raise CorpusError(problem)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise CorpusError(f"cannot write {path}: {type(exc).__name__}") from exc
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "a", encoding="utf-8")
+
+
 def write_json(path: Path, value: Mapping[str, Any], *, overwrite: bool) -> None:
     with open_private(path, overwrite=overwrite) as out:
         out.write(json.dumps(value, indent=2, sort_keys=True) + "\n")

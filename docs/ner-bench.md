@@ -31,6 +31,7 @@ uv run python -m llm_redact.bench.ner --config my-ner.toml --check   # gate agai
 | `--seed N` | Seed of generated datasets (same seed, same corpus). |
 | `--language CODE` | Keep only rows in that language (datasets that record one: `openpii`). The thresholds key becomes `NAME@CODE`. |
 | `--data-dir DIR` | The local checkout a dataset is read from (`creddata`: a CredData directory after its own download script ran). |
+| `--path FILE` | The local file a dataset is read from (`agent-eval`: the frozen set written by `scripts/pii_corpus/review.py freeze`). |
 | `--cache-dir DIR` | Where downloaded datasets are kept (default `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets`; refused inside a git work tree). |
 | `--out DIR` | Write `report.md` and `report.json` there instead of printing the report. |
 | `--thresholds PATH` | The gate file (default `bench/ner_thresholds.toml`). |
@@ -220,6 +221,7 @@ the file when you are done.
 | `pupa` | [PUPA](https://huggingface.co/datasets/Columbia-NLP/PUPA): 901 real user prompts (WildChat) with the personal-data strings an LLM extracted from each; splits `all` (default), `tnb`, `new`. | MIT — Columbia NLP (PAPILLON, Li et al. 2024) | **yes** |
 | `mapa` | [MAPA](https://huggingface.co/datasets/joelniklaus/mapa): human-annotated EUR-Lex legal text in 21 languages; splits `test` (default), `validation`, `train`; `--language` filters it. | CC BY 4.0 — de Gibert Bonet et al. (LREC 2022), converted by Joel Niklaus and Veton Matoshi | **yes** |
 | `creddata` | [CredData](https://github.com/Samsung/CredData): labelled (obfuscated) secrets in lines of real code and configuration, read from a local checkout (`--data-dir`); splits `all` (default), `src`, `test`, `other`. | labels Apache-2.0; each code file keeps its project's license | **yes** |
+| `agent-eval` | The private, hand-verified agent-traffic evaluation set: coding-agent artifacts with invented personal data, read from a local file (`--path`); split `all` (below). | private, not distributed | **yes** |
 | `rules` | The regex bench's generated positives and decoys for every built-in rule, built from the seed at run time. Structured values only: it shows what a model costs the rules (structured regressions, over-redaction). | generated (part of llm-redact) | no |
 
 ### The synthetic corpus
@@ -337,3 +339,35 @@ Licensing: the labels are Apache-2.0; every code file keeps its own
 project's license (the checkout's `license` directory holds them by
 repository), which is why nothing from it is ever committed here. The code
 is real, so `--dump-errors` needs `--allow-real-data-dump`.
+
+### The agent-traffic evaluation set
+
+`agent-eval` scores the shapes no public dataset has: tool-call JSON
+arguments and results, diffs, logs, config files, commit messages, test
+fixtures, SQL and tracebacks, with invented personal data, and hard
+negatives full of name-like identifiers that are not people. It is built out
+of band with the dev-only tooling in
+[`scripts/pii_corpus/`](../scripts/pii_corpus/README.md): a local
+Apache-2.0 teacher served by Ollama generates tagged rows (`generate.py`),
+a human accepts, edits or rejects every row following
+[`GUIDELINES.md`](../scripts/pii_corpus/GUIDELINES.md) (`review.py
+review`), and `review.py freeze` writes the frozen set with a manifest
+beside it. The set is private: it is never committed or published, and the
+bench reads it by path:
+
+```bash
+uv run python -m llm_redact.bench.ner --config my-ner.toml --dataset agent-eval \
+  --path ~/.local/share/llm-redact/pii-corpus/agent-eval.jsonl
+```
+
+The frozen file holds one JSON object per line (`id`, `text`, `spans` with
+`start`/`end`/`type`, `teacher`, `prompt_id`, `seed` and the `review`
+record); every span type is a placeholder type, scored as itself. The
+adapter first checks `FILE.manifest.json` (format
+`llm-redact-agent-eval/1`): a file whose SHA-256 differs from the
+manifest's is refused — a frozen set changes only by freezing it again.
+Rows that are malformed or whose spans fall outside their text are skipped
+and counted. A row's context in the report is its prompt id (a hard
+negative's as `<artifact>-negative`). The text is generated and verified by
+hand rather than real people's data, but the set is private and marked as
+real data, so `--dump-errors` needs `--allow-real-data-dump`.

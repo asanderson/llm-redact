@@ -17,6 +17,7 @@ counts, ids, offsets, types and model names.
 | Script | Plan task | What it does |
 |---|---|---|
 | `generate.py` | T40 | Asks the teacher for tagged artifacts, grounds every span, writes unverified JSONL rows and a run manifest. |
+| `review.py` | T42 | Shows each generated row to a human for accept, edit or reject (`review`), then writes the frozen evaluation set with its manifest (`freeze`). Rules: [GUIDELINES.md](GUIDELINES.md). |
 | `audit.py` | T41 | Has the teacher read `bench/fp_corpus` beside the detectors and lists candidate misses and false positives (file, offsets, type, reason). Report only. |
 
 ## Requirements
@@ -102,6 +103,39 @@ artifact with no personal data at all but with two kinds of name-like
 confusers: tool names that are surnames (Jenkins, Hudson), CamelCase class
 names, UUIDs and hashes, file paths, bare field names, timestamps and
 version numbers. A changed wording bumps `CATALOG_VERSION`.
+
+## Verifying and freezing the evaluation set (`review.py`)
+
+```bash
+uv run python scripts/pii_corpus/review.py review ~/.local/share/llm-redact/pii-corpus/generated-gemma4-e4b-7.jsonl --reviewer alex
+uv run python scripts/pii_corpus/review.py freeze ~/.local/share/llm-redact/pii-corpus/generated-gemma4-e4b-7.verified.jsonl \
+  --out ~/.local/share/llm-redact/pii-corpus/agent-eval.jsonl
+```
+
+`review` shows each row on your terminal — the text with its spans tagged
+inline and the list of tagged values — and reads one decision from the
+terminal (it refuses piped input: verification is by hand): `a` accept, `e`
+edit (the tagged text opens in `--editor`, `$VISUAL`, `$EDITOR` or `vi`, from
+a private temporary file; the saved text is grounded again exactly like a
+teacher answer, and an edit that does not ground is not applied), `r`
+reject, `s` skip, `q` quit. Accepted and edited rows are appended to
+`GENERATED.verified.jsonl` (or `--out`) with a review record — reviewer,
+decision, guideline version, date, and the generator run's teacher digest
+and catalog digest from its manifest; rejected ids go to
+`GENERATED.verified.jsonl.rejected`. Rows already decided are not asked
+again, so a review can stop and resume, and several reviewers can each
+review a share. The terminal is the only place rows are shown.
+
+`freeze` validates every verified row (keys, spans inside the text and not
+overlapping, placeholder types only, a review record under the current
+guideline version, unique ids) and writes the frozen set, rows sorted by id,
+plus `FROZEN.jsonl.manifest.json`: format `llm-redact-agent-eval/1`, the
+file's SHA-256, row and hard-negative counts, spans by type, and rows by
+prompt, teacher, teacher digest, seed, reviewer and decision — no text. An
+existing frozen set is replaced only with `--force`. The NER bench reads it
+with `--dataset agent-eval --path FROZEN.jsonl` and refuses a file that no
+longer matches its manifest. Keep the frozen set private (plan D7): outside
+every git work tree, never in an issue, a chat or a model prompt.
 
 ## Auditing the false-positive corpus (`audit.py`)
 

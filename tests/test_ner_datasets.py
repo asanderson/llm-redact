@@ -15,6 +15,7 @@ from llm_redact.bench import ner as bench_ner
 from llm_redact.bench.datasets import (
     DATASETS,
     LoadRequest,
+    agent_eval,
     base,
     creddata,
     dataset_key,
@@ -859,3 +860,104 @@ def test_cli_creddata_options(
     assert "not-a-real" not in printed
     assert bench_ner.main(["--list-datasets"]) == 0
     assert "reads a local checkout: --data-dir DIR" in capsys.readouterr().out
+
+
+# --- agent-eval (the private frozen set, read by path) -------------------------
+
+
+def _frozen(
+    tmp_path: Path, rows: list[object], *, manifest: dict[str, object] | None = None
+) -> Path:
+    path = tmp_path / "private" / "agent-eval.jsonl"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text("".join((r if isinstance(r, str) else json.dumps(r)) + "\n" for r in rows))
+    record = {"format": agent_eval.FORMAT, "sha256": agent_eval.file_sha256(path)}
+    agent_eval.manifest_path(path).write_text(json.dumps(manifest or record))
+    return path
+
+
+_AGENT_ROWS: list[object] = [
+    {
+        "id": "a",
+        "text": "author: Ann Lee",
+        "spans": [{"start": 8, "end": 15, "type": "PERSON"}],
+        "prompt_id": "commit",
+    },
+    {"id": "b", "text": "build 4f1c2a", "spans": [], "prompt_id": "log.negative"},
+    {"id": "c", "text": "x", "spans": [{"start": 0, "end": 5, "type": "PERSON"}]},
+    {"id": "d", "text": 5, "spans": []},
+    {"id": "e", "text": "x", "spans": "none"},
+    {"id": "f", "text": "x", "spans": ["bad"]},
+    [1, 2],
+    "{not json",
+    {
+        "id": "g",
+        "text": "Bo",
+        "spans": [{"start": 0, "end": 2, "type": "PERSON"}],
+        "prompt_id": "Bo Lin",
+    },
+]
+
+
+def test_agent_eval_reads_the_frozen_set(tmp_path: Path) -> None:
+    path = _frozen(tmp_path, _AGENT_ROWS)
+    spec = DATASETS["agent-eval"]
+    request = LoadRequest(split="all", path=path)
+    samples = list(spec.adapter(spec, request))
+    assert [(s.text, s.spans, s.context) for s in samples] == [
+        ("author: Ann Lee", (GoldSpan(8, 15, "PERSON"),), "commit"),
+        ("build 4f1c2a", (), "log-negative"),
+        ("Bo", (GoldSpan(0, 2, "PERSON"),), "other"),  # a prompt id outside the catalog grammar
+    ]
+    assert dict(request.skipped) == {base.MALFORMED: 6}
+    assert spec.real_data and spec.needs_path and spec.splits == ("all",)
+    assert spec.label_map["PERSON"] == "PERSON" and spec.label_map["EMAIL"] == "EMAIL"
+    assert agent_eval.context(None) == "other"
+
+
+def test_agent_eval_refuses_what_is_not_a_frozen_set(tmp_path: Path) -> None:
+    spec = DATASETS["agent-eval"]
+
+    def load(path: Path | None) -> list[NerSample]:
+        return list(spec.adapter(spec, LoadRequest(split="all", path=path)))
+
+    with pytest.raises(base.DatasetError, match="--path must name the frozen set"):
+        load(None)
+    with pytest.raises(base.DatasetError, match="--path must name the frozen set"):
+        load(tmp_path)
+    path = _frozen(tmp_path, _AGENT_ROWS[:1])
+    agent_eval.manifest_path(path).unlink()
+    with pytest.raises(base.DatasetError, match="cannot read agent-eval.jsonl.manifest.json"):
+        load(path)
+    path = _frozen(tmp_path, _AGENT_ROWS[:1], manifest={"format": "other/1"})
+    with pytest.raises(base.DatasetError, match="is not a llm-redact-agent-eval/1 manifest"):
+        load(path)
+    path = _frozen(tmp_path, _AGENT_ROWS[:1])
+    with path.open("a") as handle:
+        handle.write("{}\n")
+    with pytest.raises(base.DatasetError, match="does not match the SHA-256") as excinfo:
+        load(path)
+    assert "Ann" not in str(excinfo.value)
+
+
+def test_cli_agent_eval_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_transformers(monkeypatch, FakeHfPipe(findings=[("Ann Lee", "PER", 0.9)]))
+    path = _frozen(tmp_path, _AGENT_ROWS[:2])
+    config = ["--config", str(_config(tmp_path))]
+    assert bench_ner.main([*config, "--dataset", "agent-eval"]) == 2
+    assert "reads a local file: pass --path" in capsys.readouterr().err
+    assert bench_ner.main([*config, "--path", str(path)]) == 2
+    assert "--path applies only to datasets read from a local file" in capsys.readouterr().err
+    argv = [*config, "--dataset", "agent-eval", "--path", str(path)]
+    assert bench_ner.main([*argv, "--dump-errors", str(tmp_path / "e.jsonl")]) == 2
+    assert "holds real data" in capsys.readouterr().err
+    assert bench_ner.main(argv) == 0
+    printed = capsys.readouterr().out
+    assert "# NER bench: hf-fake on agent-eval" in printed
+    assert "Source: a local file (--path)." in printed
+    assert "This dataset holds real data" in printed
+    assert "Ann" not in printed and str(path) not in printed
+    assert bench_ner.main(["--list-datasets"]) == 0
+    assert "reads a local file: --path FILE" in capsys.readouterr().out

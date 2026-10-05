@@ -55,6 +55,9 @@ def _model_types(pipe: _PipelineLike, policy: LabelPolicy) -> frozenset[str] | N
 
 class HfDetector:
     name = "hf"
+    # A model runs per string: the detector plan detects it ahead of the
+    # redaction, on the NER worker thread (DetectorPlan, ner_prefetch).
+    heavy = True
 
     # Read by the never-match check (engine.build_detectors): the placeholder
     # types this model can emit (None = unknown, e.g. zero-shot), the model

@@ -19,6 +19,12 @@ class Detection:
 
 
 class Detector(Protocol):
+    """Finds values in one string. A detector that runs a model may also
+    say ``heavy = True`` (an optional attribute, read with getattr: every
+    NER backend does): the detector plan then lets it be detected ahead of
+    the redaction, off the event loop (engine.DetectorPlan, ner_prefetch),
+    and runs it under one lock per model."""
+
     name: str
 
     def detect(self, text: str) -> Iterable[Detection]: ...

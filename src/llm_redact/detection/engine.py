@@ -1,11 +1,13 @@
 """Assemble the detector list from configuration."""
 
+import functools
 import logging
 import re
+import threading
 import weakref
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, NamedTuple
 
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
@@ -38,6 +40,12 @@ class TypeFilteredDetector:
         """The wrapped NER backend's coverage counters (stats.py)."""
         stats = getattr(self.inner, "stats", None)
         return stats if isinstance(stats, NerStats) else None
+
+    @property
+    def heavy(self) -> bool:
+        """Whether the wrapped detector runs a model (``DetectorPlan``:
+        detected ahead of the redaction, off the event loop)."""
+        return getattr(self.inner, "heavy", False) is True
 
 
 DEFAULT_ALLOWLIST = frozenset({"127.0.0.1", "0.0.0.0", "255.255.255.255", "::1", "::"})
@@ -556,11 +564,75 @@ def detect_all(detectors: Sequence[Detector], text: str, allowlist: Allowlist) -
 GATED_MAX_CHARS = 1024
 
 
-def _runner(det: Detector) -> Callable[[PreparedText], Iterable[Detection]]:
+# Per scanned text, per index of a heavy detector in the plan: that
+# detector's raw detections in the text (before the allowlist), computed
+# ahead of the redaction (ner_prefetch) — what DetectorPlan.detect takes
+# instead of calling the detector.
+PrecomputedTable = Mapping[str, Mapping[int, Sequence[Detection]]]
+
+# One lock per model-backed (heavy) detector, shared by every plan over it:
+# a model must never run two strings at once (a Hugging Face fast tokenizer
+# raises "Already borrowed"), and both the NER worker thread (ner_prefetch)
+# and the event loop's inline calls run it. Held weakly: a lock dies with
+# its detector.
+_HEAVY_LOCKS: "weakref.WeakKeyDictionary[object, threading.Lock]" = weakref.WeakKeyDictionary()
+_HEAVY_LOCKS_GUARD = threading.Lock()
+
+
+def heavy_lock(det: Detector) -> threading.Lock:
+    """The lock ``det``'s model runs under: its unwrapped backend's, so a
+    type filter shares its backend's. A detector that cannot key a weak map
+    (unhashable, or not weakly referenceable) gets a new lock, which the
+    plan asking keeps for it."""
+    inner = det.inner if isinstance(det, TypeFilteredDetector) else det
+    with _HEAVY_LOCKS_GUARD:
+        try:
+            lock = _HEAVY_LOCKS.get(inner)
+            if lock is None:
+                lock = _HEAVY_LOCKS[inner] = threading.Lock()
+        except TypeError:
+            lock = threading.Lock()
+    return lock
+
+
+class _Heavy(NamedTuple):
+    """A heavy detector of a plan: the lock its model runs under and its
+    NER coverage counters (None for a detector without them)."""
+
+    lock: threading.Lock
+    stats: NerStats | None
+
+
+def _heavy(det: Detector) -> _Heavy | None:
+    """``det``'s lock and counters when it runs a model (its ``heavy``
+    attribute is True: every NER backend, and a type filter around one),
+    else None."""
+    if getattr(det, "heavy", False) is not True:
+        return None
+    stats = getattr(det, "stats", None)
+    return _Heavy(heavy_lock(det), stats if isinstance(stats, NerStats) else None)
+
+
+def _inline(det: Detector, heavy: _Heavy, prepared: PreparedText) -> list[Detection]:
+    """``det`` run on the event loop's own thread (no precomputed result):
+    under its model's lock — so a NER worker running it meanwhile holds
+    this caller up for at most the string it is on — and counted
+    (``inline_calls``, under the lock like the backend's own counters)."""
+    with heavy.lock:
+        found = list(det.detect(prepared.text))
+        if heavy.stats is not None:
+            heavy.stats.inline_calls += 1
+    return found
+
+
+def _runner(det: Detector, heavy: _Heavy | None) -> Callable[[PreparedText], Iterable[Detection]]:
     """How the plan runs ``det`` on a prepared text: regex rules share the
-    PreparedText (their prefilters read its cached haystacks)."""
+    PreparedText (their prefilters read its cached haystacks); a heavy
+    detector runs under its model's lock, counted inline."""
     if isinstance(det, RegexDetector):
         return det.detect_prepared
+    if heavy is not None:
+        return functools.partial(_inline, det, heavy)
     return lambda prepared: det.detect(prepared.text)
 
 
@@ -610,6 +682,14 @@ class DetectorPlan:
 
     The differential tests run the gated path against every detector's full
     scan, and against a plan whose gate lies, to prove they would notice.
+
+    HEAVY detectors (``heavy = True``: the NER backends, which run a model)
+    may be detected ahead of the redaction, on a worker thread
+    (``detect_heavy``, ner_prefetch): ``detect`` then takes their raw
+    detections from ``precomputed`` instead of calling them — the
+    allowlist, the sort and everything else unchanged. A heavy detector the
+    plan runs itself runs under its model's lock (``heavy_lock``) and is
+    counted (``NerStats.inline_calls``): it held up the event loop.
     """
 
     def __init__(
@@ -618,7 +698,13 @@ class DetectorPlan:
         self.source = detectors
         self.detectors = tuple(detectors)
         self.gated_max_chars = gated_max_chars
-        self._runners = tuple(_runner(det) for det in self.detectors)
+        heavy = {index: _heavy(det) for index, det in enumerate(self.detectors)}
+        self._heavy = {index: entry for index, entry in heavy.items() if entry is not None}
+        # The indices of the heavy detectors, in list order.
+        self.heavy_indices = tuple(self._heavy)
+        self._runners = tuple(
+            _runner(det, heavy[index]) for index, det in enumerate(self.detectors)
+        )
         # first character -> literal -> indices of the rules it gates, for
         # case-sensitive literals (digit-folded haystack) and case-
         # insensitive ones (lowered haystack).
@@ -664,26 +750,66 @@ class DetectorPlan:
             chosen.update(self._members)
         return tuple(sorted(chosen))
 
-    def detect(self, text: str, allowlist: Allowlist) -> list[Detection]:
+    def detect(
+        self,
+        text: str,
+        allowlist: Allowlist,
+        precomputed: Mapping[int, Sequence[Detection]] | None = None,
+    ) -> list[Detection]:
+        """The detections in ``text`` (allowlist applied, sorted).
+        ``precomputed``: heavy detectors' raw detections in ``text`` by
+        index (``detect_heavy``, a row of a ``PrecomputedTable``), taken
+        instead of running them."""
         # One PreparedText per string: regex detectors share it so their
         # required-literal prefilters (and the derived haystacks behind
         # them) are computed once, not per rule.
         prepared = PreparedText(text)
         order = self._every if len(text) > self.gated_max_chars else self.candidates(prepared)
-        return self._run(order, prepared, allowlist)
+        return self._run(order, prepared, allowlist, precomputed)
 
     def detect_each(self, text: str, allowlist: Allowlist) -> list[Detection]:
         """Every detector, ungated: the reference the gated path equals."""
         return self._run(self._every, PreparedText(text), allowlist)
 
+    def detect_heavy(self, text: str) -> dict[int, list[Detection]]:
+        """Every heavy detector's raw detections in ``text`` (no allowlist:
+        ``detect`` applies it), by index — the NER worker thread's half of
+        ``detect(text, allowlist, precomputed)`` (ner_prefetch). Each runs
+        under its model's lock, held for this one text only, so an inline
+        caller waits at most one text's inference; nothing is counted
+        inline."""
+        found: dict[int, list[Detection]] = {}
+        for index, heavy in self._heavy.items():
+            with heavy.lock:
+                found[index] = list(self.detectors[index].detect(text))
+        return found
+
+    def count_prefetch_miss(self) -> None:
+        """One text a request's redaction found no precomputed results for
+        (``Redactor.with_precomputed``): counted on every heavy detector
+        (``NerStats.prefetch_misses``), each of which now runs it inline.
+        Only the event loop counts a miss, so no lock is taken (a worker
+        holding one may be mid-inference)."""
+        for heavy in self._heavy.values():
+            if heavy.stats is not None:
+                heavy.stats.prefetch_misses += 1
+
     def _run(
-        self, order: Iterable[int], prepared: PreparedText, allowlist: Allowlist
+        self,
+        order: Iterable[int],
+        prepared: PreparedText,
+        allowlist: Allowlist,
+        precomputed: Mapping[int, Sequence[Detection]] | None = None,
     ) -> list[Detection]:
         detections: list[Detection] = []
         runners = self._runners
         allows = allowlist.allows_for
         for index in order:
-            found = runners[index](prepared)
+            found: Iterable[Detection]
+            if precomputed is not None and index in precomputed:
+                found = precomputed[index]
+            else:
+                found = runners[index](prepared)
             # Tier-0 (deny) detections bypass the allowlist — global AND
             # per-type: deny is the user's explicit strongest signal, so a
             # deny/allowlist contradiction resolves in favor of redaction.

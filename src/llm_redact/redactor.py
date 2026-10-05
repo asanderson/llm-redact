@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple, Protocol
 
 from llm_redact.detection.base import Detection, Detector
-from llm_redact.detection.engine import Allowlist, DetectorPlan, plan_for
+from llm_redact.detection.engine import Allowlist, DetectorPlan, PrecomputedTable, plan_for
 from llm_redact.jsonwalk import transform_strings
 from llm_redact.vault import PlaceholderSpaceExhausted, Vault
 
@@ -181,6 +181,7 @@ class Redactor:
         overrides: OverrideCheck | None = None,
         added_deny: DetectorPlan | None = None,
         final_blocks: frozenset[str] = frozenset(),
+        precomputed: PrecomputedTable | None = None,
     ) -> None:
         # The detector list compiled for string-at-a-time detection (same
         # output, gated per string), taken as it is now: plan_for shares the
@@ -219,6 +220,17 @@ class Redactor:
         # the configured policy would have redacted (or forwarded) it, an
         # approval would forward as sent a value it never would have.
         self._final_blocks = final_blocks
+        # The heavy (model-backed) detectors' results for the texts this
+        # request will scan, computed ahead of it off the event loop
+        # (with_precomputed, ner_prefetch); None runs them inline.
+        self._precomputed = precomputed
+
+    @property
+    def plan(self) -> DetectorPlan:
+        """The detector plan this redactor detects with (shared by its
+        copies): the one a precomputed table must be computed for
+        (``with_precomputed``)."""
+        return self._plan
 
     def with_floors(self, floors: Mapping[str, int]) -> "Redactor":
         """This redactor numbering new placeholders above ``floors`` as well
@@ -244,6 +256,20 @@ class Redactor:
         copy._overrides = overrides
         return copy
 
+    def with_precomputed(self, table: PrecomputedTable, plan: DetectorPlan) -> "Redactor":
+        """A thin copy that takes each scanned text's heavy (model-backed)
+        detections from ``table`` — computed for ``plan`` ahead of the
+        redaction, off the event loop (ner_prefetch) — instead of running
+        those detectors on the event loop; everything else is detected as
+        before. A text missing from the table runs them inline, counted
+        (``NerStats.prefetch_misses``), and so does every text when
+        ``plan`` is not this redactor's (a reload replaced the detectors
+        meanwhile): the table only ever saves work, never changes a
+        result. Its floor and budget copies keep the table."""
+        copy = self._copy(self._floors, self._budget)
+        copy._precomputed = table if plan is self._plan else {}
+        return copy
+
     def _copy(self, floors: Mapping[str, int], budget: StringBudget | None) -> "Redactor":
         return Redactor(
             self._plan,
@@ -257,7 +283,20 @@ class Redactor:
             overrides=self._overrides,
             added_deny=self._added_deny,
             final_blocks=self._final_blocks,
+            precomputed=self._precomputed,
         )
+
+    def _detect(self, text: str) -> list[Detection]:
+        """The configured detectors' detections in ``text``: the heavy
+        ones' taken from the precomputed table when one is attached
+        (``with_precomputed``) and it holds ``text``, else run here."""
+        table = self._precomputed
+        if table is None:
+            return self._plan.detect(text, self._allowlist)
+        found = table.get(text)
+        if found is None:
+            self._plan.count_prefetch_miss()
+        return self._plan.detect(text, self._allowlist, found)
 
     def _overridden(self, d: Detection) -> bool:
         """Whether the requester's approved overrides let this refusing
@@ -276,7 +315,7 @@ class Redactor:
         """The detections redaction acts on in ``text``: the configured
         policy's (``_resolve_overlaps``), with the added deny strings'
         matches taken in (``_absorb``)."""
-        winners = _resolve_overlaps(self._plan.detect(text, self._allowlist))
+        winners = _resolve_overlaps(self._detect(text))
         if self._added_deny is None:
             return winners
         return self._absorb(text, winners, self._added_deny.detect(text, self._allowlist))
@@ -428,7 +467,7 @@ class Redactor:
         count it (an upload's pieces, before its binary parts are handed to
         an upload inspector). Added deny strings take no part: they never
         block, nor take a block-mode winner's place (``_absorb``)."""
-        for d in _resolve_overlaps(self._plan.detect(text, self._allowlist)):
+        for d in _resolve_overlaps(self._detect(text)):
             # Deny strings (tier 0) never block, exactly as in redact_text.
             if d.tier and self._modes.get(d.detector_type) == "block" and not self._overridden(d):
                 return d.detector_type

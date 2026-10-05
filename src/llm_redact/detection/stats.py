@@ -16,8 +16,10 @@ Each string a backend is handed lands in exactly one of
 overlapping windows (``scanned_windowed``, each window counted in
 ``windows``), or not read at all because it is longer than
 ``[detection.ner] max_chars`` (``skipped_max_chars``). The other counters are
-per model entity or window. To add a counter, add a field: the ``/status``
-block lists every field.
+per model entity or window, and two count where the model ran: on the
+event loop (``inline_calls``) and how many of those a request's NER prefetch
+should have covered (``prefetch_misses``). To add a counter, add a field:
+the ``/status`` block lists every field.
 """
 
 from dataclasses import dataclass, fields
@@ -51,6 +53,16 @@ class NerStats:
     # contain (or that came without offsets): never redacted, since only
     # the exact sent text can be restored.
     offsets_dropped: int = 0
+    # Strings this backend was run on BY THE EVENT LOOP (DetectorPlan._run)
+    # instead of ahead of the redaction on the NER worker thread
+    # (ner_prefetch): every call that held up every other request on the
+    # proxy for one string's inference. Zero while every request shape is
+    # prefetched.
+    inline_calls: int = 0
+    # Strings a request's redaction looked up in its precomputed NER results
+    # and did not find (or found computed for detectors a reload replaced):
+    # run inline instead, and counted in inline_calls too.
+    prefetch_misses: int = 0
 
     def as_dict(self) -> dict[str, int]:
         """Every counter by name, in field order."""

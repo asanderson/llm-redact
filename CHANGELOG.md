@@ -32,6 +32,11 @@ and tags `vX.Y.Z`.
   backend; they restart from zero when a reload rebuilds the detectors). `llm-redact status`
   prints a posture line while a backend has skipped strings longer than `max_chars`, and one
   naming the entities no backend can emit.
+- Two more NER counters per backend, in `/status` `detection.ner` and on `/metrics`:
+  `inline_calls` (`llm_redact_ner_inline_calls_total`: strings a backend ran on the event
+  loop itself, holding up every other request for that string's inference) and
+  `prefetch_misses` (`llm_redact_ner_prefetch_misses_total`: strings a request's
+  precomputed NER results did not cover, run inline instead).
 - docs/detection.md "How NER runs" walks one string through an NER backend (the
   `max_chars` gate, windows, the label policy, the type guard, part merging, rule toggles,
   overlap resolution) beside a new `ner-pipeline` diagram.

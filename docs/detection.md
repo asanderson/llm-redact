@@ -226,6 +226,12 @@ error, rather than failing every request.
 A type the token format cannot carry (one that does not start with a letter,
 or longer than 28 characters) is never emitted.
 
+Models trained to tag `first_name` and `last_name` separately report "Jane
+Doe" as two parts. When one backend finds two `PERSON` (or two `ADDRESS`)
+spans separated by one or two spaces, tabs or no-break spaces, they become
+one span, so a full name gets one token. Parts are never joined across a
+newline, punctuation, a quote, a comma or a JSON delimiter.
+
 `[detection.allowlist_by_type]` keys name the type a detection carries.
 Besides the rule and deny types, a key may name any type the NER entities are
 emitted as (`JOB_TITLE` for the GLiNER entity `"job title"`) or an entity as

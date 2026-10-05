@@ -7,11 +7,11 @@ container image. Unlike spaCy, GLiNER emits per-entity confidence scores —
 this is the backend the reserved ``score_threshold`` config key exists for.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
-from llm_redact.detection.labels import LabelPolicy
+from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
 
 if TYPE_CHECKING:
@@ -52,7 +52,12 @@ class GlinerDetector:
         self._max_chars = max_chars
         self._threshold = threshold
 
-    def detect(self, text: str) -> Iterable[Detection]:
+    def detect(self, text: str) -> list[Detection]:
+        # Parts of one name or address reported separately join into one
+        # span (labels.merge_adjacent_parts).
+        return merge_adjacent_parts(self._found(text), text)
+
+    def _found(self, text: str) -> Iterator[Detection]:
         if len(text) > self._max_chars or not self._labels:
             return
         for entity in self._model.predict_entities(text, self._labels, self._threshold):

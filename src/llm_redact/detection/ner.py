@@ -13,11 +13,11 @@ Everything here is import-lazy: this module is only imported when
 startup (fail fast with an actionable error, no first-request latency spike).
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
-from llm_redact.detection.labels import LabelPolicy
+from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
@@ -49,7 +49,12 @@ class NerDetector:
         self._policy = policy if policy is not None else LabelPolicy(entities, backend="spacy")
         self._max_chars = max_chars
 
-    def detect(self, text: str) -> Iterable[Detection]:
+    def detect(self, text: str) -> list[Detection]:
+        # Parts of one name or address reported separately join into one
+        # span (labels.merge_adjacent_parts).
+        return merge_adjacent_parts(self._found(text), text)
+
+    def _found(self, text: str) -> Iterator[Detection]:
         # Latency gate: giant tool results (whole files, logs) are skipped.
         # Regex rules still cover structured values inside them.
         if len(text) > self._max_chars:

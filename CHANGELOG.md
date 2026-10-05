@@ -39,6 +39,9 @@ and tags `vX.Y.Z`.
   spaCy and Stanza models). Presidio is asked for the entities that fold into a requested
   type (`EMAIL` asks for `EMAIL_ADDRESS`) and only for entities its analyzer supports;
   `PRESIDIO_TYPE_MAP` keeps its five pairs.
+- A name or address an NER backend reports in parts ("Jane" `first_name`, "Doe"
+  `last_name`) becomes one span when the parts are separated by one or two spaces, tabs
+  or no-break spaces only, so a full name gets one `PERSON` token instead of two.
 - GLiNER is prompted in natural language for a type request: `PERSON` sends "person",
   `ADDRESS` "street address", `EMAIL` "email address" (previously the type name itself).
   Other entries are still sent as written. Detections keep their type.

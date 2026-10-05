@@ -16,11 +16,11 @@ translated into the Presidio entities that fold into it (``EMAIL`` asks for
 since it raises on every request for an unsupported-only list.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
-from llm_redact.detection.labels import LEGACY_FOLDS, LabelPolicy
+from llm_redact.detection.labels import LEGACY_FOLDS, LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
 
 if TYPE_CHECKING:
@@ -84,7 +84,12 @@ class PresidioDetector:
         self._threshold = threshold
         self._language = language
 
-    def detect(self, text: str) -> Iterable[Detection]:
+    def detect(self, text: str) -> list[Detection]:
+        # Parts of one name or address reported separately join into one
+        # span (labels.merge_adjacent_parts).
+        return merge_adjacent_parts(self._found(text), text)
+
+    def _found(self, text: str) -> Iterator[Detection]:
         # Latency gate, same as the other NER backends: giant tool results
         # are skipped; regex rules still cover structured values in them.
         if len(text) > self._max_chars:

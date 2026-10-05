@@ -11,11 +11,11 @@ happens at proxy startup (fail fast, no first-request latency spike).
 """
 
 import importlib.util
-from collections.abc import Iterable
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
-from llm_redact.detection.labels import LabelPolicy
+from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
 
 if TYPE_CHECKING:
@@ -50,7 +50,12 @@ class HfDetector:
         self._max_chars = max_chars
         self._threshold = threshold
 
-    def detect(self, text: str) -> Iterable[Detection]:
+    def detect(self, text: str) -> list[Detection]:
+        # Parts of one name or address reported separately join into one
+        # span (labels.merge_adjacent_parts).
+        return merge_adjacent_parts(self._found(text), text)
+
+    def _found(self, text: str) -> Iterator[Detection]:
         if len(text) > self._max_chars:
             return
         for ent in self._pipe(text):

@@ -30,9 +30,11 @@ and counts only, never detected text.
 
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from llm_redact.detection.base import Detection
 from llm_redact.detection.regex_rules import BUILTIN_RULES
 from llm_redact.placeholders import is_placeholder_type
 
@@ -344,6 +346,38 @@ class LabelPolicy:
         if type_name is not None:
             return type_name if is_placeholder_type(type_name) else None
         return self.classify(returned_label)
+
+
+# Types whose parts a model may report separately ("Jane" FIRST_NAME, "Doe"
+# LAST_NAME -> two PERSON spans) and that merge_adjacent_parts joins.
+MERGED_TYPES = frozenset({"PERSON", "ADDRESS"})
+# What may separate two parts of one value: one or two of these characters.
+# Never a newline, punctuation, a quote, a comma or a JSON delimiter.
+_PART_GAP_CHARS = frozenset(" \t\u00a0")
+
+
+def merge_adjacent_parts(detections: Iterable[Detection], text: str) -> list[Detection]:
+    """One backend's detections with adjacent parts of one name or address
+    joined: consecutive detections of the same type in MERGED_TYPES whose
+    gap is 1-2 characters, each a space, tab or no-break space, become one
+    span whose value is ``text[start:end]`` — so "Jane Doe" is one PERSON
+    token, not two. Every other detection is kept as it is."""
+    merged: list[Detection] = []
+    last_of_type: dict[str, int] = {}
+    for detection in sorted(detections, key=lambda d: (d.start, d.end)):
+        index = last_of_type.get(detection.detector_type)
+        if index is not None:
+            previous = merged[index]
+            gap = text[previous.end : detection.start]
+            if 1 <= len(gap) <= 2 and set(gap) <= _PART_GAP_CHARS:
+                merged[index] = replace(
+                    previous, end=detection.end, value=text[previous.start : detection.end]
+                )
+                continue
+        if detection.detector_type in MERGED_TYPES:
+            last_of_type[detection.detector_type] = len(merged)
+        merged.append(detection)
+    return merged
 
 
 def raw_entity_deprecations(ner: "NerConfig") -> list[str]:

@@ -789,3 +789,121 @@ def test_doctor_shows_the_deprecation(
         warned = [r for r in rows if r["area"] == "ner" and "from 2.0.0" in r["message"]]
         assert len(warned) == expected
         assert all(r["level"] == "WARN" for r in warned)
+
+
+# --- parts of one name or address merge (T07) -----------------------------------------
+
+
+def _parts(text: str, *spans: tuple[str, str]) -> list[tuple[str, str]]:
+    from llm_redact.detection.base import Detection
+    from llm_redact.detection.labels import merge_adjacent_parts
+
+    detections = []
+    cursor = 0
+    for surface, type_name in spans:
+        start = text.index(surface, cursor)
+        cursor = start + len(surface)
+        detections.append(Detection(start, cursor, type_name, surface, priority=120))
+    return [(d.detector_type, d.value) for d in merge_adjacent_parts(detections, text)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Jane Doe", "Jane  Doe", "Jane\tDoe", "Jane Doe", "Jane  Doe", "Jane\t Doe"],
+)
+def test_name_parts_separated_by_blanks_merge(text: str) -> None:
+    assert _parts(text, ("Jane", "PERSON"), ("Doe", "PERSON")) == [("PERSON", text)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Jane\nDoe",
+        "Jane\r\nDoe",
+        "Jane, Doe",
+        "Jane,Doe",
+        '"Jane", "Doe"',
+        '{"first": "Jane", "last": "Doe"}',
+        "Jane   Doe",  # three blanks
+        "Jane.Doe",
+        "JaneDoe",  # no gap at all
+        "Jane - Doe",
+    ],
+)
+def test_name_parts_across_anything_else_stay_apart(text: str) -> None:
+    assert _parts(text, ("Jane", "PERSON"), ("Doe", "PERSON")) == [
+        ("PERSON", "Jane"),
+        ("PERSON", "Doe"),
+    ]
+
+
+def test_three_parts_and_addresses_merge() -> None:
+    assert _parts("Jane Mary Doe", ("Jane", "PERSON"), ("Mary", "PERSON"), ("Doe", "PERSON")) == [
+        ("PERSON", "Jane Mary Doe")
+    ]
+    assert _parts("at 12 Main St", ("12", "ADDRESS"), ("Main St", "ADDRESS")) == [
+        ("ADDRESS", "12 Main St")
+    ]
+
+
+def test_only_names_and_addresses_merge_and_only_within_one_type() -> None:
+    assert _parts("Acme Corp", ("Acme", "ORG"), ("Corp", "ORG")) == [
+        ("ORG", "Acme"),
+        ("ORG", "Corp"),
+    ]
+    assert _parts("Jane Main St", ("Jane", "PERSON"), ("Main St", "ADDRESS")) == [
+        ("PERSON", "Jane"),
+        ("ADDRESS", "Main St"),
+    ]
+
+
+def test_merge_reads_parts_in_text_order() -> None:
+    from llm_redact.detection.base import Detection
+    from llm_redact.detection.labels import merge_adjacent_parts
+
+    text = "Jane Doe"
+    reversed_parts = [Detection(5, 8, "PERSON", "Doe"), Detection(0, 4, "PERSON", "Jane")]
+    (merged,) = merge_adjacent_parts(reversed_parts, text)
+    assert (merged.start, merged.end, merged.value) == (0, 8, "Jane Doe")
+
+
+@pytest.mark.parametrize("backend", ["spacy", "stanza", "gliner", "presidio", "hf"])
+def test_every_backend_merges_first_and_last_names(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    findings = [("Jane", "first_name", 0.9), ("Doe", "last_name", 0.9)]
+    install_spacy(monkeypatch, FakeSpacy(findings))
+    install_stanza(monkeypatch, FakeSpacy(findings))
+    install_gliner(monkeypatch, FakeGliner(findings))
+    install_transformers(monkeypatch, FakeHfPipe(findings))
+    install_presidio(monkeypatch, FakeAnalyzer(findings, ("first_name", "last_name")))
+    entities = ("PERSON", "first_name", "last_name") if backend == "gliner" else ("PERSON",)
+    ner = NerConfig(enabled=True, backend=backend, entities=entities)
+    (detector,) = build_detectors(DetectionConfig(enabled=(), ner=ner))
+    found = [(d.detector_type, d.value) for d in detector.detect("hi Jane Doe, bye")]
+    if backend == "gliner":  # raw requests keep their own type until 2.0.0
+        assert found == [("FIRST_NAME", "Jane"), ("LAST_NAME", "Doe")]
+    else:
+        assert found == [("PERSON", "Jane Doe")]
+
+
+def test_gliner_merges_parts_once_raw_entities_fold(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(labels, "FOLD_RAW_REQUESTS", True)
+    model = FakeGliner([("Jane", "first name", 0.9), ("Doe", "last name", 0.9)])
+    detector = GlinerDetector(model, frozenset({"first name", "last name"}), 1000, 0.5)
+    assert [(d.detector_type, d.value) for d in detector.detect("hi Jane Doe")] == [
+        ("PERSON", "Jane Doe")
+    ]
+
+
+def test_merged_name_gets_one_token(fold_raw: bool) -> None:
+    hf = HfDetector(
+        FakeHfPipe([("Jane", "B-first_name", 0.9), ("Doe", "B-last_name", 0.9)]),
+        frozenset({"PERSON"}),
+        max_chars=1000,
+        threshold=0.5,
+    )
+    vault = InMemoryVault()
+    redactor = Redactor([hf], vault, Allowlist(exact=frozenset(), patterns=()))
+    assert redactor.redact_text("Jane Doe; Jane Doe") == "«PERSON_001»; «PERSON_001»"
+    assert len(vault) == 1

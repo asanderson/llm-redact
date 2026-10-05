@@ -385,7 +385,10 @@ def test_an_oversized_sidecar_is_refused_unread(tmp_path: Path) -> None:
 
 def test_an_unreadable_sidecar_is_an_error(tmp_path: Path) -> None:
     (tmp_path / SIDECAR_NAME).mkdir()
-    with pytest.raises(SidecarError, match=r"cannot be read \(IsADirectoryError\)"):
+    # Opening a directory raises IsADirectoryError on POSIX, PermissionError on Windows.
+    with pytest.raises(
+        SidecarError, match=r"cannot be read \((IsADirectoryError|PermissionError)\)"
+    ):
         read_sidecar(tmp_path)
 
 

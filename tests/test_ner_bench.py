@@ -3,6 +3,7 @@ structured-regression check, the thresholds gate and the dump guard, with
 fake NER detectors and inline samples (no extra, no model, no network)."""
 
 import json
+import os
 import stat
 import sys
 from collections.abc import Iterable
@@ -338,7 +339,8 @@ def test_write_dump_is_private(tmp_path: Path) -> None:
     target.write_text("old")
     target.chmod(0o644)
     bench_ner.write_dump(target, [{"kind": "miss", "text": "Jane"}, {"kind": "leak"}])
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    if os.name != "nt":  # Windows has no POSIX permission bits
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
     lines = target.read_text().splitlines()
     assert [json.loads(line)["kind"] for line in lines] == ["miss", "leak"]
     link = tmp_path / "link.jsonl"
@@ -401,7 +403,8 @@ def test_cli_dumps_errors_outside_the_repo(
     argv += ["--dump-errors", str(dump)]
     assert bench_ner.main(argv) == 0
     assert "error records written to" in capsys.readouterr().out
-    assert stat.S_IMODE(dump.stat().st_mode) == 0o600
+    if os.name != "nt":  # Windows has no POSIX permission bits
+        assert stat.S_IMODE(dump.stat().st_mode) == 0o600
     records = [json.loads(line) for line in dump.read_text().splitlines()]
     people = [r for r in records if r["type"] == "PERSON"]
     assert people and all(r["text"] == "config" for r in people)

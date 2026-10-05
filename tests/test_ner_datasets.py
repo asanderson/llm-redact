@@ -110,7 +110,7 @@ def test_hf_hub_download_needs_the_extra(monkeypatch: pytest.MonkeyPatch) -> Non
     path = base.hf_hub_download(
         repo_id="r", filename="f", repo_type="dataset", revision="x", cache_dir="c"
     )
-    assert path == "/cache/f"
+    assert path == str(Path("/cache/f"))
     assert seen == {
         "repo_id": "r",
         "filename": "f",

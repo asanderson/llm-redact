@@ -21,6 +21,16 @@ and tags `vX.Y.Z`.
   or drop it (`TIME = ""`). Keys are normalized like every model label; values use the
   deny-string type grammar. An override applies to `entities` too, so `PER = "PER"` keeps
   `entities = ["PER"]` emitting `PER` once raw entities fold in 2.0.0.
+- The NER bench, `python -m llm_redact.bench.ner` (docs/ner-bench.md): scores the regex
+  rules plus the configured NER backends on a labelled dataset — per-type exact and
+  overlap-typed precision, recall and F1, the character-leak and over-redaction rates, and
+  a structured-regression check (a model must not cost a regex rule its exact match) —
+  and with `--check` gates the result against `bench/ner_thresholds.toml` (recall floors,
+  leak and over-redaction ceilings per config and dataset; a run with nothing recorded
+  fails). Reports carry counts only; `--dump-errors` writes the text of misses to a
+  mode-0600 file outside any git work tree and refuses real-data datasets unless
+  `--allow-real-data-dump` is given. The deterministic `python -m llm_redact.bench --check`
+  gate is unchanged.
 
 ### Changed
 - NER model labels become placeholder types through one label policy for every backend

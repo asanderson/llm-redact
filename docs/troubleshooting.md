@@ -436,3 +436,35 @@ listed there. If posture is clean, confirm the tool actually points at the
 proxy: `llm-redact run -- <tool>` injects the variable for you, and the
 recent-request feed (`GET /__llm-redact/recent`, or `/llm-redact:recent`
 in an agent) shows whether traffic is arriving at all.
+
+## NER bench: "the NER bench needs [detection.ner] enabled = true in the config it scores"
+
+`python -m llm_redact.bench.ner --config PATH` measures NER models, so the
+config it scores must enable them (`[detection.ner] enabled = true`, with
+the backends and entities to measure). The regex rules alone are measured by
+`python -m llm_redact.bench`. See [ner-bench.md](ner-bench.md).
+
+## NER bench: "no thresholds for [CONFIG.DATASET] in bench/ner_thresholds.toml; record a baseline from this run's report"
+
+`--check` found no recorded floors and ceilings for this configuration and
+dataset; a run with nothing recorded fails rather than passing unmeasured.
+Record a baseline as [ner-bench.md](ner-bench.md#recording-a-baseline)
+describes, or drop `--check` to only print the report.
+
+## NER bench: "recall floor for TYPE cannot be checked: the run holds no gold spans of TYPE"
+
+The thresholds entry sets a floor for a type the scored samples never
+contain (a `--limit` too small, or a dataset without that type). Raise
+`--limit`, or remove the floor from that dataset's entry.
+
+## NER bench: "--dump-errors must name a file outside any git work tree"
+
+`--dump-errors` writes dataset text, so it refuses a path inside a git
+repository, where the file could be committed. Write it under `/tmp` or your
+home directory, and delete it when done.
+
+## NER bench: "dataset 'NAME' holds real data; --dump-errors would write its text to disk: add --allow-real-data-dump to confirm"
+
+The dataset holds real text (real prompts, code or documents). Its errors
+are written only when you confirm with `--allow-real-data-dump`; the file is
+private (mode 0600) and belongs outside every repository.

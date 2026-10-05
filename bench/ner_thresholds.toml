@@ -1,0 +1,30 @@
+# Statistical gates of the NER bench: python -m llm_redact.bench.ner --check
+# (docs/ner-bench.md). Not the deterministic gate: `python -m llm_redact.bench
+# --check` (recall == 1.0 per rule, exact fp-corpus counts) is separate and
+# unchanged.
+#
+# One table per config name and dataset: [<config name>.<dataset>]. The config
+# name is the --config file's stem (or --name); the dataset is its name, plus
+# ":SPLIT" when the split is not the default (quote such keys:
+# [hf-default."openpii:train"]). A run whose entry is missing FAILS --check:
+# record a baseline first.
+#
+# Keys of an entry (all optional except that the entry must exist):
+#   recall = { TYPE = floor, ... }        overlap-typed recall floors per type
+#   exact_recall = { TYPE = floor, ... }  exact-match recall floors per type
+#   leak_max = 0.15                       character-leak rate ceiling
+#   over_redaction_max = 0.01             over-redaction rate ceiling
+#   structured_regressions_max = 0        regex-type spans NER may cost (default 0)
+#   recorded = "YYYY-MM-DD"               when the baseline was measured
+#   note = "..."                          models and revisions it was measured with
+#
+# A floor on a type the run holds no gold spans of fails: it cannot be checked.
+# Record a baseline from a measured run minus a tolerance (recall -0.05,
+# leak +0.05), with the date and the model revisions.
+#
+# Example (not a baseline):
+#   [hf-default.synthetic]
+#   recall = { PERSON = 0.85 }
+#   leak_max = 0.15
+#   recorded = "2026-10-05"
+#   note = "dslim/bert-base-NER at <revision>"

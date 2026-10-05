@@ -1605,6 +1605,32 @@ def _parse_ner_revisions(revisions_raw: object) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(revisions.items()))
 
 
+# A repo-relative ONNX file: path segments of plain characters (no
+# wildcard, no "..", no absolute path), ending in .onnx.
+ONNX_FILE_RE = re.compile(r"(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.onnx")
+
+
+def _parse_ner_onnx(onnx_raw: object) -> tuple[tuple[str, str], ...]:
+    """[detection.ner.onnx] BACKEND = "<repo-relative .onnx file>" ->
+    sorted (backend, file) pairs. Only the gliner backend loads ONNX
+    weights. The file name is also a download pattern, so wildcards and
+    ".." are refused."""
+    where = "[detection.ner.onnx]"
+    if not isinstance(onnx_raw, dict):
+        raise ConfigError(f'{where} must be a table of BACKEND = "<ONNX file in the model>"')
+    files: dict[str, str] = {}
+    for backend, file in onnx_raw.items():
+        if backend != "gliner":
+            raise ConfigError(f"{where} {backend}: only the gliner backend loads ONNX weights")
+        if not isinstance(file, str) or not ONNX_FILE_RE.fullmatch(file):
+            raise ConfigError(
+                f"{where} {backend} must be a .onnx file inside the model, such as"
+                ' "onnx/model.onnx" (no wildcards, no "..", no absolute path)'
+            )
+        files[str(backend)] = file
+    return tuple(sorted(files.items()))
+
+
 def _parse_deny(detection_raw: dict[str, Any]) -> tuple[DenyEntry, ...]:
     """Both deny surfaces -> one canonical, sorted DenyEntry tuple.
 
@@ -2520,6 +2546,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
             "models",
             "labels",
             "revisions",
+            "onnx",
             "allow_download",
             "allow_pickle_weights",
         },
@@ -2564,6 +2591,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         models=models,
         labels=_parse_ner_labels(ner_raw.get("labels", {})),
         revisions=_parse_ner_revisions(ner_raw.get("revisions", {})),
+        onnx=_parse_ner_onnx(ner_raw.get("onnx", {})),
         # Accepted whichever backends are active, like a [detection.ner.models]
         # entry: the dashboard editor keeps these keys from the file while a
         # save switches backends, and a refusal there could not be fixed in

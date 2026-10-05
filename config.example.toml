@@ -456,11 +456,14 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 #                            # ignores it and loads the `language` model.
 # score_threshold = 0.5      # gliner, presidio and hf only (spacy/stanza give no score)
 # Model sources of the Hugging Face Hub backends (gliner, hf); see
-# docs/detection.md "Model sources". NOT ENFORCED YET: these keys are parsed,
-# validated and written back, but the model loaders do not read them, so a
-# model still loads as before (the newest revision from the Hub, cached).
-# allow_download = false        # default: whether a startup may fetch model files
-#                               # from the Hub (false: local cache or folder only)
+# docs/detection.md "Model sources". Both load their model from the local
+# cache at the pinned revision (hf: safetensors only unless
+# allow_pickle_weights; gliner: with its pinned base model's tokenizer, in a
+# self-contained folder).
+# allow_download = false        # default: whether the startup may fetch pinned model
+#                               # files from the Hub (false: local cache or folder
+#                               # only; `llm-redact models pull` fills the cache).
+#                               # A reload never downloads.
 # allow_pickle_weights = false  # hf only: true permits pytorch_model.bin for a
 #                               # model with no safetensors weights
 # Pin a backend's model to a full 40-character commit id (branch and tag
@@ -468,6 +471,10 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # catalog knows uses the catalog's pin (the default models included).
 # [detection.ner.revisions]
 # hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
+# Load the gliner model's ONNX export (onnxruntime) instead of its torch
+# weights: a .onnx file inside the model; only that file is fetched.
+# [detection.ner.onnx]
+# gliner = "onnx/model_quint8.onnx"
 
 [audit]
 # Opt-in local log of proxy activity: detector types and counts, paths,

@@ -14,6 +14,7 @@ from llm_redact.detection.engine import NerConfig
 from llm_redact.detection.hf_ner import HfDetector
 from llm_redact.detection.ner import NER_PRIORITY
 from llm_redact.detection.stanza_ner import StanzaDetector
+from ner_fakes import install_hub
 
 # --- Stanza (no confidences) ------------------------------------------------
 
@@ -239,6 +240,7 @@ def _failing_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
     module = types.ModuleType("transformers")
     module.pipeline = pipeline  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", module)
+    install_hub(monkeypatch)
 
 
 def test_hf_load_failure_without_torch_names_torch(monkeypatch: pytest.MonkeyPatch) -> None:

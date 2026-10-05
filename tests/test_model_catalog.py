@@ -537,6 +537,10 @@ def _capture_builders(monkeypatch: pytest.MonkeyPatch) -> dict[str, NerConfig]:
 
     monkeypatch.setattr(gliner_ner, "build_gliner_detector", builder("gliner"))
     monkeypatch.setattr(hf_ner, "build_hf_detector", builder("hf"))
+    # A build without downloads sets the offline switches: restored after.
+    from ner_fakes import install_hub
+
+    install_hub(monkeypatch)
     return seen
 
 
@@ -552,7 +556,7 @@ def test_each_backend_builder_sees_its_effective_revision(
             "allow_download": True,
         }
     )
-    build_detectors(DetectionConfig(ner=ner))
+    build_detectors(DetectionConfig(ner=ner), startup=True)
     # hf: the user's pin; gliner: its default model's catalog pin.
     assert seen["hf"].revisions == (("hf", _SHA),)
     assert seen["gliner"].revisions == (("gliner", _SMALL_PIN),)
@@ -560,7 +564,9 @@ def test_each_backend_builder_sees_its_effective_revision(
         assert view.backend == backend
         assert view.backends is None
         assert view.revision_for(backend) == ner.revision_for(backend)
-        assert view.allow_download is True
+        assert view.allow_download is True  # the startup build only
+    build_detectors(DetectionConfig(ner=ner))  # any other build
+    assert [view.allow_download for view in seen.values()] == [False, False]
 
 
 def test_an_unpinned_backend_view_carries_no_revision(monkeypatch: pytest.MonkeyPatch) -> None:

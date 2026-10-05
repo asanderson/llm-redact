@@ -448,13 +448,133 @@ and point `[detection.ner.models] hf` at that local folder.
 
 ## "failed to load Hugging Face token-classification model '…': …"
 
-From `serve` / `serve --check`: torch is installed, but loading the named
-`hf` model failed; the message ends with the exception type. Common causes: a
-model id that does not exist or is not a token-classification model, a model
-missing from the local Hugging Face cache while the machine cannot reach the
-Hub, or a full disk. Load it once by hand to see the library's full error:
-`uv run python -c "from transformers import pipeline;
-pipeline('token-classification', model='ORG/MODEL')"`.
+From `serve` / `serve --check`: torch is installed and the model's files are
+in place, but loading the named `hf` model failed; the message ends with the
+exception type. Common causes: a model that is not a token-classification
+model, an architecture the installed transformers does not know, damaged
+files in the cache, or a full disk. Load the folder once by hand to see the
+library's full error: `uv run python -c "from transformers import pipeline;
+pipeline('token-classification', model='/path/to/the/model/folder')"` (the
+folder: the Hugging Face cache's `models--ORG--MODEL/snapshots/<revision>`).
+
+## "[detection.ner] hf model '…' has no safetensors weights; set allow_pickle_weights = true to load pytorch_model.bin"
+
+The `hf` model ships its weights only as `pytorch_model.bin`, a Python
+pickle — and loading a pickle can run code — so llm-redact loads only
+safetensors weights by default. Pick a model that ships `model.safetensors`
+(most do), convert the checkpoint once into a local folder and point
+`[detection.ner.models] hf` at it, or, if you trust the model's publisher,
+set `[detection.ner] allow_pickle_weights = true`. A model that ships both
+always loads its safetensors.
+
+## "[detection.ner] … model '…' at revision … is not (completely) in the local Hugging Face cache, and downloads are off …"
+
+The named model (or a GLiNER model's base model) is not in the local Hugging
+Face cache at the revision llm-redact loads, and `[detection.ner]
+allow_download` is `false` (the default), so nothing is fetched. A copy of
+another revision does not count: the pin is the commit the message names
+(`[detection.ner.revisions]`, else the model catalog's pin; "no revision
+pinned" means the newest cached revision of the default branch). Fetch the
+model once with `llm-redact models pull`, or set `allow_download = true` to
+let a startup fetch the pinned files (with a `HF_HOME` the proxy can write).
+A reload (SIGHUP, the dashboard editor) never downloads, whatever
+`allow_download` says: after a reload naming a new model, the running
+configuration is kept — fetch the model, then reload again, or restart.
+"(completely)": the cache holds the revision but not every file the loader
+needs, such as after an interrupted download.
+
+## "[detection.ner] … model '…' … could not be fetched from the Hugging Face Hub: …"
+
+`allow_download = true`, but fetching the model's files failed; the message
+ends with the exception type. Common causes: no network access to
+huggingface.co, a model id or revision that does not exist, a gated model
+without a token, a full disk or a cache the proxy cannot write.
+
+## "[detection.ner] … model '…' is a local directory; a revision in [detection.ner.revisions] applies only to a Hugging Face model id"
+
+`[detection.ner.models]` (or `model`) names a local folder, and
+`[detection.ner.revisions]` pins that backend too. A folder is whatever it
+holds, so a commit id cannot apply to it: remove the backend's revision.
+
+## "[detection.ner] … model '…' is neither a local directory nor a Hugging Face model id"
+
+The model value is not a folder that exists and not of the form `ORG/NAME`.
+Check the path (it is read relative to the proxy's working directory unless
+absolute) or the model id.
+
+## "[detection.ner] … model '…' needs code from its repository (… names auto_map); llm-redact never runs model code"
+
+The model's `config.json`, `tokenizer_config.json` or `gliner_config.json`
+names Python classes to import from the model repository (`auto_map`).
+llm-redact never loads with `trust_remote_code`, so such a model cannot be
+used; pick one built on an architecture transformers ships.
+
+## "[detection.ner] … model '…': config.json is not a JSON configuration" / "… cannot be read (…)"
+
+A configuration file in the model's folder is not a UTF-8 JSON object (or is
+larger than 4 MiB), or cannot be opened. Re-fetch the model
+(`llm-redact models pull`) or fix the local folder.
+
+## "failed to load GLiNER model '…': …"
+
+From `serve` / `serve --check`: the model's files are in place, but GLiNER
+could not load them; the message ends with the exception type. Common
+causes: damaged files in the cache (fetch them again: `llm-redact models
+pull`), a checkpoint the installed gliner version cannot read, or too little
+memory.
+
+## "[detection.ner] gliner model '…' has no gliner_config.json" / "… names no base model (model_name) for its tokenizer and encoder configuration"
+
+The folder or repository is not a GLiNER checkpoint (`gliner_config.json`
+is missing), or its configuration ships no tokenizer and no `encoder_config`
+and does not name the base model to take them from. Check the model id or
+folder.
+
+## "[detection.ner] gliner … '…': … names a model type transformers does not know; llm-redact never runs model code"
+
+The GLiNER checkpoint's `encoder_config` (or its base model's `config.json`)
+names an architecture the installed transformers does not ship. GLiNER
+would build that encoder with `trust_remote_code`, which could run code from
+the model repository, so it is refused. Upgrade transformers if the type is
+newer than your version (`uv sync --extra gliner`), or pick another model.
+
+## "[detection.ner] gliner model '…' … has no ONNX file '…' ([detection.ner.onnx] gliner)" / "[detection.ner.onnx] gliner needs onnxruntime, which the gliner extra installs"
+
+`[detection.ner.onnx] gliner` names a file the model does not ship (check the
+model's "Files and versions" page: Knowledgator's GLiNER-PII models ship
+`onnx/model.onnx`, `onnx/model_quint8.onnx` and, except `-large`,
+`onnx/model_fp16.onnx`), or onnxruntime is missing — reinstall the extra:
+`uv sync --extra gliner`. Related: "[detection.ner.onnx] BACKEND: only the
+gliner backend loads ONNX weights" and "… must be a .onnx file inside the
+model" (no wildcard, no `..`, no absolute path).
+
+## "[detection.ner] gliner base model '…' has no config.json"
+
+The base model a GLiNER checkpoint names lacks the configuration llm-redact
+embeds into the assembled folder. Check the `model_name` in the checkpoint's
+`gliner_config.json`.
+
+## "[detection.ner] gliner model '…' ships no tokenizer or encoder_config, and the model catalog pins no revision of its base model '…': the newest cached revision of its default branch loads"
+
+A startup warning for a GLiNER checkpoint llm-redact's model catalog does
+not know (or knows with another base model): its base model's tokenizer and
+configuration load at whatever revision of its default branch the cache
+holds. Prefer a catalogued model or a self-contained checkpoint (one that
+ships its tokenizer and an `encoder_config`), or a folder written by
+`llm-redact models pull --to`.
+
+## "[detection.ner] gliner model '…': cannot assemble its local folder under … (…)"
+
+llm-redact could not write the self-contained GLiNER folder it builds from
+the checkpoint and its base model (under `$XDG_DATA_HOME/llm-redact/models/`).
+Make that directory writable for the proxy's user (the systemd unit and the
+Helm chart already allow the data directory), or free disk space.
+
+## "[detection.ner] … model '…' needs huggingface_hub, which the hf and gliner extras install; install the backend's extra" / "backend = \"gliner\" needs transformers, which the gliner extra installs"
+
+The `huggingface_hub` package is missing, although the `hf` and `gliner`
+extras install it (through transformers and gliner). Re-install the
+backend's extra: `uv sync --extra hf` or `uv sync --extra gliner`.
 
 ## Tool sees `«EMAIL_001»`-style tokens in responses
 

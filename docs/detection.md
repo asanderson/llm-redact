@@ -160,20 +160,71 @@ hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
   `knowledgator/gliner-pii-*-v1.0` sizes are pinned to the commit their
   `main` branch pointed at on 2026-10-05. An entry for a backend that is not
   active is kept and ignored, like a `[detection.ner.models]` entry.
-- `allow_download` (default `false`) decides whether a startup may fetch the
-  pinned model files from the Hub; with `false`, models are meant to load
-  only from the local Hugging Face cache or a model folder.
+- `allow_download` (default `false`) decides whether the proxy's startup
+  (`serve`, `serve --check`) may fetch a model's pinned files from the Hub
+  into the Hugging Face cache. With `false` every model loads from the
+  local cache or a model folder, and a model that is not there stops the
+  startup with an error naming it, its revision and `llm-redact models
+  pull`. Only the startup ever downloads: a reload (SIGHUP, the dashboard
+  editor), the editor's dry run and `llm-redact preview` read local files
+  only, so a reload naming a model that is not cached is refused and the
+  running configuration is kept. Whenever a build may not download, the
+  Hugging Face libraries' own offline switches (`HF_HUB_OFFLINE`,
+  `TRANSFORMERS_OFFLINE`) are set before they are first imported, so no
+  library code reaches the network either.
 - `allow_pickle_weights` (default `false`, `hf` only) permits loading
   `pytorch_model.bin`, a pickle, for an `hf` model that ships no safetensors
   weights. GLiNER loads its `pytorch_model.bin` through torch's
   `weights_only` loader whatever this key says.
 
-**Not enforced yet.** The three keys are parsed, validated and written back
-(`llm-redact config show`, the dashboard editor keeps them from the file),
-but the model loaders do not read them yet: whatever `allow_download` and
-`revisions` say, a model still loads as it did before — the newest revision
-from the Hub, downloaded on first use and cached — and `allow_pickle_weights`
-changes nothing.
+**How the `hf` backend loads a model.** A Hub model is looked up in the local
+Hugging Face cache at its pinned revision (fetched only when
+`allow_download = true`), with an explicit list of top-level files: its
+`config.json`, safetensors weights and tokenizer files — never the
+TensorFlow, Flax, ONNX or `original/` copies a repository may also hold. A
+model missing from the cache is a startup error that names the model and the
+revision. A local folder is loaded as it is; a revision for it is a config
+error. A model whose `config.json` or `tokenizer_config.json` names code to
+import from its repository (`auto_map`) is refused, and nothing is ever
+loaded with `trust_remote_code`. The weights must be safetensors: a model
+with only `pytorch_model.bin` is refused unless `allow_pickle_weights = true`,
+and a model with both always loads its safetensors.
+
+**How the `gliner` backend loads a model.** The same way: the GLiNER
+checkpoint at its pinned revision, from the local cache unless
+`allow_download = true`, with an explicit list of files (`gliner_config.json`,
+`model.safetensors`, the tokenizer files, and `pytorch_model.bin` only for a
+checkpoint without safetensors — GLiNER loads it with torch's `weights_only`
+loader). A checkpoint that ships its own tokenizer and an `encoder_config`
+(Knowledgator's) loads from that folder. One that does not (the urchade v2.1
+models, the default included) would make GLiNER fetch its base model's
+tokenizer and configuration from the Hub at every load, at no fixed
+revision; llm-redact instead fetches the base model's configuration and
+tokenizer (never its weights) at the revision the model catalog pins and
+assembles a self-contained folder under `$XDG_DATA_HOME/llm-redact/models/gliner/`:
+links to the checkpoint's weights and the base model's tokenizer, and a
+`gliner_config.json` that embeds the base model's configuration as
+`encoder_config` and names no absolute path. A base model the catalog does
+not pin loads at its newest cached revision, with a startup warning. A
+configuration naming code to import (`auto_map`) or a model type transformers
+does not know is refused.
+
+**ONNX weights for `gliner`.** `[detection.ner.onnx]` loads a GLiNER model's
+ONNX export through onnxruntime (installed with the `gliner` extra) instead
+of its torch weights: name the file inside the model, and only that file —
+never `model.safetensors` or `pytorch_model.bin` — is fetched or read:
+
+```toml
+[detection.ner.models]
+gliner = "knowledgator/gliner-pii-base-v1.0"
+
+[detection.ner.onnx]
+gliner = "onnx/model_quint8.onnx"   # the int8 export (Knowledgator ships model.onnx,
+                                    # model_fp16.onnx and model_quint8.onnx)
+```
+
+Only `gliner` takes an entry; the value must be a `.onnx` path inside the
+model (no wildcard, no `..`). A model that lacks the file is a startup error.
 
 ## How NER runs
 
@@ -220,7 +271,12 @@ at its exact offsets:
   neither says; 512 tokens for `dslim/bert-base-NER`), and consecutive windows
   share a quarter of it. Windowing needs a fast tokenizer — the only kind that
   reports character offsets — so an `hf` model without one is refused at
-  startup.
+  startup. A model whose tokenizer marks word pieces (WordPiece, as BERT and
+  `dslim/bert-base-NER` use) labels each word by its first piece, so a name
+  is reported as whole words, never cut inside one ("Angela Merk"). Other
+  tokenizers (SentencePiece, byte-level BPE) do not tell the pipeline where
+  words end, so their models are labelled piece by piece, and a span can
+  still end inside a word.
 - `gliner`: GLiNER reads at most `max_len` words of a text (384 for the urchade
   v2.1 models) and drops the rest. A window holds at most 200 of GLiNER's own
   words, fewer when the entity prompts leave less room within `max_len`, and —

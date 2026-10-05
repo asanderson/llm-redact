@@ -448,6 +448,10 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append("\n[detection.ner.revisions]")
         for backend_name, revision in ner.revisions:
             lines.append(f"{backend_name} = {_toml_str(revision)}")
+    if ner.onnx:
+        lines.append("\n[detection.ner.onnx]")
+        for backend_name, onnx_file in ner.onnx:
+            lines.append(f"{backend_name} = {_toml_str(onnx_file)}")
     if ner.labels:
         # A subtable too: after every [detection.ner] scalar.
         lines.append("\n[detection.ner.labels]")

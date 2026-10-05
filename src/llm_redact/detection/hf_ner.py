@@ -3,8 +3,21 @@
 Any `token-classification` model on the Hub (multilingual XLM-R NER, biomedical
 NER, domain-tuned checkpoints, …) becomes a detector, which is the escape
 hatch for teams that already have a fine-tuned model. Uses the `transformers`
-pipeline with `aggregation_strategy="simple"` so sub-word tokens are merged
-into whole entity spans with a confidence, which `score_threshold` gates.
+pipeline, which merges a model's per-token labels into entity spans with a
+confidence that `score_threshold` gates.
+
+A span must cover whole words: the pipeline's token-level aggregation
+(``"simple"``) ends a span wherever a word piece's label differs, so
+dslim/bert-base-NER reported "Angela Merk" in "Angela Merkel" and the rest
+of the name went upstream as sent. A tokenizer that marks word pieces (a
+continuing-subword prefix such as WordPiece's ``##``: BERT and its family)
+gives the pipeline real word boundaries, and the word-level ``"first"``
+aggregation then labels every word by its first piece (:func:`aggregation_for`).
+Other tokenizers (SentencePiece, byte-level BPE) give it none: transformers
+falls back to a whitespace heuristic that glues ``{"name":"Angela`` — or a
+whole sentence in a script written without spaces — into one "word" labelled
+by its first piece, which would lose names token-level aggregation finds, so
+those models keep ``"simple"``.
 
 Long strings are read whole, in overlapping token windows: without `stride`
 the pipeline truncates at the tokenizer's maximum length and never reads the
@@ -12,7 +25,10 @@ rest. `stride` needs a fast tokenizer — which also reports the character
 offsets every detection needs — so a model without one is refused at startup.
 
 Import-lazy: loads only when an `hf` backend is enabled; the model load
-happens at proxy startup (fail fast, no first-request latency spike).
+happens at proxy startup (fail fast, no first-request latency spike). The
+files come from a local directory at a pinned revision (model_files.py):
+safetensors weights unless `allow_pickle_weights` is set, and never code
+from the model's repository (`trust_remote_code=False`).
 """
 
 import importlib.util
@@ -34,6 +50,10 @@ _MODEL_NAME = "dslim/bert-base-NER"
 _SENTINEL_MAX_LENGTH = 1_000_000
 # What an encoder reads when its config does not say (BERT and most others).
 _DEFAULT_WINDOW = 512
+# The pipeline's aggregation strategies: per word (a word-aware tokenizer)
+# or per token (aggregation_for).
+WORD_AGGREGATION = "first"
+TOKEN_AGGREGATION = "simple"
 
 
 class _PipelineLike(Protocol):
@@ -153,6 +173,23 @@ def model_window(tokenizer: Any, model: Any, catalog_window: int | None = None) 
     return window
 
 
+def aggregation_for(tokenizer: Any) -> str:
+    """The pipeline aggregation that keeps whole words for ``tokenizer``:
+    word-level ``"first"`` when the fast tokenizer's model marks word
+    pieces with a continuing-subword prefix — the test transformers itself
+    makes before it trusts its word boundaries — else ``"simple"``.
+
+    Measured on dslim/bert-base-NER (WordPiece) with transformers 5.10.1:
+    ``"simple"`` cut "Angela Merk", "Ngoz", "Xu Wen"; ``"first"``,
+    ``"max"`` and ``"average"`` kept every word whole, and ``"first"``
+    alone kept McAllister and DiCaprio (``"max"`` lost the one, ``"average"``
+    both, and scored Venkataraman 0.33, under the default threshold)."""
+    model = getattr(getattr(tokenizer, "_tokenizer", None), "model", None)
+    if getattr(model, "continuing_subword_prefix", None):
+        return WORD_AGGREGATION
+    return TOKEN_AGGREGATION
+
+
 def window_counter(tokenizer: Any, stride: int) -> Callable[[str], int]:
     """How many windows the strided pipeline reads a text in: the chunks
     its fast tokenizer makes with the pipeline's own overflow settings
@@ -165,8 +202,24 @@ def window_counter(tokenizer: Any, stride: int) -> Callable[[str], int]:
     return windows_of
 
 
+def catalog_window(model: str) -> int | None:
+    """The token window the model catalog records for ``model`` (a Hub id,
+    or a local directory its sidecar file identifies) on the ``hf``
+    backend; None when it records none."""
+    from llm_redact.config import ConfigError
+    from llm_redact.detection.model_catalog import SidecarError, identify, lookup
+
+    try:
+        identity = identify(model)
+    except SidecarError as exc:
+        raise ConfigError(f"[detection.ner] hf model: {exc}") from exc
+    entry = lookup(identity.model_id) if identity is not None else None
+    return entry.window if entry is not None and "hf" in entry.backends else None
+
+
 def build_hf_detector(config: "NerConfig") -> HfDetector:
     from llm_redact.config import ConfigError
+    from llm_redact.detection.model_files import SAFETENSORS_FILES, has_files, hf_model_dir
 
     try:
         from transformers import pipeline
@@ -176,10 +229,28 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
             " install it: uv sync --extra hf"
         ) from exc
     model_name = config.model or _MODEL_NAME
+    # The model's files, local at their pinned revision: configuration,
+    # tokenizer and safetensors weights (a pickle only with the hatch).
+    path = hf_model_dir(
+        model_name,
+        revision=config.revision_for("hf"),
+        allow_download=config.allow_download,
+        allow_pickle_weights=config.allow_pickle_weights,
+    )
     try:
         # Any: transformers' own types are not part of the checked surface.
+        # From the local directory only, never with model code, and from
+        # safetensors whenever the directory holds them (True refuses any
+        # other weights; None, reached only with allow_pickle_weights,
+        # lets transformers read pytorch_model.bin — False would skip
+        # safetensors altogether).
         loaded: Any = pipeline(
-            "token-classification", model=model_name, aggregation_strategy="simple"
+            "token-classification",
+            model=str(path),
+            tokenizer=str(path),
+            aggregation_strategy=TOKEN_AGGREGATION,
+            trust_remote_code=False,
+            model_kwargs={"use_safetensors": True if has_files(path, SAFETENSORS_FILES) else None},
         )
     except Exception as exc:  # load can fail many ways; name only what is known
         if importlib.util.find_spec("torch") is None:
@@ -201,7 +272,7 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
             f"[detection.ner] hf model {model_name!r} has no fast tokenizer;"
             " character offsets are required"
         )
-    window = model_window(tokenizer, loaded.model)
+    window = model_window(tokenizer, loaded.model, catalog_window(model_name))
     # The pipeline windows at the tokenizer's limit: make it the model's
     # (a tokenizer that does not know its limit would hand the model the
     # whole text, past its position embeddings).
@@ -211,11 +282,12 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
     try:
         # The same model and tokenizer, read in overlapping windows: `stride`
         # is a construction parameter, so every call reads the whole text.
+        # Each entity covers whole words where the tokenizer knows them.
         pipe: Any = pipeline(
             "token-classification",
             model=loaded.model,
             tokenizer=tokenizer,
-            aggregation_strategy="simple",
+            aggregation_strategy=aggregation_for(tokenizer),
             stride=stride,
         )
     except Exception as exc:  # transformers refuses the windowing settings

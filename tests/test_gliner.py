@@ -105,7 +105,7 @@ def test_allowlist_applies() -> None:
     assert detect_all(detectors, "ask Jane Doe", allow) == []
 
 
-def test_enabled_without_gliner_config_error() -> None:
+def test_enabled_without_gliner_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
     try:
         import gliner  # noqa: F401
 
@@ -113,6 +113,9 @@ def test_enabled_without_gliner_config_error() -> None:
     except ImportError:
         pass
     from llm_redact.config import ConfigError
+    from ner_fakes import install_hub
+
+    install_hub(monkeypatch)  # restores the offline switches the build sets
 
     with pytest.raises(ConfigError, match="uv sync --extra gliner"):
         build_detectors(DetectionConfig(ner=NerConfig(enabled=True, backend="gliner")))
@@ -145,7 +148,6 @@ import json  # noqa: E402
 import re  # noqa: E402
 import types  # noqa: E402
 
-from llm_redact.config import ConfigError  # noqa: E402
 from llm_redact.detection.gliner_ner import (  # noqa: E402
     _subword_budget,
     _window_words,
@@ -462,6 +464,9 @@ def test_gliner_words_match_gliners_whitespace_splitter() -> None:
 # its backbone, microsoft/deberta-v3-small, which must be cached too.
 GLINER_SMALL = "urchade/gliner_small-v2.1"
 GLINER_SMALL_REVISION = "4e091416cf7c3481db542c2a3d26156916f3a47f"
+DEBERTA_SMALL = "microsoft/deberta-v3-small"
+DEBERTA_SMALL_REVISION = "a36c739020e01763fe789b4b85e2df55d6180012"
+DEBERTA_SMALL_FILES = ["config.json", "tokenizer_config.json", "spm.model"]
 
 
 @pytest.mark.real_model
@@ -469,13 +474,13 @@ def test_real_model_finds_a_name_past_max_len(monkeypatch: pytest.MonkeyPatch) -
     pytest.importorskip("torch")
     pytest.importorskip("gliner")
     offline_hub(monkeypatch)
-    path = cached_snapshot(
+    cached_snapshot(
         GLINER_SMALL, GLINER_SMALL_REVISION, ["gliner_config.json", "pytorch_model.bin"]
     )
-    try:
-        detector = build_gliner_detector(NerConfig(enabled=True, backend="gliner", model=path))
-    except ConfigError:
-        pytest.skip("the gliner backbone (microsoft/deberta-v3-small) is not cached")
+    cached_snapshot(DEBERTA_SMALL, DEBERTA_SMALL_REVISION, DEBERTA_SMALL_FILES)
+    # The default model at its catalog pin, assembled with its pinned base
+    # model's tokenizer and configuration: no Hub request (offline above).
+    detector = build_gliner_detector(NerConfig(enabled=True, backend="gliner"))
     assert detector.window_words == 200
     assert detector.subword_budget is not None
     # Past GLiNER's own 384 words, which it would truncate with a warning.
@@ -486,7 +491,28 @@ def test_real_model_finds_a_name_past_max_len(monkeypatch: pytest.MonkeyPatch) -
     assert detector.stats.scanned_windowed == 1
     assert detector.stats.windows_truncated == 0
     # score_threshold reaches the model (the name scores about 0.94).
-    strict = build_gliner_detector(
-        NerConfig(enabled=True, backend="gliner", model=path, score_threshold=0.99)
-    )
+    strict = build_gliner_detector(NerConfig(enabled=True, backend="gliner", score_threshold=0.99))
     assert strict.detect("My colleague Jane Doe joined the call.") == []
+
+
+# knowledgator/gliner-pii-edge-v1.0 (Apache-2.0; self-contained: its own
+# tokenizer and encoder_config) at the catalog pin checked on 2026-10-05,
+# loaded from its int8 ONNX weights only ([detection.ner.onnx]).
+EDGE = "knowledgator/gliner-pii-edge-v1.0"
+EDGE_REVISION = "9b7f39b0a2da971a5beea78d35f1539d4009c891"
+EDGE_ONNX = "onnx/model_quint8.onnx"
+
+
+@pytest.mark.real_model
+def test_real_model_loads_onnx_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("gliner")
+    pytest.importorskip("onnxruntime")
+    offline_hub(monkeypatch)
+    files = ["gliner_config.json", "tokenizer.json", "tokenizer_config.json", EDGE_ONNX]
+    cached_snapshot(EDGE, EDGE_REVISION, files)
+    detector = build_gliner_detector(
+        NerConfig(enabled=True, backend="gliner", model=EDGE, onnx=(("gliner", EDGE_ONNX),))
+    )
+    assert getattr(detector._model, "onnx_model", False) is True
+    found = detector.detect("Please ask Jane Doe about the invoice.")
+    assert [(d.detector_type, d.value) for d in found] == [("PERSON", "Jane Doe")]

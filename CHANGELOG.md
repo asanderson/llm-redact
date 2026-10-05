@@ -15,6 +15,10 @@ and tags `vX.Y.Z`.
 - docs/how-it-works.md shows NER off the event loop in a new animated `ner-prefetch`
   diagram; the `sequence-chat` and `security-gates` diagrams and the gate ⑤ row of
   docs/security-dataflows.md include it.
+- `[detection.ner.onnx]`: the `gliner` backend can load a model's ONNX export through
+  onnxruntime (`gliner = "onnx/model_quint8.onnx"`, a file inside the model) instead of its
+  torch weights; only that file is fetched, never `model.safetensors` or `pytorch_model.bin`.
+  Only `gliner` takes an entry; a path with a wildcard or `..` is a config error.
 - `[detection.ner]` model-source keys: `allow_download` (default `false`), `allow_pickle_weights`
   (default `false`; `hf` only) and `[detection.ner.revisions]` (per `gliner`/`hf` backend, a full
   40-character commit id; a branch or tag name such as `main` is a config error because it moves).
@@ -22,7 +26,7 @@ and tags `vX.Y.Z`.
   the default models, `urchade/gliner_medium-v2.1`, `urchade/gliner_multi-v2.1`,
   `urchade/gliner_multi_pii-v1` and the four `knowledgator/gliner-pii-*-v1.0` sizes are pinned to
   their `main` commits of 2026-10-05. The keys are parsed, validated and written
-  back by `config show`; the model loaders do not read them yet, so models still load as before.
+  back by `config show`, and both Hub backends read them (see Security and Changed).
 - NER coverage counters: every NER backend counts the strings it read, the strings it
   skipped as longer than `[detection.ner] max_chars` (which only the regex rules then
   read), and the model entities it dropped (a type that cannot be a placeholder type, a
@@ -112,6 +116,17 @@ and tags `vX.Y.Z`.
   answered while a large NER request is detected. What is sent upstream is unchanged
   byte for byte; a string the precomputed results lack is detected inline and counted
   (`inline_calls`, `prefetch_misses`).
+- NER models are no longer downloaded unless `[detection.ner] allow_download = true`, and then
+  only at startup (`serve`, `serve --check`). With the default `false` the `gliner` and `hf`
+  backends load from the local Hugging Face cache or a model folder, set the libraries' offline
+  switches (`HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`) before importing them, and a model that is
+  not cached stops the startup with an error naming the model, its revision and
+  `llm-redact models pull`. A reload, the dashboard editor's dry run and `llm-redact preview`
+  never download: a reload naming an uncached model is refused and the running configuration
+  kept. Model downloads were never listed among what leaves the machine (docs/privacy.md), so
+  this fixes behaviour the documentation never allowed. Upgrading: the default models' pins are
+  the `main` commits of 2026-10-05, so a cache an online load refreshed since then already holds
+  them; `urchade/gliner_multi-v2.1` moved on 2025-12-08 (an older cache holds `853ce23e47e5`).
 - NER model labels become placeholder types through one label policy for every backend
   (`detection/labels.py`, documented in docs/detection.md "Placeholder types from NER
   models"): labels are normalized (`B-PER` → `PER`, `"street address"` →
@@ -143,6 +158,13 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The `hf` NER backend could report part of a word as an entity and leave the rest of it
+  in the request: `dslim/bert-base-NER` reported "Angela Merk" in "Yesterday Angela Merkel
+  met the press.", so "el" went upstream unredacted (also "Ngoz…", "Xu Wen…"). A model whose
+  tokenizer marks word pieces (WordPiece: BERT and its family, the default model) now
+  labels each word by its first piece, so names are reported as whole words. Models whose
+  tokenizers do not mark word pieces (SentencePiece, byte-level BPE) are still labelled
+  piece by piece: transformers cannot tell where their words end.
 - The `hf` NER backend read only the first window of a string (512 tokens for the default
   `dslim/bert-base-NER`, about 2,000 characters) and silently ignored the rest. It now
   reads the whole string, up to `max_chars`, in overlapping windows sized from the
@@ -201,6 +223,27 @@ and tags `vX.Y.Z`.
   apply keeps the live ones, so the dry run loaded a second copy of every NER model per save.
 
 ### Security
+- The `hf` NER backend loads its model from a local folder at a pinned revision, never with code
+  from the model's repository, and only from safetensors weights. A Hub model is looked up in
+  the local Hugging Face cache at its `[detection.ner.revisions]` pin (else the model catalog's)
+  with an explicit list of top-level files (configuration, safetensors weights, tokenizer:
+  never the TensorFlow, Flax, ONNX or `original/` copies); it is fetched only when
+  `[detection.ner] allow_download = true`, and a model missing from the cache stops the startup
+  with an error naming the model and revision. A model whose `config.json` or
+  `tokenizer_config.json` names code to import (`auto_map`) is refused; a model that ships only
+  `pytorch_model.bin` (a pickle, which can run code when loaded) is refused unless
+  `allow_pickle_weights = true`. Previously the newest revision was downloaded from the Hub on
+  first use.
+- The `gliner` NER backend loads its model the same way, and no longer fetches a base model
+  from the Hub at every load. The default `urchade/gliner_small-v2.1` (like the other urchade
+  v2.1 checkpoints) ships no tokenizer or encoder configuration, so GLiNER fetched them from
+  its base model (`microsoft/deberta-v3-small`) on each start, at no fixed revision, and could
+  never start offline. llm-redact now resolves that base model's configuration and tokenizer at
+  the revision its model catalog pins and assembles a self-contained folder under
+  `$XDG_DATA_HOME/llm-redact/models/gliner/`, which GLiNER loads with `local_files_only`. A
+  GLiNER or base-model configuration naming code to import (`auto_map`) or a model type
+  transformers does not know is refused. A GLiNER load failure now names the exception type
+  instead of suggesting network access.
 - The `gliner`, `stanza` and `hf` extras require `torch>=2.6`, the release that fixed
   CVE-2025-32434 (a bypass of `torch.load(weights_only=True)`, the loader GLiNER uses for
   `pytorch_model.bin` checkpoints); gliner and stanza themselves accept older torch.

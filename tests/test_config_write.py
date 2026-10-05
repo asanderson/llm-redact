@@ -104,6 +104,7 @@ def test_every_field_nondefault_round_trips() -> None:
                 max_chars=5,
                 labels=(("CITY", "ADDRESS"), ("EMAIL", ""), ("FIRST_NAME", "PERSON")),
                 revisions=(("gliner", "a" * 40), ("hf", "0123456789abcdef" * 2 + "01234567")),
+                onnx=(("gliner", "onnx/model_quint8.onnx"),),
                 allow_download=True,
                 allow_pickle_weights=True,
             ),
@@ -333,8 +334,9 @@ def test_ner_model_sources_round_trip_after_the_scalars() -> None:
         NerConfig(allow_download=True),
         NerConfig(allow_pickle_weights=True),
         NerConfig(revisions=(("gliner", "c" * 40),)),
+        NerConfig(onnx=(("gliner", "onnx/model.onnx"),)),
     ],
-    ids=["allow_download", "allow_pickle_weights", "revisions"],
+    ids=["allow_download", "allow_pickle_weights", "revisions", "onnx"],
 )
 def test_each_ner_model_source_round_trips_alone(ner: NerConfig) -> None:
     config = Config(detection=DetectionConfig(ner=ner))
@@ -348,6 +350,7 @@ def test_ner_model_sources_at_their_defaults_are_not_written() -> None:
     assert "allow_download" not in emitted
     assert "allow_pickle_weights" not in emitted
     assert "[detection.ner.revisions]" not in emitted
+    assert "[detection.ner.onnx]" not in emitted
 
 
 def test_score_threshold_is_not_emitted_without_a_confidence_backend() -> None:

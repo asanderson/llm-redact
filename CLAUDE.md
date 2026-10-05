@@ -62,6 +62,7 @@ uv run python scripts/capture_plugin_screenshots.py       # re-render docs/scree
 uv run python scripts/history_sweep.py         # audit ALL git history with the production detectors (docs/history-hygiene.md)
 uv run python scripts/fake_upstream.py --port 9999 [--mangle]  # fake provider for manual e2e
 uv run python -m llm_redact.bench --check      # recall + fp-corpus precision gates
+uv run python scripts/pii_corpus/generate.py --model gemma4:e4b --count 500   # dev-only: tagged agent-traffic samples from a LOCAL Apache-2.0 Ollama teacher, written outside the repo (scripts/pii_corpus/README.md)
 uv run coverage run -m pytest && uv run python scripts/complexity_gate.py --check  # every CC>1 function must be executed (assurance gate; allowlist scripts/complexity_allowlist.py)
 uv run python -m llm_redact.bench --latency --check   # + in-process overhead benchmark (CI form)
 uv run python scripts/live_smoke.py            # live-API tests (needs keys, costs money)

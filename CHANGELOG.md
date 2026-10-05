@@ -102,6 +102,14 @@ and tags `vX.Y.Z`.
   plus a 20,000-string body redacted end to end; the report names the CPU model.
   Report-only unless `[<config>.latency]` ceilings are recorded in
   `bench/ner_thresholds.toml`.
+- Dev-only corpus tooling in `scripts/pii_corpus/` (not in the wheel): `generate.py` asks a
+  local Ollama teacher for coding-agent artifacts (tool-call JSON, diffs, logs, configs,
+  commit messages) with invented, inline-tagged personal data, keeps only rows whose every
+  span is grounded, and writes them with a run manifest to a mode-0600 file outside any
+  git work tree. Teachers are Apache-2.0 models only, by exact name and size tag (Gemma 4,
+  Apache-2.0 Mistral models), with the Llama, Qwen, DeepSeek, Gemma 1 to 3n and Mistral
+  research/non-production models refused by name and the license re-checked on the server;
+  the server is loopback unless `--allow-remote-server` (https only) is given.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

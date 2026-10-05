@@ -185,6 +185,19 @@ conflicting modes. serve would refuse this config at startup, and a SIGHUP
 reload would keep the current one (with only a log line saying so). The
 message names the exact offender; fix it and re-run `serve --check`.
 
+## "backend \"NAME\" needs torch, which is not installed" / "needs torch >= 2.6 (CVE-2025-32434), but torch VERSION is installed"
+
+From `doctor`, for an enabled `gliner`, `stanza` or `hf` NER backend: these
+backends run on torch, and their library can be present without it
+(transformers imports fine without torch and fails only when a model
+loads), so serve could not build the backend. torch older than 2.6 is
+refused because CVE-2025-32434 lets a crafted checkpoint run code through
+`torch.load(weights_only=True)`, which GLiNER uses for `pytorch_model.bin`
+files. Install the backend's extra (`uv sync --extra hf`, or
+`pip install 'llm-redact-proxy[hf]'`), which requires `torch>=2.6`; on a
+CPU-only host take torch from the PyTorch CPU index first
+([dependencies.md](dependencies.md)).
+
 ## "config reload failed; keeping current config" / "changes require restart"
 
 Log lines from a `kill -HUP`. The first means the new file failed to parse

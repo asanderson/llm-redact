@@ -11,6 +11,19 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+- The `hf` extra installs torch: transformers declares torch only as its own extra, so
+  `uv sync --extra hf` used to install a backend that could not run any model. The extra is
+  now `transformers>=4.40` plus `torch>=2.6`. `llm-redact doctor` FAILs an enabled `gliner`,
+  `stanza` or `hf` NER backend whose torch is missing, with the install hint. A CPU-only
+  install takes torch from the PyTorch CPU index (docs/dependencies.md).
+
+### Security
+- The `gliner`, `stanza` and `hf` extras require `torch>=2.6`, the release that fixed
+  CVE-2025-32434 (a bypass of `torch.load(weights_only=True)`, the loader GLiNER uses for
+  `pytorch_model.bin` checkpoints); gliner and stanza themselves accept older torch.
+  `llm-redact doctor` FAILs a torch backend running on torch older than 2.6.
+
 ## [1.11.0] - 2026-10-05
 
 Access-control seams for role- and attribute-based policies. The access gate can now

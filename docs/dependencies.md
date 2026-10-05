@@ -25,10 +25,10 @@ checked by the weekly gating pip-audit job.
 | Extra | Package(s) | Why chosen |
 |---|---|---|
 | `ner` | `spacy` | Person-name detection. Chosen over transformer NER for footprint (tens of MB, ~1-5 ms/string on CPU) and MIT license; the `Detector` protocol keeps heavier backends optional rather than default. |
-| `gliner` | `gliner` | Zero-shot NER, more robust on unusual names; deliberately separate from `ner` because it hard-depends on torch + transformers (gigabytes). |
+| `gliner` | `gliner`, `torch` | Zero-shot NER, more robust on unusual names; deliberately separate from `ner` because it hard-depends on torch + transformers (gigabytes). `torch` is listed for its floor (below). |
 | `presidio` | `presidio-analyzer` | Microsoft's FOSS PII analyzer: pattern recognizers + checksums + context scoring over the same spaCy pipeline; overlapping entity types fold into the built-in placeholder names. Pulls pydantic — acceptable because extras never touch the body-forwarding path. |
-| `stanza` | `stanza` | Stanford Stanza NER for 60+ languages — the multilingual complement to the English-first spaCy default. Pulls torch; separate extra for the same reason as gliner. No per-entity confidence. |
-| `hf` | `transformers` | Any Hugging Face `token-classification` checkpoint as a detector (multilingual/domain-tuned models). Pulls transformers + torch (same class as gliner); emits confidences so `score_threshold` applies. |
+| `stanza` | `stanza`, `torch` | Stanford Stanza NER for 60+ languages — the multilingual complement to the English-first spaCy default. Runs on torch; separate extra for the same reason as gliner. No per-entity confidence. |
+| `hf` | `transformers`, `torch` | Any Hugging Face `token-classification` checkpoint as a detector (multilingual/domain-tuned models). transformers declares torch only as its own extra, so `hf` lists `torch` itself — without it no model can run. Same class as gliner; emits confidences so `score_threshold` applies. |
 | `crypto` | `cryptography` | Vault encryption (Fernet + HKDF + HMAC index). The canonical, FIPS-aware Python crypto library; nothing hand-rolled. |
 | `vault-postgres` | `psycopg` | PostgreSQL driver for the Pro RDBMS vault (psycopg 3, the maintained line; `[binary]` wheel so no libpq build). Vault point lookups only — never the body-forwarding path. |
 | `vault-mysql` | `PyMySQL` | Pure-Python MySQL/MariaDB driver — no C extension, no client library, easiest install story of the MySQL drivers. |
@@ -38,6 +38,21 @@ checked by the weekly gating pip-audit job.
 | `realtime` | `websockets` | One package serves BOTH sides of the realtime relay: uvicorn's server-side WebSocket protocol (auto-enabled when importable) and the upstream wss client. Floor 15.0: the relay overrides the asyncio client's redirect hook (added in 13.1) and forwards the client's `User-Agent`, which clients before 15.0 send a second time. |
 | `otel` | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | Metadata-only telemetry export over OTLP/HTTP, the vendor-neutral standard; scoped SDK providers, never process globals. |
 | `extract` | `pypdf` | PDF text layers for [document extraction](extraction.md) (`[extraction]`): pure Python, BSD-3-Clause, imported only in the isolated, resource-limited extraction worker process — never on the request path. The OOXML/ODF, markup and RTF readers are stdlib. |
+
+**torch (the `gliner`, `stanza` and `hf` extras).** Each of the three
+extras requires `torch>=2.6`: torch 2.6 fixed CVE-2025-32434, a bypass of
+`torch.load(weights_only=True)`, which is how GLiNER loads a
+`pytorch_model.bin` checkpoint, and none of the three libraries asks for
+that floor itself. `llm-redact doctor` FAILs a configured torch backend
+when torch is missing or older than 2.6. PyPI's Linux torch wheel brings
+the NVIDIA CUDA libraries (several GB), and `uv sync --extra hf` installs
+that locked build. On a CPU-only host, install torch from the PyTorch CPU
+index first; pip (or `uv pip`) then keeps it, since it satisfies the floor:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install 'llm-redact-proxy[hf]'
+```
 
 ## Development group
 

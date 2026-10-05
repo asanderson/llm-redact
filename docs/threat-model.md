@@ -343,8 +343,10 @@ own answer decides whether the page may read a response).
   ignores: a body `model` only where the upstream reads it, the path's where
   the upstream takes it from there (an Azure deployment, Gemini and Vertex,
   Claude on Vertex, a Bedrock model id or ARN), on a realtime upgrade the
-  `model` (Azure preview: `deployment`) query parameter — an OpenAI or
-  Azure realtime session's model is fixed at connect. A Gemini or Vertex
+  `model` (Azure preview: `deployment`) query parameter, and again for a
+  `session.update` that names `session.model` (a non-empty string is put
+  to the gate before the frame is forwarded; any other value closes the
+  connection with 1008). A Gemini or Vertex
   Live upgrade names no model (its setup frame does), so the gate is asked
   again with the model the setup frame names, before anything of the
   connection is forwarded: the first client frame must be a setup naming a

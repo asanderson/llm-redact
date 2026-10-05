@@ -739,8 +739,9 @@ class AuthorizationRequest:
       ``endpoints/{e}``), Claude on Vertex, a Bedrock model id or ARN
       (percent-decoded exactly as the routing reads it; StartAsyncInvoke's
       body ``modelId``). On a realtime upgrade the ``model`` query parameter
-      (OpenAI, Azure GA) or ``deployment`` (the Azure preview); the model of
-      an OpenAI or Azure realtime session is fixed at connect. None —
+      (OpenAI, Azure GA) or ``deployment`` (the Azure preview) — a later
+      ``session.update`` naming ``session.model`` is asked about again (see
+      ``AccessGate.authorize_request``). None —
       unknown — when the request names none or the upstream takes it from
       where the check cannot see it: a pass-through route, a multipart
       body, a route that runs no model or names it elsewhere (a batch's
@@ -967,9 +968,14 @@ class AccessGate(Protocol):
       frame sent; so does a first frame that is no setup naming a model, a
       later setup naming none, or a frame that is not JSON (the core's fixed
       text). An awaitable answer is bounded as above, and a connection
-      revoked while it runs forwards nothing more. The model of an OpenAI or
-      Azure realtime session is fixed at connect: their frames are never
-      asked about.
+      revoked while it runs forwards nothing more. On an OpenAI or Azure
+      realtime connection (whose upgrade names its model) a client frame of
+      type ``session.update`` whose ``session`` carries a ``model`` key is
+      checked the same way, at the same point: a non-empty string is asked
+      about with ``model`` = that value and ``model_in_frame`` False; any
+      other value closes the connection 1008 with the core's fixed text.
+      Every other frame of such a connection, one that is not JSON
+      included, is never asked about and goes as before.
     - OPTIONAL ``detection_overlay() -> DetectionOverlay | None`` — the
       detection this requester gets on top of the configured policy,
       tighten-only (``DetectionOverlay``): asked synchronously once per

@@ -671,24 +671,6 @@ async def test_detection_off_sends_the_setup_the_gate_checked(
     assert fake.texts() == [json.dumps({"setup": {"model": f"models/{ALLOWED}"}})]
 
 
-async def test_an_openai_session_update_naming_a_model_is_not_asked_again(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # OpenAI and Azure realtime sessions run the model the upgrade names
-    # (fixed at connect): their frames are never put to the model check.
-    gate = AuthorizingGate(lambda request: None)
-    _install(monkeypatch, gate)
-    update = json.dumps({"type": "session.update", "session": {"model": "other"}})
-    async with Upstream() as fake:
-        with _serve(_config("openai", fake.url())) as proxy:
-            url = f"ws://{proxy.host}/v1/realtime?model=gpt-realtime"
-            async with websockets.connect(url) as client:
-                await client.send(update)
-                await client.recv()
-    assert [(r.model, r.model_in_frame) for r in gate.requests] == [("gpt-realtime", False)]
-    assert len(fake.texts()) == 1
-
-
 @pytest.mark.parametrize(
     ("adapter", "name", "model"),
     [
@@ -723,11 +705,216 @@ async def test_a_setup_naming_no_model_reads_as_none(payload: Any) -> None:
 
 
 @pytest.mark.parametrize("cls", [realtime.OpenAIRealtimeWs, realtime.AzureRealtimeWs])
-async def test_openai_vocabulary_adapters_take_no_model_from_a_frame(cls: Any) -> None:
+async def test_openai_vocabulary_adapters_read_session_update_models(cls: Any) -> None:
     adapter = cls()
-    frame = {"type": "session.update", "session": {"model": "x"}, "setup": {"model": "y"}}
-    assert not adapter.model_in_frame
-    assert not adapter.sets_model(frame) and adapter.frame_model(frame) is None
+    assert not adapter.model_in_frame and adapter.model_in_update
+    update = {"type": "session.update", "session": {"model": "x"}}
+    assert adapter.sets_model(update) and adapter.frame_model(update) == "x"
+    for frame in (
+        {"type": "session.update", "session": {"instructions": "hi"}},
+        {"type": "session.update", "session": None},
+        {"type": "response.create", "response": {"model": "x"}},
+        {"setup": {"model": "y"}},
+        [update],
+    ):
+        assert not adapter.sets_model(frame) and adapter.frame_model(frame) is None
+    for model in (None, "", 7, ["x"], {"id": "x"}):
+        unnamed = {"type": "session.update", "session": {"model": model}}
+        assert adapter.sets_model(unnamed) and adapter.frame_model(unnamed) is None
+
+
+# --- an OpenAI/Azure session.update naming session.model ----------------------------
+
+UPGRADE_MODELS = {"openai": "gpt-realtime", "azure": "d"}
+OPENAI_PATHS = {"openai": "/v1/realtime?model=gpt-realtime", "azure": PATHS["azure"]}
+
+
+def _update(**session: Any) -> str:
+    return json.dumps({"type": "session.update", "session": session})
+
+
+def _upgrade_models_only(allowed: str) -> Callable[[AuthorizationRequest], str | None]:
+    """Admits the upgrade's own model; a frame's model must be ``allowed``."""
+
+    def decide(request: AuthorizationRequest) -> str | None:
+        if request.model in UPGRADE_MODELS.values() or request.model == allowed:
+            return None
+        return REASON
+
+    return decide
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "awaitable"])
+@pytest.mark.parametrize("provider", ["openai", "azure"])
+async def test_an_admitted_session_update_model_is_relayed(
+    monkeypatch: pytest.MonkeyPatch, provider: str, asynchronous: bool
+) -> None:
+    policy = _upgrade_models_only("gpt-realtime-mini")
+
+    async def later(request: AuthorizationRequest) -> str | None:
+        await asyncio.sleep(0)
+        return policy(request)
+
+    gate = AuthorizingGate(later if asynchronous else policy)
+    _install(monkeypatch, gate)
+    async with Upstream() as fake:
+        with _serve(_config(provider, fake.url())) as proxy:
+            async with websockets.connect(f"ws://{proxy.host}{OPENAI_PATHS[provider]}") as client:
+                await client.send(_update(model="gpt-realtime-mini", instructions="be brief"))
+                await client.recv()
+                await client.send(_frame(provider, f"mail {EMAIL}"))
+                await client.recv()
+            row = await _recent(proxy.host, lambda r: r["method"] == "WS")
+    upgrade, update = gate.requests
+    assert (upgrade.model, upgrade.model_in_frame) == (UPGRADE_MODELS[provider], False)
+    assert update == dataclasses.replace(upgrade, model="gpt-realtime-mini")
+    first, second = fake.texts()
+    assert json.loads(first)["session"]["model"] == "gpt-realtime-mini"
+    assert EMAIL not in second and row["status"] == 101
+
+
+@pytest.mark.parametrize("provider", ["openai", "azure"])
+async def test_a_refused_session_update_model_is_never_forwarded(
+    monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    gate = AuthorizingGate(_upgrade_models_only("gpt-realtime-mini"))
+    _install(monkeypatch, gate)
+    async with Upstream() as fake:
+        with _serve(_config(provider, fake.url())) as proxy:
+            client = await _connect(f"ws://{proxy.host}{OPENAI_PATHS[provider]}")
+            await client.send(_frame(provider, "plain words"))
+            await client.recv()
+            await client.send(_update(model="gpt-4o-realtime", instructions=f"mail {EMAIL}"))
+            closed = await _closed(client)
+            row = await _recent(proxy.host, lambda r: r["method"] == "WS")
+            refused_once(proxy.state, "authorization", provider)
+            stored = len(proxy.state.vault)
+    assert closed is not None and (closed.code, closed.reason) == (1008, REASON)
+    assert (row["status"], row["user"]) == (403, "ada")
+    assert [r.model for r in gate.requests] == [UPGRADE_MODELS[provider], "gpt-4o-realtime"]
+    assert len(fake.texts()) == 1 and stored == 0  # the update never sent or numbered
+
+
+@pytest.mark.parametrize("model", [None, "", 7, ["gpt-realtime"]], ids=repr)
+async def test_a_session_update_model_that_is_no_name_closes(
+    monkeypatch: pytest.MonkeyPatch, model: Any
+) -> None:
+    gate = AuthorizingGate(lambda request: None)
+    _install(monkeypatch, gate)
+    async with Upstream() as fake:
+        with _serve(_config("openai", fake.url())) as proxy:
+            client = await _connect(f"ws://{proxy.host}/v1/realtime?model=gpt-realtime")
+            await client.send(_update(model=model))
+            closed = await _closed(client)
+            row = await _recent(proxy.host, lambda r: r["method"] == "WS")
+            refused_once(proxy.state, "authorization", "openai")
+    reason = realtime.OpenAIRealtimeWs.no_model_reason
+    assert len(reason.encode()) <= 123
+    assert closed is not None and (closed.code, closed.reason) == (1008, reason)
+    assert row["status"] == 403 and fake.texts() == [] and len(gate.requests) == 1
+
+
+async def test_a_failing_session_update_check_closes_with_the_core_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def decide(request: AuthorizationRequest) -> Any:
+        return None if request.model == "gpt-realtime" else 1 / 0
+
+    _install(monkeypatch, AuthorizingGate(decide))
+    async with Upstream() as fake:
+        with _serve(_config("openai", fake.url())) as proxy:
+            client = await _connect(f"ws://{proxy.host}/v1/realtime?model=gpt-realtime")
+            await client.send(_update(model="other"))
+            closed = await _closed(client)
+            await _recent(proxy.host, lambda r: r["method"] == "WS")
+            refused_once(proxy.state, "authorization", "openai")
+            faults = proxy.state.bookkeeping_errors[AUTHORIZATION_STAGE]
+    assert closed is not None and (closed.code, closed.reason) == (1008, AUTHORIZATION_FAULT)
+    assert faults == 1 and fake.texts() == []
+
+
+async def test_a_revocation_during_an_awaited_session_update_check_forwards_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxies: list[Any] = []
+
+    async def decide(request: AuthorizationRequest) -> None:
+        if request.model == "other":
+            proxies[0].state.connections.close(subject="ada", reason="access revoked")
+
+    _install(monkeypatch, AuthorizingGate(decide))
+    async with Upstream() as fake:
+        with _serve(_config("openai", fake.url())) as proxy:
+            proxies.append(proxy)
+            client = await _connect(f"ws://{proxy.host}/v1/realtime?model=gpt-realtime")
+            await client.send(_update(model="other"))
+            closed = await _closed(client)
+            await _upstream_closed_once(fake)
+    assert closed is not None and (closed.code, closed.reason) == (1008, "access revoked")
+    assert fake.texts() == []
+
+
+@pytest.mark.parametrize("detection", [True, False])
+async def test_frames_without_a_session_model_go_as_before(
+    monkeypatch: pytest.MonkeyPatch, detection: bool
+) -> None:
+    # A session.update without session.model, any other event and a frame
+    # that is not JSON: never asked about, never refused for it.
+    gate = AuthorizingGate(lambda request: None)
+    _install(monkeypatch, gate)
+    frames = [
+        _update(instructions="be brief"),
+        json.dumps({"type": "response.create", "response": {"model": "x"}}),
+        "not json at all",
+    ]
+    async with Upstream() as fake:
+        config = _cfg({"openai": {"upstream_base_url": fake.url(), "detection": detection}})
+        with _serve(config) as proxy:
+            url = f"ws://{proxy.host}/v1/realtime?model=gpt-realtime"
+            async with websockets.connect(url) as client:
+                for frame in frames:
+                    await client.send(frame)
+                    await client.recv()
+    assert len(gate.requests) == 1
+    if detection:
+        assert len(fake.texts()) == 3 and fake.texts()[2] == "not json at all"
+    else:
+        assert fake.texts() == frames  # byte-identical, as without the member
+
+
+async def test_with_detection_off_a_checked_update_is_sent_as_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A repeated `model` key: the check reads the last occurrence, and the
+    # frame is re-serialized from that reading.
+    gate = AuthorizingGate(_upgrade_models_only("gpt-realtime-mini"))
+    _install(monkeypatch, gate)
+    frame = '{"type": "session.update", "session": {"model": "x", "model": "gpt-realtime-mini"}}'
+    async with Upstream() as fake:
+        config = _cfg({"openai": {"upstream_base_url": fake.url(), "detection": False}})
+        with _serve(config) as proxy:
+            url = f"ws://{proxy.host}/v1/realtime?model=gpt-realtime"
+            async with websockets.connect(url) as client:
+                await client.send(frame)
+                await client.recv()
+    assert [r.model for r in gate.requests] == ["gpt-realtime", "gpt-realtime-mini"]
+    assert fake.texts() == [_update(model="gpt-realtime-mini")]
+
+
+@pytest.mark.parametrize("gate", ["none", "overlay-only"])
+async def test_without_authorize_request_a_session_update_model_is_not_checked(
+    monkeypatch: pytest.MonkeyPatch, gate: str
+) -> None:
+    from test_access_seam import FakeGate
+
+    _install(monkeypatch, FakeGate() if gate == "none" else OverlayGate(None))
+    async with Upstream() as fake:
+        with _serve(_config("openai", fake.url())) as proxy:
+            async with websockets.connect(f"ws://{proxy.host}/v1/realtime") as client:
+                for model in ("anything", 7):
+                    await client.send(_update(model=model))
+                    await client.recv()
+    assert [json.loads(t)["session"]["model"] for t in fake.texts()] == ["anything", 7]
 
 
 async def test_a_revocation_landing_with_the_awaited_answer_forwards_nothing(

@@ -57,8 +57,11 @@ access gate that authorizes requests (its optional ``authorize_request``),
 the gate is asked again with that model for the connection's first client
 frame — which must be a setup naming one — and for every later setup, FIRST:
 before the session router's frame check, the frame's floors, redaction and
-send. A refusal closes the connection 1008, nothing of the frame sent; a
-connection revoked while an awaited answer runs forwards nothing more.
+send. On OpenAI and Azure realtime connections, whose upgrade names the
+model, a ``session.update`` whose ``session`` carries ``model`` is checked
+the same way (``WsAdapter.model_in_update``); other frames go as before. A
+refusal closes the connection 1008, nothing of the frame sent; a connection
+revoked while an awaited answer runs forwards nothing more.
 
 Reloads: a connection is served under the admission it was opened with
 (``RealtimeRelay``). A reload that changes it — the provider's settings, the
@@ -192,6 +195,10 @@ def websockets_available() -> bool:
     return True
 
 
+# The close reason of a later Live setup naming no model (``_FrameModels``).
+SETUP_MODEL = "llm-redact: a setup frame must name its model; the frame was not forwarded"
+
+
 class WsAdapter:
     """Base realtime adapter: path matching plus per-frame rewriting.
 
@@ -223,6 +230,14 @@ class WsAdapter:
     # an access gate that authorizes requests, the relay asks again with the
     # model the frame names (``frame_model``) before forwarding anything.
     model_in_frame = False
+    # True when a client frame MAY change the model the upgrade named (an
+    # OpenAI-vocabulary ``session.update`` carrying ``session.model``): with
+    # an access gate that authorizes requests, such a frame is asked about
+    # like a Live setup; every other frame goes as before.
+    model_in_update = False
+    # The close reason of a frame that sets the model to something other
+    # than a non-empty string (``sets_model`` true, ``frame_model`` None).
+    no_model_reason = SETUP_MODEL
 
     def request_model(self, path: str, query: QueryParams) -> str | None:
         """The model the upstream runs this connection with, as far as the
@@ -234,12 +249,14 @@ class WsAdapter:
 
     def sets_model(self, payload: Any) -> bool:
         """Whether this parsed client frame can choose the connection's model
-        (a ``model_in_frame`` adapter's setup message, whatever it holds)."""
+        (a ``model_in_frame`` adapter's setup message, a ``model_in_update``
+        adapter's model update — whatever it holds)."""
         return False
 
     def frame_model(self, payload: Any) -> str | None:
-        """The model this parsed client frame's setup names, read as the HTTP
-        adapter reports a model; None when it names none."""
+        """The model this parsed client frame names, read as the HTTP adapter
+        reports a model; None when it names none (or not as a non-empty
+        string)."""
         return None
 
     def redact_message(
@@ -417,11 +434,30 @@ class OpenAIRealtimeWs(WsAdapter):
     def matches(self, path: str) -> bool:
         return path == "/v1/realtime" or path.startswith("/v1/realtime/")
 
+    # A `session.update` naming `session.model` is put to the access gate
+    # like a Live setup (conservative: whatever the API makes of it).
+    model_in_update = True
+    no_model_reason = (
+        "llm-redact: session.update must name session.model as a non-empty string;"
+        " the frame was not forwarded"
+    )
+
     def request_model(self, path: str, query: QueryParams) -> str | None:
         # The `model` query parameter of the realtime endpoint — unless the
         # session's model is set elsewhere: by its frames (a transcription
         # `intent`) or when the call was accepted (a SIP `call_id`).
         return _session_model(path == "/v1/realtime", query, "model")
+
+    def sets_model(self, payload: Any) -> bool:
+        if not isinstance(payload, dict) or payload.get("type") != "session.update":
+            return False
+        session = payload.get("session")
+        return isinstance(session, dict) and "model" in session
+
+    def frame_model(self, payload: Any) -> str | None:
+        if not self.sets_model(payload):
+            return None
+        return body_string(payload["session"], "model")
 
     def redact_message(
         self,
@@ -1546,9 +1582,14 @@ async def _admitted(
         _record_ws_refusal(state, adapter, path, 403, started, kind="sealed_session")
         await _reject(websocket, "the session router sealed this connection's vault session")
         return
-    # A connection whose model a setup frame names: the gate is asked again
-    # with that model before any of its frames is forwarded.
-    frame_request = request if request is not None and request.model_in_frame else None
+    # A connection whose model a setup frame names, or a frame may change
+    # (session.update): the gate is asked again with that model before the
+    # frame is forwarded.
+    frame_request = (
+        request
+        if request is not None and (adapter.model_in_frame or adapter.model_in_update)
+        else None
+    )
     await _relay(
         state, websocket, adapter, relay, static_ctx, path, started, overlay, frame_request
     )
@@ -1568,9 +1609,9 @@ async def _relay(
     """Dial, relay and record one admitted connection, under ``relay``'s
     admission until a reload revokes it — with the requester's detection
     overlay (built against the relay's own detection objects), if any, and,
-    when ``frame_request`` is given (the upgrade's facts, its model in a
-    setup frame), the access gate asked again with the model each setup
-    frame names (``_FrameModels``)."""
+    when ``frame_request`` is given (the upgrade's facts), the access gate
+    asked again with the model each setup frame or model update names
+    (``_FrameModels``)."""
     import websockets
 
     from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
@@ -1736,9 +1777,10 @@ async def _relay(
     # parsed for the router.
     observe_frames = state.observes_realtime_server_frames
 
-    # The access gate asked again with the model each setup frame names
-    # (its optional authorize_request; Gemini/Vertex Live): only with that
-    # member, so without it no frame is parsed for it.
+    # The access gate asked again with the model each setup frame or model
+    # update names (its optional authorize_request; Gemini/Vertex Live
+    # setups, OpenAI/Azure session.update): only with that member, so without
+    # it no frame is parsed for it.
     frame_models = (
         _FrameModels(state, adapter, frame_request, f"WS {path}")
         if frame_request is not None
@@ -1789,14 +1831,19 @@ async def _relay(
                 data = message.get("bytes") or b""
             try:
                 parsed: tuple[Any, bool] | None = None
+                # Whether the gate checked a model this frame names: then it
+                # is sent as the check read it, even with detection = false.
+                model_checked = False
                 if frame_models is not None:
-                    # The access gate's check of the model a setup frame
-                    # names, FIRST: the connection's first frame must be a
-                    # setup naming one, a later setup is checked alike, and a
-                    # frame that is not JSON (its model unknowable) is
-                    # refused. Its parse is handed on, never parsed twice.
+                    # The access gate's check of the model a frame names,
+                    # FIRST: on Live the first frame must be a setup naming
+                    # one, a later setup is checked alike, and a frame that
+                    # is not JSON (its model unknowable) is refused; on
+                    # OpenAI/Azure a session.update carrying session.model is
+                    # checked. Its parse is handed on, never parsed twice.
                     parsed = parse_client_frame(data)
                     verdict = frame_models.verdict(parsed)
+                    model_checked = frame_models.checked
                     if inspect.isawaitable(verdict):
                         verdict = await verdict
                         if relay.revoked is not None:
@@ -1850,7 +1897,11 @@ async def _relay(
                     # stays active), the same off-switch as the HTTP path —
                     # as the frame check read it when it read it (a repeated
                     # key's earlier occurrence never leaves), else untouched.
-                    outbound = data if parsed is None else _dump_frame(*parsed)
+                    outbound = (
+                        data
+                        if parsed is None or not (check_frames or model_checked)
+                        else _dump_frame(*parsed)
+                    )
                 else:
                     # One vault transaction per frame, committed before the
                     # frame is sent (run_batched).
@@ -2121,7 +2172,6 @@ class _FrameRefused(Exception):
 # The close reasons of a frame the core cannot put to the access gate's model
 # check (``_FrameModels``); each fits a close frame's 123 bytes.
 SETUP_FIRST = "llm-redact: the first frame must be a setup naming its model; nothing was forwarded"
-SETUP_MODEL = "llm-redact: a setup frame must name its model; the frame was not forwarded"
 FRAME_NOT_JSON = "llm-redact: a frame that is not JSON cannot be authorized; it was not forwarded"
 
 
@@ -2137,12 +2187,18 @@ class _ModelRefused(Exception):
 
 class _FrameModels:
     """The access gate's ``authorize_request`` asked about the model a
-    realtime connection's setup frames name (an adapter with
-    ``model_in_frame``: Gemini and Vertex Live), with the upgrade's facts
-    and ``model`` = that model, ``model_in_frame`` False. The connection's
-    first client frame must be a setup naming a model; every later frame
-    holding a setup must name one too and is checked alike; a frame that is
-    not JSON is refused (it could name a model the check cannot read)."""
+    realtime connection's frames name, with the upgrade's facts and
+    ``model`` = that model, ``model_in_frame`` False.
+
+    An adapter with ``model_in_frame`` (Gemini and Vertex Live): the
+    connection's first client frame must be a setup naming a model; every
+    later frame holding a setup must name one too and is checked alike; a
+    frame that is not JSON is refused (it could name a model the check
+    cannot read). An adapter with ``model_in_update`` (OpenAI, Azure): a
+    frame that sets the model (``session.update`` carrying
+    ``session.model``) must name it as a non-empty string and is checked;
+    every other frame, a frame that is not JSON included, goes as before.
+    ``checked``: whether the last frame's model was put to the gate."""
 
     def __init__(
         self,
@@ -2155,20 +2211,26 @@ class _FrameModels:
         self._adapter = adapter
         self._request = request
         self._where = where
-        self._first = True
+        self._first = adapter.model_in_frame
+        self.checked = False
 
     def verdict(self, parsed: tuple[Any, bool] | None) -> "str | None | Awaitable[str | None]":
         """None (forward the frame), a refusal's close reason, or an
         awaitable of either (the gate's bounded answer)."""
         first, self._first = self._first, False
+        self.checked = False
+        setup_first = self._adapter.model_in_frame
         if parsed is None:
-            return SETUP_FIRST if first else FRAME_NOT_JSON
+            if first:
+                return SETUP_FIRST
+            return FRAME_NOT_JSON if setup_first else None
         payload = parsed[0]
         if not self._adapter.sets_model(payload):
             return SETUP_FIRST if first else None
         model = self._adapter.frame_model(payload)
         if model is None:
-            return SETUP_FIRST if first else SETUP_MODEL
+            return SETUP_FIRST if first else self._adapter.no_model_reason
+        self.checked = True
         request = dataclasses.replace(self._request, model=model, model_in_frame=False)
         return self._authorization.refusal(request, self._where)
 

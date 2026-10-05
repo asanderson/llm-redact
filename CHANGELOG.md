@@ -22,8 +22,9 @@ and tags `vX.Y.Z`.
   refusal, a failed check, a setup naming none or a frame that is not JSON closes the
   connection 1008 (row 403, kind `authorization`), nothing of the frame sent. A connection
   revoked (reload, access) while an awaited answer runs forwards nothing more. Without the
-  member nothing changes. OpenAI and Azure realtime sessions keep the model their upgrade
-  names (fixed at connect).
+  member nothing changes. On OpenAI and Azure realtime connections a `session.update` whose
+  `session` carries `model` is checked the same way (a non-empty string asked about as
+  `model`; any other value closes 1008); every other frame goes as before.
 - An access gate's `status()` may report a `posture` list in the `/status` `users` block:
   short lines it wants shown as posture warnings (llm-redact-pro: roles in audit mode).
   `llm-redact status` prints each in its posture block (`--json` shows the list). The core

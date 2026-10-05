@@ -253,6 +253,72 @@
           "refId": "A"
         }
       ]
+    },
+    { "type": "row", "title": "NER coverage", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 59 } },
+    {
+      "type": "timeseries",
+      "title": "NER strings by backend and outcome",
+      "description": "llm_redact_ner_strings_total: strings handed to each NER backend ([detection.ner]), one outcome each: scanned_whole (read in one model call), scanned_windowed (read in overlapping windows), skipped_max_chars (longer than max_chars: the model never read it, the regex rules still did). Restarts from zero when a reload rebuilds the detectors.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 },
+      "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (backend, outcome) (rate(llm_redact_ner_strings_total[5m]))",
+          "legendFormat": "{{backend}} {{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "NER strings SKIPPED (longer than max_chars) by backend",
+      "description": "Strings no NER model read because they are longer than [detection.ner] max_chars: names and other contextual values in them were not looked for (the regex rules still scanned them). The LlmRedactNerSkippingLongStrings alert reads it; raise max_chars if long strings hold names (docs/troubleshooting.md).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 },
+      "fieldConfig": { "defaults": { "unit": "cps", "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_strings_total{outcome=\"skipped_max_chars\"}[5m]))",
+          "legendFormat": "{{backend}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "NER windows by backend",
+      "description": "llm_redact_ner_windows_total: the windows long strings were read in (model calls for the windowed strings).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
+      "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_windows_total[5m]))",
+          "legendFormat": "{{backend}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "NER entities dropped by backend",
+      "description": "Model entities never redacted: labels = their type cannot be a placeholder type (llm_redact_ner_labels_dropped_total; usually an [detection.ner] entities entry that cannot be one), offsets = the scanned string does not contain their span (llm_redact_ner_offsets_dropped_total). Both should stay at zero.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
+      "fieldConfig": { "defaults": { "unit": "cps", "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_labels_dropped_total[5m]))",
+          "legendFormat": "{{backend}} labels",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_offsets_dropped_total[5m]))",
+          "legendFormat": "{{backend}} offsets",
+          "refId": "B"
+        }
+      ]
     }
   ]
 }

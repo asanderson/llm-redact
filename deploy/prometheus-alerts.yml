@@ -91,3 +91,16 @@ groups:
         annotations:
           summary: "llm-redact is refusing requests because its own storage fails"
           description: "the proxy answered {{ $value | printf \"%.2f\" }}/s requests itself with a 503 over 5m (kind audit_unavailable or vault_fault, llm_redact_local_refusals_total) — check the audit and vault databases (disk, permissions, the RDBMS)."
+
+      # NER coverage gap: strings longer than [detection.ner] max_chars are
+      # never read by the NER models (the regex rules still scan them), so
+      # names in pasted documents or large tool results go undetected. A
+      # sustained rate means such strings are routine traffic, not outliers.
+      - alert: LlmRedactNerSkippingLongStrings
+        expr: sum by (backend) (rate(llm_redact_ner_strings_total{outcome="skipped_max_chars"}[15m])) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "llm-redact NER is skipping strings longer than max_chars"
+          description: "the {{ $labels.backend }} NER backend skipped {{ $value | printf \"%.3f\" }} strings/s over 15m as longer than [detection.ner] max_chars: the regex rules still scanned them, but names and other contextual values in them were not looked for. If long strings carry names (pasted documents, large tool results), raise max_chars (each window costs model time); otherwise accept the gap. llm-redact status shows the same as a posture line; see docs/troubleshooting.md (\"NER skipped\")."

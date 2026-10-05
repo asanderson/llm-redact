@@ -16,8 +16,8 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | File | What it is |
 |---|---|
 | `deploy/prometheus-scrape.yml` | A `scrape_configs` job to merge into your `prometheus.yml`. |
-| `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage). |
-| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes). |
+| `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage, NER skipping strings longer than `max_chars`). |
+| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, windows, entities dropped). |
 
 ## Metrics reference
 
@@ -131,6 +131,10 @@ answers — none of them is a request the proxy refused to forward.
    your models; llm-redact-pro's package carries one at 30 s).
    **`LlmRedactLocalFaultRefusals`** pages when the proxy refuses requests
    because its own vault or audit storage fails.
+   **`LlmRedactNerSkippingLongStrings`** warns when an NER backend keeps
+   skipping strings longer than `[detection.ner] max_chars` for 30 minutes:
+   the regex rules still scanned them, but names in them were not looked for
+   (raise `max_chars` if such strings carry names; docs/troubleshooting.md).
 3. **Visualize.** Import `deploy/grafana-dashboard.json` (Dashboards → Import),
    pick your Prometheus data source. The warn/block panels are colored to stand
    out because they represent values leaving the box or traffic being rejected.

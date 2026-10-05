@@ -11,6 +11,17 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+- `[detection.ner] score_threshold` survives `llm-redact config show` and every config
+  rewrite when `hf` is the only backend that emits confidences: the emitter wrote it only
+  for `gliner` and `presidio`, while the parser accepts it for `hf` too (one shared
+  `CONFIDENCE_BACKENDS` list now). An `hf`-only threshold was silently dropped, and the
+  dashboard editor's round-trip check refused every save of such a configuration.
+- The `hf` NER backend maps the exact text the request carried (`text[start:end]`), never
+  the pipeline's decoded `word`, which can differ (casing, spacing, unknown-token marks):
+  a restored value is always the one the user sent. An entity whose offsets fall outside
+  the scanned string is skipped.
+
 ## [1.11.0] - 2026-10-05
 
 Access-control seams for role- and attribute-based policies. The access gate can now

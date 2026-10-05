@@ -104,6 +104,52 @@ def test_hf_entity_mapping_and_filter() -> None:
     ]
 
 
+class _ScriptedHfPipe:
+    """Returns exactly the entities it was given (offsets as the pipeline
+    reported them), whatever the text."""
+
+    def __init__(self, ents: list[dict[str, object]]) -> None:
+        self._ents = ents
+
+    def __call__(self, text: str) -> list[dict[str, object]]:
+        return list(self._ents)
+
+
+def test_hf_value_is_the_source_slice_not_the_decoded_word() -> None:
+    # transformers builds `word` with convert_tokens_to_string, which can
+    # differ from what the user sent (lowercased, re-spaced, [UNK]); the
+    # vault must map the exact sent text or rehydration restores text the
+    # user never wrote.
+    text = "hi JANE  Doe!"
+    pipe = _ScriptedHfPipe(
+        [{"entity_group": "PER", "score": 0.99, "word": "jane doe", "start": 3, "end": 12}]
+    )
+    det = HfDetector(pipe, frozenset({"PER"}), max_chars=1000, threshold=0.5)
+    (found,) = det.detect(text)
+    assert found.value == text[3:12] == "JANE  Doe"
+    assert (found.start, found.end) == (3, 12)
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [(-1, 4), (3, 3), (5, 3), (10, 14), (14, 15), (0, 14)],
+    ids=["negative", "empty", "reversed", "past-end", "beyond", "one-past-len"],
+)
+def test_hf_out_of_range_offsets_are_skipped(start: int, end: int) -> None:
+    text = "hi Jane Doe!!"  # 13 characters
+    good = {"entity_group": "PER", "score": 0.9, "word": "Jane", "start": 3, "end": 7}
+    bad = {"entity_group": "PER", "score": 0.9, "word": "x", "start": start, "end": end}
+    det = HfDetector(_ScriptedHfPipe([bad, good]), frozenset({"PER"}), 1000, 0.5)
+    assert [(d.start, d.end, d.value) for d in det.detect(text)] == [(3, 7, "Jane")]
+
+
+def test_hf_span_ending_exactly_at_the_text_end_is_kept() -> None:
+    text = "Jane"
+    pipe = _ScriptedHfPipe([{"entity_group": "PER", "score": 0.9, "start": 0, "end": 4}])
+    det = HfDetector(pipe, frozenset({"PER"}), 1000, 0.5)
+    assert [d.value for d in det.detect(text)] == ["Jane"]
+
+
 def test_hf_score_threshold_filters() -> None:
     low = HfDetector(_FakeHfPipe(score=0.30), frozenset({"PER"}), max_chars=1000, threshold=0.5)
     assert list(low.detect("hi Jane Doe")) == []  # below threshold → dropped

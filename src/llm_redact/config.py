@@ -1539,6 +1539,14 @@ def _parse_audit_azure(raw: object) -> AzureAuditConfig:
     )
 
 
+# The NER backends that emit per-entity confidences, so the only ones
+# `[detection.ner] score_threshold` applies to (spaCy and Stanza emit none).
+# One definition for the parser and the emitter: an emitter that knew fewer
+# backends than the parser accepts dropped an hf-only threshold on the way
+# out (`config show`, the pro editor's round-trip check).
+CONFIDENCE_BACKENDS = ("gliner", "presidio", "hf")
+
+
 # Deny placeholder types must stay inside the token grammar and leave room
 # for the numeric suffix within MAX_PLACEHOLDER_LEN.
 _DENY_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,19}\Z")
@@ -2478,12 +2486,11 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     _require_keys(models_raw, set(known_backends), "[detection.ner.models]")
     models = tuple(sorted((str(k), str(v)) for k, v in models_raw.items()))
     active = backends if backends is not None else (backend_name,)
-    _confidence_backends = ("gliner", "presidio", "hf")
-    if "score_threshold" in ner_raw and not any(b in _confidence_backends for b in active):
+    if "score_threshold" in ner_raw and not any(b in CONFIDENCE_BACKENDS for b in active):
         # spaCy and stanza emit no per-entity confidences; a silently ignored
         # knob would violate the reject-unknown-keys spirit.
         raise ConfigError(
-            f"[detection.ner] score_threshold requires one of {_confidence_backends} backends"
+            f"[detection.ner] score_threshold requires one of {CONFIDENCE_BACKENDS} backends"
         )
     default_ner = NerConfig()
     ner = NerConfig(

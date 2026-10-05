@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from llm_redact.config import (
+    CONFIDENCE_BACKENDS,
     DEFAULT_MAP_WRITE_WAIT_SECONDS,
     EXTRACTION_CLASSES,
     EXTRACTION_DEFAULT_SERVICE_FORMATS,
@@ -427,7 +428,7 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
     lines.append(f"language = {_toml_str(ner.language)}")
     if ner.model is not None:
         lines.append(f"model = {_toml_str(ner.model)}")
-    if any(b in ("gliner", "presidio") for b in ner.active_backends()):
+    if any(b in CONFIDENCE_BACKENDS for b in ner.active_backends()):
         # parse_config rejects score_threshold without a confidence backend.
         lines.append(f"score_threshold = {ner.score_threshold}")
     if ner.models:

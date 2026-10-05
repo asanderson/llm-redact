@@ -55,11 +55,21 @@ class HfDetector:
             start, end = ent.get("start"), ent.get("end")
             if start is None or end is None:
                 continue
+            start, end = int(start), int(end)
+            if not 0 <= start < end <= len(text):
+                # A span the text does not contain cannot be redacted (or
+                # restored) faithfully: skip it rather than guess.
+                continue
             yield Detection(
-                start=int(start),
-                end=int(end),
+                start=start,
+                end=end,
                 detector_type=label,
-                value=str(ent.get("word", text[int(start) : int(end)])),
+                # The source slice, never the pipeline's decoded `word`
+                # (convert_tokens_to_string can differ from what the user
+                # sent: casing, spacing, [UNK]) — the vault must map the
+                # exact sent text, or rehydration restores a value the user
+                # never wrote.
+                value=text[start:end],
                 priority=NER_PRIORITY,
             )
 

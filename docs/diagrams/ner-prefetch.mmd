@@ -1,0 +1,31 @@
+%% NER off the event loop: only DETECTION by a model moves to a worker
+%% thread; the redaction itself stays synchronous (one vault transaction).
+%% Code: src/llm_redact/ner_prefetch.py, detection/engine.py (DetectorPlan,
+%% FairLock), redactor.py (with_precomputed). Docs: docs/how-it-works.md.
+%% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+%% animate: the messages appear in order; scripts/animate_diagrams.py renders the
+%% animated SVG + GIF committed next to this source (a '%% animate' marker opts in).
+sequenceDiagram
+    autonumber
+    participant E as Event loop (proxy)
+    participant W as NER worker thread
+    participant N as NER model<br/>(one lock per model)
+    participant V as Vault (local)
+
+    Note over E: a JSON body, an upload or a realtime frame
+    E->>E: collecting pass: run the request's own redaction<br/>with a stand-in that only records the strings
+    E->>W: prefetch(unique strings)<br/>— one request's batch at a time
+    Note over E: free: other requests are answered meanwhile
+    loop each string
+        W->>N: take the lock, detect ONE string, release
+        N-->>W: raw detections
+    end
+    W-->>E: table: string → each model's detections
+    E->>E: synchronous redaction: regex rules + deny strings run,<br/>NER results come from the table
+    opt a string missing from the table (or a reload swapped the detectors)
+        E->>N: detect it inline, under the same lock — first come, first<br/>served: waits for at most the string the worker is on
+        N-->>E: detections (counted: prefetch_misses, inline_calls)
+    end
+    E->>V: new values → tokens, one transaction (no await inside)
+    V-->>E: «PERSON_001» …
+    Note over E,V: The outcome never depends on the table: it only moves where the models run.

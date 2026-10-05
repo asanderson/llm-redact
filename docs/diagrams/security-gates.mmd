@@ -22,7 +22,7 @@ flowchart TB
     ga -- "unrecognized traffic" --> pass([verbatim pass-through —<br/>never break the tool])
     ga -- matched --> g4{"④ body size<br/>≤ max_body_bytes?"}
     g4 -- "too large to redact" --> r4([413 — nothing sent upstream])
-    g4 -- ok --> g5{"⑤ detection + per-rule modes<br/>deny strings win every overlap,<br/>then rules + allowlists<br/>(scoped by [detection] languages);<br/>redact / warn / block;<br/>[detection.mcp] exempt_servers<br/>blocks bypass this gate"}
+    g4 -- ok --> g5{"⑤ detection + per-rule modes<br/>deny strings win every overlap,<br/>then rules + allowlists<br/>(scoped by [detection] languages)<br/>+ optional local NER (run off the<br/>event loop, coverage counted);<br/>redact / warn / block;<br/>[detection.mcp] exempt_servers<br/>blocks bypass this gate"}
 
     g5 -- "block-mode match" --> r5([400, type only —<br/>nothing sent upstream])
     g5 -- "redact (default)" --> g6{"⑥ write-ahead audit<br/>[audit] required only:<br/>START row durably committed?"}

@@ -12,6 +12,9 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- docs/how-it-works.md shows NER off the event loop in a new animated `ner-prefetch`
+  diagram; the `sequence-chat` and `security-gates` diagrams and the gate ⑤ row of
+  docs/security-dataflows.md include it.
 - `[detection.ner]` model-source keys: `allow_download` (default `false`), `allow_pickle_weights`
   (default `false`; `hf` only) and `[detection.ner.revisions]` (per `gliner`/`hf` backend, a full
   40-character commit id; a branch or tag name such as `main` is a config error because it moves).

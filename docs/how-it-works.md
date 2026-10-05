@@ -18,7 +18,7 @@ namespaces.
 
 A request round trip, using an email as the private value:
 
-![Sequence diagram of a non-streaming request: detect, issue a vault token, forward placeholders, reverse-lookup on the response](diagrams/sequence-chat.svg)
+![Sequence diagram of a non-streaming request: collect the strings to scan, run NER on a worker thread, detect and issue vault tokens in one transaction, forward placeholders, reverse-lookup on the response](diagrams/sequence-chat.svg)
 
 *Animated: the messages appear in order. Static [PNG](diagrams/sequence-chat.png) · [GIF](diagrams/sequence-chat.gif) · [Mermaid source](diagrams/sequence-chat.mmd).*
 
@@ -54,6 +54,16 @@ result never depends on the table, and is counted (`inline_calls`,
 upload inspector's extracted texts are detected the same way once the
 inspector has read them, and a realtime frame read while a reload replaced
 the connection's detectors is closed (1012) without being sent.
+
+![Sequence diagram of NER off the event loop: a collecting pass on the event loop, the models run string by string on a worker thread under one lock per model, the synchronous redaction takes the precomputed results, and a string missing from them is detected inline after waiting for at most one string](diagrams/ner-prefetch.svg)
+
+*Animated: the messages appear in order. Static [PNG](diagrams/ner-prefetch.png) · [GIF](diagrams/ner-prefetch.gif) · [Mermaid source](diagrams/ner-prefetch.mmd).*
+
+Each model runs under one first-come, first-served lock, taken for one
+string at a time: a string the redaction must still detect inline (a
+table miss) waits for at most the string the worker is on, never the whole
+batch. A model fault refuses the request (nothing is forwarded), exactly as
+it did when the models ran inline.
 
 A request body with nothing to redact is forwarded as its original bytes
 (no parse-and-reserialize round trip). The one exception is a JSON object

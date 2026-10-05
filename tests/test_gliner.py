@@ -493,3 +493,26 @@ def test_real_model_finds_a_name_past_max_len(monkeypatch: pytest.MonkeyPatch) -
     # score_threshold reaches the model (the name scores about 0.94).
     strict = build_gliner_detector(NerConfig(enabled=True, backend="gliner", score_threshold=0.99))
     assert strict.detect("My colleague Jane Doe joined the call.") == []
+
+
+# knowledgator/gliner-pii-edge-v1.0 (Apache-2.0; self-contained: its own
+# tokenizer and encoder_config) at the catalog pin checked on 2026-10-05,
+# loaded from its int8 ONNX weights only ([detection.ner.onnx]).
+EDGE = "knowledgator/gliner-pii-edge-v1.0"
+EDGE_REVISION = "9b7f39b0a2da971a5beea78d35f1539d4009c891"
+EDGE_ONNX = "onnx/model_quint8.onnx"
+
+
+@pytest.mark.real_model
+def test_real_model_loads_onnx_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("gliner")
+    pytest.importorskip("onnxruntime")
+    offline_hub(monkeypatch)
+    files = ["gliner_config.json", "tokenizer.json", "tokenizer_config.json", EDGE_ONNX]
+    cached_snapshot(EDGE, EDGE_REVISION, files)
+    detector = build_gliner_detector(
+        NerConfig(enabled=True, backend="gliner", model=EDGE, onnx=(("gliner", EDGE_ONNX),))
+    )
+    assert getattr(detector._model, "onnx_model", False) is True
+    found = detector.detect("Please ask Jane Doe about the invoice.")
+    assert [(d.detector_type, d.value) for d in found] == [("PERSON", "Jane Doe")]

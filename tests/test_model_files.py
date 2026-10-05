@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -728,3 +729,97 @@ def test_a_folder_that_cannot_be_assembled_is_a_config_error(
     monkeypatch.setattr(model_files.tempfile, "mkdtemp", no_space)
     with pytest.raises(ConfigError, match=r"cannot assemble its local folder under .* \(OSError\)"):
         _gliner(monkeypatch, hub)
+
+
+# --- GLiNER ONNX weights ([detection.ner.onnx]) -----------------------------------
+
+ONNX_REPO = {**SELF_CONTAINED, "onnx/model_quint8.onnx": "int8", "model.safetensors": ""}
+
+
+def test_onnx_weights_load_through_gliner_and_only_they_are_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_redact.detection.model_files import GLINER_PATTERNS
+
+    hub = FakeHub(repos={"org/gliner-pii": ONNX_REPO}, default=None)
+    strict, _ = _gliner(
+        monkeypatch, hub, model="org/gliner-pii", onnx=(("gliner", "onnx/model_quint8.onnx"),)
+    )
+    [call] = hub.calls  # no second lookup for a pickle
+    assert "onnx/model_quint8.onnx" in call["allow_patterns"]
+    assert "model.safetensors" not in call["allow_patterns"]
+    assert set(call["allow_patterns"]) < {*GLINER_PATTERNS, "onnx/model_quint8.onnx"}
+    [(name, kwargs)] = strict.loaded
+    assert kwargs == {
+        "local_files_only": True,
+        "map_location": "cpu",
+        "load_onnx_model": True,
+        "onnx_model_file": "onnx/model_quint8.onnx",
+    }
+    assert _files(name) == {
+        "gliner_config.json",
+        "onnx/model_quint8.onnx",
+        "tokenizer.json",
+        "tokenizer_config.json",
+    }
+
+
+def test_an_assembled_folder_carries_the_onnx_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = {**URCHADE_REPO, "onnx/model.onnx": "onnx"}
+    strict, _ = _gliner(
+        monkeypatch, _two_repos(**{GLINER_SMALL: repo}), onnx=(("gliner", "onnx/model.onnx"),)
+    )
+    folder = Path(strict.loaded[0][0])
+    assert (folder / "onnx" / "model.onnx").read_text() == "onnx"
+    assert not (folder / "pytorch_model.bin").exists()
+
+
+def test_a_missing_onnx_file_is_a_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    hub = FakeHub(repos={"org/gliner-pii": SELF_CONTAINED}, default=None)
+    with pytest.raises(ConfigError) as caught:
+        _gliner(monkeypatch, hub, model="org/gliner-pii", onnx=(("gliner", "onnx/fp8.onnx"),))
+    assert str(caught.value) == (
+        "[detection.ner] gliner model 'org/gliner-pii' (no revision pinned) has no ONNX file"
+        " 'onnx/fp8.onnx' ([detection.ner.onnx] gliner)"
+    )
+
+
+def test_onnx_without_onnxruntime_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib.util
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a: None if name == "onnxruntime" else real(name, *a),
+    )
+    hub = FakeHub(repos={"org/gliner-pii": ONNX_REPO}, default=None)
+    with pytest.raises(ConfigError, match=r"\[detection.ner.onnx\] gliner needs onnxruntime"):
+        _gliner(
+            monkeypatch, hub, model="org/gliner-pii", onnx=(("gliner", "onnx/model_quint8.onnx"),)
+        )
+    assert hub.calls == []
+
+
+@pytest.mark.parametrize(
+    ("table", "message"),
+    [
+        ({"hf": "onnx/model.onnx"}, "hf: only the gliner backend loads ONNX weights"),
+        ({"gliner": "onnx/*.onnx"}, "gliner must be a .onnx file inside the model"),
+        ({"gliner": "../model.onnx"}, "gliner must be a .onnx file inside the model"),
+        ({"gliner": "/abs/model.onnx"}, "gliner must be a .onnx file inside the model"),
+        ({"gliner": "onnx/model.bin"}, "gliner must be a .onnx file inside the model"),
+        ({"gliner": 3}, "gliner must be a .onnx file inside the model"),
+        ("onnx/model.onnx", "must be a table of BACKEND"),
+    ],
+)
+def test_the_onnx_table_is_validated(table: object, message: str) -> None:
+    from llm_redact.config import parse_config
+
+    with pytest.raises(ConfigError, match=re.escape(f"[detection.ner.onnx] {message}")):
+        parse_config({"detection": {"ner": {"backend": "gliner", "onnx": table}}}, "t")
+    ok = parse_config(
+        {"detection": {"ner": {"backend": "gliner", "onnx": {"gliner": "onnx/m-1_q.onnx"}}}}, "t"
+    )
+    assert ok.detection.ner.onnx_for("gliner") == "onnx/m-1_q.onnx"
+    assert ok.detection.ner.onnx_for("hf") is None

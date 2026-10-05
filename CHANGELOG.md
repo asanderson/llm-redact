@@ -12,6 +12,10 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- `[detection.ner.onnx]`: the `gliner` backend can load a model's ONNX export through
+  onnxruntime (`gliner = "onnx/model_quint8.onnx"`, a file inside the model) instead of its
+  torch weights; only that file is fetched, never `model.safetensors` or `pytorch_model.bin`.
+  Only `gliner` takes an entry; a path with a wildcard or `..` is a config error.
 - `[detection.ner]` model-source keys: `allow_download` (default `false`), `allow_pickle_weights`
   (default `false`; `hf` only) and `[detection.ner.revisions]` (per `gliner`/`hf` backend, a full
   40-character commit id; a branch or tag name such as `main` is a config error because it moves).

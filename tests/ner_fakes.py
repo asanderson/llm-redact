@@ -10,6 +10,7 @@ scripted repository, writing its files into the session's throwaway home.
 """
 
 import fnmatch
+import importlib.machinery
 import json
 import os
 import sys
@@ -328,6 +329,10 @@ def install_gliner(
 
     module.GLiNER = types.SimpleNamespace(from_pretrained=from_pretrained)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "gliner", module)
+    # gliner depends on onnxruntime ([detection.ner.onnx] checks for it).
+    runtime = types.ModuleType("onnxruntime")
+    runtime.__spec__ = importlib.machinery.ModuleSpec("onnxruntime", None)
+    monkeypatch.setitem(sys.modules, "onnxruntime", runtime)
     fake_transformers(monkeypatch)
     if hub is not None:
         install_hub(monkeypatch, hub)

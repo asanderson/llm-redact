@@ -209,6 +209,23 @@ not pin loads at its newest cached revision, with a startup warning. A
 configuration naming code to import (`auto_map`) or a model type transformers
 does not know is refused.
 
+**ONNX weights for `gliner`.** `[detection.ner.onnx]` loads a GLiNER model's
+ONNX export through onnxruntime (installed with the `gliner` extra) instead
+of its torch weights: name the file inside the model, and only that file —
+never `model.safetensors` or `pytorch_model.bin` — is fetched or read:
+
+```toml
+[detection.ner.models]
+gliner = "knowledgator/gliner-pii-base-v1.0"
+
+[detection.ner.onnx]
+gliner = "onnx/model_quint8.onnx"   # the int8 export (Knowledgator ships model.onnx,
+                                    # model_fp16.onnx and model_quint8.onnx)
+```
+
+Only `gliner` takes an entry; the value must be a `.onnx` path inside the
+model (no wildcard, no `..`). A model that lacks the file is a startup error.
+
 ## How NER runs
 
 ![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model, the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)

@@ -127,6 +127,10 @@ class NerConfig:
     # through model_files.py; only the startup build may download
     # (build_detectors(startup=True)).
     revisions: tuple[tuple[str, str], ...] = ()
+    # [detection.ner.onnx]: backend -> repo-relative .onnx file (gliner
+    # only), stored sorted: that backend loads ONNX weights instead of torch
+    # ones (onnx_for).
+    onnx: tuple[tuple[str, str], ...] = ()
     allow_download: bool = False
     allow_pickle_weights: bool = False
 
@@ -139,6 +143,10 @@ class NerConfig:
                 return model
         active = self.active_backends()
         return self.model if len(active) == 1 else None
+
+    def onnx_for(self, backend: str) -> str | None:
+        """The ONNX file ``backend`` loads ([detection.ner.onnx]), or None."""
+        return dict(self.onnx).get(backend)
 
     def revision_for(self, backend: str) -> str | None:
         """The commit ``backend``'s model is pinned to: its

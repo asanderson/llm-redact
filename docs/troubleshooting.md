@@ -538,6 +538,16 @@ would build that encoder with `trust_remote_code`, which could run code from
 the model repository, so it is refused. Upgrade transformers if the type is
 newer than your version (`uv sync --extra gliner`), or pick another model.
 
+## "[detection.ner] gliner model '…' … has no ONNX file '…' ([detection.ner.onnx] gliner)" / "[detection.ner.onnx] gliner needs onnxruntime, which the gliner extra installs"
+
+`[detection.ner.onnx] gliner` names a file the model does not ship (check the
+model's "Files and versions" page: Knowledgator's GLiNER-PII models ship
+`onnx/model.onnx`, `onnx/model_quint8.onnx` and, except `-large`,
+`onnx/model_fp16.onnx`), or onnxruntime is missing — reinstall the extra:
+`uv sync --extra gliner`. Related: "[detection.ner.onnx] BACKEND: only the
+gliner backend loads ONNX weights" and "… must be a .onnx file inside the
+model" (no wildcard, no `..`, no absolute path).
+
 ## "[detection.ner] gliner base model '…' has no config.json"
 
 The base model a GLiNER checkpoint names lacks the configuration llm-redact

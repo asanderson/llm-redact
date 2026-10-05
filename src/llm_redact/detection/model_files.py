@@ -375,7 +375,8 @@ def gliner_model_dir(
     what = "gliner model"
     patterns: tuple[str, ...] = GLINER_PATTERNS
     if onnx_file is not None:
-        patterns = (*patterns, onnx_file)
+        # ONNX weights replace the torch ones: neither is fetched.
+        patterns = (*(p for p in patterns if p not in GLINER_WEIGHTS), onnx_file)
     path = resolve_model(
         model, what=what, revision=revision, allow_download=allow_download, allow_patterns=patterns
     )
@@ -387,6 +388,11 @@ def gliner_model_dir(
             revision=revision,
             allow_download=allow_download,
             allow_patterns=(*patterns, GLINER_PICKLE),
+        )
+    if onnx_file is not None and not (path / onnx_file).is_file():
+        raise _config_error(
+            f"[detection.ner] gliner model {model!r} {_revision_text(revision)} has no ONNX"
+            f" file {onnx_file!r} ([detection.ner.onnx] gliner)"
         )
     configs = check_configs(path, (GLINER_CONFIG, "tokenizer_config.json"), what=what, model=model)
     config = configs.get(GLINER_CONFIG)

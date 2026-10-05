@@ -390,6 +390,18 @@ messages from the same table: "a label needs at least one letter or digit"
 spellings of one label, such as `"first name"` and `FIRST_NAME`, mapped to
 different types: keep one), and "must be a table of LABEL = TYPE".
 
+## "[detection.ner.revisions] BACKEND must be a full 40-character lowercase hex commit id; branch and tag names (such as main) are refused because they move"
+
+A `[detection.ner.revisions]` value is not a commit id. A pin must name one
+commit for good, so write the full 40-character lowercase hex id from the
+model's page on the Hugging Face Hub ("Files and versions" → the commit, or
+`https://huggingface.co/api/models/ORG/MODEL/revision/main` → `sha`), not
+`main`, a tag or a shortened id. Related messages from the same table: "…
+BACKEND: a revision pins a Hugging Face Hub model, so only the gliner and hf
+backends take one" (an entry for `spacy`, `presidio` or `stanza`, whose
+models are not Hub snapshots: remove it) and "must be a table of BACKEND =
+"<40-character commit id>"". The message names the backend, never the value.
+
 ## "[detection.ner] entities […] match no entity the Presidio analyzer supports for language '…'"
 
 From `serve` / `serve --check` with the `presidio` backend: none of the

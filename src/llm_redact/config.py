@@ -21,6 +21,7 @@ from llm_redact.detection.engine import (
     NerConfig,
 )
 from llm_redact.detection.labels import normalize_label
+from llm_redact.detection.model_catalog import HUB_BACKENDS, REVISION_RE
 from llm_redact.placeholders import TYPE_NAME_RE
 
 if TYPE_CHECKING:
@@ -1578,6 +1579,32 @@ def _parse_ner_labels(labels_raw: object) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(labels.items()))
 
 
+def _parse_ner_revisions(revisions_raw: object) -> tuple[tuple[str, str], ...]:
+    """[detection.ner.revisions] BACKEND = "<commit>" -> sorted (backend,
+    commit) pairs. Only the Hugging Face Hub backends take a pin, and only
+    a full 40-character lowercase hex commit id: a branch or tag name
+    moves, which is what a pin is there to prevent. An entry for a backend
+    that is not active is kept, inert, like a [detection.ner.models] one.
+    Error messages name the backend, never the value."""
+    where = "[detection.ner.revisions]"
+    if not isinstance(revisions_raw, dict):
+        raise ConfigError(f'{where} must be a table of BACKEND = "<40-character commit id>"')
+    revisions: dict[str, str] = {}
+    for backend, revision in revisions_raw.items():
+        if backend not in HUB_BACKENDS:
+            raise ConfigError(
+                f"{where} {backend}: a revision pins a Hugging Face Hub model, so only the"
+                f" {' and '.join(HUB_BACKENDS)} backends take one"
+            )
+        if not isinstance(revision, str) or not REVISION_RE.fullmatch(revision):
+            raise ConfigError(
+                f"{where} {backend} must be a full 40-character lowercase hex commit id;"
+                " branch and tag names (such as main) are refused because they move"
+            )
+        revisions[str(backend)] = revision
+    return tuple(sorted(revisions.items()))
+
+
 def _parse_deny(detection_raw: dict[str, Any]) -> tuple[DenyEntry, ...]:
     """Both deny surfaces -> one canonical, sorted DenyEntry tuple.
 
@@ -2492,6 +2519,9 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
             "model",
             "models",
             "labels",
+            "revisions",
+            "allow_download",
+            "allow_pickle_weights",
         },
         "[detection.ner]",
     )
@@ -2533,6 +2563,13 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         model=str(ner_raw["model"]) if "model" in ner_raw else None,
         models=models,
         labels=_parse_ner_labels(ner_raw.get("labels", {})),
+        revisions=_parse_ner_revisions(ner_raw.get("revisions", {})),
+        # Accepted whichever backends are active, like a [detection.ner.models]
+        # entry: the dashboard editor keeps these keys from the file while a
+        # save switches backends, and a refusal there could not be fixed in
+        # the form.
+        allow_download=_bool_key(ner_raw, "allow_download", False, "[detection.ner]"),
+        allow_pickle_weights=_bool_key(ner_raw, "allow_pickle_weights", False, "[detection.ner]"),
     )
     if ner.enabled and languages is not None and ner.language.lower() not in languages:
         # Loud, not silent: an NER model scanning a language the deployment

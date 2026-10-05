@@ -1,0 +1,543 @@
+"""What llm-redact knows about NER models: licenses, pins, prompts, windows.
+
+One frozen :class:`CatalogEntry` per Hugging Face model (or model-id prefix)
+the NER backends may load. The catalog states facts and never refuses a
+model (the core warns; a policy plugin may enforce):
+
+* ``status``: ``vetted`` (a known-good choice), ``caution`` (configurable,
+  with the reason shown: for example not yet measured by the llm-redact
+  bench) or ``restricted`` (never suggested; a startup warning names the
+  reason);
+* ``reason``: one neutral, verifiable line (owner decision D14: a license
+  identifier, "not OSI-approved", "backbone: ...", "trained on <dataset>
+  (<license>)"; never a legal or procurement conclusion), shown with a link
+  to the model card and the date the facts were checked
+  (:meth:`CatalogEntry.describe`);
+* ``revision``: the commit a vetted or caution model loads at unless
+  ``[detection.ner.revisions]`` names another. Each pin is the model's
+  ``main`` commit on the check date, so a cache that an online load
+  refreshed since that commit already holds the pinned snapshot;
+* ``backbone`` / ``backbone_revision``: the base model a GLiNER checkpoint
+  names in ``gliner_config.json``. A pin is recorded only where the
+  checkpoint ships no tokenizer and no ``encoder_config`` (the backbone
+  then supplies both); a self-contained checkpoint needs no backbone files;
+* ``prompts``: per placeholder type, the GLiNER prompt the model was trained
+  on, sent instead of the generic one (:data:`labels.GLINER_PROMPTS`);
+* ``window``: the longest input one model call takes: tokens for ``hf``,
+  GLiNER words for ``gliner``. None: read it from the model's own config.
+
+Local model directories are identified by an optional sidecar file,
+:data:`SIDECAR_NAME` (``{"model_id": ..., "revision": ...}``), which
+``llm-redact models pull --to`` and model bundles write beside the files.
+
+Lookups are case-insensitive: the Hub resolves an id in any letter case to
+the same repository (``NVIDIA/GLINER-PII`` loads ``nvidia/gliner-PII``), so
+a case variant must not escape its entry. This module is data plus pure
+functions; it imports nothing heavy and logs nothing.
+"""
+
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+from typing import Literal
+
+from llm_redact.jsonwalk import json_text, loads_bounded
+
+# The date every fact below was read from the model cards and the Hub API
+# (https://huggingface.co/api/models/<id>/revision/main).
+CHECKED = "2026-10-05"
+
+Status = Literal["vetted", "caution", "restricted"]
+STATUSES: tuple[Status, ...] = ("vetted", "caution", "restricted")
+# Token-tagging schemes of `hf` models (BIO models run the transformers
+# pipeline's aggregation; BIOES/BILOU need constrained decoding).
+TAGGING_SCHEMES = ("bio", "bioes", "bilou")
+
+# Value-free provenance tags a policy can match on (llm-redact-pro's model
+# policy). Each is a neutral fact about the weights or their training data.
+LINEAGE_TAGS = frozenset(
+    {
+        "noncommercial",  # the weights' license permits non-commercial use only
+        "non-osi",  # the weights' license or terms are not OSI-approved
+        "llama-derived",  # training data generated with Llama models
+        "qwen-backbone",  # built on a Qwen model
+        "ai4privacy-restricted",  # trained on an AI4Privacy release with a restrictive license
+        "remote-code",  # loading needs trust_remote_code (llm-redact never enables it)
+        "undisclosed-training-data",  # the card does not name the training data
+        "nemotron-cc-by",  # trained on NVIDIA Nemotron-PII (CC BY 4.0: attribution)
+        "conll2003",  # trained on CoNLL-2003 (Reuters news)
+    }
+)
+
+# The NER backends whose models are Hugging Face Hub snapshots: the only
+# ones a revision pin or this catalog applies to (spaCy, Presidio and Stanza
+# load pip-installed or library-managed models).
+HUB_BACKENDS = ("gliner", "hf")
+# The model each Hub backend loads when the configuration names none (the
+# backends' own defaults; tests/test_model_catalog.py pins them equal).
+DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(
+    {"gliner": "urchade/gliner_small-v2.1", "hf": "dslim/bert-base-NER"}
+)
+
+# A full commit id. Branch and tag names move, so a pin is always this.
+REVISION_RE = re.compile(r"[0-9a-f]{40}")
+# A Hugging Face model id: an owner, "/", a name (letters, digits, "-",
+# "_", "."). The owner part is optional on the Hub for a few legacy models.
+MODEL_ID_RE = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*")
+
+# The model directory's identity file and the most of it ever read.
+SIDECAR_NAME = "llm-redact-model.json"
+MAX_SIDECAR_BYTES = 64 * 1024
+
+# The reason a configurable model carries until the bench has measured it.
+UNMEASURED = "not yet measured by the llm-redact bench"
+
+# The seven contextual types a PII model is recommended for (structured
+# types stay with the regex rules: models draw wider spans, and the longest
+# span wins overlap resolution).
+_CONTEXTUAL = (
+    "PERSON",
+    "ADDRESS",
+    "DATE_OF_BIRTH",
+    "PASSPORT",
+    "DRIVER_LICENSE",
+    "USERNAME",
+    "ACCOUNT_NUMBER",
+)
+
+
+@dataclass(frozen=True)
+class CatalogEntry:
+    """The facts about one model (or, with ``prefix``, every model whose id
+    starts with ``model_id``)."""
+
+    model_id: str
+    backends: tuple[str, ...]
+    # SPDX identifier, or LicenseRef-... for a license SPDX does not list.
+    license: str
+    status: Status
+    # One neutral line (D14); describe() adds the card link and check date.
+    reason: str
+    prefix: bool = False
+    # The card the reason is read from (default: the model's own page).
+    card: str = ""
+    checked: str = CHECKED
+    revision: str | None = None
+    backbone: str | None = None
+    backbone_revision: str | None = None
+    # What a redistribution or a model list should credit.
+    attribution: str = ""
+    lineage: tuple[str, ...] = ()
+    recommended_entities: tuple[str, ...] = ()
+    # Extra label map: normalized model label -> placeholder type, before
+    # the default folds (detection/labels.py).
+    labels: tuple[tuple[str, str], ...] = ()
+    # GLiNER prompt overrides: placeholder type -> the prompt sent for it.
+    prompts: tuple[tuple[str, str], ...] = ()
+    # Repo-relative ONNX weight files the gliner backend can load.
+    onnx_files: tuple[str, ...] = ()
+    tagging: str | None = None
+    window: int | None = None
+    # (distribution, minimum version) the model needs beyond the extras'.
+    min_versions: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def card_url(self) -> str:
+        return self.card or f"https://huggingface.co/{self.model_id}"
+
+    def prompt_for(self, type_name: str) -> str | None:
+        """The GLiNER prompt this model was trained on for ``type_name``,
+        or None (the generic prompt applies)."""
+        return dict(self.prompts).get(type_name)
+
+    def describe(self) -> str:
+        """The reason as a warning or a docs row shows it: the facts, the
+        card they come from and the date they were checked."""
+        who = f"{self.model_id}*" if self.prefix else self.model_id
+        return f"{who}: {self.reason} ({self.card_url}, checked {self.checked})"
+
+
+def _urchade_v21(size: str, backbone: str, backbone_revision: str, revision: str) -> CatalogEntry:
+    # urchade's v2.1 GLiNER checkpoints ship gliner_config.json and weights
+    # only: no tokenizer and no encoder_config, so the backbone named in
+    # gliner_config.json (model_name) supplies both and is pinned here.
+    model_id = f"urchade/gliner_{size}-v2.1"
+    default = " the gliner backend's default model;" if model_id == DEFAULT_MODELS["gliner"] else ""
+    return CatalogEntry(
+        model_id=model_id,
+        backends=("gliner",),
+        license="Apache-2.0",
+        status="vetted",
+        reason=(
+            f"Apache-2.0;{default} trained on urchade/pile-mistral-v0.1 (Apache-2.0); ships"
+            f" no tokenizer or encoder_config, so its backbone {backbone} (MIT) is pinned too"
+        ),
+        revision=revision,
+        backbone=backbone,
+        backbone_revision=backbone_revision,
+        attribution=f"{model_id} (Apache-2.0); GLiNER, arXiv:2311.08526",
+        recommended_entities=("PERSON",),
+    )
+
+
+# Knowledgator GLiNER-PII (developed with Wordcab), all four sizes created
+# 2025-09-24. Each checkpoint is self-contained: tokenizer files and an
+# encoder_config in gliner_config.json. Trained-prompt names from the card's
+# label lists, one per contextual type ("location address" is the card's
+# "street addresses" label; "location street" means street names only).
+_KNOWLEDGATOR_PROMPTS = (
+    ("PERSON", "name"),
+    ("ADDRESS", "location address"),
+    ("DATE_OF_BIRTH", "dob"),
+    ("PASSPORT", "passport number"),
+    ("DRIVER_LICENSE", "driver license"),
+    ("USERNAME", "username"),
+    ("ACCOUNT_NUMBER", "account number"),
+)
+# The card's GLiNER.cpp example runs these models with a 512 limit
+# (`gliner::Config{12, 512}`); gliner_config.json's max_len is larger
+# (2048 words; 768 for -large), and the deberta-v3 encoders of -base and
+# -large take 512 positions. The gliner backend's windows also check the
+# encoder's subword limit.
+_KNOWLEDGATOR_WINDOW = 512
+_ONNX_ALL = ("onnx/model.onnx", "onnx/model_fp16.onnx", "onnx/model_quint8.onnx")
+
+
+def _knowledgator(
+    size: str,
+    revision: str,
+    backbone: str,
+    *,
+    onnx_files: tuple[str, ...] = _ONNX_ALL,
+    min_versions: tuple[tuple[str, str], ...] = (),
+) -> CatalogEntry:
+    return CatalogEntry(
+        model_id=f"knowledgator/gliner-pii-{size}-v1.0",
+        backends=("gliner",),
+        license="Apache-2.0",
+        status="caution",
+        reason=(
+            f"Apache-2.0; backbone {backbone}; the card does not name the training"
+            f" data; {UNMEASURED}"
+        ),
+        revision=revision,
+        backbone=backbone,
+        attribution="GLiNER-PII by Knowledgator and Wordcab (Apache-2.0)",
+        lineage=("undisclosed-training-data",),
+        recommended_entities=_CONTEXTUAL,
+        prompts=_KNOWLEDGATOR_PROMPTS,
+        onnx_files=onnx_files,
+        window=_KNOWLEDGATOR_WINDOW,
+        min_versions=min_versions,
+    )
+
+
+# transformers learned ModernBERT (the ettin encoders' model_type) in 4.48.0.
+_MODERNBERT = (("transformers", "4.48.0"),)
+_AI4PRIVACY_400K = (
+    "ai4privacy/pii-masking-400k, whose license permits academic and non-commercial use only"
+)
+
+CATALOG: tuple[CatalogEntry, ...] = (
+    # --- vetted: the models users already run, pinned to main ---------------
+    CatalogEntry(
+        # main since 2024-10-08 (README edits; weights unchanged since 2024).
+        model_id="dslim/bert-base-NER",
+        backends=("hf",),
+        license="MIT",
+        status="vetted",
+        reason=(
+            "MIT; the hf backend's default model; bert-base-cased fine-tuned on CoNLL-2003"
+            " (Reuters news), labels PER, ORG, LOC, MISC; model.safetensors; no tokenizer.json"
+            " (the fast tokenizer is built from vocab.txt)"
+        ),
+        revision="d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",
+        attribution=(
+            "dslim/bert-base-NER (MIT); trained on CoNLL-2003 (Tjong Kim Sang and De Meulder, 2003)"
+        ),
+        lineage=("conll2003",),
+        recommended_entities=("PERSON",),
+        # CoNLL-2003's IOB1 variant: an entity may open with I-, B- only
+        # separates two adjacent entities of one type. The pipeline's
+        # aggregation reads it like BIO.
+        tagging="bio",
+    ),
+    # main since 2024-04-10; pytorch_model.bin only (GLiNER loads it with
+    # torch.load(weights_only=True)).
+    _urchade_v21(
+        "small",
+        "microsoft/deberta-v3-small",
+        "a36c739020e01763fe789b4b85e2df55d6180012",
+        "4e091416cf7c3481db542c2a3d26156916f3a47f",
+    ),
+    # main since 2024-08-21 (model.safetensors added beside the .bin).
+    _urchade_v21(
+        "medium",
+        "microsoft/deberta-v3-base",
+        "8ccc9b6f36199bec6961081d44eb72fb3f7353f3",
+        "40ec419335d09393f298636f471328b722c6da9e",
+    ),
+    # main since 2025-12-08 (model.safetensors added); a cache last
+    # refreshed before then holds 853ce23e47e5 instead.
+    _urchade_v21(
+        "multi",
+        "microsoft/mdeberta-v3-base",
+        "a0484667b22365f84929a935b5e50a51f71f159d",
+        "443d26d654e0324125a96bebd8e796c14ff2efe6",
+    ),
+    CatalogEntry(
+        # main since 2024-04-20; pytorch_model.bin only.
+        model_id="urchade/gliner_multi_pii-v1",
+        backends=("gliner",),
+        license="Apache-2.0",
+        status="vetted",
+        reason=(
+            "Apache-2.0; urchade/gliner_multi-v2.1 fine-tuned on"
+            " urchade/synthetic-pii-ner-mistral-v1 (Apache-2.0); no updates since 2024-04-20;"
+            " ships no tokenizer or encoder_config, so its backbone microsoft/mdeberta-v3-base"
+            " (MIT) is pinned too"
+        ),
+        revision="1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d",
+        backbone="microsoft/mdeberta-v3-base",
+        backbone_revision="a0484667b22365f84929a935b5e50a51f71f159d",
+        attribution="urchade/gliner_multi_pii-v1 (Apache-2.0); GLiNER, arXiv:2311.08526",
+        recommended_entities=_CONTEXTUAL,
+    ),
+    # --- caution: configurable, not yet measured (owner decision D13) -----
+    _knowledgator(
+        # main since 2026-03-26 (README edit).
+        "edge",
+        "9b7f39b0a2da971a5beea78d35f1539d4009c891",
+        "jhu-clsp/ettin-encoder-32m",
+        min_versions=_MODERNBERT,
+    ),
+    _knowledgator(
+        # main since 2025-09-27.
+        "small",
+        "d21aad5b4a7ec82b3d0970fd1ac74a12c087d85e",
+        "jhu-clsp/ettin-encoder-68m",
+        min_versions=_MODERNBERT,
+    ),
+    _knowledgator(
+        # main since 2025-09-27.
+        "base",
+        "61726e0ad791dcab3e29339bbec3ad42ded65641",
+        "microsoft/deberta-v3-small",
+    ),
+    _knowledgator(
+        # main since 2026-05-07 (README edit); ships no fp16 ONNX file.
+        "large",
+        "f847f54fbc97ad6e78bfa20ed9c5e5d5c43327b9",
+        "microsoft/deberta-v3-large",
+        onnx_files=("onnx/model.onnx", "onnx/model_quint8.onnx"),
+    ),
+    # --- restricted: never suggested; a warning names the reason ----------
+    CatalogEntry(
+        model_id="iiiorg/piiranha-v1-detect-personal-information",
+        backends=("hf",),
+        license="CC-BY-NC-ND-4.0",
+        status="restricted",
+        reason=f"CC-BY-NC-ND-4.0 (non-commercial, no derivatives); trained on {_AI4PRIVACY_400K}",
+        lineage=("noncommercial", "ai4privacy-restricted"),
+    ),
+    CatalogEntry(
+        model_id="Isotonic/deberta-v3-base_finetuned_ai4privacy_v2",
+        backends=("hf",),
+        license="CC-BY-NC-4.0",
+        status="restricted",
+        reason=(
+            "CC-BY-NC-4.0 (non-commercial); trained on ai4privacy/pii-masking-200k, whose"
+            " license requires a company license for organizations above 3 staff"
+        ),
+        lineage=("noncommercial", "ai4privacy-restricted"),
+    ),
+    CatalogEntry(
+        model_id="Isotonic/distilbert_finetuned_ai4privacy_v2",
+        backends=("hf",),
+        license="CC-BY-NC-4.0",
+        status="restricted",
+        reason=(
+            "CC-BY-NC-4.0 (non-commercial); trained on ai4privacy/pii-masking-200k, whose"
+            " license requires a company license for organizations above 3 staff"
+        ),
+        lineage=("noncommercial", "ai4privacy-restricted"),
+    ),
+    CatalogEntry(
+        model_id="urchade/gliner_base",
+        backends=("gliner",),
+        license="CC-BY-NC-4.0",
+        status="restricted",
+        reason="CC-BY-NC-4.0 (non-commercial)",
+        lineage=("noncommercial",),
+    ),
+    CatalogEntry(
+        model_id="nvidia/gliner-PII",
+        backends=("gliner",),
+        license="LicenseRef-NVIDIA-Open-Model-License",
+        status="restricted",
+        reason=(
+            "NVIDIA Open Model License: not OSI-approved; its text includes termination"
+            " clauses; built on urchade/gliner_large-v2.1, trained on nvidia/Nemotron-PII"
+            " (CC BY 4.0)"
+        ),
+        lineage=("non-osi", "nemotron-cc-by"),
+    ),
+    CatalogEntry(
+        model_id="bigcode/starpii",
+        backends=("hf",),
+        license="LicenseRef-bigcode-starpii-terms-of-use",
+        status="restricted",
+        reason=(
+            "gated: access requires accepting the model's terms of use (use limited to"
+            " removing PII from datasets; the model may not be shared); no license declared"
+        ),
+        lineage=("non-osi",),
+    ),
+    CatalogEntry(
+        model_id="ai4privacy/llama-ai4privacy-",
+        prefix=True,
+        backends=("hf",),
+        license="MIT",
+        status="restricted",
+        reason=(
+            "MIT weights trained on ai4privacy/open-pii-masking-500k-ai4privacy, which was"
+            " generated with Llama 3.1 and 3.3; that dataset's card applies the Llama 3.1/3.3"
+            " Community License (model naming, attribution) to models trained on it"
+        ),
+        card="https://huggingface.co/datasets/ai4privacy/open-pii-masking-500k-ai4privacy",
+        lineage=("llama-derived",),
+    ),
+    CatalogEntry(
+        model_id="knowledgator/gliner-stream-pii-v1.0",
+        backends=("gliner",),
+        license="Apache-2.0",
+        status="restricted",
+        reason="Apache-2.0; backbone Qwen/Qwen3-0.6B",
+        backbone="Qwen/Qwen3-0.6B",
+        lineage=("qwen-backbone",),
+    ),
+    CatalogEntry(
+        model_id="perplexity-ai/PII-Tracer",
+        backends=("hf",),
+        license="MIT",
+        status="restricted",
+        reason=(
+            "MIT; loading requires trust_remote_code (config.json auto_map names"
+            " modeling_pii_masking.py), which llm-redact never enables; Qwen3 encoder"
+        ),
+        lineage=("remote-code", "qwen-backbone"),
+    ),
+    CatalogEntry(
+        model_id="OpenMed/privacy-filter-multilingual",
+        backends=("hf",),
+        license="Apache-2.0",
+        status="restricted",
+        reason=(
+            f"Apache-2.0; openai/privacy-filter fine-tuned on AI4Privacy releases including"
+            f" {_AI4PRIVACY_400K}, and ai4privacy/open-pii-masking-500k-ai4privacy, generated"
+            f" with Llama 3.1 and 3.3"
+        ),
+        lineage=("ai4privacy-restricted", "llama-derived"),
+    ),
+    CatalogEntry(
+        model_id="llm-semantic-router/mmbert32k-pii-detector-merged",
+        backends=("hf",),
+        license="MIT",
+        status="restricted",
+        reason=f"MIT; its card lists among its training data {_AI4PRIVACY_400K}",
+        lineage=("ai4privacy-restricted",),
+    ),
+)
+
+_EXACT: Mapping[str, CatalogEntry] = MappingProxyType(
+    {entry.model_id.casefold(): entry for entry in CATALOG if not entry.prefix}
+)
+# Longest prefix first, so a more specific prefix wins.
+_PREFIXES = tuple(
+    sorted((entry for entry in CATALOG if entry.prefix), key=lambda e: -len(e.model_id))
+)
+
+
+def lookup(model_id: str) -> CatalogEntry | None:
+    """The catalog entry for a Hub model id: an exact match, else the
+    longest matching id prefix, else None. Case-insensitive, as the Hub
+    resolves ids."""
+    folded = model_id.casefold()
+    entry = _EXACT.get(folded)
+    if entry is not None:
+        return entry
+    for candidate in _PREFIXES:
+        if folded.startswith(candidate.model_id.casefold()):
+            return candidate
+    return None
+
+
+def pinned_revision(model_id: str) -> str | None:
+    """The commit the catalog pins ``model_id`` to (None: not catalogued, or
+    catalogued without a pin, as restricted models are)."""
+    entry = lookup(model_id)
+    return entry.revision if entry is not None else None
+
+
+@dataclass(frozen=True)
+class ModelIdentity:
+    """Which Hub model, at which commit, a set of model files is."""
+
+    model_id: str
+    revision: str | None = None
+
+
+class SidecarError(ValueError):
+    """A model directory's sidecar file exists but does not say which model
+    the directory holds. The message names the file and the problem only."""
+
+
+def read_sidecar(directory: str | Path) -> ModelIdentity | None:
+    """The identity recorded in ``directory``'s :data:`SIDECAR_NAME` file;
+    None when there is no such file (or ``directory`` is no directory).
+    Keys other than ``model_id`` and ``revision`` are ignored. A file that
+    exists but cannot be read as that identity raises SidecarError."""
+    path = Path(directory) / SIDECAR_NAME
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_SIDECAR_BYTES + 1)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise SidecarError(f"{path}: cannot be read ({type(exc).__name__})") from exc
+    if len(raw) > MAX_SIDECAR_BYTES:
+        raise SidecarError(f"{path}: larger than {MAX_SIDECAR_BYTES} bytes")
+    try:
+        data = loads_bounded(raw.decode("utf-8"))
+    except ValueError as exc:  # UnicodeDecodeError, JSONDecodeError, JsonTooDeep
+        raise SidecarError(f"{path}: not a UTF-8 JSON document") from exc
+    if not isinstance(data, dict):
+        raise SidecarError(f"{path}: not a JSON object")
+    model_id = data.get("model_id")
+    if not isinstance(model_id, str) or not MODEL_ID_RE.fullmatch(model_id):
+        raise SidecarError(f"{path}: model_id must be a Hugging Face model id (owner/name)")
+    revision = data.get("revision")
+    if revision is not None and (
+        not isinstance(revision, str) or not REVISION_RE.fullmatch(revision)
+    ):
+        raise SidecarError(
+            f"{path}: revision must be a 40-character lowercase hex commit id, or null"
+        )
+    return ModelIdentity(model_id, revision)
+
+
+def sidecar_text(identity: ModelIdentity) -> str:
+    """The :data:`SIDECAR_NAME` file content for ``identity`` (what
+    ``models pull --to`` and bundles write)."""
+    return json_text({"model_id": identity.model_id, "revision": identity.revision}) + "\n"
+
+
+def identify(model: str) -> ModelIdentity | None:
+    """Which model a configured model value names: a local directory by its
+    sidecar file (None without one: an unidentified local model), anything
+    else as the Hub id it is (its revision comes from the configuration)."""
+    if Path(model).is_dir():
+        return read_sidecar(model)
+    return ModelIdentity(model)

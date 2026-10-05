@@ -11,6 +11,18 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-05
+
+Access-control seams for role- and attribute-based policies. The access gate can now
+authorize every request and realtime connection on its facts (provider, route, the model
+the upstream runs, a Live setup frame's model), tighten detection per requester, decide
+again after redaction on the value types a request carries, report posture lines in
+`llm-redact status`, and reload its own policy files on SIGHUP. The policies themselves
+(roles, Cedar and OPA/Rego) are llm-redact-pro's; llm-redact-pro 0.16 requires this release.
+
+**Upgrading:** nothing changes for an unchanged configuration. Every new seam is optional
+and inert without an access gate that implements it.
+
 ### Added
 - Optional access-gate seam `authorize_content(request, content: plugin_api.ContentFacts)`
   (sensitivity-aware authorization; the policy is llm-redact-pro's): asked once for every

@@ -31,9 +31,13 @@ and counts only, never detected text.
 import re
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from llm_redact.detection.regex_rules import BUILTIN_RULES
 from llm_redact.placeholders import is_placeholder_type
+
+if TYPE_CHECKING:
+    from llm_redact.detection.engine import NerConfig
 
 # D15 (i): 1.12.x ships the transitional mode (raw requests keep their own
 # type, with a startup deprecation warning); 2.0.0 flips this to True.
@@ -340,3 +344,31 @@ class LabelPolicy:
         if type_name is not None:
             return type_name if is_placeholder_type(type_name) else None
         return self.classify(returned_label)
+
+
+def raw_entity_deprecations(ner: "NerConfig") -> list[str]:
+    """One deprecation message per configured raw entity whose emitted type
+    changes when raw entities start folding in 2.0.0 (D15 (i)), on any
+    active backend: ``PER`` (emitted as PER now, PERSON then), but not
+    Presidio's ``EMAIL_ADDRESS`` (already emitted as EMAIL there), a type
+    request, or an entity with a [detection.ner.labels] override. Empty
+    once raw entities fold. Config names only, never detected text."""
+    if FOLD_RAW_REQUESTS:
+        return []
+    messages: list[str] = []
+    for backend in ner.active_backends():
+        now = LabelPolicy(ner.entities, backend=backend, overrides=ner.labels, fold_raw=False)
+        then = LabelPolicy(ner.entities, backend=backend, overrides=ner.labels, fold_raw=True)
+        for entity in ner.entities:
+            current, future = now.classify(entity), then.classify(entity)
+            if current == future:  # a type request, an override, a legacy fold
+                continue
+            message = (
+                f'[detection.ner] entities: "{entity}" is emitted as {current} now and as'
+                f' {future} from 2.0.0; write "{future}" to switch now, or set'
+                f' [detection.ner.labels] {normalize_label(entity)} = "{current}" to keep'
+                f" {current}"
+            )
+            if message not in messages:
+                messages.append(message)
+    return messages

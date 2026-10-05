@@ -2,6 +2,8 @@
 across every backend, in both raw-entity modes (FOLD_RAW_REQUESTS False =
 1.12.x, True = 2.0.0; the ``fold_raw`` fixture runs a test in each)."""
 
+from pathlib import Path
+
 import pytest
 
 from llm_redact.detection import labels
@@ -679,3 +681,111 @@ def test_allowlist_accepts_override_targets(fold_raw: bool) -> None:
     ner = NerConfig(entities=("ADDRESS", "CITY"), labels=(("CITY", "LOCALITY"),))
     allow = _allowlist((("LOCALITY", ("Springfield",)), ("CITY", ("Shelbyville",))), ner)
     assert allow.by_type == {"LOCALITY": frozenset({"Springfield", "Shelbyville"})}
+
+
+# --- 2.0.0 deprecation of raw entities (D15 (i)) --------------------------------------
+
+
+def _deprecations(**ner: object) -> list[str]:
+    from llm_redact.detection.engine import ner_warnings
+
+    return ner_warnings(DetectionConfig(ner=NerConfig(enabled=True, **ner)))  # type: ignore[arg-type]
+
+
+def test_raw_entity_that_changes_type_warns_once() -> None:
+    assert _deprecations(backend="hf", entities=("PER", "PERSON", "ORG")) == [
+        '[detection.ner] entities: "PER" is emitted as PER now and as PERSON from 2.0.0;'
+        ' write "PERSON" to switch now, or set [detection.ner.labels] PER = "PER" to'
+        " keep PER"
+    ]
+    # One line per entity, not per backend.
+    assert len(_deprecations(backends=("hf", "spacy"), entities=("PER",))) == 1
+
+
+@pytest.mark.parametrize(
+    "ner",
+    [
+        {"backend": "hf", "entities": ("PERSON",)},  # a type request
+        {"backend": "hf", "entities": ("PER",), "labels": (("PER", "PER"),)},  # an override
+        {"backend": "hf", "entities": ("PER",), "labels": (("PER", "PERSON"),)},
+        {"backend": "presidio", "entities": ("EMAIL_ADDRESS",)},  # already EMAIL there
+        {"backend": "spacy", "entities": ("ORG", "job title")},  # no fold either way
+        {"backend": "gliner", "entities": ("PHONE", "phone number")},  # the type wins
+    ],
+)
+def test_entities_whose_type_does_not_change_do_not_warn(ner: dict[str, object]) -> None:
+    assert _deprecations(**ner) == []
+
+
+def test_emitted_type_names_the_backend_where_it_changes() -> None:
+    # EMAIL_ADDRESS is EMAIL on presidio already, but EMAIL_ADDRESS on hf.
+    (warning,) = _deprecations(backends=("presidio", "hf"), entities=("EMAIL_ADDRESS",))
+    assert "emitted as EMAIL_ADDRESS now and as EMAIL from 2.0.0" in warning
+    assert '[detection.ner.labels] EMAIL_ADDRESS = "EMAIL_ADDRESS"' in warning
+    (gliner,) = _deprecations(backend="gliner", entities=("phone number",))
+    assert '"phone number" is emitted as PHONE_NUMBER now and as PHONE' in gliner
+    assert 'set [detection.ner.labels] PHONE_NUMBER = "PHONE_NUMBER"' in gliner
+
+
+def test_no_deprecation_once_raw_entities_fold(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(labels, "FOLD_RAW_REQUESTS", True)
+    assert _deprecations(backend="hf", entities=("PER",)) == []
+
+
+def test_no_deprecation_while_ner_is_off() -> None:
+    from llm_redact.detection.engine import ner_warnings
+
+    assert ner_warnings(DetectionConfig(ner=NerConfig(backend="hf", entities=("PER",)))) == []
+
+
+def test_startup_and_rebuild_log_the_deprecation(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import dataclasses
+    import logging
+
+    from llm_redact.config import Config
+    from llm_redact.proxy import create_app
+
+    install_transformers(monkeypatch, FakeHfPipe([("Jane Doe", "PER", 0.9)]))
+    ner = NerConfig(enabled=True, backend="hf", entities=("PER",))
+    config = Config(detection=DetectionConfig(ner=ner))
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        app = create_app(config)
+    logged = [r.getMessage() for r in caplog.records if "from 2.0.0" in r.getMessage()]
+    assert logged == [labels.raw_entity_deprecations(ner)[0]]
+    caplog.clear()
+    state = app.state.proxy
+    # A reload that keeps [detection] does not rebuild, so it does not repeat it...
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        state.apply_config(config)
+    assert not [r for r in caplog.records if "from 2.0.0" in r.getMessage()]
+    # ...one that rebuilds the detectors does.
+    changed = dataclasses.replace(
+        config,
+        detection=dataclasses.replace(config.detection, ner=dataclasses.replace(ner, max_chars=9)),
+    )
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        state.apply_config(changed)
+    assert len([r for r in caplog.records if "from 2.0.0" in r.getMessage()]) == 1
+
+
+def test_doctor_shows_the_deprecation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import argparse
+    import json
+
+    from llm_redact.doctor_cli import run_doctor
+
+    monkeypatch.delenv("LLM_REDACT_CONFIG", raising=False)
+    config_file = tmp_path / "config.toml"
+    for entities, expected in (('["PER"]', 1), ('["PERSON"]', 0)):
+        config_file.write_text(
+            f'[detection.ner]\nenabled = true\nbackend = "hf"\nentities = {entities}\n'
+        )
+        run_doctor(argparse.Namespace(config=config_file, json=True))
+        rows = json.loads(capsys.readouterr().out)["checks"]
+        warned = [r for r in rows if r["area"] == "ner" and "from 2.0.0" in r["message"]]
+        assert len(warned) == expected
+        assert all(r["level"] == "WARN" for r in warned)

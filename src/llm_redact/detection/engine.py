@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
-from llm_redact.detection.labels import LabelPolicy
+from llm_redact.detection.labels import LabelPolicy, raw_entity_deprecations
 from llm_redact.detection.regex_rules import BUILTIN_RULES, PreparedText, RegexDetector, RegexRule
 
 
@@ -344,6 +344,15 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
                 inner = build_ner_detector(single)
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
     return detectors
+
+
+def ner_warnings(config: DetectionConfig) -> list[str]:
+    """The NER configuration's startup warnings (config names only, never
+    detected text), logged by the proxy after each detector build and shown
+    by doctor: configured raw entities whose type changes in 2.0.0."""
+    if not config.ner.enabled:
+        return []
+    return raw_entity_deprecations(config.ner)
 
 
 def build_modes(config: DetectionConfig) -> dict[str, str]:

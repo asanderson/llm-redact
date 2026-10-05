@@ -324,6 +324,25 @@ which protocols your tools will send. Probe each one with `llm-redact
 routes test --protocol X` (llm-redact-pro) before traffic arrives. The
 full refusal list is in the llm-redact-pro routing guide.
 
+## `[detection.ner] entities: "PER" is emitted as PER now and as PERSON from 2.0.0; write "PERSON" to switch now, or set [detection.ner.labels] PER = "PER" to keep PER`
+
+A deprecation WARNING logged at startup (also by `serve --check`) and shown
+as a `doctor` WARN row, one per affected entity; the quoted entity and types
+are yours. The entity names a model's own label rather than a placeholder
+type, and llm-redact 2.0.0 will fold such labels into the shared type
+(`PER` → `PERSON`, `"phone number"` → `PHONE`, `EMAIL_ADDRESS` → `EMAIL`), so
+the same value gets the same token whichever backend finds it. Nothing changes
+until you upgrade to 2.0.0. Settle it now in one of two ways:
+
+- write the type the message names (`entities = ["PERSON"]`): detections
+  switch to that type now (new placeholders such as «PERSON_001»; metrics and
+  alerts keyed on the old type move with them);
+- or keep today's type for good with the override the message names
+  (`[detection.ner.labels] PER = "PER"`).
+
+Either way the warning goes away. See docs/detection.md "Placeholder types
+from NER models".
+
 ## "[detection.ner.labels] LABEL: the type must match [A-Z][A-Z0-9_]* and be at most 20 characters, or be "" to drop the label"
 
 A `[detection.ner.labels]` value is not a placeholder type. Write the type in

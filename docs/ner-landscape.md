@@ -149,14 +149,14 @@ language, cheapest first:
 
 ```toml
 # 1. A language-specific spaCy pipeline (tens of MB, ~1-10 ms). Install the
-#    model, then name it. entities uses spaCy's labels (PER for many non-EN
-#    pipelines).
+#    model, then name it. Many non-English pipelines label people PER;
+#    the PERSON type request covers it (docs/detection.md).
 [detection.ner]
 enabled = true
 backend = "spacy"
 language = "de"
 model = "de_core_news_sm"     # uv run python -m spacy download de_core_news_sm
-entities = ["PER"]
+entities = ["PERSON"]
 
 # 2. Stanza — one line per language, 60+ supported (pulls torch).
 [detection.ner]

@@ -187,9 +187,15 @@ request: GLiNER is sent the text as written, and the backend emits the label's
 normalized form (`"job title"` → `JOB_TITLE`) — as before, Presidio's
 `EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_SSN`, `IBAN_CODE` and `CREDIT_CARD`
 included, which the presidio backend emits as the built-in `EMAIL`, `PHONE`,
-`SSN`, `IBAN` and `CREDIT_CARD`. From 2.0.0 a raw request folds like a model
-label (`entities = ["PER"]` then requests and emits `PERSON`); write the type
-(`"PERSON"`) to get that behavior now.
+`SSN`, `IBAN` and `CREDIT_CARD`.
+
+**Deprecated: raw requests fold from 2.0.0.** From 2.0.0 a raw request folds
+like a model label: `entities = ["PER"]` will request and emit `PERSON`,
+`"phone number"` `PHONE`, `EMAIL_ADDRESS` (outside Presidio) `EMAIL`. Each
+configured entity whose type will change logs one WARNING at startup and shows
+a `doctor` WARN row naming both types. Write the type (`"PERSON"`) to switch
+now, or keep the old type with an override (`[detection.ner.labels] PER =
+"PER"`, below).
 
 **Overrides.** `[detection.ner.labels]` maps a model label (normalized as
 above, so `"first name"` and `FIRST_NAME` are one key) to a placeholder type,

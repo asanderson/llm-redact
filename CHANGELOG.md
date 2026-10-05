@@ -17,6 +17,14 @@ and tags `vX.Y.Z`.
   deny-string type grammar. An override applies to `entities` too, so `PER = "PER"` keeps
   `entities = ["PER"]` emitting `PER` once raw entities fold in 2.0.0.
 
+### Deprecated
+- An `[detection.ner] entities` entry naming a model's own label rather than a placeholder
+  type keeps its own type in 1.12 but will fold into the shared type in 2.0.0 (`PER` →
+  `PERSON`, `"phone number"` → `PHONE`, `EMAIL_ADDRESS` → `EMAIL` outside Presidio). Each
+  affected entity logs a startup WARNING (`serve --check` included) and shows a `doctor`
+  WARN row naming both types; write the type now (`entities = ["PERSON"]`) or keep the old
+  one for good with `[detection.ner.labels] PER = "PER"`.
+
 ### Changed
 - NER model labels become placeholder types through one label policy for every backend
   (`detection/labels.py`, documented in docs/detection.md "Placeholder types from NER

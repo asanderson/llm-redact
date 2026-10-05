@@ -91,10 +91,12 @@ from llm_redact.config import (
 from llm_redact.connections import CAUSES as CONNECTION_CLOSE_CAUSES
 from llm_redact.connections import EventStream, LiveConnections, recheck_interval
 from llm_redact.detection.engine import (
+    DetectionConfig,
     active_rule_names,
     build_allowlist,
     build_detectors,
     build_modes,
+    ner_warnings,
 )
 from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
@@ -805,6 +807,14 @@ def _resolve_license_info(config: Config) -> ResolvedLicense:
     return resolved
 
 
+def _log_ner_warnings(detection: DetectionConfig) -> None:
+    """Each NER startup warning (engine.ner_warnings), once per detector
+    build: at startup (serve and serve --check) and on a reload that
+    rebuilds the detectors."""
+    for warning in ner_warnings(detection):
+        logger.warning("%s", warning)
+
+
 class ProxyState:
     def __init__(
         self,
@@ -839,6 +849,7 @@ class ProxyState:
         self.detectors = build_detectors(config.detection)
         self.allowlist = build_allowlist(config.detection)
         self.modes = build_modes(config.detection)
+        _log_ner_warnings(config.detection)
         # The access gate's detection overlays (authorization.py), built per
         # distinct overlay against exactly these detection objects.
         self.overlay_builds = OverlayBuilds(config.detection, self.modes)
@@ -1768,6 +1779,7 @@ class ProxyState:
             detectors = build_detectors(effective.detection)
             allowlist = build_allowlist(effective.detection)
             modes = build_modes(effective.detection)
+            _log_ner_warnings(effective.detection)
             # Every cached overlay build dies with the objects it extended.
             overlay_builds = OverlayBuilds(effective.detection, modes)
         redactor = Redactor(

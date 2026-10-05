@@ -12,6 +12,12 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- NER coverage counters: every NER backend counts the strings it read, the strings it
+  skipped as longer than `[detection.ner] max_chars` (which only the regex rules then
+  read), and the model entities it dropped (a type that cannot be a placeholder type, a
+  span the string does not contain). `/status` publishes them per backend, with the model
+  and the entities no backend can emit, in a new `detection.ner` block
+  (docs/detection.md "NER coverage counters"); `detection.ner_enabled` is unchanged.
 - A startup WARNING for each `[detection.ner] entities` entry no active NER backend can ever
   emit (a typo, a label the model lacks, an override that drops it), naming the entity,
   the backends and their models; the labels come from an `hf` model's `id2label`, a spaCy

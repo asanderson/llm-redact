@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from llm_redact.detection.base import Detection
 from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
+from llm_redact.detection.stats import NerStats
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
@@ -52,6 +53,9 @@ class StanzaDetector:
             policy if policy is not None else LabelPolicy(entities, backend="stanza")
         )
         self._max_chars = max_chars
+        # Coverage counters (stats.py); Stanza reads a whole string in one
+        # call.
+        self.stats = NerStats()
 
     def detect(self, text: str) -> list[Detection]:
         # Parts of one name or address reported separately join into one
@@ -60,11 +64,16 @@ class StanzaDetector:
 
     def _found(self, text: str) -> Iterator[Detection]:
         if len(text) > self._max_chars:
+            self.stats.skipped_max_chars += 1
             return
+        self.stats.scanned_whole += 1
         for ent in self._nlp(text).ents:
-            label = self.label_policy.classify(str(ent.type))
+            label = self.label_policy.classify(str(ent.type), self.stats)
+            if label is None:
+                continue
             start, end = int(ent.start_char), int(ent.end_char)
-            if label is None or not 0 <= start < end <= len(text):
+            if not 0 <= start < end <= len(text):
+                self.stats.offsets_dropped += 1
                 continue
             yield Detection(
                 start=start,

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from llm_redact.detection.base import Detection
 from llm_redact.detection.labels import LEGACY_FOLDS, LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
+from llm_redact.detection.stats import NerStats
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
@@ -94,6 +95,9 @@ class PresidioDetector:
         self._max_chars = max_chars
         self._threshold = threshold
         self._language = language
+        # Coverage counters (stats.py); the analyzer reads a whole string
+        # in one call.
+        self.stats = NerStats()
 
     def detect(self, text: str) -> list[Detection]:
         # Parts of one name or address reported separately join into one
@@ -102,15 +106,21 @@ class PresidioDetector:
 
     def _found(self, text: str) -> Iterator[Detection]:
         # Latency gate, same as the other NER backends: giant tool results
-        # are skipped; regex rules still cover structured values in them.
+        # are skipped (and counted); regex rules still cover structured
+        # values in them.
         if len(text) > self._max_chars:
+            self.stats.skipped_max_chars += 1
             return
+        self.stats.scanned_whole += 1
         for result in self._analyzer.analyze(
             text, language=self._language, entities=self._entities, score_threshold=self._threshold
         ):
-            label = self.label_policy.classify(str(result.entity_type))
+            label = self.label_policy.classify(str(result.entity_type), self.stats)
+            if label is None:
+                continue
             start, end = int(result.start), int(result.end)
-            if label is None or not 0 <= start < end <= len(text):
+            if not 0 <= start < end <= len(text):
+                self.stats.offsets_dropped += 1
                 continue
             yield Detection(
                 start=start,

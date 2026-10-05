@@ -255,3 +255,49 @@ the startup log names each such key once.
 A folded built-in type follows its rule's toggle: with `generic_secret`
 disabled, a model's `PASSWORD` detections (type `SECRET`) are suppressed too,
 and with `email` disabled so are the `EMAIL_ADDRESS` ones.
+
+## NER coverage counters
+
+A model reads a bounded amount of text, and text it never reads is covered by
+the regex rules alone. Each NER backend therefore counts what it read and what
+it dropped, so a gap shows instead of staying silent. `GET
+/__llm-redact/status` carries the counts in `detection.ner` (beside the
+existing `detection.ner_enabled`):
+
+```json
+"ner": {
+  "enabled": true,
+  "max_chars": 20000,
+  "backends": {
+    "hf": {
+      "model": "dslim/bert-base-NER",
+      "revision": null, "catalog": null, "license": null,
+      "counters": {"scanned_whole": 812, "scanned_windowed": 0, "skipped_max_chars": 3,
+                   "windows": 0, "labels_dropped": 0, "offsets_dropped": 0}
+    }
+  },
+  "unmatched_entities": []
+}
+```
+
+| Counter | Counts |
+|---|---|
+| `scanned_whole` | strings the model read in one call |
+| `scanned_windowed` | strings the model read in overlapping windows |
+| `skipped_max_chars` | strings longer than `[detection.ner] max_chars`, which the model never read (the regex rules and deny strings still scan them) |
+| `windows` | the windows the windowed strings were read in |
+| `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |
+| `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
+
+Each string a backend is handed counts once, under `scanned_whole`,
+`scanned_windowed` or `skipped_max_chars`; with several backends each one
+counts the strings it was handed. `unmatched_entities` lists the configured
+entities no active backend can ever emit (the startup warning above), and
+`model` the model each backend loaded; `revision`, `catalog` and `license` are
+`null`.
+
+The counters belong to the built detectors: they start at zero at startup and
+again when a reload rebuilds the detectors (any change to `[detection]`); a
+reload that leaves `[detection]` alone keeps them. A redaction preview in the
+llm-redact-pro dashboard runs the live detectors and is counted like a
+request.

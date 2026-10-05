@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from llm_redact.detection.base import Detection
 from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
+from llm_redact.detection.stats import NerStats
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
@@ -58,6 +59,9 @@ class GlinerDetector:
         self._labels = list(self.label_policy.prompts)
         self._max_chars = max_chars
         self._threshold = threshold
+        # Coverage counters (stats.py): strings read or skipped, entities
+        # dropped.
+        self.stats = NerStats()
 
     def detect(self, text: str) -> list[Detection]:
         # Parts of one name or address reported separately join into one
@@ -65,15 +69,21 @@ class GlinerDetector:
         return merge_adjacent_parts(self._found(text), text)
 
     def _found(self, text: str) -> Iterator[Detection]:
-        if len(text) > self._max_chars or not self._labels:
+        if not self._labels:
+            return  # nothing requested: the model is never called
+        if len(text) > self._max_chars:
+            self.stats.skipped_max_chars += 1
             return
+        self.stats.scanned_whole += 1
         for entity in self._model.predict_entities(text, self._labels, self._threshold):
-            label = self.label_policy.classify_gliner(str(entity["label"]))
+            label = self.label_policy.classify_gliner(str(entity["label"]), self.stats)
             if label is None:
                 continue
             start, end = int(entity["start"]), int(entity["end"])
             if not 0 <= start < end <= len(text):
-                continue  # a span the text does not contain is never redacted
+                # A span the text does not contain is never redacted.
+                self.stats.offsets_dropped += 1
+                continue
             yield Detection(
                 start=start,
                 end=end,

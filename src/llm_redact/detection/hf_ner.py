@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from llm_redact.detection.base import Detection
 from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
+from llm_redact.detection.stats import NerStats
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
@@ -70,6 +71,9 @@ class HfDetector:
         self.emittable_types = _model_types(pipe, self.label_policy)
         self._max_chars = max_chars
         self._threshold = threshold
+        # Coverage counters (stats.py): strings read or skipped, entities
+        # dropped.
+        self.stats = NerStats()
 
     def detect(self, text: str) -> list[Detection]:
         # Parts of one name or address reported separately join into one
@@ -78,21 +82,24 @@ class HfDetector:
 
     def _found(self, text: str) -> Iterator[Detection]:
         if len(text) > self._max_chars:
+            self.stats.skipped_max_chars += 1
             return
+        self.stats.scanned_whole += 1
         for ent in self._pipe(text):
-            label = self.label_policy.classify(str(ent.get("entity_group", ent.get("entity", ""))))
+            label = self.label_policy.classify(
+                str(ent.get("entity_group", ent.get("entity", ""))), self.stats
+            )
             if label is None:
                 continue
             if float(ent.get("score", 1.0)) < self._threshold:
                 continue
             start, end = ent.get("start"), ent.get("end")
-            if start is None or end is None:
-                continue
-            start, end = int(start), int(end)
-            if not 0 <= start < end <= len(text):
+            if start is None or end is None or not 0 <= int(start) < int(end) <= len(text):
                 # A span the text does not contain cannot be redacted (or
                 # restored) faithfully: skip it rather than guess.
+                self.stats.offsets_dropped += 1
                 continue
+            start, end = int(start), int(end)
             yield Detection(
                 start=start,
                 end=end,

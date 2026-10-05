@@ -5,11 +5,13 @@ import re
 import weakref
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.labels import LabelPolicy, raw_entity_deprecations
 from llm_redact.detection.regex_rules import BUILTIN_RULES, PreparedText, RegexDetector, RegexRule
+from llm_redact.detection.stats import NerStats
 
 
 @dataclass
@@ -29,6 +31,12 @@ class TypeFilteredDetector:
 
     def detect(self, text: str) -> Iterable[Detection]:
         return [d for d in self.inner.detect(text) if d.detector_type not in self.suppressed]
+
+    @property
+    def stats(self) -> NerStats | None:
+        """The wrapped NER backend's coverage counters (stats.py)."""
+        stats = getattr(self.inner, "stats", None)
+        return stats if isinstance(stats, NerStats) else None
 
 
 DEFAULT_ALLOWLIST = frozenset({"127.0.0.1", "0.0.0.0", "255.255.255.255", "::1", "::"})
@@ -397,6 +405,44 @@ def ner_unmatched_entities(detectors: Sequence[Detector]) -> tuple[str, ...]:
     recorded at build time (empty without NER)."""
     backends = ner_backends(detectors)
     return tuple(getattr(backends[0], "unmatched_entities", ())) if backends else ()
+
+
+def ner_backend_stats(detectors: Sequence[Detector]) -> list[tuple[str, Detector, NerStats]]:
+    """Each NER backend among ``detectors`` (unwrapped from its type
+    filter) with its configured backend name and its coverage counters
+    (stats.py), in build order. A backend without counters (a plugin or
+    test stand-in) is left out."""
+    found: list[tuple[str, Detector, NerStats]] = []
+    for backend in ner_backends(detectors):
+        policy = _label_policy(backend)
+        stats = getattr(backend, "stats", None)
+        if policy is not None and isinstance(stats, NerStats):
+            found.append((policy.backend, backend, stats))
+    return found
+
+
+def ner_status(ner: NerConfig, detectors: Sequence[Detector]) -> dict[str, Any]:
+    """The ``/status`` block ``detection.ner``: whether NER is on, the
+    string limit, each running backend's model and coverage counters, and
+    the configured entities no backend can ever emit. Metadata and counts
+    only. The counters belong to the built detectors: a reload that
+    rebuilds them starts from zero."""
+    return {
+        "enabled": ner.enabled,
+        "max_chars": ner.max_chars,
+        "backends": {
+            name: {
+                "model": getattr(backend, "model_name", None),
+                # Not tracked yet: the backends load models by id.
+                "revision": None,
+                "catalog": None,
+                "license": None,
+                "counters": stats.as_dict(),
+            }
+            for name, backend, stats in ner_backend_stats(detectors)
+        },
+        "unmatched_entities": list(ner_unmatched_entities(detectors)),
+    }
 
 
 def ner_warnings(config: DetectionConfig, detectors: Sequence[Detector] = ()) -> list[str]:

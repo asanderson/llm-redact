@@ -10,6 +10,8 @@ and warn count; a partial table, a table computed for another plan and the
 copies a request makes of its redactor are pinned alongside.
 """
 
+import base64
+import copy
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -30,8 +32,13 @@ from llm_redact.detection.engine import (
     plan_for,
 )
 from llm_redact.detection.stats import NerStats
-from llm_redact.redactor import BlockedRequest, Redactor, TooManyStrings
+from llm_redact.ner_prefetch import CollectingRedactor, collect, collect_request_strings
+from llm_redact.providers import ALL_ADAPTERS, ProviderAdapter, RouteKind
+from llm_redact.providers.base import prepare_route_request
+from llm_redact.providers.custom import build_custom_adapters
+from llm_redact.redactor import BlockedRequest, Redactor, TooManyStrings, UnredactableRequest
 from llm_redact.vault import InMemoryVault
+from prefetch_fixtures import EXEMPT_SERVER, SHAPES, Shape
 
 ROOT = Path(__file__).resolve().parent.parent
 ALLOW = Allowlist(exact=frozenset({"Alice Smith"}), patterns=())
@@ -420,3 +427,138 @@ def test_the_redactor_names_its_plan() -> None:
     redactor = _redactor(detectors)
     assert redactor.plan is plan_for(detectors)
     assert redactor.with_floors({"EMAIL": 2}).plan is redactor.plan
+
+
+# ---- the collecting pass scans exactly what the redaction scans ----
+
+EXEMPT = frozenset({EXEMPT_SERVER})
+LIMIT = 100_000
+
+
+class Recorder(FakeModel):
+    """A heavy detector recording every text the real redaction hands to
+    detection (and finding names, so the real pass rewrites the body)."""
+
+
+def _adapter(shape: Shape) -> ProviderAdapter:
+    if shape.adapter == "CustomOpenAIAdapter":
+        return build_custom_adapters(["custom:lm"])[0]
+    return {cls.__name__: cls for cls in ALL_ADAPTERS}[shape.adapter]()
+
+
+def test_every_adapter_has_a_shape() -> None:
+    assert {cls.__name__ for cls in ALL_ADAPTERS} | {"CustomOpenAIAdapter"} == {
+        shape.adapter for shape in SHAPES
+    }
+
+
+@pytest.mark.parametrize("shape", SHAPES, ids=[shape.id for shape in SHAPES])
+def test_the_collecting_pass_scans_exactly_what_the_redaction_scans(shape: Shape) -> None:
+    adapter = _adapter(shape)
+    kind = adapter.matches(shape.method, shape.path)
+    assert kind is not RouteKind.NONE
+    body = copy.deepcopy(shape.body)
+    collected = collect_request_strings(
+        adapter, shape.method, shape.path, body, limit=LIMIT, mcp_exempt=EXEMPT
+    )
+    assert body == shape.body  # the collecting pass changes nothing
+
+    recorder = Recorder()
+    redactor = Redactor(
+        [*build_detectors(DetectionConfig()), recorder], InMemoryVault(), Allowlist()
+    ).with_budget(LIMIT)
+    prepared = prepare_route_request(
+        adapter,
+        shape.method,
+        shape.path,
+        body,
+        redactor,
+        inject_note=adapter.wants_system_note(kind, shape.path),
+        mcp_exempt=EXEMPT,
+    )
+    assert prepared != shape.body  # the real pass redacted something
+    assert collected == recorder.calls  # the same texts, in the same order
+    assert collected
+    # An exempt MCP server's block is scanned by neither.
+    assert not any("is exempt" in text for text in collected)
+
+
+def test_the_collected_strings_feed_a_complete_table() -> None:
+    # What the collecting pass found is all the real pass needs: with a
+    # table of exactly those strings nothing runs inline or misses.
+    shape = next(shape for shape in SHAPES if shape.id == "openai-fine-tuning")
+    adapter = _adapter(shape)
+    collected = collect_request_strings(adapter, shape.method, shape.path, shape.body, limit=LIMIT)
+    assert collected is not None
+    model = FakeModel()
+    redactor = Redactor([*build_detectors(DetectionConfig()), model], InMemoryVault(), Allowlist())
+    table = _table(redactor.plan, collected)
+    prepare_route_request(
+        adapter,
+        shape.method,
+        shape.path,
+        shape.body,
+        redactor.with_precomputed(table, redactor.plan).with_budget(LIMIT),
+        inject_note=False,
+    )
+    assert model.stats.inline_calls == model.stats.prefetch_misses == 0
+
+
+def test_an_over_budget_body_disables_the_prefetch() -> None:
+    shape = next(shape for shape in SHAPES if shape.id == "openai-chat")
+    adapter = _adapter(shape)
+    assert collect_request_strings(adapter, shape.method, shape.path, shape.body, limit=3) is None
+    # The real pass refuses it on its own.
+    redactor = Redactor(build_detectors(DetectionConfig()), InMemoryVault(), Allowlist())
+    with pytest.raises(TooManyStrings):
+        prepare_route_request(
+            adapter,
+            shape.method,
+            shape.path,
+            shape.body,
+            redactor.with_budget(3),
+            inject_note=False,
+        )
+
+
+def test_an_undecodable_bedrock_blob_disables_the_prefetch() -> None:
+    adapter = _adapter(next(shape for shape in SHAPES if shape.adapter == "BedrockAdapter"))
+    path = "/model/anthropic.claude-x/count-tokens"
+    body = {"input": {"invokeModel": {"body": base64.b64encode(b"\xff not json").decode()}}}
+    assert collect_request_strings(adapter, "POST", path, body, limit=LIMIT) is None
+    redactor = Redactor(build_detectors(DetectionConfig()), InMemoryVault(), Allowlist())
+    with pytest.raises(UnredactableRequest):
+        prepare_route_request(adapter, "POST", path, body, redactor, inject_note=False)
+
+
+def test_any_failure_of_a_collecting_pass_is_contained() -> None:
+    def broken(collector: CollectingRedactor) -> None:
+        collector.redact_text("a")
+        raise RuntimeError("anything")
+
+    assert collect(broken, limit=10) is None
+    assert collect(lambda collector: collector.redact_text("a"), limit=10) == ["a"]
+
+
+def test_a_collector_and_its_copies_share_one_record() -> None:
+    collector = CollectingRedactor(5)
+    assert collector.with_floors({"EMAIL": 3}) is collector
+    assert collector.with_overrides(_NoOverrides()) is collector
+    budgeted = collector.with_budget(1)
+    assert budgeted.redact_text("one") == "one"
+    with pytest.raises(TooManyStrings):
+        budgeted.redact_text("two")
+    assert collector.scan("three") == (Counter(), False)
+    assert collector.scan_text("four") == Counter()
+    assert collector.blocked_type("five") is None
+    assert collector.redact_json({"a": ["six", {"model": "m"}]}) == {"a": ["six", {"model": "m"}]}
+    # The string past the budget was never recorded (nor would it be scanned).
+    assert collector.strings == ["one", "three", "four", "five", "six"]
+    # Nothing detected, counted or refused.
+    assert not collector.blocks
+    assert collector.counts == collector.warn_counts == Counter()
+    # blocked_type charges nothing (a check ahead of the redaction); the
+    # rest are charged against the request's limit (three of five so far).
+    collector.charge(2)
+    with pytest.raises(TooManyStrings):
+        collector.charge(1)

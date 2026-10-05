@@ -6,22 +6,34 @@ hatch for teams that already have a fine-tuned model. Uses the `transformers`
 pipeline with `aggregation_strategy="simple"` so sub-word tokens are merged
 into whole entity spans with a confidence, which `score_threshold` gates.
 
+Long strings are read whole, in overlapping token windows: without `stride`
+the pipeline truncates at the tokenizer's maximum length and never reads the
+rest. `stride` needs a fast tokenizer — which also reports the character
+offsets every detection needs — so a model without one is refused at startup.
+
 Import-lazy: loads only when an `hf` backend is enabled; the model load
 happens at proxy startup (fail fast, no first-request latency spike).
 """
 
 import importlib.util
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
 from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
+from llm_redact.detection.stats import NerStats
+from llm_redact.detection.windows import drop_exact_duplicates
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
 
 _MODEL_NAME = "dslim/bert-base-NER"
+# A tokenizer that does not know its model's limit reports a huge sentinel
+# (transformers' VERY_LARGE_INTEGER); below this it is a real limit.
+_SENTINEL_MAX_LENGTH = 1_000_000
+# What an encoder reads when its config does not say (BERT and most others).
+_DEFAULT_WINDOW = 512
 
 
 class _PipelineLike(Protocol):
@@ -59,8 +71,12 @@ class HfDetector:
         threshold: float,
         *,
         policy: LabelPolicy | None = None,
+        windows_of: Callable[[str], int] | None = None,
     ) -> None:
         self._pipe = pipe
+        # How many windows the pipeline reads a text in (build_hf_detector
+        # counts them with the pipeline's own tokenizer); None: one.
+        self._windows_of = windows_of
         # The label policy (labels.py) turns the model's labels (`PER`,
         # `B-PER` without aggregation) into placeholder types; by default
         # it is built from `entities`.
@@ -70,29 +86,41 @@ class HfDetector:
         self.emittable_types = _model_types(pipe, self.label_policy)
         self._max_chars = max_chars
         self._threshold = threshold
+        # Coverage counters (stats.py): strings read or skipped, entities
+        # dropped.
+        self.stats = NerStats()
 
     def detect(self, text: str) -> list[Detection]:
-        # Parts of one name or address reported separately join into one
-        # span (labels.merge_adjacent_parts).
-        return merge_adjacent_parts(self._found(text), text)
+        # An entity two overlapping windows both report counts once; parts
+        # of one name or address reported separately join into one span
+        # (labels.merge_adjacent_parts).
+        return merge_adjacent_parts(drop_exact_duplicates(self._found(text)), text)
 
     def _found(self, text: str) -> Iterator[Detection]:
         if len(text) > self._max_chars:
+            self.stats.skipped_max_chars += 1
             return
+        windows = self._windows_of(text) if self._windows_of is not None else 1
+        if windows > 1:
+            self.stats.scanned_windowed += 1
+            self.stats.windows += windows
+        else:
+            self.stats.scanned_whole += 1
         for ent in self._pipe(text):
-            label = self.label_policy.classify(str(ent.get("entity_group", ent.get("entity", ""))))
+            label = self.label_policy.classify(
+                str(ent.get("entity_group", ent.get("entity", ""))), self.stats
+            )
             if label is None:
                 continue
             if float(ent.get("score", 1.0)) < self._threshold:
                 continue
             start, end = ent.get("start"), ent.get("end")
-            if start is None or end is None:
-                continue
-            start, end = int(start), int(end)
-            if not 0 <= start < end <= len(text):
+            if start is None or end is None or not 0 <= int(start) < int(end) <= len(text):
                 # A span the text does not contain cannot be redacted (or
                 # restored) faithfully: skip it rather than guess.
+                self.stats.offsets_dropped += 1
                 continue
+            start, end = int(start), int(end)
             yield Detection(
                 start=start,
                 end=end,
@@ -107,6 +135,33 @@ class HfDetector:
             )
 
 
+def model_window(tokenizer: Any, model: Any, catalog_window: int | None = None) -> int:
+    """How many tokens (special tokens included) the model reads at once:
+    ``catalog_window`` when known, else the smaller of the tokenizer's
+    ``model_max_length`` (unless it is the unknown-limit sentinel) and the
+    model config's ``max_position_embeddings`` (512 when absent)."""
+    if catalog_window is not None:
+        return catalog_window
+    limit = getattr(getattr(model, "config", None), "max_position_embeddings", None)
+    window = limit if isinstance(limit, int) and limit > 0 else _DEFAULT_WINDOW
+    tokenizer_limit = getattr(tokenizer, "model_max_length", None)
+    if isinstance(tokenizer_limit, int) and 0 < tokenizer_limit < _SENTINEL_MAX_LENGTH:
+        window = min(window, tokenizer_limit)
+    return window
+
+
+def window_counter(tokenizer: Any, stride: int) -> Callable[[str], int]:
+    """How many windows the strided pipeline reads a text in: the chunks
+    its fast tokenizer makes with the pipeline's own overflow settings
+    (truncation at ``model_max_length``, ``stride`` tokens of overlap)."""
+
+    def windows_of(text: str) -> int:
+        encoded = tokenizer(text, truncation=True, return_overflowing_tokens=True, stride=stride)
+        return len(encoded["input_ids"])
+
+    return windows_of
+
+
 def build_hf_detector(config: "NerConfig") -> HfDetector:
     from llm_redact.config import ConfigError
 
@@ -119,7 +174,10 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
         ) from exc
     model_name = config.model or _MODEL_NAME
     try:
-        pipe = pipeline("token-classification", model=model_name, aggregation_strategy="simple")
+        # Any: transformers' own types are not part of the checked surface.
+        loaded: Any = pipeline(
+            "token-classification", model=model_name, aggregation_strategy="simple"
+        )
     except Exception as exc:  # load can fail many ways; name only what is known
         if importlib.util.find_spec("torch") is None:
             # transformers imports without torch but cannot run a model.
@@ -131,12 +189,44 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
             f"failed to load Hugging Face token-classification model {model_name!r}:"
             f" {type(exc).__name__}"
         ) from exc
+    tokenizer = loaded.tokenizer
+    # Only a fast tokenizer reports character offsets (a slow one's
+    # entities come back without them and could never be redacted) and
+    # lets the pipeline read past its first window.
+    if not getattr(tokenizer, "is_fast", False):
+        raise ConfigError(
+            f"[detection.ner] hf model {model_name!r} has no fast tokenizer;"
+            " character offsets are required"
+        )
+    window = model_window(tokenizer, loaded.model)
+    # The pipeline windows at the tokenizer's limit: make it the model's
+    # (a tokenizer that does not know its limit would hand the model the
+    # whole text, past its position embeddings).
+    if tokenizer.model_max_length != window:
+        tokenizer.model_max_length = window
+    stride = window // 4
+    try:
+        # The same model and tokenizer, read in overlapping windows: `stride`
+        # is a construction parameter, so every call reads the whole text.
+        pipe: Any = pipeline(
+            "token-classification",
+            model=loaded.model,
+            tokenizer=tokenizer,
+            aggregation_strategy="simple",
+            stride=stride,
+        )
+    except Exception as exc:  # transformers refuses the windowing settings
+        raise ConfigError(
+            f"failed to load Hugging Face token-classification model {model_name!r}:"
+            f" {type(exc).__name__}"
+        ) from exc
     detector = HfDetector(
         pipe,
         frozenset(config.entities),
         config.max_chars,
         config.score_threshold,
         policy=LabelPolicy(config.entities, backend="hf", overrides=config.labels),
+        windows_of=window_counter(tokenizer, stride),
     )
     detector.model_name = model_name
     return detector

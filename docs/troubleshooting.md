@@ -378,7 +378,23 @@ Common causes:
   characters).
 
 Nothing breaks: the entity simply never redacts anything. Fix the entry or
-pick a model that covers it.
+pick a model that covers it. While it stands, `llm-redact status` repeats it
+as the posture line `NER entities no backend can emit: … (never detected)`,
+and `/status` lists it in `detection.ner.unmatched_entities`.
+
+## "NER skipped … string(s) longer than max_chars (…) — regex rules still applied"
+
+A `llm-redact status` posture line: since the detectors were built, the named
+NER backends were handed strings longer than `[detection.ner] max_chars` and
+never read them (`llm_redact_ner_strings_total{outcome="skipped_max_chars"}`
+counts them, `/status` `detection.ner` per backend). The regex rules, deny
+strings and custom rules still scanned those strings; only names and other
+contextual values the models would have found in them were not looked for.
+`max_chars` is a latency cap: the time a model takes grows with the length of
+what it reads. If your traffic carries long strings that
+hold names (pasted documents, large tool results), raise `max_chars`; if the
+skipped strings are logs or files you do not need NER on, the line is the
+expected cost of the cap.
 
 ## "[detection.ner.labels] LABEL: the type must match [A-Z][A-Z0-9_]* and be at most 20 characters, or be "" to drop the label"
 
@@ -418,6 +434,17 @@ From `serve` / `serve --check` with `[detection.ner]` using the `hf` backend:
 the `transformers` package is installed but `torch` is not, so no model can
 run. Install the extra, which brings both: `uv sync --extra hf` (or
 `pip install 'llm-redact-proxy[hf]'`), then re-run `serve --check`.
+
+## "[detection.ner] hf model '…' has no fast tokenizer; character offsets are required"
+
+Startup (and `serve --check`) refused an `hf` backend model whose tokenizer
+is a slow (pure-Python) one. Only a fast tokenizer reports where each entity
+sits in the text — without those offsets an entity could never be redacted,
+and the pipeline could not read a long string in windows. Most Hub models
+ship a fast tokenizer (`tokenizer.json`), and transformers builds one for
+many others (from a WordPiece `vocab.txt`, for one). If the model has none,
+pick another model, or save a converted fast tokenizer beside the model once
+and point `[detection.ner.models] hf` at that local folder.
 
 ## "failed to load Hugging Face token-classification model '…': …"
 

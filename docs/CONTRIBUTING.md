@@ -74,7 +74,10 @@ Other conventions worth knowing before writing tests:
   codec under test. Live-API drift tests (`-m live`) are deselected by
   default and double-gated on env vars + API keys.
 - NER and OTel tests inject fake models/exporters so the suite runs
-  without any extra installed.
+  without any extra installed. Tests that load a real NER model carry the
+  `real_model` marker, deselected by default: they read the model from the
+  local Hugging Face cache only (never a download) and skip when it or the
+  model's extra is absent (`uv run pytest -m real_model`).
 - The session never touches your machine (`tests/isolation.py`, applied
   by `conftest.py` before collection): `HOME` and the XDG
   config/data/state dirs point into one throwaway directory — whatever

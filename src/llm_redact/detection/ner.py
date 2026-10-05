@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
 from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
+from llm_redact.detection.stats import NerStats
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
@@ -71,6 +72,9 @@ class NerDetector:
         self.label_policy = policy if policy is not None else LabelPolicy(entities, backend="spacy")
         self.emittable_types = _pipeline_types(nlp, self.label_policy)
         self._max_chars = max_chars
+        # Coverage counters (stats.py): strings read or skipped, entities
+        # dropped. spaCy reads a whole string in one call.
+        self.stats = NerStats()
 
     def detect(self, text: str) -> list[Detection]:
         # Parts of one name or address reported separately join into one
@@ -78,14 +82,19 @@ class NerDetector:
         return merge_adjacent_parts(self._found(text), text)
 
     def _found(self, text: str) -> Iterator[Detection]:
-        # Latency gate: giant tool results (whole files, logs) are skipped.
-        # Regex rules still cover structured values inside them.
+        # Latency gate: giant tool results (whole files, logs) are skipped,
+        # and counted. Regex rules still cover structured values inside them.
         if len(text) > self._max_chars:
+            self.stats.skipped_max_chars += 1
             return
+        self.stats.scanned_whole += 1
         for ent in self._nlp(text).ents:
-            label = self.label_policy.classify(str(ent.label_))
+            label = self.label_policy.classify(str(ent.label_), self.stats)
+            if label is None:
+                continue
             start, end = int(ent.start_char), int(ent.end_char)
-            if label is None or not 0 <= start < end <= len(text):
+            if not 0 <= start < end <= len(text):
+                self.stats.offsets_dropped += 1
                 continue
             yield Detection(
                 start=start,

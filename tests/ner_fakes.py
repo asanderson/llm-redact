@@ -28,16 +28,56 @@ def _spans(text: str, findings: list[Finding]) -> list[tuple[int, int, str, floa
 
 
 @dataclass
+class FakeTokenizer:
+    """A fast tokenizer: one token per whitespace-separated word, two special
+    tokens per window; with overflow it windows like the Hugging Face fast
+    tokenizers (``model_max_length`` tokens a window, ``stride`` shared)."""
+
+    model_max_length: int = 512
+    is_fast: bool = True
+    special_tokens: int = 2
+
+    def __call__(
+        self,
+        text: str,
+        *,
+        truncation: bool = False,
+        return_overflowing_tokens: bool = False,
+        stride: int = 0,
+        **kwargs: Any,
+    ) -> dict[str, list[list[int]]]:
+        tokens = list(range(len(text.split())))
+        content = self.model_max_length - self.special_tokens
+        if not (truncation and return_overflowing_tokens) or len(tokens) <= content:
+            return {"input_ids": [tokens]}
+        chunks = []
+        start = 0
+        while True:
+            chunks.append(tokens[start : start + content])
+            if start + content >= len(tokens):
+                return {"input_ids": chunks}
+            start += content - stride
+
+
+@dataclass
 class FakeHfPipe:
     """transformers token-classification pipeline, aggregation "simple"."""
 
     findings: list[Finding]
     id2label: dict[int, str] | None = None
     calls: list[str] = field(default_factory=list)
+    tokenizer: FakeTokenizer = field(default_factory=FakeTokenizer)
+    max_position_embeddings: int | None = None
+    # The keyword arguments of every transformers.pipeline() call that
+    # handed out this pipe (install_transformers).
+    built_with: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if self.id2label is not None:
-            self.model = types.SimpleNamespace(config=types.SimpleNamespace(id2label=self.id2label))
+        self.model = types.SimpleNamespace(
+            config=types.SimpleNamespace(
+                id2label=self.id2label, max_position_embeddings=self.max_position_embeddings
+            )
+        )
 
     def __call__(self, text: str) -> list[dict[str, Any]]:
         self.calls.append(text)
@@ -125,7 +165,12 @@ class FakeAnalyzer:
 
 def install_transformers(monkeypatch: pytest.MonkeyPatch, pipe: FakeHfPipe) -> None:
     module = types.ModuleType("transformers")
-    module.pipeline = lambda *args, **kwargs: pipe  # type: ignore[attr-defined]
+
+    def pipeline(*args: Any, **kwargs: Any) -> FakeHfPipe:
+        pipe.built_with.append(kwargs)
+        return pipe
+
+    module.pipeline = pipeline  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", module)
 
 

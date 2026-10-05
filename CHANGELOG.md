@@ -20,6 +20,25 @@ and tags `vX.Y.Z`.
   `urchade/gliner_multi_pii-v1` and the four `knowledgator/gliner-pii-*-v1.0` sizes are pinned to
   their `main` commits of 2026-10-05. The keys are parsed, validated and written
   back by `config show`; the model loaders do not read them yet, so models still load as before.
+- NER coverage counters: every NER backend counts the strings it read, the strings it
+  skipped as longer than `[detection.ner] max_chars` (which only the regex rules then
+  read), and the model entities it dropped (a type that cannot be a placeholder type, a
+  span the string does not contain). `/status` publishes them per backend, with the model
+  and the entities no backend can emit, in a new `detection.ner` block
+  (docs/detection.md "NER coverage counters"); `detection.ner_enabled` is unchanged.
+- `/metrics` exports the NER coverage counters: `llm_redact_ner_strings_total{backend,outcome}`
+  (`scanned_whole`, `scanned_windowed`, `skipped_max_chars`), `llm_redact_ner_windows_total`,
+  `llm_redact_ner_windows_truncated_total`, `llm_redact_ner_labels_dropped_total` and `llm_redact_ner_offsets_dropped_total` (by
+  backend; they restart from zero when a reload rebuilds the detectors). `llm-redact status`
+  prints a posture line while a backend has skipped strings longer than `max_chars`, and one
+  naming the entities no backend can emit.
+- docs/detection.md "How NER runs" walks one string through an NER backend (the
+  `max_chars` gate, windows, the label policy, the type guard, part merging, rule toggles,
+  overlap resolution) beside a new `ner-pipeline` diagram.
+- The shipped Grafana dashboard gains an "NER coverage" row (strings by backend and outcome,
+  strings skipped as longer than `max_chars`, windows, entities dropped), and
+  `deploy/prometheus-alerts.yml` a `LlmRedactNerSkippingLongStrings` warning for a backend
+  that keeps skipping strings longer than `[detection.ner] max_chars` for 30 minutes.
 - A startup WARNING for each `[detection.ner] entities` entry no active NER backend can ever
   emit (a typo, a label the model lacks, an override that drops it), naming the entity,
   the backends and their models; the labels come from an `hf` model's `id2label`, a spaCy
@@ -62,6 +81,24 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The `hf` NER backend read only the first window of a string (512 tokens for the default
+  `dslim/bert-base-NER`, about 2,000 characters) and silently ignored the rest. It now
+  reads the whole string, up to `max_chars`, in overlapping windows sized from the
+  tokenizer and model config (the pipeline's `stride`), keeps one copy of an entity two
+  windows both report, and counts windowed strings and windows. A model without a fast
+  tokenizer, whose entities came back without the offsets redaction needs, is refused at
+  startup: `[detection.ner] hf model '…' has no fast tokenizer; character offsets are
+  required`.
+- The `gliner` NER backend read only the first 384 words of a string (GLiNER's `max_len`;
+  every JSON brace, quote, colon and comma counts as a word) and dropped the rest with a
+  library warning. It now reads the whole string, up to `max_chars`, in overlapping
+  windows of GLiNER's own words, each within `max_len` beside the entity prompts and, with
+  the model's fast tokenizer, within the subword tokens its encoder reads; one copy of an
+  entity two windows report is kept. A single word longer than the encoder reads is
+  counted (`windows_truncated` in `/status`, `llm_redact_ner_windows_truncated_total`).
+- `[detection.ner] score_threshold` never reached the `gliner` backend's model: GLiNER's
+  third parameter is `flat_ner`, so the threshold was passed there and every call used
+  GLiNER's default 0.5. It is now passed by name.
 - `[detection.allowlist_by_type]` accepts the types NER entities are emitted as (`JOB_TITLE`
   for the GLiNER entity `"job title"`, which it refused) and reads a key that names an
   entity as written as the type NER emits for it (a `"job title"` key never matched).

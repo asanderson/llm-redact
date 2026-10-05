@@ -6,7 +6,8 @@ provider and status, the proxy's own refusals by kind, detection /
 warning / block / rehydration counts by detector *type*, request duration
 and the proxy's own overhead, vault entry/session gauges and its map
 writer, audit-sink batches, compaction-fork counts, routing decisions and
-re-issues by upstream and rule name, a plugin's own gauges (llm-redact-pro:
+re-issues by upstream and rule name, NER coverage (strings read, skipped
+and entities dropped, by backend), a plugin's own gauges (llm-redact-pro:
 users and seats), and build info. It never carries secret values or placeholder ids (see
 [threat-model.md](threat-model.md) § Logging posture), so scraping it is safe.
 
@@ -15,8 +16,8 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | File | What it is |
 |---|---|
 | `deploy/prometheus-scrape.yml` | A `scrape_configs` job to merge into your `prometheus.yml`. |
-| `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage). |
-| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes). |
+| `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage, NER skipping strings longer than `max_chars`). |
+| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, windows and truncated windows, entities dropped). |
 
 ## Metrics reference
 
@@ -33,6 +34,11 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | `llm_redact_compaction_forks_total` | counter | — | Per-conversation sessions forked by history compaction. |
 | `llm_redact_unscanned_uploads_total` | counter | `provider` | Binary file parts of uploads (a PDF, an image, an archive) **forwarded unscanned** with the client's own key under `[detection] binary_uploads = "forward"` (the default) — counted only once the upload was handed to the upstream. Also `/status` `unscanned_uploads_total` and a `llm-redact status` posture line. |
 | `llm_redact_inspected_uploads_total` | counter | `provider`, `outcome` | Binary file parts read as text by an upload inspector (the core's `[extraction]`, docs/extraction.md), one outcome each: `clean` (sent byte-identical after a clean scan of the EXTRACTED text only — counted once the upload was handed to the upstream), `clean_refused` (scanned clean, the upload refused before any upstream contact), `converted`/`converted_refused` (replaced by its redacted extracted text in convert mode; sent or refused), `overridden`/`overridden_refused` (clean only because an approved refusal override let its values through: sent byte-identical WITH them, or refused — never counted `clean`), `detected`, `blocked`, `incomplete`, `not_inspected`, `timeout`, `error`. Also `/status` `inspected_uploads_total`. |
+| `llm_redact_ner_strings_total` | counter | `backend`, `outcome` | Strings handed to an NER backend (`[detection.ner]`, docs/detection.md "NER coverage counters"), one outcome each: `scanned_whole` (the model read it in one call), `scanned_windowed` (in overlapping windows), `skipped_max_chars` (longer than `[detection.ner] max_chars`: **the model never read it** — the regex rules and deny strings still did). A sustained `skipped_max_chars` rate is an NER coverage gap. Rows only for the running backends; with NER off the family is empty. Also `/status` `detection.ner`, and a `llm-redact status` posture line while non-zero. |
+| `llm_redact_ner_windows_total` | counter | `backend` | The windows the `scanned_windowed` strings were read in (model calls for them). |
+| `llm_redact_ner_windows_truncated_total` | counter | `backend` | Windows (a string read whole counts as one) holding a single word longer than the model's encoder reads (a very long identifier), which the model may read only in part. |
+| `llm_redact_ner_labels_dropped_total` | counter | `backend` | Model entities never emitted because their type cannot be a placeholder type (it starts with a digit, or is longer than 28 characters). |
+| `llm_redact_ner_offsets_dropped_total` | counter | `backend` | Model entities of a requested type never redacted because the scanned string does not contain their span (or they came without one). |
 | `llm_redact_overrides_used_total` | counter | `kind` | Requests (and realtime frames) that passed a refusal on an approved refusal override (docs/overrides.md), by `once`/`always` — **the overridden value, body or file part was forwarded upstream as sent**, like a warn-mode value. Also `/status` `overrides`. |
 | `llm_redact_upstream_errors_total` | counter | `provider` | Transport faults failed closed as 502 (by upstream name when routing is enabled). |
 | `llm_redact_bookkeeping_errors_total` | counter | `stage` | Faults in the proxy's own bookkeeping. After the upstream answered: session bookkeeping (`response_id`, `object_ids`, `listing`, and `response_observer` — a session router observing the answer — contained, the answer is still delivered) and `delivery` (restoring the answer failed: a buffered one is a recorded 502, a stream is cut). Before any upstream contact: `vault` (issuing a request's placeholders failed — a recorded 503; a realtime frame closes the connection 1011). `vault_check`: a vault view's staleness check could not read its database (contained: the view keeps serving its cache — a cached token only ever restores its own value — and checks again a second later). `recheck`: an open realtime relay's or live-events stream's access re-check raised, timed out or gave an answer that makes no sense (fail closed: the connection is closed). `realtime_frame`: the session router's per-frame realtime check (`realtime_frame_refusal`) raised or gave an answer that makes no sense (fail closed: the connection is closed 1008, the frame never sent). `realtime_server_frame`: the session router's observation of a realtime UPSTREAM frame (`realtime_server_frame`) raised (contained: the frame is delivered; what the router would have recorded stays unknown — llm-redact-pro then refuses a Live resumption it cannot attribute). `handle_map`: the vault's Live resumption handle map (written and read by llm-redact-pro) could not be written or read (contained: a failed write records nothing, a failed read answers unknown — the resumption is refused; logged once per outage, by exception type). `map_write_wait`: a `before_answer` answer sent before its map writes landed (the same answers as `llm_redact_map_write_wait_timeouts_total`, which says why). `authorization`: the access gate's optional request authorization (`authorize_request`) raised, timed out or gave an answer that makes no sense, or its detection overlay (`detection_overlay`) raised or could not be applied, or its check of what the redaction found (`authorize_content`) raised, timed out or gave an answer that makes no sense (fail closed: the request is refused 403, a realtime upgrade or frame 1008). `gate_reload`: on a configuration reload (SIGHUP or a dashboard edit) the access gate's optional policy reload (`reload`) kept its previous policy (its reason logged at WARNING, escaped and cut to 200 characters), raised or gave an answer that makes no sense (logged by type) — contained: the rest of the reload applies and the gate keeps whatever policy it holds. `plugin_metrics`: a plugin's metrics samples could not be read (a fault, a timeout, a call still running) or a sample was invalid and dropped. |
@@ -48,6 +54,13 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | `llm_redact_uptime_seconds` / `_start_time_seconds` | gauge | — | Process liveness. |
 | `llm_redact_info` | gauge | `version` | Build info (value 1). |
 | a plugin's own gauges | gauge | the plugin's | Rendered after the core's from an access gate's optional `metrics_samples` (llm-redact-pro: `llm_redact_users{state}`, `llm_redact_seats_licensed`, `llm_redact_seats_used` — see its docs/observability.md). The core enforces the SHAPE: a name under `llm_redact_` that no core family uses, at most 4 labels whose names and values are from `[a-z0-9_]` (a value at most 32 characters, with no run of 8 or more hexadecimal characters holding a digit — the shape of a key, hash, id or long number), a finite value, at most 256 samples; anything else is dropped and counted under the bookkeeping stage `plugin_metrics`. A shape check cannot tell a fixed state name from a user name that fits it (`alice_smith`): keeping every label value to a small fixed set is the plugin's obligation (llm-redact-pro's are fixed enums), and the samples are served on the open `/metrics` path. Read in a worker thread, at most 2 s per call, never two at once — scrapes arriving together (an HA pair of Prometheus servers) share the call in flight until its own 2 s bound: a slow or failing plugin never delays or fails the scrape (each scrape rendered without the gauges is counted under `plugin_metrics`, logged once per episode by exception type). |
+
+The `llm_redact_ner_*` counters belong to the built NER detectors: they
+restart from zero when a configuration reload rebuilds the detectors (any
+change to `[detection]`, by SIGHUP or the dashboard editor) — Prometheus reads
+that as a counter reset, which `rate()` and `increase()` handle. A reload that
+leaves `[detection]` alone keeps them. A redaction preview in the
+llm-redact-pro dashboard runs the live detectors and is counted like a request.
 
 ## Local refusal kinds
 
@@ -119,6 +132,10 @@ answers — none of them is a request the proxy refused to forward.
    your models; llm-redact-pro's package carries one at 30 s).
    **`LlmRedactLocalFaultRefusals`** pages when the proxy refuses requests
    because its own vault or audit storage fails.
+   **`LlmRedactNerSkippingLongStrings`** warns when an NER backend keeps
+   skipping strings longer than `[detection.ner] max_chars` for 30 minutes:
+   the regex rules still scanned them, but names in them were not looked for
+   (raise `max_chars` if such strings carry names; docs/troubleshooting.md).
 3. **Visualize.** Import `deploy/grafana-dashboard.json` (Dashboards → Import),
    pick your Prometheus data source. The warn/block panels are colored to stand
    out because they represent values leaving the box or traffic being rejected.

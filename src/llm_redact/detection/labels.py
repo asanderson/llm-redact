@@ -40,6 +40,7 @@ from llm_redact.placeholders import is_placeholder_type
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
+    from llm_redact.detection.stats import NerStats
 
 # D15 (i): 1.12.x ships the transitional mode (raw requests keep their own
 # type, with a startup deprecation warning); 2.0.0 flips this to True.
@@ -314,10 +315,11 @@ class LabelPolicy:
             return override
         return DEFAULT_FOLDS.get(label, label)
 
-    def classify(self, raw_label: str) -> str | None:
+    def classify(self, raw_label: str, stats: "NerStats | None" = None) -> str | None:
         """The placeholder type a model label is emitted as, or None when
         it was not requested, is dropped, or does not fit the placeholder
-        grammar."""
+        grammar — the last counted in ``stats.labels_dropped`` when a
+        backend passes its counters."""
         label = normalize_label(raw_label)
         if label in self.raw_requested:
             # Transitional mode: a raw request keeps its own label (the
@@ -328,7 +330,7 @@ class LabelPolicy:
             type_name = self.fold(label)
             if type_name not in self.requested:
                 return None
-        return type_name if is_placeholder_type(type_name) else None
+        return _fitting(type_name, stats)
 
     def entry_type(self, name: str) -> str | None:
         """The placeholder type a configured NAME stands for (an entity, an
@@ -339,13 +341,23 @@ class LabelPolicy:
         type_name = self.fold(label) if self.fold_raw else self.overrides.get(label, label)
         return type_name if type_name and is_placeholder_type(type_name) else None
 
-    def classify_gliner(self, returned_label: str) -> str | None:
+    def classify_gliner(self, returned_label: str, stats: "NerStats | None" = None) -> str | None:
         """A GLiNER label: one of this policy's type-request prompts is
         emitted as its type directly; anything else goes through classify."""
         type_name = self.prompt_types.get(returned_label)
         if type_name is not None:
-            return type_name if is_placeholder_type(type_name) else None
-        return self.classify(returned_label)
+            return _fitting(type_name, stats)
+        return self.classify(returned_label, stats)
+
+
+def _fitting(type_name: str, stats: "NerStats | None") -> str | None:
+    """``type_name`` when it fits the placeholder grammar; otherwise None,
+    counted as a dropped label when ``stats`` is given."""
+    if is_placeholder_type(type_name):
+        return type_name
+    if stats is not None:
+        stats.labels_dropped += 1
+    return None
 
 
 # Types whose parts a model may report separately ("Jane" FIRST_NAME, "Doe"

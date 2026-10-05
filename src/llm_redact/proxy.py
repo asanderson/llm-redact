@@ -97,6 +97,8 @@ from llm_redact.detection.engine import (
     build_allowlist,
     build_detectors,
     build_modes,
+    ner_backend_stats,
+    ner_status,
     ner_warnings,
 )
 from llm_redact.eventstream import EventStreamError, EventStreamParser
@@ -3114,6 +3116,12 @@ async def _handle_local(
                         len(values) for _type, values in config.detection.allowlist_by_type
                     ),
                     "ner_enabled": config.detection.ner.enabled,
+                    # NER coverage (detection/stats.py): per backend, the
+                    # strings read whole or in windows, those skipped as
+                    # longer than max_chars, entities dropped; entities no
+                    # backend can emit. Counts since the detectors were
+                    # built (a reload that rebuilds them starts from zero).
+                    "ner": ner_status(config.detection.ner, state.detectors),
                     "modes": {name: mode for name, mode in config.detection.modes},
                     # Count only: deny values are themselves secrets. The
                     # config editor GET returns them — the same documented
@@ -3251,6 +3259,7 @@ async def _handle_local(
                 audit_sink_rows_dropped=_sink_counts(state, "rows_dropped"),
                 map_write_queue_depth=state.map_writes_pending(),
                 map_write_wait_timeouts=state.map_write_wait_timeouts,
+                ner_stats=[(name, stats) for name, _, stats in ner_backend_stats(state.detectors)],
             )
             + plugin_text,
             media_type="text/plain; version=0.0.4; charset=utf-8",

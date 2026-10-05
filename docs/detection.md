@@ -175,6 +175,69 @@ but the model loaders do not read them yet: whatever `allow_download` and
 from the Hub, downloaded on first use and cached — and `allow_pickle_weights`
 changes nothing.
 
+## How NER runs
+
+![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model, the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)
+
+*Static diagram. [Mermaid source](diagrams/ner-pipeline.mmd).*
+
+Every NER backend handles each string the redaction scans the same way:
+
+1. **The `max_chars` gate.** A string longer than `[detection.ner] max_chars`
+   (default 20,000 characters) is read by no model; it is counted as
+   `skipped_max_chars`, and the regex rules, deny strings and custom rules
+   still scan it.
+2. **One call or windows.** A string that fits the model's window is read in
+   one call, as sent. A longer one is read in overlapping windows (the `hf`
+   and `gliner` backends; below).
+3. **The model** reports entities with a label, a score and character offsets.
+4. **The label policy** turns the label into a placeholder type and keeps it
+   only when that type was requested (see "Placeholder types from NER
+   models" below).
+5. **The type guard** drops a type that cannot be a placeholder type
+   (`labels_dropped`).
+6. **Score and offsets.** An entity scored below `score_threshold` (on the
+   backends that report a score) is dropped;
+   one whose span the string does not contain is never redacted
+   (`offsets_dropped`): only the exact text sent can be restored.
+7. **Duplicates and parts.** An entity two windows both report is kept once,
+   and parts of one name or address one or two blanks apart become one span.
+8. **Rule toggles.** A type whose built-in rule is disabled (or scoped out by
+   `[detection] languages`) is suppressed for NER too.
+9. **Allowlists, overlaps and modes.** Allowlisted values are left alone; the
+   rest meet the regex rules and deny strings in overlap resolution (deny
+   strings win every overlap, then the longest span; a regex rule wins an
+   exact tie), and the winner's mode redacts it into the vault, forwards it
+   (warn) or refuses the request (block).
+
+**Long strings.** A model reads a bounded number of tokens at a time and, left
+alone, ignores the rest of a longer string. The `hf` and `gliner` backends
+read a longer string in overlapping windows, so a name anywhere in it is found
+at its exact offsets:
+
+- `hf`: a window is the model's limit (the smaller of its tokenizer's
+  `model_max_length` and its config's `max_position_embeddings`, 512 when
+  neither says; 512 tokens for `dslim/bert-base-NER`), and consecutive windows
+  share a quarter of it. Windowing needs a fast tokenizer — the only kind that
+  reports character offsets — so an `hf` model without one is refused at
+  startup.
+- `gliner`: GLiNER reads at most `max_len` words of a text (384 for the urchade
+  v2.1 models) and drops the rest. A window holds at most 200 of GLiNER's own
+  words, fewer when the entity prompts leave less room within `max_len`, and —
+  with the model's fast tokenizer — no more subword tokens than its encoder
+  reads beside the prompt (the tokenizer's limit, else the encoder's position
+  limit, else 512). GLiNER counts every JSON brace, quote, colon and comma as
+  a word, so JSON-dense text makes many words. Consecutive windows share a
+  fifth of a window. A single word longer than the encoder reads (a very long
+  identifier) gets a window of its own, which the model may read only in part:
+  counted as `windows_truncated`.
+
+An entity two windows both report counts once; one cut by a window's edge is
+also reported whole by the next window, and the longer span wins. spaCy,
+Stanza and Presidio read each string whole. Windows make a long string cost
+more model time; `max_chars` caps that time per string, and the strings it
+skips are counted (see "NER coverage counters" below).
+
 ## Placeholder types from NER models
 
 Each NER model names what it finds in its own words: spaCy says `PERSON`,
@@ -295,3 +358,65 @@ the startup log names each such key once.
 A folded built-in type follows its rule's toggle: with `generic_secret`
 disabled, a model's `PASSWORD` detections (type `SECRET`) are suppressed too,
 and with `email` disabled so are the `EMAIL_ADDRESS` ones.
+
+## NER coverage counters
+
+A model reads a bounded amount of text, and text it never reads is covered by
+the regex rules alone. Each NER backend therefore counts what it read and what
+it dropped, so a gap shows instead of staying silent. `GET
+/__llm-redact/status` carries the counts in `detection.ner` (beside the
+existing `detection.ner_enabled`):
+
+```json
+"ner": {
+  "enabled": true,
+  "max_chars": 20000,
+  "backends": {
+    "hf": {
+      "model": "dslim/bert-base-NER",
+      "revision": null, "catalog": null, "license": null,
+      "counters": {"scanned_whole": 812, "scanned_windowed": 14, "skipped_max_chars": 3,
+                   "windows": 61, "windows_truncated": 0, "labels_dropped": 0,
+                   "offsets_dropped": 0}
+    }
+  },
+  "unmatched_entities": []
+}
+```
+
+| Counter | Counts |
+|---|---|
+| `scanned_whole` | strings the model read in one call |
+| `scanned_windowed` | strings the model read in overlapping windows (`hf`, `gliner`) |
+| `skipped_max_chars` | strings longer than `[detection.ner] max_chars`, which the model never read (the regex rules and deny strings still scan them) |
+| `windows` | the windows the windowed strings were read in |
+| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`) |
+| `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |
+| `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
+
+Each string a backend is handed counts once, under `scanned_whole`,
+`scanned_windowed` or `skipped_max_chars`; with several backends each one
+counts the strings it was handed. `unmatched_entities` lists the configured
+entities no active backend can ever emit (the startup warning above), and
+`model` the model each backend loaded; `revision`, `catalog` and `license` are
+`null`.
+
+The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
+backend and outcome, `llm_redact_ner_windows_total`,
+`llm_redact_ner_windows_truncated_total`, `llm_redact_ner_labels_dropped_total`,
+`llm_redact_ner_offsets_dropped_total`;
+see [observability.md](observability.md)), and `llm-redact status` prints a
+posture line while a backend has skipped strings longer than `max_chars` or an
+entity can never match:
+
+```
+posture:
+  ⚠ NER skipped hf×3 string(s) longer than max_chars (20000) — regex rules still applied
+  ⚠ NER entities no backend can emit: PERSONS (never detected)
+```
+
+The counters belong to the built detectors: they start at zero at startup and
+again when a reload rebuilds the detectors (any change to `[detection]`); a
+reload that leaves `[detection]` alone keeps them. A redaction preview in the
+llm-redact-pro dashboard runs the live detectors and is counted like a
+request.

@@ -455,6 +455,19 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 #                            # (gliner; hf: a token-classification model). Stanza
 #                            # ignores it and loads the `language` model.
 # score_threshold = 0.5      # gliner, presidio and hf only (spacy/stanza give no score)
+# Model sources of the Hugging Face Hub backends (gliner, hf); see
+# docs/detection.md "Model sources". NOT ENFORCED YET: these keys are parsed,
+# validated and written back, but the model loaders do not read them, so a
+# model still loads as before (the newest revision from the Hub, cached).
+# allow_download = false        # default: whether a startup may fetch model files
+#                               # from the Hub (false: local cache or folder only)
+# allow_pickle_weights = false  # hf only: true permits pytorch_model.bin for a
+#                               # model with no safetensors weights
+# Pin a backend's model to a full 40-character commit id (branch and tag
+# names are refused: they move). Without an entry, a model llm-redact's
+# catalog knows uses the catalog's pin (the default models included).
+# [detection.ner.revisions]
+# hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
 
 [audit]
 # Opt-in local log of proxy activity: detector types and counts, paths,

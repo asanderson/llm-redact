@@ -12,6 +12,14 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- `[detection.ner]` model-source keys: `allow_download` (default `false`), `allow_pickle_weights`
+  (default `false`; `hf` only) and `[detection.ner.revisions]` (per `gliner`/`hf` backend, a full
+  40-character commit id; a branch or tag name such as `main` is a config error because it moves).
+  A backend without a revision is assigned the pin llm-redact's model catalog records for its model:
+  the default models, `urchade/gliner_medium-v2.1`, `urchade/gliner_multi-v2.1`,
+  `urchade/gliner_multi_pii-v1` and the four `knowledgator/gliner-pii-*-v1.0` sizes are pinned to
+  their `main` commits of 2026-10-05. The keys are parsed, validated and written
+  back by `config show`; the model loaders do not read them yet, so models still load as before.
 - A startup WARNING for each `[detection.ner] entities` entry no active NER backend can ever
   emit (a typo, a label the model lacks, an override that drops it), naming the entity,
   the backends and their models; the labels come from an `hf` model's `id2label`, a spaCy

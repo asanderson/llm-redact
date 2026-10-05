@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.labels import LabelPolicy, raw_entity_deprecations
+from llm_redact.detection.model_catalog import DEFAULT_MODELS, HUB_BACKENDS, pinned_revision
 from llm_redact.detection.regex_rules import BUILTIN_RULES, PreparedText, RegexDetector, RegexRule
 
 
@@ -107,6 +108,18 @@ class NerConfig:
     # labels AND configured entities alike, so `PER = "PER"` keeps
     # `entities = ["PER"]` emitting PER once raw entities fold.
     labels: tuple[tuple[str, str], ...] = ()
+    # Model sources of the Hugging Face Hub backends (gliner, hf).
+    # [detection.ner.revisions]: backend -> 40-hex commit id, stored sorted
+    # (a branch or tag name moves, so the parser refuses one); a backend
+    # without an entry is pinned by its model's catalog entry, if any
+    # (revision_for). `allow_download` (owner decision D2: default false)
+    # says whether a startup may fetch pinned files from the Hub;
+    # `allow_pickle_weights` (hf only, D3) whether pytorch_model.bin may
+    # load when a model has no safetensors weights. Parsed, validated and
+    # emitted here; the model loaders do not read them yet.
+    revisions: tuple[tuple[str, str], ...] = ()
+    allow_download: bool = False
+    allow_pickle_weights: bool = False
 
     def active_backends(self) -> tuple[str, ...]:
         return self.backends if self.backends is not None else (self.backend,)
@@ -117,6 +130,18 @@ class NerConfig:
                 return model
         active = self.active_backends()
         return self.model if len(active) == 1 else None
+
+    def revision_for(self, backend: str) -> str | None:
+        """The commit ``backend``'s model is pinned to: its
+        [detection.ner.revisions] entry, else the catalog pin of the model
+        it loads (its configured model, else the backend's default). None:
+        unpinned, or a backend whose models are not Hub snapshots."""
+        for name, revision in self.revisions:
+            if name == backend:
+                return revision
+        if backend not in HUB_BACKENDS:
+            return None
+        return pinned_revision(self.model_for(backend) or DEFAULT_MODELS[backend])
 
 
 @dataclass(frozen=True)
@@ -313,14 +338,9 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
         built: list[Detector] = []
         for backend_name in config.ner.active_backends():
             # Each backend builder still sees a single-backend view with
-            # its own resolved model — the builders stay untouched.
-            single = replace(
-                config.ner,
-                backend=backend_name,
-                backends=None,
-                model=config.ner.model_for(backend_name),
-                models=(),
-            )
+            # its own resolved model and effective revision (the user's
+            # pin, else the catalog's) — the builders stay untouched.
+            single = _single_backend_view(config.ner, backend_name)
             # Imported only when enabled: the NER dependencies stay
             # optional and startup fails fast per backend if missing.
             if backend_name == "gliner":
@@ -347,6 +367,22 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
         _mark_unmatched(config.ner.entities, built)
     return detectors
+
+
+def _single_backend_view(ner: NerConfig, backend: str) -> NerConfig:
+    """``ner`` as one backend's builder sees it: that backend alone, its
+    resolved model in ``model`` and its effective revision as the only
+    ``revisions`` entry (none when unpinned), so ``revision_for(backend)``
+    answers the same on the view as on the full config."""
+    revision = ner.revision_for(backend)
+    return replace(
+        ner,
+        backend=backend,
+        backends=None,
+        model=ner.model_for(backend),
+        models=(),
+        revisions=((backend, revision),) if revision is not None else (),
+    )
 
 
 def _label_policy(detector: Detector) -> LabelPolicy | None:

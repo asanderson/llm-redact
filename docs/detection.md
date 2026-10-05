@@ -135,6 +135,46 @@ Stanza and Hugging Face `token-classification` backends are available the
 same way — the survey behind the lineup is
 [ner-landscape.md](ner-landscape.md).
 
+### Model sources: pinned revisions, downloads and pickle weights
+
+The `gliner` and `hf` backends load models from the Hugging Face Hub. Three
+`[detection.ner]` keys say where those models may come from:
+
+```toml
+[detection.ner]
+allow_download = false        # the default
+allow_pickle_weights = false  # the default; hf only
+
+[detection.ner.revisions]
+hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
+```
+
+- `revisions` pins a backend's model to one commit: a full 40-character
+  lowercase hex commit id per backend, `gliner` or `hf` (the other backends'
+  models are not Hub snapshots and take none). A branch or tag name such as
+  `main` is a config error, because it moves. A backend with no entry uses
+  the pin llm-redact's model catalog records for the model it loads, when
+  there is one: the default models `urchade/gliner_small-v2.1` and
+  `dslim/bert-base-NER`, `urchade/gliner_medium-v2.1`,
+  `urchade/gliner_multi-v2.1`, `urchade/gliner_multi_pii-v1` and the four
+  `knowledgator/gliner-pii-*-v1.0` sizes are pinned to the commit their
+  `main` branch pointed at on 2026-10-05. An entry for a backend that is not
+  active is kept and ignored, like a `[detection.ner.models]` entry.
+- `allow_download` (default `false`) decides whether a startup may fetch the
+  pinned model files from the Hub; with `false`, models are meant to load
+  only from the local Hugging Face cache or a model folder.
+- `allow_pickle_weights` (default `false`, `hf` only) permits loading
+  `pytorch_model.bin`, a pickle, for an `hf` model that ships no safetensors
+  weights. GLiNER loads its `pytorch_model.bin` through torch's
+  `weights_only` loader whatever this key says.
+
+**Not enforced yet.** The three keys are parsed, validated and written back
+(`llm-redact config show`, the dashboard editor keeps them from the file),
+but the model loaders do not read them yet: whatever `allow_download` and
+`revisions` say, a model still loads as it did before — the newest revision
+from the Hub, downloaded on first use and cached — and `allow_pickle_weights`
+changes nothing.
+
 ## Placeholder types from NER models
 
 Each NER model names what it finds in its own words: spaCy says `PERSON`,

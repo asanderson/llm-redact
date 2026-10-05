@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from llm_redact.config import ConfigError, parse_config
 from llm_redact.detection import gliner_ner, hf_ner, model_catalog
+from llm_redact.detection.engine import DetectionConfig, NerConfig, build_detectors
 from llm_redact.detection.labels import (
     CANONICAL_NER_TYPES,
     DEFAULT_FOLDS,
@@ -393,3 +395,175 @@ def test_identify(tmp_path: Path) -> None:
     assert identify(str(tmp_path)) is None
     (tmp_path / SIDECAR_NAME).write_text(sidecar_text(ModelIdentity("urchade/gliner_base")))
     assert identify(str(tmp_path)) == ModelIdentity("urchade/gliner_base")
+
+
+# --- [detection.ner] model-source keys (revisions, allow_download,
+# allow_pickle_weights) and the effective revision ------------------------
+
+
+def _ner(table: dict[str, object]) -> NerConfig:
+    return parse_config({"detection": {"ner": table}}, "<test>").detection.ner
+
+
+def test_model_source_keys_default_to_the_safe_side() -> None:
+    ner = _ner({})
+    assert ner.revisions == ()
+    assert ner.allow_download is False  # owner decision D2
+    assert ner.allow_pickle_weights is False  # owner decision D3
+    assert ner == NerConfig()
+
+
+def test_revisions_parse_sorted() -> None:
+    ner = _ner({"backends": ["gliner", "hf"], "revisions": {"hf": _SHA, "gliner": "f" * 40}})
+    assert ner.revisions == (("gliner", "f" * 40), ("hf", _SHA))
+
+
+def test_model_source_switches_parse() -> None:
+    ner = _ner({"backend": "hf", "allow_download": True, "allow_pickle_weights": True})
+    assert ner.allow_download is True
+    assert ner.allow_pickle_weights is True
+
+
+def test_model_sources_are_kept_while_their_backend_is_inactive() -> None:
+    # Inert like a [detection.ner.models] entry: the dashboard editor keeps
+    # these file-only keys while a save switches backends.
+    ner = _ner({"backend": "spacy", "revisions": {"hf": _SHA}, "allow_pickle_weights": True})
+    assert ner.revisions == (("hf", _SHA),)
+    assert ner.allow_pickle_weights is True
+
+
+@pytest.mark.parametrize(
+    ("revisions", "message"),
+    [
+        ({"hf": "main"}, r"\[detection.ner.revisions\] hf must be a full 40-character"),
+        ({"hf": "v1.0"}, "branch and tag names .* are refused because they move"),
+        ({"gliner": _SHA[:12]}, "gliner must be a full 40-character lowercase hex commit id"),
+        ({"hf": _SHA.upper()}, "hf must be a full 40-character lowercase hex"),
+        ({"hf": _SHA + "0"}, "hf must be a full 40-character"),
+        ({"hf": _SHA + "\n"}, "hf must be a full 40-character"),
+        ({"hf": 7}, "hf must be a full 40-character"),
+        ({"spacy": _SHA}, r"spacy: a revision pins a Hugging Face Hub model, so only the gliner"),
+        ({"stanza": _SHA}, "only the gliner and hf backends take one"),
+        ("main", r"\[detection.ner.revisions\] must be a table of BACKEND = "),
+    ],
+)
+def test_invalid_revisions_are_config_errors(revisions: object, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        _ner({"revisions": revisions})
+
+
+def test_a_revision_error_never_echoes_the_value() -> None:
+    # Error messages name keys, never values.
+    with pytest.raises(ConfigError) as caught:
+        _ner({"revisions": {"hf": "pasted-by-mistake-1234"}})
+    assert "pasted-by-mistake-1234" not in str(caught.value)
+    assert "[detection.ner.revisions] hf" in str(caught.value)
+
+
+@pytest.mark.parametrize("key", ["allow_download", "allow_pickle_weights"])
+@pytest.mark.parametrize("value", ["true", 1, "false"])
+def test_model_source_switches_must_be_booleans(key: str, value: object) -> None:
+    with pytest.raises(ConfigError, match=rf"\[detection.ner\] {key} must be a boolean"):
+        _ner({key: value})
+
+
+def test_unknown_ner_keys_stay_errors() -> None:
+    with pytest.raises(ConfigError, match=r"unknown key\(s\) \['revision'\] in \[detection.ner\]"):
+        _ner({"revision": _SHA})
+
+
+_SMALL_PIN = "4e091416cf7c3481db542c2a3d26156916f3a47f"
+_DSLIM_PIN = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
+
+
+@pytest.mark.parametrize(
+    ("ner", "backend", "revision"),
+    [
+        # The backends' default models load at their catalog pins.
+        (NerConfig(backend="gliner"), "gliner", _SMALL_PIN),
+        (NerConfig(backend="hf"), "hf", _DSLIM_PIN),
+        # The user's pin wins over the catalog's.
+        (NerConfig(backend="hf", revisions=(("hf", _SHA),)), "hf", _SHA),
+        # A configured catalogued model (per-backend table or legacy key,
+        # any letter case) loads at its own pin.
+        (
+            NerConfig(
+                backends=("gliner", "hf"),
+                models=(("gliner", "knowledgator/gliner-pii-edge-v1.0"),),
+            ),
+            "gliner",
+            "9b7f39b0a2da971a5beea78d35f1539d4009c891",
+        ),
+        (
+            NerConfig(backend="gliner", model="Knowledgator/GLiNER-PII-base-v1.0"),
+            "gliner",
+            "61726e0ad791dcab3e29339bbec3ad42ded65641",
+        ),
+        # An uncatalogued or restricted model, or a local path: unpinned.
+        (NerConfig(backend="hf", model="org/private-model"), "hf", None),
+        (NerConfig(backend="gliner", model="nvidia/gliner-PII"), "gliner", None),
+        (NerConfig(backend="hf", model="/models/ner"), "hf", None),
+        # The legacy single `model` applies only with one backend active:
+        # with two, each backend loads its default (and its default's pin).
+        (NerConfig(backends=("gliner", "hf"), model="org/other"), "hf", _DSLIM_PIN),
+        # Backends whose models are not Hub snapshots never have one.
+        (NerConfig(backend="spacy"), "spacy", None),
+        (NerConfig(backend="stanza", revisions=(("hf", _SHA),)), "stanza", None),
+    ],
+)
+def test_effective_revision(ner: NerConfig, backend: str, revision: str | None) -> None:
+    assert ner.revision_for(backend) == revision
+
+
+class _Stub:
+    name = "stub"
+
+    def detect(self, text: str) -> list[object]:
+        return []
+
+
+def _capture_builders(monkeypatch: pytest.MonkeyPatch) -> dict[str, NerConfig]:
+    seen: dict[str, NerConfig] = {}
+
+    def builder(backend: str) -> object:
+        def build(config: NerConfig) -> _Stub:
+            seen[backend] = config
+            return _Stub()
+
+        return build
+
+    monkeypatch.setattr(gliner_ner, "build_gliner_detector", builder("gliner"))
+    monkeypatch.setattr(hf_ner, "build_hf_detector", builder("hf"))
+    return seen
+
+
+def test_each_backend_builder_sees_its_effective_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _capture_builders(monkeypatch)
+    ner = _ner(
+        {
+            "enabled": True,
+            "backends": ["gliner", "hf"],
+            "revisions": {"hf": _SHA},
+            "allow_download": True,
+        }
+    )
+    build_detectors(DetectionConfig(ner=ner))
+    # hf: the user's pin; gliner: its default model's catalog pin.
+    assert seen["hf"].revisions == (("hf", _SHA),)
+    assert seen["gliner"].revisions == (("gliner", _SMALL_PIN),)
+    for backend, view in seen.items():
+        assert view.backend == backend
+        assert view.backends is None
+        assert view.revision_for(backend) == ner.revision_for(backend)
+        assert view.allow_download is True
+
+
+def test_an_unpinned_backend_view_carries_no_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _capture_builders(monkeypatch)
+    ner = _ner({"enabled": True, "backend": "hf", "model": "org/private-model"})
+    build_detectors(DetectionConfig(ner=ner))
+    assert seen["hf"].model == "org/private-model"
+    assert seen["hf"].revisions == ()
+    assert seen["hf"].revision_for("hf") is None

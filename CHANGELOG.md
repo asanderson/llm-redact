@@ -55,6 +55,14 @@ and tags `vX.Y.Z`.
   `entities = ["PER"]` emitting `PER` once raw entities fold in 2.0.0.
 
 ### Changed
+- NER no longer runs on the event loop for JSON request bodies: the proxy collects the
+  strings a request's redaction will scan, runs the NER models over them on a worker
+  thread (one request's batch at a time, each model locked per string), then redacts
+  synchronously with those results, so other requests (and `/__llm-redact/healthz`) are
+  answered while a large NER request is detected. What is sent upstream is unchanged
+  byte for byte; a string the precomputed results lack is detected inline and counted
+  (`inline_calls`, `prefetch_misses`). Multipart uploads and realtime frames still run
+  NER inline.
 - NER model labels become placeholder types through one label policy for every backend
   (`detection/labels.py`, documented in docs/detection.md "Placeholder types from NER
   models"): labels are normalized (`B-PER` → `PER`, `"street address"` →

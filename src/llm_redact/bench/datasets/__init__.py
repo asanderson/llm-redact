@@ -6,56 +6,39 @@ license and attribution, whether it holds REAL data (real people's text:
 turns its labels into what the bench scores (:mod:`llm_redact.bench.ner_metrics`)
 and the adapter that reads its rows into :class:`NerSample`\\ s.
 
-Generated datasets are built at run time from a seed and never committed.
-Nothing in a dataset is ever logged or printed: reports carry counts only.
+Generated datasets are built at run time from a seed and never committed;
+published ones are downloaded at a pinned revision into a cache outside the
+repository (:mod:`llm_redact.bench.datasets.base`). Nothing in a dataset is
+ever logged or printed: reports carry counts only.
 """
 
-from collections import Counter
-from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from llm_redact.bench import ner_corpus
-from llm_redact.bench.ner_metrics import GoldSpan, LabelMap, NerSample
+from llm_redact.bench.datasets import nemotron, openpii
+from llm_redact.bench.datasets.base import (
+    DatasetError,
+    DatasetSpec,
+    LoadRequest,
+    default_cache_dir,
+)
+from llm_redact.bench.ner_metrics import GoldSpan, NerSample
 from llm_redact.detection.regex_rules import BUILTIN_RULES
 
 if TYPE_CHECKING:
     from llm_redact.bench.corpus import Sample
 
-
-@dataclass(frozen=True)
-class LoadRequest:
-    split: str
-    seed: int = 42
-    # Rows the adapter skipped, by reason (counted, reported, never shown).
-    skipped: Counter[str] = field(default_factory=Counter)
-
-
-Adapter = Callable[["DatasetSpec", LoadRequest], Iterator[NerSample]]
-
-
-@dataclass(frozen=True)
-class DatasetSpec:
-    name: str
-    summary: str
-    license: str
-    attribution: str
-    # True when the rows are real text (real prompts, real code, real
-    # documents) rather than generated: --dump-errors refuses it unless
-    # --allow-real-data-dump is also given.
-    real_data: bool
-    label_map: LabelMap
-    # The first split is the default.
-    splits: tuple[str, ...]
-    adapter: Adapter
-    # Facts the report repeats (how the labels were made, what the scores
-    # mean for this dataset).
-    notes: tuple[str, ...] = ()
-
-    @property
-    def default_split(self) -> str:
-        return self.splits[0]
+__all__ = [
+    "DATASETS",
+    "DatasetError",
+    "DatasetSpec",
+    "LoadRequest",
+    "dataset_key",
+    "default_cache_dir",
+    "resolve",
+]
 
 
 def _from_regex_corpus(samples: "list[Sample]", context: str) -> Iterator[NerSample]:
@@ -112,7 +95,7 @@ SYNTHETIC = DatasetSpec(
 )
 
 DATASETS: Mapping[str, DatasetSpec] = MappingProxyType(
-    {spec.name: spec for spec in (SYNTHETIC, RULES)}
+    {spec.name: spec for spec in (SYNTHETIC, RULES, openpii.SPEC, nemotron.SPEC)}
 )
 
 
@@ -130,7 +113,8 @@ def resolve(argument: str) -> tuple[DatasetSpec, str]:
     return spec, split
 
 
-def dataset_key(spec: DatasetSpec, split: str) -> str:
+def dataset_key(spec: DatasetSpec, split: str, language: str | None = None) -> str:
     """The dataset part of a thresholds key: the name, plus the split when
-    it is not the default."""
-    return spec.name if split == spec.default_split else f"{spec.name}:{split}"
+    it is not the default, plus ``@LANGUAGE`` when rows are filtered."""
+    key = spec.name if split == spec.default_split else f"{spec.name}:{split}"
+    return f"{key}@{language}" if language else key

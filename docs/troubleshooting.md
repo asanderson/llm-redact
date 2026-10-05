@@ -485,3 +485,30 @@ read the lines named, decide whether the hits are legitimate (raise the
 ceiling, with the reason in the commit) or a regression (fix the
 configuration). The second message names a ceiling for a file that no
 longer exists: remove the stale entry.
+
+## NER bench: "downloading a dataset needs huggingface_hub; install the bench-data extra: uv sync --extra bench-data" / "reading a parquet dataset needs pyarrow; …"
+
+Published datasets (`openpii`, `nemotron`, …) are fetched and read with the
+`bench-data` extra's packages, which a default install does not carry. Run
+`uv sync --extra bench-data` (or `pip install 'llm-redact-proxy[bench-data]'`)
+and retry. The generated datasets (`synthetic`, `rules`) need neither.
+
+## NER bench: "could not download FILE of REPO at revision REVISION: ERRORTYPE"
+
+The bench asked the Hugging Face Hub for one file of a dataset at its pinned
+revision and the download failed (no network, a proxy refusing the host, a
+full disk). Files already in the cache directory are reused, so a machine
+without network access can run a dataset whose cache was filled elsewhere:
+copy `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets` across, or
+point `--cache-dir` at the copy.
+
+## NER bench: "--cache-dir must be outside any git work tree"
+
+Downloaded datasets are never committed, so the bench refuses a cache inside
+a git repository. Use the default cache or a directory outside the
+repository.
+
+## NER bench: "--language: dataset 'NAME' has no language to filter on"
+
+`--language` keeps the rows of one language and works only for datasets that
+record one (`--list-datasets` marks them). Drop it for the others.

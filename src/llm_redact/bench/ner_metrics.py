@@ -17,6 +17,10 @@ turns each label into what is scored:
 A label missing from the map is read as ``None`` and counted in
 :attr:`NerResult.unmapped`, so a dataset change surfaces in the report.
 
+Gold parts of one name or address labelled separately ("Jane" GIVENNAME,
+"Doe" SURNAME, both mapped to ``PERSON``) are merged into one span by the
+rule the detectors' parts merge by (:func:`labels.merge_adjacent_parts`).
+
 Metrics, per type: EXACT (same start, end and type) and OVERLAP-TYPED (a
 gold span is found when a detection of its type overlaps it; a detection is
 right when it overlaps a gold span of its type) precision, recall and F1. A
@@ -42,6 +46,7 @@ from typing import Any
 
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.engine import Allowlist, DetectorPlan, plan_for
+from llm_redact.detection.labels import merge_adjacent_parts
 from llm_redact.detection.regex_rules import RegexDetector
 from llm_redact.redactor import _resolve_overlaps
 
@@ -259,6 +264,11 @@ def score_sample(
             leak.append((span.start, span.end))
         elif target != NOT_PII:
             typed.append((span.start, span.end, target))
+
+    # Parts of one name or address labelled separately (GIVENNAME + SURNAME)
+    # are one gold span, exactly as the detectors' parts merge.
+    parts = [Detection(s, e, t, sample.text[s:e]) for s, e, t in typed]
+    typed = [(d.start, d.end, d.detector_type) for d in merge_adjacent_parts(parts, sample.text)]
 
     predictions = [(d.start, d.end, d.detector_type) for d in found]
     gold_set = set(typed)

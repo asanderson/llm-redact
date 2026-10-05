@@ -29,6 +29,8 @@ uv run python -m llm_redact.bench.ner --config my-ner.toml --check   # gate agai
 | `--dataset NAME[:SPLIT]` | What to score (default `synthetic`); `--list-datasets` prints every dataset with its splits, license and attribution. |
 | `--limit N` | Score at most N samples (default 2000; `0` = all). |
 | `--seed N` | Seed of generated datasets (same seed, same corpus). |
+| `--language CODE` | Keep only rows in that language (datasets that record one: `openpii`). The thresholds key becomes `NAME@CODE`. |
+| `--cache-dir DIR` | Where downloaded datasets are kept (default `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets`; refused inside a git work tree). |
 | `--out DIR` | Write `report.md` and `report.json` there instead of printing the report. |
 | `--thresholds PATH` | The gate file (default `bench/ner_thresholds.toml`). |
 | `--check` | Exit 1 when a floor or ceiling is crossed, or when the run has no recorded entry. |
@@ -56,6 +58,12 @@ Each dataset maps its own labels to what is scored:
 
 A label missing from the map is not scored and is counted in the report, so
 a dataset that changes its labels shows up.
+
+Parts of one name or address that a dataset labels separately (`GIVENNAME`
+and `SURNAME`, `BUILDINGNUM` and `STREET`) and that map to the same type are
+scored as ONE span, joined by the rule that joins a model's parts
+(separated by one or two spaces, tabs or no-break spaces): a model that
+finds "Jane Doe" whole is right, as the proxy would redact it.
 
 ## Metrics
 
@@ -95,7 +103,8 @@ dataset attributions — never text from a dataset.
 
 One table per config name and dataset, `[<config name>.<dataset>]`; the
 dataset part is its name, plus `:SPLIT` when the split is not the default
-(quote such keys: `[hf-default."openpii:train"]`).
+and `@LANGUAGE` with `--language` (quote such keys:
+`[hf-default."openpii:train"]`, `[hf-default."openpii@de"]`).
 
 | Key | Meaning |
 |---|---|
@@ -174,6 +183,8 @@ the file when you are done.
 | Name | What it is | License | Real data |
 |---|---|---|---|
 | `synthetic` (default) | Agent-traffic-shaped text generated from the seed at run time (below). | generated (part of llm-redact) | no |
+| `openpii` | [OpenPII 1.5M](https://huggingface.co/datasets/ai4privacy/pii-masking-openpii-1.5m): synthetic PII text in 30 languages; splits `validation` (default), `train`. | CC BY 4.0 — credit "Ai4Privacy / Ai Suisse SA" | no |
+| `nemotron` | [Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII): synthetic English documents (forms, invoices, emails, notes) across 50+ industries; splits `test` (default), `train`. | CC BY 4.0 — by NVIDIA Corporation | no |
 | `rules` | The regex bench's generated positives and decoys for every built-in rule, built from the seed at run time. Structured values only: it shows what a model costs the rules (structured regressions, over-redaction). | generated (part of llm-redact) | no |
 
 ### The synthetic corpus
@@ -193,3 +204,41 @@ every detection there counts as over-redaction. Names, streets and handles
 come from small embedded lists combined at random and describe no real
 person. The regex rules alone find exactly the corpus's `EMAIL` and `PHONE`
 values and nothing else (pinned by `tests/test_ner_corpus.py`).
+
+### Published datasets
+
+Published datasets are downloaded at run time with
+`huggingface_hub.hf_hub_download` at a pinned revision (a commit hash) into
+the cache directory and never committed; they need the `bench-data` extra
+(`uv sync --extra bench-data`: `huggingface_hub` and `pyarrow`). They are
+used for EVALUATION only — the bench never trains on anything. Rows whose
+gold spans do not match their text are skipped and counted in the report,
+never repaired; each report repeats the dataset's license and attribution.
+A `--limit` slice reads the first rows of the split in file order.
+
+| Dataset | Hub id at revision | Card checked | Label map |
+|---|---|---|---|
+| `openpii` | `ai4privacy/pii-masking-openpii-1.5m` at `a785eb528e28be2693c3718a27e066970de5dadb` | 2026-10-05 | `GIVENNAME`, `SURNAME` → `PERSON`; `STREET`, `BUILDINGNUM` → `ADDRESS`; `PASSPORTNUM` → `PASSPORT`; `DRIVERLICENSENUM` → `DRIVER_LICENSE`; `EMAIL` → `EMAIL`; `TELEPHONENUM` → `PHONE`; `CREDITCARDNUMBER` → `CREDIT_CARD`; `SOCIALNUM`, `TAXNUM`, `IDCARDNUM` → leak; `DATE`, `AGE`, `TITLE`, `GENDER`, `SEX`, `CITY`, `ZIPCODE` → not scored |
+| `nemotron` | `nvidia/Nemotron-PII` at `b70ffaf5ff39e079776134c5bf4381f00a9fd1ed` | 2026-10-05 | `first_name`, `last_name` → `PERSON`; `street_address` → `ADDRESS`; `date_of_birth` → `DATE_OF_BIRTH`; `user_name` → `USERNAME`; `account_number` → `ACCOUNT_NUMBER`; `email` → `EMAIL`; `phone_number` → `PHONE`; `ssn` → `SSN`; `credit_debit_card` → `CREDIT_CARD`; `ipv4` → `IPV4`; `ipv6` → `IPV6`; `password`, `api_key` → `SECRET`; the other 40 labels → not scored |
+
+Facts found when the adapters were checked against the data (2026-10-05):
+
+- **OpenPII 1.5M** (`data/validation.jsonl`, `data/train.jsonl`; fields
+  `source_text`, `privacy_mask` with `value`/`start`/`end`/`label`,
+  `language`). The card lists 19 labels; the rows also carry a few labels
+  it does not list (`TIME`, `CURRENCY`, `ACCOUNTNUM`, `AMOUNT`, `COUNTRY`,
+  `ORGANISATION`, `URL`: about 80 spans in 3,926 rows sampled across the
+  validation file). They are not in the label map, so reports list them as
+  unmapped and do not score them. The card's metadata says
+  `license: other` with `license_name: cc-by-4.0`; its text grants CC BY
+  4.0 and asks for the credit "Ai4Privacy / Ai Suisse SA". The validation
+  file is about 1 GB, downloaded whole on first use.
+- **Nemotron-PII** (`data/test-00000-of-00001.parquet`,
+  `data/train-00000-of-00001.parquet`, about 150 MB each). The `spans`
+  column is a string holding a Python-literal list (single quotes, not
+  JSON), read with `ast.literal_eval`, which evaluates literals only. Each
+  file holds 100,000 rows — 50,000 records twice, once with locale `us`
+  (the first half) and once `intl` (the second half), with different
+  text — so a `--limit` slice reads US-locale rows only. About 7% of rows
+  have a span whose text differs from the text at its offsets (76 of the
+  first 1,000); they are skipped and counted.

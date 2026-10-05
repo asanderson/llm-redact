@@ -38,6 +38,7 @@ checked by the weekly gating pip-audit job.
 | `realtime` | `websockets` | One package serves BOTH sides of the realtime relay: uvicorn's server-side WebSocket protocol (auto-enabled when importable) and the upstream wss client. Floor 15.0: the relay overrides the asyncio client's redirect hook (added in 13.1) and forwards the client's `User-Agent`, which clients before 15.0 send a second time. |
 | `otel` | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | Metadata-only telemetry export over OTLP/HTTP, the vendor-neutral standard; scoped SDK providers, never process globals. |
 | `extract` | `pypdf` | PDF text layers for [document extraction](extraction.md) (`[extraction]`): pure Python, BSD-3-Clause, imported only in the isolated, resource-limited extraction worker process — never on the request path. The OOXML/ODF, markup and RTF readers are stdlib. |
+| `bench-data` | `huggingface_hub`, `pyarrow` | The [NER bench](ner-bench.md)'s published datasets only (`python -m llm_redact.bench.ner --dataset openpii`, …): `huggingface_hub` downloads a dataset file at a pinned revision, `pyarrow` reads the parquet ones a batch at a time. Never imported by the proxy. Floor `pyarrow>=14.0.1`: 14.0.1 fixed CVE-2023-47248 (code execution when reading an untrusted IPC/Parquet file), and a downloaded dataset is exactly such a file. |
 
 **torch (the `gliner`, `stanza` and `hf` extras).** Each of the three
 extras requires `torch>=2.6`: torch 2.6 fixed CVE-2025-32434, a bypass of

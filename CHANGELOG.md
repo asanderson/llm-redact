@@ -44,6 +44,14 @@ and tags `vX.Y.Z`.
   hits-per-100-KB ceiling in `bench/ner_ceilings.toml`. The corpus gains four
   agent-traffic files with no personal data (tool results as JSON, git output, a CI log, a
   Python module), pinned to zero regex detections in its manifest.
+- Published datasets for the NER bench: `--dataset openpii` (OpenPII 1.5M, CC BY 4.0,
+  Ai4Privacy / Ai Suisse SA; `--language` filters it) and `--dataset nemotron`
+  (Nemotron-PII, CC BY 4.0, NVIDIA), downloaded at run time at a pinned revision into
+  `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets` (never inside a git work tree,
+  never committed) and used for evaluation only. A new `bench-data` extra
+  (`huggingface_hub`, `pyarrow>=14.0.1`) carries the download and parquet reading. Rows
+  whose gold spans do not match their text are skipped and counted; every report
+  repeats the dataset's license and attribution, and `--list-datasets` lists them.
 
 ### Changed
 - NER model labels become placeholder types through one label policy for every backend

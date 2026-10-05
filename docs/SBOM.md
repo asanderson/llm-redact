@@ -64,6 +64,7 @@ padding differs), pinned to the published Keccak test vectors.
 | `realtime` | `websockets` | The realtime WS relay — serves both uvicorn's WS protocol and the upstream wss client. |
 | `otel` | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | Metadata-only traces/counters over OTLP/HTTP. |
 | `extract` | `pypdf` | PDF text layers for document extraction, in the isolated extraction worker only. |
+| `bench-data` | `huggingface_hub`, `pyarrow` | The NER bench's published datasets (download at a pinned revision; parquet reading). Bench only, never the proxy. |
 
 The NER extras' heavyweight transitive dependencies (torch,
 transformers, pydantic via presidio) never touch the request-forwarding

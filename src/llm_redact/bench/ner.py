@@ -27,7 +27,15 @@ from pathlib import Path
 from typing import Any
 
 from llm_redact.bench import ner_fp
-from llm_redact.bench.datasets import DATASETS, DatasetSpec, LoadRequest, dataset_key, resolve
+from llm_redact.bench.datasets import (
+    DATASETS,
+    DatasetError,
+    DatasetSpec,
+    LoadRequest,
+    dataset_key,
+    default_cache_dir,
+    resolve,
+)
 from llm_redact.bench.ner_metrics import NerResult, Pipeline, evaluate, to_json_dict, to_markdown
 from llm_redact.config import ConfigError, load_config
 from llm_redact.detection.base import Detector
@@ -150,18 +158,27 @@ def _toml_key(key: str) -> str:
     return key if bare else f'"{key}"'
 
 
+def git_work_tree(path: Path) -> Path | None:
+    """The git work tree ``path`` would be inside (None = none): a directory
+    at or above it holding ``.git``."""
+    directory = path.resolve()
+    for candidate in (directory, *directory.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
 def dump_problem(path: Path) -> str | None:
     """Why --dump-errors may not write ``path`` (None = it may): the file
     must be outside every git work tree, so dataset text never lands where it
     could be committed."""
-    directory = path.parent.resolve()
-    for candidate in (directory, *directory.parents):
-        if (candidate / ".git").exists():
-            return (
-                f"--dump-errors must name a file outside any git work tree"
-                f" ({candidate} is one); dataset text must never be committed"
-            )
-    return None
+    tree = git_work_tree(path.parent)
+    if tree is None:
+        return None
+    return (
+        f"--dump-errors must name a file outside any git work tree ({tree} is one);"
+        " dataset text must never be committed"
+    )
 
 
 def write_dump(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
@@ -185,49 +202,60 @@ def list_datasets(datasets: Mapping[str, DatasetSpec] = DATASETS) -> str:
             f"  license: {spec.license}",
             f"  attribution: {spec.attribution}",
         ]
+        if spec.hub_id is not None:
+            lines.append(f"  source: {spec.hub_id} at revision {spec.revision}")
+        if spec.card is not None:
+            lines.append(f"  card: {spec.card} (checked {spec.checked})")
+        if spec.filters_language:
+            lines.append("  --language filters its rows")
     return "\n".join(lines) + "\n"
 
 
 def report_markdown(
     spec: DatasetSpec,
-    split: str,
+    request: LoadRequest,
     config_name: str,
     backends: Sequence[str],
     result: NerResult,
-    skipped: Mapping[str, int],
 ) -> str:
+    split = request.split
     lines = [
-        f"# NER bench: {config_name} on {dataset_key(spec, split)}",
+        f"# NER bench: {config_name} on {dataset_key(spec, split, request.language)}",
         "",
         f"Dataset: {spec.name} (split {split}) — {spec.summary}.",
         f"License: {spec.license}. Attribution: {spec.attribution}.",
     ]
+    if spec.hub_id is not None:
+        lines.append(f"Source: {spec.hub_id} at revision {spec.revision}.")
+    if request.language is not None:
+        lines.append(f"Rows in language {request.language} only.")
     if spec.real_data:
         lines.append("This dataset holds real data; its text never appears in a report.")
     lines += [*spec.notes, f"NER backends: {', '.join(backends) or 'none'}.", ""]
-    if skipped:
-        reasons = ", ".join(f"{reason}×{n}" for reason, n in sorted(skipped.items()))
+    if request.skipped:
+        reasons = ", ".join(f"{reason}×{n}" for reason, n in sorted(request.skipped.items()))
         lines += [f"Rows skipped: {reasons}.", ""]
     return "\n".join(lines) + "\n" + to_markdown(result)
 
 
 def report_json(
     spec: DatasetSpec,
-    split: str,
+    request: LoadRequest,
     config_name: str,
     backends: Sequence[str],
     result: NerResult,
-    skipped: Mapping[str, int],
 ) -> dict[str, object]:
     return {
         "config": config_name,
         "dataset": spec.name,
-        "split": split,
+        "split": request.split,
+        "language": request.language,
         "license": spec.license,
         "attribution": spec.attribution,
+        "source": None if spec.hub_id is None else f"{spec.hub_id}@{spec.revision}",
         "real_data": spec.real_data,
         "backends": list(backends),
-        "skipped_rows": dict(sorted(skipped.items())),
+        "skipped_rows": dict(sorted(request.skipped.items())),
         **to_json_dict(result),
     }
 
@@ -253,6 +281,15 @@ def _parser() -> argparse.ArgumentParser:
         help=f"score at most this many samples (default {DEFAULT_LIMIT}; 0 = all)",
     )
     parser.add_argument("--seed", type=int, default=42, help="seed of generated datasets")
+    parser.add_argument(
+        "--language", help="keep only rows in this language (datasets that record one)"
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        help="where downloaded datasets are kept (default"
+        " ${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets; never inside a git work tree)",
+    )
     parser.add_argument("--out", type=Path, help="write report.md and report.json here")
     parser.add_argument("--thresholds", type=Path, default=DEFAULT_THRESHOLDS)
     parser.add_argument(
@@ -292,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         return _run(args)
-    except BenchError as exc:
+    except (BenchError, DatasetError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -306,6 +343,16 @@ def _run(args: argparse.Namespace) -> int:
             spec, split = resolve(args.dataset)
         except ValueError as exc:
             raise BenchError(str(exc)) from exc
+    if args.language is not None and (spec is None or not spec.filters_language):
+        what = f"dataset {spec.name!r}" if spec is not None else "--fp-corpus"
+        raise BenchError(f"--language: {what} has no language to filter on")
+    cache_dir = args.cache_dir or default_cache_dir()
+    tree = git_work_tree(cache_dir)
+    if tree is not None:
+        raise BenchError(
+            f"--cache-dir must be outside any git work tree ({tree} is one);"
+            " datasets are never committed"
+        )
     if args.dump_errors is not None:
         if spec is not None and spec.real_data and not args.allow_real_data_dump:
             raise BenchError(
@@ -327,8 +374,12 @@ def _run(args: argparse.Namespace) -> int:
         failures = _run_fp_corpus(args, pipeline, config_name, backends, errors)
         passed = f"[{_toml_key(config_name)}] in {args.ceilings}"
     else:
-        failures = _run_dataset(args, spec, split, pipeline, config_name, backends, errors)
-        passed = f"[{_toml_key(config_name)}.{_toml_key(dataset_key(spec, split))}]"
+        request = LoadRequest(
+            split=split, seed=args.seed, language=args.language, cache_dir=cache_dir
+        )
+        failures = _run_dataset(args, spec, request, pipeline, config_name, backends, errors)
+        key = dataset_key(spec, split, args.language)
+        passed = f"[{_toml_key(config_name)}.{_toml_key(key)}]"
     if errors is not None:
         write_dump(args.dump_errors, errors)
         print(f"{len(errors)} error records written to {args.dump_errors} (mode 0600)")
@@ -355,29 +406,28 @@ def _emit(args: argparse.Namespace, markdown: str, report: Mapping[str, object])
 def _run_dataset(
     args: argparse.Namespace,
     spec: DatasetSpec,
-    split: str,
+    request: LoadRequest,
     pipeline: Pipeline,
     config_name: str,
     backends: Sequence[str],
     errors: list[dict[str, Any]] | None,
 ) -> list[str] | None:
     """Score the dataset; the gate's failures with --check, else None."""
-    request = LoadRequest(split=split, seed=args.seed)
+    split = request.split
     samples = spec.adapter(spec, request)
     if args.limit > 0:
         samples = itertools.islice(samples, args.limit)
     result = evaluate(samples, spec.label_map, pipeline, errors=errors)
     _emit(
         args,
-        report_markdown(spec, split, config_name, backends, result, request.skipped),
-        report_json(spec, split, config_name, backends, result, request.skipped),
+        report_markdown(spec, request, config_name, backends, result),
+        report_json(spec, request, config_name, backends, result),
     )
     if not args.check:
         return None
     thresholds = load_thresholds(args.thresholds)
-    return threshold_failures(
-        thresholds, config_name, dataset_key(spec, split), result, args.thresholds
-    )
+    key = dataset_key(spec, split, request.language)
+    return threshold_failures(thresholds, config_name, key, result, args.thresholds)
 
 
 def _run_fp_corpus(

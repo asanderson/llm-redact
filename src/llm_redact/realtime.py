@@ -1972,6 +1972,9 @@ async def _relay(
                         else None,
                         warned=_grown(state.warn_counts, warned_before) if frame_scanned else None,
                         overridden=frame_marker is not None,
+                        overridden_types=frame_scope.allowed_types()
+                        if frame_scope is not None
+                        else None,
                     )
                     if not await _content_allowed(
                         state,

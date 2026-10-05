@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -262,6 +263,63 @@ async def test_without_the_member_frames_go_as_before(monkeypatch: pytest.Monkey
                 await client.send("not json at all")
                 await client.recv()
     assert "«EMAIL_001»" in fake.texts()[0] and fake.texts()[1] == "not json at all"
+
+
+async def test_a_frame_reports_the_values_an_override_let_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The realtime twin of the HTTP fact: a block-mode value an approved
+    # override lets through goes upstream RAW, so the frame's facts carry
+    # its TYPE (distinct values), each frame its own.
+    from llm_redact.config import Config, OverridesConfig, ProviderConfig
+    from llm_redact.detection.engine import DetectionConfig
+    from llm_redact.overrides import OverrideStore
+    from test_overrides_realtime import _frame as _blocked_frame
+    from test_overrides_realtime import _refused
+    from test_realtime_relay import FakeUpstream, _proxy
+
+    gate = ContentGate(
+        lambda request, content: REASON if refuse[0] and content.overridden_types else None,
+        subject=None,
+    )
+    refuse = [True]
+    _install(monkeypatch, gate)
+    store_path = tmp_path / "overrides.db"
+    async with FakeUpstream() as fake:
+        config = Config(
+            providers={
+                **Config().providers,
+                "openai": ProviderConfig(f"http://127.0.0.1:{fake.port}"),
+            },
+            detection=DetectionConfig(modes=(("email", "block"),)),
+            overrides=OverridesConfig(enabled=True, path=str(store_path)),
+        )
+        with _proxy(config) as host:
+            url = f"ws://{host}{MODEL_URL}"
+            code = await _refused(url)
+            OverrideStore(store_path).approve("always", approver=None, code=code)
+            async with websockets.connect(url) as client:
+                await client.send(_blocked_frame())
+                with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
+                    await client.recv()
+            assert closed.value.rcvd is not None and closed.value.rcvd.code == 1008
+            assert fake.received == []
+            refuse[0] = False
+            async with websockets.connect(url) as client:
+                await client.send(_blocked_frame())
+                await client.recv()
+                await client.send(_frame("openai", "nothing here"))
+                await client.recv()
+    assert sum(EMAIL in str(frame) for frame in fake.received) == 1
+    approved = ContentFacts(scanned=True, overridden=True, overridden_types=(("EMAIL", 1),))
+    # The blocked frame before the approval is refused by the redaction
+    # itself (never asked); then the gate's refusal, the allowed frame and a
+    # frame of its own with nothing in it.
+    assert [content for _request, content in gate.asked] == [
+        approved,
+        approved,
+        ContentFacts(scanned=True),
+    ]
 
 
 def _never(*args: Any, **kwargs: Any) -> Any:

@@ -5747,6 +5747,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     # unscanned (counted once the upload was read in full).
     scanned = False
     binary_forwarded: list[int] = []
+    # The MCP blocks to an exempt server the redaction held out (sent
+    # unscanned): ContentFacts.exempt_blocks.
+    exempt_blocks = [0]
     if adapter is not None and detection_off:
         # [providers.NAME] detection = false: the deliberate off-switch.
         # The request is forwarded byte-identical — no detection, no deny
@@ -5798,6 +5801,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                     redactor,
                     inject_note=note_wanted and adapter.wants_system_note(kind, path),
                     mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
+                    exempt_blocks=exempt_blocks,
                 ),
             )
         except BlockedRequest as exc:
@@ -6105,6 +6109,8 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 warned=new_warned if scanned else None,
                 unscanned_parts=binary_forwarded[0] if binary_forwarded else 0,
                 overridden=_COMMITTED_OVERRIDE.get() is not None,
+                overridden_types=scope.allowed_types() if scope is not None else None,
+                exempt_blocks=exempt_blocks[0],
             ),
             ctx,
             adapter,

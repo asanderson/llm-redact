@@ -188,7 +188,8 @@ DATACLASSES: dict[str, str] = {
     "ContentFacts": (
         "(scanned: 'bool', detected: 'tuple[tuple[str, int], ...]' = (),"
         " warned: 'tuple[tuple[str, int], ...]' = (), unscanned_parts: 'int' = 0,"
-        " overridden: 'bool' = False) -> None"
+        " overridden: 'bool' = False, overridden_types: 'tuple[tuple[str, int], ...]' = (),"
+        " exempt_blocks: 'int' = 0) -> None"
     ),
     "DetectionOverlay": (
         "(modes: 'tuple[tuple[str, str], ...]' = (), deny: 'tuple[str, ...]' = ()) -> None"

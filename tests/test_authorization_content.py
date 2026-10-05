@@ -435,6 +435,202 @@ async def test_a_refusal_hands_a_one_time_override_back(
     assert [row["override"] for row in recent] == ["once", None, None]
 
 
+def _approved(store_path: Path, response: httpx.Response) -> None:
+    """Approve, every time, the value refusal ``response`` carries."""
+    from test_overrides import _code
+
+    assert response.status_code == 400
+    OverrideStore(store_path).approve("always", approver=None, code=_code(response))
+
+
+async def test_a_value_an_override_lets_through_is_reported_by_type(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A send-stage policy keyed on types ("no EMAIL may leave"): the value an
+    # approved override lets through goes upstream RAW, so it must show —
+    # by type, never as a value — or the policy would refuse the redacted
+    # form and forward the raw one.
+    def decide(request: AuthorizationRequest, content: ContentFacts) -> str | None:
+        types = {
+            name for pairs in (content.detected, content.overridden_types) for name, _ in pairs
+        }
+        return REASON if refuse[0] and "EMAIL" in types else None
+
+    refuse = [True]
+    gate = ContentGate(decide, subject=None)
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    store_path = tmp_path / "overrides.db"
+    app = _app(
+        upstream,
+        detection=DetectionConfig(modes=(("email", "block"),)),
+        overrides=OverridesConfig(enabled=True, path=str(store_path)),
+    )
+    # The same value twice (one DISTINCT value) and a redacted address.
+    chat = _chat(f"mail {EMAIL}, again {EMAIL}, from 10.1.2.3")
+    async with _client(app) as client:
+        _approved(store_path, await client.post("/v1/chat/completions", json=chat, headers=KEY))
+        refused = await client.post("/v1/chat/completions", json=chat, headers=KEY)
+        assert refused.status_code == 403 and upstream.requests == []
+        refuse[0] = False
+        passed = await client.post("/v1/chat/completions", json=chat, headers=KEY)
+    assert passed.status_code == 200 and EMAIL in upstream.sent()
+    facts = _facts(detected=(("IPV4", 1),), overridden=True, overridden_types=(("EMAIL", 1),))
+    assert [content for _request, content in gate.asked] == [facts, facts]
+    assert EMAIL not in repr(facts)
+
+
+async def test_override_counts_are_each_requests_own(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    both_in = asyncio.Event()
+    entered: list[ContentFacts] = []
+
+    async def decide(request: AuthorizationRequest, content: ContentFacts) -> None:
+        if not content.overridden:
+            return
+        entered.append(content)
+        if len(entered) == 2:
+            both_in.set()
+        # Yields while the other request redacts (and is asked) meanwhile.
+        await asyncio.wait_for(both_in.wait(), 5)
+
+    gate = ContentGate(decide, subject=None)
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    store_path = tmp_path / "overrides.db"
+    app = _app(
+        upstream,
+        detection=DetectionConfig(modes=(("email", "block"),)),
+        overrides=OverridesConfig(enabled=True, path=str(store_path)),
+    )
+    async with _client(app) as client:
+        for value in (EMAIL, OTHER, THIRD):
+            blocked = await client.post(
+                "/v1/chat/completions", json=_chat(f"mail {value}"), headers=KEY
+            )
+            _approved(store_path, blocked)
+    one, two = await asyncio.gather(
+        _post(app, "/v1/chat/completions", _chat(f"mail {EMAIL}"), KEY),
+        _post(app, "/v1/chat/completions", _chat(f"mail {OTHER} and {THIRD}"), KEY),
+    )
+    assert one.status_code == two.status_code == 200
+    assert sorted(content.overridden_types for content in entered) == [
+        (("EMAIL", 1),),
+        (("EMAIL", 2),),
+    ]
+
+
+async def test_a_route_override_reports_no_value_type(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A body forwarded unscanned on an approved route override is no value:
+    # `overridden` (and `scanned` False) say so, `overridden_types` stays
+    # empty.
+    gate = ContentGate(subject=None)
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    store_path = tmp_path / "overrides.db"
+    app = _app(upstream, overrides=OverridesConfig(enabled=True, path=str(store_path)))
+    headers = {**KEY, "content-type": "text/plain"}
+    body = f"plain text {EMAIL}".encode()
+    async with _client(app) as client:
+        refused = await client.post("/v1/chat/completions", content=body, headers=headers)
+        _approved(store_path, refused)
+        passed = await client.post("/v1/chat/completions", content=body, headers=headers)
+    assert passed.status_code == 200
+    assert [content for _request, content in gate.asked] == [
+        ContentFacts(scanned=False, overridden=True)
+    ]
+
+
+# --- MCP blocks to an exempt server ---------------------------------------------------------
+
+IBAN = "DE89370400440532013000"
+
+
+def _wrapped(*blocks: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 16,
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "pay the account below"}, *blocks],
+            }
+        ],
+    }
+
+
+async def test_mcp_blocks_to_an_exempt_server_are_counted_as_unscanned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A client may wrap content in a block addressed to an exempt MCP
+    # server: it goes upstream unscanned, so the facts count the block —
+    # a policy keyed on detected types alone would see nothing.
+    gate = ContentGate(
+        lambda request, content: REASON if content.exempt_blocks else None,
+    )
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    app = _app(upstream, detection=DetectionConfig(mcp_exempt_servers=("internal",)))
+    use = {
+        "type": "mcp_tool_use",
+        "id": "u1",
+        "name": "n",
+        "server_name": "internal",
+        "input": {"note": IBAN},
+    }
+    result = {"type": "mcp_tool_result", "tool_use_id": "u1", "content": IBAN}
+    other = {**use, "id": "u2", "server_name": "elsewhere"}
+    async with _client(app) as client:
+        plain = await client.post("/v1/messages", json=_messages(f"pay {IBAN}"), headers=ANTHROPIC)
+        wrapped = await client.post("/v1/messages", json=_wrapped(use, result), headers=ANTHROPIC)
+        scanned = await client.post("/v1/messages", json=_wrapped(other), headers=ANTHROPIC)
+    assert plain.status_code == 200 and wrapped.status_code == 403
+    assert scanned.status_code == 200
+    assert [content for _request, content in gate.asked] == [
+        _facts(detected=(("IBAN", 1),)),
+        # Both blocks held out (the result correlates to the exempt use).
+        _facts(exempt_blocks=2),
+        # A block to a server that is not exempt is scanned like any other.
+        _facts(detected=(("IBAN", 1),)),
+    ]
+    assert len(upstream.requests) == 2
+    assert all(IBAN not in request.content.decode() for request in upstream.requests)
+
+
+def test_prepare_route_request_counts_only_while_asked() -> None:
+    from llm_redact.detection.engine import Allowlist, build_detectors
+    from llm_redact.providers.anthropic import AnthropicAdapter
+    from llm_redact.providers.base import prepare_route_request, stash_exempt_mcp_blocks
+    from llm_redact.redactor import Redactor
+    from llm_redact.vault import InMemoryVault
+
+    redactor = Redactor(build_detectors(DetectionConfig()), InMemoryVault(), Allowlist())
+    block = {"type": "mcp_tool_use", "id": "u", "server_name": "internal", "input": {}}
+    body = _wrapped(block, block)
+    exempt = frozenset({"internal"})
+    counted = [0]
+    prepare_route_request(
+        AnthropicAdapter(),
+        "POST",
+        "/v1/messages",
+        body,
+        redactor,
+        inject_note=False,
+        mcp_exempt=exempt,
+        exempt_blocks=counted,
+    )
+    assert counted == [2]
+    # Outside it nothing is counted (and nothing fails).
+    stash_exempt_mcp_blocks(body, exempt)
+    prepare_route_request(
+        AnthropicAdapter(), "POST", "/v1/messages", body, redactor, inject_note=False
+    )
+    assert counted == [2]
+
+
 # --- absent member, routing -----------------------------------------------------------------
 
 

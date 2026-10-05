@@ -232,6 +232,8 @@ def content_facts(
     warned: Mapping[str, int] | None = None,
     unscanned_parts: int = 0,
     overridden: bool = False,
+    overridden_types: Mapping[str, int] | None = None,
+    exempt_blocks: int = 0,
 ) -> ContentFacts:
     """A request's (or realtime frame's) ``ContentFacts``: its counts as
     sorted ``(type, count)`` pairs, positive counts only."""
@@ -241,6 +243,8 @@ def content_facts(
         warned=_pairs(warned),
         unscanned_parts=unscanned_parts,
         overridden=overridden,
+        overridden_types=_pairs(overridden_types),
+        exempt_blocks=exempt_blocks,
     )
 
 

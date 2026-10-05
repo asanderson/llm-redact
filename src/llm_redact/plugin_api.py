@@ -853,6 +853,19 @@ class ContentFacts:
     - ``overridden``: True when the request passes a refusal on an approved
       refusal override (overrides.py): something it carries goes out as
       sent where the configured policy would have refused it.
+    - ``overridden_types``: ``(detector type, count)`` pairs, sorted by
+      type, of the VALUES an approved refusal override let through in THIS
+      request (frame) — count = distinct values. Content the policy cannot
+      see in ``detected``/``warned``: each such value goes upstream RAW (not
+      a placeholder), so a policy keyed on types must read it here. A
+      route-kind override (a body forwarded unscanned, a binary part) is no
+      value: only ``overridden`` (and, for a binary part,
+      ``unscanned_parts``) carry it.
+    - ``exempt_blocks``: the MCP content blocks addressed to a
+      ``[detection.mcp] exempt_servers`` server that this request carries:
+      held out of detection and sent UNSCANNED — nothing in them is in
+      ``detected``/``warned``, whatever they hold. Always 0 for a realtime
+      frame (no exempt blocks there).
     """
 
     scanned: bool
@@ -860,6 +873,8 @@ class ContentFacts:
     warned: tuple[tuple[str, int], ...] = ()
     unscanned_parts: int = 0
     overridden: bool = False
+    overridden_types: tuple[tuple[str, int], ...] = ()
+    exempt_blocks: int = 0
 
 
 class AccessGate(Protocol):
@@ -1060,8 +1075,13 @@ class AccessGate(Protocol):
       refused request is never forwarded, but the placeholders its
       redaction issued stay in the vault (as with any refusal after
       redaction: harmless, the vault is deterministic); a one-time refusal
-      override it used is handed back. Without the member nothing is asked
-      and no fact is computed.
+      override it used is handed back. Content the redaction did NOT
+      replace with placeholders shows apart from ``detected``: warn-mode
+      values (``warned``), values an approved refusal override let through
+      RAW (``overridden_types``), MCP blocks to an exempt server sent
+      unscanned (``exempt_blocks``) and binary parts sent unscanned
+      (``unscanned_parts``). Without the member nothing is asked and no
+      fact is computed.
     - OPTIONAL ``reload(config: Config) -> str | None`` — called once,
       synchronously, on EVERY applied configuration reload (SIGHUP and a
       dashboard config edit alike, even one that changed nothing), AFTER

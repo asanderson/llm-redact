@@ -18,8 +18,11 @@ and tags `vX.Y.Z`.
   the upstream authorizer, a routed plan's `begin()` and any upstream contact, with the
   same `AuthorizationRequest` `authorize_request` got (built alike without it) and the
   request's own value types and counts — `scanned` (False for pass-through, `detection =
-  false` and body-less requests), `detected`, `warned`, `unscanned_parts`, `overridden`;
-  never a value or a placeholder. On realtime: per client frame, after its redaction and
+  false` and body-less requests), `detected`, `warned`, `unscanned_parts`, `overridden`,
+  `overridden_types` (the types and distinct-value counts an approved refusal override let
+  through RAW, which `detected`/`warned` never show) and `exempt_blocks` (MCP blocks to a
+  `[detection.mcp] exempt_servers` server, sent unscanned; 0 on realtime); never a value or
+  a placeholder. On realtime: per client frame, after its redaction and
   before its send (the frame's own counts; the latest model-checked request on a Live or
   `session.update`-checked connection). A refusal is a recorded 403 / close 1008 (kind
   `authorization`); a fault, timeout or nonsense answer refuses with the core's text

@@ -732,3 +732,9 @@ def test_the_image_license_label_is_the_declared_license() -> None:
     dockerfile = (root / "Dockerfile").read_text()
     labels = re.findall(r'org\.opencontainers\.image\.licenses="([^"]*)"', dockerfile)
     assert labels == [declared]
+    # The published image takes its labels from docker/metadata-action, whose
+    # default licence label is the repository's GitHub-detected SPDX id
+    # ("AGPL-3.0"), overriding the Dockerfile's: release.yml pins it.
+    release = (root / ".github" / "workflows" / "release.yml").read_text()
+    pinned = re.findall(r"org\.opencontainers\.image\.licenses=(\S+)", release)
+    assert pinned == [declared]

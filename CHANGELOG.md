@@ -18,7 +18,9 @@ and tags `vX.Y.Z`.
   `stanza` or `hf` NER backend whose torch is missing, with the install hint. A CPU-only
   install takes torch from the PyTorch CPU index (docs/dependencies.md).
 - The container image's `org.opencontainers.image.licenses` label names `AGPL-3.0-only`,
-  the license `pyproject.toml` declares (it still said `MIT`); a test keeps the two equal.
+  the license `pyproject.toml` declares (it still said `MIT`), in the `Dockerfile` and in the
+  release workflow (the published image carried metadata-action's GitHub-detected
+  `AGPL-3.0`); a test keeps all three equal.
   The fp-corpus README lists every corpus file under that license, and the `[detection.ner]`
   `model` and `score_threshold` docs (config.example.toml, docs/detection.md) cover the `hf`
   backend.

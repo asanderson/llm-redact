@@ -343,6 +343,30 @@ until you upgrade to 2.0.0. Settle it now in one of two ways:
 Either way the warning goes away. See docs/detection.md "Placeholder types
 from NER models".
 
+## `[detection.ner] entities: "…" can never match: no active backend emits it (…)`
+
+A WARNING logged at startup (also by `serve --check`) and after a reload that
+rebuilds the detectors, once per entity; the parentheses name each active
+backend and its model. Every loaded model was asked which labels it has
+(Hugging Face models through their `id2label` table, spaCy pipelines through
+their `ner` component, Presidio through the entities its analyzer supports),
+and none of them is ever emitted as this entity's type. GLiNER (zero-shot) and
+Stanza publish no label set, so with either of them active this never fires.
+Common causes:
+
+- a typo (`PERSONS`), or a label this model does not use — check the model
+  card (`PER` vs `PERSON` no longer matters: write `PERSON`, the type);
+- a type the model was not trained for (`ADDRESS` with a CoNLL-2003 model);
+- while raw entities keep their own type (until 2.0.0), a raw entry such as
+  `PER` claims the model's `PER` label, which then no longer serves a
+  `PERSON` entry beside it — list one of the two;
+- a `[detection.ner.labels]` override that maps the type to `""`, or a type
+  that cannot be a placeholder (it starts with a digit or is longer than 28
+  characters).
+
+Nothing breaks: the entity simply never redacts anything. Fix the entry or
+pick a model that covers it.
+
 ## "[detection.ner.labels] LABEL: the type must match [A-Z][A-Z0-9_]* and be at most 20 characters, or be "" to drop the label"
 
 A `[detection.ner.labels]` value is not a placeholder type. Write the type in

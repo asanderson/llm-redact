@@ -12,18 +12,15 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- A startup WARNING for each `[detection.ner] entities` entry no active NER backend can ever
+  emit (a typo, a label the model lacks, an override that drops it), naming the entity,
+  the backends and their models; the labels come from an `hf` model's `id2label`, a spaCy
+  pipeline's `ner` component and the entities Presidio supports (GLiNER and Stanza can
+  emit anything). Logged after every detector build, `serve --check` included.
 - `[detection.ner.labels]`: map a model label to a placeholder type (`CITY = "ADDRESS"`)
   or drop it (`TIME = ""`). Keys are normalized like every model label; values use the
   deny-string type grammar. An override applies to `entities` too, so `PER = "PER"` keeps
   `entities = ["PER"]` emitting `PER` once raw entities fold in 2.0.0.
-
-### Deprecated
-- An `[detection.ner] entities` entry naming a model's own label rather than a placeholder
-  type keeps its own type in 1.12 but will fold into the shared type in 2.0.0 (`PER` →
-  `PERSON`, `"phone number"` → `PHONE`, `EMAIL_ADDRESS` → `EMAIL` outside Presidio). Each
-  affected entity logs a startup WARNING (`serve --check` included) and shows a `doctor`
-  WARN row naming both types; write the type now (`entities = ["PERSON"]`) or keep the old
-  one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Changed
 - NER model labels become placeholder types through one label policy for every backend
@@ -47,6 +44,14 @@ and tags `vX.Y.Z`.
   Other entries are still sent as written. Detections keep their type.
 - A model label that cannot be a placeholder type (it starts with a digit, or is longer
   than 28 characters) is no longer emitted: its tokens could never be restored.
+
+### Deprecated
+- An `[detection.ner] entities` entry naming a model's own label rather than a placeholder
+  type keeps its own type in 1.12 but will fold into the shared type in 2.0.0 (`PER` →
+  `PERSON`, `"phone number"` → `PHONE`, `EMAIL_ADDRESS` → `EMAIL` outside Presidio). Each
+  affected entity logs a startup WARNING (`serve --check` included) and shows a `doctor`
+  WARN row naming both types; write the type now (`entities = ["PERSON"]`) or keep the old
+  one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
 - `[detection.allowlist_by_type]` accepts the types NER entities are emitted as (`JOB_TITLE`

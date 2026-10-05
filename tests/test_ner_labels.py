@@ -907,3 +907,154 @@ def test_merged_name_gets_one_token(fold_raw: bool) -> None:
     redactor = Redactor([hf], vault, Allowlist(exact=frozenset(), patterns=()))
     assert redactor.redact_text("Jane Doe; Jane Doe") == "«PERSON_001»; «PERSON_001»"
     assert len(vault) == 1
+
+
+# --- entities that can never match (T08) ------------------------------------------------
+
+# dslim/bert-base-NER's config.json id2label (CoNLL-2003 tags).
+DSLIM_ID2LABEL = {
+    0: "O",
+    1: "B-MISC",
+    2: "I-MISC",
+    3: "B-PER",
+    4: "I-PER",
+    5: "B-ORG",
+    6: "I-ORG",
+    7: "B-LOC",
+    8: "I-LOC",
+}
+
+
+def _built(monkeypatch: pytest.MonkeyPatch, **ner: object) -> tuple[DetectionConfig, list[object]]:
+    install_transformers(monkeypatch, FakeHfPipe([], id2label=DSLIM_ID2LABEL))
+    install_spacy(monkeypatch, FakeSpacy([], labels=("PERSON", "ORG", "GPE", "DATE")))
+    install_stanza(monkeypatch, FakeSpacy([]))
+    install_gliner(monkeypatch, FakeGliner([]))
+    install_presidio(monkeypatch, FakeAnalyzer([], PRESIDIO_SUPPORTED))
+    config = DetectionConfig(enabled=(), ner=NerConfig(enabled=True, **ner))  # type: ignore[arg-type]
+    return config, list(build_detectors(config))
+
+
+def _never(monkeypatch: pytest.MonkeyPatch, **ner: object) -> list[str]:
+    from llm_redact.detection.engine import ner_warnings
+
+    config, detectors = _built(monkeypatch, **ner)
+    return [w for w in ner_warnings(config, detectors) if "can never match" in w]  # type: ignore[arg-type]
+
+
+def test_default_hf_config_matches(monkeypatch: pytest.MonkeyPatch, fold_raw: bool) -> None:
+    assert _never(monkeypatch, backend="hf") == []
+    assert _never(monkeypatch, backend="hf", entities=("PERSON", "ORG", "LOC", "MISC")) == []
+    # While raw entities keep their type, a raw PER claims the model's PER
+    # label, so nothing is left for PERSON on this model: said, not hidden.
+    both = _never(monkeypatch, backend="hf", entities=("PERSON", "PER"))
+    assert [w.split('"')[1] for w in both] == ([] if fold_raw else ["PERSON"])
+
+
+def test_a_typo_can_never_match(monkeypatch: pytest.MonkeyPatch, fold_raw: bool) -> None:
+    assert _never(monkeypatch, backend="hf", entities=("PERSONS",)) == [
+        '[detection.ner] entities: "PERSONS" can never match: no active backend emits it'
+        " (hf: dslim/bert-base-NER)"
+    ]
+
+
+def test_multi_backend_warns_only_for_uncovered_entities(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    warnings = _never(
+        monkeypatch,
+        backends=("hf", "spacy", "presidio"),
+        entities=("PERSON", "ORG", "GPE", "EMAIL", "ADDRESS"),
+    )
+    assert warnings == [
+        '[detection.ner] entities: "ADDRESS" can never match: no active backend emits it'
+        " (hf: dslim/bert-base-NER, spacy: en_core_web_sm, presidio: en_core_web_sm)"
+    ]
+
+
+@pytest.mark.parametrize("backend", ["gliner", "stanza"])
+def test_backends_without_a_label_set_can_emit_anything(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    assert _never(monkeypatch, backends=("hf", backend), entities=("PERSONS", "ADDRESS")) == []
+
+
+def test_presidio_entities_it_lacks_can_never_match(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    warnings = _never(monkeypatch, backend="presidio", entities=("PERSON", "ADDRESS"))
+    assert [w.split('"')[1] for w in warnings] == ["ADDRESS"]
+
+
+def test_a_dropped_or_ungrammatical_entity_can_never_match(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    warnings = _never(
+        monkeypatch,
+        backends=("gliner",),
+        entities=("PERSON", "3d model"),
+        labels=(("PERSON", ""),),
+    )
+    assert [w.split('"')[1] for w in warnings] == ["PERSON", "3d model"]
+
+
+def test_unmatched_entities_are_kept_on_the_detectors(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    from llm_redact.detection.engine import ner_backends, ner_unmatched_entities
+
+    _config, detectors = _built(monkeypatch, backends=("hf", "spacy"), entities=("PERSON", "ZIP"))
+    assert ner_unmatched_entities(detectors) == ("ZIP",)  # type: ignore[arg-type]
+    backends = ner_backends(detectors)  # type: ignore[arg-type]
+    assert [b.unmatched_entities for b in backends] == [("ZIP",), ("ZIP",)]  # type: ignore[attr-defined]
+    assert ner_unmatched_entities([]) == ()
+
+
+def test_backends_that_do_not_say_are_never_reported() -> None:
+    # A pipeline without id2label / get_pipe: unknown, so nothing is claimed.
+    from llm_redact.detection.engine import ner_unmatched_entities
+
+    hf = HfDetector(FakeHfPipe([]), frozenset({"PERSONS"}), 1000, 0.5)
+    spacy_like = NerDetector(FakeSpacy([]), frozenset({"PERSONS"}), 1000)
+    assert hf.emittable_types is None and spacy_like.emittable_types is None
+    nlp_without_ner = FakeSpacy([], labels=None)
+    assert NerDetector(nlp_without_ner, frozenset({"PERSON"}), 1000).emittable_types is None
+    assert ner_unmatched_entities([hf, spacy_like]) == ()
+
+
+def test_stand_in_backends_without_a_policy_record_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_redact.detection import ner as ner_mod
+    from llm_redact.detection.base import Detection
+    from llm_redact.detection.engine import ner_unmatched_entities, ner_warnings
+
+    class Stub:
+        name = "stub"
+
+        def detect(self, text: str) -> list[Detection]:
+            return []
+
+    monkeypatch.setattr(ner_mod, "build_ner_detector", lambda config: Stub())
+    config = DetectionConfig(ner=NerConfig(enabled=True, entities=("PERSONS",)))
+    detectors = build_detectors(config)
+    assert ner_unmatched_entities(detectors) == ()
+    assert ner_warnings(config, detectors) == []
+
+
+def test_startup_logs_the_never_match_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from llm_redact.config import Config
+    from llm_redact.proxy import create_app
+
+    install_transformers(monkeypatch, FakeHfPipe([], id2label=DSLIM_ID2LABEL))
+    ner = NerConfig(enabled=True, backend="hf", entities=("PERSON", "PERSONS"))
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        create_app(Config(detection=DetectionConfig(ner=ner)))
+    assert [r.getMessage() for r in caplog.records if "can never match" in r.getMessage()] == [
+        '[detection.ner] entities: "PERSONS" can never match: no active backend emits it'
+        " (hf: dslim/bert-base-NER)"
+    ]

@@ -226,6 +226,13 @@ error, rather than failing every request.
 A type the token format cannot carry (one that does not start with a letter,
 or longer than 28 characters) is never emitted.
 
+After the models load, each entity is checked against the labels they can
+emit (an `hf` model's `id2label`, a spaCy pipeline's `ner` labels, the
+entities Presidio supports; zero-shot GLiNER and Stanza can emit anything).
+An entity no active backend can ever emit logs one WARNING naming the entity,
+the backends and their models, so a typo or a label the model lacks no
+longer detects nothing in silence.
+
 Models trained to tag `first_name` and `last_name` separately report "Jane
 Doe" as two parts. When one backend finds two `PERSON` (or two `ADDRESS`)
 spans separated by one or two spaces, tabs or no-break spaces, they become

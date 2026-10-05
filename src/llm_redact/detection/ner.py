@@ -32,8 +32,30 @@ class _NlpLike(Protocol):
     def __call__(self, text: str) -> Any: ...
 
 
+def _pipeline_types(nlp: _NlpLike, policy: LabelPolicy) -> frozenset[str] | None:
+    """The placeholder types the pipeline's ``ner`` component can emit
+    under ``policy``. None when the pipeline does not say (no ``ner``
+    component: an entity ruler may still add entities)."""
+    get_pipe = getattr(nlp, "get_pipe", None)
+    if get_pipe is None:
+        return None
+    try:
+        labels = get_pipe("ner").labels
+    except KeyError:
+        return None
+    types = (policy.classify(str(label)) for label in labels)
+    return frozenset(t for t in types if t is not None)
+
+
 class NerDetector:
     name = "ner"
+
+    # Read by the never-match check (engine.build_detectors): the placeholder
+    # types this model can emit (None = unknown, e.g. zero-shot), the model
+    # for messages, and the configured entities no active backend emits.
+    emittable_types: frozenset[str] | None = None
+    model_name: str | None = None
+    unmatched_entities: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -46,7 +68,8 @@ class NerDetector:
         self._nlp = nlp
         # spaCy labels (PERSON, ORG, a non-English pipeline's PER) become
         # placeholder types through the label policy (labels.py).
-        self._policy = policy if policy is not None else LabelPolicy(entities, backend="spacy")
+        self.label_policy = policy if policy is not None else LabelPolicy(entities, backend="spacy")
+        self.emittable_types = _pipeline_types(nlp, self.label_policy)
         self._max_chars = max_chars
 
     def detect(self, text: str) -> list[Detection]:
@@ -60,7 +83,7 @@ class NerDetector:
         if len(text) > self._max_chars:
             return
         for ent in self._nlp(text).ents:
-            label = self._policy.classify(str(ent.label_))
+            label = self.label_policy.classify(str(ent.label_))
             start, end = int(ent.start_char), int(ent.end_char)
             if label is None or not 0 <= start < end <= len(text):
                 continue
@@ -91,9 +114,11 @@ def build_ner_detector(config: "NerConfig") -> NerDetector:
             f"spaCy model {model_name} is not available;"
             f" download it: uv run python -m spacy download {model_name}"
         ) from exc
-    return NerDetector(
+    detector = NerDetector(
         nlp,
         frozenset(config.entities),
         config.max_chars,
         policy=LabelPolicy(config.entities, backend="spacy", overrides=config.labels),
     )
+    detector.model_name = model_name
+    return detector

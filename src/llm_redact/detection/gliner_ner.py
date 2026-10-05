@@ -31,6 +31,13 @@ class _ModelLike(Protocol):
 class GlinerDetector:
     name = "gliner"
 
+    # Read by the never-match check (engine.build_detectors): the placeholder
+    # types this model can emit (None = unknown, e.g. zero-shot), the model
+    # for messages, and the configured entities no active backend emits.
+    emittable_types: frozenset[str] | None = None
+    model_name: str | None = None
+    unmatched_entities: tuple[str, ...] = ()
+
     def __init__(
         self,
         model: _ModelLike,
@@ -45,10 +52,10 @@ class GlinerDetector:
         # request sends a natural-language prompt ("person", "street
         # address"), a raw request its own text; by default the policy is
         # built from `entities` (sorted: a set has no order to keep).
-        self._policy = (
+        self.label_policy = (
             policy if policy is not None else LabelPolicy(sorted(entities), backend=self.name)
         )
-        self._labels = list(self._policy.prompts)
+        self._labels = list(self.label_policy.prompts)
         self._max_chars = max_chars
         self._threshold = threshold
 
@@ -61,7 +68,7 @@ class GlinerDetector:
         if len(text) > self._max_chars or not self._labels:
             return
         for entity in self._model.predict_entities(text, self._labels, self._threshold):
-            label = self._policy.classify_gliner(str(entity["label"]))
+            label = self.label_policy.classify_gliner(str(entity["label"]))
             if label is None:
                 continue
             start, end = int(entity["start"]), int(entity["end"])
@@ -95,10 +102,12 @@ def build_gliner_detector(config: "NerConfig") -> GlinerDetector:
         raise ConfigError(
             f"failed to load GLiNER model {model_name!r}; check network access and disk space"
         ) from exc
-    return GlinerDetector(
+    detector = GlinerDetector(
         model,
         frozenset(config.entities),
         config.max_chars,
         config.score_threshold,
         policy=LabelPolicy(config.entities, backend="gliner", overrides=config.labels),
     )
+    detector.model_name = model_name
+    return detector

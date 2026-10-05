@@ -50,6 +50,13 @@ class _AnalyzerLike(Protocol):
 class PresidioDetector:
     name = "presidio"
 
+    # Read by the never-match check (engine.build_detectors): the placeholder
+    # types this model can emit (None = unknown, e.g. zero-shot), the model
+    # for messages, and the configured entities no active backend emits.
+    emittable_types: frozenset[str] | None = None
+    model_name: str | None = None
+    unmatched_entities: tuple[str, ...] = ()
+
     def __init__(
         self,
         analyzer: _AnalyzerLike,
@@ -61,7 +68,7 @@ class PresidioDetector:
         policy: LabelPolicy | None = None,
     ) -> None:
         self._analyzer = analyzer
-        self._policy = (
+        self.label_policy = (
             policy if policy is not None else LabelPolicy(sorted(entities), backend="presidio")
         )
         # Ask only for supported entities the policy keeps: every Presidio
@@ -70,16 +77,20 @@ class PresidioDetector:
         # every request, so it is a startup error instead.
         supported = analyzer.get_supported_entities(language)
         self._entities = sorted(
-            {name for name in supported if self._policy.classify(name) is not None}
+            {name for name in supported if self.label_policy.classify(name) is not None}
         )
         if not self._entities:
             from llm_redact.config import ConfigError
 
             raise ConfigError(
-                f"[detection.ner] entities {list(self._policy.entities)!r} match no entity the"
+                f"[detection.ner] entities {list(self.label_policy.entities)!r} match no entity the"
                 f" Presidio analyzer supports for language {language!r}; it supports"
                 f" {sorted(supported)!r}"
             )
+        # Exactly the types the asked entities classify as.
+        self.emittable_types = frozenset(
+            t for t in map(self.label_policy.classify, self._entities) if t is not None
+        )
         self._max_chars = max_chars
         self._threshold = threshold
         self._language = language
@@ -97,7 +108,7 @@ class PresidioDetector:
         for result in self._analyzer.analyze(
             text, language=self._language, entities=self._entities, score_threshold=self._threshold
         ):
-            label = self._policy.classify(str(result.entity_type))
+            label = self.label_policy.classify(str(result.entity_type))
             start, end = int(result.start), int(result.end)
             if label is None or not 0 <= start < end <= len(text):
                 continue
@@ -140,7 +151,7 @@ def build_presidio_detector(config: "NerConfig") -> PresidioDetector:
             "failed to build the Presidio analyzer; is the spaCy model available?"
             " download it: uv run python -m spacy download en_core_web_sm"
         ) from exc
-    return PresidioDetector(
+    detector = PresidioDetector(
         analyzer,
         frozenset(config.entities),
         config.max_chars,
@@ -148,3 +159,5 @@ def build_presidio_detector(config: "NerConfig") -> PresidioDetector:
         language=config.language,
         policy=LabelPolicy(config.entities, backend="presidio", overrides=config.labels),
     )
+    detector.model_name = model_name
+    return detector

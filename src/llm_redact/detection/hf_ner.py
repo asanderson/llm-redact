@@ -11,7 +11,7 @@ happens at proxy startup (fail fast, no first-request latency spike).
 """
 
 import importlib.util
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
@@ -30,8 +30,26 @@ class _PipelineLike(Protocol):
     def __call__(self, text: str) -> list[dict[str, Any]]: ...
 
 
+def _model_types(pipe: _PipelineLike, policy: LabelPolicy) -> frozenset[str] | None:
+    """The placeholder types the pipeline's model can emit under ``policy``:
+    its ``config.id2label`` labels, classified. None when the pipeline does
+    not say (any type may come)."""
+    id2label = getattr(getattr(getattr(pipe, "model", None), "config", None), "id2label", None)
+    if not isinstance(id2label, Mapping):
+        return None
+    types = (policy.classify(str(label)) for label in id2label.values())
+    return frozenset(t for t in types if t is not None)
+
+
 class HfDetector:
     name = "hf"
+
+    # Read by the never-match check (engine.build_detectors): the placeholder
+    # types this model can emit (None = unknown, e.g. zero-shot), the model
+    # for messages, and the configured entities no active backend emits.
+    emittable_types: frozenset[str] | None = None
+    model_name: str | None = None
+    unmatched_entities: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -46,7 +64,10 @@ class HfDetector:
         # The label policy (labels.py) turns the model's labels (`PER`,
         # `B-PER` without aggregation) into placeholder types; by default
         # it is built from `entities`.
-        self._policy = policy if policy is not None else LabelPolicy(entities, backend=self.name)
+        self.label_policy = (
+            policy if policy is not None else LabelPolicy(entities, backend=self.name)
+        )
+        self.emittable_types = _model_types(pipe, self.label_policy)
         self._max_chars = max_chars
         self._threshold = threshold
 
@@ -59,7 +80,7 @@ class HfDetector:
         if len(text) > self._max_chars:
             return
         for ent in self._pipe(text):
-            label = self._policy.classify(str(ent.get("entity_group", ent.get("entity", ""))))
+            label = self.label_policy.classify(str(ent.get("entity_group", ent.get("entity", ""))))
             if label is None:
                 continue
             if float(ent.get("score", 1.0)) < self._threshold:
@@ -110,10 +131,12 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
             f"failed to load Hugging Face token-classification model {model_name!r}:"
             f" {type(exc).__name__}"
         ) from exc
-    return HfDetector(
+    detector = HfDetector(
         pipe,
         frozenset(config.entities),
         config.max_chars,
         config.score_threshold,
         policy=LabelPolicy(config.entities, backend="hf", overrides=config.labels),
     )
+    detector.model_name = model_name
+    return detector

@@ -177,9 +177,10 @@ hf = "Davlan/xlm-roberta-base-ner-hrl"   # 10 languages
 
 Backends compose: `backends = ["spacy", "stanza"]` runs an English spaCy
 model and a per-language Stanza model at once, and same-span same-type hits
-dedupe in overlap resolution. Entity labels differ across models — check the
-model card and set `entities` to match (a wrong label silently detects
-nothing).
+dedupe in overlap resolution. Entity labels differ across models; a
+placeholder type such as `PERSON` requests every label that folds into it
+(docs/detection.md), and an entity no loaded model can emit logs a startup
+warning instead of silently detecting nothing.
 
 This document is also the decision record for when a user asks for a
 language the current backends serve poorly.

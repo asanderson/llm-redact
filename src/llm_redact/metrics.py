@@ -110,6 +110,7 @@ CORE_METRIC_FAMILIES = frozenset(
         "llm_redact_inspected_uploads_total",
         "llm_redact_ner_strings_total",
         "llm_redact_ner_windows_total",
+        "llm_redact_ner_windows_truncated_total",
         "llm_redact_ner_labels_dropped_total",
         "llm_redact_ner_offsets_dropped_total",
         "llm_redact_routed_requests_total",
@@ -500,6 +501,13 @@ def _ner_lines(backends: list[tuple[str, "NerStats"]]) -> list[str]:
             "llm_redact_ner_windows_total",
             "windows",
             "Windows the windowed strings were read in, by NER backend.",
+        ),
+        (
+            "llm_redact_ner_windows_truncated_total",
+            "windows_truncated",
+            "NER windows (a string read whole counts as one) longer than the model's token"
+            " limit because one word alone exceeds it: the model may read only part of"
+            " them, by backend.",
         ),
         (
             "llm_redact_ner_labels_dropped_total",

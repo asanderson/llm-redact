@@ -40,6 +40,10 @@ class NerStats:
     skipped_max_chars: int = 0
     # Windows the windowed strings were read in (model calls for them).
     windows: int = 0
+    # Windows (a string read whole counts as one) longer than the model's
+    # token limit because one word alone exceeds it: the model may read
+    # only part of them.
+    windows_truncated: int = 0
     # Model entities whose placeholder type does not fit the placeholder
     # grammar (labels.LabelPolicy.classify): never emitted.
     labels_dropped: int = 0

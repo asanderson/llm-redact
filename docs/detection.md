@@ -136,18 +136,33 @@ same way — the survey behind the lineup is
 [ner-landscape.md](ner-landscape.md).
 
 **Long strings.** A model reads a bounded number of tokens at a time and, left
-alone, ignores the rest of a longer string. The `hf` backend reads a longer
-string in overlapping windows: a window is the model's limit (the smaller of
-its tokenizer's `model_max_length` and its config's `max_position_embeddings`,
-512 when neither says; 512 tokens for `dslim/bert-base-NER`), and consecutive
-windows share a quarter of it, so a name anywhere in the string is found at its
-exact offsets. An entity two windows both report counts once; one cut by a
-window's edge is also reported whole by the next window, and the longer span
-wins. Windowing needs a fast tokenizer — the only kind that reports character
-offsets — so an `hf` model without one is refused at startup. Strings longer
-than `max_chars` (default 20,000 characters) are still read by no model:
-`max_chars` caps the time NER may spend on one string, and such strings are
-counted (see "NER coverage counters" below).
+alone, ignores the rest of a longer string. The `hf` and `gliner` backends
+read a longer string in overlapping windows, so a name anywhere in it is found
+at its exact offsets:
+
+- `hf`: a window is the model's limit (the smaller of its tokenizer's
+  `model_max_length` and its config's `max_position_embeddings`, 512 when
+  neither says; 512 tokens for `dslim/bert-base-NER`), and consecutive windows
+  share a quarter of it. Windowing needs a fast tokenizer — the only kind that
+  reports character offsets — so an `hf` model without one is refused at
+  startup.
+- `gliner`: GLiNER reads at most `max_len` words of a text (384 for the urchade
+  v2.1 models) and drops the rest. A window holds at most 200 of GLiNER's own
+  words, fewer when the entity prompts leave less room within `max_len`, and —
+  with the model's fast tokenizer — no more subword tokens than its encoder
+  reads beside the prompt (the tokenizer's limit, else the encoder's position
+  limit, else 512). GLiNER counts every JSON brace, quote, colon and comma as
+  a word, so JSON-dense text makes many words. Consecutive windows share a
+  fifth of a window. A single word longer than the encoder reads (a very long
+  identifier) gets a window of its own, which the model may read only in part:
+  counted as `windows_truncated`.
+
+An entity two windows both report counts once; one cut by a window's edge is
+also reported whole by the next window, and the longer span wins. A string
+that fits is read in one call, as before. spaCy, Stanza and Presidio read each
+string whole. Strings longer than `max_chars` (default 20,000 characters) are
+still read by no model: `max_chars` caps the time NER may spend on one string,
+and such strings are counted (see "NER coverage counters" below).
 
 ## Placeholder types from NER models
 
@@ -286,8 +301,9 @@ existing `detection.ner_enabled`):
     "hf": {
       "model": "dslim/bert-base-NER",
       "revision": null, "catalog": null, "license": null,
-      "counters": {"scanned_whole": 812, "scanned_windowed": 0, "skipped_max_chars": 3,
-                   "windows": 0, "labels_dropped": 0, "offsets_dropped": 0}
+      "counters": {"scanned_whole": 812, "scanned_windowed": 14, "skipped_max_chars": 3,
+                   "windows": 61, "windows_truncated": 0, "labels_dropped": 0,
+                   "offsets_dropped": 0}
     }
   },
   "unmatched_entities": []
@@ -297,9 +313,10 @@ existing `detection.ner_enabled`):
 | Counter | Counts |
 |---|---|
 | `scanned_whole` | strings the model read in one call |
-| `scanned_windowed` | strings the model read in overlapping windows (`hf`) |
+| `scanned_windowed` | strings the model read in overlapping windows (`hf`, `gliner`) |
 | `skipped_max_chars` | strings longer than `[detection.ner] max_chars`, which the model never read (the regex rules and deny strings still scan them) |
 | `windows` | the windows the windowed strings were read in |
+| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`) |
 | `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |
 | `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
 
@@ -312,7 +329,8 @@ entities no active backend can ever emit (the startup warning above), and
 
 The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
 backend and outcome, `llm_redact_ner_windows_total`,
-`llm_redact_ner_labels_dropped_total`, `llm_redact_ner_offsets_dropped_total`;
+`llm_redact_ner_windows_truncated_total`, `llm_redact_ner_labels_dropped_total`,
+`llm_redact_ner_offsets_dropped_total`;
 see [observability.md](observability.md)), and `llm-redact status` prints a
 posture line while a backend has skipped strings longer than `max_chars` or an
 entity can never match:

@@ -288,7 +288,7 @@
     {
       "type": "timeseries",
       "title": "NER windows by backend",
-      "description": "llm_redact_ner_windows_total: the windows long strings were read in (model calls for the windowed strings).",
+      "description": "llm_redact_ner_windows_total: the windows long strings were read in (model calls for the windowed strings). truncated = llm_redact_ner_windows_truncated_total: windows holding one word longer than the model's encoder reads, which it may read only in part.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
       "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
@@ -297,6 +297,11 @@
           "expr": "sum by (backend) (rate(llm_redact_ner_windows_total[5m]))",
           "legendFormat": "{{backend}}",
           "refId": "A"
+        },
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_windows_truncated_total[5m]))",
+          "legendFormat": "{{backend}} truncated",
+          "refId": "B"
         }
       ]
     },

@@ -87,6 +87,7 @@ def test_ner_coverage_gap_has_panels_and_an_alert() -> None:
     for family in (
         "llm_redact_ner_strings_total",
         "llm_redact_ner_windows_total",
+        "llm_redact_ner_windows_truncated_total",
         "llm_redact_ner_labels_dropped_total",
         "llm_redact_ner_offsets_dropped_total",
     ):

@@ -33,6 +33,7 @@ from llm_redact.detection.windows import drop_exact_duplicates
 from llm_redact.redactor import Redactor
 from llm_redact.vault import InMemoryVault
 from ner_fakes import FakeHfPipe, FakeTokenizer, install_transformers
+from real_models import cached_snapshot, offline_hub
 
 SENTINEL = int(1e30)  # transformers' VERY_LARGE_INTEGER: "limit unknown"
 
@@ -271,30 +272,13 @@ DSLIM_FILES = [
 ]
 
 
-def _cached_dslim() -> str:
-    pytest.importorskip("torch")
-    pytest.importorskip("transformers")
-    hub = pytest.importorskip("huggingface_hub")
-    try:
-        # Only the files a load reads (a partial snapshot is complete for
-        # them): never the TF/Flax/ONNX/pickle copies.
-        path: str = hub.snapshot_download(
-            DSLIM,
-            revision=DSLIM_REVISION,
-            allow_patterns=DSLIM_FILES,
-            local_files_only=True,
-        )
-    except Exception:  # not cached here (LocalEntryNotFoundError and kin)
-        pytest.skip(f"{DSLIM} at {DSLIM_REVISION} is not in the Hugging Face cache")
-    return path
-
-
 @pytest.mark.real_model
 def test_real_model_finds_a_name_after_3000_words(monkeypatch: pytest.MonkeyPatch) -> None:
     # Offline: the model loads from its cached local folder only.
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
-    path = _cached_dslim()
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    offline_hub(monkeypatch)
+    path = cached_snapshot(DSLIM, DSLIM_REVISION, DSLIM_FILES)
     detector = build_hf_detector(NerConfig(enabled=True, backend="hf", model=path))
     text = "word " * 3000 + "Angela Merkel met Barack Obama in Berlin."
     found = detector.detect(text)

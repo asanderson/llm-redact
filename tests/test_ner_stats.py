@@ -50,6 +50,7 @@ UPSTREAM = "https://api.openai.test"
 NER_FAMILIES = (
     "llm_redact_ner_strings_total",
     "llm_redact_ner_windows_total",
+    "llm_redact_ner_windows_truncated_total",
     "llm_redact_ner_labels_dropped_total",
     "llm_redact_ner_offsets_dropped_total",
 )
@@ -98,6 +99,7 @@ def test_counters_start_at_zero_and_list_every_field() -> None:
         "scanned_windowed": 0,
         "skipped_max_chars": 0,
         "windows": 0,
+        "windows_truncated": 0,
         "labels_dropped": 0,
         "offsets_dropped": 0,
     }
@@ -116,6 +118,7 @@ def test_each_string_is_scanned_or_skipped(backend: str) -> None:
         "scanned_windowed": 0,
         "skipped_max_chars": 1,
         "windows": 0,
+        "windows_truncated": 0,
         "labels_dropped": 0,
         "offsets_dropped": 0,
     }
@@ -425,7 +428,7 @@ def test_metrics_render_each_backend() -> None:
     from llm_redact.metrics import Metrics
 
     hf = NerStats(scanned_whole=4, skipped_max_chars=1, labels_dropped=2, offsets_dropped=3)
-    gliner = NerStats(scanned_windowed=2, windows=9)
+    gliner = NerStats(scanned_windowed=2, windows=9, windows_truncated=1)
     text = Metrics("0").render(
         detections=Counter(),
         rehydrations=Counter(),
@@ -445,6 +448,8 @@ def test_metrics_render_each_backend() -> None:
         'llm_redact_ner_strings_total{backend="gliner",outcome="skipped_max_chars"} 0',
         'llm_redact_ner_windows_total{backend="hf"} 0',
         'llm_redact_ner_windows_total{backend="gliner"} 9',
+        'llm_redact_ner_windows_truncated_total{backend="hf"} 0',
+        'llm_redact_ner_windows_truncated_total{backend="gliner"} 1',
         'llm_redact_ner_labels_dropped_total{backend="hf"} 2',
         'llm_redact_ner_labels_dropped_total{backend="gliner"} 0',
         'llm_redact_ner_offsets_dropped_total{backend="hf"} 3',

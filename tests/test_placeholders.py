@@ -2,9 +2,12 @@ import pytest
 
 from llm_redact.placeholders import (
     MAX_PLACEHOLDER_LEN,
+    MAX_TOKEN_NUMBER,
+    MAX_TYPE_NAME_LEN,
     PLACEHOLDER_RE,
     canonicalize,
     format_placeholder,
+    is_placeholder_type,
     viable_prefix_start,
 )
 
@@ -99,3 +102,35 @@ def test_fuzzy_prefix_holdback_and_release() -> None:
     assert viable_prefix_start("«email ", fuzzy=True) is None
     # Length cap still applies.
     assert viable_prefix_start("«" + "a" * MAX_PLACEHOLDER_LEN, fuzzy=True) is None
+
+
+def test_max_type_name_len_keeps_every_token_within_the_holdback_bound() -> None:
+    assert MAX_TYPE_NAME_LEN == 28
+    longest = format_placeholder("T" * MAX_TYPE_NAME_LEN, MAX_TOKEN_NUMBER)
+    assert len(longest) == MAX_PLACEHOLDER_LEN
+    assert PLACEHOLDER_RE.fullmatch(longest)
+    assert canonicalize(longest) == longest
+
+
+@pytest.mark.parametrize(
+    ("name", "ok"),
+    [
+        ("PERSON", True),
+        ("A", True),
+        ("A1_B2", True),
+        ("A_", True),
+        ("T" * 28, True),
+        ("T" * 29, False),
+        ("", False),
+        ("1A", False),
+        ("_A", False),
+        ("a", False),
+        ("Ab", False),
+        ("A-B", False),
+        ("A B", False),
+        ("A\n", False),
+        ("É", False),
+    ],
+)
+def test_is_placeholder_type(name: str, ok: bool) -> None:
+    assert is_placeholder_type(name) is ok

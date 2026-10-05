@@ -11,12 +11,33 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+- NER model labels become placeholder types through one label policy for every backend
+  (`detection/labels.py`, documented in docs/detection.md "Placeholder types from NER
+  models"): labels are normalized (`B-PER` → `PER`, `"street address"` →
+  `STREET_ADDRESS`) and synonyms fold into one type (`PER`, `FIRST_NAME`, `SURNAME` … →
+  `PERSON`; `EMAIL_ADDRESS` → `EMAIL`), so one value gets one token whichever backend
+  finds it. An `entities` entry that names a placeholder type (`PERSON`, `ADDRESS`,
+  `EMAIL`, …) requests that type from every backend. Entries that name a model's own
+  label (`PER`, `"job title"`) keep emitting that label, as before.
+- GLiNER is prompted in natural language for a type request: `PERSON` sends "person",
+  `ADDRESS` "street address", `EMAIL` "email address" (previously the type name itself).
+  Other entries are still sent as written. Detections keep their type.
+- A model label that cannot be a placeholder type (it starts with a digit, or is longer
+  than 28 characters) is no longer emitted: its tokens could never be restored.
+
 ### Fixed
+- The default `hf` NER configuration detected nothing: `dslim/bert-base-NER` labels people
+  `PER`, the default `entities = ["PERSON"]` asked for `PERSON`. `PERSON` now requests
+  every label that folds into it.
 - `[detection.ner] score_threshold` survives `llm-redact config show` and every config
   rewrite when `hf` is the only backend that emits confidences: the emitter wrote it only
   for `gliner` and `presidio`, while the parser accepts it for `hf` too (one shared
   `CONFIDENCE_BACKENDS` list now). An `hf`-only threshold was silently dropped, and the
   dashboard editor's round-trip check refused every save of such a configuration.
+- A failed `hf` model load names its cause instead of always suggesting network access and
+  disk space: `torch is not installed; install the hf extra` when torch is missing (it
+  cannot run a model without it), else the model id and the exception type.
 - The `hf` NER backend maps the exact text the request carried (`text[start:end]`), never
   the pipeline's decoded `word`, which can differ (casing, spacing, unknown-token marks):
   a restored value is always the one the user sent. An entity whose offsets fall outside

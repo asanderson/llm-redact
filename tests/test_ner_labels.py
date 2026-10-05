@@ -1,0 +1,332 @@
+"""The NER label policy (detection/labels.py): one placeholder type per value
+across every backend, in both raw-entity modes (FOLD_RAW_REQUESTS False =
+1.12.x, True = 2.0.0; the ``fold_raw`` fixture runs a test in each)."""
+
+import pytest
+
+from llm_redact.detection import labels
+from llm_redact.detection.engine import Allowlist, DetectionConfig, NerConfig, build_detectors
+from llm_redact.detection.gliner_ner import GlinerDetector
+from llm_redact.detection.hf_ner import HfDetector
+from llm_redact.detection.labels import (
+    CANONICAL_NER_TYPES,
+    DEFAULT_FOLDS,
+    GLINER_PROMPTS,
+    LEGACY_FOLDS,
+    SENSITIVE_LABELS,
+    TYPE_NAMES,
+    UNFOLDED_LABELS,
+    LabelPolicy,
+    gliner_prompt,
+    normalize_label,
+)
+from llm_redact.detection.ner import NerDetector
+from llm_redact.detection.regex_rules import BUILTIN_RULES
+from llm_redact.placeholders import MAX_TYPE_NAME_LEN
+from llm_redact.redactor import Redactor
+from llm_redact.vault import InMemoryVault
+from ner_fakes import FakeGliner, FakeHfPipe, FakeSpacy, install_gliner, install_transformers
+
+# --- normalization ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "normalized"),
+    [
+        ("street address", "STREET_ADDRESS"),
+        ("B-first_name", "FIRST_NAME"),
+        ("private_person", "PRIVATE_PERSON"),
+        ("  I-PER ", "PER"),
+        ("i-per", "PER"),
+        ("E-LOC", "LOC"),
+        ("S-ORG", "ORG"),
+        ("L-PER", "PER"),
+        ("U-PER", "PER"),
+        ("B-I-PER", "I_PER"),  # one prefix only
+        ("B-2nd", "B_2ND"),  # kept: no letter after the dash
+        ("X-PER", "X_PER"),  # not a tagging prefix
+        ("PER", "PER"),
+        ("phone  number", "PHONE_NUMBER"),
+        ("__job.title!!", "JOB_TITLE"),
+        ("Straße", "STRASSE"),
+        ("", ""),
+        ("---", ""),
+    ],
+)
+def test_normalize_label(raw: str, normalized: str) -> None:
+    assert normalize_label(raw) == normalized
+
+
+# --- the fold table -------------------------------------------------------------
+
+
+def test_type_names_are_canonical_plus_builtin_types() -> None:
+    assert frozenset(CANONICAL_NER_TYPES) <= TYPE_NAMES
+    assert {rule.detector_type for rule in BUILTIN_RULES} <= TYPE_NAMES
+    assert len(TYPE_NAMES) == len(CANONICAL_NER_TYPES) + len(
+        {rule.detector_type for rule in BUILTIN_RULES}
+    )
+
+
+def test_every_type_name_requests_itself() -> None:
+    # A type request asks for exactly its own type: no placeholder type
+    # folds into another one.
+    policy = LabelPolicy(())
+    assert all(policy.fold(name) == name for name in TYPE_NAMES)
+
+
+def test_folds_target_placeholder_types_and_are_normalized() -> None:
+    assert set(DEFAULT_FOLDS.values()) <= TYPE_NAMES
+    assert all(normalize_label(label) == label for label in DEFAULT_FOLDS)
+
+
+def test_legacy_folds_are_the_five_presidio_folds_inside_the_defaults() -> None:
+    assert dict(LEGACY_FOLDS) == {
+        "EMAIL_ADDRESS": "EMAIL",
+        "PHONE_NUMBER": "PHONE",
+        "US_SSN": "SSN",
+        "IBAN_CODE": "IBAN",
+        "CREDIT_CARD": "CREDIT_CARD",
+    }
+    assert all(DEFAULT_FOLDS[label] == type_name for label, type_name in LEGACY_FOLDS.items())
+
+
+def test_broad_and_sensitive_labels_are_never_folded() -> None:
+    # D10: a sensitive attribute is detected only when listed raw.
+    assert not (UNFOLDED_LABELS | SENSITIVE_LABELS) & set(DEFAULT_FOLDS)
+    assert not SENSITIVE_LABELS & TYPE_NAMES
+    assert all(normalize_label(label) == label for label in UNFOLDED_LABELS | SENSITIVE_LABELS)
+
+
+def test_canonical_types_fit_the_placeholder_grammar() -> None:
+    from llm_redact.placeholders import is_placeholder_type
+
+    assert all(is_placeholder_type(name) for name in TYPE_NAMES)
+
+
+def test_gliner_prompts() -> None:
+    assert set(GLINER_PROMPTS) <= TYPE_NAMES
+    assert gliner_prompt("ADDRESS") == "street address"
+    assert gliner_prompt("CREDIT_CARD") == "credit card"
+    assert gliner_prompt("GITHUB_TOKEN") == "github token"
+    # Each prompt reads back (normalized) as a label that folds into its type.
+    policy = LabelPolicy(())
+    assert all(policy.fold(normalize_label(gliner_prompt(t))) == t for t in TYPE_NAMES)
+
+
+# --- classify, in both modes ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("entities", "backend", "label", "kept", "folded"),
+    [
+        # Type requests fold every synonym in both modes.
+        (("PERSON",), "hf", "PER", "PERSON", "PERSON"),
+        (("PERSON",), "hf", "B-PER", "PERSON", "PERSON"),
+        (("PERSON",), "hf", "first_name", "PERSON", "PERSON"),
+        (("PERSON",), "hf", "ORG", None, None),
+        (("person",), "spacy", "PERSON", "PERSON", "PERSON"),
+        (("EMAIL",), "hf", "EMAIL_ADDRESS", "EMAIL", "EMAIL"),
+        (("ADDRESS",), "hf", "street_address", "ADDRESS", "ADDRESS"),
+        (("SECRET",), "hf", "password", "SECRET", "SECRET"),
+        # Raw requests keep their own type until they fold.
+        (("PER",), "hf", "PER", "PER", "PERSON"),
+        (("PER",), "hf", "I-PER", "PER", "PERSON"),
+        (("PER",), "spacy", "PERSON", None, "PERSON"),
+        (("phone number",), "gliner", "phone number", "PHONE_NUMBER", "PHONE"),
+        (("EMAIL_ADDRESS",), "hf", "EMAIL_ADDRESS", "EMAIL_ADDRESS", "EMAIL"),
+        # ...except Presidio's five legacy folds, on the presidio backend.
+        (("EMAIL_ADDRESS",), "presidio", "EMAIL_ADDRESS", "EMAIL", "EMAIL"),
+        (("US_SSN",), "presidio", "US_SSN", "SSN", "SSN"),
+        (("IP_ADDRESS",), "presidio", "IP_ADDRESS", "IP_ADDRESS", "IP_ADDRESS"),
+        # Unfolded labels stay themselves.
+        (("ORG",), "spacy", "ORG", "ORG", "ORG"),
+        (("job title",), "gliner", "job title", "JOB_TITLE", "JOB_TITLE"),
+        (("RELIGION",), "hf", "religion", "RELIGION", "RELIGION"),
+        (("PERSON",), "hf", "religion", None, None),
+        # Not requested at all.
+        ((), "hf", "PER", None, None),
+    ],
+)
+def test_classify(
+    entities: tuple[str, ...],
+    backend: str,
+    label: str,
+    kept: str | None,
+    folded: str | None,
+    fold_raw: bool,
+) -> None:
+    policy = LabelPolicy(entities, backend=backend)
+    assert policy.fold_raw is fold_raw
+    assert policy.classify(label) == (folded if fold_raw else kept)
+
+
+def test_explicit_mode_beats_the_module_constant(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(labels, "FOLD_RAW_REQUESTS", False)
+    assert LabelPolicy(("PER",), fold_raw=True).classify("PER") == "PERSON"
+    monkeypatch.setattr(labels, "FOLD_RAW_REQUESTS", True)
+    assert LabelPolicy(("PER",), fold_raw=False).classify("PER") == "PER"
+
+
+def test_the_shipped_mode_keeps_raw_entities() -> None:
+    # D15 (i): 1.12.x warns; 2.0.0 (T46) flips this constant.
+    assert labels.FOLD_RAW_REQUESTS is False
+
+
+def test_requested_types(fold_raw: bool) -> None:
+    policy = LabelPolicy(("PERSON", "PER", "job title", "email"))
+    if fold_raw:
+        assert policy.requested == {"PERSON", "JOB_TITLE", "EMAIL"}
+        assert policy.raw_requested == frozenset()
+    else:
+        assert policy.requested == {"PERSON", "EMAIL"}
+        assert policy.raw_requested == {"PER", "JOB_TITLE"}
+
+
+@pytest.mark.parametrize(
+    ("entity", "label"),
+    [
+        ("3d model", "3d model"),  # starts with a digit
+        ("x" * (MAX_TYPE_NAME_LEN + 1), "x" * (MAX_TYPE_NAME_LEN + 1)),
+        ("---", "---"),  # normalizes to nothing
+    ],
+)
+def test_a_type_outside_the_placeholder_grammar_is_never_emitted(
+    entity: str, label: str, fold_raw: bool
+) -> None:
+    assert LabelPolicy((entity,)).classify(label) is None
+
+
+def test_the_longest_placeholder_type_is_emitted(fold_raw: bool) -> None:
+    entity = "x" * MAX_TYPE_NAME_LEN
+    assert LabelPolicy((entity,)).classify(entity) == entity.upper()
+
+
+def test_overrides_are_keyed_by_normalized_label() -> None:
+    # Overrides arrive normalized or not; both spellings land on one key.
+    policy = LabelPolicy(("PERSON",), overrides={"first name": "PERSON"})
+    assert dict(policy.overrides) == {"FIRST_NAME": "PERSON"}
+
+
+# --- hf -------------------------------------------------------------------------
+
+
+def test_default_hf_config_detects_person(monkeypatch: pytest.MonkeyPatch, fold_raw: bool) -> None:
+    # The shipped default (`entities = ["PERSON"]`) against a PER-emitting
+    # model (dslim/bert-base-NER) once detected nothing.
+    install_transformers(monkeypatch, FakeHfPipe([("Jane Doe", "PER", 0.99)]))
+    (detector,) = build_detectors(
+        DetectionConfig(enabled=(), ner=NerConfig(enabled=True, backend="hf"))
+    )
+    assert [(d.detector_type, d.value) for d in detector.detect("ask Jane Doe")] == [
+        ("PERSON", "Jane Doe")
+    ]
+
+
+def test_hf_raw_entity_per(monkeypatch: pytest.MonkeyPatch, fold_raw: bool) -> None:
+    install_transformers(monkeypatch, FakeHfPipe([("Jane Doe", "PER", 0.99)]))
+    (detector,) = build_detectors(
+        DetectionConfig(enabled=(), ner=NerConfig(enabled=True, backend="hf", entities=("PER",)))
+    )
+    assert [d.detector_type for d in detector.detect("ask Jane Doe")] == [
+        "PERSON" if fold_raw else "PER"
+    ]
+
+
+def test_spacy_person_and_hf_per_share_one_token(fold_raw: bool) -> None:
+    # Two backends, two label names, one PERSON request: the vault sees one
+    # (PERSON, value) identity, so one name gets one token.
+    spacy_like = NerDetector(FakeSpacy([("Jane Doe", "PERSON", 1.0)]), frozenset({"PERSON"}), 1000)
+    hf = HfDetector(
+        FakeHfPipe([("Jane Doe", "PER", 0.9), ("Bob Roe", "PER", 0.9)]),
+        frozenset({"PERSON"}),
+        max_chars=1000,
+        threshold=0.5,
+    )
+    vault = InMemoryVault()
+    redactor = Redactor([spacy_like, hf], vault, Allowlist(exact=frozenset(), patterns=()))
+    out = redactor.redact_text("Jane Doe met Bob Roe; Jane Doe left")
+    assert out == "«PERSON_001» met «PERSON_002»; «PERSON_001» left"
+    assert len(vault) == 2
+    assert redactor.counts["PERSON"] == 3
+
+
+def test_folded_builtin_type_is_suppressed_with_its_rule(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    # A model label folded into a built-in type (EMAIL_ADDRESS -> EMAIL)
+    # follows that type's rule toggle: off means off for NER too.
+    pipe = FakeHfPipe([("a@corp.example", "EMAIL_ADDRESS", 0.9), ("Jane", "PER", 0.9)])
+    install_transformers(monkeypatch, pipe)
+    ner = NerConfig(enabled=True, backend="hf", entities=("EMAIL", "PERSON"))
+    (off,) = build_detectors(DetectionConfig(enabled=(), ner=ner))
+    assert [d.detector_type for d in off.detect("Jane a@corp.example")] == ["PERSON"]
+    _email_rule, on = build_detectors(DetectionConfig(enabled=("email",), ner=ner))
+    assert sorted(d.detector_type for d in on.detect("Jane a@corp.example")) == ["EMAIL", "PERSON"]
+
+
+# --- gliner ---------------------------------------------------------------------
+
+
+def test_gliner_type_request_sends_its_prompt(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    model = FakeGliner([("1 Main St", "street address", 0.9)])
+    install_gliner(monkeypatch, model)
+    ner = NerConfig(enabled=True, backend="gliner", entities=("ADDRESS",))
+    (detector,) = build_detectors(DetectionConfig(enabled=(), ner=ner))
+    assert [(d.detector_type, d.value) for d in detector.detect("at 1 Main St")] == [
+        ("ADDRESS", "1 Main St")
+    ]
+    assert model.calls == [["street address"]]
+
+
+def test_gliner_raw_request_is_sent_verbatim(fold_raw: bool) -> None:
+    model = FakeGliner([("555-0100", "phone number", 0.9)])
+    detector = GlinerDetector(model, frozenset({"phone number"}), 1000, 0.5)
+    assert [d.detector_type for d in detector.detect("call 555-0100")] == [
+        "PHONE" if fold_raw else "PHONE_NUMBER"
+    ]
+    assert model.calls == [["phone number"]]
+
+
+def test_gliner_type_request_wins_a_shared_prompt(fold_raw: bool) -> None:
+    # entities = ["PHONE", "phone number"]: the prompt is sent once and its
+    # label comes back as the type request's type, in both modes.
+    model = FakeGliner([("555-0100", "phone number", 0.9)])
+    policy = LabelPolicy(("PHONE", "phone number"), backend="gliner")
+    detector = GlinerDetector(model, frozenset(), 1000, 0.5, policy=policy)
+    assert [d.detector_type for d in detector.detect("call 555-0100")] == ["PHONE"]
+    assert model.calls == [["phone number"]]
+    assert policy.classify("phone number") == "PHONE"
+
+
+def test_gliner_label_equal_to_a_prompt_is_the_requesting_type(fold_raw: bool) -> None:
+    policy = LabelPolicy(("PERSON", "USERNAME", "ORG"), backend="gliner")
+    assert policy.prompts == ("person", "username", "ORG")
+    assert policy.classify_gliner("person") == "PERSON"
+    assert policy.classify_gliner("username") == "USERNAME"
+    assert policy.classify_gliner("ORG") == "ORG"
+    assert policy.classify_gliner("street address") is None  # never requested
+
+
+def test_gliner_without_prompts_never_calls_the_model() -> None:
+    model = FakeGliner([("Jane", "person", 0.9)])
+    detector = GlinerDetector(model, frozenset(), 1000, 0.5)
+    assert list(detector.detect("Jane")) == []
+    assert model.calls == []
+
+
+@pytest.mark.parametrize(("start", "end"), [(-1, 3), (2, 2), (0, 99)])
+def test_gliner_out_of_range_offsets_are_skipped(start: int, end: int) -> None:
+    class Scripted:
+        def predict_entities(
+            self, text: str, labels: list[str], threshold: float
+        ) -> list[dict[str, object]]:
+            return [
+                {"start": start, "end": end, "label": "person", "text": "x", "score": 0.9},
+                {"start": 0, "end": 4, "label": "person", "text": "JANE", "score": 0.9},
+            ]
+
+    detector = GlinerDetector(Scripted(), frozenset({"PERSON"}), 1000, 0.5)
+    assert [(d.start, d.end, d.value) for d in detector.detect("Jane Doe")] == [(0, 4, "Jane")]

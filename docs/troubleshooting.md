@@ -324,6 +324,23 @@ which protocols your tools will send. Probe each one with `llm-redact
 routes test --protocol X` (llm-redact-pro) before traffic arrives. The
 full refusal list is in the llm-redact-pro routing guide.
 
+## `backend = "hf" but torch is not installed; install the hf extra`
+
+From `serve` / `serve --check` with `[detection.ner]` using the `hf` backend:
+the `transformers` package is installed but `torch` is not, so no model can
+run. Install the extra, which brings both: `uv sync --extra hf` (or
+`pip install 'llm-redact-proxy[hf]'`), then re-run `serve --check`.
+
+## "failed to load Hugging Face token-classification model '…': …"
+
+From `serve` / `serve --check`: torch is installed, but loading the named
+`hf` model failed; the message ends with the exception type. Common causes: a
+model id that does not exist or is not a token-classification model, a model
+missing from the local Hugging Face cache while the machine cannot reach the
+Hub, or a full disk. Load it once by hand to see the library's full error:
+`uv run python -c "from transformers import pipeline;
+pipeline('token-classification', model='ORG/MODEL')"`.
+
 ## Tool sees `«EMAIL_001»`-style tokens in responses
 
 A placeholder reached the tool unrestored. Almost always one of: the

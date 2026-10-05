@@ -18,7 +18,9 @@ NO_ALLOW = Allowlist(exact=frozenset(), patterns=())
 
 
 class FakeModel:
-    """Recognizes 'Jane Doe' as PERSON with score 0.9, 'Acme' as ORG at 0.3."""
+    """Recognizes 'Jane Doe' when prompted "person" (score 0.9) and 'Acme'
+    when prompted "ORG" (0.3). A PERSON type request sends the
+    natural-language prompt "person"; the raw request ORG is sent verbatim."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, list[str], float]] = []
@@ -28,7 +30,7 @@ class FakeModel:
     ) -> list[dict[str, Any]]:
         self.calls.append((text, labels, threshold))
         entities = []
-        for name, label, score in (("Jane Doe", "PERSON", 0.9), ("Acme", "ORG", 0.3)):
+        for name, label, score in (("Jane Doe", "person", 0.9), ("Acme", "ORG", 0.3)):
             index = text.find(name)
             if index != -1 and label in labels and score >= threshold:
                 entities.append(
@@ -65,6 +67,15 @@ def test_threshold_filters_low_scores() -> None:
     assert types == ["PERSON", "ORG"]
 
 
+def test_type_request_sends_its_natural_language_prompt() -> None:
+    model = FakeModel()
+    detector = GlinerDetector(model, frozenset({"PERSON", "ORG"}), max_chars=1000, threshold=0.5)
+    list(detector.detect("Jane Doe"))
+    ((_text, labels, threshold),) = model.calls
+    assert labels == ["person", "ORG"]  # type request's prompt, then the raw one
+    assert threshold == 0.5
+
+
 def test_max_chars_gate() -> None:
     model = FakeModel()
     detector = GlinerDetector(model, frozenset({"PERSON"}), max_chars=10, threshold=0.5)
@@ -89,6 +100,7 @@ def test_allowlist_applies() -> None:
     detectors: list[Any] = [
         GlinerDetector(FakeModel(), frozenset({"PERSON"}), max_chars=1000, threshold=0.5)
     ]
+    assert [d.value for d in detect_all(detectors, "ask Jane Doe", NO_ALLOW)] == ["Jane Doe"]
     allow = Allowlist(exact=frozenset({"Jane Doe"}), patterns=())
     assert detect_all(detectors, "ask Jane Doe", allow) == []
 

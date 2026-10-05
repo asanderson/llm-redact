@@ -95,6 +95,17 @@ def rehydrator(vault: InMemoryVault) -> Rehydrator:
     return Rehydrator(vault)
 
 
+@pytest.fixture(params=[False, True], ids=["raw-kept", "raw-folded"])
+def fold_raw(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> bool:
+    """Both NER label modes (detection/labels.py FOLD_RAW_REQUESTS): False
+    is what 1.12.x ships (raw entities such as PER keep their own type),
+    True what 2.0.0 ships (they fold: PER -> PERSON)."""
+    from llm_redact.detection import labels
+
+    monkeypatch.setattr(labels, "FOLD_RAW_REQUESTS", request.param)
+    return bool(request.param)
+
+
 @pytest.fixture(autouse=True)
 def _local_refusals_counted_once(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     """Every request any test sends through ``create_app`` — an HTTP

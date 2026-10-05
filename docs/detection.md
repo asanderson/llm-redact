@@ -128,3 +128,72 @@ backends can run concurrently (`backends = ["spacy", "presidio"]`), and
 the multilingual Stanza and Hugging Face `token-classification` backends
 are available the same way — the survey behind the lineup is
 [ner-landscape.md](ner-landscape.md).
+
+## Placeholder types from NER models
+
+Each NER model names what it finds in its own words: spaCy says `PERSON`,
+`dslim/bert-base-NER` says `PER`, a PII model may say `first_name` and
+`last_name`. llm-redact turns every model label into one placeholder type, so
+a value gets the same token whichever backend finds it — the vault is keyed on
+(session, type, value), and two names for one type would issue two tokens for
+one person.
+
+A label is first normalized (a leading `B-`/`I-`/`E-`/`S-`/`L-`/`U-` tag is
+dropped, letters are uppercased, any other run of characters becomes `_`:
+`"B-first_name"` → `FIRST_NAME`, `"street address"` → `STREET_ADDRESS`), then
+folded into its placeholder type:
+
+| Type | Model labels that fold into it |
+|---|---|
+| `PERSON` | PER, PERSON, NAME, FULL_NAME, FIRST_NAME, FIRSTNAME, GIVENNAME, GIVEN_NAME, MIDDLE_NAME, MIDDLENAME, LAST_NAME, LASTNAME, SURNAME, FAMILY_NAME, PRIVATE_PERSON |
+| `ADDRESS` | ADDRESS, STREET_ADDRESS, STREETADDRESS, STREET, LOCATION_STREET, LOCATION_ADDRESS, BUILDINGNUM, BUILDING_NUMBER, BUILDINGNUMBER, PRIVATE_ADDRESS |
+| `DATE_OF_BIRTH` | DATE_OF_BIRTH, DATEOFBIRTH, DOB, BIRTH_DATE, BIRTHDATE |
+| `PASSPORT` | PASSPORT, PASSPORT_NUMBER, PASSPORTNUM, PASSPORTNUMBER |
+| `DRIVER_LICENSE` | DRIVER_LICENSE, DRIVERS_LICENSE, DRIVER_LICENSE_NUMBER, DRIVERS_LICENSE_NUMBER, DRIVERLICENSENUM, DRIVER_LICENCE |
+| `USERNAME` | USERNAME, USER_NAME |
+| `ACCOUNT_NUMBER` | ACCOUNT_NUMBER, ACCOUNTNUM, BANK_ACCOUNT, BANK_ACCOUNT_NUMBER |
+| `EMAIL` | EMAIL, EMAIL_ADDRESS, PRIVATE_EMAIL |
+| `PHONE` | PHONE, PHONE_NUMBER, TELEPHONE, TELEPHONENUM, PRIVATE_PHONE |
+| `SSN` | SSN, US_SSN |
+| `IBAN` | IBAN, IBAN_CODE |
+| `CREDIT_CARD` | CREDIT_CARD, CREDIT_CARD_NUMBER, CREDITCARDNUMBER, CREDIT_DEBIT_CARD, CARD_NUMBER, PAYMENT_CARD |
+| `IPV4` / `IPV6` | IPV4 / IPV6 |
+| `SECRET` (the type of `generic_secret`) | PASSWORD, SECRET, API_KEY, ACCESS_TOKEN |
+
+Deliberately not folded, and kept only when listed raw in `entities`:
+`IP_ADDRESS` (it covers v4 and v6), place names and plain dates (`LOC`,
+`LOCATION`, `GPE`, `CITY`, `STATE`, `COUNTRY`, `ZIPCODE`, `POSTCODE`, `DATE`,
+`PRIVATE_DATE`, `TIME`), organisations (`ORG`, `COMPANY_NAME`), URLs, the
+country-ambiguous `SOCIALNUM`/`TAXNUM`/`IDCARDNUM` (the national-id rules own
+those types), and every label describing a sensitive attribute (race or
+ethnicity, religion, political view, sexuality, gender, Presidio's `NRP`):
+those are detected only when you list them yourself.
+
+**Type requests.** An entry of `[detection.ner] entities` whose normalized form
+is a placeholder type — `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `PASSPORT`,
+`DRIVER_LICENSE`, `USERNAME`, `ACCOUNT_NUMBER`, or any built-in rule's type
+such as `EMAIL` — requests that type from every backend, whatever the model
+calls it. The default `entities = ["PERSON"]` therefore works with spaCy,
+Stanza, Presidio and with a `PER`-emitting `hf` model alike, and a name two
+backends both find gets one token. GLiNER is prompted in natural language for
+a type request (`PERSON` → "person", `ADDRESS` → "street address",
+`DATE_OF_BIRTH` → "date of birth", `PASSPORT` → "passport number",
+`DRIVER_LICENSE` → "driver license number", `USERNAME` → "username",
+`ACCOUNT_NUMBER` → "account number", `EMAIL` → "email address", `PHONE` →
+"phone number"; other built-in types send their name in lowercase words).
+
+**Raw requests.** Any other entry (`PER`, `ORG`, `"job title"`) is a raw
+request: GLiNER is sent the text as written, and the backend emits the label's
+normalized form (`"job title"` → `JOB_TITLE`) — as before, Presidio's
+`EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_SSN`, `IBAN_CODE` and `CREDIT_CARD`
+included, which the presidio backend emits as the built-in `EMAIL`, `PHONE`,
+`SSN`, `IBAN` and `CREDIT_CARD`. From 2.0.0 a raw request folds like a model
+label (`entities = ["PER"]` then requests and emits `PERSON`); write the type
+(`"PERSON"`) to get that behavior now.
+
+A type the token format cannot carry (one that does not start with a letter,
+or longer than 28 characters) is never emitted.
+
+A folded built-in type follows its rule's toggle: with `generic_secret`
+disabled, a model's `PASSWORD` detections (type `SECRET`) are suppressed too,
+and with `email` disabled so are the `EMAIL_ADDRESS` ones.

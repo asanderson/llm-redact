@@ -96,11 +96,22 @@ class _FakeHfPipe:
         return out
 
 
-def test_hf_entity_mapping_and_filter() -> None:
+def test_hf_entity_mapping_and_filter(fold_raw: bool) -> None:
+    # The raw entity PER keeps its own type until raw entities fold (2.0.0).
     det = HfDetector(_FakeHfPipe(), frozenset({"PER"}), max_chars=1000, threshold=0.5)
     found = list(det.detect("hi Jane Doe at Acme"))
+    expected = "PERSON" if fold_raw else "PER"
     assert found == [
-        Detection(start=3, end=11, detector_type="PER", value="Jane Doe", priority=NER_PRIORITY)
+        Detection(start=3, end=11, detector_type=expected, value="Jane Doe", priority=NER_PRIORITY)
+    ]
+
+
+def test_hf_type_request_folds_the_model_label(fold_raw: bool) -> None:
+    # The default `entities = ["PERSON"]` requests the PERSON type, which a
+    # PER-emitting model (dslim/bert-base-NER) now serves in both modes.
+    det = HfDetector(_FakeHfPipe(), frozenset({"PERSON"}), max_chars=1000, threshold=0.5)
+    assert [(d.detector_type, d.value) for d in det.detect("hi Jane Doe at Acme")] == [
+        ("PERSON", "Jane Doe")
     ]
 
 
@@ -216,3 +227,49 @@ def test_per_backend_model_override_for_new_backends() -> None:
     )
     assert cfg.detection.ner.model_for("hf") == "org/multilingual-ner"
     assert cfg.detection.ner.model_for("stanza") is None
+
+
+def _failing_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    import types
+
+    def pipeline(*args: object, **kwargs: object) -> object:
+        raise OSError("no such model")
+
+    module = types.ModuleType("transformers")
+    module.pipeline = pipeline  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "transformers", module)
+
+
+def test_hf_load_failure_without_torch_names_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib.util
+
+    from llm_redact.config import ConfigError
+    from llm_redact.detection.hf_ner import build_hf_detector
+
+    _failing_transformers(monkeypatch)
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a: None if name == "torch" else real_find_spec(name, *a),
+    )
+    with pytest.raises(ConfigError, match="torch is not installed; install the hf extra"):
+        build_hf_detector(NerConfig(enabled=True, backend="hf"))
+
+
+def test_hf_load_failure_with_torch_names_the_model_and_exception_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.util
+
+    from llm_redact.config import ConfigError
+    from llm_redact.detection.hf_ner import build_hf_detector
+
+    _failing_transformers(monkeypatch)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: object())
+    with pytest.raises(ConfigError) as caught:
+        build_hf_detector(NerConfig(enabled=True, backend="hf", model="org/ner-model"))
+    assert str(caught.value) == (
+        "failed to load Hugging Face token-classification model 'org/ner-model': OSError"
+    )

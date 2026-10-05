@@ -18,7 +18,7 @@ gates differ.
 
 ```bash
 uv run python -m llm_redact.bench.ner --list-datasets
-uv run python -m llm_redact.bench.ner --config my-ner.toml --dataset rules --out /tmp/ner-report
+uv run python -m llm_redact.bench.ner --config my-ner.toml --out /tmp/ner-report   # the synthetic corpus
 uv run python -m llm_redact.bench.ner --config my-ner.toml --check   # gate against bench/ner_thresholds.toml
 ```
 
@@ -26,7 +26,7 @@ uv run python -m llm_redact.bench.ner --config my-ner.toml --check   # gate agai
 |---|---|
 | `--config PATH` | The llm-redact config to score (parsed like `serve`'s; `[detection.ner] enabled = true` is required). Models load exactly as at proxy startup. |
 | `--name NAME` | The config's name in the thresholds file (default: the config file's stem, so `bench/configs/hf-default.toml` is `hf-default`). |
-| `--dataset NAME[:SPLIT]` | What to score; `--list-datasets` prints every dataset with its splits, license and attribution. |
+| `--dataset NAME[:SPLIT]` | What to score (default `synthetic`); `--list-datasets` prints every dataset with its splits, license and attribution. |
 | `--limit N` | Score at most N samples (default 2000; `0` = all). |
 | `--seed N` | Seed of generated datasets (same seed, same corpus). |
 | `--out DIR` | Write `report.md` and `report.json` there instead of printing the report. |
@@ -132,4 +132,23 @@ the file when you are done.
 
 | Name | What it is | License | Real data |
 |---|---|---|---|
+| `synthetic` (default) | Agent-traffic-shaped text generated from the seed at run time (below). | generated (part of llm-redact) | no |
 | `rules` | The regex bench's generated positives and decoys for every built-in rule, built from the seed at run time. Structured values only: it shows what a model costs the rules (structured regressions, over-redaction). | generated (part of llm-redact) | no |
+
+### The synthetic corpus
+
+`synthetic` (`src/llm_redact/bench/ner_corpus.py`) is generated from the
+seed at every run and never committed. Its 1,200 samples take turns over
+twelve contexts. Six carry gold spans, in the shapes coding-agent traffic
+has: prose, chat turns, JSON tool results carried as text, code comments,
+log lines and git output, with `PERSON` (a first and a last name),
+`ADDRESS` (number, street, suffix), `DATE_OF_BIRTH` (four date formats),
+`USERNAME`, `ACCOUNT_NUMBER` (8–12 digits) and, for the
+structured-regression check, `EMAIL` and `PHONE` values the regex rules own.
+The other six are hard negatives with no gold at all — UUIDs, commit hashes,
+CamelCase identifiers (many built from tool names that are also surnames,
+such as Jenkins or Jackson), file paths, stack traces and timestamps — so
+every detection there counts as over-redaction. Names, streets and handles
+come from small embedded lists combined at random and describe no real
+person. The regex rules alone find exactly the corpus's `EMAIL` and `PHONE`
+values and nothing else (pinned by `tests/test_ner_corpus.py`).

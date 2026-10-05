@@ -31,6 +31,13 @@ and tags `vX.Y.Z`.
   mode-0600 file outside any git work tree and refuses real-data datasets unless
   `--allow-real-data-dump` is given. The deterministic `python -m llm_redact.bench --check`
   gate is unchanged.
+- The NER bench's default dataset, `synthetic`: 1,200 samples generated from the seed at
+  run time (never committed) in agent-traffic shapes — prose, chat, JSON tool results,
+  code comments, log lines, git output — labelled with names, street addresses, dates of
+  birth, usernames and account numbers (plus emails and phone numbers for the
+  structured-regression check), and hard negatives with no personal data (UUIDs, commit
+  hashes, identifiers named after tools such as Jenkins, paths, stack traces,
+  timestamps).
 
 ### Changed
 - NER model labels become placeholder types through one label policy for every backend

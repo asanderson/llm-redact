@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from llm_redact.bench import ner_corpus
 from llm_redact.bench.ner_metrics import GoldSpan, LabelMap, NerSample
 from llm_redact.detection.regex_rules import BUILTIN_RULES
 
@@ -86,7 +87,33 @@ RULES = DatasetSpec(
     ),
 )
 
-DATASETS: Mapping[str, DatasetSpec] = MappingProxyType({spec.name: spec for spec in (RULES,)})
+
+def _synthetic_adapter(spec: DatasetSpec, request: LoadRequest) -> Iterator[NerSample]:
+    yield from ner_corpus.generate(seed=request.seed)
+
+
+SYNTHETIC = DatasetSpec(
+    name="synthetic",
+    summary=(
+        "agent-traffic-shaped text (prose, chat, JSON tool results, code comments, log"
+        " lines, git output) with names, street addresses, dates of birth, usernames and"
+        " account numbers, plus hard negatives"
+    ),
+    license="generated at run time (part of llm-redact, AGPL-3.0-only)",
+    attribution="llm-redact",
+    real_data=False,
+    label_map=MappingProxyType({label: label for label in ner_corpus.LABELS}),
+    splits=("generated",),
+    adapter=_synthetic_adapter,
+    notes=(
+        "Generated from small embedded name, street and handle lists; also carries"
+        " EMAIL and PHONE values for the structured-regression check.",
+    ),
+)
+
+DATASETS: Mapping[str, DatasetSpec] = MappingProxyType(
+    {spec.name: spec for spec in (SYNTHETIC, RULES)}
+)
 
 
 def resolve(argument: str) -> tuple[DatasetSpec, str]:

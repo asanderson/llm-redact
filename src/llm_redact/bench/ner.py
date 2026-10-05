@@ -239,7 +239,9 @@ def _parser() -> argparse.ArgumentParser:
         "--name", help="config name for the thresholds key (default: the config file's stem)"
     )
     parser.add_argument(
-        "--dataset", default="rules", help="NAME[:SPLIT] (see --list-datasets; default rules)"
+        "--dataset",
+        default="synthetic",
+        help="NAME[:SPLIT] (see --list-datasets; default synthetic)",
     )
     parser.add_argument(
         "--limit",

@@ -368,7 +368,7 @@ def test_cli_scores_reports_and_gates(
     thresholds = tmp_path / "thresholds.toml"
     thresholds.write_text("[hf-fake.rules]\nrecall = { EMAIL = 1.0 }\nleak_max = 0.0\n")
     out = tmp_path / "report"
-    argv = ["--config", str(config), "--thresholds", str(thresholds)]
+    argv = ["--config", str(config), "--dataset", "rules", "--thresholds", str(thresholds)]
     assert bench_ner.main([*argv, "--limit", "0", "--out", str(out), "--check"]) == 0
     printed = capsys.readouterr().out
     assert "check passed: [hf-fake.rules]" in printed
@@ -396,7 +396,8 @@ def test_cli_dumps_errors_outside_the_repo(
     # positive, written with its text to the dump.
     install_transformers(monkeypatch, FakeHfPipe(findings=[("config", "PER", 0.99)]))
     dump = tmp_path / "errors.jsonl"
-    argv = ["--config", str(_config(tmp_path)), "--limit", "0", "--dump-errors", str(dump)]
+    argv = ["--config", str(_config(tmp_path)), "--dataset", "rules", "--limit", "0"]
+    argv += ["--dump-errors", str(dump)]
     assert bench_ner.main(argv) == 0
     assert "error records written to" in capsys.readouterr().out
     assert stat.S_IMODE(dump.stat().st_mode) == 0o600

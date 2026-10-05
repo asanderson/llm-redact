@@ -110,6 +110,9 @@ and tags `vX.Y.Z`.
   Apache-2.0 Mistral models), with the Llama, Qwen, DeepSeek, Gemma 1 to 3n and Mistral
   research/non-production models refused by name and the license re-checked on the server;
   the server is loopback unless `--allow-remote-server` (https only) is given.
+  `audit.py` has the same teacher read `bench/fp_corpus` beside the detectors and lists
+  candidate misses and false positives (file, offsets, type, reason; no text) for a human;
+  it never edits `MANIFEST.toml` or `bench/ner_ceilings.toml`.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from fake_ollama import APACHE, DIGEST, FakeOllama
 
 # The tooling is a dev-only package under scripts/, not part of llm_redact.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from pii_corpus import generate, grounding, prompts, teacher  # noqa: E402
+from pii_corpus import audit, generate, grounding, prompts, teacher  # noqa: E402
 from pii_corpus.private_files import (  # noqa: E402
     CorpusError,
     default_data_dir,
@@ -536,3 +537,147 @@ def test_generate_runs_as_a_file() -> None:
     assert result.returncode == 0 and "--allow-remote-server" in result.stdout
     assert generate.slug("gemma4:12b-it-q8_0") == "gemma4-12b-it-q8-0"
     assert generate.slug("mistral-small3.2:24b") == "mistral-small3.2-24b"
+
+
+# --- audit.py ---------------------------------------------------------------------
+
+_CORPUS_A = "Contact Ann Lee at ann@example.com\nbuild by Jenkins\nmail foo@bar.example\n"
+
+
+def _corpus(root: Path) -> Path:
+    corpus = root / "fp_corpus"
+    corpus.mkdir()
+    (corpus / "MANIFEST.toml").write_text('["a.txt"]\nEMAIL = 2\n')
+    (corpus / "a.txt").write_text(_CORPUS_A)
+    (corpus / "b.txt").write_text("nothing here\n")
+    return corpus
+
+
+def _audit_answer(body: dict[str, Any]) -> str:
+    chunk = body["messages"][1]["content"]
+    assert body["format"] == "json" and body["options"]["temperature"] == 0
+    if "Ann Lee" not in chunk:
+        return "I cannot help with that"
+    entities = [
+        {"type": "person", "value": "Ann Lee"},
+        {"type": "EMAIL", "value": "ann@example.com"},
+        {"type": "USERNAME", "value": "foo@bar.example"},
+        {"type": "PERSON", "value": "Zed"},
+        {"type": "COLOR", "value": "Jenkins"},
+        {"type": "PERSON"},
+        "Ann",
+    ]
+    return json.dumps({"entities": entities})
+
+
+def _snapshot(directory: Path) -> dict[str, tuple[bytes, int]]:
+    return {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in directory.iterdir()}
+
+
+def test_audit_lists_disagreements_by_offset_type_and_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    corpus = _corpus(tmp_path)
+    before = _snapshot(corpus)
+    fake = FakeOllama(_audit_answer)
+    out = tmp_path / "report.json"
+    argv = ["--model", "gemma4:e4b", "--corpus", str(corpus), "--out", str(out)]
+    assert audit.main(argv, transport=fake.transport()) == 0
+    assert _snapshot(corpus) == before  # report only: nothing in the corpus changes
+    report = json.loads(out.read_text())
+    ann = _CORPUS_A.index("Ann Lee")
+    foo = _CORPUS_A.index("foo@bar.example")
+    assert report["findings"] == [
+        {"file": "a.txt", "start": ann, "end": ann + 7, "type": "PERSON", "reason": "teacher-only"},
+        {
+            "file": "a.txt",
+            "start": foo,
+            "end": foo + 15,
+            "type": "USERNAME",
+            "reason": "type-differs",
+        },
+    ]
+    assert report["counts"] == {
+        "chunks": 2,
+        "files": 2,
+        "teacher answers unusable": 1,
+        "teacher entities malformed": 2,
+        "teacher types unknown": 1,
+        "teacher values ungrounded": 1,
+        "teacher-only": 1,
+        "type-differs": 1,
+    }
+    assert report["teacher"] == {"model": "gemma4:e4b", "digest": DIGEST}
+    printed = capsys.readouterr()
+    assert f"| a.txt | {ann} | {ann + 7} | PERSON | teacher-only |" in printed.out
+    for value in ("Ann Lee", "ann@example.com", "foo@bar.example", "Jenkins", "nothing here"):
+        assert value not in printed.out + printed.err + out.read_text()
+
+
+def test_audit_reports_detector_only_spans_and_audits_chosen_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    corpus = _corpus(tmp_path)
+    fake = FakeOllama(lambda body: '{"entities": []}')
+    argv = ["--model", "gemma4:e4b", "--corpus", str(corpus), "--file", "a.txt"]
+    assert audit.main(argv, transport=fake.transport()) == 0
+    printed = capsys.readouterr().out
+    rows = [line for line in printed.splitlines() if line.startswith("| a.txt")]
+    assert len(rows) == 2 and all(row.endswith("| EMAIL | detector-only |") for row in rows)
+    assert "files: 1." in printed and "default configuration" in printed
+    assert len(fake.chats) == 1
+
+
+def test_audit_compare_and_teacher_spans() -> None:
+    counts: Counter[str] = Counter()
+    chunk = "Lee met Leeds; Lee"
+    assert audit.teacher_spans(
+        '{"entities": [{"type": "PERSON", "value": "Lee"}]}', chunk, counts
+    ) == [
+        (0, 3, "PERSON"),
+        (15, 18, "PERSON"),
+    ]
+    assert audit.teacher_spans("[]", chunk, counts) is None
+    assert audit.teacher_spans('{"entities": {}}', chunk, counts) is None
+    found = audit.compare("f", 100, [(0, 3, "PERSON")], [(0, 3, "PERSON"), (8, 13, "ADDRESS")])
+    assert found == [audit.Finding("f", 108, 113, "ADDRESS", "detector-only")]
+
+
+@pytest.mark.parametrize(
+    ("extra", "message", "status"),
+    [
+        (["--url", "http://box.lan:11434"], "non-loopback server box.lan", 2),
+        (["--corpus", "{tmp}/missing"], "is not a directory", 2),
+        (["--out", "{corpus}/report.json"], "--out must not be inside the corpus", 2),
+        (["--model", "qwen3:8b"], "Qwen family", 2),
+        (["--config", "{tmp}/missing.toml"], "missing.toml", 2),
+    ],
+)
+def test_audit_input_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    extra: list[str],
+    message: str,
+    status: int,
+) -> None:
+    corpus = _corpus(tmp_path)
+    extra = [a.replace("{tmp}", str(tmp_path)).replace("{corpus}", str(corpus)) for a in extra]
+    fake = FakeOllama(_audit_answer)
+    argv = ["--model", "gemma4:e4b", "--corpus", str(corpus), *extra]
+    assert audit.main(argv, transport=fake.transport()) == status
+    assert message in capsys.readouterr().err
+    assert fake.chats == []
+
+
+def test_audit_with_a_config_and_a_failing_teacher(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    corpus = _corpus(tmp_path)
+    config = tmp_path / "rules-only.toml"
+    config.write_text("[detection]\n")
+    fake = FakeOllama(_audit_answer, chat_status=503)
+    argv = ["--model", "gemma4:e4b", "--corpus", str(corpus), "--config", str(config)]
+    assert audit.main(argv, transport=fake.transport()) == 1
+    assert (
+        "the teacher failed: the server answered HTTP 503 to /api/chat" in capsys.readouterr().err
+    )

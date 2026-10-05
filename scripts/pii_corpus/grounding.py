@@ -107,7 +107,7 @@ def _value_ok(value: str, type_name: str) -> bool:
     return type_name in MULTILINE_TYPES or "\n" not in value
 
 
-def _whole_token(text: str, start: int, end: int) -> bool:
+def whole_token(text: str, start: int, end: int) -> bool:
     before = text[start - 1] if start > 0 else " "
     after = text[end] if end < len(text) else " "
     return not (before.isalnum() or before == "_" or after.isalnum() or after == "_")
@@ -136,7 +136,7 @@ def _propagate(text: str, spans: list[Span]) -> tuple[list[Span], int] | str:
         start = text.find(value)
         while start != -1:
             end = start + len(value)
-            if _whole_token(text, start, end) and not _inside(start, end, type_name, spans):
+            if whole_token(text, start, end) and not _inside(start, end, type_name, spans):
                 if _overlaps(start, end, spans) or _overlaps(start, end, added):
                     return CONFLICT
                 added.append(Span(start, end, type_name))

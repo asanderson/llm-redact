@@ -17,6 +17,7 @@ counts, ids, offsets, types and model names.
 | Script | Plan task | What it does |
 |---|---|---|
 | `generate.py` | T40 | Asks the teacher for tagged artifacts, grounds every span, writes unverified JSONL rows and a run manifest. |
+| `audit.py` | T41 | Has the teacher read `bench/fp_corpus` beside the detectors and lists candidate misses and false positives (file, offsets, type, reason). Report only. |
 
 ## Requirements
 
@@ -101,6 +102,38 @@ artifact with no personal data at all but with two kinds of name-like
 confusers: tool names that are surnames (Jenkins, Hudson), CamelCase class
 names, UUIDs and hashes, file paths, bare field names, timestamps and
 version numbers. A changed wording bumps `CATALOG_VERSION`.
+
+## Auditing the false-positive corpus (`audit.py`)
+
+```bash
+uv run python scripts/pii_corpus/audit.py --model gemma4:e4b                 # the regex rules
+uv run python scripts/pii_corpus/audit.py --model gemma4:e4b --config my-ner.toml --out /tmp/audit.json
+```
+
+Each file of `bench/fp_corpus` (except `MANIFEST.toml`; `--file NAME`
+narrows it) is read in the NER bench's chunks of whole lines (at most 2,000
+characters). For each chunk the detection pipeline of `--config` (default:
+the built-in configuration, i.e. the regex rules) runs with no allowlist,
+and the teacher is asked, in JSON mode, for every personal value with its
+type; its values are grounded by exact whole-token match in the chunk
+(values that do not occur, unknown types and unusable answers are counted).
+The report lists every disagreement:
+
+| Reason | Meaning |
+|---|---|
+| `teacher-only` | The teacher found a value no detection covers: a candidate miss (or a teacher error). |
+| `type-differs` | Detections cover the value, none with the teacher's type. |
+| `detector-only` | A detection the teacher does not support: a candidate false positive (or a teacher miss). |
+
+The report holds the file name, start and end offsets (characters from the
+start of the file), the type and the reason — never text; `--out PATH`
+writes it as JSON too (refused inside the corpus directory). The audit never
+writes to the corpus, `MANIFEST.toml` or `bench/ner_ceilings.toml`: a human
+reads the candidates and decides, following `bench/fp_corpus/README.md`.
+The corpus text is sent to the teacher, which is why the loopback rule
+applies. The teacher is told the text is data, not instructions; a corpus
+file that talks it out of a finding only costs a candidate, since nothing is
+changed automatically.
 
 ## Licensing: why these teachers
 

@@ -3,8 +3,21 @@
 Any `token-classification` model on the Hub (multilingual XLM-R NER, biomedical
 NER, domain-tuned checkpoints, …) becomes a detector, which is the escape
 hatch for teams that already have a fine-tuned model. Uses the `transformers`
-pipeline with `aggregation_strategy="simple"` so sub-word tokens are merged
-into whole entity spans with a confidence, which `score_threshold` gates.
+pipeline, which merges a model's per-token labels into entity spans with a
+confidence that `score_threshold` gates.
+
+A span must cover whole words: the pipeline's token-level aggregation
+(``"simple"``) ends a span wherever a word piece's label differs, so
+dslim/bert-base-NER reported "Angela Merk" in "Angela Merkel" and the rest
+of the name went upstream as sent. A tokenizer that marks word pieces (a
+continuing-subword prefix such as WordPiece's ``##``: BERT and its family)
+gives the pipeline real word boundaries, and the word-level ``"first"``
+aggregation then labels every word by its first piece (:func:`aggregation_for`).
+Other tokenizers (SentencePiece, byte-level BPE) give it none: transformers
+falls back to a whitespace heuristic that glues ``{"name":"Angela`` — or a
+whole sentence in a script written without spaces — into one "word" labelled
+by its first piece, which would lose names token-level aggregation finds, so
+those models keep ``"simple"``.
 
 Long strings are read whole, in overlapping token windows: without `stride`
 the pipeline truncates at the tokenizer's maximum length and never reads the
@@ -34,6 +47,10 @@ _MODEL_NAME = "dslim/bert-base-NER"
 _SENTINEL_MAX_LENGTH = 1_000_000
 # What an encoder reads when its config does not say (BERT and most others).
 _DEFAULT_WINDOW = 512
+# The pipeline's aggregation strategies: per word (a word-aware tokenizer)
+# or per token (aggregation_for).
+WORD_AGGREGATION = "first"
+TOKEN_AGGREGATION = "simple"
 
 
 class _PipelineLike(Protocol):
@@ -150,6 +167,23 @@ def model_window(tokenizer: Any, model: Any, catalog_window: int | None = None) 
     return window
 
 
+def aggregation_for(tokenizer: Any) -> str:
+    """The pipeline aggregation that keeps whole words for ``tokenizer``:
+    word-level ``"first"`` when the fast tokenizer's model marks word
+    pieces with a continuing-subword prefix — the test transformers itself
+    makes before it trusts its word boundaries — else ``"simple"``.
+
+    Measured on dslim/bert-base-NER (WordPiece) with transformers 5.10.1:
+    ``"simple"`` cut "Angela Merk", "Ngoz", "Xu Wen"; ``"first"``,
+    ``"max"`` and ``"average"`` kept every word whole, and ``"first"``
+    alone kept McAllister and DiCaprio (``"max"`` lost the one, ``"average"``
+    both, and scored Venkataraman 0.33, under the default threshold)."""
+    model = getattr(getattr(tokenizer, "_tokenizer", None), "model", None)
+    if getattr(model, "continuing_subword_prefix", None):
+        return WORD_AGGREGATION
+    return TOKEN_AGGREGATION
+
+
 def window_counter(tokenizer: Any, stride: int) -> Callable[[str], int]:
     """How many windows the strided pipeline reads a text in: the chunks
     its fast tokenizer makes with the pipeline's own overflow settings
@@ -176,7 +210,7 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
     try:
         # Any: transformers' own types are not part of the checked surface.
         loaded: Any = pipeline(
-            "token-classification", model=model_name, aggregation_strategy="simple"
+            "token-classification", model=model_name, aggregation_strategy=TOKEN_AGGREGATION
         )
     except Exception as exc:  # load can fail many ways; name only what is known
         if importlib.util.find_spec("torch") is None:
@@ -208,11 +242,12 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
     try:
         # The same model and tokenizer, read in overlapping windows: `stride`
         # is a construction parameter, so every call reads the whole text.
+        # Each entity covers whole words where the tokenizer knows them.
         pipe: Any = pipeline(
             "token-classification",
             model=loaded.model,
             tokenizer=tokenizer,
-            aggregation_strategy="simple",
+            aggregation_strategy=aggregation_for(tokenizer),
             stride=stride,
         )
     except Exception as exc:  # transformers refuses the windowing settings

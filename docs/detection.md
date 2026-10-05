@@ -220,7 +220,12 @@ at its exact offsets:
   neither says; 512 tokens for `dslim/bert-base-NER`), and consecutive windows
   share a quarter of it. Windowing needs a fast tokenizer — the only kind that
   reports character offsets — so an `hf` model without one is refused at
-  startup.
+  startup. A model whose tokenizer marks word pieces (WordPiece, as BERT and
+  `dslim/bert-base-NER` use) labels each word by its first piece, so a name
+  is reported as whole words, never cut inside one ("Angela Merk"). Other
+  tokenizers (SentencePiece, byte-level BPE) do not tell the pipeline where
+  words end, so their models are labelled piece by piece, and a span can
+  still end inside a word.
 - `gliner`: GLiNER reads at most `max_len` words of a text (384 for the urchade
   v2.1 models) and drops the rest. A window holds at most 200 of GLiNER's own
   words, fewer when the entity prompts leave less room within `max_len`, and —

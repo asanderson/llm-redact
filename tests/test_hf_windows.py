@@ -24,6 +24,7 @@ from llm_redact.detection.base import Detection
 from llm_redact.detection.engine import Allowlist, NerConfig
 from llm_redact.detection.hf_ner import (
     HfDetector,
+    aggregation_for,
     build_hf_detector,
     model_window,
     window_counter,
@@ -129,12 +130,46 @@ def test_stride_is_set_once_at_construction(monkeypatch: pytest.MonkeyPatch) -> 
     assert strided == {
         "model": pipe.model,
         "tokenizer": pipe.tokenizer,
-        "aggregation_strategy": "simple",
+        "aggregation_strategy": "first",
         "stride": 128,
     }
     # Calls keep their one-argument signature: the stride is not per call.
     assert [d.value for d in detector.detect("hi Jane Doe")] == ["Jane Doe"]
     assert pipe.calls == ["hi Jane Doe"]
+
+
+# --- whole words --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("prefix", "strategy"),
+    [
+        ("##", "first"),  # WordPiece (BERT, dslim/bert-base-NER): real word boundaries
+        ("", "simple"),  # byte-level BPE (RoBERTa): the whitespace fallback
+        (None, "simple"),  # SentencePiece Unigram (XLM-R, DeBERTa-v3): no prefix at all
+    ],
+)
+def test_the_aggregation_keeps_whole_words_where_the_tokenizer_knows_them(
+    monkeypatch: pytest.MonkeyPatch, prefix: str | None, strategy: str
+) -> None:
+    # A word-level strategy only where transformers trusts its word
+    # boundaries; elsewhere its fallback glues '{"name":"Angela' into one
+    # "word" labelled by its first piece, which would lose the name.
+    tokenizer = FakeTokenizer(subword_prefix=prefix)
+    assert aggregation_for(tokenizer) == strategy
+    pipe = FakeHfPipe([("Jane Doe", "PER", 0.9)], tokenizer=tokenizer)
+    install_transformers(monkeypatch, pipe)
+    build_hf_detector(NerConfig(enabled=True, backend="hf"))
+    loaded, strided = pipe.built_with
+    # The first load only fetches the model and its tokenizer: a word-level
+    # strategy there would refuse a slow tokenizer before the clearer
+    # fast-tokenizer check below runs.
+    assert loaded["aggregation_strategy"] == "simple"
+    assert strided["aggregation_strategy"] == strategy
+
+
+def test_a_tokenizer_without_a_backend_model_keeps_token_aggregation() -> None:
+    assert aggregation_for(object()) == "simple"
 
 
 def test_a_tokenizer_without_a_known_limit_gets_the_model_window(
@@ -270,6 +305,32 @@ DSLIM_FILES = [
     "added_tokens.json",
     "vocab.txt",
 ]
+
+
+@pytest.mark.real_model
+def test_real_model_reports_a_name_as_whole_words(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Token-level aggregation reported "Angela Merk": the word piece "##el"
+    # was labelled O, so "el" went upstream as sent.
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    offline_hub(monkeypatch)
+    path = cached_snapshot(DSLIM, DSLIM_REVISION, DSLIM_FILES)
+    detector = build_hf_detector(NerConfig(enabled=True, backend="hf", model=path))
+    for text, names in [
+        ("Yesterday Angela Merkel met the press.", ["Angela Merkel"]),
+        ('{"name":"Angela Merkel","role":"chancellor"}', ["Angela Merkel"]),
+        (
+            "Contact Zbigniew Brzezinski or Kateryna Shevchenko today.",
+            ["Zbigniew Brzezinski", "Kateryna Shevchenko"],
+        ),
+        ("The file was written by Xu Wenjing.", ["Xu Wenjing"]),
+    ]:
+        found = detector.detect(text)
+        assert [(d.detector_type, d.value) for d in found] == [("PERSON", n) for n in names]
+        for d in found:
+            # No word is cut: the characters around the span are no letters.
+            assert not text[d.start - 1 : d.start].isalnum()
+            assert not text[d.end : d.end + 1].isalnum()
 
 
 @pytest.mark.real_model

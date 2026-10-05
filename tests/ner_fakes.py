@@ -31,11 +31,21 @@ def _spans(text: str, findings: list[Finding]) -> list[tuple[int, int, str, floa
 class FakeTokenizer:
     """A fast tokenizer: one token per whitespace-separated word, two special
     tokens per window; with overflow it windows like the Hugging Face fast
-    tokenizers (``model_max_length`` tokens a window, ``stride`` shared)."""
+    tokenizers (``model_max_length`` tokens a window, ``stride`` shared).
+    Its model marks word pieces with ``subword_prefix`` (WordPiece's "##";
+    None or "" for SentencePiece and byte-level BPE models)."""
 
     model_max_length: int = 512
     is_fast: bool = True
     special_tokens: int = 2
+    subword_prefix: str | None = "##"
+
+    @property
+    def _tokenizer(self) -> Any:
+        # The `tokenizers` backend object a fast tokenizer wraps.
+        return types.SimpleNamespace(
+            model=types.SimpleNamespace(continuing_subword_prefix=self.subword_prefix)
+        )
 
     def __call__(
         self,

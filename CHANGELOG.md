@@ -81,6 +81,13 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The `hf` NER backend could report part of a word as an entity and leave the rest of it
+  in the request: `dslim/bert-base-NER` reported "Angela Merk" in "Yesterday Angela Merkel
+  met the press.", so "el" went upstream unredacted (also "Ngoz…", "Xu Wen…"). A model whose
+  tokenizer marks word pieces (WordPiece: BERT and its family, the default model) now
+  labels each word by its first piece, so names are reported as whole words. Models whose
+  tokenizers do not mark word pieces (SentencePiece, byte-level BPE) are still labelled
+  piece by piece: transformers cannot tell where their words end.
 - The `hf` NER backend read only the first window of a string (512 tokens for the default
   `dslim/bert-base-NER`, about 2,000 characters) and silently ignored the rest. It now
   reads the whole string, up to `max_chars`, in overlapping windows sized from the

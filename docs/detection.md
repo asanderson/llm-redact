@@ -191,6 +191,14 @@ included, which the presidio backend emits as the built-in `EMAIL`, `PHONE`,
 label (`entities = ["PER"]` then requests and emits `PERSON`); write the type
 (`"PERSON"`) to get that behavior now.
 
+Presidio is asked only for the entities its analyzer supports for the
+configured language and the policy keeps: a type request becomes the Presidio
+entities that fold into it (`EMAIL` asks for `EMAIL_ADDRESS`, `PHONE` for
+`PHONE_NUMBER`, `SSN` for `US_SSN`, `PERSON` for `PERSON`), a raw request is
+asked for as written, and a type Presidio has no entity for (`ADDRESS`) is left
+out. An `entities` list Presidio supports none of stops the startup with an
+error, rather than failing every request.
+
 A type the token format cannot carry (one that does not start with a letter,
 or longer than 28 characters) is never emitted.
 

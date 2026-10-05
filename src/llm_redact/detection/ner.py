@@ -17,6 +17,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
+from llm_redact.detection.labels import LabelPolicy
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
@@ -34,9 +35,18 @@ class _NlpLike(Protocol):
 class NerDetector:
     name = "ner"
 
-    def __init__(self, nlp: _NlpLike, entities: frozenset[str], max_chars: int) -> None:
+    def __init__(
+        self,
+        nlp: _NlpLike,
+        entities: frozenset[str],
+        max_chars: int,
+        *,
+        policy: LabelPolicy | None = None,
+    ) -> None:
         self._nlp = nlp
-        self._entities = entities
+        # spaCy labels (PERSON, ORG, a non-English pipeline's PER) become
+        # placeholder types through the label policy (labels.py).
+        self._policy = policy if policy is not None else LabelPolicy(entities, backend="spacy")
         self._max_chars = max_chars
 
     def detect(self, text: str) -> Iterable[Detection]:
@@ -45,14 +55,17 @@ class NerDetector:
         if len(text) > self._max_chars:
             return
         for ent in self._nlp(text).ents:
-            if ent.label_ in self._entities:
-                yield Detection(
-                    start=ent.start_char,
-                    end=ent.end_char,
-                    detector_type=ent.label_,
-                    value=ent.text,
-                    priority=NER_PRIORITY,
-                )
+            label = self._policy.classify(str(ent.label_))
+            start, end = int(ent.start_char), int(ent.end_char)
+            if label is None or not 0 <= start < end <= len(text):
+                continue
+            yield Detection(
+                start=start,
+                end=end,
+                detector_type=label,
+                value=text[start:end],
+                priority=NER_PRIORITY,
+            )
 
 
 def build_ner_detector(config: "NerConfig") -> NerDetector:
@@ -73,4 +86,9 @@ def build_ner_detector(config: "NerConfig") -> NerDetector:
             f"spaCy model {model_name} is not available;"
             f" download it: uv run python -m spacy download {model_name}"
         ) from exc
-    return NerDetector(nlp, frozenset(config.entities), config.max_chars)
+    return NerDetector(
+        nlp,
+        frozenset(config.entities),
+        config.max_chars,
+        policy=LabelPolicy(config.entities, backend="spacy"),
+    )

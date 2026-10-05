@@ -25,7 +25,17 @@ from llm_redact.detection.regex_rules import BUILTIN_RULES
 from llm_redact.placeholders import MAX_TYPE_NAME_LEN
 from llm_redact.redactor import Redactor
 from llm_redact.vault import InMemoryVault
-from ner_fakes import FakeGliner, FakeHfPipe, FakeSpacy, install_gliner, install_transformers
+from ner_fakes import (
+    FakeAnalyzer,
+    FakeGliner,
+    FakeHfPipe,
+    FakeSpacy,
+    install_gliner,
+    install_presidio,
+    install_spacy,
+    install_stanza,
+    install_transformers,
+)
 
 # --- normalization ------------------------------------------------------------
 
@@ -330,3 +340,113 @@ def test_gliner_out_of_range_offsets_are_skipped(start: int, end: int) -> None:
 
     detector = GlinerDetector(Scripted(), frozenset({"PERSON"}), 1000, 0.5)
     assert [(d.start, d.end, d.value) for d in detector.detect("Jane Doe")] == [(0, 4, "Jane")]
+
+
+# --- spaCy, Stanza, Presidio (the same policy) ------------------------------------
+
+
+@pytest.mark.parametrize("backend", ["spacy", "stanza"])
+def test_spacy_and_stanza_fold_per(
+    monkeypatch: pytest.MonkeyPatch, backend: str, fold_raw: bool
+) -> None:
+    nlp = FakeSpacy([("Jane Doe", "PER", 1.0), ("Acme", "ORG", 1.0)])
+    (install_spacy if backend == "spacy" else install_stanza)(monkeypatch, nlp)
+    for entities, expected in (
+        (("PERSON",), ["PERSON"]),
+        (("PER",), ["PERSON" if fold_raw else "PER"]),
+        (("PERSON", "ORG"), ["PERSON", "ORG"]),
+    ):
+        ner = NerConfig(enabled=True, backend=backend, entities=entities)
+        (detector,) = build_detectors(DetectionConfig(enabled=(), ner=ner))
+        assert [d.detector_type for d in detector.detect("Jane Doe at Acme")] == expected
+
+
+# A realistic slice of presidio-analyzer's default recognizers (English).
+PRESIDIO_SUPPORTED = (
+    "CREDIT_CARD",
+    "CRYPTO",
+    "DATE_TIME",
+    "EMAIL_ADDRESS",
+    "IBAN_CODE",
+    "IP_ADDRESS",
+    "LOCATION",
+    "MEDICAL_LICENSE",
+    "NRP",
+    "PERSON",
+    "PHONE_NUMBER",
+    "URL",
+    "US_BANK_NUMBER",
+    "US_DRIVER_LICENSE",
+    "US_PASSPORT",
+    "US_SSN",
+)
+PRESIDIO_FINDINGS = [
+    ("jane@corp-example.com", "EMAIL_ADDRESS", 0.9),
+    ("10.1.2.3", "IP_ADDRESS", 0.9),
+    ("Jane Doe", "PERSON", 0.9),
+    ("Berlin", "LOCATION", 0.9),
+]
+PRESIDIO_TEXT = "Jane Doe <jane@corp-example.com> from Berlin at 10.1.2.3"
+
+
+def _presidio(
+    monkeypatch: pytest.MonkeyPatch, entities: tuple[str, ...], *, enabled: tuple[str, ...] = ()
+) -> tuple[FakeAnalyzer, list[str]]:
+    analyzer = FakeAnalyzer(PRESIDIO_FINDINGS, PRESIDIO_SUPPORTED)
+    install_presidio(monkeypatch, analyzer)
+    ner = NerConfig(enabled=True, backend="presidio", entities=entities)
+    detectors = build_detectors(DetectionConfig(enabled=enabled, ner=ner))
+    found = sorted(d.detector_type for d in detectors[-1].detect(PRESIDIO_TEXT))
+    return analyzer, found
+
+
+def test_presidio_folds_exactly_as_before(monkeypatch: pytest.MonkeyPatch, fold_raw: bool) -> None:
+    analyzer, found = _presidio(
+        monkeypatch, ("EMAIL_ADDRESS", "IP_ADDRESS", "PERSON"), enabled=("email",)
+    )
+    assert analyzer.calls == [["EMAIL_ADDRESS", "IP_ADDRESS", "PERSON"]]
+    assert found == ["EMAIL", "IP_ADDRESS", "PERSON"]  # IP_ADDRESS stays unfolded
+
+
+def test_presidio_type_requests_are_translated(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    # EMAIL asks Presidio for EMAIL_ADDRESS; ADDRESS has no Presidio entity
+    # and is dropped from the request (the analyzer would raise on it).
+    analyzer, found = _presidio(monkeypatch, ("EMAIL", "PERSON", "ADDRESS"), enabled=("email",))
+    assert analyzer.calls == [["EMAIL_ADDRESS", "PERSON"]]
+    assert found == ["EMAIL", "PERSON"]
+
+
+def test_presidio_is_asked_for_person_once_raw_entities_fold(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    analyzer, found = _presidio(monkeypatch, ("PER", "EMAIL"), enabled=("email",))
+    if fold_raw:
+        assert analyzer.calls == [["EMAIL_ADDRESS", "PERSON"]]
+        assert found == ["EMAIL", "PERSON"]
+    else:  # PER is no Presidio entity: asked for as written, so dropped
+        assert analyzer.calls == [["EMAIL_ADDRESS"]]
+        assert found == ["EMAIL"]
+
+
+@pytest.mark.parametrize("entities", [("ADDRESS",), ("PER",), ("job title", "USERNAME")])
+def test_presidio_supporting_no_entity_fails_at_startup(
+    monkeypatch: pytest.MonkeyPatch, entities: tuple[str, ...]
+) -> None:
+    from llm_redact.config import ConfigError
+
+    monkeypatch.setattr(labels, "FOLD_RAW_REQUESTS", False)
+    analyzer = FakeAnalyzer(PRESIDIO_FINDINGS, PRESIDIO_SUPPORTED)
+    install_presidio(monkeypatch, analyzer)
+    ner = NerConfig(enabled=True, backend="presidio", entities=entities)
+    with pytest.raises(ConfigError, match="match no entity the Presidio analyzer supports"):
+        build_detectors(DetectionConfig(enabled=(), ner=ner))
+    assert analyzer.calls == []  # never a per-request ValueError
+
+
+def test_presidio_rule_toggle_suppresses_its_folds(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    _analyzer, found = _presidio(monkeypatch, ("EMAIL", "PERSON"), enabled=())
+    assert found == ["PERSON"]

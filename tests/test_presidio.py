@@ -31,6 +31,9 @@ class FakeAnalyzer:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, list[str] | None, float]] = []
 
+    def get_supported_entities(self, language: str | None = None) -> list[str]:
+        return ["EMAIL_ADDRESS", "PERSON", "ORG"]
+
     def analyze(
         self,
         text: str,
@@ -165,6 +168,16 @@ def test_type_map_targets_are_builtin_types() -> None:
     assert set(PRESIDIO_TYPE_MAP.values()) <= builtin_types
 
 
+def test_type_map_is_exactly_the_five_legacy_folds() -> None:
+    assert PRESIDIO_TYPE_MAP == {
+        "EMAIL_ADDRESS": "EMAIL",
+        "PHONE_NUMBER": "PHONE",
+        "US_SSN": "SSN",
+        "IBAN_CODE": "IBAN",
+        "CREDIT_CARD": "CREDIT_CARD",
+    }
+
+
 def test_real_analyzer_smoke() -> None:
     """The one test that exercises a real presidio AnalyzerEngine (the rest
     inject fakes). Runs in the ner-extra CI job; skips wherever the presidio
@@ -215,3 +228,21 @@ def test_real_analyzer_smoke() -> None:
     suppressed_types = {d.detector_type for d in suppressed_detector.detect(text)}
     assert "EMAIL" not in suppressed_types
     assert "PERSON" in suppressed_types
+
+    # Type requests through the label policy: EMAIL asks the real engine
+    # for EMAIL_ADDRESS, and ADDRESS (no Presidio entity) is dropped from the
+    # request at build time instead of failing every analyze() call.
+    _email_rule, typed = build_detectors(
+        DetectionConfig(
+            enabled=("email",),
+            ner=NerConfig(
+                enabled=True,
+                backend="presidio",
+                entities=("EMAIL", "PERSON", "ADDRESS"),
+                score_threshold=0.4,
+            ),
+        )
+    )
+    typed_values = {d.detector_type: d.value for d in typed.detect(text)}
+    assert typed_values.get("EMAIL") == email
+    assert typed_values.get("PERSON") == "Jane Doe"

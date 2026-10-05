@@ -324,6 +324,16 @@ which protocols your tools will send. Probe each one with `llm-redact
 routes test --protocol X` (llm-redact-pro) before traffic arrives. The
 full refusal list is in the llm-redact-pro routing guide.
 
+## "[detection.ner] entities […] match no entity the Presidio analyzer supports for language '…'"
+
+From `serve` / `serve --check` with the `presidio` backend: none of the
+configured `entities` is something Presidio can find in that language, so
+every request would fail. The message lists what the analyzer supports. Name
+a placeholder type Presidio covers (`PERSON`, `EMAIL`, `PHONE`, `SSN`, `IBAN`,
+`CREDIT_CARD`) or one of the listed Presidio entities (`LOCATION`,
+`IP_ADDRESS`, …); `PER` is a spaCy/Hugging Face label Presidio does not use —
+write `PERSON`.
+
 ## `backend = "hf" but torch is not installed; install the hf extra`
 
 From `serve` / `serve --check` with `[detection.ner]` using the `hf` backend:

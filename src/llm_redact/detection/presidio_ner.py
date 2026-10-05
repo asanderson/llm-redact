@@ -6,38 +6,37 @@ confidence scores — like GLiNER, it honors ``score_threshold``. It is a
 separate opt-in extra (pulls pydantic and spaCy; extras never touch the
 request path, so the no-pydantic rule for body handling is unaffected).
 
-Several Presidio recognizers overlap with the built-in regex rules.
-``PRESIDIO_TYPE_MAP`` folds those entity types into the built-in
-placeholder names, so «EMAIL_001» means the same thing whichever detector
-found the value — the vault is keyed on (session, type, value), and two
-names for one type would issue two tokens for the same secret. Unmapped
-entity types (PERSON, LOCATION, NRP, ...) pass through as-is.
+Several Presidio recognizers overlap with the built-in regex rules. Their
+entity types become placeholder types through the shared label policy
+(labels.py), so «EMAIL_001» means the same thing whichever detector found
+the value — the vault is keyed on (session, type, value), and two names for
+one type would issue two tokens for the same secret. A type request is
+translated into the Presidio entities that fold into it (``EMAIL`` asks for
+``EMAIL_ADDRESS``); the analyzer is asked only for entities it supports,
+since it raises on every request for an unsupported-only list.
 """
 
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
+from llm_redact.detection.labels import LEGACY_FOLDS, LabelPolicy
 from llm_redact.detection.ner import NER_PRIORITY
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
 
-# Presidio entity type -> built-in placeholder type. Only types the regex
-# rules also emit are folded; everything else keeps Presidio's name
-# (IP_ADDRESS included: it covers v4 and v6, so folding it into either
-# built-in name would mislabel the other).
-PRESIDIO_TYPE_MAP = {
-    "EMAIL_ADDRESS": "EMAIL",
-    "PHONE_NUMBER": "PHONE",
-    "US_SSN": "SSN",
-    "IBAN_CODE": "IBAN",
-    "CREDIT_CARD": "CREDIT_CARD",
-}
+# Presidio entity type -> built-in placeholder type: the five folds this
+# backend has always applied (labels.LEGACY_FOLDS, a subset of the policy's
+# default folds). IP_ADDRESS stays unfolded: it covers v4 and v6, so either
+# built-in name would mislabel the other.
+PRESIDIO_TYPE_MAP = dict(LEGACY_FOLDS)
 
 
 class _AnalyzerLike(Protocol):
     """The sliver of presidio_analyzer.AnalyzerEngine this detector uses."""
+
+    def get_supported_entities(self, language: str | None = ...) -> list[str]: ...
 
     def analyze(
         self,
@@ -58,9 +57,29 @@ class PresidioDetector:
         max_chars: int,
         threshold: float,
         language: str = "en",
+        *,
+        policy: LabelPolicy | None = None,
     ) -> None:
         self._analyzer = analyzer
-        self._entities = sorted(entities)
+        self._policy = (
+            policy if policy is not None else LabelPolicy(sorted(entities), backend="presidio")
+        )
+        # Ask only for supported entities the policy keeps: every Presidio
+        # entity a requested type folds from (EMAIL -> EMAIL_ADDRESS), raw
+        # requests as written. An empty list would make analyze() raise on
+        # every request, so it is a startup error instead.
+        supported = analyzer.get_supported_entities(language)
+        self._entities = sorted(
+            {name for name in supported if self._policy.classify(name) is not None}
+        )
+        if not self._entities:
+            from llm_redact.config import ConfigError
+
+            raise ConfigError(
+                f"[detection.ner] entities {list(self._policy.entities)!r} match no entity the"
+                f" Presidio analyzer supports for language {language!r}; it supports"
+                f" {sorted(supported)!r}"
+            )
         self._max_chars = max_chars
         self._threshold = threshold
         self._language = language
@@ -73,12 +92,14 @@ class PresidioDetector:
         for result in self._analyzer.analyze(
             text, language=self._language, entities=self._entities, score_threshold=self._threshold
         ):
+            label = self._policy.classify(str(result.entity_type))
             start, end = int(result.start), int(result.end)
-            entity_type = str(result.entity_type)
+            if label is None or not 0 <= start < end <= len(text):
+                continue
             yield Detection(
                 start=start,
                 end=end,
-                detector_type=PRESIDIO_TYPE_MAP.get(entity_type, entity_type),
+                detector_type=label,
                 value=text[start:end],
                 priority=NER_PRIORITY,
             )
@@ -120,4 +141,5 @@ def build_presidio_detector(config: "NerConfig") -> PresidioDetector:
         config.max_chars,
         config.score_threshold,
         language=config.language,
+        policy=LabelPolicy(config.entities, backend="presidio"),
     )

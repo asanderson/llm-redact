@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
+from llm_redact.detection.labels import LabelPolicy
 from llm_redact.detection.ner import NER_PRIORITY
 
 if TYPE_CHECKING:
@@ -29,23 +30,35 @@ class _PipelineLike(Protocol):
 class StanzaDetector:
     name = "stanza"
 
-    def __init__(self, nlp: _PipelineLike, entities: frozenset[str], max_chars: int) -> None:
+    def __init__(
+        self,
+        nlp: _PipelineLike,
+        entities: frozenset[str],
+        max_chars: int,
+        *,
+        policy: LabelPolicy | None = None,
+    ) -> None:
         self._nlp = nlp
-        self._entities = entities
+        # Stanza's labels (PER in most languages, PERSON in English) become
+        # placeholder types through the label policy (labels.py).
+        self._policy = policy if policy is not None else LabelPolicy(entities, backend="stanza")
         self._max_chars = max_chars
 
     def detect(self, text: str) -> Iterable[Detection]:
         if len(text) > self._max_chars:
             return
         for ent in self._nlp(text).ents:
-            if ent.type in self._entities:
-                yield Detection(
-                    start=int(ent.start_char),
-                    end=int(ent.end_char),
-                    detector_type=str(ent.type),
-                    value=str(ent.text),
-                    priority=NER_PRIORITY,
-                )
+            label = self._policy.classify(str(ent.type))
+            start, end = int(ent.start_char), int(ent.end_char)
+            if label is None or not 0 <= start < end <= len(text):
+                continue
+            yield Detection(
+                start=start,
+                end=end,
+                detector_type=label,
+                value=text[start:end],
+                priority=NER_PRIORITY,
+            )
 
 
 def build_stanza_detector(config: "NerConfig") -> StanzaDetector:
@@ -73,4 +86,9 @@ def build_stanza_detector(config: "NerConfig") -> StanzaDetector:
             f"Stanza {language!r} NER model is not available; download it:"
             f" uv run python -c \"import stanza; stanza.download('{language}')\""
         ) from exc
-    return StanzaDetector(nlp, frozenset(config.entities), config.max_chars)
+    return StanzaDetector(
+        nlp,
+        frozenset(config.entities),
+        config.max_chars,
+        policy=LabelPolicy(config.entities, backend="stanza"),
+    )

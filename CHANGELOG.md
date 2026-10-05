@@ -20,6 +20,11 @@ and tags `vX.Y.Z`.
   finds it. An `entities` entry that names a placeholder type (`PERSON`, `ADDRESS`,
   `EMAIL`, …) requests that type from every backend. Entries that name a model's own
   label (`PER`, `"job title"`) keep emitting that label, as before.
+- The spaCy, Stanza and Presidio backends use the same label policy: `entities =
+  ["PERSON"]` now also finds people with pipelines that label them `PER` (most non-English
+  spaCy and Stanza models). Presidio is asked for the entities that fold into a requested
+  type (`EMAIL` asks for `EMAIL_ADDRESS`) and only for entities its analyzer supports;
+  `PRESIDIO_TYPE_MAP` keeps its five pairs.
 - GLiNER is prompted in natural language for a type request: `PERSON` sends "person",
   `ADDRESS` "street address", `EMAIL` "email address" (previously the type name itself).
   Other entries are still sent as written. Detections keep their type.
@@ -27,6 +32,10 @@ and tags `vX.Y.Z`.
   than 28 characters) is no longer emitted: its tokens could never be restored.
 
 ### Fixed
+- A Presidio `entities` list naming nothing the analyzer supports failed every request
+  (Presidio raises when asked only for unknown entities); it now stops the startup with
+  an error naming what the analyzer supports, and unsupported entries beside supported
+  ones are left out of the request.
 - The default `hf` NER configuration detected nothing: `dslim/bert-base-NER` labels people
   `PER`, the default `entities = ["PERSON"]` asked for `PERSON`. `PERSON` now requests
   every label that folds into it.

@@ -97,6 +97,7 @@ from llm_redact.detection.engine import (
     build_allowlist,
     build_detectors,
     build_modes,
+    ner_backend_stats,
     ner_status,
     ner_warnings,
 )
@@ -3258,6 +3259,7 @@ async def _handle_local(
                 audit_sink_rows_dropped=_sink_counts(state, "rows_dropped"),
                 map_write_queue_depth=state.map_writes_pending(),
                 map_write_wait_timeouts=state.map_write_wait_timeouts,
+                ner_stats=[(name, stats) for name, _, stats in ner_backend_stats(state.detectors)],
             )
             + plugin_text,
             media_type="text/plain; version=0.0.4; charset=utf-8",

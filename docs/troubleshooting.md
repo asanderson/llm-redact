@@ -378,7 +378,23 @@ Common causes:
   characters).
 
 Nothing breaks: the entity simply never redacts anything. Fix the entry or
-pick a model that covers it.
+pick a model that covers it. While it stands, `llm-redact status` repeats it
+as the posture line `NER entities no backend can emit: … (never detected)`,
+and `/status` lists it in `detection.ner.unmatched_entities`.
+
+## "NER skipped … string(s) longer than max_chars (…) — regex rules still applied"
+
+A `llm-redact status` posture line: since the detectors were built, the named
+NER backends were handed strings longer than `[detection.ner] max_chars` and
+never read them (`llm_redact_ner_strings_total{outcome="skipped_max_chars"}`
+counts them, `/status` `detection.ner` per backend). The regex rules, deny
+strings and custom rules still scanned those strings; only names and other
+contextual values the models would have found in them were not looked for.
+`max_chars` is a latency cap: the time a model takes grows with the length of
+what it reads. If your traffic carries long strings that
+hold names (pasted documents, large tool results), raise `max_chars`; if the
+skipped strings are logs or files you do not need NER on, the line is the
+expected cost of the cap.
 
 ## "[detection.ner.labels] LABEL: the type must match [A-Z][A-Z0-9_]* and be at most 20 characters, or be "" to drop the label"
 

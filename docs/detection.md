@@ -296,6 +296,19 @@ entities no active backend can ever emit (the startup warning above), and
 `model` the model each backend loaded; `revision`, `catalog` and `license` are
 `null`.
 
+The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
+backend and outcome, `llm_redact_ner_windows_total`,
+`llm_redact_ner_labels_dropped_total`, `llm_redact_ner_offsets_dropped_total`;
+see [observability.md](observability.md)), and `llm-redact status` prints a
+posture line while a backend has skipped strings longer than `max_chars` or an
+entity can never match:
+
+```
+posture:
+  ⚠ NER skipped hf×3 string(s) longer than max_chars (20000) — regex rules still applied
+  ⚠ NER entities no backend can emit: PERSONS (never detected)
+```
+
 The counters belong to the built detectors: they start at zero at startup and
 again when a reload rebuilds the detectors (any change to `[detection]`); a
 reload that leaves `[detection]` alone keeps them. A redaction preview in the

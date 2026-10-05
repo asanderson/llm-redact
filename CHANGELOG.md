@@ -18,6 +18,12 @@ and tags `vX.Y.Z`.
   span the string does not contain). `/status` publishes them per backend, with the model
   and the entities no backend can emit, in a new `detection.ner` block
   (docs/detection.md "NER coverage counters"); `detection.ner_enabled` is unchanged.
+- `/metrics` exports the NER coverage counters: `llm_redact_ner_strings_total{backend,outcome}`
+  (`scanned_whole`, `scanned_windowed`, `skipped_max_chars`), `llm_redact_ner_windows_total`,
+  `llm_redact_ner_labels_dropped_total` and `llm_redact_ner_offsets_dropped_total` (by
+  backend; they restart from zero when a reload rebuilds the detectors). `llm-redact status`
+  prints a posture line while a backend has skipped strings longer than `max_chars`, and one
+  naming the entities no backend can emit.
 - A startup WARNING for each `[detection.ner] entities` entry no active NER backend can ever
   emit (a typo, a label the model lacks, an override that drops it), naming the entity,
   the backends and their models; the labels come from an `hf` model's `id2label`, a spaCy

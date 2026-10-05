@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -46,6 +47,12 @@ from ner_fakes import (
 )
 
 UPSTREAM = "https://api.openai.test"
+NER_FAMILIES = (
+    "llm_redact_ner_strings_total",
+    "llm_redact_ner_windows_total",
+    "llm_redact_ner_labels_dropped_total",
+    "llm_redact_ner_offsets_dropped_total",
+)
 SHORT = "hi Jane Doe"
 LONG = "Jane Doe " + "x" * 60
 
@@ -393,3 +400,74 @@ def test_every_builder_hands_out_counting_detectors(
     ((name, _backend, stats),) = ner_backend_stats([detector])
     assert name == backend
     assert stats.scanned_whole == 1
+
+
+# --- /metrics -------------------------------------------------------------------
+
+
+def test_metrics_render_the_ner_families_even_without_ner() -> None:
+    from llm_redact.metrics import Metrics
+
+    text = Metrics("0").render(
+        detections=Counter(),
+        rehydrations=Counter(),
+        warnings=Counter(),
+        blocked=Counter(),
+        vault_entries=0,
+        vault_sessions=0,
+    )
+    for name in NER_FAMILIES:
+        assert f"# TYPE {name} counter" in text
+        assert f"\n{name}{{" not in text  # no backend, no sample
+
+
+def test_metrics_render_each_backend() -> None:
+    from llm_redact.metrics import Metrics
+
+    hf = NerStats(scanned_whole=4, skipped_max_chars=1, labels_dropped=2, offsets_dropped=3)
+    gliner = NerStats(scanned_windowed=2, windows=9)
+    text = Metrics("0").render(
+        detections=Counter(),
+        rehydrations=Counter(),
+        warnings=Counter(),
+        blocked=Counter(),
+        vault_entries=0,
+        vault_sessions=0,
+        ner_stats=[("hf", hf), ("gliner", gliner)],
+    )
+    samples = [line for line in text.splitlines() if line.startswith("llm_redact_ner_")]
+    assert samples == [
+        'llm_redact_ner_strings_total{backend="hf",outcome="scanned_whole"} 4',
+        'llm_redact_ner_strings_total{backend="hf",outcome="scanned_windowed"} 0',
+        'llm_redact_ner_strings_total{backend="hf",outcome="skipped_max_chars"} 1',
+        'llm_redact_ner_strings_total{backend="gliner",outcome="scanned_whole"} 0',
+        'llm_redact_ner_strings_total{backend="gliner",outcome="scanned_windowed"} 2',
+        'llm_redact_ner_strings_total{backend="gliner",outcome="skipped_max_chars"} 0',
+        'llm_redact_ner_windows_total{backend="hf"} 0',
+        'llm_redact_ner_windows_total{backend="gliner"} 9',
+        'llm_redact_ner_labels_dropped_total{backend="hf"} 2',
+        'llm_redact_ner_labels_dropped_total{backend="gliner"} 0',
+        'llm_redact_ner_offsets_dropped_total{backend="hf"} 3',
+        'llm_redact_ner_offsets_dropped_total{backend="gliner"} 0',
+    ]
+
+
+def test_the_ner_families_are_core_families() -> None:
+    from llm_redact.metrics import CORE_METRIC_FAMILIES
+
+    assert set(NER_FAMILIES) <= CORE_METRIC_FAMILIES
+
+
+async def test_metrics_endpoint_counts_ner_strings(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_transformers(monkeypatch, FakeHfPipe([("Jane Doe", "PER", 0.9)]))
+    app = create_app(_config(backend="hf", max_chars=40), upstream_transport=_upstream([]))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8787") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4.1", "messages": [{"role": "user", "content": LONG}]},
+        )
+        assert response.status_code == 200
+        text = (await client.get("/__llm-redact/metrics")).text
+    assert 'llm_redact_ner_strings_total{backend="hf",outcome="skipped_max_chars"} 1' in text
+    assert 'llm_redact_ner_strings_total{backend="hf",outcome="scanned_whole"} 0' in text

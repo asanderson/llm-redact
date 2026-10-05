@@ -304,3 +304,49 @@ def test_routes_and_spend_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit) as excinfo:
         main(["spend", "--month", "2026-09"])
     assert excinfo.value.code == 5 and calls["spend"].month == "2026-09"
+
+
+def _ner_block(skipped: dict[str, int], unmatched: list[str]) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "max_chars": 20000,
+        "backends": {
+            name: {"model": None, "counters": {"scanned_whole": 7, "skipped_max_chars": count}}
+            for name, count in skipped.items()
+        },
+        "unmatched_entities": unmatched,
+    }
+
+
+def test_posture_surfaces_ner_coverage_gaps(capsys: pytest.CaptureFixture[str]) -> None:
+    from llm_redact.cli import _print_posture
+
+    ner = _ner_block({"hf": 3, "gliner": 0, "spacy": 2}, ["PERSONS", "ZIP"])
+    _print_posture({"detection": {"ner": ner}})
+    out = capsys.readouterr().out
+    assert (
+        "NER skipped hf×3 spacy×2 string(s) longer than max_chars (20000)"
+        " — regex rules still applied"
+    ) in out
+    assert "gliner×" not in out  # a backend that skipped nothing stays quiet
+    assert "NER entities no backend can emit: PERSONS, ZIP (never detected)" in out
+
+
+@pytest.mark.parametrize(
+    "ner",
+    [
+        None,  # a proxy older than the block
+        "unexpected",
+        {"enabled": False, "max_chars": 20000, "backends": {}, "unmatched_entities": []},
+        _ner_block({"hf": 0}, []),
+    ],
+)
+def test_posture_stays_quiet_without_ner_gaps(
+    capsys: pytest.CaptureFixture[str], ner: object
+) -> None:
+    from llm_redact.cli import _print_posture
+
+    _print_posture({"detection": {"ner": ner}})
+    out = capsys.readouterr().out
+    assert "NER" not in out
+    assert "all traffic redacted" in out

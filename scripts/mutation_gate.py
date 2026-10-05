@@ -16,6 +16,7 @@ survivor list without being stale.
 Exit codes: 0 clean, 1 unlisted survivors or stale entries, 2 harness error.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from mutation_equivalents import EQUIVALENT_MUTANTS, OSCILLATING_MUTANTS  # noqa: E402
+
+
+def _annotate(unlisted: list[str], stale: list[str]) -> None:
+    """On GitHub Actions, repeat each finding as an error annotation: they
+    show on the check run (and through its annotations API) without the job
+    log, which is not always at hand."""
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    for sid in unlisted:
+        print(f"::error title=mutation gate: unlisted survivor::{sid}")
+    for sid in stale:
+        print(f"::error title=mutation gate: stale allow-list entry::{sid}")
 
 
 def main() -> int:
@@ -63,6 +76,7 @@ def main() -> int:
             print(f"  {sid}")
         print("\nRemove them (killed or renumbered mutants must not keep justifications).")
     if unlisted or stale:
+        _annotate(unlisted, stale)
         return 1
     print(
         f"mutation gate: clean — {len(survivors)} survivor(s), all reviewed equivalents;"

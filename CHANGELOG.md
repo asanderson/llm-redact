@@ -11,6 +11,27 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Fixed
+- The `hf` extra installs torch: transformers declares torch only as its own extra, so
+  `uv sync --extra hf` used to install a backend that could not run any model. The extra is
+  now `transformers>=4.40` plus `torch>=2.6`. `llm-redact doctor` FAILs an enabled `gliner`,
+  `stanza` or `hf` NER backend whose torch is missing, with the install hint. A CPU-only
+  install takes torch from the PyTorch CPU index (docs/dependencies.md).
+- The container image's `org.opencontainers.image.licenses` label names `AGPL-3.0-only`,
+  the license `pyproject.toml` declares (it still said `MIT`); a test keeps the two equal.
+  The fp-corpus README lists every corpus file under that license, and the `[detection.ner]`
+  `model` and `score_threshold` docs (config.example.toml, docs/detection.md) cover the `hf`
+  backend.
+- A config dry run (`ProxyState.validate_config`, which the llm-redact-pro config editor runs
+  before every save) no longer builds the detectors when `[detection]` did not change: the
+  apply keeps the live ones, so the dry run loaded a second copy of every NER model per save.
+
+### Security
+- The `gliner`, `stanza` and `hf` extras require `torch>=2.6`, the release that fixed
+  CVE-2025-32434 (a bypass of `torch.load(weights_only=True)`, the loader GLiNER uses for
+  `pytorch_model.bin` checkpoints); gliner and stanza themselves accept older torch.
+  `llm-redact doctor` FAILs a torch backend running on torch older than 2.6.
+
 ## [1.11.0] - 2026-10-05
 
 Access-control seams for role- and attribute-based policies. The access gate can now

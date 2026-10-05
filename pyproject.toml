@@ -23,18 +23,25 @@ dependencies = [
 
 [project.optional-dependencies]
 ner = ["spacy>=3.7,<4"]
+# torch floor (gliner, stanza, hf): 2.6 fixed CVE-2025-32434, a bypass of
+# torch.load(weights_only=True), which is how GLiNER loads a pytorch_model.bin
+# checkpoint. The floor rides each extra because no library asks for it
+# (gliner 0.2.28 requires torch>=2.0, stanza 1.13 torch>=1.13, and
+# transformers lists torch only under its own extras, so `hf` lists it).
+# PyPI's Linux torch wheel pulls the CUDA libraries (gigabytes); a CPU-only
+# host installs torch from the PyTorch CPU index (docs/dependencies.md).
 # Heavy (pulls torch + transformers); more robust than spaCy on unusual names.
-gliner = ["gliner>=0.2"]
+gliner = ["gliner>=0.2", "torch>=2.6"]
 # Microsoft's FOSS PII analyzer: recognizers + checksums + context scoring
 # over spaCy. Pulls pydantic — extras never touch the request path.
 presidio = ["presidio-analyzer>=2.2,<3"]
 # Stanford Stanza: accurate neural NER for 60+ languages (the multilingual
 # complement to the English-first spaCy default). Pulls torch; no confidences.
-stanza = ["stanza>=1.7,<2"]
+stanza = ["stanza>=1.7,<2", "torch>=2.6"]
 # Any Hugging Face token-classification model as a detector (multilingual
 # XLM-R NER, domain-tuned checkpoints, ...). Pulls transformers + torch;
 # emits confidences (score_threshold applies).
-hf = ["transformers>=4.40"]
+hf = ["transformers>=4.40", "torch>=2.6"]
 # At-rest encryption for the sqlite vault ([vault] encryption = "fernet").
 crypto = ["cryptography>=42"]
 # Pro persistent vault on a server RDBMS ([vault] backend = "postgresql" /

@@ -436,9 +436,11 @@ backend = "spacy"
 # into the built-in types) — rule toggles are the single source of truth.
 entities = ["PERSON"]
 max_chars = 20000   # strings longer than this skip NER (regex still applies)
-language = "en"     # presidio wires this through the analyzer
-# model = "en_core_web_sm"   # spaCy pipeline (spacy/presidio) or HF id (gliner)
-# score_threshold = 0.5      # gliner and presidio backends only
+language = "en"     # presidio wires this through the analyzer; stanza loads its model
+# model = "en_core_web_sm"   # spaCy pipeline (spacy/presidio) or Hugging Face model id
+#                            # (gliner; hf: a token-classification model). Stanza
+#                            # ignores it and loads the `language` model.
+# score_threshold = 0.5      # gliner, presidio and hf only (spacy/stanza give no score)
 
 [audit]
 # Opt-in local log of proxy activity: detector types and counts, paths,

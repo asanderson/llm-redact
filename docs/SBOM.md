@@ -51,10 +51,10 @@ padding differs), pinned to the published Keccak test vectors.
 | Extra | Packages | Purpose |
 | --- | --- | --- |
 | `ner` | `spacy` | Person-name NER, small-footprint English-first default backend. |
-| `gliner` | `gliner` | Zero-shot NER, robust on unusual names; separate extra because it pulls torch + transformers. |
+| `gliner` | `gliner`, `torch` | Zero-shot NER, robust on unusual names; separate extra because it pulls torch + transformers. |
 | `presidio` | `presidio-analyzer` | Microsoft's FOSS PII analyzer layered over spaCy (recognizers + context scoring). |
-| `stanza` | `stanza` | Stanford Stanza NER, 60+ languages — the multilingual complement to spaCy. |
-| `hf` | `transformers` | Any Hugging Face token-classification checkpoint as a detector; emits confidences. |
+| `stanza` | `stanza`, `torch` | Stanford Stanza NER, 60+ languages — the multilingual complement to spaCy. |
+| `hf` | `transformers`, `torch` | Any Hugging Face token-classification checkpoint as a detector; emits confidences. |
 | `crypto` | `cryptography` | At-rest Fernet encryption for the vault (`[vault] encryption = "fernet"`). |
 | `vault-postgres` | `psycopg[binary]` | PostgreSQL driver for the Pro RDBMS vault backend. |
 | `vault-mysql` | `PyMySQL` | Pure-Python MySQL/MariaDB driver for the Pro RDBMS vault backend. |
@@ -67,7 +67,11 @@ padding differs), pinned to the published Keccak test vectors.
 
 The NER extras' heavyweight transitive dependencies (torch,
 transformers, pydantic via presidio) never touch the request-forwarding
-path — detectors only read strings and return spans.
+path — detectors only read strings and return spans. The `gliner`,
+`stanza` and `hf` extras each require `torch>=2.6` directly (the release
+that fixed CVE-2025-32434); on Linux, PyPI's torch wheel also brings the
+NVIDIA CUDA libraries, which a CPU-only install avoids by taking torch from
+the PyTorch CPU index ([dependencies.md](dependencies.md)).
 
 ## Development toolchain (dev group; never ships in the wheel)
 

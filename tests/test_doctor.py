@@ -213,6 +213,105 @@ def test_missing_ner_extra_fails(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "uv sync --extra gliner" in capsys.readouterr().out
 
 
+_BACKENDS = ("spacy", "gliner", "presidio", "stanza", "hf")
+_LIBRARIES = {"spacy", "gliner", "presidio_analyzer", "stanza", "transformers"}
+
+
+def _ner_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    present: set[str],
+    torch_version: str | None = None,
+) -> dict[str, tuple[str, str]]:
+    """Run the extras check over all five backends with `present` as the
+    importable modules and `torch_version` as torch's installed metadata
+    (None: none); return backend -> (level, message)."""
+    import importlib.metadata
+    import importlib.util
+
+    from llm_redact.config import load_config
+    from llm_redact.doctor_cli import _check_extras, _Report
+
+    real_find_spec = importlib.util.find_spec
+
+    def find_spec(name: str, package: str | None = None) -> Any:
+        if name in _LIBRARIES | {"torch"}:
+            return object() if name in present else None
+        return real_find_spec(name, package)
+
+    def version(name: str) -> str:
+        if name == "torch" and torch_version is not None:
+            return torch_version
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    backends = ", ".join(f'"{name}"' for name in _BACKENDS)
+    config = load_config(
+        _write(tmp_path, f"[detection.ner]\nenabled = true\nbackends = [{backends}]\n")
+    )
+    report = _Report(json_mode=True)
+    _check_extras(report, config)
+    rows = [(row["level"], row["message"]) for row in report.rows if row["area"] == "ner"]
+    assert len(rows) == len(_BACKENDS)  # one line per backend, in order
+    return dict(zip(_BACKENDS, rows, strict=True))
+
+
+def test_torch_backends_fail_without_torch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # transformers imports without torch (torch is only its own extra), so
+    # the library check alone passed an hf backend that cannot load a model.
+    rows = _ner_rows(tmp_path, monkeypatch, present=_LIBRARIES)
+    for backend in ("gliner", "stanza", "hf"):
+        assert rows[backend] == (
+            "FAIL",
+            f'backend "{backend}" needs torch, which is not installed;'
+            f" install it: uv sync --extra {backend}",
+        )
+    # spaCy and Presidio do not run on torch.
+    assert rows["spacy"] == ("PASS", "spacy backend importable")
+    assert rows["presidio"] == ("PASS", "presidio backend importable")
+
+
+def test_a_missing_library_is_reported_before_torch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = _ner_rows(tmp_path, monkeypatch, present=set())
+    assert rows["hf"] == (
+        "FAIL",
+        'backend "hf" but its extra is not installed; install it: uv sync --extra hf',
+    )
+    assert rows["spacy"] == (
+        "FAIL",
+        'backend "spacy" but its extra is not installed; install it: uv sync --extra ner',
+    )
+
+
+def test_torch_below_the_floor_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = _ner_rows(
+        tmp_path, monkeypatch, present=_LIBRARIES | {"torch"}, torch_version="2.5.1+cpu"
+    )
+    for backend in ("gliner", "stanza", "hf"):
+        assert rows[backend] == (
+            "FAIL",
+            f'backend "{backend}" needs torch >= 2.6 (CVE-2025-32434), but torch 2.5.1+cpu'
+            f" is installed; install it: uv sync --extra {backend}",
+        )
+    assert rows["spacy"][0] == "PASS"
+
+
+@pytest.mark.parametrize("torch_version", ["2.6.0", "2.13.0+cpu", "10.0", "3.0.0", None])
+def test_torch_at_or_above_the_floor_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, torch_version: str | None
+) -> None:
+    # None: importable without distribution metadata (a source tree), so
+    # there is no version to compare.
+    rows = _ner_rows(
+        tmp_path, monkeypatch, present=_LIBRARIES | {"torch"}, torch_version=torch_version
+    )
+    assert rows == {name: ("PASS", f"{name} backend importable") for name in _BACKENDS}
+
+
 def test_licensed_features_line_reports_not_installed() -> None:
     # Free suite: the pro package is genuinely absent, so the line is a PASS
     # that says so (never a FAIL — the Free core is complete on its own).

@@ -722,3 +722,13 @@ def test_the_image_ships_the_extras_its_features_need() -> None:
     dockerfile = (DEPLOY.parent / "Dockerfile").read_text()
     (default,) = re.findall(r'^ARG EXTRAS="([^"]*)"$', dockerfile, re.MULTILINE)
     assert set(re.findall(r"--extra (\S+)", default)) == {"perf", "realtime", "extract"}
+
+
+def test_the_image_license_label_is_the_declared_license() -> None:
+    # The OCI label still said MIT after the relicensing to AGPL-3.0-only;
+    # every image label must name what pyproject.toml declares.
+    root = DEPLOY.parent
+    declared = tomllib.loads((root / "pyproject.toml").read_text())["project"]["license"]
+    dockerfile = (root / "Dockerfile").read_text()
+    labels = re.findall(r'org\.opencontainers\.image\.licenses="([^"]*)"', dockerfile)
+    assert labels == [declared]

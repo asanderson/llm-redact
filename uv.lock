@@ -1106,8 +1106,10 @@ extract = [
 ]
 gliner = [
     { name = "gliner" },
+    { name = "torch" },
 ]
 hf = [
+    { name = "torch" },
     { name = "transformers" },
 ]
 keyring = [
@@ -1131,6 +1133,7 @@ realtime = [
 ]
 stanza = [
     { name = "stanza" },
+    { name = "torch" },
 ]
 vault-mysql = [
     { name = "pymysql" },
@@ -1173,6 +1176,9 @@ requires-dist = [
     { name = "spacy", marker = "extra == 'ner'", specifier = ">=3.7,<4" },
     { name = "stanza", marker = "extra == 'stanza'", specifier = ">=1.7,<2" },
     { name = "starlette", specifier = ">=1.0" },
+    { name = "torch", marker = "extra == 'gliner'", specifier = ">=2.6" },
+    { name = "torch", marker = "extra == 'hf'", specifier = ">=2.6" },
+    { name = "torch", marker = "extra == 'stanza'", specifier = ">=2.6" },
     { name = "transformers", marker = "extra == 'hf'", specifier = ">=4.40" },
     { name = "uvicorn", specifier = ">=0.50" },
     { name = "uvloop", marker = "extra == 'perf'", specifier = ">=0.19" },

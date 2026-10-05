@@ -145,7 +145,7 @@ def test_a_model_missing_from_the_cache_names_models_pull(monkeypatch: pytest.Mo
         f"[detection.ner] hf model '{DSLIM}' at revision {DSLIM_PIN} is not (completely) in"
         " the local Hugging Face cache, and downloads are off (an older revision in the"
         " cache does not count); run `llm-redact models pull`, or set [detection.ner]"
-        " allow_download = true to fetch it at startup"
+        " allow_download = true to fetch it at startup (a reload never downloads)"
     )
 
 

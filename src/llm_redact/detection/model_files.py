@@ -11,7 +11,10 @@ nothing else ever fetches a file:
   catalog's pin), with an explicit list of top-level file names
   (``allow_patterns``) — never TensorFlow, Flax, ONNX or ``original/``
   copies a repository may also hold — and ``local_files_only`` unless
-  ``[detection.ner] allow_download`` is set;
+  ``[detection.ner] allow_download`` is set AND the build is the process's
+  startup (``serve``, ``serve --check``): a reload, a config dry run or a
+  preview never downloads, and a build that may not download first sets
+  the libraries' offline switches (:func:`go_offline`);
 * a model whose configuration names code to run (``auto_map``) is refused:
   llm-redact never loads with ``trust_remote_code``;
 * ``hf`` weights must be safetensors unless ``allow_pickle_weights`` is set
@@ -31,6 +34,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -82,6 +86,26 @@ def _config_error(message: str) -> Exception:
 def is_local(model: str) -> bool:
     """Whether a configured model value names a local directory."""
     return Path(model).is_dir()
+
+
+# The Hugging Face libraries' offline switches. huggingface_hub reads
+# HF_HUB_OFFLINE when it is imported (into huggingface_hub.constants),
+# transformers asks that constant; both refuse every request while set.
+OFFLINE_VARIABLES = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+
+
+def go_offline() -> None:
+    """Make the Hugging Face libraries refuse every network request in this
+    process from now on: the loaders' own lookups already pass
+    ``local_files_only``, and this guards the library code they do not
+    control. Set before the first NER import of a build that may not
+    download (every reload; a startup with ``allow_download = false``) and
+    never unset — no later build of this process downloads either."""
+    for name in OFFLINE_VARIABLES:
+        os.environ[name] = "1"
+    constants = sys.modules.get("huggingface_hub.constants")
+    if constants is not None:  # imported before: the variable is read already
+        setattr(constants, "HF_HUB_OFFLINE", True)  # noqa: B010 (a module, typed loosely)
 
 
 def _revision_text(revision: str | None) -> str:
@@ -137,7 +161,7 @@ def resolve_model(
                 " (completely) in the local Hugging Face cache, and downloads are off"
                 " (an older revision in the cache does not count); run"
                 " `llm-redact models pull`, or set [detection.ner] allow_download = true"
-                " to fetch it at startup"
+                " to fetch it at startup (a reload never downloads)"
             ) from exc
         raise _config_error(
             f"[detection.ner] {what} {model!r} {_revision_text(revision)} could not be"

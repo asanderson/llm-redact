@@ -160,9 +160,18 @@ hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
   `knowledgator/gliner-pii-*-v1.0` sizes are pinned to the commit their
   `main` branch pointed at on 2026-10-05. An entry for a backend that is not
   active is kept and ignored, like a `[detection.ner.models]` entry.
-- `allow_download` (default `false`) decides whether a startup may fetch the
-  pinned model files from the Hub; with `false`, models are meant to load
-  only from the local Hugging Face cache or a model folder.
+- `allow_download` (default `false`) decides whether the proxy's startup
+  (`serve`, `serve --check`) may fetch a model's pinned files from the Hub
+  into the Hugging Face cache. With `false` every model loads from the
+  local cache or a model folder, and a model that is not there stops the
+  startup with an error naming it, its revision and `llm-redact models
+  pull`. Only the startup ever downloads: a reload (SIGHUP, the dashboard
+  editor), the editor's dry run and `llm-redact preview` read local files
+  only, so a reload naming a model that is not cached is refused and the
+  running configuration is kept. Whenever a build may not download, the
+  Hugging Face libraries' own offline switches (`HF_HUB_OFFLINE`,
+  `TRANSFORMERS_OFFLINE`) are set before they are first imported, so no
+  library code reaches the network either.
 - `allow_pickle_weights` (default `false`, `hf` only) permits loading
   `pytorch_model.bin`, a pickle, for an `hf` model that ships no safetensors
   weights. GLiNER loads its `pytorch_model.bin` through torch's

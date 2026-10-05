@@ -460,8 +460,10 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # cache at the pinned revision (hf: safetensors only unless
 # allow_pickle_weights; gliner: with its pinned base model's tokenizer, in a
 # self-contained folder).
-# allow_download = false        # default: whether a startup may fetch model files
-#                               # from the Hub (false: local cache or folder only)
+# allow_download = false        # default: whether the startup may fetch pinned model
+#                               # files from the Hub (false: local cache or folder
+#                               # only; `llm-redact models pull` fills the cache).
+#                               # A reload never downloads.
 # allow_pickle_weights = false  # hf only: true permits pytorch_model.bin for a
 #                               # model with no safetensors weights
 # Pin a backend's model to a full 40-character commit id (branch and tag

@@ -123,8 +123,9 @@ class NerConfig:
     # (revision_for). `allow_download` (owner decision D2: default false)
     # says whether a startup may fetch pinned files from the Hub;
     # `allow_pickle_weights` (hf only, D3) whether pytorch_model.bin may
-    # load when a model has no safetensors weights. Parsed, validated and
-    # emitted here; the model loaders do not read them yet.
+    # load when a model has no safetensors weights. The loaders read them
+    # through model_files.py; only the startup build may download
+    # (build_detectors(startup=True)).
     revisions: tuple[tuple[str, str], ...] = ()
     allow_download: bool = False
     allow_pickle_weights: bool = False
@@ -295,7 +296,12 @@ def active_rule_names(config: DetectionConfig) -> list[str]:
     return [name for name in config.enabled if _language_active(known[name], config.languages)]
 
 
-def build_detectors(config: DetectionConfig) -> list[Detector]:
+def build_detectors(config: DetectionConfig, *, startup: bool = False) -> list[Detector]:
+    """The detectors ``config`` asks for. ``startup`` marks the process's
+    startup build (``serve``, ``serve --check``), the only one that may
+    download NER model files (and only with ``[detection.ner]
+    allow_download``); every other build — a reload, a config dry run, a
+    preview — loads them from local files only."""
     known = {rule.name: rule for rule in BUILTIN_RULES}
     active = active_rule_names(config)
     detectors: list[Detector] = [RegexDetector(known[name]) for name in active]
@@ -348,7 +354,13 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
             # Each backend builder still sees a single-backend view with
             # its own resolved model and effective revision (the user's
             # pin, else the catalog's) — the builders stay untouched.
-            single = _single_backend_view(config.ner, backend_name)
+            single = _single_backend_view(config.ner, backend_name, startup=startup)
+            if backend_name in HUB_BACKENDS and not single.allow_download:
+                # Before the backend's first import of the Hugging Face
+                # libraries, which read their offline switch at import.
+                from llm_redact.detection.model_files import go_offline
+
+                go_offline()
             # Imported only when enabled: the NER dependencies stay
             # optional and startup fails fast per backend if missing.
             if backend_name == "gliner":
@@ -377,11 +389,13 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
     return detectors
 
 
-def _single_backend_view(ner: NerConfig, backend: str) -> NerConfig:
+def _single_backend_view(ner: NerConfig, backend: str, *, startup: bool = False) -> NerConfig:
     """``ner`` as one backend's builder sees it: that backend alone, its
-    resolved model in ``model`` and its effective revision as the only
+    resolved model in ``model``, its effective revision as the only
     ``revisions`` entry (none when unpinned), so ``revision_for(backend)``
-    answers the same on the view as on the full config."""
+    answers the same on the view as on the full config, and
+    ``allow_download`` only for the startup build (downloads happen at
+    startup or never)."""
     revision = ner.revision_for(backend)
     return replace(
         ner,
@@ -390,6 +404,7 @@ def _single_backend_view(ner: NerConfig, backend: str) -> NerConfig:
         model=ner.model_for(backend),
         models=(),
         revisions=((backend, revision),) if revision is not None else (),
+        allow_download=ner.allow_download and startup,
     )
 
 

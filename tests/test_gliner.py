@@ -105,7 +105,7 @@ def test_allowlist_applies() -> None:
     assert detect_all(detectors, "ask Jane Doe", allow) == []
 
 
-def test_enabled_without_gliner_config_error() -> None:
+def test_enabled_without_gliner_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
     try:
         import gliner  # noqa: F401
 
@@ -113,6 +113,9 @@ def test_enabled_without_gliner_config_error() -> None:
     except ImportError:
         pass
     from llm_redact.config import ConfigError
+    from ner_fakes import install_hub
+
+    install_hub(monkeypatch)  # restores the offline switches the build sets
 
     with pytest.raises(ConfigError, match="uv sync --extra gliner"):
         build_detectors(DetectionConfig(ner=NerConfig(enabled=True, backend="gliner")))

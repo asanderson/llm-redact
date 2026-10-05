@@ -19,7 +19,7 @@ and tags `vX.Y.Z`.
   the default models, `urchade/gliner_medium-v2.1`, `urchade/gliner_multi-v2.1`,
   `urchade/gliner_multi_pii-v1` and the four `knowledgator/gliner-pii-*-v1.0` sizes are pinned to
   their `main` commits of 2026-10-05. The keys are parsed, validated and written
-  back by `config show`, and both Hub backends read them (see Security).
+  back by `config show`, and both Hub backends read them (see Security and Changed).
 - NER coverage counters: every NER backend counts the strings it read, the strings it
   skipped as longer than `[detection.ner] max_chars` (which only the regex rules then
   read), and the model entities it dropped (a type that cannot be a placeholder type, a
@@ -50,6 +50,17 @@ and tags `vX.Y.Z`.
   `entities = ["PER"]` emitting `PER` once raw entities fold in 2.0.0.
 
 ### Changed
+- NER models are no longer downloaded unless `[detection.ner] allow_download = true`, and then
+  only at startup (`serve`, `serve --check`). With the default `false` the `gliner` and `hf`
+  backends load from the local Hugging Face cache or a model folder, set the libraries' offline
+  switches (`HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`) before importing them, and a model that is
+  not cached stops the startup with an error naming the model, its revision and
+  `llm-redact models pull`. A reload, the dashboard editor's dry run and `llm-redact preview`
+  never download: a reload naming an uncached model is refused and the running configuration
+  kept. Model downloads were never listed among what leaves the machine (docs/privacy.md), so
+  this fixes behaviour the documentation never allowed. Upgrading: the default models' pins are
+  the `main` commits of 2026-10-05, so a cache an online load refreshed since then already holds
+  them; `urchade/gliner_multi-v2.1` moved on 2025-12-08 (an older cache holds `853ce23e47e5`).
 - NER model labels become placeholder types through one label policy for every backend
   (`detection/labels.py`, documented in docs/detection.md "Placeholder types from NER
   models"): labels are normalized (`B-PER` → `PER`, `"street address"` →

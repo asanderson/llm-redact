@@ -849,7 +849,9 @@ class ProxyState:
         # What a vault fault raises while a request's placeholders are issued
         # (a write, its batch's COMMIT): refused 503, never a bare 500.
         self.vault_faults = vault_fault_types(self.vault_manager)
-        self.detectors = build_detectors(config.detection)
+        # The startup build: the only one that may download NER model files
+        # (with [detection.ner] allow_download); reloads and dry runs never do.
+        self.detectors = build_detectors(config.detection, startup=True)
         self.allowlist = build_allowlist(config.detection)
         self.modes = build_modes(config.detection)
         _log_ner_warnings(config.detection, self.detectors)

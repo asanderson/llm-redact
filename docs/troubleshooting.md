@@ -477,6 +477,9 @@ another revision does not count: the pin is the commit the message names
 pinned" means the newest cached revision of the default branch). Fetch the
 model once with `llm-redact models pull`, or set `allow_download = true` to
 let a startup fetch the pinned files (with a `HF_HOME` the proxy can write).
+A reload (SIGHUP, the dashboard editor) never downloads, whatever
+`allow_download` says: after a reload naming a new model, the running
+configuration is kept — fetch the model, then reload again, or restart.
 "(completely)": the cache holds the revision but not every file the loader
 needs, such as after an interrupted download.
 

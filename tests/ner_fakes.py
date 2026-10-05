@@ -260,6 +260,18 @@ def install_hub(monkeypatch: pytest.MonkeyPatch, hub: FakeHub | None = None) -> 
     module.snapshot_download = hub.snapshot_download  # type: ignore[attr-defined]
     module.fake_hub = hub  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "huggingface_hub", module)
+    # A build that may not download sets the libraries' offline switches
+    # (model_files.go_offline); they are restored after the test.
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        if name in os.environ:
+            monkeypatch.setenv(name, os.environ[name])
+        else:
+            # (delenv of an absent variable records nothing to restore)
+            monkeypatch.setenv(name, "")
+            monkeypatch.delenv(name)
+    constants = sys.modules.get("huggingface_hub.constants")
+    if constants is not None:
+        monkeypatch.setattr(constants, "HF_HUB_OFFLINE", constants.HF_HUB_OFFLINE)
     return hub
 
 

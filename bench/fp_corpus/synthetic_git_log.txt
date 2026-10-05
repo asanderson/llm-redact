@@ -1,0 +1,96 @@
+$ git log --oneline --decorate -14
+3f9c2ab (HEAD -> main, origin/main, origin/HEAD) Fix rounding in InvoiceBuilder.total
+e81d07c Merge pull request #482 from fix/hudson-retry-jitter
+5b2c9fa Bump celery from 5.3.6 to 5.4.0 in /services/worker
+a0d4e17 Revert "Pin kombu below 5.4"
+c6f3b28 Add JacksonCompat shim for legacy invoice exports
+91e7a5d ci: cache the uv download directory per lockfile hash
+0bd8e63 docs: explain cursor pagination limits
+7a6c4f1 Merge branch 'release/2.14' into main
+d29b8e0 Handle 503 from the tax service with jittered backoff
+44f1c9a test: cover half-even rounding on three-line invoices
+fe3a7b2 chore(deps): update dependency jest to v29.7.0
+2c8d5e9 Rename LedgerEntry.amount to amount_cents
+b7e0f43 Drop Python 3.9 from the test matrix
+6d1a9c2 Initial import of the billing service
+
+$ git log -3 --format='%H %ad%n    %s' --date=iso-strict
+3f9c2ab64e1d0a7c5b9e8f2d3c4b5a6978f0e1d2 2025-03-04T10:12:01+00:00
+    Fix rounding in InvoiceBuilder.total
+e81d07c95a2b4f6e8d0c1a3b5d7f9e2c4a6b8d0f 2025-03-03T17:45:22+00:00
+    Merge pull request #482 from fix/hudson-retry-jitter
+5b2c9fa1e3d5b7f9a0c2e4f6b8d0a2c4e6f8b0d2 2025-03-03T09:02:13+00:00
+    Bump celery from 5.3.6 to 5.4.0 in /services/worker
+
+$ git show --stat --format='commit %H%nDate:   %ad%n%n    %s%n' c6f3b28
+commit c6f3b28d7e9a1b3c5d7e9f1a3b5c7d9e1f3a5b7c
+Date:   Fri Feb 28 16:20:44 2025 +0000
+
+    Add JacksonCompat shim for legacy invoice exports
+
+ src/billing/jackson_compat.py              | 142 +++++++++++++++++++++++
+ src/billing/invoice_builder.py             |  11 +-
+ tests/billing/test_jackson_compat.py       |  87 ++++++++++++++
+ 3 files changed, 236 insertions(+), 4 deletions(-)
+
+$ git status
+On branch fix/invoice-rounding
+Your branch is ahead of 'origin/fix/invoice-rounding' by 1 commit.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   src/billing/invoice_builder.py
+	modified:   tests/billing/test_invoice_builder.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	scratch/rounding_notes.md
+
+no changes added to commit (use "git add" and/or "git commit -a")
+
+$ git diff --stat
+ src/billing/invoice_builder.py        | 6 ++++--
+ tests/billing/test_invoice_builder.py | 9 +++++++++
+ 2 files changed, 13 insertions(+), 2 deletions(-)
+
+$ git diff src/billing/invoice_builder.py
+diff --git a/src/billing/invoice_builder.py b/src/billing/invoice_builder.py
+index 4e1a2b3..9c8d7e6 100644
+--- a/src/billing/invoice_builder.py
++++ b/src/billing/invoice_builder.py
+@@ -84,8 +84,10 @@ class InvoiceBuilder:
+     def total(self, lines: Sequence[Line]) -> int:
+         """Sum of the lines in cents, rounded once at the end."""
+-        total = sum(line.qty * line.unit_cents for line in lines)
+-        return round(total)
++        total = Decimal(sum(line.qty * line.unit_cents for line in lines))
++        return int(total.quantize(CENT, rounding=ROUND_HALF_EVEN))
+
+$ git blame -L 84,88 src/billing/invoice_builder.py
+2c8d5e91 (renovate[bot]       2025-01-17 08:00:12 +0000 84)     def total(self, lines: Sequence[Line]) -> int:
+44f1c9a7 (ci-release-bot      2025-02-11 14:31:09 +0000 85)         """Sum of the lines in cents, rounded once at the end."""
+6d1a9c2e (ci-release-bot      2024-11-02 09:15:47 +0000 86)         total = sum(line.qty * line.unit_cents for line in lines)
+6d1a9c2e (ci-release-bot      2024-11-02 09:15:47 +0000 87)         return round(total)
+
+$ git branch -a
+  feature/jackson-export
+* fix/invoice-rounding
+  main
+  remotes/origin/HEAD -> origin/main
+  remotes/origin/feature/jackson-export
+  remotes/origin/fix/invoice-rounding
+  remotes/origin/main
+  remotes/origin/release/2.14
+
+$ git stash list
+stash@{0}: WIP on main: 91e7a5d ci: cache the uv download directory per lockfile hash
+stash@{1}: On feature/jackson-export: half-finished CSV exporter
+
+$ git reflog -5
+3f9c2ab HEAD@{0}: commit: Fix rounding in InvoiceBuilder.total
+e81d07c HEAD@{1}: checkout: moving from main to fix/invoice-rounding
+e81d07c HEAD@{2}: pull --ff-only: Fast-forward
+91e7a5d HEAD@{3}: checkout: moving from feature/jackson-export to main
+c6f3b28 HEAD@{4}: commit: Add JacksonCompat shim for legacy invoice exports

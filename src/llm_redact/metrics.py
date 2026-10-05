@@ -10,7 +10,10 @@ import re
 import time
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from typing import Literal, get_args
+from typing import TYPE_CHECKING, Literal, get_args
+
+if TYPE_CHECKING:
+    from llm_redact.detection.stats import NerStats
 
 _BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
 # The proxy's own share of a request is milliseconds on healthy hardware:
@@ -105,6 +108,13 @@ CORE_METRIC_FAMILIES = frozenset(
         "llm_redact_overrides_used_total",
         "llm_redact_unscanned_uploads_total",
         "llm_redact_inspected_uploads_total",
+        "llm_redact_ner_strings_total",
+        "llm_redact_ner_windows_total",
+        "llm_redact_ner_windows_truncated_total",
+        "llm_redact_ner_labels_dropped_total",
+        "llm_redact_ner_offsets_dropped_total",
+        "llm_redact_ner_inline_calls_total",
+        "llm_redact_ner_prefetch_misses_total",
         "llm_redact_routed_requests_total",
         "llm_redact_reissues_total",
         "llm_redact_audit_sink_batches_total",
@@ -232,6 +242,7 @@ class Metrics:
         audit_sink_rows_dropped: "Counter[str] | None" = None,
         map_write_queue_depth: int = 0,
         map_write_wait_timeouts: "Counter[str] | None" = None,
+        ner_stats: "Iterable[tuple[str, NerStats]]" = (),
     ) -> str:
         lines: list[str] = []
         lines.append("# HELP llm_redact_info Build information.")
@@ -382,6 +393,8 @@ class Metrics:
                 f" {count}"
             )
 
+        lines.extend(_ner_lines(list(ner_stats)))
+
         lines.append(
             "# HELP llm_redact_routed_requests_total Requests delivered through the routing"
             " layer, by the upstream that produced the response and the rule that chose it."
@@ -462,6 +475,74 @@ class Metrics:
             lines.append(f"{name} {value}")
 
         return "\n".join(lines) + "\n"
+
+
+def _ner_lines(backends: list[tuple[str, "NerStats"]]) -> list[str]:
+    """The NER coverage counters (detection/stats.py), by backend name. The
+    HELP/TYPE lines are written even with NER off, so dashboards and alerts
+    reading them always find the family."""
+    from llm_redact.detection.stats import STRING_OUTCOMES
+
+    lines = [
+        "# HELP llm_redact_ner_strings_total Strings handed to an NER backend, by backend and"
+        " outcome: scanned_whole (the model read it in one call), scanned_windowed (in"
+        " overlapping windows), skipped_max_chars (longer than [detection.ner] max_chars: the"
+        " model never read it, the regex rules still did). Restarts from zero when a reload"
+        " rebuilds the detectors.",
+        "# TYPE llm_redact_ner_strings_total counter",
+    ]
+    for backend, stats in backends:
+        counts = stats.as_dict()
+        for outcome in STRING_OUTCOMES:
+            lines.append(
+                f'llm_redact_ner_strings_total{{backend="{_escape_label(backend)}",'
+                f'outcome="{outcome}"}} {counts[outcome]}'
+            )
+    for name, field, help_text in (
+        (
+            "llm_redact_ner_windows_total",
+            "windows",
+            "Windows the windowed strings were read in, by NER backend.",
+        ),
+        (
+            "llm_redact_ner_windows_truncated_total",
+            "windows_truncated",
+            "NER windows (a string read whole counts as one) longer than the model's token"
+            " limit because one word alone exceeds it: the model may read only part of"
+            " them, by backend.",
+        ),
+        (
+            "llm_redact_ner_labels_dropped_total",
+            "labels_dropped",
+            "NER model entities never emitted because their type cannot be a placeholder"
+            " type, by backend.",
+        ),
+        (
+            "llm_redact_ner_offsets_dropped_total",
+            "offsets_dropped",
+            "NER model entities of a requested type never redacted because the scanned"
+            " string does not contain their span, by backend.",
+        ),
+        (
+            "llm_redact_ner_inline_calls_total",
+            "inline_calls",
+            "Strings an NER backend ran on the event loop (holding up every other request"
+            " for that string's inference) instead of ahead of the redaction on the NER"
+            " worker thread, by backend.",
+        ),
+        (
+            "llm_redact_ner_prefetch_misses_total",
+            "prefetch_misses",
+            "Strings a request's redaction did not find in its precomputed NER results and"
+            " ran inline instead, by backend.",
+        ),
+    ):
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} counter")
+        for backend, stats in backends:
+            value = stats.as_dict()[field]
+            lines.append(f'{name}{{backend="{_escape_label(backend)}"}} {value}')
+    return lines
 
 
 def plugin_metric_lines(samples: Iterable[object]) -> tuple[list[str], int]:

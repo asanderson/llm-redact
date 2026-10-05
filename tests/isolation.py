@@ -55,11 +55,12 @@ def watched_paths(
     environ: Mapping[str, str], home: Path, *, platform: str = sys.platform
 ) -> list[Path]:
     """Where llm-redact and its CLIs write by default, resolved against the
-    REAL ``environ`` and ``home``: its config and data dirs, the agent
-    plugins' command dirs (Claude Code, Codex, OpenCode, Cursor) and the
-    user service unit."""
+    REAL ``environ`` and ``home``: its config, data and bench-cache dirs,
+    the agent plugins' command dirs (Claude Code, Codex, OpenCode, Cursor)
+    and the user service unit."""
     config = Path(environ.get("XDG_CONFIG_HOME") or home / ".config")
     data = Path(environ.get("XDG_DATA_HOME") or home / ".local" / "share")
+    cache = Path(environ.get("XDG_CACHE_HOME") or home / ".cache")
     # `llm-redact plugin` prefers HOME to Path.home(); the two differ only on
     # Windows (where Path.home() reads USERPROFILE).
     tool_home = Path(environ.get("HOME") or home)
@@ -74,6 +75,9 @@ def watched_paths(
     return [
         config / "llm-redact",
         data / "llm-redact",
+        # The NER bench's dataset cache (bench/datasets/base.py): tests pass
+        # their own cache_dir, so nothing may land here.
+        cache / "llm-redact",
         claude / "commands",
         codex / "prompts",
         opencode / "opencode" / "commands",
@@ -114,8 +118,10 @@ def isolate(environ: MutableMapping[str, str], root: Path) -> None:
     and the former everywhere else."""
     real_home = Path(environ.get("HOME") or Path.home())
     # Third-party caches (the hypothesis/spaCy/tldextract kind) stay where
-    # they were: llm-redact never reads XDG_CACHE_HOME, and an empty cache
-    # would only make those libraries refetch.
+    # they were: an empty cache would only make those libraries refetch. The
+    # one llm-redact entry under XDG_CACHE_HOME, the NER bench's dataset
+    # cache, is never written by the suite (tests pass a tmp_path cache_dir)
+    # and is a watched path, so a test that did would fail the session.
     environ.setdefault("XDG_CACHE_HOME", str(real_home / ".cache"))
     for name, sub in (
         ("HOME", "home"),

@@ -1,13 +1,20 @@
 """Assemble the detector list from configuration."""
 
+import functools
+import logging
 import re
+import threading
 import weakref
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from typing import Any, NamedTuple
 
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
+from llm_redact.detection.labels import LabelPolicy, raw_entity_deprecations
+from llm_redact.detection.model_catalog import DEFAULT_MODELS, HUB_BACKENDS, pinned_revision
 from llm_redact.detection.regex_rules import BUILTIN_RULES, PreparedText, RegexDetector, RegexRule
+from llm_redact.detection.stats import NerStats
 
 
 @dataclass
@@ -27,6 +34,18 @@ class TypeFilteredDetector:
 
     def detect(self, text: str) -> Iterable[Detection]:
         return [d for d in self.inner.detect(text) if d.detector_type not in self.suppressed]
+
+    @property
+    def stats(self) -> NerStats | None:
+        """The wrapped NER backend's coverage counters (stats.py)."""
+        stats = getattr(self.inner, "stats", None)
+        return stats if isinstance(stats, NerStats) else None
+
+    @property
+    def heavy(self) -> bool:
+        """Whether the wrapped detector runs a model (``DetectorPlan``:
+        detected ahead of the redaction, off the event loop)."""
+        return getattr(self.inner, "heavy", False) is True
 
 
 DEFAULT_ALLOWLIST = frozenset({"127.0.0.1", "0.0.0.0", "255.255.255.255", "::1", "::"})
@@ -99,6 +118,29 @@ class NerConfig:
     # when exactly one backend is active — a spaCy pipeline name handed to
     # gliner would be nonsense.
     models: tuple[tuple[str, str], ...] = ()
+    # [detection.ner.labels]: normalized model label -> placeholder type
+    # ("" drops the label), stored sorted for canonical equality. The first
+    # source of the label policy's fold (detection/labels.py), for model
+    # labels AND configured entities alike, so `PER = "PER"` keeps
+    # `entities = ["PER"]` emitting PER once raw entities fold.
+    labels: tuple[tuple[str, str], ...] = ()
+    # Model sources of the Hugging Face Hub backends (gliner, hf).
+    # [detection.ner.revisions]: backend -> 40-hex commit id, stored sorted
+    # (a branch or tag name moves, so the parser refuses one); a backend
+    # without an entry is pinned by its model's catalog entry, if any
+    # (revision_for). `allow_download` (owner decision D2: default false)
+    # says whether a startup may fetch pinned files from the Hub;
+    # `allow_pickle_weights` (hf only, D3) whether pytorch_model.bin may
+    # load when a model has no safetensors weights. The loaders read them
+    # through model_files.py; only the startup build may download
+    # (build_detectors(startup=True)).
+    revisions: tuple[tuple[str, str], ...] = ()
+    # [detection.ner.onnx]: backend -> repo-relative .onnx file (gliner
+    # only), stored sorted: that backend loads ONNX weights instead of torch
+    # ones (onnx_for).
+    onnx: tuple[tuple[str, str], ...] = ()
+    allow_download: bool = False
+    allow_pickle_weights: bool = False
 
     def active_backends(self) -> tuple[str, ...]:
         return self.backends if self.backends is not None else (self.backend,)
@@ -109,6 +151,22 @@ class NerConfig:
                 return model
         active = self.active_backends()
         return self.model if len(active) == 1 else None
+
+    def onnx_for(self, backend: str) -> str | None:
+        """The ONNX file ``backend`` loads ([detection.ner.onnx]), or None."""
+        return dict(self.onnx).get(backend)
+
+    def revision_for(self, backend: str) -> str | None:
+        """The commit ``backend``'s model is pinned to: its
+        [detection.ner.revisions] entry, else the catalog pin of the model
+        it loads (its configured model, else the backend's default). None:
+        unpinned, or a backend whose models are not Hub snapshots."""
+        for name, revision in self.revisions:
+            if name == backend:
+                return revision
+        if backend not in HUB_BACKENDS:
+            return None
+        return pinned_revision(self.model_for(backend) or DEFAULT_MODELS[backend])
 
 
 @dataclass(frozen=True)
@@ -151,30 +209,72 @@ class DetectionConfig:
 
 BINARY_UPLOAD_MODES = ("forward", "refuse")
 
+logger = logging.getLogger("llm_redact")
+
+
+def ner_entity_types(ner: NerConfig) -> set[str]:
+    """Every placeholder type the configured NER entities can be emitted
+    as, on any active backend: the requested types, each entity's own type
+    (a raw entity's normalized label while raw entities do not fold), and
+    the [detection.ner.labels] targets."""
+    types = {type_name for _label, type_name in ner.labels if type_name}
+    for backend in ner.active_backends():
+        policy = LabelPolicy(ner.entities, backend=backend, overrides=ner.labels)
+        types |= policy.requested
+        types |= {t for t in map(policy.classify, ner.entities) if t is not None}
+    return types
+
+
+def _allowlist_by_type(config: DetectionConfig) -> dict[str, frozenset[str]]:
+    """[detection.allowlist_by_type] keyed by the types detections carry.
+
+    A typo'd TYPE key was silently inert (the user believes the value is
+    allowlisted; it keeps being redacted), so every key must name a type
+    something can emit: a built-in rule, a custom rule, a deny entry, a
+    configured NER entity as written (always accepted), or a type the NER
+    entities are emitted as. A key no rule emits is read as the type NER
+    emits for it ("job title" -> JOB_TITLE; PER -> PERSON once raw entities
+    fold), so an allowlist written for a model label keeps matching; keys of
+    one type merge. Logged once, key names only.
+    """
+    rule_types = (
+        {rule.detector_type for rule in BUILTIN_RULES}
+        | {rule.detector_type for rule in config.custom_rules}
+        | {entry.detector_type for entry in config.deny_strings}
+    )
+    ner_types = ner_entity_types(config.ner)
+    policy = LabelPolicy(config.ner.entities, overrides=config.ner.labels)
+    by_type: dict[str, frozenset[str]] = {}
+    unknown: list[str] = []
+    renamed: list[str] = []
+    for key, values in config.allowlist_by_type:
+        detector_type = key
+        if key not in rule_types:
+            canonical = policy.entry_type(key)
+            if canonical is not None and canonical in ner_types:
+                detector_type = canonical
+            elif key not in config.ner.entities:
+                unknown.append(key)
+        if detector_type != key:
+            renamed.append(f"{key!r} -> {detector_type}")
+        by_type[detector_type] = by_type.get(detector_type, frozenset()) | frozenset(values)
+    if unknown:
+        known_types = rule_types | ner_types | set(config.ner.entities)
+        raise ValueError(
+            f"unknown placeholder type(s) {sorted(unknown)} in"
+            f" [detection.allowlist_by_type]; known types are"
+            f" {sorted(known_types)}"
+        )
+    if renamed:
+        logger.info(
+            "[detection.allowlist_by_type] keys read as the types NER emits: %s",
+            ", ".join(renamed),
+        )
+    return by_type
+
 
 def build_allowlist(config: DetectionConfig) -> Allowlist:
-    # A typo'd TYPE key was silently inert (the user believes the value is
-    # allowlisted; it keeps being redacted). Validate against every type that
-    # can actually be emitted: built-in rules, custom rules, deny entries,
-    # and the configured NER entity labels.
-    if config.allowlist_by_type:
-        known_types = (
-            {rule.detector_type for rule in BUILTIN_RULES}
-            | {rule.detector_type for rule in config.custom_rules}
-            | {entry.detector_type for entry in config.deny_strings}
-            | set(config.ner.entities)
-        )
-        unknown_types = sorted(
-            detector_type
-            for detector_type, _values in config.allowlist_by_type
-            if detector_type not in known_types
-        )
-        if unknown_types:
-            raise ValueError(
-                f"unknown placeholder type(s) {unknown_types} in"
-                f" [detection.allowlist_by_type]; known types are"
-                f" {sorted(known_types)}"
-            )
+    by_type = _allowlist_by_type(config) if config.allowlist_by_type else {}
     patterns = []
     for p in config.allowlist_patterns:
         try:
@@ -188,9 +288,7 @@ def build_allowlist(config: DetectionConfig) -> Allowlist:
     return Allowlist(
         exact=DEFAULT_ALLOWLIST | frozenset(config.allowlist),
         patterns=tuple(patterns),
-        by_type={
-            detector_type: frozenset(values) for detector_type, values in config.allowlist_by_type
-        },
+        by_type=by_type,
     )
 
 
@@ -214,7 +312,12 @@ def active_rule_names(config: DetectionConfig) -> list[str]:
     return [name for name in config.enabled if _language_active(known[name], config.languages)]
 
 
-def build_detectors(config: DetectionConfig) -> list[Detector]:
+def build_detectors(config: DetectionConfig, *, startup: bool = False) -> list[Detector]:
+    """The detectors ``config`` asks for. ``startup`` marks the process's
+    startup build (``serve``, ``serve --check``), the only one that may
+    download NER model files (and only with ``[detection.ner]
+    allow_download``); every other build — a reload, a config dry run, a
+    preview — loads them from local files only."""
     known = {rule.name: rule for rule in BUILTIN_RULES}
     active = active_rule_names(config)
     detectors: list[Detector] = [RegexDetector(known[name]) for name in active]
@@ -253,8 +356,8 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
         detectors.append(DenyDetector(config.deny_strings))
     if config.ner.enabled:
         # A placeholder type disabled at the rule level is disabled, period
-        # — NER must not reintroduce it (presidio folds EMAIL/PHONE/SSN/
-        # IBAN/CREDIT_CARD into the built-in types). Rule toggles are the
+        # — NER must not reintroduce it (model labels fold into built-in
+        # types: EMAIL_ADDRESS -> EMAIL, PASSWORD -> SECRET). Rule toggles are the
         # single source of truth; entity types with no built-in rule
         # (PERSON) are never suppressed. Language scoping counts as a rule
         # toggle here: a type whose only rule is scoped out stays out.
@@ -262,16 +365,18 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
         suppressed = frozenset(
             rule.detector_type for rule in BUILTIN_RULES if rule.detector_type not in enabled_types
         )
+        built: list[Detector] = []
         for backend_name in config.ner.active_backends():
             # Each backend builder still sees a single-backend view with
-            # its own resolved model — the builders stay untouched.
-            single = replace(
-                config.ner,
-                backend=backend_name,
-                backends=None,
-                model=config.ner.model_for(backend_name),
-                models=(),
-            )
+            # its own resolved model and effective revision (the user's
+            # pin, else the catalog's) — the builders stay untouched.
+            single = _single_backend_view(config.ner, backend_name, startup=startup)
+            if backend_name in HUB_BACKENDS and not single.allow_download:
+                # Before the backend's first import of the Hugging Face
+                # libraries, which read their offline switch at import.
+                from llm_redact.detection.model_files import go_offline
+
+                go_offline()
             # Imported only when enabled: the NER dependencies stay
             # optional and startup fails fast per backend if missing.
             if backend_name == "gliner":
@@ -294,8 +399,141 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
                 from llm_redact.detection.ner import build_ner_detector
 
                 inner = build_ner_detector(single)
+            built.append(inner)
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
+        _mark_unmatched(config.ner.entities, built)
     return detectors
+
+
+def _single_backend_view(ner: NerConfig, backend: str, *, startup: bool = False) -> NerConfig:
+    """``ner`` as one backend's builder sees it: that backend alone, its
+    resolved model in ``model``, its effective revision as the only
+    ``revisions`` entry (none when unpinned), so ``revision_for(backend)``
+    answers the same on the view as on the full config, and
+    ``allow_download`` only for the startup build (downloads happen at
+    startup or never)."""
+    revision = ner.revision_for(backend)
+    return replace(
+        ner,
+        backend=backend,
+        backends=None,
+        model=ner.model_for(backend),
+        models=(),
+        revisions=((backend, revision),) if revision is not None else (),
+        allow_download=ner.allow_download and startup,
+    )
+
+
+def _label_policy(detector: Detector) -> LabelPolicy | None:
+    policy = getattr(detector, "label_policy", None)
+    return policy if isinstance(policy, LabelPolicy) else None
+
+
+def _can_emit(detector: Detector, entity: str) -> bool:
+    """Whether ``detector`` (an NER backend) can ever emit the type
+    ``entity`` is emitted as: a type its model's labels classify as, or any
+    type when the model does not say (zero-shot GLiNER, Stanza)."""
+    policy = _label_policy(detector)
+    type_name = policy.classify(entity) if policy is not None else None
+    emittable = getattr(detector, "emittable_types", None)
+    return type_name is not None and (emittable is None or type_name in emittable)
+
+
+def _mark_unmatched(entities: Sequence[str], backends: Sequence[Detector]) -> None:
+    """Record on every NER backend the configured entities NO active backend
+    can ever emit (a typo such as PERSONS, a type the loaded models lack, an
+    override that drops it). Backends without a label policy (plugin or
+    test stand-ins) say nothing, so nothing is recorded for them."""
+    known = [backend for backend in backends if _label_policy(backend) is not None]
+    if not known:
+        return
+    unmatched = tuple(
+        entity
+        for entity in dict.fromkeys(entities)
+        if not any(_can_emit(backend, entity) for backend in known)
+    )
+    for backend in known:
+        backend.unmatched_entities = unmatched  # type: ignore[attr-defined]
+
+
+def ner_backends(detectors: Sequence[Detector]) -> list[Detector]:
+    """The NER backends among ``detectors`` (unwrapped from their type
+    filter), in build order."""
+    found: list[Detector] = []
+    for detector in detectors:
+        inner = detector.inner if isinstance(detector, TypeFilteredDetector) else detector
+        if _label_policy(inner) is not None:
+            found.append(inner)
+    return found
+
+
+def ner_unmatched_entities(detectors: Sequence[Detector]) -> tuple[str, ...]:
+    """The configured NER entities no active backend can ever emit, as
+    recorded at build time (empty without NER)."""
+    backends = ner_backends(detectors)
+    return tuple(getattr(backends[0], "unmatched_entities", ())) if backends else ()
+
+
+def ner_backend_stats(detectors: Sequence[Detector]) -> list[tuple[str, Detector, NerStats]]:
+    """Each NER backend among ``detectors`` (unwrapped from its type
+    filter) with its configured backend name and its coverage counters
+    (stats.py), in build order. A backend without counters (a plugin or
+    test stand-in) is left out."""
+    found: list[tuple[str, Detector, NerStats]] = []
+    for backend in ner_backends(detectors):
+        policy = _label_policy(backend)
+        stats = getattr(backend, "stats", None)
+        if policy is not None and isinstance(stats, NerStats):
+            found.append((policy.backend, backend, stats))
+    return found
+
+
+def ner_status(ner: NerConfig, detectors: Sequence[Detector]) -> dict[str, Any]:
+    """The ``/status`` block ``detection.ner``: whether NER is on, the
+    string limit, each running backend's model and coverage counters, and
+    the configured entities no backend can ever emit. Metadata and counts
+    only. The counters belong to the built detectors: a reload that
+    rebuilds them starts from zero."""
+    return {
+        "enabled": ner.enabled,
+        "max_chars": ner.max_chars,
+        "backends": {
+            name: {
+                "model": getattr(backend, "model_name", None),
+                # Not tracked yet: the backends load models by id.
+                "revision": None,
+                "catalog": None,
+                "license": None,
+                "counters": stats.as_dict(),
+            }
+            for name, backend, stats in ner_backend_stats(detectors)
+        },
+        "unmatched_entities": list(ner_unmatched_entities(detectors)),
+    }
+
+
+def ner_warnings(config: DetectionConfig, detectors: Sequence[Detector] = ()) -> list[str]:
+    """The NER configuration's startup warnings (config names, types,
+    backends and model ids only, never detected text), logged by the proxy
+    after each detector build and shown by doctor (which builds no model,
+    so passes no detectors): configured raw entities whose type changes in
+    2.0.0, and, from the built ``detectors``, entities no active backend
+    can ever emit."""
+    if not config.ner.enabled:
+        return []
+    warnings = raw_entity_deprecations(config.ner)
+    backends = ner_backends(detectors)
+    where = ", ".join(
+        f"{policy.backend}: {getattr(backend, 'model_name', None) or 'default model'}"
+        for backend in backends
+        if (policy := _label_policy(backend)) is not None
+    )
+    for entity in ner_unmatched_entities(detectors):
+        warnings.append(
+            f'[detection.ner] entities: "{entity}" can never match: no active backend'
+            f" emits it ({where})"
+        )
+    return warnings
 
 
 def build_modes(config: DetectionConfig) -> dict[str, str]:
@@ -349,11 +587,139 @@ def detect_all(detectors: Sequence[Detector], text: str, allowlist: Allowlist) -
 GATED_MAX_CHARS = 1024
 
 
-def _runner(det: Detector) -> Callable[[PreparedText], Iterable[Detection]]:
+# Per scanned text, per index of a heavy detector in the plan: that
+# detector's raw detections in the text (before the allowlist), computed
+# ahead of the redaction (ner_prefetch) — what DetectorPlan.detect takes
+# instead of calling the detector.
+PrecomputedTable = Mapping[str, Mapping[int, Sequence[Detection]]]
+
+
+class FairLock:
+    """A first-come, first-served lock: each ``acquire`` takes a ticket and
+    waits for its turn. A model's lock must be fair: ``threading.Lock``
+    lets the thread that just released it take it straight back, so the
+    NER worker thread, releasing it after one string and taking it again
+    for the next, could keep an inline caller on the event loop waiting
+    for a whole batch instead of one string. A waiter interrupted while it
+    waits gives its turn up (never left holding the queue)."""
+
+    __slots__ = ("_abandoned", "_cond", "_next", "_serving", "__weakref__")
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition(threading.Lock())
+        # The next ticket to hand out, and the ticket whose turn it is.
+        self._next = 0
+        self._serving = 0
+        # Tickets whose waiters gave up before their turn came.
+        self._abandoned: set[int] = set()
+
+    def acquire(self, blocking: bool = True) -> bool:
+        with self._cond:
+            if not blocking and self._next != self._serving:
+                return False
+            ticket = self._next
+            self._next += 1
+            try:
+                while self._serving != ticket:
+                    self._cond.wait()
+            except BaseException:
+                # Interrupted while waiting: the turn passes on, now if it
+                # had just come, else when it comes.
+                if self._serving == ticket:
+                    self._advance()
+                else:
+                    self._abandoned.add(ticket)
+                raise
+            return True
+
+    def release(self) -> None:
+        with self._cond:
+            if self._next == self._serving:
+                raise RuntimeError("release of an unlocked FairLock")
+            self._advance()
+
+    def locked(self) -> bool:
+        with self._cond:
+            return self._next != self._serving
+
+    def _advance(self) -> None:
+        """The next waiting ticket's turn (the condition is held)."""
+        self._serving += 1
+        while self._serving in self._abandoned:
+            self._abandoned.remove(self._serving)
+            self._serving += 1
+        self._cond.notify_all()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+
+# One lock per model-backed (heavy) detector, shared by every plan over it:
+# a model must never run two strings at once (a Hugging Face fast tokenizer
+# raises "Already borrowed"), and both the NER worker thread (ner_prefetch)
+# and the event loop's inline calls run it. Held weakly: a lock dies with
+# its detector.
+_HEAVY_LOCKS: "weakref.WeakKeyDictionary[object, FairLock]" = weakref.WeakKeyDictionary()
+_HEAVY_LOCKS_GUARD = threading.Lock()
+
+
+def heavy_lock(det: Detector) -> FairLock:
+    """The lock ``det``'s model runs under: its unwrapped backend's, so a
+    type filter shares its backend's. A detector that cannot key a weak map
+    (unhashable, or not weakly referenceable) gets a new lock, which the
+    plan asking keeps for it."""
+    inner = det.inner if isinstance(det, TypeFilteredDetector) else det
+    with _HEAVY_LOCKS_GUARD:
+        try:
+            lock = _HEAVY_LOCKS.get(inner)
+            if lock is None:
+                lock = _HEAVY_LOCKS[inner] = FairLock()
+        except TypeError:
+            lock = FairLock()
+    return lock
+
+
+class _Heavy(NamedTuple):
+    """A heavy detector of a plan: the lock its model runs under and its
+    NER coverage counters (None for a detector without them)."""
+
+    lock: FairLock
+    stats: NerStats | None
+
+
+def _heavy(det: Detector) -> _Heavy | None:
+    """``det``'s lock and counters when it runs a model (its ``heavy``
+    attribute is True: every NER backend, and a type filter around one),
+    else None."""
+    if getattr(det, "heavy", False) is not True:
+        return None
+    stats = getattr(det, "stats", None)
+    return _Heavy(heavy_lock(det), stats if isinstance(stats, NerStats) else None)
+
+
+def _inline(det: Detector, heavy: _Heavy, prepared: PreparedText) -> list[Detection]:
+    """``det`` run on the event loop's own thread (no precomputed result):
+    under its model's lock — so a NER worker running it meanwhile holds
+    this caller up for at most the string it is on — and counted
+    (``inline_calls``, under the lock like the backend's own counters)."""
+    with heavy.lock:
+        found = list(det.detect(prepared.text))
+        if heavy.stats is not None:
+            heavy.stats.inline_calls += 1
+    return found
+
+
+def _runner(det: Detector, heavy: _Heavy | None) -> Callable[[PreparedText], Iterable[Detection]]:
     """How the plan runs ``det`` on a prepared text: regex rules share the
-    PreparedText (their prefilters read its cached haystacks)."""
+    PreparedText (their prefilters read its cached haystacks); a heavy
+    detector runs under its model's lock, counted inline."""
     if isinstance(det, RegexDetector):
         return det.detect_prepared
+    if heavy is not None:
+        return functools.partial(_inline, det, heavy)
     return lambda prepared: det.detect(prepared.text)
 
 
@@ -403,6 +769,14 @@ class DetectorPlan:
 
     The differential tests run the gated path against every detector's full
     scan, and against a plan whose gate lies, to prove they would notice.
+
+    HEAVY detectors (``heavy = True``: the NER backends, which run a model)
+    may be detected ahead of the redaction, on a worker thread
+    (``detect_heavy``, ner_prefetch): ``detect`` then takes their raw
+    detections from ``precomputed`` instead of calling them — the
+    allowlist, the sort and everything else unchanged. A heavy detector the
+    plan runs itself runs under its model's lock (``heavy_lock``) and is
+    counted (``NerStats.inline_calls``): it held up the event loop.
     """
 
     def __init__(
@@ -411,7 +785,13 @@ class DetectorPlan:
         self.source = detectors
         self.detectors = tuple(detectors)
         self.gated_max_chars = gated_max_chars
-        self._runners = tuple(_runner(det) for det in self.detectors)
+        heavy = {index: _heavy(det) for index, det in enumerate(self.detectors)}
+        self._heavy = {index: entry for index, entry in heavy.items() if entry is not None}
+        # The indices of the heavy detectors, in list order.
+        self.heavy_indices = tuple(self._heavy)
+        self._runners = tuple(
+            _runner(det, heavy[index]) for index, det in enumerate(self.detectors)
+        )
         # first character -> literal -> indices of the rules it gates, for
         # case-sensitive literals (digit-folded haystack) and case-
         # insensitive ones (lowered haystack).
@@ -457,26 +837,66 @@ class DetectorPlan:
             chosen.update(self._members)
         return tuple(sorted(chosen))
 
-    def detect(self, text: str, allowlist: Allowlist) -> list[Detection]:
+    def detect(
+        self,
+        text: str,
+        allowlist: Allowlist,
+        precomputed: Mapping[int, Sequence[Detection]] | None = None,
+    ) -> list[Detection]:
+        """The detections in ``text`` (allowlist applied, sorted).
+        ``precomputed``: heavy detectors' raw detections in ``text`` by
+        index (``detect_heavy``, a row of a ``PrecomputedTable``), taken
+        instead of running them."""
         # One PreparedText per string: regex detectors share it so their
         # required-literal prefilters (and the derived haystacks behind
         # them) are computed once, not per rule.
         prepared = PreparedText(text)
         order = self._every if len(text) > self.gated_max_chars else self.candidates(prepared)
-        return self._run(order, prepared, allowlist)
+        return self._run(order, prepared, allowlist, precomputed)
 
     def detect_each(self, text: str, allowlist: Allowlist) -> list[Detection]:
         """Every detector, ungated: the reference the gated path equals."""
         return self._run(self._every, PreparedText(text), allowlist)
 
+    def detect_heavy(self, text: str) -> dict[int, list[Detection]]:
+        """Every heavy detector's raw detections in ``text`` (no allowlist:
+        ``detect`` applies it), by index — the NER worker thread's half of
+        ``detect(text, allowlist, precomputed)`` (ner_prefetch). Each runs
+        under its model's lock, held for this one text only, so an inline
+        caller waits at most one text's inference; nothing is counted
+        inline."""
+        found: dict[int, list[Detection]] = {}
+        for index, heavy in self._heavy.items():
+            with heavy.lock:
+                found[index] = list(self.detectors[index].detect(text))
+        return found
+
+    def count_prefetch_miss(self) -> None:
+        """One text a request's redaction found no precomputed results for
+        (``Redactor.with_precomputed``): counted on every heavy detector
+        (``NerStats.prefetch_misses``), each of which now runs it inline.
+        Only the event loop counts a miss, so no lock is taken (a worker
+        holding one may be mid-inference)."""
+        for heavy in self._heavy.values():
+            if heavy.stats is not None:
+                heavy.stats.prefetch_misses += 1
+
     def _run(
-        self, order: Iterable[int], prepared: PreparedText, allowlist: Allowlist
+        self,
+        order: Iterable[int],
+        prepared: PreparedText,
+        allowlist: Allowlist,
+        precomputed: Mapping[int, Sequence[Detection]] | None = None,
     ) -> list[Detection]:
         detections: list[Detection] = []
         runners = self._runners
         allows = allowlist.allows_for
         for index in order:
-            found = runners[index](prepared)
+            found: Iterable[Detection]
+            if precomputed is not None and index in precomputed:
+                found = precomputed[index]
+            else:
+                found = runners[index](prepared)
             # Tier-0 (deny) detections bypass the allowlist — global AND
             # per-type: deny is the user's explicit strongest signal, so a
             # deny/allowlist contradiction resolves in favor of redaction.

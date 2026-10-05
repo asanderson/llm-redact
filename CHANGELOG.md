@@ -11,6 +11,244 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+- docs/how-it-works.md shows NER off the event loop in a new animated `ner-prefetch`
+  diagram; the `sequence-chat` and `security-gates` diagrams and the gate ⑤ row of
+  docs/security-dataflows.md include it.
+- `[detection.ner.onnx]`: the `gliner` backend can load a model's ONNX export through
+  onnxruntime (`gliner = "onnx/model_quint8.onnx"`, a file inside the model) instead of its
+  torch weights; only that file is fetched, never `model.safetensors` or `pytorch_model.bin`.
+  Only `gliner` takes an entry; a path with a wildcard or `..` is a config error.
+- `[detection.ner]` model-source keys: `allow_download` (default `false`), `allow_pickle_weights`
+  (default `false`; `hf` only) and `[detection.ner.revisions]` (per `gliner`/`hf` backend, a full
+  40-character commit id; a branch or tag name such as `main` is a config error because it moves).
+  A backend without a revision is assigned the pin llm-redact's model catalog records for its model:
+  the default models, `urchade/gliner_medium-v2.1`, `urchade/gliner_multi-v2.1`,
+  `urchade/gliner_multi_pii-v1` and the four `knowledgator/gliner-pii-*-v1.0` sizes are pinned to
+  their `main` commits of 2026-10-05. The keys are parsed, validated and written
+  back by `config show`, and both Hub backends read them (see Security and Changed).
+- NER coverage counters: every NER backend counts the strings it read, the strings it
+  skipped as longer than `[detection.ner] max_chars` (which only the regex rules then
+  read), and the model entities it dropped (a type that cannot be a placeholder type, a
+  span the string does not contain). `/status` publishes them per backend, with the model
+  and the entities no backend can emit, in a new `detection.ner` block
+  (docs/detection.md "NER coverage counters"); `detection.ner_enabled` is unchanged.
+- `/metrics` exports the NER coverage counters: `llm_redact_ner_strings_total{backend,outcome}`
+  (`scanned_whole`, `scanned_windowed`, `skipped_max_chars`), `llm_redact_ner_windows_total`,
+  `llm_redact_ner_windows_truncated_total`, `llm_redact_ner_labels_dropped_total` and `llm_redact_ner_offsets_dropped_total` (by
+  backend; they restart from zero when a reload rebuilds the detectors). `llm-redact status`
+  prints a posture line while a backend has skipped strings longer than `max_chars`, and one
+  naming the entities no backend can emit.
+- Two more NER counters per backend, in `/status` `detection.ner` and on `/metrics`:
+  `inline_calls` (`llm_redact_ner_inline_calls_total`: strings a backend ran on the event
+  loop itself, holding up every other request for that string's inference) and
+  `prefetch_misses` (`llm_redact_ner_prefetch_misses_total`: strings a request's
+  precomputed NER results did not cover, run inline instead).
+- docs/detection.md "How NER runs" walks one string through an NER backend (the
+  `max_chars` gate, windows, the label policy, the type guard, part merging, rule toggles,
+  overlap resolution) beside a new `ner-pipeline` diagram.
+- The shipped Grafana dashboard gains an "NER coverage" row (strings by backend and outcome,
+  strings skipped as longer than `max_chars`, windows, entities dropped), and
+  `deploy/prometheus-alerts.yml` a `LlmRedactNerSkippingLongStrings` warning for a backend
+  that keeps skipping strings longer than `[detection.ner] max_chars` for 30 minutes.
+- A startup WARNING for each `[detection.ner] entities` entry no active NER backend can ever
+  emit (a typo, a label the model lacks, an override that drops it), naming the entity,
+  the backends and their models; the labels come from an `hf` model's `id2label`, a spaCy
+  pipeline's `ner` component and the entities Presidio supports (GLiNER and Stanza can
+  emit anything). Logged after every detector build, `serve --check` included.
+- `[detection.ner.labels]`: map a model label to a placeholder type (`CITY = "ADDRESS"`)
+  or drop it (`TIME = ""`). Keys are normalized like every model label; values use the
+  deny-string type grammar. An override applies to `entities` too, so `PER = "PER"` keeps
+  `entities = ["PER"]` emitting `PER` once raw entities fold in 2.0.0.
+- The NER bench, `python -m llm_redact.bench.ner` (docs/ner-bench.md): scores the regex
+  rules plus the configured NER backends on a labelled dataset — per-type exact and
+  overlap-typed precision, recall and F1, the character-leak and over-redaction rates, and
+  a structured-regression check (a model must not cost a regex rule its exact match) —
+  and with `--check` gates the result against `bench/ner_thresholds.toml` (recall floors,
+  leak and over-redaction ceilings per config and dataset; a run with nothing recorded
+  fails). Reports carry counts only; `--dump-errors` writes the text of misses to a
+  mode-0600 file outside any git work tree and refuses real-data datasets unless
+  `--allow-real-data-dump` is given. The deterministic `python -m llm_redact.bench --check`
+  gate is unchanged.
+- The NER bench's default dataset, `synthetic`: 1,200 samples generated from the seed at
+  run time (never committed) in agent-traffic shapes — prose, chat, JSON tool results,
+  code comments, log lines, git output — labelled with names, street addresses, dates of
+  birth, usernames and account numbers (plus emails and phone numbers for the
+  structured-regression check), and hard negatives with no personal data (UUIDs, commit
+  hashes, identifiers named after tools such as Jenkins, paths, stack traces,
+  timestamps).
+- NER false-positive ceilings: `python -m llm_redact.bench.ner --fp-corpus bench/fp_corpus
+  --check` counts the detections NER adds to every negatives-corpus file (scanned in
+  message-sized chunks) and gates them against per-file, per-type maximum counts and a
+  hits-per-100-KB ceiling in `bench/ner_ceilings.toml`. The corpus gains four
+  agent-traffic files with no personal data (tool results as JSON, git output, a CI log, a
+  Python module), pinned to zero regex detections in its manifest.
+- Published datasets for the NER bench: `--dataset openpii` (OpenPII 1.5M, CC BY 4.0,
+  Ai4Privacy / Ai Suisse SA; `--language` filters it) and `--dataset nemotron`
+  (Nemotron-PII, CC BY 4.0, NVIDIA), downloaded at run time at a pinned revision into
+  `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets` (never inside a git work tree,
+  never committed) and used for evaluation only. A new `bench-data` extra
+  (`huggingface_hub`, `pyarrow>=14.0.1`) carries the download and parquet reading. Rows
+  whose gold spans do not match their text are skipped and counted; every report
+  repeats the dataset's license and attribution, and `--list-datasets` lists them.
+- More NER bench datasets: `privy` (beki/privy, MIT: PII inside JSON, SQL, HTML and XML
+  payloads; values it marks non-PII count as over-redaction), `pupa` (PUPA, MIT: 901 real
+  user prompts with LLM-extracted PII units, scored by the leak metric only; real data)
+  and `mapa` (MAPA, CC BY 4.0: human-annotated EUR-Lex legal text in 21 languages,
+  `--language` filters it; real data). Empty gold spans are dropped rather than failing
+  their row.
+- `--dataset creddata --data-dir DIR` measures the secret rules on real code: a local
+  CredData checkout (Samsung; labels Apache-2.0, code under its projects' licenses),
+  prepared with CredData's own download script and never vendored; each labelled true
+  credential is scored by the leak metric, lines of false look-alikes by over-redaction.
+- `python -m llm_redact.bench.ner --latency` times NER: p50/p95 per string at 50, 500,
+  2,000 and 10,000 characters for each NER backend and model and for the full pipeline,
+  plus a 20,000-string body redacted end to end; the report names the CPU model.
+  Report-only unless `[<config>.latency]` ceilings are recorded in
+  `bench/ner_thresholds.toml`.
+
+### Changed
+- NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
+  upload inspector's extracted texts included) and a realtime client frame the proxy collects the
+  strings a request's redaction will scan, runs the NER models over them on a worker
+  thread (one request's batch at a time, each model locked per string), then redacts
+  synchronously with those results, so other requests (and `/__llm-redact/healthz`) are
+  answered while a large NER request is detected. What is sent upstream is unchanged
+  byte for byte; a string the precomputed results lack is detected inline and counted
+  (`inline_calls`, `prefetch_misses`).
+- NER models are no longer downloaded unless `[detection.ner] allow_download = true`, and then
+  only at startup (`serve`, `serve --check`). With the default `false` the `gliner` and `hf`
+  backends load from the local Hugging Face cache or a model folder, set the libraries' offline
+  switches (`HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`) before importing them, and a model that is
+  not cached stops the startup with an error naming the model, its revision and
+  `llm-redact models pull`. A reload, the dashboard editor's dry run and `llm-redact preview`
+  never download: a reload naming an uncached model is refused and the running configuration
+  kept. Model downloads were never listed among what leaves the machine (docs/privacy.md), so
+  this fixes behaviour the documentation never allowed. Upgrading: the default models' pins are
+  the `main` commits of 2026-10-05, so a cache an online load refreshed since then already holds
+  them; `urchade/gliner_multi-v2.1` moved on 2025-12-08 (an older cache holds `853ce23e47e5`).
+- NER model labels become placeholder types through one label policy for every backend
+  (`detection/labels.py`, documented in docs/detection.md "Placeholder types from NER
+  models"): labels are normalized (`B-PER` → `PER`, `"street address"` →
+  `STREET_ADDRESS`) and synonyms fold into one type (`PER`, `FIRST_NAME`, `SURNAME` … →
+  `PERSON`; `EMAIL_ADDRESS` → `EMAIL`), so one value gets one token whichever backend
+  finds it. An `entities` entry that names a placeholder type (`PERSON`, `ADDRESS`,
+  `EMAIL`, …) requests that type from every backend. Entries that name a model's own
+  label (`PER`, `"job title"`) keep emitting that label, as before.
+- The spaCy, Stanza and Presidio backends use the same label policy: `entities =
+  ["PERSON"]` now also finds people with pipelines that label them `PER` (most non-English
+  spaCy and Stanza models). Presidio is asked for the entities that fold into a requested
+  type (`EMAIL` asks for `EMAIL_ADDRESS`) and only for entities its analyzer supports;
+  `PRESIDIO_TYPE_MAP` keeps its five pairs.
+- A name or address an NER backend reports in parts ("Jane" `first_name`, "Doe"
+  `last_name`) becomes one span when the parts are separated by one or two spaces, tabs
+  or no-break spaces only, so a full name gets one `PERSON` token instead of two.
+- GLiNER is prompted in natural language for a type request: `PERSON` sends "person",
+  `ADDRESS` "street address", `EMAIL` "email address" (previously the type name itself).
+  Other entries are still sent as written. Detections keep their type.
+- A model label that cannot be a placeholder type (it starts with a digit, or is longer
+  than 28 characters) is no longer emitted: its tokens could never be restored.
+
+### Deprecated
+- An `[detection.ner] entities` entry naming a model's own label rather than a placeholder
+  type keeps its own type in 1.12 but will fold into the shared type in 2.0.0 (`PER` →
+  `PERSON`, `"phone number"` → `PHONE`, `EMAIL_ADDRESS` → `EMAIL` outside Presidio). Each
+  affected entity logs a startup WARNING (`serve --check` included) and shows a `doctor`
+  WARN row naming both types; write the type now (`entities = ["PERSON"]`) or keep the old
+  one for good with `[detection.ner.labels] PER = "PER"`.
+
+### Fixed
+- The `hf` NER backend could report part of a word as an entity and leave the rest of it
+  in the request: `dslim/bert-base-NER` reported "Angela Merk" in "Yesterday Angela Merkel
+  met the press.", so "el" went upstream unredacted (also "Ngoz…", "Xu Wen…"). A model whose
+  tokenizer marks word pieces (WordPiece: BERT and its family, the default model) now
+  labels each word by its first piece, so names are reported as whole words. Models whose
+  tokenizers do not mark word pieces (SentencePiece, byte-level BPE) are still labelled
+  piece by piece: transformers cannot tell where their words end.
+- The `hf` NER backend read only the first window of a string (512 tokens for the default
+  `dslim/bert-base-NER`, about 2,000 characters) and silently ignored the rest. It now
+  reads the whole string, up to `max_chars`, in overlapping windows sized from the
+  tokenizer and model config (the pipeline's `stride`), keeps one copy of an entity two
+  windows both report, and counts windowed strings and windows. A model without a fast
+  tokenizer, whose entities came back without the offsets redaction needs, is refused at
+  startup: `[detection.ner] hf model '…' has no fast tokenizer; character offsets are
+  required`.
+- The `gliner` NER backend read only the first 384 words of a string (GLiNER's `max_len`;
+  every JSON brace, quote, colon and comma counts as a word) and dropped the rest with a
+  library warning. It now reads the whole string, up to `max_chars`, in overlapping
+  windows of GLiNER's own words, each within `max_len` beside the entity prompts and, with
+  the model's fast tokenizer, within the subword tokens its encoder reads; one copy of an
+  entity two windows report is kept. A single word longer than the encoder reads is
+  counted (`windows_truncated` in `/status`, `llm_redact_ner_windows_truncated_total`).
+- `[detection.ner] score_threshold` never reached the `gliner` backend's model: GLiNER's
+  third parameter is `flat_ner`, so the threshold was passed there and every call used
+  GLiNER's default 0.5. It is now passed by name.
+- `[detection.allowlist_by_type]` accepts the types NER entities are emitted as (`JOB_TITLE`
+  for the GLiNER entity `"job title"`, which it refused) and reads a key that names an
+  entity as written as the type NER emits for it (a `"job title"` key never matched).
+  Every key valid before stays valid.
+- A Presidio `entities` list naming nothing the analyzer supports failed every request
+  (Presidio raises when asked only for unknown entities); it now stops the startup with
+  an error naming what the analyzer supports, and unsupported entries beside supported
+  ones are left out of the request.
+- The default `hf` NER configuration detected nothing: `dslim/bert-base-NER` labels people
+  `PER`, the default `entities = ["PERSON"]` asked for `PERSON`. `PERSON` now requests
+  every label that folds into it.
+- `[detection.ner] score_threshold` survives `llm-redact config show` and every config
+  rewrite when `hf` is the only backend that emits confidences: the emitter wrote it only
+  for `gliner` and `presidio`, while the parser accepts it for `hf` too (one shared
+  `CONFIDENCE_BACKENDS` list now). An `hf`-only threshold was silently dropped, and the
+  dashboard editor's round-trip check refused every save of such a configuration.
+- A failed `hf` model load names its cause instead of always suggesting network access and
+  disk space: `torch is not installed; install the hf extra` when torch is missing (it
+  cannot run a model without it), else the model id and the exception type.
+- The `hf` NER backend maps the exact text the request carried (`text[start:end]`), never
+  the pipeline's decoded `word`, which can differ (casing, spacing, unknown-token marks):
+  a restored value is always the one the user sent. An entity whose offsets fall outside
+  the scanned string is skipped.
+- The `hf` extra installs torch: transformers declares torch only as its own extra, so
+  `uv sync --extra hf` used to install a backend that could not run any model. The extra is
+  now `transformers>=4.40` plus `torch>=2.6`. `llm-redact doctor` FAILs an enabled `gliner`,
+  `stanza` or `hf` NER backend whose torch is missing, with the install hint. A CPU-only
+  install takes torch from the PyTorch CPU index (docs/dependencies.md).
+- The container image's `org.opencontainers.image.licenses` label names `AGPL-3.0-only`,
+  the license `pyproject.toml` declares (it still said `MIT`), in the `Dockerfile` and in the
+  release workflow (the published image carried metadata-action's GitHub-detected
+  `AGPL-3.0`); a test keeps all three equal.
+  The fp-corpus README lists every corpus file under that license, and the `[detection.ner]`
+  `model` and `score_threshold` docs (config.example.toml, docs/detection.md) cover the `hf`
+  backend.
+- A config dry run (`ProxyState.validate_config`, which the llm-redact-pro config editor runs
+  before every save) no longer builds the detectors when `[detection]` did not change: the
+  apply keeps the live ones, so the dry run loaded a second copy of every NER model per save.
+
+### Security
+- The `hf` NER backend loads its model from a local folder at a pinned revision, never with code
+  from the model's repository, and only from safetensors weights. A Hub model is looked up in
+  the local Hugging Face cache at its `[detection.ner.revisions]` pin (else the model catalog's)
+  with an explicit list of top-level files (configuration, safetensors weights, tokenizer:
+  never the TensorFlow, Flax, ONNX or `original/` copies); it is fetched only when
+  `[detection.ner] allow_download = true`, and a model missing from the cache stops the startup
+  with an error naming the model and revision. A model whose `config.json` or
+  `tokenizer_config.json` names code to import (`auto_map`) is refused; a model that ships only
+  `pytorch_model.bin` (a pickle, which can run code when loaded) is refused unless
+  `allow_pickle_weights = true`. Previously the newest revision was downloaded from the Hub on
+  first use.
+- The `gliner` NER backend loads its model the same way, and no longer fetches a base model
+  from the Hub at every load. The default `urchade/gliner_small-v2.1` (like the other urchade
+  v2.1 checkpoints) ships no tokenizer or encoder configuration, so GLiNER fetched them from
+  its base model (`microsoft/deberta-v3-small`) on each start, at no fixed revision, and could
+  never start offline. llm-redact now resolves that base model's configuration and tokenizer at
+  the revision its model catalog pins and assembles a self-contained folder under
+  `$XDG_DATA_HOME/llm-redact/models/gliner/`, which GLiNER loads with `local_files_only`. A
+  GLiNER or base-model configuration naming code to import (`auto_map`) or a model type
+  transformers does not know is refused. A GLiNER load failure now names the exception type
+  instead of suggesting network access.
+- The `gliner`, `stanza` and `hf` extras require `torch>=2.6`, the release that fixed
+  CVE-2025-32434 (a bypass of `torch.load(weights_only=True)`, the loader GLiNER uses for
+  `pytorch_model.bin` checkpoints); gliner and stanza themselves accept older torch.
+  `llm-redact doctor` FAILs a torch backend running on torch older than 2.6.
+
 ## [1.11.0] - 2026-10-05
 
 Access-control seams for role- and attribute-based policies. The access gate can now

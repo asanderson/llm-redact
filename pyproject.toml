@@ -23,18 +23,25 @@ dependencies = [
 
 [project.optional-dependencies]
 ner = ["spacy>=3.7,<4"]
+# torch floor (gliner, stanza, hf): 2.6 fixed CVE-2025-32434, a bypass of
+# torch.load(weights_only=True), which is how GLiNER loads a pytorch_model.bin
+# checkpoint. The floor rides each extra because no library asks for it
+# (gliner 0.2.28 requires torch>=2.0, stanza 1.13 torch>=1.13, and
+# transformers lists torch only under its own extras, so `hf` lists it).
+# PyPI's Linux torch wheel pulls the CUDA libraries (gigabytes); a CPU-only
+# host installs torch from the PyTorch CPU index (docs/dependencies.md).
 # Heavy (pulls torch + transformers); more robust than spaCy on unusual names.
-gliner = ["gliner>=0.2"]
+gliner = ["gliner>=0.2", "torch>=2.6"]
 # Microsoft's FOSS PII analyzer: recognizers + checksums + context scoring
 # over spaCy. Pulls pydantic — extras never touch the request path.
 presidio = ["presidio-analyzer>=2.2,<3"]
 # Stanford Stanza: accurate neural NER for 60+ languages (the multilingual
 # complement to the English-first spaCy default). Pulls torch; no confidences.
-stanza = ["stanza>=1.7,<2"]
+stanza = ["stanza>=1.7,<2", "torch>=2.6"]
 # Any Hugging Face token-classification model as a detector (multilingual
 # XLM-R NER, domain-tuned checkpoints, ...). Pulls transformers + torch;
 # emits confidences (score_threshold applies).
-hf = ["transformers>=4.40"]
+hf = ["transformers>=4.40", "torch>=2.6"]
 # At-rest encryption for the sqlite vault ([vault] encryption = "fernet").
 crypto = ["cryptography>=42"]
 # Pro persistent vault on a server RDBMS ([vault] backend = "postgresql" /
@@ -67,6 +74,13 @@ realtime = ["websockets>=15.0"]
 # "pdf" refuses to start with this install hint; the OOXML/ODF, markup and
 # RTF readers are stdlib.
 extract = ["pypdf>=5"]
+# The NER bench's published datasets (python -m llm_redact.bench.ner
+# --dataset openpii|nemotron|...; docs/ner-bench.md): huggingface_hub fetches
+# them at a pinned revision, pyarrow reads the parquet ones. Bench only —
+# never imported by the proxy. pyarrow 14.0.1 fixed CVE-2023-47248 (code
+# execution when reading an untrusted IPC/Parquet file), and a downloaded
+# dataset is exactly such a file.
+bench-data = ["pyarrow>=14.0.1", "huggingface_hub>=0.23"]
 # OpenTelemetry export ([otel] enabled = true): metadata-only traces and
 # counters over OTLP/HTTP. Extras never touch the request path.
 otel = [
@@ -137,8 +151,9 @@ testpaths = ["tests"]
 markers = [
     "live: hits real provider APIs; requires LLM_REDACT_LIVE=1 and API keys (costs money)",
     "soak: many-connection concurrency/soak checks; slower, run with -m soak",
+    "real_model: loads a real NER model from the local Hugging Face cache (needs the model's extra and a cached model; never downloads); run with -m real_model",
 ]
-addopts = "-m 'not live and not soak'"
+addopts = "-m 'not live and not soak and not real_model'"
 
 [tool.mypy]
 strict = true
@@ -162,6 +177,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "transformers.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pyarrow.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "huggingface_hub.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -223,5 +246,5 @@ only_mutate = [
 # so those must be copied alongside the tests/ and pyproject.toml mutmut
 # copies by default — a path missing here fails the BASELINE run and every
 # mutant reports "not checked".
-also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", "config.example.toml", "README.md", "CHANGELOG.md", "Dockerfile", "uv.lock"]
+also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", ".github", "config.example.toml", "README.md", "CHANGELOG.md", "Dockerfile", "uv.lock"]
 pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]

@@ -90,11 +90,18 @@ from llm_redact.config import (
 )
 from llm_redact.connections import CAUSES as CONNECTION_CLOSE_CAUSES
 from llm_redact.connections import EventStream, LiveConnections, recheck_interval
+from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.engine import (
+    DetectionConfig,
+    DetectorPlan,
+    PrecomputedTable,
     active_rule_names,
     build_allowlist,
     build_detectors,
     build_modes,
+    ner_backend_stats,
+    ner_status,
+    ner_warnings,
 )
 from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
@@ -115,6 +122,7 @@ from llm_redact.metrics import (
 from llm_redact.multipart import parse as parse_multipart
 from llm_redact.multipart import parse_boundary as parse_multipart_boundary
 from llm_redact.ndjson import NDJSONParser
+from llm_redact.ner_prefetch import collect, collect_request_strings, prefetch
 from llm_redact.overrides import (
     DISABLED_REASON,
     PROXY_BUSY_TIMEOUT_MS,
@@ -805,6 +813,14 @@ def _resolve_license_info(config: Config) -> ResolvedLicense:
     return resolved
 
 
+def _log_ner_warnings(detection: DetectionConfig, detectors: Sequence[Detector]) -> None:
+    """Each NER startup warning (engine.ner_warnings), once per detector
+    build: at startup (serve and serve --check) and on a reload that
+    rebuilds the detectors."""
+    for warning in ner_warnings(detection, detectors):
+        logger.warning("%s", warning)
+
+
 class ProxyState:
     def __init__(
         self,
@@ -836,9 +852,12 @@ class ProxyState:
         # What a vault fault raises while a request's placeholders are issued
         # (a write, its batch's COMMIT): refused 503, never a bare 500.
         self.vault_faults = vault_fault_types(self.vault_manager)
-        self.detectors = build_detectors(config.detection)
+        # The startup build: the only one that may download NER model files
+        # (with [detection.ner] allow_download); reloads and dry runs never do.
+        self.detectors = build_detectors(config.detection, startup=True)
         self.allowlist = build_allowlist(config.detection)
         self.modes = build_modes(config.detection)
+        _log_ner_warnings(config.detection, self.detectors)
         # The access gate's detection overlays (authorization.py), built per
         # distinct overlay against exactly these detection objects.
         self.overlay_builds = OverlayBuilds(config.detection, self.modes)
@@ -1768,6 +1787,7 @@ class ProxyState:
             detectors = build_detectors(effective.detection)
             allowlist = build_allowlist(effective.detection)
             modes = build_modes(effective.detection)
+            _log_ner_warnings(effective.detection, detectors)
             # Every cached overlay build dies with the objects it extended.
             overlay_builds = OverlayBuilds(effective.detection, modes)
         redactor = Redactor(
@@ -1893,10 +1913,16 @@ class ProxyState:
         router's own checks — or, when the file enabled routing since
         startup, a build-and-close probe so a refusal (package absent,
         Free tier, bad price file) surfaces here rather than after a write.
+
+        An unchanged ``[detection]`` is not built: apply_config keeps the
+        live detectors for it, so a build here would only load a second
+        copy of every NER model on each editor save. (``[detection]`` has
+        no env override, so the candidate's is the one apply would use.)
         """
-        build_detectors(candidate.detection)
-        build_allowlist(candidate.detection)
-        build_modes(candidate.detection)
+        if candidate.detection != self.config.detection:
+            build_detectors(candidate.detection)
+            build_allowlist(candidate.detection)
+            build_modes(candidate.detection)
         effective = apply_env_overrides(candidate)
         resolved = _resolve_license_info(effective)
         resolve_credentials(candidate.routing, os.environ)
@@ -3095,6 +3121,12 @@ async def _handle_local(
                         len(values) for _type, values in config.detection.allowlist_by_type
                     ),
                     "ner_enabled": config.detection.ner.enabled,
+                    # NER coverage (detection/stats.py): per backend, the
+                    # strings read whole or in windows, those skipped as
+                    # longer than max_chars, entities dropped; entities no
+                    # backend can emit. Counts since the detectors were
+                    # built (a reload that rebuilds them starts from zero).
+                    "ner": ner_status(config.detection.ner, state.detectors),
                     "modes": {name: mode for name, mode in config.detection.modes},
                     # Count only: deny values are themselves secrets. The
                     # config editor GET returns them — the same documented
@@ -3232,6 +3264,7 @@ async def _handle_local(
                 audit_sink_rows_dropped=_sink_counts(state, "rows_dropped"),
                 map_write_queue_depth=state.map_writes_pending(),
                 map_write_wait_timeouts=state.map_write_wait_timeouts,
+                ner_stats=[(name, stats) for name, _, stats in ner_backend_stats(state.detectors)],
             )
             + plugin_text,
             media_type="text/plain; version=0.0.4; charset=utf-8",
@@ -4716,6 +4749,97 @@ def _credential_protocol_refused(
     return JSONResponse(adapter.error_body(message, status=403), status_code=403)
 
 
+async def _prefetch_json(
+    state: ProxyState,
+    adapter: ProviderAdapter,
+    method: str,
+    path: str,
+    parsed: dict[str, Any],
+    *,
+    limit: int,
+) -> tuple[DetectorPlan, PrecomputedTable] | None:
+    """The live detector plan and its model-backed (heavy) detectors'
+    results for every string the redaction of this JSON body will scan
+    (``ner_prefetch``: collected on the loop, detected on a worker thread)
+    — None when the plan has no heavy detector or the collecting pass
+    failed (the redaction then runs them inline, as before)."""
+    plan = state.redactor.plan
+    if not plan.heavy_indices:
+        return None
+    strings = collect_request_strings(
+        adapter,
+        method,
+        path,
+        parsed,
+        limit=limit,
+        mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
+    )
+    if strings is None:
+        return None
+    return plan, await prefetch(plan, strings)
+
+
+async def _prefetch_upload(
+    redactor: Redactor,
+    adapter: ProviderAdapter,
+    path: str,
+    body: bytes,
+    boundary: bytes,
+    *,
+    limit: int,
+) -> tuple[DetectorPlan, dict[str, dict[int, list[Detection]]]] | None:
+    """``_prefetch_json`` for a multipart upload: the request redactor's
+    plan and its heavy detectors' results for every string the upload's
+    redaction will scan (its file names, form fields, text files and JSONL
+    lines; a binary part's content is not text), collected by running the
+    adapter's own upload redaction with a collector — None when the plan
+    has no heavy detector or the collecting pass failed."""
+    plan = redactor.plan
+    if not plan.heavy_indices:
+        return None
+    strings = collect(
+        lambda collector: adapter.redact_multipart(
+            path,
+            body,
+            boundary,
+            collector,
+            inject_note=False,
+            require_scanned=True,
+            # A binary part is skipped, never refused, by the collector:
+            # its file name is still scanned, as in the real pass.
+            forward_binary=_ignore_binary,
+        ),
+        limit=limit,
+    )
+    if strings is None:
+        return None
+    return plan, await prefetch(plan, strings)
+
+
+def _ignore_binary(parts: int) -> None:
+    """The collecting pass's ``forward_binary``: nothing to count."""
+
+
+async def _prefetch_more(
+    plan: DetectorPlan, table: dict[str, dict[int, list[Detection]]], texts: list[str]
+) -> None:
+    """``texts`` the table lacks, detected on the worker thread and added
+    to it (the redactor holding the table sees them)."""
+    table.update(await prefetch(plan, [text for text in texts if text not in table]))
+
+
+def _inspected_texts(results: Mapping[int, object]) -> list[str]:
+    """The texts an inspection's judgement scans or a converted part is
+    redacted as: each reading's ``text`` and ``convert_text``."""
+    texts: list[str] = []
+    for result in results.values():
+        for name in ("text", "convert_text"):
+            value = getattr(result, name, None)
+            if isinstance(value, str):
+                texts.append(value)
+    return texts
+
+
 class _CountWindow:
     """One request's share of the process-wide detection and warn-mode
     counts: the totals as its redaction starts (``detections``,
@@ -4751,6 +4875,7 @@ async def _inspect_upload(
     outcomes: Counter[str],
     window: _CountWindow,
     before_inspection: Callable[[], None],
+    prefetch_texts: Callable[[list[str]], Awaitable[None]] | None = None,
 ) -> tuple[InspectedUpload | None, dict[str, int]]:
     """An upload's binary file parts read as text by the upload inspector
     and judged (``upload_inspection``): the adapter's reading of ``body``
@@ -4792,6 +4917,11 @@ async def _inspect_upload(
     results = await inspect_parts(
         inspector, parts, provider=provider_name, identity=identity, limits=limits
     )
+    if prefetch_texts is not None:
+        # The extracted texts the judgement scans and the display texts a
+        # converted part is redacted as: detected by the NER models on the
+        # worker thread too, before the window restarts.
+        await prefetch_texts(_inspected_texts(results))
     # Other requests redacted while this one waited: their counts are theirs.
     window.restart()
     verdict = judge(
@@ -5591,6 +5721,20 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         )
         if refused is not None:
             return refused
+    # NER off the event loop (ner_prefetch): a JSON body the redaction below
+    # will walk has its strings collected now and run through the model-
+    # backed detectors on a worker thread; the redaction takes their results
+    # from the table. The one await between here and the redaction, placed
+    # BEFORE the overlay and the session are read (one synchronous stretch
+    # with the redaction): a reload meanwhile hands the request new
+    # detectors, whose plan the table was not computed for — every string
+    # then runs inline (counted), never a stale result. A detector's
+    # exception propagates as an inline one does (nothing is forwarded).
+    prefetched: tuple[DetectorPlan, PrecomputedTable] | None = None
+    if adapter is not None and isinstance(parsed, dict) and not detection_off:
+        prefetched = await _prefetch_json(
+            state, adapter, request.method, path, parsed, limit=max_body_strings
+        )
     # The requester's detection overlay (tighten-only), read in the same
     # synchronous stretch as the session below, so it extends exactly the
     # detection objects the request redacts with.
@@ -5781,6 +5925,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         # The copy is this body's own: it counts the strings it redacts
         # against max_body_strings.
         budgeted = ctx.redactor.with_budget(max_body_strings)
+        if prefetched is not None:
+            # The model-backed detections computed off the loop (above).
+            budgeted = budgeted.with_precomputed(prefetched[1], prefetched[0])
         if scope is not None:
             budgeted = budgeted.with_overrides(scope)
         redactor = (
@@ -5892,6 +6039,21 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             upload_redactor = ctx.redactor.with_budget(max_body_strings)
             if scope is not None:
                 upload_redactor = upload_redactor.with_overrides(scope)
+            # NER off the event loop, as for a JSON body: every string the
+            # upload's redaction (and its block check) will scan, detected
+            # by the models on the worker thread first; an inspector's
+            # extracted texts are added once it has read them
+            # (prefetch_texts). Other requests redact meanwhile: the count
+            # window restarts after the await.
+            prefetch_texts: Callable[[list[str]], Awaitable[None]] | None = None
+            upload_prefetch = await _prefetch_upload(
+                upload_redactor, adapter, path, upload_body, boundary, limit=max_body_strings
+            )
+            if upload_prefetch is not None:
+                upload_plan, upload_table = upload_prefetch
+                upload_redactor = upload_redactor.with_precomputed(upload_table, upload_plan)
+                prefetch_texts = functools.partial(_prefetch_more, upload_plan, upload_table)
+                window.restart()
             # The inspected binary parts' outcomes and the binary parts
             # forwarded unscanned, counted once the upload is handed to the
             # upstream or refused (_UploadFate: a refusal after redaction —
@@ -6002,6 +6164,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                         outcomes=inspection_outcomes,
                         window=window,
                         before_inspection=before_inspection,
+                        prefetch_texts=prefetch_texts,
                     )
                     upload_redactor = upload_redactor.with_floors(floors)
                 # One vault transaction for the whole upload (run_batched).

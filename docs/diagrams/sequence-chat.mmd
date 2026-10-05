@@ -7,13 +7,17 @@ sequenceDiagram
     autonumber
     participant T as Agentic tool
     participant P as llm-redact proxy
+    participant W as NER worker thread
     participant V as Vault (local)
     participant L as LLM provider
 
     T->>P: POST /v1/messages<br/>"…email jane@corp.example…"
     activate P
-    P->>P: walk every JSON string value,<br/>detect + resolve overlaps
-    P->>V: token for (session, EMAIL, value)
+    P->>P: collect the strings the redaction<br/>will scan (every JSON string value)
+    P->>W: [detection.ner] only: NER on a worker<br/>thread — off the event loop
+    W-->>P: each string's model detections
+    P->>P: detect + resolve overlaps, taking the<br/>precomputed NER results (synchronous)
+    P->>V: token for (session, EMAIL, value)<br/>— one vault transaction per request
     V-->>P: «EMAIL_001» — deterministic:<br/>same value ⇒ same token
     P->>L: "…email «EMAIL_001»…"<br/>(+ system note: reproduce tokens exactly)
     deactivate P

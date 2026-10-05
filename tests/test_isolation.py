@@ -21,6 +21,7 @@ import pytest
 import isolation
 from llm_redact import plugin_cli, service_cli
 from llm_redact.audit import default_audit_path
+from llm_redact.bench.datasets import default_cache_dir
 from llm_redact.config import default_config_path
 from llm_redact.vault import default_vault_path
 
@@ -138,7 +139,15 @@ def test_the_watched_paths_cover_every_default_writer(
             monkeypatch.setenv(name, str(tmp_path / name.lower()))
         else:
             monkeypatch.delenv(name, raising=False)
+    if tool_dirs:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg_cache_home"))
+    else:
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     watched = isolation.watched_paths(os.environ, Path.home(), platform=platform)
+    # The NER bench's dataset cache resolves from the real XDG_CACHE_HOME
+    # (the session keeps it real): it must be watched instead.
+    bench_cache = default_cache_dir(os.environ)
+    assert any(bench_cache.is_relative_to(root) for root in watched), bench_cache
     for path in _defaults():
         if path == Path.home():
             continue  # `~` itself: what the configured paths expand under

@@ -209,8 +209,10 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
-          # Copyleft licences would complicate the MIT distribution; flag them
-          # for a human decision rather than silently pulling them in.
+          # The core is AGPL-3.0-only and is also licensed on other terms (the
+          # dual-license model docs/CLA.md describes); a GPL or AGPL
+          # dependency would constrain those terms. Flag them for a human
+          # decision rather than silently pulling them in.
           deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
 
   ner:

@@ -13,10 +13,12 @@ Everything here is import-lazy: this module is only imported when
 startup (fail fast with an actionable error, no first-request latency spike).
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
+from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
+from llm_redact.detection.stats import NerStats
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
@@ -31,28 +33,79 @@ class _NlpLike(Protocol):
     def __call__(self, text: str) -> Any: ...
 
 
+def _pipeline_types(nlp: _NlpLike, policy: LabelPolicy) -> frozenset[str] | None:
+    """The placeholder types the pipeline's ``ner`` component can emit
+    under ``policy``. None when the pipeline does not say (no ``ner``
+    component: an entity ruler may still add entities)."""
+    get_pipe = getattr(nlp, "get_pipe", None)
+    if get_pipe is None:
+        return None
+    try:
+        labels = get_pipe("ner").labels
+    except KeyError:
+        return None
+    types = (policy.classify(str(label)) for label in labels)
+    return frozenset(t for t in types if t is not None)
+
+
 class NerDetector:
     name = "ner"
+    # A model runs per string: the detector plan detects it ahead of the
+    # redaction, on the NER worker thread (DetectorPlan, ner_prefetch).
+    heavy = True
 
-    def __init__(self, nlp: _NlpLike, entities: frozenset[str], max_chars: int) -> None:
+    # Read by the never-match check (engine.build_detectors): the placeholder
+    # types this model can emit (None = unknown, e.g. zero-shot), the model
+    # for messages, and the configured entities no active backend emits.
+    emittable_types: frozenset[str] | None = None
+    model_name: str | None = None
+    unmatched_entities: tuple[str, ...] = ()
+
+    def __init__(
+        self,
+        nlp: _NlpLike,
+        entities: frozenset[str],
+        max_chars: int,
+        *,
+        policy: LabelPolicy | None = None,
+    ) -> None:
         self._nlp = nlp
-        self._entities = entities
+        # spaCy labels (PERSON, ORG, a non-English pipeline's PER) become
+        # placeholder types through the label policy (labels.py).
+        self.label_policy = policy if policy is not None else LabelPolicy(entities, backend="spacy")
+        self.emittable_types = _pipeline_types(nlp, self.label_policy)
         self._max_chars = max_chars
+        # Coverage counters (stats.py): strings read or skipped, entities
+        # dropped. spaCy reads a whole string in one call.
+        self.stats = NerStats()
 
-    def detect(self, text: str) -> Iterable[Detection]:
-        # Latency gate: giant tool results (whole files, logs) are skipped.
-        # Regex rules still cover structured values inside them.
+    def detect(self, text: str) -> list[Detection]:
+        # Parts of one name or address reported separately join into one
+        # span (labels.merge_adjacent_parts).
+        return merge_adjacent_parts(self._found(text), text)
+
+    def _found(self, text: str) -> Iterator[Detection]:
+        # Latency gate: giant tool results (whole files, logs) are skipped,
+        # and counted. Regex rules still cover structured values inside them.
         if len(text) > self._max_chars:
+            self.stats.skipped_max_chars += 1
             return
+        self.stats.scanned_whole += 1
         for ent in self._nlp(text).ents:
-            if ent.label_ in self._entities:
-                yield Detection(
-                    start=ent.start_char,
-                    end=ent.end_char,
-                    detector_type=ent.label_,
-                    value=ent.text,
-                    priority=NER_PRIORITY,
-                )
+            label = self.label_policy.classify(str(ent.label_), self.stats)
+            if label is None:
+                continue
+            start, end = int(ent.start_char), int(ent.end_char)
+            if not 0 <= start < end <= len(text):
+                self.stats.offsets_dropped += 1
+                continue
+            yield Detection(
+                start=start,
+                end=end,
+                detector_type=label,
+                value=text[start:end],
+                priority=NER_PRIORITY,
+            )
 
 
 def build_ner_detector(config: "NerConfig") -> NerDetector:
@@ -73,4 +126,11 @@ def build_ner_detector(config: "NerConfig") -> NerDetector:
             f"spaCy model {model_name} is not available;"
             f" download it: uv run python -m spacy download {model_name}"
         ) from exc
-    return NerDetector(nlp, frozenset(config.entities), config.max_chars)
+    detector = NerDetector(
+        nlp,
+        frozenset(config.entities),
+        config.max_chars,
+        policy=LabelPolicy(config.entities, backend="spacy", overrides=config.labels),
+    )
+    detector.model_name = model_name
+    return detector

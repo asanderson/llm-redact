@@ -431,14 +431,50 @@ backend = "spacy"
 # [detection.ner.models]
 # spacy = "en_core_web_md"
 # gliner = "urchade/gliner_medium-v2.1"
+# Model labels become placeholder types through one label policy for every
+# backend (docs/detection.md "Placeholder types from NER models"): synonyms
+# fold into one type (PER, FIRST_NAME, SURNAME -> PERSON; EMAIL_ADDRESS ->
+# EMAIL), so a value gets one token whichever backend finds it.
+# Override the fold per normalized model label (a type, or "" to drop the
+# label). An override applies to `entities` too: PER = "PER" keeps
+# entities = ["PER"] emitting PER after 2.0.0, when raw labels start folding.
+# [detection.ner.labels]
+# CITY = "ADDRESS"   # cities count as addresses (ADDRESS must be requested)
+# TIME = ""          # never emit the model's TIME label
 # NOTE: a placeholder type disabled in the `enabled` rule list above stays
-# disabled for NER too (presidio folds EMAIL/PHONE/US_SSN/IBAN/CREDIT_CARD
-# into the built-in types) — rule toggles are the single source of truth.
+# disabled for NER too (a model's EMAIL_ADDRESS folds into the built-in
+# EMAIL type) — rule toggles are the single source of truth.
+# `entities` names placeholder types (PERSON, ADDRESS, DATE_OF_BIRTH,
+# PASSPORT, DRIVER_LICENSE, USERNAME, ACCOUNT_NUMBER, or a built-in rule's
+# type such as EMAIL), which every backend serves whatever its model calls
+# them, or a model's own label (ORG, "job title"), emitted as written.
 entities = ["PERSON"]
 max_chars = 20000   # strings longer than this skip NER (regex still applies)
-language = "en"     # presidio wires this through the analyzer
-# model = "en_core_web_sm"   # spaCy pipeline (spacy/presidio) or HF id (gliner)
-# score_threshold = 0.5      # gliner and presidio backends only
+language = "en"     # presidio wires this through the analyzer; stanza loads its model
+# model = "en_core_web_sm"   # spaCy pipeline (spacy/presidio) or Hugging Face model id
+#                            # (gliner; hf: a token-classification model). Stanza
+#                            # ignores it and loads the `language` model.
+# score_threshold = 0.5      # gliner, presidio and hf only (spacy/stanza give no score)
+# Model sources of the Hugging Face Hub backends (gliner, hf); see
+# docs/detection.md "Model sources". Both load their model from the local
+# cache at the pinned revision (hf: safetensors only unless
+# allow_pickle_weights; gliner: with its pinned base model's tokenizer, in a
+# self-contained folder).
+# allow_download = false        # default: whether the startup may fetch pinned model
+#                               # files from the Hub (false: local cache or folder
+#                               # only; `llm-redact models pull` fills the cache).
+#                               # A reload never downloads.
+# allow_pickle_weights = false  # hf only: true permits pytorch_model.bin for a
+#                               # model with no safetensors weights
+# Pin a backend's model to a full 40-character commit id (branch and tag
+# names are refused: they move). Without an entry, a model llm-redact's
+# catalog knows uses the catalog's pin (the default models included).
+# [detection.ner.revisions]
+# hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
+# Load the gliner model's ONNX export (onnxruntime) instead of its torch
+# weights: a .onnx file inside the model; only that file is fetched.
+# [detection.ner.onnx]
+# gliner = "onnx/model_quint8.onnx"
 
 [audit]
 # Opt-in local log of proxy activity: detector types and counts, paths,

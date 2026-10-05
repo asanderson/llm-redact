@@ -1,0 +1,29 @@
+# NER false-positive ceilings on the negatives corpus (bench/fp_corpus):
+#   python -m llm_redact.bench.ner --config CONFIG --fp-corpus bench/fp_corpus --check
+# (docs/ner-bench.md). Counted are the detections the full pipeline makes and
+# the same config's rules alone do not; the rules' own counts stay gated,
+# exactly, by bench/fp_corpus/MANIFEST.toml and `python -m llm_redact.bench
+# --check`. Kept here, not inside bench/fp_corpus, whose every file is a
+# scanned corpus file.
+#
+# One section per config name (the --config file's stem, or --name); a run
+# whose section is missing FAILS --check: record a baseline first.
+#
+#   [<config name>]
+#   recorded = "YYYY-MM-DD"        when the baseline was measured
+#   note = "..."                   models and revisions it was measured with
+#   per_100kb_max = 2.0            NER hits per 100 KB of the whole corpus
+#
+#   [<config name>."<corpus file>"]
+#   PERSON = 3                     maximum count per type in that file
+#
+# A file or type not listed allows no NER detection at all; a ceiling naming
+# a file the corpus does not hold fails (a stale entry).
+#
+# Example (not a baseline):
+#   [hf-default]
+#   recorded = "2026-10-05"
+#   note = "dslim/bert-base-NER at <revision>"
+#   per_100kb_max = 2.0
+#   [hf-default."rfc_excerpt.txt"]
+#   PERSON = 4

@@ -97,7 +97,17 @@ def test_every_field_nondefault_round_trips() -> None:
                 CustomRule(name="jira", detector_type="TICKET", pattern=r"PROJ-\d+", priority=90),
                 CustomRule(name="two", detector_type="ID", pattern=r"ID\d+"),
             ),
-            ner=NerConfig(enabled=False, backend="spacy", entities=("PERSON", "ORG"), max_chars=5),
+            ner=NerConfig(
+                enabled=False,
+                backend="spacy",
+                entities=("PERSON", "ORG"),
+                max_chars=5,
+                labels=(("CITY", "ADDRESS"), ("EMAIL", ""), ("FIRST_NAME", "PERSON")),
+                revisions=(("gliner", "a" * 40), ("hf", "0123456789abcdef" * 2 + "01234567")),
+                onnx=(("gliner", "onnx/model_quint8.onnx"),),
+                allow_download=True,
+                allow_pickle_weights=True,
+            ),
             modes=(("email", "warn"), ("us_ssn", "block")),
         ),
         vault=VaultConfig(
@@ -253,6 +263,103 @@ def test_gliner_score_threshold_round_trips() -> None:
         )
     )
     assert _round_trip(config) == config
+
+
+@pytest.mark.parametrize(
+    "ner",
+    [
+        NerConfig(enabled=True, backend="hf", score_threshold=0.8),
+        NerConfig(enabled=True, backends=("spacy", "hf"), score_threshold=0.8),
+    ],
+    ids=["hf", "spacy+hf"],
+)
+def test_hf_score_threshold_round_trips(ner: NerConfig) -> None:
+    # hf emits confidences, so the parser accepts its threshold; an emitter
+    # that knew only gliner/presidio dropped it (config show, editor saves).
+    config = Config(detection=DetectionConfig(ner=ner))
+    assert "score_threshold = 0.8" in emit_config_toml(config)
+    assert _round_trip(config) == config
+
+
+def test_ner_labels_round_trip_after_models() -> None:
+    config = Config(
+        detection=DetectionConfig(
+            ner=NerConfig(
+                enabled=True,
+                backends=("gliner", "hf"),
+                models=(("hf", "org/model"),),
+                labels=(("CITY", "ADDRESS"), ("PER", "PER"), ("TIME", "")),
+                score_threshold=0.6,
+            )
+        )
+    )
+    emitted = emit_config_toml(config)
+    # Both subtables follow every [detection.ner] scalar.
+    ner_section = emitted.split("[detection.ner]")[1]
+    assert ner_section.index("score_threshold") < ner_section.index("[detection.ner.labels]")
+    assert '"CITY" = "ADDRESS"' in emitted
+    assert '"TIME" = ""' in emitted
+    assert _round_trip(config) == config
+    assert "[detection.ner.labels]" not in emit_config_toml(Config())
+
+
+def test_ner_model_sources_round_trip_after_the_scalars() -> None:
+    config = Config(
+        detection=DetectionConfig(
+            ner=NerConfig(
+                enabled=True,
+                backends=("gliner", "hf"),
+                models=(("hf", "org/model"),),
+                revisions=(("hf", "b" * 40),),
+                labels=(("CITY", "ADDRESS"),),
+                allow_download=True,
+                allow_pickle_weights=True,
+            )
+        )
+    )
+    emitted = emit_config_toml(config)
+    ner_section = emitted.split("[detection.ner]")[1]
+    # Both switches are [detection.ner] scalars: before every subtable.
+    assert ner_section.index("allow_download = true") < ner_section.index("[detection.ner.models]")
+    assert ner_section.index("allow_pickle_weights = true") < ner_section.index(
+        "[detection.ner.revisions]"
+    )
+    assert f'hf = "{"b" * 40}"' in emitted
+    assert _round_trip(config) == config
+
+
+@pytest.mark.parametrize(
+    "ner",
+    [
+        NerConfig(allow_download=True),
+        NerConfig(allow_pickle_weights=True),
+        NerConfig(revisions=(("gliner", "c" * 40),)),
+        NerConfig(onnx=(("gliner", "onnx/model.onnx"),)),
+    ],
+    ids=["allow_download", "allow_pickle_weights", "revisions", "onnx"],
+)
+def test_each_ner_model_source_round_trips_alone(ner: NerConfig) -> None:
+    config = Config(detection=DetectionConfig(ner=ner))
+    assert _round_trip(config) == config
+
+
+def test_ner_model_sources_at_their_defaults_are_not_written() -> None:
+    # The switches loosen a safe default: written only when turned on (like
+    # [audit] tamper_evident), so a default configuration emits none of them.
+    emitted = emit_config_toml(Config())
+    assert "allow_download" not in emitted
+    assert "allow_pickle_weights" not in emitted
+    assert "[detection.ner.revisions]" not in emitted
+    assert "[detection.ner.onnx]" not in emitted
+
+
+def test_score_threshold_is_not_emitted_without_a_confidence_backend() -> None:
+    # The parser rejects the key for spacy/stanza-only configs, so the
+    # emitter must not write it there either.
+    for ner in (NerConfig(backend="spacy"), NerConfig(backends=("spacy", "stanza"))):
+        config = Config(detection=DetectionConfig(ner=ner))
+        assert "score_threshold" not in emit_config_toml(config)
+        assert _round_trip(config) == config
 
 
 def test_allowlist_by_type_round_trips() -> None:

@@ -185,6 +185,19 @@ conflicting modes. serve would refuse this config at startup, and a SIGHUP
 reload would keep the current one (with only a log line saying so). The
 message names the exact offender; fix it and re-run `serve --check`.
 
+## "backend \"NAME\" needs torch, which is not installed" / "needs torch >= 2.6 (CVE-2025-32434), but torch VERSION is installed"
+
+From `doctor`, for an enabled `gliner`, `stanza` or `hf` NER backend: these
+backends run on torch, and their library can be present without it
+(transformers imports fine without torch and fails only when a model
+loads), so serve could not build the backend. torch older than 2.6 is
+refused because CVE-2025-32434 lets a crafted checkpoint run code through
+`torch.load(weights_only=True)`, which GLiNER uses for `pytorch_model.bin`
+files. Install the backend's extra (`uv sync --extra hf`, or
+`pip install 'llm-redact-proxy[hf]'`), which requires `torch>=2.6`; on a
+CPU-only host take torch from the PyTorch CPU index first
+([dependencies.md](dependencies.md)).
+
 ## "config reload failed; keeping current config" / "changes require restart"
 
 Log lines from a `kill -HUP`. The first means the new file failed to parse
@@ -324,6 +337,245 @@ which protocols your tools will send. Probe each one with `llm-redact
 routes test --protocol X` (llm-redact-pro) before traffic arrives. The
 full refusal list is in the llm-redact-pro routing guide.
 
+## `[detection.ner] entities: "PER" is emitted as PER now and as PERSON from 2.0.0; write "PERSON" to switch now, or set [detection.ner.labels] PER = "PER" to keep PER`
+
+A deprecation WARNING logged at startup (also by `serve --check`) and shown
+as a `doctor` WARN row, one per affected entity; the quoted entity and types
+are yours. The entity names a model's own label rather than a placeholder
+type, and llm-redact 2.0.0 will fold such labels into the shared type
+(`PER` → `PERSON`, `"phone number"` → `PHONE`, `EMAIL_ADDRESS` → `EMAIL`), so
+the same value gets the same token whichever backend finds it. Nothing changes
+until you upgrade to 2.0.0. Settle it now in one of two ways:
+
+- write the type the message names (`entities = ["PERSON"]`): detections
+  switch to that type now (new placeholders such as «PERSON_001»; metrics and
+  alerts keyed on the old type move with them);
+- or keep today's type for good with the override the message names
+  (`[detection.ner.labels] PER = "PER"`).
+
+Either way the warning goes away. See docs/detection.md "Placeholder types
+from NER models".
+
+## `[detection.ner] entities: "…" can never match: no active backend emits it (…)`
+
+A WARNING logged at startup (also by `serve --check`) and after a reload that
+rebuilds the detectors, once per entity; the parentheses name each active
+backend and its model. Every loaded model was asked which labels it has
+(Hugging Face models through their `id2label` table, spaCy pipelines through
+their `ner` component, Presidio through the entities its analyzer supports),
+and none of them is ever emitted as this entity's type. GLiNER (zero-shot) and
+Stanza publish no label set, so with either of them active this never fires.
+Common causes:
+
+- a typo (`PERSONS`), or a label this model does not use — check the model
+  card (`PER` vs `PERSON` no longer matters: write `PERSON`, the type);
+- a type the model was not trained for (`ADDRESS` with a CoNLL-2003 model);
+- while raw entities keep their own type (until 2.0.0), a raw entry such as
+  `PER` claims the model's `PER` label, which then no longer serves a
+  `PERSON` entry beside it — list one of the two;
+- a `[detection.ner.labels]` override that maps the type to `""`, or a type
+  that cannot be a placeholder (it starts with a digit or is longer than 28
+  characters).
+
+Nothing breaks: the entity simply never redacts anything. Fix the entry or
+pick a model that covers it. While it stands, `llm-redact status` repeats it
+as the posture line `NER entities no backend can emit: … (never detected)`,
+and `/status` lists it in `detection.ner.unmatched_entities`.
+
+## "NER skipped … string(s) longer than max_chars (…) — regex rules still applied"
+
+A `llm-redact status` posture line: since the detectors were built, the named
+NER backends were handed strings longer than `[detection.ner] max_chars` and
+never read them (`llm_redact_ner_strings_total{outcome="skipped_max_chars"}`
+counts them, `/status` `detection.ner` per backend). The regex rules, deny
+strings and custom rules still scanned those strings; only names and other
+contextual values the models would have found in them were not looked for.
+`max_chars` is a latency cap: the time a model takes grows with the length of
+what it reads. If your traffic carries long strings that
+hold names (pasted documents, large tool results), raise `max_chars`; if the
+skipped strings are logs or files you do not need NER on, the line is the
+expected cost of the cap.
+
+## "[detection.ner.labels] LABEL: the type must match [A-Z][A-Z0-9_]* and be at most 20 characters, or be "" to drop the label"
+
+A `[detection.ner.labels]` value is not a placeholder type. Write the type in
+uppercase letters, digits and `_`, starting with a letter and at most 20
+characters (`CITY = "ADDRESS"`), or `""` to drop the label. Related
+messages from the same table: "a label needs at least one letter or digit"
+(a key such as `"--"`), "… name the same label (X) with different types" (two
+spellings of one label, such as `"first name"` and `FIRST_NAME`, mapped to
+different types: keep one), and "must be a table of LABEL = TYPE".
+
+## "[detection.ner.revisions] BACKEND must be a full 40-character lowercase hex commit id; branch and tag names (such as main) are refused because they move"
+
+A `[detection.ner.revisions]` value is not a commit id. A pin must name one
+commit for good, so write the full 40-character lowercase hex id from the
+model's page on the Hugging Face Hub ("Files and versions" → the commit, or
+`https://huggingface.co/api/models/ORG/MODEL/revision/main` → `sha`), not
+`main`, a tag or a shortened id. Related messages from the same table: "…
+BACKEND: a revision pins a Hugging Face Hub model, so only the gliner and hf
+backends take one" (an entry for `spacy`, `presidio` or `stanza`, whose
+models are not Hub snapshots: remove it) and "must be a table of BACKEND =
+"<40-character commit id>"". The message names the backend, never the value.
+
+## "[detection.ner] entities […] match no entity the Presidio analyzer supports for language '…'"
+
+From `serve` / `serve --check` with the `presidio` backend: none of the
+configured `entities` is something Presidio can find in that language, so
+every request would fail. The message lists what the analyzer supports. Name
+a placeholder type Presidio covers (`PERSON`, `EMAIL`, `PHONE`, `SSN`, `IBAN`,
+`CREDIT_CARD`) or one of the listed Presidio entities (`LOCATION`,
+`IP_ADDRESS`, …); `PER` is a spaCy/Hugging Face label Presidio does not use —
+write `PERSON`.
+
+## `backend = "hf" but torch is not installed; install the hf extra`
+
+From `serve` / `serve --check` with `[detection.ner]` using the `hf` backend:
+the `transformers` package is installed but `torch` is not, so no model can
+run. Install the extra, which brings both: `uv sync --extra hf` (or
+`pip install 'llm-redact-proxy[hf]'`), then re-run `serve --check`.
+
+## "[detection.ner] hf model '…' has no fast tokenizer; character offsets are required"
+
+Startup (and `serve --check`) refused an `hf` backend model whose tokenizer
+is a slow (pure-Python) one. Only a fast tokenizer reports where each entity
+sits in the text — without those offsets an entity could never be redacted,
+and the pipeline could not read a long string in windows. Most Hub models
+ship a fast tokenizer (`tokenizer.json`), and transformers builds one for
+many others (from a WordPiece `vocab.txt`, for one). If the model has none,
+pick another model, or save a converted fast tokenizer beside the model once
+and point `[detection.ner.models] hf` at that local folder.
+
+## "failed to load Hugging Face token-classification model '…': …"
+
+From `serve` / `serve --check`: torch is installed and the model's files are
+in place, but loading the named `hf` model failed; the message ends with the
+exception type. Common causes: a model that is not a token-classification
+model, an architecture the installed transformers does not know, damaged
+files in the cache, or a full disk. Load the folder once by hand to see the
+library's full error: `uv run python -c "from transformers import pipeline;
+pipeline('token-classification', model='/path/to/the/model/folder')"` (the
+folder: the Hugging Face cache's `models--ORG--MODEL/snapshots/<revision>`).
+
+## "[detection.ner] hf model '…' has no safetensors weights; set allow_pickle_weights = true to load pytorch_model.bin"
+
+The `hf` model ships its weights only as `pytorch_model.bin`, a Python
+pickle — and loading a pickle can run code — so llm-redact loads only
+safetensors weights by default. Pick a model that ships `model.safetensors`
+(most do), convert the checkpoint once into a local folder and point
+`[detection.ner.models] hf` at it, or, if you trust the model's publisher,
+set `[detection.ner] allow_pickle_weights = true`. A model that ships both
+always loads its safetensors.
+
+## "[detection.ner] … model '…' at revision … is not (completely) in the local Hugging Face cache, and downloads are off …"
+
+The named model (or a GLiNER model's base model) is not in the local Hugging
+Face cache at the revision llm-redact loads, and `[detection.ner]
+allow_download` is `false` (the default), so nothing is fetched. A copy of
+another revision does not count: the pin is the commit the message names
+(`[detection.ner.revisions]`, else the model catalog's pin; "no revision
+pinned" means the newest cached revision of the default branch). Fetch the
+model once with `llm-redact models pull`, or set `allow_download = true` to
+let a startup fetch the pinned files (with a `HF_HOME` the proxy can write).
+A reload (SIGHUP, the dashboard editor) never downloads, whatever
+`allow_download` says: after a reload naming a new model, the running
+configuration is kept — fetch the model, then reload again, or restart.
+"(completely)": the cache holds the revision but not every file the loader
+needs, such as after an interrupted download.
+
+## "[detection.ner] … model '…' … could not be fetched from the Hugging Face Hub: …"
+
+`allow_download = true`, but fetching the model's files failed; the message
+ends with the exception type. Common causes: no network access to
+huggingface.co, a model id or revision that does not exist, a gated model
+without a token, a full disk or a cache the proxy cannot write.
+
+## "[detection.ner] … model '…' is a local directory; a revision in [detection.ner.revisions] applies only to a Hugging Face model id"
+
+`[detection.ner.models]` (or `model`) names a local folder, and
+`[detection.ner.revisions]` pins that backend too. A folder is whatever it
+holds, so a commit id cannot apply to it: remove the backend's revision.
+
+## "[detection.ner] … model '…' is neither a local directory nor a Hugging Face model id"
+
+The model value is not a folder that exists and not of the form `ORG/NAME`.
+Check the path (it is read relative to the proxy's working directory unless
+absolute) or the model id.
+
+## "[detection.ner] … model '…' needs code from its repository (… names auto_map); llm-redact never runs model code"
+
+The model's `config.json`, `tokenizer_config.json` or `gliner_config.json`
+names Python classes to import from the model repository (`auto_map`).
+llm-redact never loads with `trust_remote_code`, so such a model cannot be
+used; pick one built on an architecture transformers ships.
+
+## "[detection.ner] … model '…': config.json is not a JSON configuration" / "… cannot be read (…)"
+
+A configuration file in the model's folder is not a UTF-8 JSON object (or is
+larger than 4 MiB), or cannot be opened. Re-fetch the model
+(`llm-redact models pull`) or fix the local folder.
+
+## "failed to load GLiNER model '…': …"
+
+From `serve` / `serve --check`: the model's files are in place, but GLiNER
+could not load them; the message ends with the exception type. Common
+causes: damaged files in the cache (fetch them again: `llm-redact models
+pull`), a checkpoint the installed gliner version cannot read, or too little
+memory.
+
+## "[detection.ner] gliner model '…' has no gliner_config.json" / "… names no base model (model_name) for its tokenizer and encoder configuration"
+
+The folder or repository is not a GLiNER checkpoint (`gliner_config.json`
+is missing), or its configuration ships no tokenizer and no `encoder_config`
+and does not name the base model to take them from. Check the model id or
+folder.
+
+## "[detection.ner] gliner … '…': … names a model type transformers does not know; llm-redact never runs model code"
+
+The GLiNER checkpoint's `encoder_config` (or its base model's `config.json`)
+names an architecture the installed transformers does not ship. GLiNER
+would build that encoder with `trust_remote_code`, which could run code from
+the model repository, so it is refused. Upgrade transformers if the type is
+newer than your version (`uv sync --extra gliner`), or pick another model.
+
+## "[detection.ner] gliner model '…' … has no ONNX file '…' ([detection.ner.onnx] gliner)" / "[detection.ner.onnx] gliner needs onnxruntime, which the gliner extra installs"
+
+`[detection.ner.onnx] gliner` names a file the model does not ship (check the
+model's "Files and versions" page: Knowledgator's GLiNER-PII models ship
+`onnx/model.onnx`, `onnx/model_quint8.onnx` and, except `-large`,
+`onnx/model_fp16.onnx`), or onnxruntime is missing — reinstall the extra:
+`uv sync --extra gliner`. Related: "[detection.ner.onnx] BACKEND: only the
+gliner backend loads ONNX weights" and "… must be a .onnx file inside the
+model" (no wildcard, no `..`, no absolute path).
+
+## "[detection.ner] gliner base model '…' has no config.json"
+
+The base model a GLiNER checkpoint names lacks the configuration llm-redact
+embeds into the assembled folder. Check the `model_name` in the checkpoint's
+`gliner_config.json`.
+
+## "[detection.ner] gliner model '…' ships no tokenizer or encoder_config, and the model catalog pins no revision of its base model '…': the newest cached revision of its default branch loads"
+
+A startup warning for a GLiNER checkpoint llm-redact's model catalog does
+not know (or knows with another base model): its base model's tokenizer and
+configuration load at whatever revision of its default branch the cache
+holds. Prefer a catalogued model or a self-contained checkpoint (one that
+ships its tokenizer and an `encoder_config`), or a folder written by
+`llm-redact models pull --to`.
+
+## "[detection.ner] gliner model '…': cannot assemble its local folder under … (…)"
+
+llm-redact could not write the self-contained GLiNER folder it builds from
+the checkpoint and its base model (under `$XDG_DATA_HOME/llm-redact/models/`).
+Make that directory writable for the proxy's user (the systemd unit and the
+Helm chart already allow the data directory), or free disk space.
+
+## "[detection.ner] … model '…' needs huggingface_hub, which the hf and gliner extras install; install the backend's extra" / "backend = \"gliner\" needs transformers, which the gliner extra installs"
+
+The `huggingface_hub` package is missing, although the `hf` and `gliner`
+extras install it (through transformers and gliner). Re-install the
+backend's extra: `uv sync --extra hf` or `uv sync --extra gliner`.
+
 ## Tool sees `«EMAIL_001»`-style tokens in responses
 
 A placeholder reached the tool unrestored. Almost always one of: the
@@ -343,3 +595,122 @@ listed there. If posture is clean, confirm the tool actually points at the
 proxy: `llm-redact run -- <tool>` injects the variable for you, and the
 recent-request feed (`GET /__llm-redact/recent`, or `/llm-redact:recent`
 in an agent) shows whether traffic is arriving at all.
+
+## NER bench: "the NER bench needs [detection.ner] enabled = true in the config it scores"
+
+`python -m llm_redact.bench.ner --config PATH` measures NER models, so the
+config it scores must enable them (`[detection.ner] enabled = true`, with
+the backends and entities to measure). The regex rules alone are measured by
+`python -m llm_redact.bench`. See [ner-bench.md](ner-bench.md).
+
+## NER bench: "no thresholds for [CONFIG.DATASET] in bench/ner_thresholds.toml; record a baseline from this run's report"
+
+`--check` found no recorded floors and ceilings for this configuration and
+dataset; a run with nothing recorded fails rather than passing unmeasured.
+Record a baseline as [ner-bench.md](ner-bench.md#recording-a-baseline)
+describes, or drop `--check` to only print the report.
+
+## NER bench: "recall floor for TYPE cannot be checked: the run holds no gold spans of TYPE"
+
+The thresholds entry sets a floor for a type the scored samples never
+contain (a `--limit` too small, or a dataset without that type). Raise
+`--limit`, or remove the floor from that dataset's entry.
+
+## NER bench: "--dump-errors must name a file outside any git work tree"
+
+`--dump-errors` writes dataset text, so it refuses a path inside a git
+repository, where the file could be committed. Write it under `/tmp` or your
+home directory, and delete it when done.
+
+## NER bench: "dataset 'NAME' holds real data; --dump-errors would write its text to disk: add --allow-real-data-dump to confirm"
+
+The dataset holds real text (real prompts, code or documents). Its errors
+are written only when you confirm with `--allow-real-data-dump`; the file is
+private (mode 0600) and belongs outside every repository.
+
+## NER bench: "no NER ceilings for [CONFIG] in bench/ner_ceilings.toml; record a baseline from this run's report"
+
+`--fp-corpus … --check` found no section for this configuration in the
+ceilings file; a run with nothing recorded fails. Run it without `--check`,
+read the per-file counts, and record a section as
+[ner-bench.md](ner-bench.md#false-positives-on-agent-traffic---fp-corpus)
+describes.
+
+## NER bench: "FILE: TYPE found N, ceiling M (lines …)" / "bench/ner_ceilings.toml [CONFIG] names FILE, which is not in the corpus"
+
+The model adds more detections of that type to that negatives file than
+its recorded ceiling allows (a file or type with no ceiling allows none):
+read the lines named, decide whether the hits are legitimate (raise the
+ceiling, with the reason in the commit) or a regression (fix the
+configuration). The second message names a ceiling for a file that no
+longer exists: remove the stale entry.
+
+## NER bench: "downloading a dataset needs huggingface_hub; install the bench-data extra: uv sync --extra bench-data" / "reading a parquet dataset needs pyarrow; …"
+
+Published datasets (`openpii`, `nemotron`, …) are fetched and read with the
+`bench-data` extra's packages, which a default install does not carry. Run
+`uv sync --extra bench-data` (or `pip install 'llm-redact-proxy[bench-data]'`)
+and retry. The generated datasets (`synthetic`, `rules`) need neither.
+
+## NER bench: "could not download FILE of REPO at revision REVISION: ERRORTYPE"
+
+The bench asked the Hugging Face Hub for one file of a dataset at its pinned
+revision and the download failed (no network, a proxy refusing the host, a
+full disk). Files already in the cache directory are reused, so a machine
+without network access can run a dataset whose cache was filled elsewhere:
+copy `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets` across, or
+point `--cache-dir` at the copy.
+
+## NER bench: "--cache-dir must be outside any git work tree"
+
+Downloaded datasets are never committed, so the bench refuses a cache inside
+a git repository. Use the default cache or a directory outside the
+repository.
+
+## NER bench: "--language: dataset 'NAME' has no language to filter on"
+
+`--language` keeps the rows of one language and works only for datasets that
+record one (`--list-datasets` marks them). Drop it for the others.
+
+## NER bench: "privy: cannot read privy-dataset.zip: …" / "privy: a data file …" / "PUPA: cannot read FILE: …"
+
+A downloaded dataset file is not what its pinned revision holds: a truncated
+download, a damaged cache entry or a file edited by hand. Delete the
+dataset's entry under the cache directory
+(`${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets`, or your
+`--cache-dir`) and run again to download it afresh.
+
+## NER bench: "dataset 'creddata' reads a local checkout: pass --data-dir" / "CredData: --data-dir must name a CredData checkout with a meta/ directory"
+
+CredData is not downloaded by the bench: clone it, run its own
+`download_data.py`, and pass the checkout with `--data-dir`
+([ner-bench.md](ner-bench.md#creddata)). `--data-dir` must point at the
+CredData directory itself (the one holding `meta/` and, after the
+download, `data/`). Rows whose files the download did not produce are
+skipped and counted.
+
+## NER bench: "--data-dir applies only to datasets read from a local checkout"
+
+Only `creddata` reads a local checkout; the other datasets are generated or
+downloaded. Drop `--data-dir`, or add `--dataset creddata`.
+
+## NER bench: "CredData: cannot read meta/FILE.csv: …"
+
+A CredData metadata file lacks the columns the adapter reads (`FilePath`,
+`LineStart`, `LineEnd`, `GroundTruth`, `ValueStart`, `ValueEnd`) or is not
+valid UTF-8 CSV — a checkout of a CredData version whose format changed, or
+a damaged file. Check out the commit named in
+[ner-bench.md](ner-bench.md#creddata).
+
+## NER bench: "--fp-corpus and --latency are separate runs; pick one" / "--dump-errors applies to dataset and --fp-corpus runs"
+
+`--latency` times NER; it scores nothing and dumps nothing. Run it on its
+own, and run `--fp-corpus` or a dataset (with `--dump-errors` if wanted)
+separately.
+
+## NER bench: "p50_ms at N characters: X ms is above the ceiling Y ms"
+
+The full pipeline's median per-string time crossed the ceiling recorded in
+`[CONFIG.latency]` of the thresholds file. Latency depends on the CPU the
+report names: compare like with like before treating it as a regression,
+and raise the ceiling (with the CPU in its `note`) when the machine changed.

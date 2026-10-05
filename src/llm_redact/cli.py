@@ -925,6 +925,7 @@ def _print_posture(payload: dict[str, Any]) -> None:
     inactive = payload.get("detection", {}).get("language_inactive_rules") or []
     if inactive:
         lines.append(f"language-inactive rules: {', '.join(inactive)} (not detected)")
+    lines.extend(_ner_posture((payload.get("detection") or {}).get("ner")))
     forks = payload.get("compaction_forks") or 0
     if forks:
         lines.append(f"compaction forks: {forks} (history rewrites that forked a fresh session)")
@@ -963,6 +964,30 @@ def _print_posture(payload: dict[str, Any]) -> None:
             print(f"  ⚠ {line}")
     else:
         print("posture: all traffic redacted (no coverage opt-outs)")
+
+
+def _ner_posture(ner: object) -> list[str]:
+    """NER coverage gaps from the /status ``detection.ner`` block (absent on
+    an older proxy): strings the models never read because they were
+    longer than max_chars, and configured entities no backend can emit."""
+    if not isinstance(ner, dict):
+        return []
+    lines: list[str] = []
+    backends = ner.get("backends") or {}
+    skipped = {
+        name: (entry.get("counters") or {}).get("skipped_max_chars") or 0
+        for name, entry in backends.items()
+    }
+    seen = " ".join(f"{name}×{count}" for name, count in skipped.items() if count)
+    if seen:
+        lines.append(
+            f"NER skipped {seen} string(s) longer than max_chars ({ner.get('max_chars')})"
+            " — regex rules still applied"
+        )
+    unmatched = ner.get("unmatched_entities") or []
+    if unmatched:
+        lines.append(f"NER entities no backend can emit: {', '.join(unmatched)} (never detected)")
+    return lines
 
 
 def _gate_posture(users: object) -> list[str]:

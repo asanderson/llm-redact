@@ -20,6 +20,9 @@ from llm_redact.detection.engine import (
     DetectionConfig,
     NerConfig,
 )
+from llm_redact.detection.labels import normalize_label
+from llm_redact.detection.model_catalog import HUB_BACKENDS, REVISION_RE
+from llm_redact.placeholders import TYPE_NAME_RE
 
 if TYPE_CHECKING:
     from llm_redact.plugin_api import ConfigSection
@@ -1539,9 +1542,93 @@ def _parse_audit_azure(raw: object) -> AzureAuditConfig:
     )
 
 
-# Deny placeholder types must stay inside the token grammar and leave room
-# for the numeric suffix within MAX_PLACEHOLDER_LEN.
-_DENY_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,19}\Z")
+# The NER backends that emit per-entity confidences, so the only ones
+# `[detection.ner] score_threshold` applies to (spaCy and Stanza emit none).
+# One definition for the parser and the emitter: an emitter that knew fewer
+# backends than the parser accepts dropped an hf-only threshold on the way
+# out (`config show`, the pro editor's round-trip check).
+CONFIDENCE_BACKENDS = ("gliner", "presidio", "hf")
+
+
+def _parse_ner_labels(labels_raw: object) -> tuple[tuple[str, str], ...]:
+    """[detection.ner.labels] LABEL = TYPE -> sorted (normalized label, type)
+    pairs. Keys are model labels (normalized like every label the policy
+    sees: "first name" and FIRST_NAME are one key); values are placeholder
+    types in the deny-type grammar, or "" to drop the label."""
+    where = "[detection.ner.labels]"
+    if not isinstance(labels_raw, dict):
+        raise ConfigError(f"{where} must be a table of LABEL = TYPE")
+    labels: dict[str, str] = {}
+    spelled: dict[str, str] = {}
+    for key, value in labels_raw.items():
+        if not isinstance(value, str) or (value and not TYPE_NAME_RE.match(value)):
+            raise ConfigError(
+                f"{where} {key}: the type must match [A-Z][A-Z0-9_]* and be at most 20"
+                f' characters, or be "" to drop the label; got {value!r}'
+            )
+        label = normalize_label(str(key))
+        if not label:
+            raise ConfigError(f"{where} {key!r}: a label needs at least one letter or digit")
+        if labels.get(label, value) != value:
+            raise ConfigError(
+                f"{where} {spelled[label]!r} and {key!r} name the same label ({label})"
+                " with different types"
+            )
+        labels[label] = value
+        spelled.setdefault(label, str(key))
+    return tuple(sorted(labels.items()))
+
+
+def _parse_ner_revisions(revisions_raw: object) -> tuple[tuple[str, str], ...]:
+    """[detection.ner.revisions] BACKEND = "<commit>" -> sorted (backend,
+    commit) pairs. Only the Hugging Face Hub backends take a pin, and only
+    a full 40-character lowercase hex commit id: a branch or tag name
+    moves, which is what a pin is there to prevent. An entry for a backend
+    that is not active is kept, inert, like a [detection.ner.models] one.
+    Error messages name the backend, never the value."""
+    where = "[detection.ner.revisions]"
+    if not isinstance(revisions_raw, dict):
+        raise ConfigError(f'{where} must be a table of BACKEND = "<40-character commit id>"')
+    revisions: dict[str, str] = {}
+    for backend, revision in revisions_raw.items():
+        if backend not in HUB_BACKENDS:
+            raise ConfigError(
+                f"{where} {backend}: a revision pins a Hugging Face Hub model, so only the"
+                f" {' and '.join(HUB_BACKENDS)} backends take one"
+            )
+        if not isinstance(revision, str) or not REVISION_RE.fullmatch(revision):
+            raise ConfigError(
+                f"{where} {backend} must be a full 40-character lowercase hex commit id;"
+                " branch and tag names (such as main) are refused because they move"
+            )
+        revisions[str(backend)] = revision
+    return tuple(sorted(revisions.items()))
+
+
+# A repo-relative ONNX file: path segments of plain characters (no
+# wildcard, no "..", no absolute path), ending in .onnx.
+ONNX_FILE_RE = re.compile(r"(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.onnx")
+
+
+def _parse_ner_onnx(onnx_raw: object) -> tuple[tuple[str, str], ...]:
+    """[detection.ner.onnx] BACKEND = "<repo-relative .onnx file>" ->
+    sorted (backend, file) pairs. Only the gliner backend loads ONNX
+    weights. The file name is also a download pattern, so wildcards and
+    ".." are refused."""
+    where = "[detection.ner.onnx]"
+    if not isinstance(onnx_raw, dict):
+        raise ConfigError(f'{where} must be a table of BACKEND = "<ONNX file in the model>"')
+    files: dict[str, str] = {}
+    for backend, file in onnx_raw.items():
+        if backend != "gliner":
+            raise ConfigError(f"{where} {backend}: only the gliner backend loads ONNX weights")
+        if not isinstance(file, str) or not ONNX_FILE_RE.fullmatch(file):
+            raise ConfigError(
+                f"{where} {backend} must be a .onnx file inside the model, such as"
+                ' "onnx/model.onnx" (no wildcards, no "..", no absolute path)'
+            )
+        files[str(backend)] = file
+    return tuple(sorted(files.items()))
 
 
 def _parse_deny(detection_raw: dict[str, Any]) -> tuple[DenyEntry, ...]:
@@ -1584,7 +1671,9 @@ def _deny_entry(value: str, case_sensitive: bool, detector_type: str, where: str
         raise ConfigError(f"{where}: deny value must be a non-empty string")
     if "«" in value or "»" in value:
         raise ConfigError(f"{where}: deny values may not contain guillemets («»)")
-    if not _DENY_TYPE_RE.match(detector_type):
+    # Deny placeholder types must stay inside the token grammar and leave
+    # room for the numeric suffix within MAX_PLACEHOLDER_LEN.
+    if not TYPE_NAME_RE.match(detector_type):
         raise ConfigError(
             f"{where}: type must match [A-Z][A-Z0-9_]* and be at most 20 characters,"
             f" got {detector_type!r}"
@@ -2455,6 +2544,11 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
             "language",
             "model",
             "models",
+            "labels",
+            "revisions",
+            "onnx",
+            "allow_download",
+            "allow_pickle_weights",
         },
         "[detection.ner]",
     )
@@ -2478,12 +2572,11 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     _require_keys(models_raw, set(known_backends), "[detection.ner.models]")
     models = tuple(sorted((str(k), str(v)) for k, v in models_raw.items()))
     active = backends if backends is not None else (backend_name,)
-    _confidence_backends = ("gliner", "presidio", "hf")
-    if "score_threshold" in ner_raw and not any(b in _confidence_backends for b in active):
+    if "score_threshold" in ner_raw and not any(b in CONFIDENCE_BACKENDS for b in active):
         # spaCy and stanza emit no per-entity confidences; a silently ignored
         # knob would violate the reject-unknown-keys spirit.
         raise ConfigError(
-            f"[detection.ner] score_threshold requires one of {_confidence_backends} backends"
+            f"[detection.ner] score_threshold requires one of {CONFIDENCE_BACKENDS} backends"
         )
     default_ner = NerConfig()
     ner = NerConfig(
@@ -2496,6 +2589,15 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         language=str(ner_raw.get("language", default_ner.language)),
         model=str(ner_raw["model"]) if "model" in ner_raw else None,
         models=models,
+        labels=_parse_ner_labels(ner_raw.get("labels", {})),
+        revisions=_parse_ner_revisions(ner_raw.get("revisions", {})),
+        onnx=_parse_ner_onnx(ner_raw.get("onnx", {})),
+        # Accepted whichever backends are active, like a [detection.ner.models]
+        # entry: the dashboard editor keeps these keys from the file while a
+        # save switches backends, and a refusal there could not be fixed in
+        # the form.
+        allow_download=_bool_key(ner_raw, "allow_download", False, "[detection.ner]"),
+        allow_pickle_weights=_bool_key(ner_raw, "allow_pickle_weights", False, "[detection.ner]"),
     )
     if ner.enabled and languages is not None and ner.language.lower() not in languages:
         # Loud, not silent: an NER model scanning a language the deployment

@@ -9,6 +9,7 @@ requires but that is not installed).
 """
 
 import argparse
+import importlib.metadata
 import importlib.util
 import os
 import re
@@ -45,6 +46,13 @@ _NER_EXTRAS = {
     "stanza": "stanza",
     "hf": "hf",
 }
+# Backends whose library runs on torch. Their extras pin torch>=2.6: 2.6
+# fixed CVE-2025-32434, a torch.load(weights_only=True) bypass, and GLiNER
+# loads pytorch_model.bin checkpoints that way. An environment built without
+# the extra can hold the library without torch (transformers imports fine
+# and fails only when a model loads) or with an older torch.
+_TORCH_BACKENDS = frozenset({"gliner", "stanza", "hf"})
+_TORCH_FLOOR = (2, 6)
 _ENV_OVERRIDES = ("LLM_REDACT_HOST", "LLM_REDACT_PORT", "LLM_REDACT_CONFIG")
 
 
@@ -518,18 +526,35 @@ def _check_vault_key_matches(report: _Report, config: Config) -> None:
         report.line("PASS", "vault", "fernet key matches the vault")
 
 
+def _torch_problem() -> str | None:
+    """Why the installed torch cannot run a torch backend, or None.
+
+    Reads the distribution metadata only: doctor never imports torch.
+    """
+    if importlib.util.find_spec("torch") is None:
+        return "needs torch, which is not installed"
+    try:
+        version = importlib.metadata.version("torch")
+    except importlib.metadata.PackageNotFoundError:
+        return None  # importable without metadata (a source tree): nothing to compare
+    match = re.match(r"(\d+)\.(\d+)", version)
+    if match is not None and (int(match[1]), int(match[2])) < _TORCH_FLOOR:
+        return f"needs torch >= 2.6 (CVE-2025-32434), but torch {version} is installed"
+    return None
+
+
 def _check_extras(report: _Report, config: Config) -> None:
     if config.detection.ner.enabled:
         # EVERY active backend, not just the legacy single one — a
         # multi-backend config with one missing extra fails serve at startup.
         for backend in config.detection.ner.active_backends():
+            hint = f"install it: uv sync --extra {_NER_EXTRAS[backend]}"
             if importlib.util.find_spec(_NER_MODULES[backend]) is None:
                 report.line(
-                    "FAIL",
-                    "ner",
-                    f'backend "{backend}" but its extra is not installed;'
-                    f" install it: uv sync --extra {_NER_EXTRAS[backend]}",
+                    "FAIL", "ner", f'backend "{backend}" but its extra is not installed; {hint}'
                 )
+            elif backend in _TORCH_BACKENDS and (problem := _torch_problem()) is not None:
+                report.line("FAIL", "ner", f'backend "{backend}" {problem}; {hint}')
             else:
                 report.line("PASS", "ner", f"{backend} backend importable")
     if config.otel.enabled:
@@ -653,6 +678,16 @@ def _check_licensed_features(report: _Report, config: Config) -> None:
             "licensed-features package present but its plugin did not register — paid"
             " features stay OFF (reinstall llm-redact-pro or check the startup log)",
         )
+
+
+def _check_ner_labels(report: _Report, config: Config) -> None:
+    """The NER label policy's config-only warnings (doctor never loads a
+    model): configured raw entities whose placeholder type changes in
+    2.0.0 — the same lines serve logs at startup."""
+    from llm_redact.detection.engine import ner_warnings
+
+    for warning in ner_warnings(config.detection):
+        report.line("WARN", "ner", warning)
 
 
 def _check_posture(report: _Report, config: Config) -> None:
@@ -1090,6 +1125,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_vault(report, config)
     _check_extras(report, config)
     _check_posture(report, config)
+    _check_ner_labels(report, config)
     _check_extraction(report, config)
     _check_upstream_auth(report, config)
     _check_allowed_hosts(report, config)

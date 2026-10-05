@@ -10,11 +10,13 @@ Import-lazy: this module loads only when a `stanza` backend is enabled, and
 the model load happens at proxy startup (fail fast, no first-request spike).
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
+from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
+from llm_redact.detection.stats import NerStats
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
@@ -28,24 +30,61 @@ class _PipelineLike(Protocol):
 
 class StanzaDetector:
     name = "stanza"
+    # A model runs per string: the detector plan detects it ahead of the
+    # redaction, on the NER worker thread (DetectorPlan, ner_prefetch).
+    heavy = True
 
-    def __init__(self, nlp: _PipelineLike, entities: frozenset[str], max_chars: int) -> None:
+    # Read by the never-match check (engine.build_detectors): the placeholder
+    # types this model can emit (None = unknown, e.g. zero-shot), the model
+    # for messages, and the configured entities no active backend emits.
+    emittable_types: frozenset[str] | None = None
+    model_name: str | None = None
+    unmatched_entities: tuple[str, ...] = ()
+
+    def __init__(
+        self,
+        nlp: _PipelineLike,
+        entities: frozenset[str],
+        max_chars: int,
+        *,
+        policy: LabelPolicy | None = None,
+    ) -> None:
         self._nlp = nlp
-        self._entities = entities
+        # Stanza's labels (PER in most languages, PERSON in English) become
+        # placeholder types through the label policy (labels.py).
+        self.label_policy = (
+            policy if policy is not None else LabelPolicy(entities, backend="stanza")
+        )
         self._max_chars = max_chars
+        # Coverage counters (stats.py); Stanza reads a whole string in one
+        # call.
+        self.stats = NerStats()
 
-    def detect(self, text: str) -> Iterable[Detection]:
+    def detect(self, text: str) -> list[Detection]:
+        # Parts of one name or address reported separately join into one
+        # span (labels.merge_adjacent_parts).
+        return merge_adjacent_parts(self._found(text), text)
+
+    def _found(self, text: str) -> Iterator[Detection]:
         if len(text) > self._max_chars:
+            self.stats.skipped_max_chars += 1
             return
+        self.stats.scanned_whole += 1
         for ent in self._nlp(text).ents:
-            if ent.type in self._entities:
-                yield Detection(
-                    start=int(ent.start_char),
-                    end=int(ent.end_char),
-                    detector_type=str(ent.type),
-                    value=str(ent.text),
-                    priority=NER_PRIORITY,
-                )
+            label = self.label_policy.classify(str(ent.type), self.stats)
+            if label is None:
+                continue
+            start, end = int(ent.start_char), int(ent.end_char)
+            if not 0 <= start < end <= len(text):
+                self.stats.offsets_dropped += 1
+                continue
+            yield Detection(
+                start=start,
+                end=end,
+                detector_type=label,
+                value=text[start:end],
+                priority=NER_PRIORITY,
+            )
 
 
 def build_stanza_detector(config: "NerConfig") -> StanzaDetector:
@@ -73,4 +112,11 @@ def build_stanza_detector(config: "NerConfig") -> StanzaDetector:
             f"Stanza {language!r} NER model is not available; download it:"
             f" uv run python -c \"import stanza; stanza.download('{language}')\""
         ) from exc
-    return StanzaDetector(nlp, frozenset(config.entities), config.max_chars)
+    detector = StanzaDetector(
+        nlp,
+        frozenset(config.entities),
+        config.max_chars,
+        policy=LabelPolicy(config.entities, backend="stanza", overrides=config.labels),
+    )
+    detector.model_name = f"stanza {language}"
+    return detector

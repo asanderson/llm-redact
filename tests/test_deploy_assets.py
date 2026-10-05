@@ -79,6 +79,27 @@ def test_no_alert_reads_the_end_to_end_duration() -> None:
     assert 'kind=~"audit_unavailable|vault_fault"' in storage["expr"]
 
 
+def test_ner_coverage_gap_has_panels_and_an_alert() -> None:
+    # Strings longer than [detection.ner] max_chars are never read by the
+    # models: the shipped dashboard shows every NER family and an alert
+    # pages on a sustained skip rate, with a runbook-style description.
+    dashboard = (DEPLOY / "grafana-dashboard.json").read_text()
+    for family in (
+        "llm_redact_ner_strings_total",
+        "llm_redact_ner_windows_total",
+        "llm_redact_ner_windows_truncated_total",
+        "llm_redact_ner_labels_dropped_total",
+        "llm_redact_ner_offsets_dropped_total",
+    ):
+        assert family in dashboard, family
+    rules = yaml.safe_load((DEPLOY / "prometheus-alerts.yml").read_text())["groups"][0]["rules"]
+    rule = {r["alert"]: r for r in rules}["LlmRedactNerSkippingLongStrings"]
+    assert 'llm_redact_ner_strings_total{outcome="skipped_max_chars"}' in rule["expr"]
+    assert rule["labels"]["severity"] == "warning"
+    assert rule["annotations"]["summary"]
+    assert "max_chars" in rule["annotations"]["description"]
+
+
 def test_prometheus_scrape_targets_reserved_path() -> None:
     text = (DEPLOY / "prometheus-scrape.yml").read_text()
     assert "/__llm-redact/metrics" in text
@@ -722,3 +743,19 @@ def test_the_image_ships_the_extras_its_features_need() -> None:
     dockerfile = (DEPLOY.parent / "Dockerfile").read_text()
     (default,) = re.findall(r'^ARG EXTRAS="([^"]*)"$', dockerfile, re.MULTILINE)
     assert set(re.findall(r"--extra (\S+)", default)) == {"perf", "realtime", "extract"}
+
+
+def test_the_image_license_label_is_the_declared_license() -> None:
+    # The OCI label still said MIT after the relicensing to AGPL-3.0-only;
+    # every image label must name what pyproject.toml declares.
+    root = DEPLOY.parent
+    declared = tomllib.loads((root / "pyproject.toml").read_text())["project"]["license"]
+    dockerfile = (root / "Dockerfile").read_text()
+    labels = re.findall(r'org\.opencontainers\.image\.licenses="([^"]*)"', dockerfile)
+    assert labels == [declared]
+    # The published image takes its labels from docker/metadata-action, whose
+    # default licence label is the repository's GitHub-detected SPDX id
+    # ("AGPL-3.0"), overriding the Dockerfile's: release.yml pins it.
+    release = (root / ".github" / "workflows" / "release.yml").read_text()
+    pinned = re.findall(r"org\.opencontainers\.image\.licenses=(\S+)", release)
+    assert pinned == [declared]

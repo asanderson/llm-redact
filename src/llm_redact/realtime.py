@@ -91,6 +91,8 @@ from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 from llm_redact.audit import AuditWriteError
 from llm_redact.authorization import content_facts
 from llm_redact.connections import ACCESS_CLOSE_CODE
+from llm_redact.detection.base import Detection
+from llm_redact.detection.engine import DetectorPlan
 from llm_redact.jsonwalk import (
     MAX_JSON_DEPTH,
     STRUCTURAL_KEYS,
@@ -101,6 +103,7 @@ from llm_redact.jsonwalk import (
     transform_strings,
 )
 from llm_redact.metrics import LocalRefusal
+from llm_redact.ner_prefetch import collect, prefetch
 from llm_redact.placeholders import json_floors, may_carry_tokens, token_floors
 from llm_redact.plugin_api import ContentFacts, UpstreamAuthError
 from llm_redact.providers.base import (
@@ -1795,6 +1798,11 @@ async def _relay(
     # records): read once per connection; without it no upstream frame is
     # parsed for the router.
     observe_frames = state.observes_realtime_server_frames
+    # NER off the event loop (ner_prefetch): with a model-backed detector
+    # in the connection's plan, each client frame's strings are detected
+    # by the models on the worker thread before the frame is checked and
+    # redacted.
+    prefetching = provider_config.detection and bool(ctx.redactor.plan.heavy_indices)
 
     # The access gate asked again with the model each setup frame or model
     # update names (its optional authorize_request; Gemini/Vertex Live
@@ -1849,6 +1857,22 @@ async def _relay(
             else:
                 data = message.get("bytes") or b""
             try:
+                frame_table: tuple[DetectorPlan, dict[str, dict[int, list[Detection]]]] | None
+                frame_table = None
+                if prefetching:
+                    # Before every check, so that nothing below waits: a
+                    # revocation landing meanwhile is seen right after.
+                    frame_table = await _prefetch_frame(
+                        adapter,
+                        data,
+                        ctx,
+                        require_json=require_json,
+                        limit=state.config.max_body_strings,
+                    )
+                    if relay.revoked is not None:
+                        # The frame is neither redacted nor sent under the
+                        # admission it was read with (1012 / 1008).
+                        return
                 parsed: tuple[Any, bool] | None = None
                 # Whether the gate checked a model this frame names: then it
                 # is sent as the check read it, even with detection = false.
@@ -1904,6 +1928,8 @@ async def _relay(
                 # identity (every refusal under it is final, no code).
                 frame_scope = None if require_json else state.override_scope()
                 frame_redactor = ctx.redactor.with_budget(state.config.max_body_strings)
+                if frame_table is not None:
+                    frame_redactor = frame_redactor.with_precomputed(frame_table[1], frame_table[0])
                 if frame_scope is not None:
                     frame_redactor = frame_redactor.with_overrides(frame_scope)
                 frame_ctx = RequestContext(
@@ -2265,6 +2291,36 @@ def _grown(after: Mapping[str, int], before: Mapping[str, int]) -> dict[str, int
         for name, count in after.items()
         if count > before.get(name, 0)
     }
+
+
+async def _prefetch_frame(
+    adapter: WsAdapter,
+    data: str | bytes,
+    ctx: "RequestContext",
+    *,
+    require_json: bool,
+    limit: int,
+) -> "tuple[DetectorPlan, dict[str, dict[int, list[Detection]]]] | None":
+    """The connection redactor's plan and its heavy detectors' results for
+    every string this client frame's redaction will scan (the adapter's own
+    ``redact_message`` run with a collector, which parses the frame itself)
+    — None when the collecting pass failed (the frame is then detected
+    inline, and refused by its real pass if it must be)."""
+    from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
+
+    plan = ctx.redactor.plan
+    strings = collect(
+        lambda collector: adapter.redact_message(
+            data,
+            RequestContext(ctx.session_id, ctx.vault, collector, ctx.rehydrator),
+            inject_note=False,
+            require_json=require_json,
+        ),
+        limit=limit,
+    )
+    if strings is None:
+        return None
+    return plan, await prefetch(plan, strings)
 
 
 async def _content_allowed(

@@ -142,6 +142,12 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+          # metadata-action labels the image with the repository's GitHub-detected
+          # license (pro: NOASSERTION, core: AGPL-3.0), overriding the Dockerfile
+          # LABEL; pin it to pyproject's `license` (tests/test_license_metadata.py /
+          # test_deploy_assets.py check it).
+          labels: |
+            org.opencontainers.image.licenses=AGPL-3.0-only
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:

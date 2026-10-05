@@ -52,6 +52,31 @@ def format_placeholder(type_name: str, n: int) -> str:
     return f"«{type_name}_{n:03d}»"
 
 
+# A placeholder type a user names in the config (a deny string's `type`, a
+# `[detection.ner.labels]` target): an uppercase letter, then uppercase
+# letters, digits and `_`, at most 20 characters — well inside what a token
+# can carry (MAX_TYPE_NAME_LEN below), so every number the vault can issue
+# for it stays within MAX_PLACEHOLDER_LEN.
+TYPE_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{0,19}\Z")
+
+# The longest placeholder TYPE a token can carry: every token the vault can
+# issue for it (up to «TYPE_999999999») must fit MAX_PLACEHOLDER_LEN, the
+# bound on streaming holdback and the fuzzy grammar's reach. 28 characters.
+MAX_TYPE_NAME_LEN = MAX_PLACEHOLDER_LEN - len(format_placeholder("", MAX_TOKEN_NUMBER))
+
+_PLACEHOLDER_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
+
+
+def is_placeholder_type(name: str) -> bool:
+    """Whether ``name`` fits the placeholder grammar as a token's TYPE: an
+    uppercase letter, then uppercase letters, digits and ``_``, at most
+    MAX_TYPE_NAME_LEN characters — so every issued token matches
+    PLACEHOLDER_RE and stays restorable. A type that does not fit (a model
+    label such as ``3D_MODEL``) must never be issued: its tokens could not
+    be rehydrated."""
+    return len(name) <= MAX_TYPE_NAME_LEN and _PLACEHOLDER_TYPE_RE.match(name) is not None
+
+
 def canonicalize(matched: str) -> str | None:
     """Reduce a fuzzy-grammar match to canonical «TYPE_NNN» form.
 

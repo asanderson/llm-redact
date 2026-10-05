@@ -74,3 +74,16 @@ def test_fp_scan_never_carries_matched_text(tmp_path: Path) -> None:
     results = scan_fp_corpus(tmp_path)
     assert "AKIAIOSFODNN7EXAMPLE" not in repr(results)
     assert "AKIAIOSFODNN7EXAMPLE" not in to_markdown_table(results)
+
+
+def test_fp_corpus_readme_lists_every_file() -> None:
+    # Provenance is part of the corpus's contract: every vendored or
+    # authored file has a row in the README's contents table.
+    root = Path(__file__).resolve().parent.parent / "bench" / "fp_corpus"
+    readme = (root / "README.md").read_text()
+    unlisted = [
+        p.name
+        for p in sorted(root.iterdir())
+        if p.name not in ("README.md", "MANIFEST.toml") and f"| `{p.name}` |" not in readme
+    ]
+    assert unlisted == []

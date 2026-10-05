@@ -65,7 +65,8 @@ reference and enforcement internals ship with it.
 
 | Doc | What it covers |
 | --- | --- |
-| [assurance.md](assurance.md) | Proving the suites have teeth: mutation testing, property tests, differential fuzzing, the complexity-coverage gate. |
+| [assurance.md](assurance.md) | Proving the suites have teeth: mutation testing, property tests, differential fuzzing, the complexity-coverage gate, and how the NER bench's statistical gates differ from the deterministic rule gate. |
+| [ner-bench.md](ner-bench.md) | The NER bench: scoring regex rules plus NER models on labelled datasets — per-type exact and overlap-typed scores, character-leak and over-redaction rates, the structured-regression check, the statistical thresholds gate and the error-dump guard. |
 | [dependencies.md](dependencies.md) | What ships and why: the three runtime deps, every extra, and the vendored-code policy (pinned to pyproject by test). |
 | [SBOM.md](SBOM.md) | The software bill of materials: every package by install path — runtime closure, extras, dev toolchain — and how to verify the per-release CycloneDX artifact (pinned to pyproject by test). |
 | [versioning.md](versioning.md) | SemVer policy: what counts as breaking, deprecation windows, release verification. |

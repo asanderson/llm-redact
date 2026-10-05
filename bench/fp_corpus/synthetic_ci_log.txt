@@ -1,0 +1,60 @@
+2025-03-04T10:12:03.1182934Z ##[group]Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+2025-03-04T10:12:03.1184521Z with:
+2025-03-04T10:12:03.1185002Z   persist-credentials: false
+2025-03-04T10:12:03.1185417Z   fetch-depth: 1
+2025-03-04T10:12:03.1186203Z ##[endgroup]
+2025-03-04T10:12:03.8810447Z Syncing repository: example/billing-service
+2025-03-04T10:12:04.2271390Z Determining the checkout info
+2025-03-04T10:12:04.9903125Z Checking out the ref
+2025-03-04T10:12:05.0114872Z HEAD is now at 3f9c2ab Fix rounding in InvoiceBuilder.total
+2025-03-04T10:12:05.2207611Z ##[group]Run astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc
+2025-03-04T10:12:05.6631508Z Downloading uv from "https://github.com/astral-sh/uv/releases/download/0.5.4/uv-x86_64-unknown-linux-gnu.tar.gz" ...
+2025-03-04T10:12:06.4402918Z Trying to restore uv cache from GitHub Actions cache with key: setup-uv-1-x86_64-unknown-linux-gnu-3.12-9f2c4e81b07d36a5e1f8c9b2a4d6e0f1c3b5a7d9e2f4a6c8b0d1e3f5a7c9b2d4
+2025-03-04T10:12:07.1023377Z Cache restored successfully
+2025-03-04T10:12:07.1031846Z ##[endgroup]
+2025-03-04T10:12:07.3348870Z ##[group]Run uv sync --frozen --group dev
+2025-03-04T10:12:07.8817265Z Using CPython 3.12.7 interpreter at: /opt/hostedtoolcache/Python/3.12.7/x64/bin/python3
+2025-03-04T10:12:07.8819340Z Creating virtual environment at: .venv
+2025-03-04T10:12:09.4405168Z Resolved 87 packages in 12ms
+2025-03-04T10:12:11.9972034Z Prepared 84 packages in 2.51s
+2025-03-04T10:12:12.6640118Z Installed 84 packages in 659ms
+2025-03-04T10:12:12.6642291Z  + alembic==1.13.2
+2025-03-04T10:12:12.6643007Z  + celery==5.4.0
+2025-03-04T10:12:12.6643815Z  + kombu==5.4.2
+2025-03-04T10:12:12.6644402Z  + pytest==8.3.3
+2025-03-04T10:12:12.6644998Z  + sqlalchemy==2.0.35
+2025-03-04T10:12:12.6645561Z ##[endgroup]
+2025-03-04T10:12:12.9120044Z ##[group]Run uv run pytest -q --junitxml=reports/junit.xml
+2025-03-04T10:12:19.0071925Z ........................................................................ [ 31%]
+2025-03-04T10:12:24.5503311Z ........................................................................ [ 63%]
+2025-03-04T10:12:29.8817742Z ................................................s....................... [ 95%]
+2025-03-04T10:12:30.6620953Z ..........                                                               [100%]
+2025-03-04T10:12:30.6630481Z - generated xml file: /home/runner/work/billing-service/billing-service/reports/junit.xml -
+2025-03-04T10:12:30.6631102Z 225 passed, 1 skipped in 17.66s
+2025-03-04T10:12:30.7012583Z ##[endgroup]
+2025-03-04T10:12:30.9910437Z ##[group]Run docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75
+2025-03-04T10:12:31.4407216Z #0 building with "builder-4c1f7d" instance using docker-container driver
+2025-03-04T10:12:31.9902833Z #1 [internal] load build definition from Dockerfile
+2025-03-04T10:12:31.9903311Z #1 transferring dockerfile: 1.83kB done
+2025-03-04T10:12:32.7714502Z #2 [internal] load metadata for docker.io/library/python:3.12-slim
+2025-03-04T10:12:33.6621097Z #3 [base 1/5] FROM docker.io/library/python:3.12-slim@sha256:2b0079146a74e23bb4ae8f6f8d1b4c8e7f1b31eef2d4a4b1d9c8f7a6e5d4c3b2
+2025-03-04T10:12:33.6622415Z #3 resolve docker.io/library/python:3.12-slim@sha256:2b0079146a74e23bb4ae8f6f8d1b4c8e7f1b31eef2d4a4b1d9c8f7a6e5d4c3b2 0.0s done
+2025-03-04T10:12:41.1192870Z #4 [base 2/5] RUN pip install --no-cache-dir uv==0.5.4
+2025-03-04T10:12:44.7756613Z #4 DONE 3.6s
+2025-03-04T10:12:44.9981172Z #5 [base 3/5] COPY pyproject.toml uv.lock ./
+2025-03-04T10:12:45.0013859Z #5 DONE 0.0s
+2025-03-04T10:12:58.4418833Z #6 [base 4/5] RUN uv sync --frozen --no-dev
+2025-03-04T10:13:07.2209914Z #6 DONE 8.8s
+2025-03-04T10:13:07.8831195Z #7 exporting to image
+2025-03-04T10:13:08.1102645Z #7 writing image sha256:7c1e9d3b5a8f2e4c6d0b9a1f3e5c7d9b2a4f6e8c0d1b3a5f7e9c2d4b6a8f0e1c done
+2025-03-04T10:13:08.1104110Z #7 naming to ghcr.io/example/billing-service:3f9c2ab done
+2025-03-04T10:13:08.1105922Z #7 DONE 0.4s
+2025-03-04T10:13:08.2210871Z ##[endgroup]
+2025-03-04T10:13:08.4416290Z ##[group]Run jenkins-trigger --job billing-deploy --param ENV=staging
+2025-03-04T10:13:09.0029913Z Triggered job billing-deploy #1187 on the Jenkins controller
+2025-03-04T10:13:09.0031542Z Waiting for build #1187 (poll every 10s, timeout 15m)
+2025-03-04T10:13:59.7712044Z Build #1187 finished: SUCCESS (duration 49.3s)
+2025-03-04T10:13:59.7820148Z ##[endgroup]
+2025-03-04T10:14:00.1105813Z ##[warning]Node.js 16 actions are deprecated. Please update the following actions to use Node.js 20: example/legacy-annotate@v1
+2025-03-04T10:14:00.4419822Z Post job cleanup.
+2025-03-04T10:14:00.9930576Z Cleaning up orphan processes

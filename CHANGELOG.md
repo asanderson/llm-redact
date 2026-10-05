@@ -56,6 +56,52 @@ and tags `vX.Y.Z`.
   or drop it (`TIME = ""`). Keys are normalized like every model label; values use the
   deny-string type grammar. An override applies to `entities` too, so `PER = "PER"` keeps
   `entities = ["PER"]` emitting `PER` once raw entities fold in 2.0.0.
+- The NER bench, `python -m llm_redact.bench.ner` (docs/ner-bench.md): scores the regex
+  rules plus the configured NER backends on a labelled dataset — per-type exact and
+  overlap-typed precision, recall and F1, the character-leak and over-redaction rates, and
+  a structured-regression check (a model must not cost a regex rule its exact match) —
+  and with `--check` gates the result against `bench/ner_thresholds.toml` (recall floors,
+  leak and over-redaction ceilings per config and dataset; a run with nothing recorded
+  fails). Reports carry counts only; `--dump-errors` writes the text of misses to a
+  mode-0600 file outside any git work tree and refuses real-data datasets unless
+  `--allow-real-data-dump` is given. The deterministic `python -m llm_redact.bench --check`
+  gate is unchanged.
+- The NER bench's default dataset, `synthetic`: 1,200 samples generated from the seed at
+  run time (never committed) in agent-traffic shapes — prose, chat, JSON tool results,
+  code comments, log lines, git output — labelled with names, street addresses, dates of
+  birth, usernames and account numbers (plus emails and phone numbers for the
+  structured-regression check), and hard negatives with no personal data (UUIDs, commit
+  hashes, identifiers named after tools such as Jenkins, paths, stack traces,
+  timestamps).
+- NER false-positive ceilings: `python -m llm_redact.bench.ner --fp-corpus bench/fp_corpus
+  --check` counts the detections NER adds to every negatives-corpus file (scanned in
+  message-sized chunks) and gates them against per-file, per-type maximum counts and a
+  hits-per-100-KB ceiling in `bench/ner_ceilings.toml`. The corpus gains four
+  agent-traffic files with no personal data (tool results as JSON, git output, a CI log, a
+  Python module), pinned to zero regex detections in its manifest.
+- Published datasets for the NER bench: `--dataset openpii` (OpenPII 1.5M, CC BY 4.0,
+  Ai4Privacy / Ai Suisse SA; `--language` filters it) and `--dataset nemotron`
+  (Nemotron-PII, CC BY 4.0, NVIDIA), downloaded at run time at a pinned revision into
+  `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets` (never inside a git work tree,
+  never committed) and used for evaluation only. A new `bench-data` extra
+  (`huggingface_hub`, `pyarrow>=14.0.1`) carries the download and parquet reading. Rows
+  whose gold spans do not match their text are skipped and counted; every report
+  repeats the dataset's license and attribution, and `--list-datasets` lists them.
+- More NER bench datasets: `privy` (beki/privy, MIT: PII inside JSON, SQL, HTML and XML
+  payloads; values it marks non-PII count as over-redaction), `pupa` (PUPA, MIT: 901 real
+  user prompts with LLM-extracted PII units, scored by the leak metric only; real data)
+  and `mapa` (MAPA, CC BY 4.0: human-annotated EUR-Lex legal text in 21 languages,
+  `--language` filters it; real data). Empty gold spans are dropped rather than failing
+  their row.
+- `--dataset creddata --data-dir DIR` measures the secret rules on real code: a local
+  CredData checkout (Samsung; labels Apache-2.0, code under its projects' licenses),
+  prepared with CredData's own download script and never vendored; each labelled true
+  credential is scored by the leak metric, lines of false look-alikes by over-redaction.
+- `python -m llm_redact.bench.ner --latency` times NER: p50/p95 per string at 50, 500,
+  2,000 and 10,000 characters for each NER backend and model and for the full pipeline,
+  plus a 20,000-string body redacted end to end; the report names the CPU model.
+  Report-only unless `[<config>.latency]` ceilings are recorded in
+  `bench/ner_thresholds.toml`.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

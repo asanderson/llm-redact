@@ -210,6 +210,33 @@ and each carried token the session did not own stays unissued.
 | Caller-keyed maps | A value under ANY key — every skip name included — of `metadata` (OpenAI/Azure batches, chat, Responses, Realtime), Bedrock `requestMetadata`, `prompt.variables` and `:predict` `instances`/`parameters` is redacted end to end (signed redacted under identity auth) and restored in the echoes | `test_caller_keyed_maps.py` |
 | Streaming channels | `RehydratorPool` channels stay isolated under interleaving: each channel's streamed output equals the whole-text rehydration of just its fragments | `test_properties.py` |
 
+## Statistical gates for NER models
+
+The detection bench's gate, `python -m llm_redact.bench --check`, is
+deterministic: every rule must find every one of its own generated
+positives (recall == 1.0 per rule) and the vendored false-positive corpus
+must produce exactly the counts its manifest pins. That bar fits a rule —
+it either matches its grammar or it is broken — but not a model, whose
+output on text it has never seen is a rate, not a guarantee.
+
+NER models are therefore measured by a separate bench,
+`python -m llm_redact.bench.ner` ([ner-bench.md](ner-bench.md)), with
+statistical gates kept in `bench/ner_thresholds.toml`: recall FLOORS per
+type, CEILINGS on the character-leak and over-redaction rates, keyed by
+configuration and dataset, each recorded from a measured baseline minus a
+tolerance. Two properties keep it honest:
+
+- a run with no recorded entry fails, and so does a floor on a type the
+  run holds no examples of — a gate cannot pass by measuring nothing;
+- the structured-regression check is exact even here: a span of a regex
+  rule's type that the rules alone find exactly must still be found exactly
+  with NER on (default allowance 0), because a model drawing a wider span
+  would cost the rule its match through overlap resolution.
+
+Neither gate replaces the other: the deterministic gate stays unchanged and
+runs without any model; the statistical one needs a model and states what it
+measured.
+
 ## Reproducible builds
 
 Two builds of the same tree under a pinned `SOURCE_DATE_EPOCH` produce

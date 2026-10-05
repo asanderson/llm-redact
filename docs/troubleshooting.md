@@ -475,3 +475,122 @@ listed there. If posture is clean, confirm the tool actually points at the
 proxy: `llm-redact run -- <tool>` injects the variable for you, and the
 recent-request feed (`GET /__llm-redact/recent`, or `/llm-redact:recent`
 in an agent) shows whether traffic is arriving at all.
+
+## NER bench: "the NER bench needs [detection.ner] enabled = true in the config it scores"
+
+`python -m llm_redact.bench.ner --config PATH` measures NER models, so the
+config it scores must enable them (`[detection.ner] enabled = true`, with
+the backends and entities to measure). The regex rules alone are measured by
+`python -m llm_redact.bench`. See [ner-bench.md](ner-bench.md).
+
+## NER bench: "no thresholds for [CONFIG.DATASET] in bench/ner_thresholds.toml; record a baseline from this run's report"
+
+`--check` found no recorded floors and ceilings for this configuration and
+dataset; a run with nothing recorded fails rather than passing unmeasured.
+Record a baseline as [ner-bench.md](ner-bench.md#recording-a-baseline)
+describes, or drop `--check` to only print the report.
+
+## NER bench: "recall floor for TYPE cannot be checked: the run holds no gold spans of TYPE"
+
+The thresholds entry sets a floor for a type the scored samples never
+contain (a `--limit` too small, or a dataset without that type). Raise
+`--limit`, or remove the floor from that dataset's entry.
+
+## NER bench: "--dump-errors must name a file outside any git work tree"
+
+`--dump-errors` writes dataset text, so it refuses a path inside a git
+repository, where the file could be committed. Write it under `/tmp` or your
+home directory, and delete it when done.
+
+## NER bench: "dataset 'NAME' holds real data; --dump-errors would write its text to disk: add --allow-real-data-dump to confirm"
+
+The dataset holds real text (real prompts, code or documents). Its errors
+are written only when you confirm with `--allow-real-data-dump`; the file is
+private (mode 0600) and belongs outside every repository.
+
+## NER bench: "no NER ceilings for [CONFIG] in bench/ner_ceilings.toml; record a baseline from this run's report"
+
+`--fp-corpus … --check` found no section for this configuration in the
+ceilings file; a run with nothing recorded fails. Run it without `--check`,
+read the per-file counts, and record a section as
+[ner-bench.md](ner-bench.md#false-positives-on-agent-traffic---fp-corpus)
+describes.
+
+## NER bench: "FILE: TYPE found N, ceiling M (lines …)" / "bench/ner_ceilings.toml [CONFIG] names FILE, which is not in the corpus"
+
+The model adds more detections of that type to that negatives file than
+its recorded ceiling allows (a file or type with no ceiling allows none):
+read the lines named, decide whether the hits are legitimate (raise the
+ceiling, with the reason in the commit) or a regression (fix the
+configuration). The second message names a ceiling for a file that no
+longer exists: remove the stale entry.
+
+## NER bench: "downloading a dataset needs huggingface_hub; install the bench-data extra: uv sync --extra bench-data" / "reading a parquet dataset needs pyarrow; …"
+
+Published datasets (`openpii`, `nemotron`, …) are fetched and read with the
+`bench-data` extra's packages, which a default install does not carry. Run
+`uv sync --extra bench-data` (or `pip install 'llm-redact-proxy[bench-data]'`)
+and retry. The generated datasets (`synthetic`, `rules`) need neither.
+
+## NER bench: "could not download FILE of REPO at revision REVISION: ERRORTYPE"
+
+The bench asked the Hugging Face Hub for one file of a dataset at its pinned
+revision and the download failed (no network, a proxy refusing the host, a
+full disk). Files already in the cache directory are reused, so a machine
+without network access can run a dataset whose cache was filled elsewhere:
+copy `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets` across, or
+point `--cache-dir` at the copy.
+
+## NER bench: "--cache-dir must be outside any git work tree"
+
+Downloaded datasets are never committed, so the bench refuses a cache inside
+a git repository. Use the default cache or a directory outside the
+repository.
+
+## NER bench: "--language: dataset 'NAME' has no language to filter on"
+
+`--language` keeps the rows of one language and works only for datasets that
+record one (`--list-datasets` marks them). Drop it for the others.
+
+## NER bench: "privy: cannot read privy-dataset.zip: …" / "privy: a data file …" / "PUPA: cannot read FILE: …"
+
+A downloaded dataset file is not what its pinned revision holds: a truncated
+download, a damaged cache entry or a file edited by hand. Delete the
+dataset's entry under the cache directory
+(`${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets`, or your
+`--cache-dir`) and run again to download it afresh.
+
+## NER bench: "dataset 'creddata' reads a local checkout: pass --data-dir" / "CredData: --data-dir must name a CredData checkout with a meta/ directory"
+
+CredData is not downloaded by the bench: clone it, run its own
+`download_data.py`, and pass the checkout with `--data-dir`
+([ner-bench.md](ner-bench.md#creddata)). `--data-dir` must point at the
+CredData directory itself (the one holding `meta/` and, after the
+download, `data/`). Rows whose files the download did not produce are
+skipped and counted.
+
+## NER bench: "--data-dir applies only to datasets read from a local checkout"
+
+Only `creddata` reads a local checkout; the other datasets are generated or
+downloaded. Drop `--data-dir`, or add `--dataset creddata`.
+
+## NER bench: "CredData: cannot read meta/FILE.csv: …"
+
+A CredData metadata file lacks the columns the adapter reads (`FilePath`,
+`LineStart`, `LineEnd`, `GroundTruth`, `ValueStart`, `ValueEnd`) or is not
+valid UTF-8 CSV — a checkout of a CredData version whose format changed, or
+a damaged file. Check out the commit named in
+[ner-bench.md](ner-bench.md#creddata).
+
+## NER bench: "--fp-corpus and --latency are separate runs; pick one" / "--dump-errors applies to dataset and --fp-corpus runs"
+
+`--latency` times NER; it scores nothing and dumps nothing. Run it on its
+own, and run `--fp-corpus` or a dataset (with `--dump-errors` if wanted)
+separately.
+
+## NER bench: "p50_ms at N characters: X ms is above the ceiling Y ms"
+
+The full pipeline's median per-string time crossed the ceiling recorded in
+`[CONFIG.latency]` of the thresholds file. Latency depends on the CPU the
+report names: compare like with like before treating it as a regression,
+and raise the ceiling (with the CPU in its `note`) when the machine changed.

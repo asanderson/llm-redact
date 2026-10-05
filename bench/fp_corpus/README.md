@@ -29,6 +29,10 @@ manifest in the same commit and explain why.
 | `synthetic_bigint.log` | Authored for this repo | Part of llm-redact (AGPL-3.0-only) |
 | `synthetic_natids_r10.log` | Authored for this repo | Part of llm-redact (AGPL-3.0-only) |
 | `synthetic_agentstack.env` | Authored for this repo | Part of llm-redact (AGPL-3.0-only) |
+| `synthetic_agent_tool_results.json` | Authored for this repo | Part of llm-redact (AGPL-3.0-only) |
+| `synthetic_git_log.txt` | Authored for this repo | Part of llm-redact (AGPL-3.0-only) |
+| `synthetic_ci_log.txt` | Authored for this repo | Part of llm-redact (AGPL-3.0-only) |
+| `synthetic_python_module.py` | Authored for this repo | Part of llm-redact (AGPL-3.0-only) |
 
 The synthetic files deliberately probe the noisy rules: UUIDs and git SHAs
 against the hex rules, ten-digit invoice ids and truncated numbers against
@@ -42,5 +46,16 @@ the card and phone grammars, national-id near misses whose grammar is valid
 but whose checksum is not, agent-tool key lookalikes, and runbook prose
 quoting deliberately broken vendor-token specimens. Each probe's intent is
 commented inline.
+
+The agent-traffic files (`synthetic_agent_tool_results.json`,
+`synthetic_git_log.txt`, `synthetic_ci_log.txt`,
+`synthetic_python_module.py`) look like what a coding agent sends —
+tool results, git and CI output, a source module — and contain no personal
+data: commits are made by bots, and the names that appear are tools that
+are also surnames (Jenkins, Jackson, Hudson). They are the NER bench's
+negatives too: `python -m llm_redact.bench.ner --fp-corpus bench/fp_corpus`
+counts what an NER model adds on every file here against the ceilings in
+`bench/ner_ceilings.toml` (kept outside this directory, which holds only
+scanned files).
 
 This directory ships in the repository only — it is not part of the wheel.

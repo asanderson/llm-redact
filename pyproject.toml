@@ -74,6 +74,13 @@ realtime = ["websockets>=15.0"]
 # "pdf" refuses to start with this install hint; the OOXML/ODF, markup and
 # RTF readers are stdlib.
 extract = ["pypdf>=5"]
+# The NER bench's published datasets (python -m llm_redact.bench.ner
+# --dataset openpii|nemotron|...; docs/ner-bench.md): huggingface_hub fetches
+# them at a pinned revision, pyarrow reads the parquet ones. Bench only —
+# never imported by the proxy. pyarrow 14.0.1 fixed CVE-2023-47248 (code
+# execution when reading an untrusted IPC/Parquet file), and a downloaded
+# dataset is exactly such a file.
+bench-data = ["pyarrow>=14.0.1", "huggingface_hub>=0.23"]
 # OpenTelemetry export ([otel] enabled = true): metadata-only traces and
 # counters over OTLP/HTTP. Extras never touch the request path.
 otel = [
@@ -170,6 +177,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "transformers.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pyarrow.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "huggingface_hub.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

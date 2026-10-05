@@ -12,6 +12,27 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- Optional access-gate seam `authorize_content(request, content: plugin_api.ContentFacts)`
+  (sensitivity-aware authorization; the policy is llm-redact-pro's): asked once for every
+  forwarded HTTP request AFTER its redaction and BEFORE the `[audit] required` START row,
+  the upstream authorizer, a routed plan's `begin()` and any upstream contact, with the
+  same `AuthorizationRequest` `authorize_request` got (built alike without it) and the
+  request's own value types and counts — `scanned` (False for pass-through, `detection =
+  false` and body-less requests), `detected`, `warned`, `unscanned_parts`, `overridden`;
+  never a value or a placeholder. On realtime: per client frame, after its redaction and
+  before its send (the frame's own counts; the latest model-checked request on a Live or
+  `session.update`-checked connection). A refusal is a recorded 403 / close 1008 (kind
+  `authorization`); a fault, timeout or nonsense answer refuses with the core's text
+  (bookkeeping stage `authorization`). A refused request's placeholders stay in the vault;
+  a one-time refusal override it used is handed back. `/status` `access.authorizes_content`.
+- Optional access-gate seams `reload(config)` and `validate_reload(candidate)`: every applied
+  configuration reload (SIGHUP and a dashboard edit, even one that changed nothing) calls
+  `reload` once, after the swap is live and stale realtime relays were revoked, so the gate
+  re-reads its own policy files. A reason (the gate kept its previous policy) is logged at
+  WARNING (escaped, cut to 200 characters), a fault or nonsense answer by type; both count
+  under the new bookkeeping stage `gate_reload` and never fail the reload. The dashboard
+  editor's dry run (`validate_config`) asks `validate_reload` and refuses an edit the gate
+  refuses (or whose check fails). `/status` `access.reloads_policy`.
 - `plugin_api.AuthorizationRequest.model_in_frame` (default False): a Gemini or Vertex Live
   upgrade, whose model the setup frame names, is asked about with `model=None,
   model_in_frame=True`; with the access gate's `authorize_request`, the core then asks again

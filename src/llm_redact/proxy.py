@@ -64,7 +64,12 @@ from llm_redact.audit import (
     WriteAheadAudit,
 )
 from llm_redact.audit_s3 import AzureAuditSink, S3AuditSink
-from llm_redact.authorization import GateAuthorization, OverlayBuild, OverlayBuilds
+from llm_redact.authorization import (
+    GateAuthorization,
+    OverlayBuild,
+    OverlayBuilds,
+    content_facts,
+)
 from llm_redact.config import (
     DEFAULT_MAP_WRITE_WAIT_SECONDS,
     RDBMS_BACKENDS,
@@ -127,6 +132,7 @@ from llm_redact.plugin_api import (
     AccessGate,
     Admission,
     AuthorizationRequest,
+    ContentFacts,
     Dashboard,
     HopRequest,
     HopResult,
@@ -1704,7 +1710,8 @@ class ProxyState:
         inject_system_note, max_body_bytes, provider upstreams. Requires
         restart (kept with a warning): vault, audit, host, port. An open
         realtime connection whose provider settings, upstream authorizer or
-        detection policy changed is closed 1012 (reconnect).
+        detection policy changed is closed 1012 (reconnect). The access
+        gate's optional ``reload`` then re-reads its own policy.
         """
         try:
             fresh = apply_env_overrides(load_config(self.config_path))
@@ -1836,6 +1843,12 @@ class ProxyState:
         # anything displaced is closed — a relay whose admission the swap
         # changed forwards no frame it reads from here on, and closes 1012.
         self._revoke_stale_relays()
+        # The access gate's own policy (its optional reload: the files its
+        # restart-only section names), re-read against the configuration
+        # now live — on every apply, even one that changed nothing. Never
+        # raises: a gate that keeps its previous policy, or fails, is
+        # logged and counted (bookkeeping stage gate_reload).
+        self.authorization.reload_policy(effective)
         if displaced_router is not None:
             displaced_router.close()
         _close_upstream_auths(displaced_auths)
@@ -1897,6 +1910,9 @@ class ProxyState:
         # network I/O), so a missing package or an unresolvable region is a
         # 400 in the editor rather than a failed apply after the write.
         _close_upstream_auths(_build_upstream_auths(effective.providers))
+        # The access gate's own dry run of its policy (its optional
+        # validate_reload): a refusal is a ConfigError like any above.
+        self.authorization.validate_policy(candidate)
 
     def preview(self, text: str) -> dict[str, Any]:
         """Run the LIVE detectors/allowlist/modes over ``text`` on a
@@ -3148,10 +3164,14 @@ async def _handle_local(
                 # key itself. Warnings surface invalid-key-fell-to-Free and
                 # the expiry grace window (never silent).
                 # The access gate's optional authorization seams: whether it
-                # authorizes requests and hands out detection overlays.
+                # authorizes requests, hands out detection overlays,
+                # authorizes what the redaction found, and reloads its own
+                # policy with the configuration.
                 "access": {
                     "authorizes_requests": state.authorization.authorizes,
                     "detection_overlays": state.authorization.overlays,
+                    "authorizes_content": state.authorization.checks_content,
+                    "reloads_policy": state.authorization.reloads,
                 },
                 # The access gate's own block (llm-redact-pro); without one,
                 # no registry and nothing enforced.
@@ -5205,8 +5225,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # given only once the access gate's request authorization allows
             # it, like any request (nothing read, nothing forwarded).
             if state.authorization.authorizes:
-                refused = await _authorization_check(
-                    state,
+                local_asked = _authorization_request(
                     request,
                     adapter,
                     kind,
@@ -5216,6 +5235,14 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                     if adapter is not None
                     else None,
                     identity=upstream_auth is not None,
+                )
+                refused = await _authorization_check(
+                    state,
+                    request,
+                    local_asked,
+                    adapter,
+                    provider_name=provider_name,
+                    path=path,
                     started=started,
                 )
                 if refused is not None:
@@ -5259,6 +5286,10 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 started=started,
             )
 
+    # This request's facts as the access gate is asked about it — its
+    # authorize_request and, after redaction, its authorize_content get the
+    # SAME object. Built only when the gate has either member.
+    asked: AuthorizationRequest | None = None
     # The body caps this request is held to, read once like its provider
     # config: a reload while the body arrives changes neither.
     max_body_bytes = state.config.max_body_bytes
@@ -5281,7 +5312,17 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             )
         body_bytes = capped
     else:
-        if state.authorization.authorizes:
+        if state.authorization.authorizes or state.authorization.checks_content:
+            asked = _authorization_request(
+                request,
+                None,
+                kind,
+                provider_name=provider_name,
+                path=path,
+                model=None,
+                identity=False,
+            )
+        if asked is not None and state.authorization.authorizes:
             # Pass-through: its facts are all known before the body (none of
             # it is read for them, no model), so the access gate decides
             # before the unbounded read — and with the client's own credential
@@ -5290,12 +5331,10 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             refused = await _authorization_check(
                 state,
                 request,
+                asked,
                 None,
-                kind,
                 provider_name=provider_name,
                 path=path,
-                model=None,
-                identity=False,
                 started=started,
             )
             if refused is not None:
@@ -5529,9 +5568,8 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     # read, a local answer before it was given.) Without the member: one
     # attribute test, no await.
     authorization = state.authorization
-    if authorization.authorizes and adapter is not None:
-        refused = await _authorization_check(
-            state,
+    if adapter is not None and (authorization.authorizes or authorization.checks_content):
+        asked = _authorization_request(
             request,
             adapter,
             kind,
@@ -5539,6 +5577,16 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             path=path,
             model=adapter.request_model(request.method, path, parsed),
             identity=proxy_credential,
+        )
+    if authorization.authorizes and adapter is not None:
+        assert asked is not None  # built above
+        refused = await _authorization_check(
+            state,
+            request,
+            asked,
+            adapter,
+            provider_name=provider_name,
+            path=path,
             started=started,
         )
         if refused is not None:
@@ -5694,6 +5742,11 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     # The decoded form of `outbound` (None for pass-through / non-JSON
     # bodies): the routed path applies per-hop body rewrites to it.
     outbound_obj: dict[str, Any] | None = parsed if isinstance(parsed, dict) else None
+    # Whether the redaction below read the request's content (the access
+    # gate's ContentFacts.scanned), and the binary upload parts it forwards
+    # unscanned (counted once the upload was read in full).
+    scanned = False
+    binary_forwarded: list[int] = []
     if adapter is not None and detection_off:
         # [providers.NAME] detection = false: the deliberate off-switch.
         # The request is forwarded byte-identical — no detection, no deny
@@ -5776,6 +5829,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 raced_message(scope), adapter, "one-time override", _raced_kind(scope)
             )
         outbound_obj = prepared
+        scanned = True
         # No-op short-circuit: redaction increments detection_counts, and note
         # injection is gated on a redaction actually happening (base
         # prepare_request), so an unchanged count means the prepared body is
@@ -5805,7 +5859,6 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # it read) — unless an upload inspector read it as text that
             # scanned clean (below). Counted once the upload was read in
             # full.
-            binary_forwarded: list[int] = []
             forward_binary = (
                 binary_forwarded.append
                 if not proxy_credential and state.config.detection.binary_uploads == "forward"
@@ -6023,6 +6076,7 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 return refused_response(
                     raced_message(scope), adapter, "one-time override", _raced_kind(scope)
                 )
+            scanned = True
             if rewritten is not None:
                 outbound = rewritten
             elif checked_upload is not None:
@@ -6032,6 +6086,36 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     # Same diff trick for warn-mode hits: attribute forwarded-unredacted
     # values to THIS request, not just the process-lifetime aggregate.
     new_warned = _count_delta(state.warn_counts, window.warned)
+
+    if authorization.checks_content:
+        # The access gate's optional authorize_content on what the redaction
+        # found: its facts are THIS request's, taken above with no await
+        # since the redaction (another request's counts never leak in), and
+        # asked before the audit START row, the upstream authorizer, a
+        # routed plan's begin() and any upstream contact. A refusal hands a
+        # one-time override it used back (handle()'s refused settlement).
+        assert asked is not None  # built for every forwarded request
+        refused = await _content_check(
+            state,
+            request,
+            asked,
+            content_facts(
+                scanned=scanned,
+                detected=new_counts if scanned else None,
+                warned=new_warned if scanned else None,
+                unscanned_parts=binary_forwarded[0] if binary_forwarded else 0,
+                overridden=_COMMITTED_OVERRIDE.get() is not None,
+            ),
+            ctx,
+            adapter,
+            provider_name=provider_name,
+            path=path,
+            started=started,
+            new_counts=new_counts,
+            new_warned=new_warned,
+        )
+        if refused is not None:
+            return refused
 
     if plan is not None:
         return await _handle_routed(
@@ -7249,8 +7333,7 @@ def _object_access_refused(
     return JSONResponse(error, status_code=403)
 
 
-async def _authorization_check(
-    state: ProxyState,
+def _authorization_request(
     request: Request,
     adapter: ProviderAdapter | None,
     kind: RouteKind,
@@ -7259,25 +7342,36 @@ async def _authorization_check(
     path: str,
     model: str | None,
     identity: bool,
+) -> AuthorizationRequest:
+    """This request's FACTS (``plugin_api.AuthorizationRequest``), as the
+    access gate's ``authorize_request`` and ``authorize_content`` get them."""
+    return AuthorizationRequest(
+        surface="http",
+        provider=provider_name,
+        adapter=adapter.name if adapter is not None else None,
+        kind=kind.value,
+        method=request.method,
+        path=path,
+        model=model,
+        identity=identity,
+    )
+
+
+async def _authorization_check(
+    state: ProxyState,
+    request: Request,
+    asked: AuthorizationRequest,
+    adapter: ProviderAdapter | None,
+    *,
+    provider_name: str,
+    path: str,
     started: float,
 ) -> JSONResponse | None:
     """The access gate's optional ``authorize_request`` on this request's
-    FACTS (``plugin_api.AuthorizationRequest``; asked only when the gate has
-    the member): None when it allows the request, else the recorded 403
-    refusing it. A synchronous answer adds no event-loop turn."""
-    verdict = state.authorization.refusal(
-        AuthorizationRequest(
-            surface="http",
-            provider=provider_name,
-            adapter=adapter.name if adapter is not None else None,
-            kind=kind.value,
-            method=request.method,
-            path=path,
-            model=model,
-            identity=identity,
-        ),
-        f"{request.method} {path}",
-    )
+    FACTS (``asked``; asked only when the gate has the member): None when
+    it allows the request, else the recorded 403 refusing it. A synchronous
+    answer adds no event-loop turn."""
+    verdict = state.authorization.refusal(asked, f"{request.method} {path}")
     if inspect.isawaitable(verdict):
         verdict = await verdict
     if verdict is None:
@@ -7293,6 +7387,47 @@ async def _authorization_check(
     )
 
 
+async def _content_check(
+    state: ProxyState,
+    request: Request,
+    asked: AuthorizationRequest,
+    content: ContentFacts,
+    ctx: RequestContext,
+    adapter: ProviderAdapter | None,
+    *,
+    provider_name: str,
+    path: str,
+    started: float,
+    new_counts: dict[str, int],
+    new_warned: dict[str, int],
+) -> JSONResponse | None:
+    """The access gate's optional ``authorize_content`` on what this
+    request's redaction found (``content``, the request's own counts, taken
+    before this await): None when it allows the request, else the recorded
+    403 refusing it — before the audit START row, the upstream authorizer, a
+    routed plan's ``begin()`` and any upstream contact. The placeholders the
+    redaction issued stay in the vault (harmless: nothing was forwarded); a
+    one-time override it used is handed back by ``handle()``'s refused
+    settlement (``_UploadFate``)."""
+    verdict = state.authorization.content_refusal(asked, content, f"{request.method} {path}")
+    if inspect.isawaitable(verdict):
+        verdict = await verdict
+    if verdict is None:
+        return None
+    return _authorization_refused(
+        state,
+        adapter,
+        verdict,
+        provider_name=provider_name,
+        request=request,
+        path=path,
+        started=started,
+        session=ctx.session_id,
+        detections=new_counts,
+        warned=new_warned,
+    )
+
+
 def _authorization_refused(
     state: ProxyState,
     adapter: ProviderAdapter | None,
@@ -7302,22 +7437,28 @@ def _authorization_refused(
     request: Request,
     path: str,
     started: float,
+    session: str | None = None,
+    detections: dict[str, int] | None = None,
+    warned: dict[str, int] | None = None,
 ) -> JSONResponse:
     """The access gate's authorization refusal (or the core's fixed text
     when its check or the requester's detection overlay failed): a recorded,
-    provider-shaped 403, sent before the session, redaction and any upstream
-    contact. The reason reaches the client only, never the log."""
+    provider-shaped 403, sent before any upstream contact — before the
+    session and redaction, except a refusal of what the redaction found
+    (``authorize_content``: its row carries the request's session and
+    counts). The reason reaches the client only, never the log."""
     error = adapter.error_body(message, status=403) if adapter is not None else {"error": message}
     state.record_request(
-        session=state.config.vault.session,
+        session=session if session is not None else state.config.vault.session,
         provider=provider_name,
         method=request.method,
         path=path,
         status=403,
         started=started,
         streamed=False,
-        detections={},
+        detections=detections or {},
         rehydrations={},
+        warned=warned or None,
         refusal="authorization",
     )
     logger.info("%s %s -> 403 refused by the access gate (authorization)", request.method, path)

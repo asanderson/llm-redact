@@ -89,6 +89,7 @@ from starlette.datastructures import QueryParams
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from llm_redact.audit import AuditWriteError
+from llm_redact.authorization import content_facts
 from llm_redact.connections import ACCESS_CLOSE_CODE
 from llm_redact.jsonwalk import (
     MAX_JSON_DEPTH,
@@ -101,7 +102,7 @@ from llm_redact.jsonwalk import (
 )
 from llm_redact.metrics import LocalRefusal
 from llm_redact.placeholders import json_floors, may_carry_tokens, token_floors
-from llm_redact.plugin_api import UpstreamAuthError
+from llm_redact.plugin_api import ContentFacts, UpstreamAuthError
 from llm_redact.providers.base import (
     SYSTEM_NOTE,
     body_string,
@@ -125,6 +126,7 @@ if TYPE_CHECKING:
     from llm_redact.config import ProviderConfig
     from llm_redact.detection.base import Detector
     from llm_redact.detection.engine import Allowlist
+    from llm_redact.overrides import OverrideScope
     from llm_redact.plugin_api import AuthorizationRequest, ConnectionRecheck, UpstreamAuth
     from llm_redact.proxy import ProxyState, RequestContext
 
@@ -1548,11 +1550,15 @@ async def _admitted(
 ) -> None:
     """One admitted connection, its relay held: the access gate's
     authorization, the connection's session, then the relay itself."""
-    request = (
+    authorization = state.authorization
+    # The upgrade's facts, built when the gate asks about requests or about
+    # their content (authorize_request / authorize_content).
+    upgrade = (
         _upgrade_request(adapter, path, websocket.query_params, relay.upstream_auth is not None)
-        if state.authorization.authorizes
+        if authorization.authorizes or authorization.checks_content
         else None
     )
+    request = upgrade if authorization.authorizes else None
     overlay, refusal = await _authorize_connection(state, request, relay, path)
     if refusal is not None:
         _record_ws_refusal(state, adapter, path, refusal[0], started, kind=refusal[1])
@@ -1591,7 +1597,16 @@ async def _admitted(
         else None
     )
     await _relay(
-        state, websocket, adapter, relay, static_ctx, path, started, overlay, frame_request
+        state,
+        websocket,
+        adapter,
+        relay,
+        static_ctx,
+        path,
+        started,
+        overlay,
+        frame_request,
+        upgrade if authorization.checks_content else None,
     )
 
 
@@ -1605,13 +1620,17 @@ async def _relay(
     started: float,
     overlay: "OverlayBuild | None" = None,
     frame_request: "AuthorizationRequest | None" = None,
+    content_request: "AuthorizationRequest | None" = None,
 ) -> None:
     """Dial, relay and record one admitted connection, under ``relay``'s
     admission until a reload revokes it — with the requester's detection
-    overlay (built against the relay's own detection objects), if any, and,
+    overlay (built against the relay's own detection objects), if any;
     when ``frame_request`` is given (the upgrade's facts), the access gate
     asked again with the model each setup frame or model update names
-    (``_FrameModels``)."""
+    (``_FrameModels``); and when ``content_request`` is given (the upgrade's
+    facts again), the gate's ``authorize_content`` asked about each client
+    frame's redaction before it is sent — with the latest model check's
+    request when there is one."""
     import websockets
 
     from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
@@ -1890,6 +1909,24 @@ async def _relay(
                 frame_ctx = RequestContext(
                     ctx.session_id, ctx.vault, frame_redactor, ctx.rehydrator
                 )
+                # The access gate's authorize_content (below): whether this
+                # frame's content is redacted (a JSON frame, detection on —
+                # parsed here once, handed on, when nothing above read it)
+                # and the counts as its redaction starts: the frame's own
+                # share, taken with no await before the redaction.
+                frame_scanned = False
+                if content_request is not None:
+                    if (
+                        provider_config.detection
+                        and parsed is None
+                        and frame_models is None
+                        and not check_frames
+                    ):
+                        parsed = parse_client_frame(data)
+                    frame_scanned = provider_config.detection and parsed is not None
+                    detected_before = dict(connection_counts)
+                    warned_before = dict(state.warn_counts)
+                frame_marker: str | None = None
                 outbound: str | bytes
                 if not provider_config.detection:
                     # [providers.NAME] detection = false applies to realtime
@@ -1920,13 +1957,45 @@ async def _relay(
                         # Consumed as the frame passes (no await since the
                         # redaction): a one-time grant another request used
                         # first refuses the frame.
-                        ok, marker = frame_scope.commit()
+                        ok, frame_marker = frame_scope.commit()
                         if not ok:
                             raise _OverrideRaced(frame_scope.fault)
-                        override_marker = marker or override_marker
-                        # Handed to the upstream next, with no check between.
-                        frame_scope.settle(sent=True)
+                if content_request is not None:
+                    # What this frame's redaction found, put to the access
+                    # gate before it is sent; a frame it refuses (or one read
+                    # under an admission revoked while it decided) hands a
+                    # one-time override it used back and is never sent.
+                    content = content_facts(
+                        scanned=frame_scanned,
+                        detected=_grown(connection_counts, detected_before)
+                        if frame_scanned
+                        else None,
+                        warned=_grown(state.warn_counts, warned_before) if frame_scanned else None,
+                        overridden=frame_marker is not None,
+                    )
+                    if not await _content_allowed(
+                        state,
+                        frame_models.latest if frame_models is not None else content_request,
+                        content,
+                        relay,
+                        frame_scope,
+                        f"WS {path}",
+                    ):
+                        return
+                if frame_scope is not None:
+                    override_marker = frame_marker or override_marker
+                    # Handed to the upstream next, with no check between.
+                    frame_scope.settle(sent=True)
                 await upstream.send(outbound)
+            except _ContentRefused as refused:
+                # The access gate refused what this frame's redaction found
+                # (or its check failed): never sent — closed 1008 with the
+                # gate's reason or the core's fixed text (never logged); the
+                # row records the HTTP 403.
+                logger.info("WS %s -> refused by the access gate (a frame's content)", path)
+                status, refusal = 403, "authorization"
+                await close_on_policy(refused.reason)
+                return
             except _ModelRefused as refused:
                 # The access gate refused the model a setup frame names (or
                 # its check failed), or the frame named none: never redacted
@@ -2175,6 +2244,57 @@ SETUP_FIRST = "llm-redact: the first frame must be a setup naming its model; not
 FRAME_NOT_JSON = "llm-redact: a frame that is not JSON cannot be authorized; it was not forwarded"
 
 
+class _ContentRefused(Exception):
+    """The access gate's ``authorize_content`` refused a client frame (or
+    its check failed): ``reason`` is the close reason — the gate's fixed
+    text or the core's — and is never logged."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("refused by the access gate's content check")
+        self.reason = reason
+
+
+def _grown(after: Mapping[str, int], before: Mapping[str, int]) -> dict[str, int]:
+    """The counts that grew from ``before`` to ``after`` (one frame's own
+    share), with the growth."""
+    return {
+        name: count - before.get(name, 0)
+        for name, count in after.items()
+        if count > before.get(name, 0)
+    }
+
+
+async def _content_allowed(
+    state: "ProxyState",
+    request: "AuthorizationRequest",
+    content: ContentFacts,
+    relay: RealtimeRelay,
+    scope: "OverrideScope | None",
+    where: str,
+) -> bool:
+    """The access gate's ``authorize_content`` on one client frame: True to
+    send it; False when the relay was revoked while an awaited answer ran
+    (the frame is then dropped and the relay closes as revoked); raises
+    ``_ContentRefused`` for a refusal. On every way but True the one-time
+    override the frame used is handed back (``scope.settle``)."""
+    allowed = False
+    try:
+        verdict = state.authorization.content_refusal(request, content, where)
+        if inspect.isawaitable(verdict):
+            verdict = await verdict
+            if relay.revoked is not None:
+                # Revoked while the gate decided: the frame is not sent
+                # under the admission it was read with.
+                return False
+        if verdict is not None:
+            raise _ContentRefused(verdict)
+        allowed = True
+        return True
+    finally:
+        if not allowed and scope is not None:
+            scope.settle(sent=False)
+
+
 class _ModelRefused(Exception):
     """The access gate refused the model a setup frame names, its check
     failed, or the frame named none: ``reason`` is the close reason — the
@@ -2213,6 +2333,9 @@ class _FrameModels:
         self._where = where
         self._first = adapter.model_in_frame
         self.checked = False
+        # The request the gate was last asked with (the upgrade's until a
+        # frame names a model): what its authorize_content is asked with.
+        self.latest = request
 
     def verdict(self, parsed: tuple[Any, bool] | None) -> "str | None | Awaitable[str | None]":
         """None (forward the frame), a refusal's close reason, or an
@@ -2232,6 +2355,7 @@ class _FrameModels:
             return SETUP_FIRST if first else self._adapter.no_model_reason
         self.checked = True
         request = dataclasses.replace(self._request, model=model, model_in_frame=False)
+        self.latest = request
         return self._authorization.refusal(request, self._where)
 
 

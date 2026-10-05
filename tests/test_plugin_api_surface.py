@@ -185,6 +185,11 @@ DATACLASSES: dict[str, str] = {
         " method: 'str', path: 'str', model: 'str | None', identity: 'bool',"
         " model_in_frame: 'bool' = False) -> None"
     ),
+    "ContentFacts": (
+        "(scanned: 'bool', detected: 'tuple[tuple[str, int], ...]' = (),"
+        " warned: 'tuple[tuple[str, int], ...]' = (), unscanned_parts: 'int' = 0,"
+        " overridden: 'bool' = False) -> None"
+    ),
     "DetectionOverlay": (
         "(modes: 'tuple[tuple[str, str], ...]' = (), deny: 'tuple[str, ...]' = ()) -> None"
     ),
@@ -232,6 +237,7 @@ ALL: tuple[str, ...] = (
     "ConfigSection",
     "ConnectionControl",
     "ConnectionRecheck",
+    "ContentFacts",
     "Dashboard",
     "DashboardHost",
     "DbPasswordProvider",
@@ -376,6 +382,9 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``metrics_samples() -> Iterable[tuple[str, Mapping[str, str], float]]``",
         "``authorize_request(request: AuthorizationRequest) -> str | None``",
         "``detection_overlay() -> DetectionOverlay | None``",
+        "``authorize_content(request: AuthorizationRequest, content: ContentFacts) -> str | None``",
+        "``reload(config: Config) -> str | None``",
+        "``validate_reload(candidate: Config) -> str | None``",
     ),
     "SessionRouter": (
         "``is_durable(session_id) -> bool``",

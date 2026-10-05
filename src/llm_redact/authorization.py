@@ -1,5 +1,6 @@
 """The access gate's authorization seams (``plugin_api.AccessGate``'s optional
-``authorize_request`` and ``detection_overlay``), applied by the core.
+``authorize_request``, ``detection_overlay`` and ``authorize_content``, and its
+policy reload, ``reload`` / ``validate_reload``), applied by the core.
 
 The core holds NO user, role, group or seat logic: it hands the gate the FACTS
 of a request it resolved itself (``plugin_api.AuthorizationRequest``) and
@@ -21,10 +22,12 @@ from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from llm_redact.config import Config, ConfigError
 from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.engine import DetectionConfig, DetectorPlan, active_rule_names
 from llm_redact.detection.regex_rules import BUILTIN_RULES
-from llm_redact.plugin_api import AuthorizationRequest, DetectionOverlay
+from llm_redact.overrides import printable
+from llm_redact.plugin_api import AuthorizationRequest, ContentFacts, DetectionOverlay
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,11 @@ OVERLAY_FAULT = (
     "llm-redact: this requester's detection policy could not be applied;"
     " the request was not forwarded"
 )
+# The bookkeeping stage a gate's policy reload that kept its previous policy,
+# failed or answered nonsense counts in.
+GATE_RELOAD_STAGE = "gate_reload"
+# How much of a gate's kept-policy reason the core logs (escaped first).
+GATE_RELOAD_CHARS = 200
 # Distinct overlays whose builds are kept (least recently used dropped).
 OVERLAY_CACHE_SIZE = 64
 # The modes an overlay may set, and how strict each mode is.
@@ -217,6 +225,40 @@ def _discard(task: asyncio.Future[Any]) -> None:
         task.exception()
 
 
+def content_facts(
+    *,
+    scanned: bool,
+    detected: Mapping[str, int] | None = None,
+    warned: Mapping[str, int] | None = None,
+    unscanned_parts: int = 0,
+    overridden: bool = False,
+) -> ContentFacts:
+    """A request's (or realtime frame's) ``ContentFacts``: its counts as
+    sorted ``(type, count)`` pairs, positive counts only."""
+    return ContentFacts(
+        scanned=scanned,
+        detected=_pairs(detected),
+        warned=_pairs(warned),
+        unscanned_parts=unscanned_parts,
+        overridden=overridden,
+    )
+
+
+def _pairs(counts: Mapping[str, int] | None) -> tuple[tuple[str, int], ...]:
+    if not counts:
+        return ()
+    return tuple(sorted((name, count) for name, count in counts.items() if count > 0))
+
+
+def _reason_text(reason: str) -> str:
+    """A gate's value-free reason as the core logs or reports it: every
+    non-printable character escaped, cut to ``GATE_RELOAD_CHARS``."""
+    escaped = printable(reason)
+    if len(escaped) > GATE_RELOAD_CHARS:
+        return escaped[: GATE_RELOAD_CHARS - 1] + "…"
+    return escaped
+
+
 class GateAuthorization:
     """The access gate's optional authorization members, read ONCE (the gate
     is restart-only). Without them every test here is one attribute read.
@@ -236,8 +278,16 @@ class GateAuthorization:
     ) -> None:
         self._authorize = getattr(gate, "authorize_request", None)
         self._overlay = getattr(gate, "detection_overlay", None)
+        self._content = getattr(gate, "authorize_content", None)
+        self._reload = getattr(gate, "reload", None)
+        self._validate_reload = getattr(gate, "validate_reload", None)
         self.authorizes = self._authorize is not None
         self.overlays = self._overlay is not None
+        # Whether the gate asks about each request's content (its optional
+        # authorize_content): only then are a request's facts computed.
+        self.checks_content = self._content is not None
+        # Whether the gate reloads its own policy with the configuration.
+        self.reloads = self._reload is not None
         self.timeout = timeout
         self._faults = bookkeeping_errors
 
@@ -254,8 +304,21 @@ class GateAuthorization:
         awaitable of either (bounded by ``timeout``). ``where`` (method and
         path, or "WS path") names the request in the log."""
         assert self._authorize is not None  # callers test ``authorizes``
+        return self._ask(self._authorize, (request,), where)
+
+    def content_refusal(
+        self, request: AuthorizationRequest, content: ContentFacts, where: str
+    ) -> str | None | Awaitable[str | None]:
+        """The gate's verdict on what the redaction found in this request
+        (its optional ``authorize_content``), answered like ``refusal``."""
+        assert self._content is not None  # callers test ``checks_content``
+        return self._ask(self._content, (request, content), where)
+
+    def _ask(
+        self, member: Any, args: tuple[Any, ...], where: str
+    ) -> str | None | Awaitable[str | None]:
         try:
-            answer = self._authorize(request)
+            answer = member(*args)
         except Exception as exc:  # noqa: BLE001 — fail closed
             return self._fault(where, type(exc).__name__, AUTHORIZATION_FAULT)
         if inspect.isawaitable(answer):
@@ -288,6 +351,65 @@ class GateAuthorization:
         if isinstance(answer, str) and answer:
             return answer
         return self._fault(where, f"answered {type(answer).__name__}", AUTHORIZATION_FAULT)
+
+    def reload_policy(self, config: Config) -> None:
+        """The gate's optional ``reload(config)`` after a configuration
+        reload went live: never raises. A gate that kept its previous policy
+        (a reason), failed or answered anything else is logged — the reason
+        escaped and cut, an exception or answer by TYPE only — and counted
+        under ``GATE_RELOAD_STAGE``."""
+        if self._reload is None:
+            return
+        try:
+            answer = self._reload(config)
+        except Exception as exc:  # noqa: BLE001 — a bad policy file never crashes the proxy
+            self._reload_fault(type(exc).__name__)
+            return
+        if answer is None:
+            return
+        if isinstance(answer, str) and answer:
+            self._faults[GATE_RELOAD_STAGE] += 1
+            logger.warning(
+                "config reload: access gate kept its previous policy: %s", _reason_text(answer)
+            )
+            return
+        if inspect.isawaitable(answer):
+            _close_unrun(answer)
+            self._reload_fault("answered an awaitable")
+            return
+        self._reload_fault(f"answered {type(answer).__name__}")
+
+    def _reload_fault(self, what: str) -> None:
+        self._faults[GATE_RELOAD_STAGE] += 1
+        logger.warning(
+            "config reload: the access gate's policy reload failed (%s);"
+            " it keeps whatever policy it holds",
+            what,
+        )
+
+    def validate_policy(self, candidate: Config) -> None:
+        """The gate's optional ``validate_reload(candidate)`` (the config
+        editor's dry run): ConfigError with the gate's reason (escaped and
+        cut) when it refuses, naming only the TYPE when it fails or answers
+        anything but None or a reason."""
+        if self._validate_reload is None:
+            return
+        try:
+            answer = self._validate_reload(candidate)
+        except Exception as exc:  # noqa: BLE001 — refuse the edit, never crash
+            raise ConfigError(
+                f"the access gate could not check its policy ({type(exc).__name__})"
+            ) from None
+        if answer is None:
+            return
+        if isinstance(answer, str) and answer:
+            raise ConfigError(f"the access gate refuses this configuration: {_reason_text(answer)}")
+        if inspect.isawaitable(answer):
+            _close_unrun(answer)
+            what = "an awaitable"
+        else:
+            what = type(answer).__name__
+        raise ConfigError(f"the access gate could not check its policy (answered {what})")
 
     def overlay(self, builds: OverlayBuilds, where: str) -> tuple[OverlayBuild | None, str | None]:
         """The requester's detection overlay applied to ``builds``' detection

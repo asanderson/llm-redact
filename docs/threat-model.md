@@ -379,7 +379,22 @@ own answer decides whether the page may read a response).
   for it and its refusal carries no code — an approval would forward as sent
   a value the configured policy redacts. The core refuses the request rather
   than drop an overlay it cannot apply, and an overlay never turns detection
-  back on for a provider configured `detection = false`.
+  back on for a provider configured `detection = false`. A gate may also
+  decide on what the redaction FOUND (`authorize_content`): after a
+  request's redaction and before its audit START row, the upstream
+  authorizer and any upstream contact (a realtime frame: after its
+  redaction, before its send), it gets the request's facts and its own
+  value types and counts — redacted, forwarded as sent under warn mode,
+  binary upload parts forwarded unscanned, whether a refusal override was
+  used, and whether the content was scanned at all (never a value or a
+  placeholder). A refusal is the same 403 / close 1008; the placeholders
+  the redaction issued stay in the vault (nothing was forwarded) and a
+  one-time override the request used is handed back. A gate that reloads
+  its own policy files with a configuration reload (`reload`) and fails or
+  keeps its previous policy is logged and counted (bookkeeping stage
+  `gate_reload`) — it never fails the reload, so the gate's previous policy
+  stays in force; the dashboard editor's dry run asks `validate_reload`
+  first and refuses an edit the gate refuses.
 - Status/metrics/audit — and the `/events` live feed, which streams the
   same rows `/recent` serves — expose **types and counts only**: never
   values, never placeholder ids, never allowlist contents (the

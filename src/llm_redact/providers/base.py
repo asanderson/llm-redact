@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
@@ -88,6 +89,13 @@ def restore_mcp_tools(original: Any, redacted: Any) -> Any:
 
 _EXEMPT_STASH_SENTINEL: dict[str, Any] = {"type": "mcp_exempt_stash"}
 
+# The running count of exempt MCP blocks stashed around redaction for the
+# request ``prepare_route_request`` is preparing (its ``exempt_blocks``), so
+# the access gate's content facts can say what went out unscanned; None
+# outside it. A context variable, not a parameter, so every adapter's
+# ``prepare_request`` (a plugin's included) keeps its signature.
+_EXEMPT_STASHED: ContextVar[list[int] | None] = ContextVar("_EXEMPT_STASHED", default=None)
+
 
 def _is_exempt_mcp_block(node: dict[str, Any], exempt: frozenset[str], ids: frozenset[str]) -> bool:
     """An MCP content block addressed to an exempt server.
@@ -142,10 +150,13 @@ def stash_exempt_mcp_blocks(node: Any, exempt: frozenset[str]) -> Any:
     position, which is sound because redact_json preserves structure.
     """
     ids = frozenset(_exempt_mcp_use_ids(node, exempt))
+    stashed = _EXEMPT_STASHED.get()
 
     def stash(item: Any) -> Any:
         if isinstance(item, dict):
             if _is_exempt_mcp_block(item, exempt, ids):
+                if stashed is not None:
+                    stashed[0] += 1
                 return dict(_EXEMPT_STASH_SENTINEL)
             return {key: stash(value) for key, value in item.items()}
         if isinstance(item, list):
@@ -329,6 +340,7 @@ def prepare_route_request(
     *,
     inject_note: bool,
     mcp_exempt: frozenset[str] = frozenset(),
+    exempt_blocks: list[int] | None = None,
 ) -> dict[str, Any]:
     """``adapter.prepare_request`` for a request to ``path`` — the proxy's
     entry point, with the route in view. The route's VERBATIM fields
@@ -343,7 +355,9 @@ def prepare_route_request(
     out in one copy and put back in another; each field found is counted
     against the redactor's string budget at once (a verbatim field when
     found, a label when redacted), so a body of too many is refused before
-    they are all collected."""
+    they are all collected. ``exempt_blocks`` (a one-item list) is raised
+    by every exempt MCP block stashed around the redaction (sent unscanned).
+    """
     held: _Slots = {}
     order = count()
     for position in adapter.verbatim_fields(method, path):
@@ -373,9 +387,13 @@ def prepare_route_request(
                     " forwarded"
                 )
     target = _rebuilt(body, held, lambda field: None) if fields else body
-    prepared = adapter.prepare_request(
-        target, redactor, inject_note=inject_note, mcp_exempt=mcp_exempt
-    )
+    token = _EXEMPT_STASHED.set(exempt_blocks)
+    try:
+        prepared = adapter.prepare_request(
+            target, redactor, inject_note=inject_note, mcp_exempt=mcp_exempt
+        )
+    finally:
+        _EXEMPT_STASHED.reset(token)
     if fields:
         prepared = _rebuilt(prepared, held, lambda field: field.value)
     # LABELS: user text under a key the walk skips as structural (a vector

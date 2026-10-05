@@ -502,7 +502,12 @@ async def test_without_the_members_nothing_is_asked_and_no_await_is_added(
     assert state.context_for(None, "POST", "/v1/messages", None) is state._static_context
     async with _client(app) as client:
         status = (await client.get("/__llm-redact/status")).json()
-    assert status["access"] == {"authorizes_requests": False, "detection_overlays": False}
+    assert status["access"] == {
+        "authorizes_requests": False,
+        "detection_overlays": False,
+        "authorizes_content": False,
+        "reloads_policy": False,
+    }
 
 
 async def test_a_synchronous_answer_costs_no_await(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -513,7 +518,12 @@ async def test_a_synchronous_answer_costs_no_await(monkeypatch: pytest.MonkeyPat
     assert (await _post(app, "/v1/messages", _messages("hi"), ANTHROPIC)).status_code == 200
     async with _client(app) as client:
         status = (await client.get("/__llm-redact/status")).json()
-    assert status["access"] == {"authorizes_requests": True, "detection_overlays": False}
+    assert status["access"] == {
+        "authorizes_requests": True,
+        "detection_overlays": False,
+        "authorizes_content": False,
+        "reloads_policy": False,
+    }
 
 
 async def test_no_gate_at_all_reports_neither_seam() -> None:
@@ -521,7 +531,12 @@ async def test_no_gate_at_all_reports_neither_seam() -> None:
     assert app.state.proxy.authorization.authorizes is False
     async with _client(app) as client:
         status = (await client.get("/__llm-redact/status")).json()
-    assert status["access"] == {"authorizes_requests": False, "detection_overlays": False}
+    assert status["access"] == {
+        "authorizes_requests": False,
+        "detection_overlays": False,
+        "authorizes_content": False,
+        "reloads_policy": False,
+    }
 
 
 # --- the detection overlay ----------------------------------------------------------------
@@ -827,7 +842,12 @@ async def test_the_overlay_follows_the_authorization_check(
     assert response.status_code == 200 and DENIED not in upstream.sent()
     async with _client(app) as client:
         status = (await client.get("/__llm-redact/status")).json()
-    assert status["access"] == {"authorizes_requests": True, "detection_overlays": True}
+    assert status["access"] == {
+        "authorizes_requests": True,
+        "detection_overlays": True,
+        "authorizes_content": False,
+        "reloads_policy": False,
+    }
 
 
 class ConversationRouter:

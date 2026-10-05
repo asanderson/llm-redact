@@ -916,6 +916,10 @@ class OverrideScope:
         # (type, value) pairs refused: held in memory for this request only
         # (the request body holds them anyway), hashed when a code is minted.
         self._refused: dict[tuple[str, str], None] = {}
+        # (type, value) pairs an approved override let through (forwarded
+        # as sent): this request's only, for the access gate's content facts
+        # (``allowed_types``); never stored, never reported as values.
+        self._allowed: dict[tuple[str, str], None] = {}
         self._once: set[int] = set()
         self._always: set[int] = set()
         # Whether a finding no approval passes (a deny string in text the
@@ -960,13 +964,24 @@ class OverrideScope:
             rule = snap.always_values.get(item)
             if rule is not None:
                 self._always.add(rule)
+                self._allowed[(detector_type, value)] = None
                 return True
             for grant, items in snap.once_values:
                 if item in items:
                     self._once.add(grant)
+                    self._allowed[(detector_type, value)] = None
                     return True
         self._refused[(detector_type, value)] = None
         return False
+
+    def allowed_types(self) -> dict[str, int]:
+        """Per detector type, how many DISTINCT values an approved override
+        let through in this request (``allows`` answered True): values that
+        go upstream as sent, never redacted or counted as detections — the
+        access gate's ``ContentFacts.overridden_types``. A value consulted
+        twice (a check ahead of the redaction, then the redaction) counts
+        once."""
+        return dict(Counter(detector_type for detector_type, _ in self._allowed))
 
     def unoverridable(self) -> None:
         """This request is refused for a finding no approval passes (a

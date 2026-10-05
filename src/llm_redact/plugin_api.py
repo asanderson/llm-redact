@@ -828,6 +828,55 @@ class DetectionOverlay:
     deny: tuple[str, ...] = field(default=(), repr=False)
 
 
+@dataclass(frozen=True)
+class ContentFacts:
+    """What the core's redaction found in ONE request (or one realtime client
+    frame), as the access gate's optional ``authorize_content`` is asked
+    about it: value TYPES and counts only — never a value, a placeholder or a
+    position.
+
+    - ``scanned``: True when the core redacted the request's content (a
+      matched route's JSON body or upload, a realtime JSON frame, with
+      detection on); False when it did not: a pass-through route, a provider
+      configured ``detection = false``, a body-less request, a body
+      forwarded unscanned on an approved override, a realtime frame that is
+      not JSON. With ``scanned`` False the counts below are empty: the core
+      cannot say what the content holds.
+    - ``detected``: ``(detector type, count)`` pairs of the values the
+      redaction replaced with placeholders in THIS request (never another
+      request's, whatever runs concurrently), sorted by type.
+    - ``warned``: likewise for the warn-mode values the request forwards as
+      sent (observed, not redacted).
+    - ``unscanned_parts``: the binary upload file parts this request
+      forwards unscanned (``[detection] binary_uploads = "forward"``, or an
+      approved ``binary_upload`` override).
+    - ``overridden``: True when the request passes a refusal on an approved
+      refusal override (overrides.py): something it carries goes out as
+      sent where the configured policy would have refused it.
+    - ``overridden_types``: ``(detector type, count)`` pairs, sorted by
+      type, of the VALUES an approved refusal override let through in THIS
+      request (frame) — count = distinct values. Content the policy cannot
+      see in ``detected``/``warned``: each such value goes upstream RAW (not
+      a placeholder), so a policy keyed on types must read it here. A
+      route-kind override (a body forwarded unscanned, a binary part) is no
+      value: only ``overridden`` (and, for a binary part,
+      ``unscanned_parts``) carry it.
+    - ``exempt_blocks``: the MCP content blocks addressed to a
+      ``[detection.mcp] exempt_servers`` server that this request carries:
+      held out of detection and sent UNSCANNED — nothing in them is in
+      ``detected``/``warned``, whatever they hold. Always 0 for a realtime
+      frame (no exempt blocks there).
+    """
+
+    scanned: bool
+    detected: tuple[tuple[str, int], ...] = ()
+    warned: tuple[tuple[str, int], ...] = ()
+    unscanned_parts: int = 0
+    overridden: bool = False
+    overridden_types: tuple[tuple[str, int], ...] = ()
+    exempt_blocks: int = 0
+
+
 class AccessGate(Protocol):
     """Client admission (``Registry.build_access_gate``).
 
@@ -990,6 +1039,72 @@ class AccessGate(Protocol):
       log) — as does the member itself when it is present but cannot be
       called. A provider configured ``detection = false`` stays unredacted:
       an overlay never turns detection back on.
+    - OPTIONAL ``authorize_content(request: AuthorizationRequest, content:
+      ContentFacts) -> str | None`` — whether this requester may send what
+      the redaction found in this request (sensitivity-aware policy: a role
+      that may not send credentials even redacted, a cap on warn-mode
+      values forwarded as sent, no unscanned uploads): asked once for EVERY
+      HTTP request the proxy forwards — matched, pass-through, ``detection
+      = false`` (``ContentFacts.scanned`` False for the last two) — AFTER
+      its redaction (the vault batch committed, a refusal override's use
+      committed) and BEFORE the ``[audit] required`` START row (an upload
+      whose binary parts went to an upload inspector wrote its START row
+      before the inspection: this refusal is its END row), the upstream
+      authorizer, a routing layer's ``begin()`` and any upstream contact;
+      never for a request refused earlier or one answered locally. Asked
+      with the SAME ``AuthorizationRequest`` that ``authorize_request`` got
+      (built the same way when that member is absent) and the request's own
+      ``ContentFacts`` (its counts are taken before any await: a request
+      running concurrently never shows in them). On a realtime connection:
+      for EVERY client frame, after that frame's redaction and BEFORE its
+      send, with the frame's own facts (``scanned`` False with ``detection
+      = false`` or a frame that is not JSON) and the upgrade's request — on
+      a connection whose frames ``authorize_request`` checks for a model
+      (Gemini or Vertex Live setups, an OpenAI or Azure
+      ``session.update``), the latest request it was asked with, i.e. with
+      that model; without ``authorize_request`` the upgrade's facts.
+      Upstream frames are never asked about. Answers as
+      ``authorize_request``'s: None allows; a non-empty string refuses with
+      that FIXED, value-free reason (a recorded provider-shaped 403, kind
+      ``authorization``; realtime: closed 1008 with the reason cut to 123
+      bytes, nothing of the frame sent, row 403) and is never logged; an
+      awaitable is bounded by ``authorization.AUTHORIZE_TIMEOUT_SECONDS``
+      (a realtime connection revoked while it runs forwards nothing more);
+      an exception, a timeout or any other answer refuses with the core's
+      fixed text (bookkeeping stage ``authorization``, type-only log). A
+      refused request is never forwarded, but the placeholders its
+      redaction issued stay in the vault (as with any refusal after
+      redaction: harmless, the vault is deterministic); a one-time refusal
+      override it used is handed back. Content the redaction did NOT
+      replace with placeholders shows apart from ``detected``: warn-mode
+      values (``warned``), values an approved refusal override let through
+      RAW (``overridden_types``), MCP blocks to an exempt server sent
+      unscanned (``exempt_blocks``) and binary parts sent unscanned
+      (``unscanned_parts``). Without the member nothing is asked and no
+      fact is computed.
+    - OPTIONAL ``reload(config: Config) -> str | None`` — called once,
+      synchronously, on EVERY applied configuration reload (SIGHUP and a
+      dashboard config edit alike, even one that changed nothing), AFTER
+      the hot swap is live (``config`` is the configuration now in effect)
+      and after open realtime relays whose admission changed were revoked,
+      so the gate re-reads what its own restart-only section NAMES (policy
+      files, role tables). None: reloaded (or nothing to do); a non-empty
+      string: the gate KEPT its previous policy, for that value-free reason
+      — logged by the core at WARNING (every non-printable character
+      escaped, cut to 200 characters) and counted under the bookkeeping
+      stage ``gate_reload``. An exception, an awaitable (closed unrun: the
+      member is synchronous) or any other answer is logged by exception
+      TYPE only and counted the same; it never propagates — a bad policy
+      file never crashes the proxy nor fails the rest of the reload. A
+      reload that fails before the swap (an invalid file) never calls it.
+    - OPTIONAL ``validate_reload(candidate: Config) -> str | None`` — the
+      dry-run twin, asked by ``DashboardHost.validate_config`` (the
+      dashboard editor's check before it writes the file) with the
+      candidate configuration: a non-empty string refuses the edit with
+      that reason (a ConfigError; sanitized like ``reload``'s); None lets
+      it through; an exception or any other answer (an awaitable is closed
+      unrun) refuses it naming only the exception or answer TYPE. It must
+      change nothing. Without it the editor checks nothing of the gate's.
     - ``recheck_interval: float`` — seconds between the core's re-checks
       of every open long-lived connection's ``Admission.recheck`` (read
       once at startup; default 30; anything but a number from 5 to 3600 is
@@ -1271,6 +1386,7 @@ __all__ = [
     "ConfigSection",
     "ConnectionControl",
     "ConnectionRecheck",
+    "ContentFacts",
     "Dashboard",
     "DashboardHost",
     "DbPasswordProvider",

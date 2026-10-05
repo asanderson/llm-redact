@@ -70,6 +70,14 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The `hf` NER backend read only the first window of a string (512 tokens for the default
+  `dslim/bert-base-NER`, about 2,000 characters) and silently ignored the rest. It now
+  reads the whole string, up to `max_chars`, in overlapping windows sized from the
+  tokenizer and model config (the pipeline's `stride`), keeps one copy of an entity two
+  windows both report, and counts windowed strings and windows. A model without a fast
+  tokenizer, whose entities came back without the offsets redaction needs, is refused at
+  startup: `[detection.ner] hf model '…' has no fast tokenizer; character offsets are
+  required`.
 - `[detection.allowlist_by_type]` accepts the types NER entities are emitted as (`JOB_TITLE`
   for the GLiNER entity `"job title"`, which it refused) and reads a key that names an
   entity as written as the type NER emits for it (a `"job title"` key never matched).

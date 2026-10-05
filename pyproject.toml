@@ -144,8 +144,9 @@ testpaths = ["tests"]
 markers = [
     "live: hits real provider APIs; requires LLM_REDACT_LIVE=1 and API keys (costs money)",
     "soak: many-connection concurrency/soak checks; slower, run with -m soak",
+    "real_model: loads a real NER model from the local Hugging Face cache (needs the model's extra and a cached model; never downloads); run with -m real_model",
 ]
-addopts = "-m 'not live and not soak'"
+addopts = "-m 'not live and not soak and not real_model'"
 
 [tool.mypy]
 strict = true

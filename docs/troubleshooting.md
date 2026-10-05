@@ -423,6 +423,17 @@ the `transformers` package is installed but `torch` is not, so no model can
 run. Install the extra, which brings both: `uv sync --extra hf` (or
 `pip install 'llm-redact-proxy[hf]'`), then re-run `serve --check`.
 
+## "[detection.ner] hf model '…' has no fast tokenizer; character offsets are required"
+
+Startup (and `serve --check`) refused an `hf` backend model whose tokenizer
+is a slow (pure-Python) one. Only a fast tokenizer reports where each entity
+sits in the text — without those offsets an entity could never be redacted,
+and the pipeline could not read a long string in windows. Most Hub models
+ship a fast tokenizer (`tokenizer.json`), and transformers builds one for
+many others (from a WordPiece `vocab.txt`, for one). If the model has none,
+pick another model, or save a converted fast tokenizer beside the model once
+and point `[detection.ner.models] hf` at that local folder.
+
 ## "failed to load Hugging Face token-classification model '…': …"
 
 From `serve` / `serve --check`: torch is installed, but loading the named

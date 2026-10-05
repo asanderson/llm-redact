@@ -135,6 +135,20 @@ Stanza and Hugging Face `token-classification` backends are available the
 same way — the survey behind the lineup is
 [ner-landscape.md](ner-landscape.md).
 
+**Long strings.** A model reads a bounded number of tokens at a time and, left
+alone, ignores the rest of a longer string. The `hf` backend reads a longer
+string in overlapping windows: a window is the model's limit (the smaller of
+its tokenizer's `model_max_length` and its config's `max_position_embeddings`,
+512 when neither says; 512 tokens for `dslim/bert-base-NER`), and consecutive
+windows share a quarter of it, so a name anywhere in the string is found at its
+exact offsets. An entity two windows both report counts once; one cut by a
+window's edge is also reported whole by the next window, and the longer span
+wins. Windowing needs a fast tokenizer — the only kind that reports character
+offsets — so an `hf` model without one is refused at startup. Strings longer
+than `max_chars` (default 20,000 characters) are still read by no model:
+`max_chars` caps the time NER may spend on one string, and such strings are
+counted (see "NER coverage counters" below).
+
 ## Placeholder types from NER models
 
 Each NER model names what it finds in its own words: spaCy says `PERSON`,
@@ -283,7 +297,7 @@ existing `detection.ner_enabled`):
 | Counter | Counts |
 |---|---|
 | `scanned_whole` | strings the model read in one call |
-| `scanned_windowed` | strings the model read in overlapping windows |
+| `scanned_windowed` | strings the model read in overlapping windows (`hf`) |
 | `skipped_max_chars` | strings longer than `[detection.ner] max_chars`, which the model never read (the regex rules and deny strings still scan them) |
 | `windows` | the windows the windowed strings were read in |
 | `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |

@@ -135,6 +135,41 @@ Stanza and Hugging Face `token-classification` backends are available the
 same way — the survey behind the lineup is
 [ner-landscape.md](ner-landscape.md).
 
+## How NER runs
+
+![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model, the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)
+
+*Static diagram. [Mermaid source](diagrams/ner-pipeline.mmd).*
+
+Every NER backend handles each string the redaction scans the same way:
+
+1. **The `max_chars` gate.** A string longer than `[detection.ner] max_chars`
+   (default 20,000 characters) is read by no model; it is counted as
+   `skipped_max_chars`, and the regex rules, deny strings and custom rules
+   still scan it.
+2. **One call or windows.** A string that fits the model's window is read in
+   one call, as sent. A longer one is read in overlapping windows (the `hf`
+   and `gliner` backends; below).
+3. **The model** reports entities with a label, a score and character offsets.
+4. **The label policy** turns the label into a placeholder type and keeps it
+   only when that type was requested (see "Placeholder types from NER
+   models" below).
+5. **The type guard** drops a type that cannot be a placeholder type
+   (`labels_dropped`).
+6. **Score and offsets.** An entity scored below `score_threshold` (on the
+   backends that report a score) is dropped;
+   one whose span the string does not contain is never redacted
+   (`offsets_dropped`): only the exact text sent can be restored.
+7. **Duplicates and parts.** An entity two windows both report is kept once,
+   and parts of one name or address one or two blanks apart become one span.
+8. **Rule toggles.** A type whose built-in rule is disabled (or scoped out by
+   `[detection] languages`) is suppressed for NER too.
+9. **Allowlists, overlaps and modes.** Allowlisted values are left alone; the
+   rest meet the regex rules and deny strings in overlap resolution (deny
+   strings win every overlap, then the longest span; a regex rule wins an
+   exact tie), and the winner's mode redacts it into the vault, forwards it
+   (warn) or refuses the request (block).
+
 **Long strings.** A model reads a bounded number of tokens at a time and, left
 alone, ignores the rest of a longer string. The `hf` and `gliner` backends
 read a longer string in overlapping windows, so a name anywhere in it is found
@@ -158,11 +193,10 @@ at its exact offsets:
   counted as `windows_truncated`.
 
 An entity two windows both report counts once; one cut by a window's edge is
-also reported whole by the next window, and the longer span wins. A string
-that fits is read in one call, as before. spaCy, Stanza and Presidio read each
-string whole. Strings longer than `max_chars` (default 20,000 characters) are
-still read by no model: `max_chars` caps the time NER may spend on one string,
-and such strings are counted (see "NER coverage counters" below).
+also reported whole by the next window, and the longer span wins. spaCy,
+Stanza and Presidio read each string whole. Windows make a long string cost
+more model time; `max_chars` caps that time per string, and the strings it
+skips are counted (see "NER coverage counters" below).
 
 ## Placeholder types from NER models
 

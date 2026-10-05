@@ -24,6 +24,9 @@ and tags `vX.Y.Z`.
   backend; they restart from zero when a reload rebuilds the detectors). `llm-redact status`
   prints a posture line while a backend has skipped strings longer than `max_chars`, and one
   naming the entities no backend can emit.
+- docs/detection.md "How NER runs" walks one string through an NER backend (the
+  `max_chars` gate, windows, the label policy, the type guard, part merging, rule toggles,
+  overlap resolution) beside a new `ner-pipeline` diagram.
 - The shipped Grafana dashboard gains an "NER coverage" row (strings by backend and outcome,
   strings skipped as longer than `max_chars`, windows, entities dropped), and
   `deploy/prometheus-alerts.yml` a `LlmRedactNerSkippingLongStrings` warning for a backend

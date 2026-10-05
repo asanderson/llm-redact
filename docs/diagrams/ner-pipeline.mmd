@@ -1,0 +1,46 @@
+%% One string's path through one NER backend ([detection.ner]), from the
+%% max_chars gate to the vault: windows, the label policy, the type guard,
+%% part merging, rule toggles and overlap resolution. Counted gaps are the
+%% NerStats counters (/status detection.ner, /metrics llm_redact_ner_*).
+%% Code: detection/hf_ner.py, gliner_ner.py, windows.py, labels.py,
+%% stats.py, engine.py; redactor.py. Prose: docs/detection.md "How NER runs".
+%% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+flowchart TB
+    str([a string the redaction scans]) --> gate{"longer than<br/>max_chars?"}
+    gate -- "yes" --> skip(["not read by any model:<br/>skipped_max_chars counted<br/>(the regex rules and deny<br/>strings still scan it)"])
+    gate -- no --> fits{"fits one<br/>model window?"}
+    fits -- yes --> whole["one call with the string as sent<br/>(scanned_whole)"]
+    fits -- no --> windows["overlapping windows (scanned_windowed, windows)<br/>hf: the pipeline's token stride, a quarter shared;<br/>window = the model's token limit<br/>gliner: GLiNER words (JSON punctuation counts),<br/>within max_len beside the prompts and within<br/>the encoder's subwords, a fifth shared;<br/>a lone over-long word: windows_truncated"]
+    whole --> model["model: entities with a label,<br/>a score and character offsets"]
+    windows --> model
+    model --> policy["label policy (labels.py)<br/>normalize the label (B-PER → PER);<br/>a GLiNER type prompt → its type;<br/>a raw request without an override keeps its<br/>label until 2.0.0 (presidio: its five legacy folds);<br/>else the [detection.ner.labels] override,<br/>else the default fold (PER → PERSON)"]
+    policy --> requested{"a requested<br/>type?"}
+    requested -- "no, or overridden to #quot;#quot;" --> notreq([not emitted])
+    requested -- yes --> guard{"fits the<br/>placeholder<br/>type grammar?"}
+    guard -- "no (a digit first,<br/>over 28 characters)" --> dropped(["never emitted:<br/>labels_dropped counted"])
+    guard -- yes --> score{"score at least<br/>score_threshold?"}
+    score -- "no (hf here; gliner and<br/>presidio in the model call)" --> low([not emitted])
+    score -- yes --> span{"span inside<br/>the string?"}
+    span -- no --> offsets(["never redacted:<br/>offsets_dropped counted"])
+    span -- yes --> dedupe["one copy per (start, end, type):<br/>two windows report an overlap"]
+    dedupe --> merge["parts merged: PERSON or ADDRESS parts<br/>1–2 spaces, tabs or no-break spaces<br/>apart → one span (Jane + Doe)"]
+    merge --> toggle{"the type's built-in<br/>rule off?"}
+    toggle -- "yes (TypeFilteredDetector:<br/>disabled or language-scoped out)" --> suppressed([suppressed with its rule])
+    toggle -- no --> allow{"allowlisted<br/>value?"}
+    allow -- "yes (global or per type)" --> allowed([left as sent])
+    allow -- no --> resolve["overlap resolution with the regex rules<br/>and deny strings: deny strings win every<br/>overlap, else the longest span wins<br/>(NER priority 120 loses exact ties)"]
+    resolve --> mode{"the winner's<br/>mode?"}
+    mode -- redact --> vault[("vault: «PERSON_001»")]
+    mode -. "warn: counted, the<br/>value IS FORWARDED" .-> fwd([forwarded as sent])
+    mode -- block --> refused([request refused 400])
+
+    classDef refuse fill:#ffebe9,stroke:#cf222e,stroke-width:1px;
+    classDef gap fill:#fff1e5,stroke:#bc4c00,stroke-width:1px;
+    classDef gate fill:#ddf4ff,stroke:#0969da,stroke-width:1px;
+    classDef okPath fill:#dafbe1,stroke:#1a7f37,stroke-width:1px;
+    classDef vaultBox fill:#fff8c5,stroke:#9a6700,stroke-width:1.5px;
+    class skip,dropped,offsets gap;
+    class notreq,low,suppressed,allowed,fwd,refused refuse;
+    class gate,fits,requested,guard,score,span,toggle,allow,mode gate;
+    class whole,windows,model,policy,dedupe,merge,resolve okPath;
+    class vault vaultBox;

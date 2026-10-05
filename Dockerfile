@@ -24,7 +24,7 @@ FROM python:3.13-slim-bookworm AS runtime
 LABEL org.opencontainers.image.title="llm-redact" \
       org.opencontainers.image.description="Transparent redact/rehydrate proxy for LLM API traffic" \
       org.opencontainers.image.source="https://github.com/asanderson/llm-redact" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="AGPL-3.0-only"
 RUN useradd --uid 10001 --create-home app && mkdir -p /data && chown 10001:10001 /data
 COPY --from=builder --chown=10001:10001 /app/.venv /app/.venv
 COPY --chown=10001:10001 scripts/fake_upstream.py /app/scripts/fake_upstream.py

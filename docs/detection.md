@@ -121,10 +121,16 @@ are folded into the built-in placeholder names, so a value gets the same
 `«EMAIL_NNN»` identity whichever detector finds it.
 
 `[detection.ner] language` sets the analyzer language (wired through
-Presidio; implied by the model for spaCy), and `model` overrides the
-default pipeline: a spaCy package name for spacy/presidio (default
-`en_core_web_sm`) or a Hugging Face model id for GLiNER. Multiple
-backends can run concurrently (`backends = ["spacy", "presidio"]`), and
-the multilingual Stanza and Hugging Face `token-classification` backends
-are available the same way — the survey behind the lineup is
+Presidio; the Stanza model to load; implied by the model for spaCy), and
+`model` overrides the default model: a spaCy package name for
+spacy/presidio (default `en_core_web_sm`), a Hugging Face model id for
+GLiNER (default `urchade/gliner_small-v2.1`) or, for the `hf` backend, a
+Hugging Face `token-classification` model id (default
+`dslim/bert-base-NER`); Stanza ignores it. `score_threshold` (default 0.5)
+drops entities below that confidence on the backends that report one —
+gliner, presidio and hf; spaCy and Stanza report none, so the key is a
+config error when only they are active. Multiple backends can run
+concurrently (`backends = ["spacy", "presidio"]`), and the multilingual
+Stanza and Hugging Face `token-classification` backends are available the
+same way — the survey behind the lineup is
 [ner-landscape.md](ner-landscape.md).

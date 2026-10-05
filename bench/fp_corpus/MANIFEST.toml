@@ -107,3 +107,26 @@ IPV6 = 2
 # in a dashed hostname (which forced the rule's dash-excluding
 # lookarounds). The malformed sk-lf- row is kept SHORT so the generic sk-
 # rule doesn't legitimately claim it. Nothing here may fire.
+
+[files."synthetic_agent_tool_results.json"]
+# Coding-agent tool results carried as JSON text (ls, file reads, grep,
+# pytest, docker/kubectl, curl headers, pip and jest output): run as the
+# NER negatives (bench/ner_ceilings.toml) and pinned here too. Ports are
+# written without an address, and the x-request-id is a UUID. Nothing may
+# fire.
+
+[files."synthetic_git_log.txt"]
+# git output an agent reads (log, show --stat, status, diff, blame, branch,
+# stash, reflog) with no author identities: commits are bots or nameless,
+# branch names and classes carry tool names (Jackson, Hudson). Forty-hex
+# and seven-hex hashes probe the hex rules. Nothing may fire.
+
+[files."synthetic_ci_log.txt"]
+# A CI run log: action pins (40-hex), a 64-hex cache key, sha256 image
+# digests, timestamps with seven-digit fractions, pip/pytest/docker output
+# and a Jenkins trigger. Nothing may fire.
+
+[files."synthetic_python_module.py"]
+# A Python module whose classes are named after tools that are also
+# surnames (JenkinsClient, JacksonCompatSerializer); the token is read from
+# an environment variable by NAME only. Nothing may fire.

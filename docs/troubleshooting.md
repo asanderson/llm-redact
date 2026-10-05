@@ -468,3 +468,20 @@ home directory, and delete it when done.
 The dataset holds real text (real prompts, code or documents). Its errors
 are written only when you confirm with `--allow-real-data-dump`; the file is
 private (mode 0600) and belongs outside every repository.
+
+## NER bench: "no NER ceilings for [CONFIG] in bench/ner_ceilings.toml; record a baseline from this run's report"
+
+`--fp-corpus … --check` found no section for this configuration in the
+ceilings file; a run with nothing recorded fails. Run it without `--check`,
+read the per-file counts, and record a section as
+[ner-bench.md](ner-bench.md#false-positives-on-agent-traffic---fp-corpus)
+describes.
+
+## NER bench: "FILE: TYPE found N, ceiling M (lines …)" / "bench/ner_ceilings.toml [CONFIG] names FILE, which is not in the corpus"
+
+The model adds more detections of that type to that negatives file than
+its recorded ceiling allows (a file or type with no ceiling allows none):
+read the lines named, decide whether the hits are legitimate (raise the
+ceiling, with the reason in the commit) or a regression (fix the
+configuration). The second message names a ceiling for a file that no
+longer exists: remove the stale entry.

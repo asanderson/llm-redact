@@ -32,6 +32,8 @@ uv run python -m llm_redact.bench.ner --config my-ner.toml --check   # gate agai
 | `--out DIR` | Write `report.md` and `report.json` there instead of printing the report. |
 | `--thresholds PATH` | The gate file (default `bench/ner_thresholds.toml`). |
 | `--check` | Exit 1 when a floor or ceiling is crossed, or when the run has no recorded entry. |
+| `--fp-corpus DIR` | Count NER's detections on a negatives corpus (`bench/fp_corpus`) instead of scoring a dataset (below). |
+| `--ceilings PATH` | The `--fp-corpus` gate file (default `bench/ner_ceilings.toml`). |
 | `--dump-errors PATH` | Write misses, leaks, false positives and regressions WITH their text to PATH (below). |
 | `--allow-real-data-dump` | Let `--dump-errors` write the text of a real-data dataset. |
 
@@ -115,6 +117,45 @@ report, and add an entry: each recall floor at the measured value minus
 ceiling is fine when the measured rate is near zero), `recorded` set to the
 date and `note` naming the model ids and revisions. Commit the entry with
 the change that motivated it.
+
+## False positives on agent traffic: `--fp-corpus`
+
+```bash
+uv run python -m llm_redact.bench.ner --config my-ner.toml --fp-corpus bench/fp_corpus --check
+```
+
+`bench/fp_corpus` holds real-world and authored NEGATIVES — files the
+deterministic gate pins to exact regex counts in its `MANIFEST.toml`. Four
+of them look like coding-agent traffic and contain no personal data:
+`synthetic_agent_tool_results.json` (tool results as JSON text),
+`synthetic_git_log.txt`, `synthetic_ci_log.txt` and
+`synthetic_python_module.py`, full of tool names that are also surnames
+(Jenkins, Jackson, Hudson). With `--fp-corpus`, the bench scans every
+corpus file in chunks of whole lines of at most 2,000 characters (the size
+of a message or a tool result; a whole file in one string would exceed
+NER's `max_chars` and be skipped) and counts what NER ADDS: detections the
+full pipeline makes and the same configuration's rules alone do not (a
+model span displacing a rule's match counts). The report lists them per
+file and type, with the total per 100 KB of corpus.
+
+`--check` compares against `bench/ner_ceilings.toml` (outside the corpus
+directory, whose every file is scanned):
+
+```toml
+[hf-default]
+recorded = "2026-10-05"
+note = "dslim/bert-base-NER at <revision>"
+per_100kb_max = 2.0              # NER hits per 100 KB of the whole corpus
+
+[hf-default."rfc_excerpt.txt"]
+PERSON = 4                       # maximum count of that type in that file
+```
+
+A config without a section fails; a file or type not listed allows no NER
+detection at all; a ceiling naming a file the corpus does not hold fails
+(a stale entry). Some files hold real names on purpose (the RFC's authors,
+the characters of *Alice's Adventures in Wonderland*): a model finding them
+is right, and their ceilings say so.
 
 ## Seeing the errors: `--dump-errors`
 

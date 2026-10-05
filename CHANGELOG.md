@@ -38,6 +38,12 @@ and tags `vX.Y.Z`.
   structured-regression check), and hard negatives with no personal data (UUIDs, commit
   hashes, identifiers named after tools such as Jenkins, paths, stack traces,
   timestamps).
+- NER false-positive ceilings: `python -m llm_redact.bench.ner --fp-corpus bench/fp_corpus
+  --check` counts the detections NER adds to every negatives-corpus file (scanned in
+  message-sized chunks) and gates them against per-file, per-type maximum counts and a
+  hits-per-100-KB ceiling in `bench/ner_ceilings.toml`. The corpus gains four
+  agent-traffic files with no personal data (tool results as JSON, git output, a CI log, a
+  Python module), pinned to zero regex detections in its manifest.
 
 ### Changed
 - NER model labels become placeholder types through one label policy for every backend

@@ -26,6 +26,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from llm_redact.bench import ner_fp
 from llm_redact.bench.datasets import DATASETS, DatasetSpec, LoadRequest, dataset_key, resolve
 from llm_redact.bench.ner_metrics import NerResult, Pipeline, evaluate, to_json_dict, to_markdown
 from llm_redact.config import ConfigError, load_config
@@ -33,6 +34,7 @@ from llm_redact.detection.base import Detector
 from llm_redact.detection.engine import DetectionConfig, build_detectors, ner_backends
 
 DEFAULT_THRESHOLDS = Path("bench/ner_thresholds.toml")
+DEFAULT_CEILINGS = Path("bench/ner_ceilings.toml")
 DEFAULT_LIMIT = 2000
 
 # Keys a thresholds entry may hold: floors per type, ceilings, and two
@@ -77,8 +79,9 @@ def describe_backends(detectors: Sequence[Detector]) -> list[str]:
 
 
 def load_thresholds(path: Path) -> dict[str, Any]:
+    """A thresholds or ceilings TOML file."""
     if not path.is_file():
-        raise BenchError(f"thresholds file {path} not found")
+        raise BenchError(f"{path} not found")
     try:
         return tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError as exc:
@@ -253,9 +256,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, help="write report.md and report.json here")
     parser.add_argument("--thresholds", type=Path, default=DEFAULT_THRESHOLDS)
     parser.add_argument(
-        "--check", action="store_true", help="exit 1 when a floor or ceiling is crossed"
+        "--check",
+        action="store_true",
+        help="exit 1 when a floor or ceiling is crossed (--thresholds, or --ceilings with"
+        " --fp-corpus)",
     )
     parser.add_argument("--list-datasets", action="store_true")
+    parser.add_argument(
+        "--fp-corpus",
+        type=Path,
+        metavar="DIR",
+        help="count NER's detections on a negatives corpus (bench/fp_corpus) instead of"
+        " scoring a dataset",
+    )
+    parser.add_argument("--ceilings", type=Path, default=DEFAULT_CEILINGS)
     parser.add_argument(
         "--dump-errors",
         type=Path,
@@ -286,12 +300,14 @@ def main(argv: list[str] | None = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     if args.config is None:
         raise BenchError("--config PATH is required (a config with [detection.ner] enabled)")
-    try:
-        spec, split = resolve(args.dataset)
-    except ValueError as exc:
-        raise BenchError(str(exc)) from exc
+    spec, split = None, ""
+    if args.fp_corpus is None:
+        try:
+            spec, split = resolve(args.dataset)
+        except ValueError as exc:
+            raise BenchError(str(exc)) from exc
     if args.dump_errors is not None:
-        if spec.real_data and not args.allow_real_data_dump:
+        if spec is not None and spec.real_data and not args.allow_real_data_dump:
             raise BenchError(
                 f"dataset {spec.name!r} holds real data; --dump-errors would write its text"
                 " to disk: add --allow-real-data-dump to confirm"
@@ -306,39 +322,100 @@ def _run(args: argparse.Namespace) -> int:
     pipeline, detectors = build_pipeline(config.detection)
     config_name = args.name or args.config.stem
     backends = describe_backends(detectors)
-
-    request = LoadRequest(split=split, seed=args.seed)
-    samples = spec.adapter(spec, request)
-    if args.limit > 0:
-        samples = itertools.islice(samples, args.limit)
     errors: list[dict[str, Any]] | None = [] if args.dump_errors is not None else None
-    result = evaluate(samples, spec.label_map, pipeline, errors=errors)
-
-    markdown = report_markdown(spec, split, config_name, backends, result, request.skipped)
-    if args.out is not None:
-        args.out.mkdir(parents=True, exist_ok=True)
-        (args.out / "report.md").write_text(markdown)
-        report = report_json(spec, split, config_name, backends, result, request.skipped)
-        (args.out / "report.json").write_text(json.dumps(report, indent=2))
-        print(f"report written to {args.out}/report.md and report.json")
+    if spec is None:
+        failures = _run_fp_corpus(args, pipeline, config_name, backends, errors)
+        passed = f"[{_toml_key(config_name)}] in {args.ceilings}"
     else:
-        print(markdown)
+        failures = _run_dataset(args, spec, split, pipeline, config_name, backends, errors)
+        passed = f"[{_toml_key(config_name)}.{_toml_key(dataset_key(spec, split))}]"
     if errors is not None:
         write_dump(args.dump_errors, errors)
         print(f"{len(errors)} error records written to {args.dump_errors} (mode 0600)")
-
-    if not args.check:
+    if failures is None:
         return 0
-    thresholds = load_thresholds(args.thresholds)
-    failures = threshold_failures(
-        thresholds, config_name, dataset_key(spec, split), result, args.thresholds
-    )
     for line in failures:
         print(f"CHECK FAILED: {line}")
     if failures:
         return 1
-    print(f"check passed: [{_toml_key(config_name)}.{_toml_key(dataset_key(spec, split))}]")
+    print(f"check passed: {passed}")
     return 0
+
+
+def _emit(args: argparse.Namespace, markdown: str, report: Mapping[str, object]) -> None:
+    if args.out is None:
+        print(markdown)
+        return
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "report.md").write_text(markdown)
+    (args.out / "report.json").write_text(json.dumps(report, indent=2))
+    print(f"report written to {args.out}/report.md and report.json")
+
+
+def _run_dataset(
+    args: argparse.Namespace,
+    spec: DatasetSpec,
+    split: str,
+    pipeline: Pipeline,
+    config_name: str,
+    backends: Sequence[str],
+    errors: list[dict[str, Any]] | None,
+) -> list[str] | None:
+    """Score the dataset; the gate's failures with --check, else None."""
+    request = LoadRequest(split=split, seed=args.seed)
+    samples = spec.adapter(spec, request)
+    if args.limit > 0:
+        samples = itertools.islice(samples, args.limit)
+    result = evaluate(samples, spec.label_map, pipeline, errors=errors)
+    _emit(
+        args,
+        report_markdown(spec, split, config_name, backends, result, request.skipped),
+        report_json(spec, split, config_name, backends, result, request.skipped),
+    )
+    if not args.check:
+        return None
+    thresholds = load_thresholds(args.thresholds)
+    return threshold_failures(
+        thresholds, config_name, dataset_key(spec, split), result, args.thresholds
+    )
+
+
+def _run_fp_corpus(
+    args: argparse.Namespace,
+    pipeline: Pipeline,
+    config_name: str,
+    backends: Sequence[str],
+    errors: list[dict[str, Any]] | None,
+) -> list[str] | None:
+    """Count NER's additions on the negatives corpus; the ceilings' failures
+    with --check, else None."""
+    root: Path = args.fp_corpus
+    if not root.is_dir():
+        raise BenchError(f"--fp-corpus {root} is not a directory")
+    files = ner_fp.scan(root, pipeline, errors=errors)
+    markdown = (
+        f"# NER bench: {config_name} on the false-positive corpus\n\n"
+        f"Corpus: {root}, scanned in chunks of whole lines of at most"
+        f" {ner_fp.CHUNK_CHARS} characters; counted: detections the full pipeline"
+        " makes and the rules alone do not.\n"
+        f"NER backends: {', '.join(backends) or 'none'}.\n\n" + ner_fp.to_markdown(files)
+    )
+    report = {
+        "config": config_name,
+        "corpus": str(root),
+        "backends": list(backends),
+        "hits": ner_fp.total_hits(files),
+        "per_100kb": ner_fp.per_100kb(files),
+        "files": ner_fp.to_json_list(files),
+    }
+    _emit(args, markdown, report)
+    if not args.check:
+        return None
+    ceilings = load_thresholds(args.ceilings)
+    try:
+        return ner_fp.ceiling_failures(ceilings, config_name, files, args.ceilings)
+    except ValueError as exc:
+        raise BenchError(f"{args.ceilings}: {exc}") from exc
 
 
 if __name__ == "__main__":

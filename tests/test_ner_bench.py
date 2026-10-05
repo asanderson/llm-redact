@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from llm_redact.bench import ner as bench_ner
+from llm_redact.bench import ner_fp
 from llm_redact.bench.datasets import DATASETS, LoadRequest, dataset_key, resolve
 from llm_redact.bench.ner_metrics import (
     LEAK,
@@ -474,3 +475,127 @@ def test_cli_lists_datasets(capsys: pytest.CaptureFixture[str]) -> None:
     assert "license: generated at run time" in printed
     real = bench_ner.list_datasets({"real": replace(DATASETS["rules"], real_data=True)})
     assert "REAL DATA" in real
+
+
+# --- NER false positives on the negatives corpus (--fp-corpus) ---------------
+
+
+def test_chunks_split_on_whole_lines() -> None:
+    text = "aaaa\nbbbb\ncccccccccccc\ndd\n"
+    parts = list(ner_fp.chunks(text, limit=10))
+    assert [chunk for _, chunk in parts] == ["aaaa\nbbbb\n", "cccccccccccc\n", "dd\n"]
+    assert all(text[offset : offset + len(chunk)] == chunk for offset, chunk in parts)
+    assert list(ner_fp.chunks("")) == []
+    assert list(ner_fp.chunks("no newline")) == [(0, "no newline")]
+
+
+def _corpus(root: Path) -> Path:
+    root.mkdir()
+    (root / "MANIFEST.toml").write_text("[files]\n")
+    (root / "build.log").write_text("Jenkins job 12 passed\nmail ops@corp.example\nJenkins\n")
+    (root / "clean.txt").write_text("nothing to see\n")
+    return root
+
+
+def test_scan_counts_only_what_ner_adds(tmp_path: Path) -> None:
+    root = _corpus(tmp_path / "corpus")
+    # "Jenkins" is a tool, not a person; the EMAIL the rules find is not
+    # counted, but the wider span that displaces it is.
+    pipeline = _pipeline({"Jenkins": "PERSON", "mail ops@corp.example": "USERNAME"})
+    errors: list[dict[str, object]] = []
+    files = ner_fp.scan(root, pipeline, errors=errors)
+    assert [f.name for f in files] == ["build.log", "clean.txt"]
+    build, clean = files
+    assert build.found == {"PERSON": 2, "USERNAME": 1}
+    assert build.lines == {"PERSON": [1, 3], "USERNAME": [2]}
+    assert not clean.found
+    assert ner_fp.total_hits(files) == 3
+    size = build.size + clean.size
+    assert ner_fp.per_100kb(files) == pytest.approx(3 * 100_000 / size)
+    assert {e["text"] for e in errors} == {"Jenkins", "mail ops@corp.example"}
+    assert {e["file"] for e in errors} == {"build.log"}
+    assert "Jenkins" not in ner_fp.to_markdown(files)
+    assert "Jenkins" not in json.dumps(ner_fp.to_json_list(files))
+    assert ner_fp.per_100kb([]) == 0.0
+
+
+def test_ceiling_gate(tmp_path: Path) -> None:
+    files = ner_fp.scan(_corpus(tmp_path / "corpus"), _pipeline({"Jenkins": "PERSON"}))
+    path = Path("c.toml")
+    assert ner_fp.ceiling_failures({}, "cfg", files, path) == [
+        "no NER ceilings for [cfg] in c.toml; record a baseline from this run's report"
+        " (docs/ner-bench.md, 'Recording a baseline')"
+    ]
+    assert ner_fp.ceiling_failures({"cfg": {"build.log": {"PERSON": 2}}}, "cfg", files, path) == []
+    assert ner_fp.ceiling_failures({"cfg": {"recorded": "x"}}, "cfg", files, path) == [
+        "build.log: PERSON found 2, ceiling 0 (lines 1, 3)"
+    ]
+    section = {"build.log": {"PERSON": 2}, "gone.txt": {}, "per_100kb_max": 0.5}
+    assert ner_fp.ceiling_failures({"cfg": section}, "cfg", files, path) == [
+        "c.toml [cfg] names gone.txt, which is not in the corpus",
+        f"NER hits per 100 KB {ner_fp.per_100kb(files):.2f} is above per_100kb_max 0.50",
+    ]
+    for bad, message in (
+        ({"build.log": 3}, "must be a table"),
+        ({"build.log": {"PERSON": 1.5}}, "must be an integer"),
+        ({"per_100kb_max": "low"}, "must be a number"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            ner_fp.ceiling_failures({"cfg": bad}, "cfg", files, path)
+
+
+def test_cli_fp_corpus_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_transformers(monkeypatch, FakeHfPipe(findings=[("Jenkins", "PER", 0.9)]))
+    root = _corpus(tmp_path / "corpus")
+    ceilings = tmp_path / "ceilings.toml"
+    ceilings.write_text('[hf-fake."build.log"]\nPERSON = 2\n')
+    argv = ["--config", str(_config(tmp_path)), "--fp-corpus", str(root)]
+    argv += ["--ceilings", str(ceilings), "--check"]
+    assert bench_ner.main([*argv, "--out", str(tmp_path / "r")]) == 0
+    assert f"check passed: [hf-fake] in {ceilings}" in capsys.readouterr().out
+    report = json.loads((tmp_path / "r" / "report.json").read_text())
+    assert report["hits"] == 2
+    assert report["files"][0] == {
+        "file": "build.log",
+        "bytes": 52,
+        "chunks": 1,
+        "found": {"PERSON": 2},
+        "lines": {"PERSON": [1, 3]},
+    }
+    ceilings.write_text('[hf-fake."build.log"]\nPERSON = 1\n')
+    dump = tmp_path / "fp.jsonl"
+    assert bench_ner.main([*argv, "--dump-errors", str(dump)]) == 1
+    printed = capsys.readouterr().out
+    assert "# NER bench: hf-fake on the false-positive corpus" in printed
+    assert "CHECK FAILED: build.log: PERSON found 2, ceiling 1 (lines 1, 3)" in printed
+    assert [json.loads(line)["line"] for line in dump.read_text().splitlines()] == [1, 3]
+    ceilings.write_text('[hf-fake."build.log"]\nPERSON = "two"\n')
+    assert bench_ner.main(argv) == 2
+    assert "must be an integer" in capsys.readouterr().err
+    argv[3] = str(tmp_path / "missing")
+    assert bench_ner.main(argv) == 2
+    assert "is not a directory" in capsys.readouterr().err
+
+
+def test_agent_traffic_negatives_catch_tool_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The committed corpus: a model that calls the tools Jenkins and Jackson
+    # people is caught in the agent-traffic files, with no ceiling allowing it.
+    root = Path(__file__).resolve().parent.parent / "bench" / "fp_corpus"
+    findings = [("Jenkins", "PER", 0.9), ("Jackson", "PER", 0.9)]
+    install_transformers(monkeypatch, FakeHfPipe(findings=findings))
+    ceilings = tmp_path / "c.toml"
+    ceilings.write_text("[hf-fake]\n")
+    argv = ["--config", str(_config(tmp_path)), "--fp-corpus", str(root), "--check"]
+    assert bench_ner.main([*argv, "--ceilings", str(ceilings)]) == 1
+    failed = capsys.readouterr().out
+    for name in ("synthetic_git_log.txt", "synthetic_ci_log.txt", "synthetic_python_module.py"):
+        assert f"CHECK FAILED: {name}: PERSON found" in failed
+
+
+def test_committed_ceilings_file_parses() -> None:
+    root = Path(__file__).resolve().parent.parent
+    assert isinstance(bench_ner.load_thresholds(root / "bench" / "ner_ceilings.toml"), dict)

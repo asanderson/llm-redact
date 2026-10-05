@@ -90,5 +90,5 @@ def build_stanza_detector(config: "NerConfig") -> StanzaDetector:
         nlp,
         frozenset(config.entities),
         config.max_chars,
-        policy=LabelPolicy(config.entities, backend="stanza"),
+        policy=LabelPolicy(config.entities, backend="stanza", overrides=config.labels),
     )

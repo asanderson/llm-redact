@@ -95,5 +95,5 @@ def build_gliner_detector(config: "NerConfig") -> GlinerDetector:
         frozenset(config.entities),
         config.max_chars,
         config.score_threshold,
-        policy=LabelPolicy(config.entities, backend="gliner"),
+        policy=LabelPolicy(config.entities, backend="gliner", overrides=config.labels),
     )

@@ -99,6 +99,12 @@ class NerConfig:
     # when exactly one backend is active — a spaCy pipeline name handed to
     # gliner would be nonsense.
     models: tuple[tuple[str, str], ...] = ()
+    # [detection.ner.labels]: normalized model label -> placeholder type
+    # ("" drops the label), stored sorted for canonical equality. The first
+    # source of the label policy's fold (detection/labels.py), for model
+    # labels AND configured entities alike, so `PER = "PER"` keeps
+    # `entities = ["PER"]` emitting PER once raw entities fold.
+    labels: tuple[tuple[str, str], ...] = ()
 
     def active_backends(self) -> tuple[str, ...]:
         return self.backends if self.backends is not None else (self.backend,)

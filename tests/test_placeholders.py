@@ -5,6 +5,7 @@ from llm_redact.placeholders import (
     MAX_TOKEN_NUMBER,
     MAX_TYPE_NAME_LEN,
     PLACEHOLDER_RE,
+    TYPE_NAME_RE,
     canonicalize,
     format_placeholder,
     is_placeholder_type,
@@ -134,3 +135,27 @@ def test_max_type_name_len_keeps_every_token_within_the_holdback_bound() -> None
 )
 def test_is_placeholder_type(name: str, ok: bool) -> None:
     assert is_placeholder_type(name) is ok
+
+
+@pytest.mark.parametrize(
+    ("name", "ok"),
+    [
+        ("DENY", True),
+        ("A", True),
+        ("A_1", True),
+        ("T" * 20, True),
+        ("T" * 21, False),
+        ("", False),
+        ("1A", False),
+        ("_A", False),
+        ("a", False),
+        ("A-B", False),
+        ("A\n", False),
+    ],
+)
+def test_type_name_re_is_the_config_grammar(name: str, ok: bool) -> None:
+    # The grammar for types a user names in the config (deny `type`,
+    # [detection.ner.labels] targets): stricter than what a token can carry.
+    assert (TYPE_NAME_RE.match(name) is not None) is ok
+    if ok:
+        assert is_placeholder_type(name)

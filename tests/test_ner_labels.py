@@ -450,3 +450,112 @@ def test_presidio_rule_toggle_suppresses_its_folds(
 ) -> None:
     _analyzer, found = _presidio(monkeypatch, ("EMAIL", "PERSON"), enabled=())
     assert found == ["PERSON"]
+
+
+# --- [detection.ner.labels] overrides ---------------------------------------------
+
+
+def _parse_labels(table: object) -> tuple[tuple[str, str], ...]:
+    from llm_redact.config import parse_config
+
+    return parse_config({"detection": {"ner": {"labels": table}}}, "<test>").detection.ner.labels
+
+
+def test_labels_parse_normalized_and_sorted() -> None:
+    assert _parse_labels({"city": "ADDRESS", "first name": "PERSON", "B-TIME": ""}) == (
+        ("CITY", "ADDRESS"),
+        ("FIRST_NAME", "PERSON"),
+        ("TIME", ""),
+    )
+    assert _parse_labels({}) == ()
+    # Two spellings of one label with the same type are one entry.
+    assert _parse_labels({"first name": "PERSON", "FIRST_NAME": "PERSON"}) == (
+        ("FIRST_NAME", "PERSON"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("table", "message"),
+    [
+        ({"CITY": "address"}, r"\[detection.ner.labels\] CITY: the type must match"),
+        ({"CITY": "A" * 21}, r"CITY: the type must match .* at most 20"),
+        ({"CITY": "STREET-ADDRESS"}, "CITY: the type must match"),
+        ({"CITY": "1ADDRESS"}, "CITY: the type must match"),
+        ({"CITY": 5}, "CITY: the type must match"),
+        ({"CITY": ["ADDRESS"]}, "CITY: the type must match"),
+        ({"--": "ADDRESS"}, "'--': a label needs at least one letter or digit"),
+        (
+            {"first name": "PERSON", "FIRST_NAME": "NAME"},
+            r"'first name' and 'FIRST_NAME' name the same label \(FIRST_NAME\)",
+        ),
+        ("CITY", "must be a table of LABEL = TYPE"),
+    ],
+)
+def test_invalid_labels_are_config_errors(table: object, message: str) -> None:
+    from llm_redact.config import ConfigError
+
+    with pytest.raises(ConfigError, match=message):
+        _parse_labels(table)
+
+
+def test_a_twenty_character_type_is_accepted() -> None:
+    assert _parse_labels({"CITY": "A" * 20}) == (("CITY", "A" * 20),)
+
+
+def test_override_opts_a_label_into_a_requested_type(
+    monkeypatch: pytest.MonkeyPatch, fold_raw: bool
+) -> None:
+    # CITY is deliberately unfolded; an override folds it into ADDRESS.
+    pipe = FakeHfPipe([("Springfield", "CITY", 0.9), ("1 Main St", "STREET_ADDRESS", 0.9)])
+    install_transformers(monkeypatch, pipe)
+    for labels_table, expected in (
+        ((), ["ADDRESS"]),
+        ((("CITY", "ADDRESS"),), ["ADDRESS", "ADDRESS"]),
+    ):
+        ner = NerConfig(enabled=True, backend="hf", entities=("ADDRESS",), labels=labels_table)
+        (detector,) = build_detectors(DetectionConfig(enabled=(), ner=ner))
+        found = [d.detector_type for d in detector.detect("1 Main St, Springfield")]
+        assert found == expected
+
+
+def test_empty_override_drops_the_label(fold_raw: bool) -> None:
+    policy = LabelPolicy(("EMAIL", "PERSON"), overrides={"EMAIL": "", "PER": ""})
+    assert policy.classify("EMAIL") is None
+    assert policy.classify("PER") is None
+    assert policy.classify("PERSON") == "PERSON"
+
+
+def test_override_keeps_per_in_both_modes(monkeypatch: pytest.MonkeyPatch, fold_raw: bool) -> None:
+    # The opt-out from the 2.0.0 fold: PER = "PER" keeps entities = ["PER"]
+    # requesting and emitting PER.
+    install_transformers(monkeypatch, FakeHfPipe([("Jane Doe", "PER", 0.9)]))
+    ner = NerConfig(enabled=True, backend="hf", entities=("PER",), labels=(("PER", "PER"),))
+    (detector,) = build_detectors(DetectionConfig(enabled=(), ner=ner))
+    assert [d.detector_type for d in detector.detect("hi Jane Doe")] == ["PER"]
+    policy = LabelPolicy(("PER",), overrides={"PER": "PER"})
+    assert policy.requested == {"PER"}
+    assert policy.raw_requested == frozenset()
+
+
+@pytest.mark.parametrize("backend", ["spacy", "stanza", "gliner", "presidio", "hf"])
+def test_every_builder_hands_the_overrides_to_its_policy(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    # Each backend's model reports the same name as CITY; the override makes
+    # it an ADDRESS for every one of them.
+    install_spacy(monkeypatch, FakeSpacy([("Springfield", "CITY", 1.0)]))
+    install_stanza(monkeypatch, FakeSpacy([("Springfield", "CITY", 1.0)]))
+    install_gliner(monkeypatch, FakeGliner([("Springfield", "CITY", 0.9)]))
+    install_transformers(monkeypatch, FakeHfPipe([("Springfield", "CITY", 0.9)]))
+    install_presidio(monkeypatch, FakeAnalyzer([("Springfield", "CITY", 0.9)], ("CITY", "PERSON")))
+    ner = NerConfig(
+        enabled=True, backend=backend, entities=("ADDRESS", "CITY"), labels=(("CITY", "ADDRESS"),)
+    )
+    (detector,) = build_detectors(DetectionConfig(enabled=(), ner=ner))
+    assert [d.detector_type for d in detector.detect("in Springfield")] == ["ADDRESS"]
+
+
+def test_an_override_target_outside_the_grammar_is_never_emitted(fold_raw: bool) -> None:
+    # Programmatic configs skip the parser's check; the runtime guard holds.
+    policy = LabelPolicy(("CITY",), overrides={"CITY": "city-name"})
+    assert policy.classify("CITY") is None

@@ -191,6 +191,24 @@ included, which the presidio backend emits as the built-in `EMAIL`, `PHONE`,
 label (`entities = ["PER"]` then requests and emits `PERSON`); write the type
 (`"PERSON"`) to get that behavior now.
 
+**Overrides.** `[detection.ner.labels]` maps a model label (normalized as
+above, so `"first name"` and `FIRST_NAME` are one key) to a placeholder type,
+or to `""` to drop it. An override comes before the fold table, and it applies
+to the `entities` list as well as to model output:
+
+```toml
+[detection.ner]
+entities = ["PERSON", "ADDRESS"]
+
+[detection.ner.labels]
+CITY = "ADDRESS"   # a model's CITY detections are redacted as addresses
+TIME = ""          # the model's TIME label is never emitted
+```
+
+A target type uses the deny-string type grammar: an uppercase letter, then
+uppercase letters, digits and `_`, at most 20 characters. `PER = "PER"` keeps
+`entities = ["PER"]` emitting `PER` after raw requests start folding in 2.0.0.
+
 Presidio is asked only for the entities its analyzer supports for the
 configured language and the policy keeps: a type request becomes the Presidio
 entities that fold into it (`EMAIL` asks for `EMAIL_ADDRESS`, `PHONE` for

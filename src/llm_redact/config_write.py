@@ -437,6 +437,11 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append("\n[detection.ner.models]")
         for backend_name, model_name in ner.models:
             lines.append(f"{backend_name} = {_toml_str(model_name)}")
+    if ner.labels:
+        # A subtable too: after every [detection.ner] scalar.
+        lines.append("\n[detection.ner.labels]")
+        for label, type_name in ner.labels:
+            lines.append(f"{_toml_str(label)} = {_toml_str(type_name)}")
 
     for entry in detection.deny_strings:
         # Always the canonical per-entry form: the `deny = [...]` sugar folds

@@ -431,9 +431,23 @@ backend = "spacy"
 # [detection.ner.models]
 # spacy = "en_core_web_md"
 # gliner = "urchade/gliner_medium-v2.1"
+# Model labels become placeholder types through one label policy for every
+# backend (docs/detection.md "Placeholder types from NER models"): synonyms
+# fold into one type (PER, FIRST_NAME, SURNAME -> PERSON; EMAIL_ADDRESS ->
+# EMAIL), so a value gets one token whichever backend finds it.
+# Override the fold per normalized model label (a type, or "" to drop the
+# label). An override applies to `entities` too: PER = "PER" keeps
+# entities = ["PER"] emitting PER after 2.0.0, when raw labels start folding.
+# [detection.ner.labels]
+# CITY = "ADDRESS"   # cities count as addresses (ADDRESS must be requested)
+# TIME = ""          # never emit the model's TIME label
 # NOTE: a placeholder type disabled in the `enabled` rule list above stays
-# disabled for NER too (presidio folds EMAIL/PHONE/US_SSN/IBAN/CREDIT_CARD
-# into the built-in types) — rule toggles are the single source of truth.
+# disabled for NER too (a model's EMAIL_ADDRESS folds into the built-in
+# EMAIL type) — rule toggles are the single source of truth.
+# `entities` names placeholder types (PERSON, ADDRESS, DATE_OF_BIRTH,
+# PASSPORT, DRIVER_LICENSE, USERNAME, ACCOUNT_NUMBER, or a built-in rule's
+# type such as EMAIL), which every backend serves whatever its model calls
+# them, or a model's own label (ORG, "job title"), emitted as written.
 entities = ["PERSON"]
 max_chars = 20000   # strings longer than this skip NER (regex still applies)
 language = "en"     # presidio wires this through the analyzer

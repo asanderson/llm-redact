@@ -324,6 +324,16 @@ which protocols your tools will send. Probe each one with `llm-redact
 routes test --protocol X` (llm-redact-pro) before traffic arrives. The
 full refusal list is in the llm-redact-pro routing guide.
 
+## "[detection.ner.labels] LABEL: the type must match [A-Z][A-Z0-9_]* and be at most 20 characters, or be "" to drop the label"
+
+A `[detection.ner.labels]` value is not a placeholder type. Write the type in
+uppercase letters, digits and `_`, starting with a letter and at most 20
+characters (`CITY = "ADDRESS"`), or `""` to drop the label. Related
+messages from the same table: "a label needs at least one letter or digit"
+(a key such as `"--"`), "… name the same label (X) with different types" (two
+spellings of one label, such as `"first name"` and `FIRST_NAME`, mapped to
+different types: keep one), and "must be a table of LABEL = TYPE".
+
 ## "[detection.ner] entities […] match no entity the Presidio analyzer supports for language '…'"
 
 From `serve` / `serve --check` with the `presidio` backend: none of the

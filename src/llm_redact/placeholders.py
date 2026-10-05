@@ -52,6 +52,13 @@ def format_placeholder(type_name: str, n: int) -> str:
     return f"«{type_name}_{n:03d}»"
 
 
+# A placeholder type a user names in the config (a deny string's `type`, a
+# `[detection.ner.labels]` target): an uppercase letter, then uppercase
+# letters, digits and `_`, at most 20 characters — well inside what a token
+# can carry (MAX_TYPE_NAME_LEN below), so every number the vault can issue
+# for it stays within MAX_PLACEHOLDER_LEN.
+TYPE_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{0,19}\Z")
+
 # The longest placeholder TYPE a token can carry: every token the vault can
 # issue for it (up to «TYPE_999999999») must fit MAX_PLACEHOLDER_LEN, the
 # bound on streaming holdback and the fuzzy grammar's reach. 28 characters.

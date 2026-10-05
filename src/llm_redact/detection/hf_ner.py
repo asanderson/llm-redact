@@ -110,5 +110,5 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
         frozenset(config.entities),
         config.max_chars,
         config.score_threshold,
-        policy=LabelPolicy(config.entities, backend="hf"),
+        policy=LabelPolicy(config.entities, backend="hf", overrides=config.labels),
     )

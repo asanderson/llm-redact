@@ -11,6 +11,12 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+- `[detection.ner.labels]`: map a model label to a placeholder type (`CITY = "ADDRESS"`)
+  or drop it (`TIME = ""`). Keys are normalized like every model label; values use the
+  deny-string type grammar. An override applies to `entities` too, so `PER = "PER"` keeps
+  `entities = ["PER"]` emitting `PER` once raw entities fold in 2.0.0.
+
 ### Changed
 - NER model labels become placeholder types through one label policy for every backend
   (`detection/labels.py`, documented in docs/detection.md "Placeholder types from NER

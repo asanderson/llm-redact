@@ -90,5 +90,5 @@ def build_ner_detector(config: "NerConfig") -> NerDetector:
         nlp,
         frozenset(config.entities),
         config.max_chars,
-        policy=LabelPolicy(config.entities, backend="spacy"),
+        policy=LabelPolicy(config.entities, backend="spacy", overrides=config.labels),
     )

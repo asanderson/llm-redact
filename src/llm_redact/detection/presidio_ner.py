@@ -141,5 +141,5 @@ def build_presidio_detector(config: "NerConfig") -> PresidioDetector:
         config.max_chars,
         config.score_threshold,
         language=config.language,
-        policy=LabelPolicy(config.entities, backend="presidio"),
+        policy=LabelPolicy(config.entities, backend="presidio", overrides=config.labels),
     )

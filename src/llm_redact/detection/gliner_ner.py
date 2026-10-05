@@ -12,6 +12,11 @@ encoder — the prompt block of entity labels first, then the words — is
 bounded too. A longer string is therefore read in overlapping windows of
 GLiNER's own words (its words splitter: every JSON brace, quote, colon and
 comma is a word), each small enough for both limits (windows.word_windows).
+
+The model loads from a local folder at a pinned revision (model_files.py):
+a checkpoint without its own tokenizer and encoder configuration gets them
+from its pinned base model in a folder assembled once, so no load asks the
+Hub for anything.
 """
 
 from collections.abc import Callable, Iterator, Sequence
@@ -228,12 +233,21 @@ def build_gliner_detector(config: "NerConfig") -> GlinerDetector:
             '[detection.ner] backend = "gliner" but the gliner extra is not installed;'
             " install it: uv sync --extra gliner"
         ) from exc
+    from llm_redact.detection.model_files import gliner_model_dir
+
     model_name = config.model or _MODEL_NAME
+    # A self-contained local folder at the pinned revision (model_files.py):
+    # loading it reads no file from the Hub, the base model's included.
+    folder = gliner_model_dir(
+        model_name,
+        revision=config.revision_for("gliner"),
+        allow_download=config.allow_download,
+    )
     try:
-        model = GLiNER.from_pretrained(model_name)
-    except Exception as exc:  # model download/load can fail many ways
+        model = GLiNER.from_pretrained(str(folder), local_files_only=True, map_location="cpu")
+    except Exception as exc:  # model load can fail many ways; name only what is known
         raise ConfigError(
-            f"failed to load GLiNER model {model_name!r}; check network access and disk space"
+            f"failed to load GLiNER model {model_name!r}: {type(exc).__name__}"
         ) from exc
     detector = GlinerDetector(
         model,

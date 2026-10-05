@@ -181,9 +181,24 @@ loaded with `trust_remote_code`. The weights must be safetensors: a model
 with only `pytorch_model.bin` is refused unless `allow_pickle_weights = true`,
 and a model with both always loads its safetensors.
 
-**Not enforced yet for `gliner`.** The `gliner` backend does not read these
-keys yet: it still loads the newest revision from the Hub, downloaded on
-first use and cached.
+**How the `gliner` backend loads a model.** The same way: the GLiNER
+checkpoint at its pinned revision, from the local cache unless
+`allow_download = true`, with an explicit list of files (`gliner_config.json`,
+`model.safetensors`, the tokenizer files, and `pytorch_model.bin` only for a
+checkpoint without safetensors — GLiNER loads it with torch's `weights_only`
+loader). A checkpoint that ships its own tokenizer and an `encoder_config`
+(Knowledgator's) loads from that folder. One that does not (the urchade v2.1
+models, the default included) would make GLiNER fetch its base model's
+tokenizer and configuration from the Hub at every load, at no fixed
+revision; llm-redact instead fetches the base model's configuration and
+tokenizer (never its weights) at the revision the model catalog pins and
+assembles a self-contained folder under `$XDG_DATA_HOME/llm-redact/models/gliner/`:
+links to the checkpoint's weights and the base model's tokenizer, and a
+`gliner_config.json` that embeds the base model's configuration as
+`encoder_config` and names no absolute path. A base model the catalog does
+not pin loads at its newest cached revision, with a startup warning. A
+configuration naming code to import (`auto_map`) or a model type transformers
+does not know is refused.
 
 ## How NER runs
 

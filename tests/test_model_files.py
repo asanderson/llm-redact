@@ -382,3 +382,349 @@ def test_a_malformed_sidecar_is_a_config_error(tmp_path: Path) -> None:
 def test_install_hub_returns_the_installed_fake(monkeypatch: pytest.MonkeyPatch) -> None:
     hub = install_hub(monkeypatch)
     assert sys.modules["huggingface_hub"].snapshot_download == hub.snapshot_download
+
+
+# --- GLiNER: pinned base model, self-contained folder (D13) ----------------------
+
+GLINER_SMALL = "urchade/gliner_small-v2.1"
+GLINER_PIN = "4e091416cf7c3481db542c2a3d26156916f3a47f"
+DEBERTA = "microsoft/deberta-v3-small"
+DEBERTA_PIN = "a36c739020e01763fe789b4b85e2df55d6180012"
+DEBERTA_CONFIG = {"model_type": "deberta-v2", "hidden_size": 768, "vocab_size": 128100}
+# urchade's v2.1 layout: configuration and a pickle, no tokenizer, no
+# encoder_config (the base model supplies both).
+URCHADE_REPO = {
+    "gliner_config.json": json.dumps({"model_name": DEBERTA, "max_len": 384}),
+    "pytorch_model.bin": "weights",
+    "README.md": "",
+}
+DEBERTA_REPO = {
+    "config.json": json.dumps(DEBERTA_CONFIG),
+    "tokenizer_config.json": json.dumps({"do_lower_case": False}),
+    "spm.model": "sentencepiece",
+    "pytorch_model.bin": "backbone weights",
+    "tf_model.h5": "",
+}
+# A self-contained checkpoint (Knowledgator's layout).
+SELF_CONTAINED = {
+    "gliner_config.json": json.dumps(
+        {"model_name": DEBERTA, "encoder_config": {"model_type": "deberta-v2"}}
+    ),
+    "pytorch_model.bin": "",
+    "tokenizer.json": "{}",
+    "tokenizer_config.json": "{}",
+    "onnx/model.onnx": "",
+}
+
+
+class StrictGliner:
+    """GLiNER.from_pretrained as gliner 0.2.28 decides: the tokenizer comes
+    from the folder only when it holds tokenizer_config.json, the encoder
+    configuration only from an embedded encoder_config — otherwise GLiNER
+    would ask the Hub for model_name, which this stand-in refuses."""
+
+    def __init__(self) -> None:
+        self.loaded: list[tuple[str, dict[str, Any]]] = []
+
+    def from_pretrained(self, name: str, **kwargs: Any) -> Any:
+        folder = Path(name)
+        config = json.loads((folder / "gliner_config.json").read_text())
+        if not (folder / "tokenizer_config.json").is_file():
+            raise OSError(f"would fetch the tokenizer of {config['model_name']}")
+        if not isinstance(config.get("encoder_config"), dict):
+            raise OSError(f"would fetch the configuration of {config['model_name']}")
+        weights = [w for w in ("model.safetensors", "pytorch_model.bin") if (folder / w).is_file()]
+        if not weights and not kwargs.get("load_onnx_model"):
+            raise FileNotFoundError("no model file")
+        self.loaded.append((name, kwargs))
+        from ner_fakes import FakeGliner
+
+        return FakeGliner([])
+
+
+def _gliner(monkeypatch: pytest.MonkeyPatch, hub: FakeHub, **ner: Any) -> tuple[StrictGliner, Any]:
+    from llm_redact.detection.gliner_ner import build_gliner_detector
+    from ner_fakes import FakeGliner, install_gliner
+
+    install_gliner(monkeypatch, FakeGliner([]), hub)
+    strict = StrictGliner()
+    monkeypatch.setattr(sys.modules["gliner"], "GLiNER", strict)
+    detector = build_gliner_detector(NerConfig(enabled=True, backend="gliner", **ner))
+    return strict, detector
+
+
+def _two_repos(**extra: dict[str, str]) -> FakeHub:
+    return FakeHub(repos={GLINER_SMALL: URCHADE_REPO, DEBERTA: DEBERTA_REPO, **extra}, default=None)
+
+
+def test_the_default_gliner_model_loads_from_an_assembled_local_folder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_redact.detection.model_files import (
+        BACKBONE_PATTERNS,
+        GLINER_PATTERNS,
+        models_dir,
+    )
+
+    hub = _two_repos()
+    strict, _ = _gliner(monkeypatch, hub)
+    assert [(c["repo_id"], c["revision"], c["allow_patterns"]) for c in hub.calls] == [
+        (GLINER_SMALL, GLINER_PIN, list(GLINER_PATTERNS)),
+        # No safetensors in the repository: GLiNER's weights_only pickle.
+        (GLINER_SMALL, GLINER_PIN, [*GLINER_PATTERNS, "pytorch_model.bin"]),
+        # The base model at the catalog's pin: configuration and tokenizer.
+        (DEBERTA, DEBERTA_PIN, list(BACKBONE_PATTERNS)),
+    ]
+    assert all(c["local_files_only"] for c in hub.calls)
+    [(name, kwargs)] = strict.loaded
+    assert kwargs == {"local_files_only": True, "map_location": "cpu"}
+    folder = Path(name)
+    assert folder.parent == models_dir() / "gliner"
+    assert _files(folder) == {
+        "gliner_config.json",
+        "pytorch_model.bin",
+        "config.json",
+        "tokenizer_config.json",
+        "spm.model",
+    }  # never the base model's weights
+    assert (folder / "pytorch_model.bin").read_text() == "weights"
+    config = json.loads((folder / "gliner_config.json").read_text())
+    # A local path, and no absolute one: the folder can be carried.
+    assert config["model_name"] == "."
+    assert config["encoder_config"] == DEBERTA_CONFIG
+    assert config["max_len"] == 384
+    assert str(folder) not in (folder / "gliner_config.json").read_text()
+
+
+def test_a_second_load_reuses_the_assembled_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    hub = _two_repos()
+    first, _ = _gliner(monkeypatch, hub)
+    marker = Path(first.loaded[0][0]) / "marker"
+    marker.write_text("")
+    second, _ = _gliner(monkeypatch, hub)
+    assert first.loaded[0][0] == second.loaded[0][0]
+    assert marker.exists()  # not rebuilt
+
+
+def test_the_checkpoint_vocabulary_size_reaches_the_embedded_encoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = {
+        **URCHADE_REPO,
+        "gliner_config.json": json.dumps({"model_name": DEBERTA, "vocab_size": 128004}),
+    }
+    strict, _ = _gliner(monkeypatch, _two_repos(**{GLINER_SMALL: repo}))
+    config = json.loads((Path(strict.loaded[0][0]) / "gliner_config.json").read_text())
+    assert config["encoder_config"]["vocab_size"] == 128004
+
+
+def test_a_checkpoint_with_its_own_tokenizer_keeps_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = {**URCHADE_REPO, "tokenizer.json": "own", "tokenizer_config.json": "{}"}
+    strict, _ = _gliner(monkeypatch, _two_repos(**{GLINER_SMALL: repo}))
+    folder = Path(strict.loaded[0][0])
+    assert (folder / "tokenizer.json").read_text() == "own"
+    assert not (folder / "spm.model").exists()
+
+
+def test_a_self_contained_checkpoint_loads_from_its_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hub = FakeHub(repos={"org/gliner-pii": SELF_CONTAINED}, default=None)
+    strict, _ = _gliner(monkeypatch, hub, model="org/gliner-pii")
+    assert [c["repo_id"] for c in hub.calls] == ["org/gliner-pii", "org/gliner-pii"]
+    name = strict.loaded[0][0]
+    assert Path(name) == hub.root / "org--gliner-pii" / "main"
+    # Only the names asked for: no ONNX copy without [detection.ner.onnx].
+    assert "onnx/model.onnx" not in _files(name)
+
+
+def test_an_assembled_folder_loads_with_no_hub_at_all(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import shutil
+
+    from llm_redact.detection import model_files
+
+    # Without links (Windows without the privilege) the files are copied,
+    # and the folder is then a portable copy of everything it needs.
+    def refuse(*args: Any) -> None:
+        raise OSError("no links here")
+
+    monkeypatch.setattr(model_files.os, "symlink", refuse)
+    monkeypatch.setattr(model_files.os, "link", refuse)
+    hub = _two_repos()
+    strict, _ = _gliner(monkeypatch, hub)
+    folder = strict.loaded[0][0]
+    shutil.rmtree(hub.root)  # the cache (base model included) is gone
+    offline = FakeHub(default=None)  # and every hub call fails
+    again, _ = _gliner(monkeypatch, offline, model=folder)
+    assert offline.calls == []
+    assert again.loaded[0][0] == folder
+
+
+@pytest.mark.parametrize(
+    ("repo", "base", "message"),
+    [
+        (
+            {
+                **SELF_CONTAINED,
+                "gliner_config.json": json.dumps({"encoder_config": {"auto_map": {}}}),
+            },
+            DEBERTA_REPO,
+            "gliner model 'org/gliner-x' needs code from its repository"
+            " (gliner_config.json names auto_map)",
+        ),
+        (
+            {
+                **SELF_CONTAINED,
+                "gliner_config.json": json.dumps({"encoder_config": {"model_type": "evil"}}),
+            },
+            DEBERTA_REPO,
+            "gliner model 'org/gliner-x': gliner_config.json names a model type"
+            " transformers does not know",
+        ),
+        (
+            {"gliner_config.json": json.dumps({"model_name": DEBERTA}), "model.safetensors": ""},
+            {
+                **DEBERTA_REPO,
+                "config.json": json.dumps({"model_type": "bert", "auto_map": {"x": "y"}}),
+            },
+            f"gliner base model '{DEBERTA}' needs code from its repository"
+            " (config.json names auto_map)",
+        ),
+        (
+            {"gliner_config.json": json.dumps({"model_name": DEBERTA}), "model.safetensors": ""},
+            {**DEBERTA_REPO, "config.json": json.dumps({"model_type": "qwen-custom"})},
+            f"gliner base model '{DEBERTA}': config.json names a model type"
+            " transformers does not know",
+        ),
+        (
+            {"gliner_config.json": json.dumps({"model_name": DEBERTA}), "model.safetensors": ""},
+            {"tokenizer_config.json": "{}"},
+            f"gliner base model '{DEBERTA}' has no config.json",
+        ),
+        (
+            {"gliner_config.json": json.dumps({"max_len": 384}), "model.safetensors": ""},
+            DEBERTA_REPO,
+            "gliner model 'org/gliner-x': gliner_config.json names no base model (model_name)",
+        ),
+        (
+            {"model.safetensors": ""},
+            DEBERTA_REPO,
+            "gliner model 'org/gliner-x' has no gliner_config.json",
+        ),
+    ],
+)
+def test_gliner_checkpoints_that_would_run_code_or_cannot_load_are_refused(
+    monkeypatch: pytest.MonkeyPatch, repo: dict[str, str], base: dict[str, str], message: str
+) -> None:
+    hub = FakeHub(repos={"org/gliner-x": repo, DEBERTA: base}, default=None)
+    with pytest.raises(ConfigError) as caught:
+        _gliner(monkeypatch, hub, model="org/gliner-x")
+    assert str(caught.value).startswith(f"[detection.ner] {message}")
+
+
+def test_an_uncatalogued_base_model_loads_unpinned_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    repo = {"gliner_config.json": json.dumps({"model_name": DEBERTA}), "model.safetensors": ""}
+    hub = FakeHub(repos={"org/gliner-x": repo, DEBERTA: DEBERTA_REPO}, default=None)
+    with caplog.at_level("WARNING", logger="llm_redact"):
+        _gliner(monkeypatch, hub, model="org/gliner-x")
+    assert hub.calls[-1]["repo_id"] == DEBERTA
+    assert hub.calls[-1]["revision"] is None
+    assert [r.getMessage() for r in caplog.records] == [
+        "[detection.ner] gliner model 'org/gliner-x' ships no tokenizer or encoder_config, and"
+        f" the model catalog pins no revision of its base model '{DEBERTA}': the newest cached"
+        " revision of its default branch loads"
+    ]
+
+
+def test_a_base_model_missing_from_the_cache_names_models_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hub = _two_repos()
+    hub.uncached.add(DEBERTA)
+    with pytest.raises(ConfigError) as caught:
+        _gliner(monkeypatch, hub)
+    assert str(caught.value).startswith(
+        f"[detection.ner] gliner base model '{DEBERTA}' at revision {DEBERTA_PIN} is not"
+        " (completely) in the local Hugging Face cache"
+    )
+
+
+def test_a_sidecar_identified_folder_takes_the_catalog_base_model_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    folder = _folder(
+        tmp_path / "model", {**URCHADE_REPO, SIDECAR_NAME: json.dumps({"model_id": GLINER_SMALL})}
+    )
+    hub = FakeHub(repos={DEBERTA: DEBERTA_REPO}, default=None)
+    _gliner(monkeypatch, hub, model=str(folder))
+    assert [(c["repo_id"], c["revision"]) for c in hub.calls] == [(DEBERTA, DEBERTA_PIN)]
+    (folder / SIDECAR_NAME).write_text("[]")
+    with pytest.raises(ConfigError, match=r"\[detection.ner\] gliner model: .*llm-redact-model"):
+        _gliner(monkeypatch, hub, model=str(folder))
+
+
+def test_a_failed_gliner_load_names_the_exception_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.detection.gliner_ner import build_gliner_detector
+    from ner_fakes import FakeGliner, install_gliner
+
+    install_gliner(monkeypatch, FakeGliner([]), _two_repos())
+
+    def fail(name: str, **kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sys.modules["gliner"].GLiNER, "from_pretrained", fail)
+    with pytest.raises(ConfigError) as caught:
+        build_gliner_detector(NerConfig(enabled=True, backend="gliner"))
+    assert str(caught.value) == f"failed to load GLiNER model '{GLINER_SMALL}': RuntimeError"
+
+
+def test_without_transformers_the_gliner_extra_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.detection.model_files import gliner_model_dir
+
+    install_hub(monkeypatch, FakeHub(repos={"org/gliner-pii": SELF_CONTAINED}, default=None))
+    monkeypatch.setitem(sys.modules, "transformers", None)
+    with pytest.raises(ConfigError, match="needs transformers, which the gliner extra installs"):
+        gliner_model_dir("org/gliner-pii", revision=None, allow_download=False)
+
+
+def test_the_models_dir_follows_xdg_data_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from llm_redact.detection.model_files import models_dir
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert models_dir() == tmp_path / "llm-redact" / "models"
+    monkeypatch.setenv("XDG_DATA_HOME", "")  # empty counts as unset
+    assert models_dir() == Path.home() / ".local" / "share" / "llm-redact" / "models"
+
+
+def test_a_concurrent_twin_of_the_folder_is_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.detection import model_files
+
+    real_rename = model_files.os.rename
+
+    def rename_then_lose(source: Any, target: Any) -> None:
+        real_rename(source, target)  # another process got there first
+        raise FileExistsError(target)
+
+    monkeypatch.setattr(model_files.os, "rename", rename_then_lose)
+    strict, _ = _gliner(monkeypatch, _two_repos())
+    assert (Path(strict.loaded[0][0]) / "gliner_config.json").is_file()
+
+
+def test_a_folder_that_cannot_be_assembled_is_a_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from llm_redact.detection import model_files
+
+    def no_space(**kwargs: Any) -> str:
+        raise OSError(28, "No space left on device")
+
+    hub = _two_repos()
+    monkeypatch.setattr(model_files.tempfile, "mkdtemp", no_space)
+    with pytest.raises(ConfigError, match=r"cannot assemble its local folder under .* \(OSError\)"):
+        _gliner(monkeypatch, hub)

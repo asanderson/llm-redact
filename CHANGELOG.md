@@ -19,8 +19,7 @@ and tags `vX.Y.Z`.
   the default models, `urchade/gliner_medium-v2.1`, `urchade/gliner_multi-v2.1`,
   `urchade/gliner_multi_pii-v1` and the four `knowledgator/gliner-pii-*-v1.0` sizes are pinned to
   their `main` commits of 2026-10-05. The keys are parsed, validated and written
-  back by `config show`. The `hf` backend reads them (see Security); the `gliner` backend does
-  not yet and still loads as before.
+  back by `config show`, and both Hub backends read them (see Security).
 - NER coverage counters: every NER backend counts the strings it read, the strings it
   skipped as longer than `[detection.ner] max_chars` (which only the regex rules then
   read), and the model entities it dropped (a type that cannot be a placeholder type, a
@@ -158,6 +157,16 @@ and tags `vX.Y.Z`.
   `pytorch_model.bin` (a pickle, which can run code when loaded) is refused unless
   `allow_pickle_weights = true`. Previously the newest revision was downloaded from the Hub on
   first use.
+- The `gliner` NER backend loads its model the same way, and no longer fetches a base model
+  from the Hub at every load. The default `urchade/gliner_small-v2.1` (like the other urchade
+  v2.1 checkpoints) ships no tokenizer or encoder configuration, so GLiNER fetched them from
+  its base model (`microsoft/deberta-v3-small`) on each start, at no fixed revision, and could
+  never start offline. llm-redact now resolves that base model's configuration and tokenizer at
+  the revision its model catalog pins and assembles a self-contained folder under
+  `$XDG_DATA_HOME/llm-redact/models/gliner/`, which GLiNER loads with `local_files_only`. A
+  GLiNER or base-model configuration naming code to import (`auto_map`) or a model type
+  transformers does not know is refused. A GLiNER load failure now names the exception type
+  instead of suggesting network access.
 - The `gliner`, `stanza` and `hf` extras require `torch>=2.6`, the release that fixed
   CVE-2025-32434 (a bypass of `torch.load(weights_only=True)`, the loader GLiNER uses for
   `pytorch_model.bin` checkpoints); gliner and stanza themselves accept older torch.

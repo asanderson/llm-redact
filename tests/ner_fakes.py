@@ -111,6 +111,8 @@ class FakeGliner:
 
     findings: list[Finding]
     calls: list[list[str]] = field(default_factory=list)
+    # The arguments of every GLiNER.from_pretrained() call (install_gliner).
+    loaded_with: list[dict[str, Any]] = field(default_factory=list)
 
     def predict_entities(
         self, text: str, labels: list[str], threshold: float
@@ -300,12 +302,25 @@ def install_transformers(
         _ensure_hub(monkeypatch)
 
 
-def install_gliner(monkeypatch: pytest.MonkeyPatch, model: FakeGliner) -> None:
+def install_gliner(
+    monkeypatch: pytest.MonkeyPatch, model: FakeGliner, hub: FakeHub | None = None
+) -> None:
+    """A fake ``gliner`` whose ``GLiNER.from_pretrained`` records its
+    arguments on ``model.loaded_with`` and hands ``model`` back; with the
+    fake hub and the fake transformers model types the loader needs."""
     module = types.ModuleType("gliner")
-    module.GLiNER = types.SimpleNamespace(  # type: ignore[attr-defined]
-        from_pretrained=lambda name: model
-    )
+
+    def from_pretrained(name: str, **kwargs: Any) -> FakeGliner:
+        model.loaded_with.append({"model_id": name, **kwargs})
+        return model
+
+    module.GLiNER = types.SimpleNamespace(from_pretrained=from_pretrained)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "gliner", module)
+    fake_transformers(monkeypatch)
+    if hub is not None:
+        install_hub(monkeypatch, hub)
+    else:
+        _ensure_hub(monkeypatch)
 
 
 def install_spacy(monkeypatch: pytest.MonkeyPatch, nlp: FakeSpacy) -> None:

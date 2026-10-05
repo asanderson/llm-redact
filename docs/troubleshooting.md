@@ -512,7 +512,52 @@ A configuration file in the model's folder is not a UTF-8 JSON object (or is
 larger than 4 MiB), or cannot be opened. Re-fetch the model
 (`llm-redact models pull`) or fix the local folder.
 
-## "[detection.ner] … model '…' needs huggingface_hub, which the hf and gliner extras install; install the backend's extra"
+## "failed to load GLiNER model '…': …"
+
+From `serve` / `serve --check`: the model's files are in place, but GLiNER
+could not load them; the message ends with the exception type. Common
+causes: damaged files in the cache (fetch them again: `llm-redact models
+pull`), a checkpoint the installed gliner version cannot read, or too little
+memory.
+
+## "[detection.ner] gliner model '…' has no gliner_config.json" / "… names no base model (model_name) for its tokenizer and encoder configuration"
+
+The folder or repository is not a GLiNER checkpoint (`gliner_config.json`
+is missing), or its configuration ships no tokenizer and no `encoder_config`
+and does not name the base model to take them from. Check the model id or
+folder.
+
+## "[detection.ner] gliner … '…': … names a model type transformers does not know; llm-redact never runs model code"
+
+The GLiNER checkpoint's `encoder_config` (or its base model's `config.json`)
+names an architecture the installed transformers does not ship. GLiNER
+would build that encoder with `trust_remote_code`, which could run code from
+the model repository, so it is refused. Upgrade transformers if the type is
+newer than your version (`uv sync --extra gliner`), or pick another model.
+
+## "[detection.ner] gliner base model '…' has no config.json"
+
+The base model a GLiNER checkpoint names lacks the configuration llm-redact
+embeds into the assembled folder. Check the `model_name` in the checkpoint's
+`gliner_config.json`.
+
+## "[detection.ner] gliner model '…' ships no tokenizer or encoder_config, and the model catalog pins no revision of its base model '…': the newest cached revision of its default branch loads"
+
+A startup warning for a GLiNER checkpoint llm-redact's model catalog does
+not know (or knows with another base model): its base model's tokenizer and
+configuration load at whatever revision of its default branch the cache
+holds. Prefer a catalogued model or a self-contained checkpoint (one that
+ships its tokenizer and an `encoder_config`), or a folder written by
+`llm-redact models pull --to`.
+
+## "[detection.ner] gliner model '…': cannot assemble its local folder under … (…)"
+
+llm-redact could not write the self-contained GLiNER folder it builds from
+the checkpoint and its base model (under `$XDG_DATA_HOME/llm-redact/models/`).
+Make that directory writable for the proxy's user (the systemd unit and the
+Helm chart already allow the data directory), or free disk space.
+
+## "[detection.ner] … model '…' needs huggingface_hub, which the hf and gliner extras install; install the backend's extra" / "backend = \"gliner\" needs transformers, which the gliner extra installs"
 
 The `huggingface_hub` package is missing, although the `hf` and `gliner`
 extras install it (through transformers and gliner). Re-install the

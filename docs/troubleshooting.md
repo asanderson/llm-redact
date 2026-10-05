@@ -337,6 +337,86 @@ which protocols your tools will send. Probe each one with `llm-redact
 routes test --protocol X` (llm-redact-pro) before traffic arrives. The
 full refusal list is in the llm-redact-pro routing guide.
 
+## `[detection.ner] entities: "PER" is emitted as PER now and as PERSON from 2.0.0; write "PERSON" to switch now, or set [detection.ner.labels] PER = "PER" to keep PER`
+
+A deprecation WARNING logged at startup (also by `serve --check`) and shown
+as a `doctor` WARN row, one per affected entity; the quoted entity and types
+are yours. The entity names a model's own label rather than a placeholder
+type, and llm-redact 2.0.0 will fold such labels into the shared type
+(`PER` → `PERSON`, `"phone number"` → `PHONE`, `EMAIL_ADDRESS` → `EMAIL`), so
+the same value gets the same token whichever backend finds it. Nothing changes
+until you upgrade to 2.0.0. Settle it now in one of two ways:
+
+- write the type the message names (`entities = ["PERSON"]`): detections
+  switch to that type now (new placeholders such as «PERSON_001»; metrics and
+  alerts keyed on the old type move with them);
+- or keep today's type for good with the override the message names
+  (`[detection.ner.labels] PER = "PER"`).
+
+Either way the warning goes away. See docs/detection.md "Placeholder types
+from NER models".
+
+## `[detection.ner] entities: "…" can never match: no active backend emits it (…)`
+
+A WARNING logged at startup (also by `serve --check`) and after a reload that
+rebuilds the detectors, once per entity; the parentheses name each active
+backend and its model. Every loaded model was asked which labels it has
+(Hugging Face models through their `id2label` table, spaCy pipelines through
+their `ner` component, Presidio through the entities its analyzer supports),
+and none of them is ever emitted as this entity's type. GLiNER (zero-shot) and
+Stanza publish no label set, so with either of them active this never fires.
+Common causes:
+
+- a typo (`PERSONS`), or a label this model does not use — check the model
+  card (`PER` vs `PERSON` no longer matters: write `PERSON`, the type);
+- a type the model was not trained for (`ADDRESS` with a CoNLL-2003 model);
+- while raw entities keep their own type (until 2.0.0), a raw entry such as
+  `PER` claims the model's `PER` label, which then no longer serves a
+  `PERSON` entry beside it — list one of the two;
+- a `[detection.ner.labels]` override that maps the type to `""`, or a type
+  that cannot be a placeholder (it starts with a digit or is longer than 28
+  characters).
+
+Nothing breaks: the entity simply never redacts anything. Fix the entry or
+pick a model that covers it.
+
+## "[detection.ner.labels] LABEL: the type must match [A-Z][A-Z0-9_]* and be at most 20 characters, or be "" to drop the label"
+
+A `[detection.ner.labels]` value is not a placeholder type. Write the type in
+uppercase letters, digits and `_`, starting with a letter and at most 20
+characters (`CITY = "ADDRESS"`), or `""` to drop the label. Related
+messages from the same table: "a label needs at least one letter or digit"
+(a key such as `"--"`), "… name the same label (X) with different types" (two
+spellings of one label, such as `"first name"` and `FIRST_NAME`, mapped to
+different types: keep one), and "must be a table of LABEL = TYPE".
+
+## "[detection.ner] entities […] match no entity the Presidio analyzer supports for language '…'"
+
+From `serve` / `serve --check` with the `presidio` backend: none of the
+configured `entities` is something Presidio can find in that language, so
+every request would fail. The message lists what the analyzer supports. Name
+a placeholder type Presidio covers (`PERSON`, `EMAIL`, `PHONE`, `SSN`, `IBAN`,
+`CREDIT_CARD`) or one of the listed Presidio entities (`LOCATION`,
+`IP_ADDRESS`, …); `PER` is a spaCy/Hugging Face label Presidio does not use —
+write `PERSON`.
+
+## `backend = "hf" but torch is not installed; install the hf extra`
+
+From `serve` / `serve --check` with `[detection.ner]` using the `hf` backend:
+the `transformers` package is installed but `torch` is not, so no model can
+run. Install the extra, which brings both: `uv sync --extra hf` (or
+`pip install 'llm-redact-proxy[hf]'`), then re-run `serve --check`.
+
+## "failed to load Hugging Face token-classification model '…': …"
+
+From `serve` / `serve --check`: torch is installed, but loading the named
+`hf` model failed; the message ends with the exception type. Common causes: a
+model id that does not exist or is not a token-classification model, a model
+missing from the local Hugging Face cache while the machine cannot reach the
+Hub, or a full disk. Load it once by hand to see the library's full error:
+`uv run python -c "from transformers import pipeline;
+pipeline('token-classification', model='ORG/MODEL')"`.
+
 ## Tool sees `«EMAIL_001»`-style tokens in responses
 
 A placeholder reached the tool unrestored. Almost always one of: the

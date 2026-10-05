@@ -7,10 +7,11 @@ container image. Unlike spaCy, GLiNER emits per-entity confidence scores —
 this is the backend the reserved ``score_threshold`` config key exists for.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
+from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
 
 if TYPE_CHECKING:
@@ -30,23 +31,56 @@ class _ModelLike(Protocol):
 class GlinerDetector:
     name = "gliner"
 
+    # Read by the never-match check (engine.build_detectors): the placeholder
+    # types this model can emit (None = unknown, e.g. zero-shot), the model
+    # for messages, and the configured entities no active backend emits.
+    emittable_types: frozenset[str] | None = None
+    model_name: str | None = None
+    unmatched_entities: tuple[str, ...] = ()
+
     def __init__(
-        self, model: _ModelLike, entities: frozenset[str], max_chars: int, threshold: float
+        self,
+        model: _ModelLike,
+        entities: frozenset[str],
+        max_chars: int,
+        threshold: float,
+        *,
+        policy: LabelPolicy | None = None,
     ) -> None:
         self._model = model
-        self._entities = sorted(entities)
+        # Zero-shot prompts come from the label policy (labels.py): a type
+        # request sends a natural-language prompt ("person", "street
+        # address"), a raw request its own text; by default the policy is
+        # built from `entities` (sorted: a set has no order to keep).
+        self.label_policy = (
+            policy if policy is not None else LabelPolicy(sorted(entities), backend=self.name)
+        )
+        self._labels = list(self.label_policy.prompts)
         self._max_chars = max_chars
         self._threshold = threshold
 
-    def detect(self, text: str) -> Iterable[Detection]:
-        if len(text) > self._max_chars:
+    def detect(self, text: str) -> list[Detection]:
+        # Parts of one name or address reported separately join into one
+        # span (labels.merge_adjacent_parts).
+        return merge_adjacent_parts(self._found(text), text)
+
+    def _found(self, text: str) -> Iterator[Detection]:
+        if len(text) > self._max_chars or not self._labels:
             return
-        for entity in self._model.predict_entities(text, self._entities, self._threshold):
+        for entity in self._model.predict_entities(text, self._labels, self._threshold):
+            label = self.label_policy.classify_gliner(str(entity["label"]))
+            if label is None:
+                continue
+            start, end = int(entity["start"]), int(entity["end"])
+            if not 0 <= start < end <= len(text):
+                continue  # a span the text does not contain is never redacted
             yield Detection(
-                start=int(entity["start"]),
-                end=int(entity["end"]),
-                detector_type=str(entity["label"]).upper().replace(" ", "_"),
-                value=str(entity["text"]),
+                start=start,
+                end=end,
+                detector_type=label,
+                # The source slice: what the vault maps is exactly what the
+                # user sent.
+                value=text[start:end],
                 priority=NER_PRIORITY,
             )
 
@@ -68,6 +102,12 @@ def build_gliner_detector(config: "NerConfig") -> GlinerDetector:
         raise ConfigError(
             f"failed to load GLiNER model {model_name!r}; check network access and disk space"
         ) from exc
-    return GlinerDetector(
-        model, frozenset(config.entities), config.max_chars, config.score_threshold
+    detector = GlinerDetector(
+        model,
+        frozenset(config.entities),
+        config.max_chars,
+        config.score_threshold,
+        policy=LabelPolicy(config.entities, backend="gliner", overrides=config.labels),
     )
+    detector.model_name = model_name
+    return detector

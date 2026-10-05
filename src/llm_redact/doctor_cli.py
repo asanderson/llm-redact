@@ -680,6 +680,16 @@ def _check_licensed_features(report: _Report, config: Config) -> None:
         )
 
 
+def _check_ner_labels(report: _Report, config: Config) -> None:
+    """The NER label policy's config-only warnings (doctor never loads a
+    model): configured raw entities whose placeholder type changes in
+    2.0.0 — the same lines serve logs at startup."""
+    from llm_redact.detection.engine import ner_warnings
+
+    for warning in ner_warnings(config.detection):
+        report.line("WARN", "ner", warning)
+
+
 def _check_posture(report: _Report, config: Config) -> None:
     """Loud reminders for every configured coverage opt-out. Each is a
     deliberate feature, so these are WARN (never FAIL) — but an operator
@@ -1115,6 +1125,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_vault(report, config)
     _check_extras(report, config)
     _check_posture(report, config)
+    _check_ner_labels(report, config)
     _check_extraction(report, config)
     _check_upstream_auth(report, config)
     _check_allowed_hosts(report, config)

@@ -11,7 +11,72 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+- A startup WARNING for each `[detection.ner] entities` entry no active NER backend can ever
+  emit (a typo, a label the model lacks, an override that drops it), naming the entity,
+  the backends and their models; the labels come from an `hf` model's `id2label`, a spaCy
+  pipeline's `ner` component and the entities Presidio supports (GLiNER and Stanza can
+  emit anything). Logged after every detector build, `serve --check` included.
+- `[detection.ner.labels]`: map a model label to a placeholder type (`CITY = "ADDRESS"`)
+  or drop it (`TIME = ""`). Keys are normalized like every model label; values use the
+  deny-string type grammar. An override applies to `entities` too, so `PER = "PER"` keeps
+  `entities = ["PER"]` emitting `PER` once raw entities fold in 2.0.0.
+
+### Changed
+- NER model labels become placeholder types through one label policy for every backend
+  (`detection/labels.py`, documented in docs/detection.md "Placeholder types from NER
+  models"): labels are normalized (`B-PER` → `PER`, `"street address"` →
+  `STREET_ADDRESS`) and synonyms fold into one type (`PER`, `FIRST_NAME`, `SURNAME` … →
+  `PERSON`; `EMAIL_ADDRESS` → `EMAIL`), so one value gets one token whichever backend
+  finds it. An `entities` entry that names a placeholder type (`PERSON`, `ADDRESS`,
+  `EMAIL`, …) requests that type from every backend. Entries that name a model's own
+  label (`PER`, `"job title"`) keep emitting that label, as before.
+- The spaCy, Stanza and Presidio backends use the same label policy: `entities =
+  ["PERSON"]` now also finds people with pipelines that label them `PER` (most non-English
+  spaCy and Stanza models). Presidio is asked for the entities that fold into a requested
+  type (`EMAIL` asks for `EMAIL_ADDRESS`) and only for entities its analyzer supports;
+  `PRESIDIO_TYPE_MAP` keeps its five pairs.
+- A name or address an NER backend reports in parts ("Jane" `first_name`, "Doe"
+  `last_name`) becomes one span when the parts are separated by one or two spaces, tabs
+  or no-break spaces only, so a full name gets one `PERSON` token instead of two.
+- GLiNER is prompted in natural language for a type request: `PERSON` sends "person",
+  `ADDRESS` "street address", `EMAIL` "email address" (previously the type name itself).
+  Other entries are still sent as written. Detections keep their type.
+- A model label that cannot be a placeholder type (it starts with a digit, or is longer
+  than 28 characters) is no longer emitted: its tokens could never be restored.
+
+### Deprecated
+- An `[detection.ner] entities` entry naming a model's own label rather than a placeholder
+  type keeps its own type in 1.12 but will fold into the shared type in 2.0.0 (`PER` →
+  `PERSON`, `"phone number"` → `PHONE`, `EMAIL_ADDRESS` → `EMAIL` outside Presidio). Each
+  affected entity logs a startup WARNING (`serve --check` included) and shows a `doctor`
+  WARN row naming both types; write the type now (`entities = ["PERSON"]`) or keep the old
+  one for good with `[detection.ner.labels] PER = "PER"`.
+
 ### Fixed
+- `[detection.allowlist_by_type]` accepts the types NER entities are emitted as (`JOB_TITLE`
+  for the GLiNER entity `"job title"`, which it refused) and reads a key that names an
+  entity as written as the type NER emits for it (a `"job title"` key never matched).
+  Every key valid before stays valid.
+- A Presidio `entities` list naming nothing the analyzer supports failed every request
+  (Presidio raises when asked only for unknown entities); it now stops the startup with
+  an error naming what the analyzer supports, and unsupported entries beside supported
+  ones are left out of the request.
+- The default `hf` NER configuration detected nothing: `dslim/bert-base-NER` labels people
+  `PER`, the default `entities = ["PERSON"]` asked for `PERSON`. `PERSON` now requests
+  every label that folds into it.
+- `[detection.ner] score_threshold` survives `llm-redact config show` and every config
+  rewrite when `hf` is the only backend that emits confidences: the emitter wrote it only
+  for `gliner` and `presidio`, while the parser accepts it for `hf` too (one shared
+  `CONFIDENCE_BACKENDS` list now). An `hf`-only threshold was silently dropped, and the
+  dashboard editor's round-trip check refused every save of such a configuration.
+- A failed `hf` model load names its cause instead of always suggesting network access and
+  disk space: `torch is not installed; install the hf extra` when torch is missing (it
+  cannot run a model without it), else the model id and the exception type.
+- The `hf` NER backend maps the exact text the request carried (`text[start:end]`), never
+  the pipeline's decoded `word`, which can differ (casing, spacing, unknown-token marks):
+  a restored value is always the one the user sent. An entity whose offsets fall outside
+  the scanned string is skipped.
 - The `hf` extra installs torch: transformers declares torch only as its own extra, so
   `uv sync --extra hf` used to install a backend that could not run any model. The extra is
   now `transformers>=4.40` plus `torch>=2.6`. `llm-redact doctor` FAILs an enabled `gliner`,

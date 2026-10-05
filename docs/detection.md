@@ -134,3 +134,124 @@ concurrently (`backends = ["spacy", "presidio"]`), and the multilingual
 Stanza and Hugging Face `token-classification` backends are available the
 same way — the survey behind the lineup is
 [ner-landscape.md](ner-landscape.md).
+
+## Placeholder types from NER models
+
+Each NER model names what it finds in its own words: spaCy says `PERSON`,
+`dslim/bert-base-NER` says `PER`, a PII model may say `first_name` and
+`last_name`. llm-redact turns every model label into one placeholder type, so
+a value gets the same token whichever backend finds it — the vault is keyed on
+(session, type, value), and two names for one type would issue two tokens for
+one person.
+
+A label is first normalized (a leading `B-`/`I-`/`E-`/`S-`/`L-`/`U-` tag is
+dropped, letters are uppercased, any other run of characters becomes `_`:
+`"B-first_name"` → `FIRST_NAME`, `"street address"` → `STREET_ADDRESS`), then
+folded into its placeholder type:
+
+| Type | Model labels that fold into it |
+|---|---|
+| `PERSON` | PER, PERSON, NAME, FULL_NAME, FIRST_NAME, FIRSTNAME, GIVENNAME, GIVEN_NAME, MIDDLE_NAME, MIDDLENAME, LAST_NAME, LASTNAME, SURNAME, FAMILY_NAME, PRIVATE_PERSON |
+| `ADDRESS` | ADDRESS, STREET_ADDRESS, STREETADDRESS, STREET, LOCATION_STREET, LOCATION_ADDRESS, BUILDINGNUM, BUILDING_NUMBER, BUILDINGNUMBER, PRIVATE_ADDRESS |
+| `DATE_OF_BIRTH` | DATE_OF_BIRTH, DATEOFBIRTH, DOB, BIRTH_DATE, BIRTHDATE |
+| `PASSPORT` | PASSPORT, PASSPORT_NUMBER, PASSPORTNUM, PASSPORTNUMBER |
+| `DRIVER_LICENSE` | DRIVER_LICENSE, DRIVERS_LICENSE, DRIVER_LICENSE_NUMBER, DRIVERS_LICENSE_NUMBER, DRIVERLICENSENUM, DRIVER_LICENCE |
+| `USERNAME` | USERNAME, USER_NAME |
+| `ACCOUNT_NUMBER` | ACCOUNT_NUMBER, ACCOUNTNUM, BANK_ACCOUNT, BANK_ACCOUNT_NUMBER |
+| `EMAIL` | EMAIL, EMAIL_ADDRESS, PRIVATE_EMAIL |
+| `PHONE` | PHONE, PHONE_NUMBER, TELEPHONE, TELEPHONENUM, PRIVATE_PHONE |
+| `SSN` | SSN, US_SSN |
+| `IBAN` | IBAN, IBAN_CODE |
+| `CREDIT_CARD` | CREDIT_CARD, CREDIT_CARD_NUMBER, CREDITCARDNUMBER, CREDIT_DEBIT_CARD, CARD_NUMBER, PAYMENT_CARD |
+| `IPV4` / `IPV6` | IPV4 / IPV6 |
+| `SECRET` (the type of `generic_secret`) | PASSWORD, SECRET, API_KEY, ACCESS_TOKEN |
+
+Deliberately not folded, and kept only when listed raw in `entities`:
+`IP_ADDRESS` (it covers v4 and v6), place names and plain dates (`LOC`,
+`LOCATION`, `GPE`, `CITY`, `STATE`, `COUNTRY`, `ZIPCODE`, `POSTCODE`, `DATE`,
+`PRIVATE_DATE`, `TIME`), organisations (`ORG`, `COMPANY_NAME`), URLs, the
+country-ambiguous `SOCIALNUM`/`TAXNUM`/`IDCARDNUM` (the national-id rules own
+those types), and every label describing a sensitive attribute (race or
+ethnicity, religion, political view, sexuality, gender, Presidio's `NRP`):
+those are detected only when you list them yourself.
+
+**Type requests.** An entry of `[detection.ner] entities` whose normalized form
+is a placeholder type — `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `PASSPORT`,
+`DRIVER_LICENSE`, `USERNAME`, `ACCOUNT_NUMBER`, or any built-in rule's type
+such as `EMAIL` — requests that type from every backend, whatever the model
+calls it. The default `entities = ["PERSON"]` therefore works with spaCy,
+Stanza, Presidio and with a `PER`-emitting `hf` model alike, and a name two
+backends both find gets one token. GLiNER is prompted in natural language for
+a type request (`PERSON` → "person", `ADDRESS` → "street address",
+`DATE_OF_BIRTH` → "date of birth", `PASSPORT` → "passport number",
+`DRIVER_LICENSE` → "driver license number", `USERNAME` → "username",
+`ACCOUNT_NUMBER` → "account number", `EMAIL` → "email address", `PHONE` →
+"phone number"; other built-in types send their name in lowercase words).
+
+**Raw requests.** Any other entry (`PER`, `ORG`, `"job title"`) is a raw
+request: GLiNER is sent the text as written, and the backend emits the label's
+normalized form (`"job title"` → `JOB_TITLE`) — as before, Presidio's
+`EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_SSN`, `IBAN_CODE` and `CREDIT_CARD`
+included, which the presidio backend emits as the built-in `EMAIL`, `PHONE`,
+`SSN`, `IBAN` and `CREDIT_CARD`.
+
+**Deprecated: raw requests fold from 2.0.0.** From 2.0.0 a raw request folds
+like a model label: `entities = ["PER"]` will request and emit `PERSON`,
+`"phone number"` `PHONE`, `EMAIL_ADDRESS` (outside Presidio) `EMAIL`. Each
+configured entity whose type will change logs one WARNING at startup and shows
+a `doctor` WARN row naming both types. Write the type (`"PERSON"`) to switch
+now, or keep the old type with an override (`[detection.ner.labels] PER =
+"PER"`, below).
+
+**Overrides.** `[detection.ner.labels]` maps a model label (normalized as
+above, so `"first name"` and `FIRST_NAME` are one key) to a placeholder type,
+or to `""` to drop it. An override comes before the fold table, and it applies
+to the `entities` list as well as to model output:
+
+```toml
+[detection.ner]
+entities = ["PERSON", "ADDRESS"]
+
+[detection.ner.labels]
+CITY = "ADDRESS"   # a model's CITY detections are redacted as addresses
+TIME = ""          # the model's TIME label is never emitted
+```
+
+A target type uses the deny-string type grammar: an uppercase letter, then
+uppercase letters, digits and `_`, at most 20 characters. `PER = "PER"` keeps
+`entities = ["PER"]` emitting `PER` after raw requests start folding in 2.0.0.
+
+Presidio is asked only for the entities its analyzer supports for the
+configured language and the policy keeps: a type request becomes the Presidio
+entities that fold into it (`EMAIL` asks for `EMAIL_ADDRESS`, `PHONE` for
+`PHONE_NUMBER`, `SSN` for `US_SSN`, `PERSON` for `PERSON`), a raw request is
+asked for as written, and a type Presidio has no entity for (`ADDRESS`) is left
+out. An `entities` list Presidio supports none of stops the startup with an
+error, rather than failing every request.
+
+A type the token format cannot carry (one that does not start with a letter,
+or longer than 28 characters) is never emitted.
+
+After the models load, each entity is checked against the labels they can
+emit (an `hf` model's `id2label`, a spaCy pipeline's `ner` labels, the
+entities Presidio supports; zero-shot GLiNER and Stanza can emit anything).
+An entity no active backend can ever emit logs one WARNING naming the entity,
+the backends and their models, so a typo or a label the model lacks no
+longer detects nothing in silence.
+
+Models trained to tag `first_name` and `last_name` separately report "Jane
+Doe" as two parts. When one backend finds two `PERSON` (or two `ADDRESS`)
+spans separated by one or two spaces, tabs or no-break spaces, they become
+one span, so a full name gets one token. Parts are never joined across a
+newline, punctuation, a quote, a comma or a JSON delimiter.
+
+`[detection.allowlist_by_type]` keys name the type a detection carries.
+Besides the rule and deny types, a key may name any type the NER entities are
+emitted as (`JOB_TITLE` for the GLiNER entity `"job title"`) or an entity as
+written; a key that only NER emits is read as the type NER emits for it
+(`"job title"` → `JOB_TITLE`; `PER` → `PERSON` once raw entities fold), and
+the startup log names each such key once.
+
+A folded built-in type follows its rule's toggle: with `generic_secret`
+disabled, a model's `PASSWORD` detections (type `SECRET`) are suppressed too,
+and with `email` disabled so are the `EMAIL_ADDRESS` ones.

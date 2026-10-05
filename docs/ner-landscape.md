@@ -149,14 +149,14 @@ language, cheapest first:
 
 ```toml
 # 1. A language-specific spaCy pipeline (tens of MB, ~1-10 ms). Install the
-#    model, then name it. entities uses spaCy's labels (PER for many non-EN
-#    pipelines).
+#    model, then name it. Many non-English pipelines label people PER;
+#    the PERSON type request covers it (docs/detection.md).
 [detection.ner]
 enabled = true
 backend = "spacy"
 language = "de"
 model = "de_core_news_sm"     # uv run python -m spacy download de_core_news_sm
-entities = ["PER"]
+entities = ["PERSON"]
 
 # 2. Stanza — one line per language, 60+ supported (pulls torch).
 [detection.ner]
@@ -177,9 +177,10 @@ hf = "Davlan/xlm-roberta-base-ner-hrl"   # 10 languages
 
 Backends compose: `backends = ["spacy", "stanza"]` runs an English spaCy
 model and a per-language Stanza model at once, and same-span same-type hits
-dedupe in overlap resolution. Entity labels differ across models — check the
-model card and set `entities` to match (a wrong label silently detects
-nothing).
+dedupe in overlap resolution. Entity labels differ across models; a
+placeholder type such as `PERSON` requests every label that folds into it
+(docs/detection.md), and an entity no loaded model can emit logs a startup
+warning instead of silently detecting nothing.
 
 This document is also the decision record for when a user asks for a
 language the current backends serve poorly.

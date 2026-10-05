@@ -1,5 +1,6 @@
 """Assemble the detector list from configuration."""
 
+import logging
 import re
 import weakref
 from collections.abc import Callable, Iterable, Sequence
@@ -7,6 +8,7 @@ from dataclasses import dataclass, field, replace
 
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
+from llm_redact.detection.labels import LabelPolicy, raw_entity_deprecations
 from llm_redact.detection.regex_rules import BUILTIN_RULES, PreparedText, RegexDetector, RegexRule
 
 
@@ -99,6 +101,12 @@ class NerConfig:
     # when exactly one backend is active — a spaCy pipeline name handed to
     # gliner would be nonsense.
     models: tuple[tuple[str, str], ...] = ()
+    # [detection.ner.labels]: normalized model label -> placeholder type
+    # ("" drops the label), stored sorted for canonical equality. The first
+    # source of the label policy's fold (detection/labels.py), for model
+    # labels AND configured entities alike, so `PER = "PER"` keeps
+    # `entities = ["PER"]` emitting PER once raw entities fold.
+    labels: tuple[tuple[str, str], ...] = ()
 
     def active_backends(self) -> tuple[str, ...]:
         return self.backends if self.backends is not None else (self.backend,)
@@ -151,30 +159,72 @@ class DetectionConfig:
 
 BINARY_UPLOAD_MODES = ("forward", "refuse")
 
+logger = logging.getLogger("llm_redact")
+
+
+def ner_entity_types(ner: NerConfig) -> set[str]:
+    """Every placeholder type the configured NER entities can be emitted
+    as, on any active backend: the requested types, each entity's own type
+    (a raw entity's normalized label while raw entities do not fold), and
+    the [detection.ner.labels] targets."""
+    types = {type_name for _label, type_name in ner.labels if type_name}
+    for backend in ner.active_backends():
+        policy = LabelPolicy(ner.entities, backend=backend, overrides=ner.labels)
+        types |= policy.requested
+        types |= {t for t in map(policy.classify, ner.entities) if t is not None}
+    return types
+
+
+def _allowlist_by_type(config: DetectionConfig) -> dict[str, frozenset[str]]:
+    """[detection.allowlist_by_type] keyed by the types detections carry.
+
+    A typo'd TYPE key was silently inert (the user believes the value is
+    allowlisted; it keeps being redacted), so every key must name a type
+    something can emit: a built-in rule, a custom rule, a deny entry, a
+    configured NER entity as written (always accepted), or a type the NER
+    entities are emitted as. A key no rule emits is read as the type NER
+    emits for it ("job title" -> JOB_TITLE; PER -> PERSON once raw entities
+    fold), so an allowlist written for a model label keeps matching; keys of
+    one type merge. Logged once, key names only.
+    """
+    rule_types = (
+        {rule.detector_type for rule in BUILTIN_RULES}
+        | {rule.detector_type for rule in config.custom_rules}
+        | {entry.detector_type for entry in config.deny_strings}
+    )
+    ner_types = ner_entity_types(config.ner)
+    policy = LabelPolicy(config.ner.entities, overrides=config.ner.labels)
+    by_type: dict[str, frozenset[str]] = {}
+    unknown: list[str] = []
+    renamed: list[str] = []
+    for key, values in config.allowlist_by_type:
+        detector_type = key
+        if key not in rule_types:
+            canonical = policy.entry_type(key)
+            if canonical is not None and canonical in ner_types:
+                detector_type = canonical
+            elif key not in config.ner.entities:
+                unknown.append(key)
+        if detector_type != key:
+            renamed.append(f"{key!r} -> {detector_type}")
+        by_type[detector_type] = by_type.get(detector_type, frozenset()) | frozenset(values)
+    if unknown:
+        known_types = rule_types | ner_types | set(config.ner.entities)
+        raise ValueError(
+            f"unknown placeholder type(s) {sorted(unknown)} in"
+            f" [detection.allowlist_by_type]; known types are"
+            f" {sorted(known_types)}"
+        )
+    if renamed:
+        logger.info(
+            "[detection.allowlist_by_type] keys read as the types NER emits: %s",
+            ", ".join(renamed),
+        )
+    return by_type
+
 
 def build_allowlist(config: DetectionConfig) -> Allowlist:
-    # A typo'd TYPE key was silently inert (the user believes the value is
-    # allowlisted; it keeps being redacted). Validate against every type that
-    # can actually be emitted: built-in rules, custom rules, deny entries,
-    # and the configured NER entity labels.
-    if config.allowlist_by_type:
-        known_types = (
-            {rule.detector_type for rule in BUILTIN_RULES}
-            | {rule.detector_type for rule in config.custom_rules}
-            | {entry.detector_type for entry in config.deny_strings}
-            | set(config.ner.entities)
-        )
-        unknown_types = sorted(
-            detector_type
-            for detector_type, _values in config.allowlist_by_type
-            if detector_type not in known_types
-        )
-        if unknown_types:
-            raise ValueError(
-                f"unknown placeholder type(s) {unknown_types} in"
-                f" [detection.allowlist_by_type]; known types are"
-                f" {sorted(known_types)}"
-            )
+    by_type = _allowlist_by_type(config) if config.allowlist_by_type else {}
     patterns = []
     for p in config.allowlist_patterns:
         try:
@@ -188,9 +238,7 @@ def build_allowlist(config: DetectionConfig) -> Allowlist:
     return Allowlist(
         exact=DEFAULT_ALLOWLIST | frozenset(config.allowlist),
         patterns=tuple(patterns),
-        by_type={
-            detector_type: frozenset(values) for detector_type, values in config.allowlist_by_type
-        },
+        by_type=by_type,
     )
 
 
@@ -253,8 +301,8 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
         detectors.append(DenyDetector(config.deny_strings))
     if config.ner.enabled:
         # A placeholder type disabled at the rule level is disabled, period
-        # — NER must not reintroduce it (presidio folds EMAIL/PHONE/SSN/
-        # IBAN/CREDIT_CARD into the built-in types). Rule toggles are the
+        # — NER must not reintroduce it (model labels fold into built-in
+        # types: EMAIL_ADDRESS -> EMAIL, PASSWORD -> SECRET). Rule toggles are the
         # single source of truth; entity types with no built-in rule
         # (PERSON) are never suppressed. Language scoping counts as a rule
         # toggle here: a type whose only rule is scoped out stays out.
@@ -262,6 +310,7 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
         suppressed = frozenset(
             rule.detector_type for rule in BUILTIN_RULES if rule.detector_type not in enabled_types
         )
+        built: list[Detector] = []
         for backend_name in config.ner.active_backends():
             # Each backend builder still sees a single-backend view with
             # its own resolved model — the builders stay untouched.
@@ -294,8 +343,84 @@ def build_detectors(config: DetectionConfig) -> list[Detector]:
                 from llm_redact.detection.ner import build_ner_detector
 
                 inner = build_ner_detector(single)
+            built.append(inner)
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
+        _mark_unmatched(config.ner.entities, built)
     return detectors
+
+
+def _label_policy(detector: Detector) -> LabelPolicy | None:
+    policy = getattr(detector, "label_policy", None)
+    return policy if isinstance(policy, LabelPolicy) else None
+
+
+def _can_emit(detector: Detector, entity: str) -> bool:
+    """Whether ``detector`` (an NER backend) can ever emit the type
+    ``entity`` is emitted as: a type its model's labels classify as, or any
+    type when the model does not say (zero-shot GLiNER, Stanza)."""
+    policy = _label_policy(detector)
+    type_name = policy.classify(entity) if policy is not None else None
+    emittable = getattr(detector, "emittable_types", None)
+    return type_name is not None and (emittable is None or type_name in emittable)
+
+
+def _mark_unmatched(entities: Sequence[str], backends: Sequence[Detector]) -> None:
+    """Record on every NER backend the configured entities NO active backend
+    can ever emit (a typo such as PERSONS, a type the loaded models lack, an
+    override that drops it). Backends without a label policy (plugin or
+    test stand-ins) say nothing, so nothing is recorded for them."""
+    known = [backend for backend in backends if _label_policy(backend) is not None]
+    if not known:
+        return
+    unmatched = tuple(
+        entity
+        for entity in dict.fromkeys(entities)
+        if not any(_can_emit(backend, entity) for backend in known)
+    )
+    for backend in known:
+        backend.unmatched_entities = unmatched  # type: ignore[attr-defined]
+
+
+def ner_backends(detectors: Sequence[Detector]) -> list[Detector]:
+    """The NER backends among ``detectors`` (unwrapped from their type
+    filter), in build order."""
+    found: list[Detector] = []
+    for detector in detectors:
+        inner = detector.inner if isinstance(detector, TypeFilteredDetector) else detector
+        if _label_policy(inner) is not None:
+            found.append(inner)
+    return found
+
+
+def ner_unmatched_entities(detectors: Sequence[Detector]) -> tuple[str, ...]:
+    """The configured NER entities no active backend can ever emit, as
+    recorded at build time (empty without NER)."""
+    backends = ner_backends(detectors)
+    return tuple(getattr(backends[0], "unmatched_entities", ())) if backends else ()
+
+
+def ner_warnings(config: DetectionConfig, detectors: Sequence[Detector] = ()) -> list[str]:
+    """The NER configuration's startup warnings (config names, types,
+    backends and model ids only, never detected text), logged by the proxy
+    after each detector build and shown by doctor (which builds no model,
+    so passes no detectors): configured raw entities whose type changes in
+    2.0.0, and, from the built ``detectors``, entities no active backend
+    can ever emit."""
+    if not config.ner.enabled:
+        return []
+    warnings = raw_entity_deprecations(config.ner)
+    backends = ner_backends(detectors)
+    where = ", ".join(
+        f"{policy.backend}: {getattr(backend, 'model_name', None) or 'default model'}"
+        for backend in backends
+        if (policy := _label_policy(backend)) is not None
+    )
+    for entity in ner_unmatched_entities(detectors):
+        warnings.append(
+            f'[detection.ner] entities: "{entity}" can never match: no active backend'
+            f" emits it ({where})"
+        )
+    return warnings
 
 
 def build_modes(config: DetectionConfig) -> dict[str, str]:

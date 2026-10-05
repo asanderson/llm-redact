@@ -242,18 +242,30 @@ async def test_the_client_pace_of_a_stream_is_charged_once_per_chunk() -> None:
 
 
 class MeteredGate(FakeGate):
-    def __init__(self, samples: Any = (), *, delay: float = 0.0) -> None:
+    def __init__(
+        self, samples: Any = (), *, delay: float = 0.0, hold: threading.Event | None = None
+    ) -> None:
         super().__init__()
         self.samples = samples
         self.delay = delay
+        # A call held until the test releases it: a deadline assertion then
+        # never races the call's own end on a loaded runner (a fixed delay did
+        # — a scrape under mutmut once took longer than the delay itself).
+        self.hold = hold
         self.calls = 0
+        self.finished = 0
         self.threads: set[int] = set()
 
     def metrics_samples(self) -> Any:
         self.calls += 1
         self.threads.add(threading.get_ident())
-        if self.delay:
-            time.sleep(self.delay)
+        try:
+            if self.hold is not None:
+                self.hold.wait(30)
+            if self.delay:
+                time.sleep(self.delay)
+        finally:
+            self.finished += 1
         if isinstance(self.samples, Exception):
             raise self.samples
         return self.samples
@@ -428,18 +440,28 @@ async def test_a_slow_gate_is_bounded_and_never_asked_twice_at_once(
     install_gate: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(proxy, "PLUGIN_METRICS_TIMEOUT_SECONDS", 0.05)
-    gate = MeteredGate([("llm_redact_seats_used", {}, 1)], delay=0.5)
+    hold = threading.Event()
+    gate = MeteredGate([("llm_redact_seats_used", {}, 1)], hold=hold)
     app = install_gate(gate)
     started = time.monotonic()
     first = await _scrape(app)
     second = await _scrape(app)  # the first call is still running: not asked again
-    assert time.monotonic() - started < 0.45
+    # The call is held until released below: the scrapes ending at all is the
+    # bound; the margin only absorbs a loaded runner's scheduling.
+    assert time.monotonic() - started < 5
     assert "llm_redact_seats_used" not in first + second
     assert gate.calls == 1
     assert app.state.proxy.bookkeeping_errors[PLUGIN_METRICS_STAGE] == 2
-    await asyncio.sleep(0.6)  # the abandoned call ends; its answer is discarded
-    gate.delay = 0
+    hold.set()  # the abandoned call ends; its answer is discarded
+    await _until(lambda: gate.finished == 1)
     assert "llm_redact_seats_used 1" in await _scrape(app)
+
+
+async def _until(done: Any, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not done():
+        assert time.monotonic() < deadline
+        await asyncio.sleep(0.01)
 
 
 async def _scrapes_at_once(app: Any, n: int = 2) -> list[str]:
@@ -469,16 +491,20 @@ async def test_a_joined_scrape_waits_only_until_the_calls_own_deadline(
     install_gate: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(proxy, "PLUGIN_METRICS_TIMEOUT_SECONDS", 0.05)
-    gate = MeteredGate([("llm_redact_seats_used", {}, 1)], delay=0.5)
+    hold = threading.Event()
+    gate = MeteredGate([("llm_redact_seats_used", {}, 1)], hold=hold)
     app = install_gate(gate)
     started = time.monotonic()
     texts = await _scrapes_at_once(app)
-    assert time.monotonic() - started < 0.45
+    # Both scrapes answered while the call is still held: neither waited for it.
+    assert time.monotonic() - started < 5
+    assert gate.finished == 0
     assert not any("llm_redact_seats_used" in text for text in texts)
     assert gate.calls == 1
     # Once per scrape rendered without the gauges.
     assert app.state.proxy.bookkeeping_errors[PLUGIN_METRICS_STAGE] == 2
-    await asyncio.sleep(0.6)
+    hold.set()
+    await _until(lambda: gate.finished == 1)
 
 
 async def test_a_gate_without_the_member_adds_nothing(install_gate: Any) -> None:

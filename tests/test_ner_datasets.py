@@ -445,7 +445,7 @@ def test_cli_scores_a_downloaded_dataset(
     ("extra", "message"),
     [
         (["--dataset", "synthetic", "--language", "en"], "dataset 'synthetic' has no language"),
-        (["--fp-corpus", "{tmp}", "--language", "en"], "--fp-corpus has no language"),
+        (["--fp-corpus", "{tmp}", "--language", "en"], "--language: this run has no language"),
         (["--cache-dir", "{repo}"], "--cache-dir must be outside any git work tree"),
         (["--dataset", "nemotron"], "could not download data/test-00000-of-00001.parquet"),
     ],

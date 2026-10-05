@@ -62,6 +62,11 @@ and tags `vX.Y.Z`.
   CredData checkout (Samsung; labels Apache-2.0, code under its projects' licenses),
   prepared with CredData's own download script and never vendored; each labelled true
   credential is scored by the leak metric, lines of false look-alikes by over-redaction.
+- `python -m llm_redact.bench.ner --latency` times NER: p50/p95 per string at 50, 500,
+  2,000 and 10,000 characters for each NER backend and model and for the full pipeline,
+  plus a 20,000-string body redacted end to end; the report names the CPU model.
+  Report-only unless `[<config>.latency]` ceilings are recorded in
+  `bench/ner_thresholds.toml`.
 
 ### Changed
 - NER model labels become placeholder types through one label policy for every backend

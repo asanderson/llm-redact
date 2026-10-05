@@ -542,3 +542,16 @@ A CredData metadata file lacks the columns the adapter reads (`FilePath`,
 valid UTF-8 CSV — a checkout of a CredData version whose format changed, or
 a damaged file. Check out the commit named in
 [ner-bench.md](ner-bench.md#creddata).
+
+## NER bench: "--fp-corpus and --latency are separate runs; pick one" / "--dump-errors applies to dataset and --fp-corpus runs"
+
+`--latency` times NER; it scores nothing and dumps nothing. Run it on its
+own, and run `--fp-corpus` or a dataset (with `--dump-errors` if wanted)
+separately.
+
+## NER bench: "p50_ms at N characters: X ms is above the ceiling Y ms"
+
+The full pipeline's median per-string time crossed the ceiling recorded in
+`[CONFIG.latency]` of the thresholds file. Latency depends on the CPU the
+report names: compare like with like before treating it as a regression,
+and raise the ceiling (with the CPU in its `note`) when the machine changed.

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from llm_redact.bench import ner as bench_ner
-from llm_redact.bench import ner_fp
+from llm_redact.bench import ner_fp, ner_latency
 from llm_redact.bench.datasets import DATASETS, LoadRequest, dataset_key, resolve
 from llm_redact.bench.ner_metrics import (
     LEAK,
@@ -599,3 +599,118 @@ def test_agent_traffic_negatives_catch_tool_names(
 def test_committed_ceilings_file_parses() -> None:
     root = Path(__file__).resolve().parent.parent
     assert isinstance(bench_ner.load_thresholds(root / "bench" / "ner_ceilings.toml"), dict)
+
+
+# --- NER latency (--latency) --------------------------------------------------
+
+
+def test_cpu_model(tmp_path: Path) -> None:
+    cpuinfo = tmp_path / "cpuinfo"
+    cpuinfo.write_text("processor\t: 0\nmodel name\t: Example CPU @ 2.00GHz\nflags\t: x\n")
+    assert ner_latency.cpu_model(cpuinfo) == "Example CPU @ 2.00GHz"
+    cpuinfo.write_text("processor\t: 0\n")
+    assert ner_latency.cpu_model(cpuinfo)  # the platform's answer
+    assert ner_latency.cpu_model(tmp_path / "missing")
+
+
+def test_text_of_length() -> None:
+    for length in (1, 50, 2000, 50_000):
+        assert len(ner_latency.text_of_length(length)) == length
+    assert ner_latency.text_of_length(500, seed=3) == ner_latency.text_of_length(500, seed=3)
+
+
+def test_latency_run_times_each_backend_and_the_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.detection.engine import NerConfig
+
+    install_transformers(monkeypatch, FakeHfPipe(findings=[("Okafor", "PER", 0.9)]))
+    detection = DetectionConfig(ner=NerConfig(enabled=True, backend="hf"))
+    pipeline, detectors = bench_ner.build_pipeline(detection)
+    stats = ner_latency.run(
+        pipeline, detectors, lengths=(50, 500), iterations=2, many_small=30, many_small_iterations=1
+    )
+    assert [(s.target, s.length, s.iterations) for s in stats] == [
+        ("hf: dslim/bert-base-NER", 50, 2),
+        ("pipeline", 50, 2),
+        ("hf: dslim/bert-base-NER", 500, 2),
+        ("pipeline", 500, 2),
+        ("many_small", 30, 1),
+    ]
+    assert all(s.p95_ms >= s.p50_ms >= 0 for s in stats)
+    env = {"cpu": "Example CPU", "python": "3.x", "platform": "test"}
+    markdown = ner_latency.to_markdown(stats, env)
+    assert "CPU: Example CPU." in markdown
+    assert "| many_small | (30 strings) |" in markdown
+    assert ner_latency.to_json(stats, env)["stats"][0]["target"] == "hf: dslim/bert-base-NER"  # type: ignore[index]
+    assert set(ner_latency.environment()) == {"cpu", "python", "platform"}
+
+
+def test_latency_ceilings() -> None:
+    stat = ner_latency.NerLatencyStat
+    stats = [stat("pipeline", 500, 80.0, 120.0, 5), stat("many_small", 100, 900.0, 950.0, 1)]
+    assert ner_latency.ceiling_failures({"p50_ms": {"500": 100}, "note": "x"}, stats) == []
+    assert ner_latency.ceiling_failures(
+        {"p50_ms": {"500": 50, "50": 10}, "p95_ms": {"500": 100}, "many_small_ms": 500}, stats
+    ) == [
+        "p50_ms ceiling for 50 characters: not measured",
+        "p50_ms at 500 characters: 80.0 ms is above the ceiling 50.0 ms",
+        "p95_ms at 500 characters: 120.0 ms is above the ceiling 100.0 ms",
+        "many_small_ms: 900.0 ms is above the ceiling 500.0 ms",
+    ]
+    assert ner_latency.ceiling_failures({"many_small_ms": 1000}, stats) == []
+    assert ner_latency.ceiling_failures({"many_small_ms": 1}, stats[:1]) == [
+        "many_small_ms ceiling: not measured"
+    ]
+    with pytest.raises(ValueError, match="unknown latency key"):
+        ner_latency.ceiling_failures({"p99_ms": {}}, stats)
+    with pytest.raises(ValueError, match="must be a table"):
+        ner_latency.ceiling_failures({"p50_ms": 3}, stats)
+
+
+def test_cli_latency_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_transformers(monkeypatch, FakeHfPipe(findings=[]))
+    thresholds = tmp_path / "t.toml"
+    thresholds.write_text("[other.synthetic]\nleak_max = 1.0\n")
+    argv = ["--config", str(_config(tmp_path)), "--latency", "--latency-iterations", "1"]
+    argv += ["--many-small-strings", "10", "--thresholds", str(thresholds)]
+    assert bench_ner.main([*argv, "--check", "--out", str(tmp_path / "r")]) == 0
+    assert "no latency ceilings recorded for [hf-fake.latency]; report only" in (
+        capsys.readouterr().out
+    )
+    report = json.loads((tmp_path / "r" / "report.json").read_text())
+    assert report["config"] == "hf-fake"
+    assert {s["length"] for s in report["stats"]} == {*ner_latency.LENGTHS, 10}
+    assert "cpu" in report
+    thresholds.write_text('[hf-fake.latency]\np50_ms = { "50" = 0.0 }\n')
+    assert bench_ner.main([*argv, "--check"]) == 1
+    printed = capsys.readouterr().out
+    assert "# NER bench: hf-fake latency" in printed
+    assert "CHECK FAILED: p50_ms at 50 characters" in printed
+    thresholds.write_text('[hf-fake.latency]\np50_ms = { "fifty" = 1.0 }\n')
+    assert bench_ner.main([*argv, "--check"]) == 2
+    assert "[hf-fake.latency]" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--fp-corpus", "."], "--fp-corpus and --latency are separate runs"),
+        (["--dump-errors", "/tmp/x.jsonl"], "--dump-errors applies to dataset"),
+        (["--language", "en"], "--language: this run has no language"),
+    ],
+)
+def test_cli_latency_refuses_other_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: list[str],
+    message: str,
+) -> None:
+    install_transformers(monkeypatch, FakeHfPipe(findings=[]))
+    argv = ["--config", str(_config(tmp_path)), "--latency", "--latency-iterations", "1"]
+    argv += ["--many-small-strings", "5", *extra]
+    if "--dump-errors" in extra:
+        argv[argv.index("/tmp/x.jsonl")] = str(tmp_path / "x.jsonl")
+    assert bench_ner.main(argv) == 2
+    assert message in capsys.readouterr().err

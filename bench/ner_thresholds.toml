@@ -18,6 +18,10 @@
 #   recorded = "YYYY-MM-DD"               when the baseline was measured
 #   note = "..."                          models and revisions it was measured with
 #
+# Latency (--latency) ceilings are optional: [<config name>.latency] with
+#   p50_ms = { "500" = 100.0 }  p95_ms = { ... }  many_small_ms = 30000.0
+# A latency run without that table passes, report only.
+#
 # A floor on a type the run holds no gold spans of fails: it cannot be checked.
 # Record a baseline from a measured run minus a tolerance (recall -0.05,
 # leak +0.05), with the date and the model revisions.

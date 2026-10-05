@@ -36,6 +36,7 @@ uv run python -m llm_redact.bench.ner --config my-ner.toml --check   # gate agai
 | `--thresholds PATH` | The gate file (default `bench/ner_thresholds.toml`). |
 | `--check` | Exit 1 when a floor or ceiling is crossed, or when the run has no recorded entry. |
 | `--fp-corpus DIR` | Count NER's detections on a negatives corpus (`bench/fp_corpus`) instead of scoring a dataset (below). |
+| `--latency` | Time NER instead of scoring a dataset (below). `--latency-iterations N` (default 20) and `--many-small-strings N` (default 20,000) size the run. |
 | `--ceilings PATH` | The `--fp-corpus` gate file (default `bench/ner_ceilings.toml`). |
 | `--dump-errors PATH` | Write misses, leaks, false positives and regressions WITH their text to PATH (below). |
 | `--allow-real-data-dump` | Let `--dump-errors` write the text of a real-data dataset. |
@@ -166,6 +167,35 @@ detection at all; a ceiling naming a file the corpus does not hold fails
 (a stale entry). Some files hold real names on purpose (the RFC's authors,
 the characters of *Alice's Adventures in Wonderland*): a model finding them
 is right, and their ceilings say so.
+
+## Latency: `--latency`
+
+```bash
+uv run python -m llm_redact.bench.ner --config my-ner.toml --latency --out /tmp/ner-latency
+```
+
+Times detection with the configured NER backends, per string, at 50, 500,
+2,000 and 10,000 characters of synthetic-corpus text: each NER backend's
+own `detect` (one row per backend and model) and the full pipeline (every
+detector plus overlap resolution). It also redacts, end to end, the
+many-small-strings body the regex latency bench uses (20,000 short chat
+messages): NER runs once per string, which is what such a request costs the
+event loop. The report gives p50 and p95 in milliseconds and names the CPU
+model (Linux `/proc/cpuinfo`, else what the platform reports), the Python
+version and the platform — every number depends on them.
+
+It is report-only by default. With `--check`, optional ceilings in the
+thresholds file apply; without an entry the run passes and says nothing was
+recorded:
+
+```toml
+[hf-default.latency]
+p50_ms = { "500" = 100.0 }      # full pipeline, per string length
+p95_ms = { "2000" = 400.0 }
+many_small_ms = 30000.0         # p50 of the many-small body
+recorded = "2026-10-05"
+note = "CPU model, model ids and revisions"
+```
 
 ## Seeing the errors: `--dump-errors`
 

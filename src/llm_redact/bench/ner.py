@@ -26,7 +26,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from llm_redact.bench import ner_fp
+from llm_redact.bench import ner_fp, ner_latency
 from llm_redact.bench.datasets import (
     DATASETS,
     DatasetError,
@@ -36,6 +36,7 @@ from llm_redact.bench.datasets import (
     default_cache_dir,
     resolve,
 )
+from llm_redact.bench.latency import MANY_SMALL_STRINGS
 from llm_redact.bench.ner_metrics import NerResult, Pipeline, evaluate, to_json_dict, to_markdown
 from llm_redact.config import ConfigError, load_config
 from llm_redact.detection.base import Detector
@@ -318,6 +319,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ceilings", type=Path, default=DEFAULT_CEILINGS)
     parser.add_argument(
+        "--latency",
+        action="store_true",
+        help="time NER per string (50 to 10,000 characters) and on a many-small-strings"
+        " body instead of scoring a dataset",
+    )
+    parser.add_argument(
+        "--latency-iterations",
+        type=int,
+        default=ner_latency.ITERATIONS,
+        help=f"timed runs per string length (default {ner_latency.ITERATIONS})",
+    )
+    parser.add_argument(
+        "--many-small-strings",
+        type=int,
+        default=MANY_SMALL_STRINGS,
+        help=f"strings in the many-small body (default {MANY_SMALL_STRINGS})",
+    )
+    parser.add_argument(
         "--dump-errors",
         type=Path,
         metavar="PATH",
@@ -347,14 +366,16 @@ def main(argv: list[str] | None = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     if args.config is None:
         raise BenchError("--config PATH is required (a config with [detection.ner] enabled)")
+    if args.fp_corpus is not None and args.latency:
+        raise BenchError("--fp-corpus and --latency are separate runs; pick one")
     spec, split = None, ""
-    if args.fp_corpus is None:
+    if args.fp_corpus is None and not args.latency:
         try:
             spec, split = resolve(args.dataset)
         except ValueError as exc:
             raise BenchError(str(exc)) from exc
     if args.language is not None and (spec is None or not spec.filters_language):
-        what = f"dataset {spec.name!r}" if spec is not None else "--fp-corpus"
+        what = f"dataset {spec.name!r}" if spec is not None else "this run"
         raise BenchError(f"--language: {what} has no language to filter on")
     if spec is not None and spec.needs_data_dir and args.data_dir is None:
         raise BenchError(
@@ -386,7 +407,10 @@ def _run(args: argparse.Namespace) -> int:
     config_name = args.name or args.config.stem
     backends = describe_backends(detectors)
     errors: list[dict[str, Any]] | None = [] if args.dump_errors is not None else None
-    if spec is None:
+    if args.latency:
+        failures = _run_latency(args, pipeline, detectors, config_name, backends)
+        passed = f"[{_toml_key(config_name)}.latency]"
+    elif spec is None:
         failures = _run_fp_corpus(args, pipeline, config_name, backends, errors)
         passed = f"[{_toml_key(config_name)}] in {args.ceilings}"
     else:
@@ -448,6 +472,47 @@ def _run_dataset(
     thresholds = load_thresholds(args.thresholds)
     key = dataset_key(spec, split, request.language)
     return threshold_failures(thresholds, config_name, key, result, args.thresholds)
+
+
+def _run_latency(
+    args: argparse.Namespace,
+    pipeline: Pipeline,
+    detectors: Sequence[Detector],
+    config_name: str,
+    backends: Sequence[str],
+) -> list[str] | None:
+    """Time NER; with --check, the failures against the optional ceilings
+    of [<config>.latency] (none recorded: nothing to fail), else None."""
+    if args.dump_errors is not None:
+        raise BenchError("--dump-errors applies to dataset and --fp-corpus runs")
+    stats = ner_latency.run(
+        pipeline,
+        detectors,
+        iterations=args.latency_iterations,
+        many_small=args.many_small_strings,
+        seed=args.seed,
+    )
+    env = ner_latency.environment()
+    markdown = (
+        f"# NER bench: {config_name} latency\n\n"
+        f"NER backends: {', '.join(backends) or 'none'}.\n" + ner_latency.to_markdown(stats, env)
+    )
+    _emit(
+        args,
+        markdown,
+        {"config": config_name, "backends": list(backends), **ner_latency.to_json(stats, env)},
+    )
+    if not args.check:
+        return None
+    section = load_thresholds(args.thresholds).get(config_name)
+    entry = section.get("latency") if isinstance(section, dict) else None
+    if not isinstance(entry, dict):
+        print(f"no latency ceilings recorded for [{_toml_key(config_name)}.latency]; report only")
+        return []
+    try:
+        return ner_latency.ceiling_failures(entry, stats)
+    except (ValueError, TypeError) as exc:
+        raise BenchError(f"{args.thresholds} [{config_name}.latency]: {exc}") from exc
 
 
 def _run_fp_corpus(

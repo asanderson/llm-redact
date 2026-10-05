@@ -33,7 +33,7 @@ from llm_redact.detection.ner import NER_PRIORITY
 from llm_redact.detection.windows import drop_exact_duplicates
 from llm_redact.redactor import Redactor
 from llm_redact.vault import InMemoryVault
-from ner_fakes import FakeHfPipe, FakeTokenizer, install_transformers
+from ner_fakes import FakeHfPipe, FakeHub, FakeTokenizer, install_hub, install_transformers
 from real_models import cached_snapshot, offline_hub
 
 SENTINEL = int(1e30)  # transformers' VERY_LARGE_INTEGER: "limit unknown"
@@ -123,10 +123,19 @@ def test_window_counter_matches_the_pipeline_chunking() -> None:
 
 def test_stride_is_set_once_at_construction(monkeypatch: pytest.MonkeyPatch) -> None:
     pipe = FakeHfPipe([("Jane Doe", "PER", 0.9)])
-    install_transformers(monkeypatch, pipe)
+    hub = FakeHub()
+    install_transformers(monkeypatch, pipe, hub)
     detector = build_hf_detector(NerConfig(enabled=True, backend="hf"))
     loaded, strided = pipe.built_with
-    assert loaded == {"model": "dslim/bert-base-NER", "aggregation_strategy": "simple"}
+    # The model loads from its local folder at the pinned revision.
+    folder = hub.snapshot_download("dslim/bert-base-NER", revision=DSLIM_REVISION)
+    assert loaded == {
+        "model": folder,
+        "tokenizer": folder,
+        "aggregation_strategy": "simple",
+        "trust_remote_code": False,
+        "model_kwargs": {"use_safetensors": True},
+    }
     assert strided == {
         "model": pipe.model,
         "tokenizer": pipe.tokenizer,
@@ -213,6 +222,7 @@ def test_windowing_settings_transformers_refuses_are_a_config_error(
     module = types.ModuleType("transformers")
     module.pipeline = pipeline  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "transformers", module)
+    install_hub(monkeypatch)
     with pytest.raises(ConfigError) as caught:
         build_hf_detector(NerConfig(enabled=True, backend="hf", model="org/ner"))
     assert str(caught.value) == (
@@ -314,8 +324,9 @@ def test_real_model_reports_a_name_as_whole_words(monkeypatch: pytest.MonkeyPatc
     pytest.importorskip("torch")
     pytest.importorskip("transformers")
     offline_hub(monkeypatch)
-    path = cached_snapshot(DSLIM, DSLIM_REVISION, DSLIM_FILES)
-    detector = build_hf_detector(NerConfig(enabled=True, backend="hf", model=path))
+    cached_snapshot(DSLIM, DSLIM_REVISION, DSLIM_FILES)
+    # The default model, resolved from the cache at its catalog pin.
+    detector = build_hf_detector(NerConfig(enabled=True, backend="hf"))
     for text, names in [
         ("Yesterday Angela Merkel met the press.", ["Angela Merkel"]),
         ('{"name":"Angela Merkel","role":"chancellor"}', ["Angela Merkel"]),

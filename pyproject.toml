@@ -173,6 +173,10 @@ module = "transformers.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = "huggingface_hub.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "opentelemetry.*"
 ignore_missing_imports = true
 

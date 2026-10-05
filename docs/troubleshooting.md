@@ -448,13 +448,75 @@ and point `[detection.ner.models] hf` at that local folder.
 
 ## "failed to load Hugging Face token-classification model '…': …"
 
-From `serve` / `serve --check`: torch is installed, but loading the named
-`hf` model failed; the message ends with the exception type. Common causes: a
-model id that does not exist or is not a token-classification model, a model
-missing from the local Hugging Face cache while the machine cannot reach the
-Hub, or a full disk. Load it once by hand to see the library's full error:
-`uv run python -c "from transformers import pipeline;
-pipeline('token-classification', model='ORG/MODEL')"`.
+From `serve` / `serve --check`: torch is installed and the model's files are
+in place, but loading the named `hf` model failed; the message ends with the
+exception type. Common causes: a model that is not a token-classification
+model, an architecture the installed transformers does not know, damaged
+files in the cache, or a full disk. Load the folder once by hand to see the
+library's full error: `uv run python -c "from transformers import pipeline;
+pipeline('token-classification', model='/path/to/the/model/folder')"` (the
+folder: the Hugging Face cache's `models--ORG--MODEL/snapshots/<revision>`).
+
+## "[detection.ner] hf model '…' has no safetensors weights; set allow_pickle_weights = true to load pytorch_model.bin"
+
+The `hf` model ships its weights only as `pytorch_model.bin`, a Python
+pickle — and loading a pickle can run code — so llm-redact loads only
+safetensors weights by default. Pick a model that ships `model.safetensors`
+(most do), convert the checkpoint once into a local folder and point
+`[detection.ner.models] hf` at it, or, if you trust the model's publisher,
+set `[detection.ner] allow_pickle_weights = true`. A model that ships both
+always loads its safetensors.
+
+## "[detection.ner] … model '…' at revision … is not (completely) in the local Hugging Face cache, and downloads are off …"
+
+The named model (or a GLiNER model's base model) is not in the local Hugging
+Face cache at the revision llm-redact loads, and `[detection.ner]
+allow_download` is `false` (the default), so nothing is fetched. A copy of
+another revision does not count: the pin is the commit the message names
+(`[detection.ner.revisions]`, else the model catalog's pin; "no revision
+pinned" means the newest cached revision of the default branch). Fetch the
+model once with `llm-redact models pull`, or set `allow_download = true` to
+let a startup fetch the pinned files (with a `HF_HOME` the proxy can write).
+"(completely)": the cache holds the revision but not every file the loader
+needs, such as after an interrupted download.
+
+## "[detection.ner] … model '…' … could not be fetched from the Hugging Face Hub: …"
+
+`allow_download = true`, but fetching the model's files failed; the message
+ends with the exception type. Common causes: no network access to
+huggingface.co, a model id or revision that does not exist, a gated model
+without a token, a full disk or a cache the proxy cannot write.
+
+## "[detection.ner] … model '…' is a local directory; a revision in [detection.ner.revisions] applies only to a Hugging Face model id"
+
+`[detection.ner.models]` (or `model`) names a local folder, and
+`[detection.ner.revisions]` pins that backend too. A folder is whatever it
+holds, so a commit id cannot apply to it: remove the backend's revision.
+
+## "[detection.ner] … model '…' is neither a local directory nor a Hugging Face model id"
+
+The model value is not a folder that exists and not of the form `ORG/NAME`.
+Check the path (it is read relative to the proxy's working directory unless
+absolute) or the model id.
+
+## "[detection.ner] … model '…' needs code from its repository (… names auto_map); llm-redact never runs model code"
+
+The model's `config.json`, `tokenizer_config.json` or `gliner_config.json`
+names Python classes to import from the model repository (`auto_map`).
+llm-redact never loads with `trust_remote_code`, so such a model cannot be
+used; pick one built on an architecture transformers ships.
+
+## "[detection.ner] … model '…': config.json is not a JSON configuration" / "… cannot be read (…)"
+
+A configuration file in the model's folder is not a UTF-8 JSON object (or is
+larger than 4 MiB), or cannot be opened. Re-fetch the model
+(`llm-redact models pull`) or fix the local folder.
+
+## "[detection.ner] … model '…' needs huggingface_hub, which the hf and gliner extras install; install the backend's extra"
+
+The `huggingface_hub` package is missing, although the `hf` and `gliner`
+extras install it (through transformers and gliner). Re-install the
+backend's extra: `uv sync --extra hf` or `uv sync --extra gliner`.
 
 ## Tool sees `«EMAIL_001»`-style tokens in responses
 

@@ -3,12 +3,20 @@ any extra installed: each ``install_*`` puts a fake module into
 ``sys.modules`` that hands back a scripted model.
 
 A fake model finds fixed surface strings and reports them under the label
-the test chose — never anything derived from the text beyond offsets.
+the test chose — never anything derived from the text beyond offsets. The
+``hf`` and ``gliner`` builders resolve model files first (model_files.py):
+:class:`FakeHub` stands in for ``huggingface_hub.snapshot_download`` over a
+scripted repository, writing its files into the session's throwaway home.
 """
 
+import fnmatch
+import json
+import os
 import sys
+import tempfile
 import types
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -173,15 +181,123 @@ class FakeAnalyzer:
         ]
 
 
-def install_transformers(monkeypatch: pytest.MonkeyPatch, pipe: FakeHfPipe) -> None:
-    module = types.ModuleType("transformers")
+# A repository every backend's fake loads from: an hf model (config.json,
+# safetensors weights, a tokenizer) and a self-contained GLiNER model
+# (gliner_config.json with an encoder_config, the same weights and
+# tokenizer). Each backend's file patterns pick its own files.
+DEFAULT_REPO: dict[str, str] = {
+    "config.json": json.dumps({"model_type": "bert"}),
+    "model.safetensors": "",
+    "tokenizer.json": "{}",
+    "tokenizer_config.json": "{}",
+    "vocab.txt": "",
+    "gliner_config.json": json.dumps(
+        {"model_name": "microsoft/deberta-v3-small", "encoder_config": {"model_type": "deberta-v2"}}
+    ),
+}
+
+
+class NotCached(Exception):
+    """huggingface_hub's LocalEntryNotFoundError, for the fake hub."""
+
+
+@dataclass
+class FakeHub:
+    """``huggingface_hub.snapshot_download`` over scripted repositories: a
+    call writes the repository's files its ``allow_patterns`` match
+    (fnmatch, as the hub matches them) into one folder per repository and
+    revision, and returns it. A repository in ``uncached`` is missing from
+    the cache: a ``local_files_only`` call raises. Every call is recorded.
+    No network, ever."""
+
+    repos: dict[str, dict[str, str]] = field(default_factory=dict)
+    default: dict[str, str] | None = field(default_factory=lambda: dict(DEFAULT_REPO))
+    uncached: set[str] = field(default_factory=set)
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    root: Path = field(
+        default_factory=lambda: Path(tempfile.mkdtemp(prefix="fake-hub-", dir=os.environ["HOME"]))
+    )
+
+    def snapshot_download(
+        self,
+        repo_id: str,
+        *,
+        revision: str | None = None,
+        allow_patterns: list[str] | None = None,
+        local_files_only: bool = False,
+        **kwargs: Any,
+    ) -> str:
+        self.calls.append(
+            {
+                "repo_id": repo_id,
+                "revision": revision,
+                "allow_patterns": allow_patterns,
+                "local_files_only": local_files_only,
+                **kwargs,
+            }
+        )
+        files = self.repos.get(repo_id, self.default)
+        if files is None:
+            raise NotCached(f"no repository {repo_id}")
+        if local_files_only and repo_id in self.uncached:
+            raise NotCached(f"{repo_id} is not cached")
+        folder = self.root / repo_id.replace("/", "--") / (revision or "main")
+        for name, content in files.items():
+            if allow_patterns is None or any(fnmatch.fnmatch(name, p) for p in allow_patterns):
+                target = folder / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+        folder.mkdir(parents=True, exist_ok=True)
+        return str(folder)
+
+
+def install_hub(monkeypatch: pytest.MonkeyPatch, hub: FakeHub | None = None) -> FakeHub:
+    """Make ``huggingface_hub`` the fake ``hub`` (a default one when None)."""
+    hub = hub if hub is not None else FakeHub()
+    module = types.ModuleType("huggingface_hub")
+    module.snapshot_download = hub.snapshot_download  # type: ignore[attr-defined]
+    module.fake_hub = hub  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", module)
+    return hub
+
+
+def _ensure_hub(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A fake hub a test installed itself is kept.
+    if getattr(sys.modules.get("huggingface_hub"), "fake_hub", None) is None:
+        install_hub(monkeypatch)
+
+
+def fake_transformers(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """The fake ``transformers`` module (one per test, shared by the fake
+    hf pipeline and the GLiNER loader's model-type check)."""
+    module = sys.modules.get("transformers")
+    if module is None or not getattr(module, "is_fake", False):
+        module = types.ModuleType("transformers")
+        module.is_fake = True  # type: ignore[attr-defined]
+        # The model types the GLiNER loader may see (transformers knows them).
+        module.CONFIG_MAPPING = {  # type: ignore[attr-defined]
+            "bert": object(),
+            "deberta-v2": object(),
+            "modernbert": object(),
+        }
+        monkeypatch.setitem(sys.modules, "transformers", module)
+    return module
+
+
+def install_transformers(
+    monkeypatch: pytest.MonkeyPatch, pipe: FakeHfPipe, hub: FakeHub | None = None
+) -> None:
+    module = fake_transformers(monkeypatch)
 
     def pipeline(*args: Any, **kwargs: Any) -> FakeHfPipe:
         pipe.built_with.append(kwargs)
         return pipe
 
     module.pipeline = pipeline  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "transformers", module)
+    if hub is not None:
+        install_hub(monkeypatch, hub)
+    else:
+        _ensure_hub(monkeypatch)
 
 
 def install_gliner(monkeypatch: pytest.MonkeyPatch, model: FakeGliner) -> None:

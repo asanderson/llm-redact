@@ -25,7 +25,10 @@ rest. `stride` needs a fast tokenizer — which also reports the character
 offsets every detection needs — so a model without one is refused at startup.
 
 Import-lazy: loads only when an `hf` backend is enabled; the model load
-happens at proxy startup (fail fast, no first-request latency spike).
+happens at proxy startup (fail fast, no first-request latency spike). The
+files come from a local directory at a pinned revision (model_files.py):
+safetensors weights unless `allow_pickle_weights` is set, and never code
+from the model's repository (`trust_remote_code=False`).
 """
 
 import importlib.util
@@ -196,8 +199,24 @@ def window_counter(tokenizer: Any, stride: int) -> Callable[[str], int]:
     return windows_of
 
 
+def catalog_window(model: str) -> int | None:
+    """The token window the model catalog records for ``model`` (a Hub id,
+    or a local directory its sidecar file identifies) on the ``hf``
+    backend; None when it records none."""
+    from llm_redact.config import ConfigError
+    from llm_redact.detection.model_catalog import SidecarError, identify, lookup
+
+    try:
+        identity = identify(model)
+    except SidecarError as exc:
+        raise ConfigError(f"[detection.ner] hf model: {exc}") from exc
+    entry = lookup(identity.model_id) if identity is not None else None
+    return entry.window if entry is not None and "hf" in entry.backends else None
+
+
 def build_hf_detector(config: "NerConfig") -> HfDetector:
     from llm_redact.config import ConfigError
+    from llm_redact.detection.model_files import SAFETENSORS_FILES, has_files, hf_model_dir
 
     try:
         from transformers import pipeline
@@ -207,10 +226,28 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
             " install it: uv sync --extra hf"
         ) from exc
     model_name = config.model or _MODEL_NAME
+    # The model's files, local at their pinned revision: configuration,
+    # tokenizer and safetensors weights (a pickle only with the hatch).
+    path = hf_model_dir(
+        model_name,
+        revision=config.revision_for("hf"),
+        allow_download=config.allow_download,
+        allow_pickle_weights=config.allow_pickle_weights,
+    )
     try:
         # Any: transformers' own types are not part of the checked surface.
+        # From the local directory only, never with model code, and from
+        # safetensors whenever the directory holds them (True refuses any
+        # other weights; None, reached only with allow_pickle_weights,
+        # lets transformers read pytorch_model.bin — False would skip
+        # safetensors altogether).
         loaded: Any = pipeline(
-            "token-classification", model=model_name, aggregation_strategy=TOKEN_AGGREGATION
+            "token-classification",
+            model=str(path),
+            tokenizer=str(path),
+            aggregation_strategy=TOKEN_AGGREGATION,
+            trust_remote_code=False,
+            model_kwargs={"use_safetensors": True if has_files(path, SAFETENSORS_FILES) else None},
         )
     except Exception as exc:  # load can fail many ways; name only what is known
         if importlib.util.find_spec("torch") is None:
@@ -232,7 +269,7 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
             f"[detection.ner] hf model {model_name!r} has no fast tokenizer;"
             " character offsets are required"
         )
-    window = model_window(tokenizer, loaded.model)
+    window = model_window(tokenizer, loaded.model, catalog_window(model_name))
     # The pipeline windows at the tokenizer's limit: make it the model's
     # (a tokenizer that does not know its limit would hand the model the
     # whole text, past its position embeddings).

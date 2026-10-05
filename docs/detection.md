@@ -168,12 +168,22 @@ hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
   weights. GLiNER loads its `pytorch_model.bin` through torch's
   `weights_only` loader whatever this key says.
 
-**Not enforced yet.** The three keys are parsed, validated and written back
-(`llm-redact config show`, the dashboard editor keeps them from the file),
-but the model loaders do not read them yet: whatever `allow_download` and
-`revisions` say, a model still loads as it did before — the newest revision
-from the Hub, downloaded on first use and cached — and `allow_pickle_weights`
-changes nothing.
+**How the `hf` backend loads a model.** A Hub model is looked up in the local
+Hugging Face cache at its pinned revision (fetched only when
+`allow_download = true`), with an explicit list of top-level files: its
+`config.json`, safetensors weights and tokenizer files — never the
+TensorFlow, Flax, ONNX or `original/` copies a repository may also hold. A
+model missing from the cache is a startup error that names the model and the
+revision. A local folder is loaded as it is; a revision for it is a config
+error. A model whose `config.json` or `tokenizer_config.json` names code to
+import from its repository (`auto_map`) is refused, and nothing is ever
+loaded with `trust_remote_code`. The weights must be safetensors: a model
+with only `pytorch_model.bin` is refused unless `allow_pickle_weights = true`,
+and a model with both always loads its safetensors.
+
+**Not enforced yet for `gliner`.** The `gliner` backend does not read these
+keys yet: it still loads the newest revision from the Hub, downloaded on
+first use and cached.
 
 ## How NER runs
 

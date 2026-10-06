@@ -29,7 +29,7 @@ listed="$(uv export --frozen --no-header --no-annotate --no-hashes --no-emit-pro
 locked="$(sed -nE 's/^torch==([^ ;]+).*/\1/p' <<<"$listed")"
 pinned="$(sed -nE 's/^torch==([^+ ;]+)\+cpu .*/\1/p' "$pin")"
 if [ -z "$locked" ] || [ "$locked" != "$pinned" ]; then
-  echo "uv.lock pins torch ${locked:-(none)} but $pin pins ${pinned:-(none)}+cpu: update the pin and its sha256" >&2
+  echo "uv.lock pins torch ${locked:-(none)} but scripts/ner_ci_torch_cpu.txt pins ${pinned:-(none)}+cpu: update the pin and its sha256" >&2
   exit 1
 fi
 

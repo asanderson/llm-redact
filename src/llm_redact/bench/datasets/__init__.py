@@ -17,7 +17,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from llm_redact.bench import ner_corpus
-from llm_redact.bench.datasets import creddata, mapa, nemotron, openpii, privy, pupa
+from llm_redact.bench.datasets import agent_eval, creddata, mapa, nemotron, openpii, privy, pupa
 from llm_redact.bench.datasets.base import (
     DatasetError,
     DatasetSpec,
@@ -106,6 +106,7 @@ DATASETS: Mapping[str, DatasetSpec] = MappingProxyType(
             pupa.SPEC,
             mapa.SPEC,
             creddata.SPEC,
+            agent_eval.SPEC,
         )
     }
 )

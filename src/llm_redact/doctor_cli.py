@@ -35,6 +35,7 @@ from llm_redact.config import (
 _NER_MODULES = {
     "spacy": "spacy",
     "gliner": "gliner",
+    "gliner2": "gliner2",
     "presidio": "presidio_analyzer",
     "stanza": "stanza",
     "hf": "transformers",
@@ -42,6 +43,7 @@ _NER_MODULES = {
 _NER_EXTRAS = {
     "spacy": "ner",
     "gliner": "gliner",
+    "gliner2": "gliner2",
     "presidio": "presidio",
     "stanza": "stanza",
     "hf": "hf",
@@ -51,7 +53,7 @@ _NER_EXTRAS = {
 # loads pytorch_model.bin checkpoints that way. An environment built without
 # the extra can hold the library without torch (transformers imports fine
 # and fails only when a model loads) or with an older torch.
-_TORCH_BACKENDS = frozenset({"gliner", "stanza", "hf"})
+_TORCH_BACKENDS = frozenset({"gliner", "gliner2", "stanza", "hf"})
 _TORCH_FLOOR = (2, 6)
 _ENV_OVERRIDES = ("LLM_REDACT_HOST", "LLM_REDACT_PORT", "LLM_REDACT_CONFIG")
 

@@ -12,6 +12,20 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- A `gliner2` NER backend (`[detection.ner] backend = "gliner2"`, extra `gliner2`): Fastino's
+  GLiNER2, zero-shot like `gliner` (the same natural-language prompts for type requests) with a
+  confidence per entity (`score_threshold` applies) and each entity's character span, used as
+  given — a value that occurs twice is redacted at both places. Long strings are read in
+  overlapping windows of the model's own words, bounded by its encoder's subword limit beside
+  the prompt. The model loads like the other Hub backends: from the local cache at a pinned
+  revision (`[detection.ner.revisions] gliner2`), downloaded only at startup with
+  `allow_download = true`, from a self-contained checkpoint whose configuration names no code
+  and whose encoder is a model type transformers knows. The default model
+  `fastino/gliner2-base-v1` (Apache-2.0) is catalogued as not yet measured by the llm-redact bench
+  and pinned to its `main` commit of 2026-10-06. The extra installs gliner2 2.0+ with torch
+  (`>=2.6`), transformers, peft, safetensors and numpy; gliner2's own `local` extra caps
+  transformers below 5, which the other extras use, so the extra lists those dependencies itself
+  (checked with gliner2 2.0.0 on transformers 5.10.1). `doctor` checks the extra and torch.
 - The `hf` NER backend decodes BIOES and BILOU taggers (models whose labels carry `E-`/`S-`
   or `L-`/`U-` tags, such as `openai/privacy-filter`'s): the transformers pipeline understands
   only `B-`/`I-` and cut every such span at its last token, so these models now run without it

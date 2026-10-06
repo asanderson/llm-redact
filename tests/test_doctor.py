@@ -213,8 +213,8 @@ def test_missing_ner_extra_fails(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "uv sync --extra gliner" in capsys.readouterr().out
 
 
-_BACKENDS = ("spacy", "gliner", "presidio", "stanza", "hf")
-_LIBRARIES = {"spacy", "gliner", "presidio_analyzer", "stanza", "transformers"}
+_BACKENDS = ("spacy", "gliner", "gliner2", "presidio", "stanza", "hf")
+_LIBRARIES = {"spacy", "gliner", "gliner2", "presidio_analyzer", "stanza", "transformers"}
 
 
 def _ner_rows(
@@ -224,7 +224,7 @@ def _ner_rows(
     present: set[str],
     torch_version: str | None = None,
 ) -> dict[str, tuple[str, str]]:
-    """Run the extras check over all five backends with `present` as the
+    """Run the extras check over all six backends with `present` as the
     importable modules and `torch_version` as torch's installed metadata
     (None: none); return backend -> (level, message)."""
     import importlib.metadata
@@ -262,7 +262,7 @@ def test_torch_backends_fail_without_torch(tmp_path: Path, monkeypatch: pytest.M
     # transformers imports without torch (torch is only its own extra), so
     # the library check alone passed an hf backend that cannot load a model.
     rows = _ner_rows(tmp_path, monkeypatch, present=_LIBRARIES)
-    for backend in ("gliner", "stanza", "hf"):
+    for backend in ("gliner", "gliner2", "stanza", "hf"):
         assert rows[backend] == (
             "FAIL",
             f'backend "{backend}" needs torch, which is not installed;'
@@ -291,7 +291,7 @@ def test_torch_below_the_floor_fails(tmp_path: Path, monkeypatch: pytest.MonkeyP
     rows = _ner_rows(
         tmp_path, monkeypatch, present=_LIBRARIES | {"torch"}, torch_version="2.5.1+cpu"
     )
-    for backend in ("gliner", "stanza", "hf"):
+    for backend in ("gliner", "gliner2", "stanza", "hf"):
         assert rows[backend] == (
             "FAIL",
             f'backend "{backend}" needs torch >= 2.6 (CVE-2025-32434), but torch 2.5.1+cpu'

@@ -171,7 +171,7 @@ def test_a_value_that_is_no_directory_and_no_model_id_is_refused(
 
 def test_without_huggingface_hub_the_extra_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "huggingface_hub", None)  # import fails
-    with pytest.raises(ConfigError, match="needs huggingface_hub, which the hf and gliner"):
+    with pytest.raises(ConfigError, match="needs huggingface_hub, which the hf, gliner and"):
         resolve_model(
             DSLIM, what="hf model", revision=None, allow_download=False, allow_patterns=HF_PATTERNS
         )

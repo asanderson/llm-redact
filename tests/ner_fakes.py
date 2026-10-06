@@ -127,6 +127,39 @@ class FakeGliner:
 
 
 @dataclass
+class FakeGliner2:
+    """GLiNER2 (``AutoExtractor``): answers a finding only when its label was
+    among the entity types, with its character span and confidence, the
+    way gliner2 2.0.0 formats ``include_confidence`` + ``include_spans``."""
+
+    findings: list[Finding]
+    calls: list[list[str]] = field(default_factory=list)
+    texts: list[str] = field(default_factory=list)
+    # The arguments of every AutoExtractor.from_pretrained() call (install_gliner2).
+    loaded_with: list[dict[str, Any]] = field(default_factory=list)
+
+    def extract_entities(
+        self,
+        text: str,
+        entity_types: list[str],
+        *,
+        threshold: float,
+        include_confidence: bool,
+        include_spans: bool,
+    ) -> dict[str, Any]:
+        assert include_confidence and include_spans
+        self.calls.append(list(entity_types))
+        self.texts.append(text)
+        entities: dict[str, list[dict[str, Any]]] = {label: [] for label in entity_types}
+        for s, e, label, score in _spans(text, self.findings):
+            if label in entities and score >= threshold:
+                entities[label].append(
+                    {"text": text[s:e], "confidence": score, "start": s, "end": e}
+                )
+        return {"entities": entities}
+
+
+@dataclass
 class _Ent:
     start_char: int
     end_char: int
@@ -197,6 +230,9 @@ DEFAULT_REPO: dict[str, str] = {
     "gliner_config.json": json.dumps(
         {"model_name": "microsoft/deberta-v3-small", "encoder_config": {"model_type": "deberta-v2"}}
     ),
+    # A GLiNER2 checkpoint's encoder configuration (its own config.json
+    # names model_type "extractor"; the fake's is only read for auto_map).
+    "encoder_config/config.json": json.dumps({"model_type": "deberta-v2"}),
 }
 
 
@@ -388,6 +424,29 @@ def install_torch(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     module.made = made  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "torch", module)
     return module
+
+
+def install_gliner2(
+    monkeypatch: pytest.MonkeyPatch, model: Any, hub: FakeHub | None = None
+) -> None:
+    """A fake ``gliner2`` whose ``AutoExtractor.from_pretrained`` records its
+    arguments on ``model.loaded_with``, prints to stdout as gliner2 does
+    while it builds a model, and hands ``model`` back; with the fake hub and
+    the fake transformers model types the loader checks."""
+    module = types.ModuleType("gliner2")
+
+    def from_pretrained(name: str, **kwargs: Any) -> Any:
+        model.loaded_with.append({"model_id": name, **kwargs})
+        print("Model Configuration")  # gliner2's load banner
+        return model
+
+    module.AutoExtractor = types.SimpleNamespace(from_pretrained=from_pretrained)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gliner2", module)
+    fake_transformers(monkeypatch)
+    if hub is not None:
+        install_hub(monkeypatch, hub)
+    else:
+        _ensure_hub(monkeypatch)
 
 
 def install_spacy(monkeypatch: pytest.MonkeyPatch, nlp: FakeSpacy) -> None:

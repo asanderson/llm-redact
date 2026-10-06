@@ -79,11 +79,15 @@ LINEAGE_TAGS = frozenset(
 # The NER backends whose models are Hugging Face Hub snapshots: the only
 # ones a revision pin or this catalog applies to (spaCy, Presidio and Stanza
 # load pip-installed or library-managed models).
-HUB_BACKENDS = ("gliner", "hf")
+HUB_BACKENDS = ("gliner", "gliner2", "hf")
 # The model each Hub backend loads when the configuration names none (the
 # backends' own defaults; tests/test_model_catalog.py pins them equal).
 DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(
-    {"gliner": "urchade/gliner_small-v2.1", "hf": "dslim/bert-base-NER"}
+    {
+        "gliner": "urchade/gliner_small-v2.1",
+        "gliner2": "fastino/gliner2-base-v1",
+        "hf": "dslim/bert-base-NER",
+    }
 )
 
 # A full commit id. Branch and tag names move, so a pin is always this.
@@ -340,6 +344,27 @@ CATALOG: tuple[CatalogEntry, ...] = (
         "f847f54fbc97ad6e78bfa20ed9c5e5d5c43327b9",
         "microsoft/deberta-v3-large",
         onnx_files=("onnx/model.onnx", "onnx/model_quint8.onnx"),
+    ),
+    # --- caution: the gliner2 backend's default, not yet measured --------
+    CatalogEntry(
+        # main since 2026-09-28 (card edits; model.safetensors unchanged since
+        # 2025-07-02). Self-contained: config.json, encoder_config/config.json
+        # (deberta-v2), tokenizer files and model.safetensors.
+        model_id="fastino/gliner2-base-v1",
+        backends=("gliner2",),
+        license="Apache-2.0",
+        status="caution",
+        reason=(
+            "Apache-2.0; the gliner2 backend's default model; backbone"
+            " microsoft/deberta-v3-base; the card describes its training data only as"
+            f" multi-domain datasets; {UNMEASURED}"
+        ),
+        checked="2026-10-06",
+        revision="f9634218e53580c56edf0de97ca1a7d3f1c2354e",
+        backbone="microsoft/deberta-v3-base",
+        attribution="GLiNER2 by Fastino AI (Apache-2.0); arXiv:2507.18546",
+        lineage=("undisclosed-training-data",),
+        recommended_entities=("PERSON",),
     ),
     # --- restricted: never suggested; a warning names the reason ----------
     CatalogEntry(

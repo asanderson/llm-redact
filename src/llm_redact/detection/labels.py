@@ -195,6 +195,10 @@ SENSITIVE_LABELS = frozenset(
     }
 )
 
+# The zero-shot backends: prompted with label TEXT, they return the prompts
+# as labels (gliner_prompt, LabelPolicy.prompts and classify_gliner).
+ZERO_SHOT_BACKENDS = frozenset({"gliner", "gliner2"})
+
 # GLiNER is zero-shot: it is prompted with label TEXT. A type request sends
 # a natural-language prompt (a model reads "street address" better than
 # "ADDRESS"); built-in types without an entry send their name lowercased
@@ -298,7 +302,7 @@ class LabelPolicy:
                 requested.add(type_name)
         sent_types = {normalize_label(prompt) for prompt in prompt_types}
         unsent = {raw for raw in raw_prompts if normalize_label(raw) in sent_types}
-        if backend == "gliner":
+        if backend in ZERO_SHOT_BACKENDS:
             # What an unsent raw request's label comes back as is the type
             # request's type, so classify must not keep it raw either.
             raw_requested -= {normalize_label(raw) for raw in unsent}

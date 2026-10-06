@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from llm_redact.config import ConfigError, parse_config
-from llm_redact.detection import gliner_ner, hf_ner, model_catalog
+from llm_redact.detection import gliner2_ner, gliner_ner, hf_ner, model_catalog
 from llm_redact.detection.engine import DetectionConfig, NerConfig, build_detectors
 from llm_redact.detection.labels import (
     CANONICAL_NER_TYPES,
@@ -139,7 +139,8 @@ def test_entry_shape(entry: CatalogEntry) -> None:
     assert set(entry.lineage) <= LINEAGE_TAGS
     assert len(set(entry.lineage)) == len(entry.lineage)
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry.checked)
-    assert entry.checked == CHECKED
+    # Each entry's facts were read on CHECKED or later (gliner2's on 2026-10-06).
+    assert entry.checked >= CHECKED
     assert entry.card_url.startswith("https://huggingface.co/")
     for type_name in entry.recommended_entities:
         # D10: a sensitive attribute is never recommended.
@@ -201,7 +202,7 @@ def test_reasons_are_neutral_dated_facts_with_a_link(entry: CatalogEntry) -> Non
     assert not _CONCLUSIONS.search(entry.reason)
     line = entry.describe()
     assert entry.card_url in line
-    assert f"checked {CHECKED}" in line
+    assert f"checked {entry.checked}" in line
     assert entry.reason in line
 
 
@@ -225,7 +226,9 @@ def test_section_4_6_statuses() -> None:
         "urchade/gliner_multi-v2.1",
         "urchade/gliner_multi_pii-v1",
     }
-    assert caution == set(_KNOWLEDGATOR)
+    # Not yet measured by the bench: the Knowledgator sizes and the gliner2
+    # backend's default model.
+    assert caution == {*_KNOWLEDGATOR, "fastino/gliner2-base-v1"}
     restricted = {e.model_id for e in CATALOG if e.status == "restricted"}
     assert {
         "iiiorg/piiranha-v1-detect-personal-information",
@@ -242,13 +245,20 @@ def test_section_4_6_statuses() -> None:
 
 
 def test_default_models_are_the_backends_defaults() -> None:
-    assert dict(DEFAULT_MODELS) == {"gliner": gliner_ner._MODEL_NAME, "hf": hf_ner._MODEL_NAME}
-    for model_id in DEFAULT_MODELS.values():
+    assert dict(DEFAULT_MODELS) == {
+        "gliner": gliner_ner._MODEL_NAME,
+        "gliner2": gliner2_ner._MODEL_NAME,
+        "hf": hf_ner._MODEL_NAME,
+    }
+    assert set(DEFAULT_MODELS) == set(HUB_BACKENDS)
+    for backend, model_id in DEFAULT_MODELS.items():
         entry = lookup(model_id)
         assert entry is not None
-        assert entry.status == "vetted"
+        assert entry.backends == (backend,)
+        # Pinned whatever its status; gliner2's default is not yet measured.
+        assert entry.status == ("caution" if backend == "gliner2" else "vetted")
         assert entry.revision is not None
-        assert "default model" in entry.reason
+        assert f"the {backend} backend's default model" in entry.reason
 
 
 @pytest.mark.parametrize(
@@ -450,7 +460,7 @@ def test_model_sources_are_kept_while_their_backend_is_inactive() -> None:
         ({"hf": _SHA + "\n"}, "hf must be a full 40-character"),
         ({"hf": 7}, "hf must be a full 40-character"),
         ({"spacy": _SHA}, r"spacy: a revision pins a Hugging Face Hub model, so only the gliner"),
-        ({"stanza": _SHA}, "only the gliner and hf backends take one"),
+        ({"stanza": _SHA}, "only the gliner, gliner2 and hf backends take one"),
         ("main", r"\[detection.ner.revisions\] must be a table of BACKEND = "),
     ],
 )
@@ -540,6 +550,7 @@ def _capture_builders(monkeypatch: pytest.MonkeyPatch) -> dict[str, NerConfig]:
         return build
 
     monkeypatch.setattr(gliner_ner, "build_gliner_detector", builder("gliner"))
+    monkeypatch.setattr(gliner2_ner, "build_gliner2_detector", builder("gliner2"))
     monkeypatch.setattr(hf_ner, "build_hf_detector", builder("hf"))
     # A build without downloads sets the offline switches: restored after.
     from ner_fakes import install_hub
@@ -555,22 +566,23 @@ def test_each_backend_builder_sees_its_effective_revision(
     ner = _ner(
         {
             "enabled": True,
-            "backends": ["gliner", "hf"],
+            "backends": ["gliner", "gliner2", "hf"],
             "revisions": {"hf": _SHA},
             "allow_download": True,
         }
     )
     build_detectors(DetectionConfig(ner=ner), startup=True)
-    # hf: the user's pin; gliner: its default model's catalog pin.
+    # hf: the user's pin; gliner and gliner2: their default models' catalog pins.
     assert seen["hf"].revisions == (("hf", _SHA),)
     assert seen["gliner"].revisions == (("gliner", _SMALL_PIN),)
+    assert seen["gliner2"].revisions == (("gliner2", "f9634218e53580c56edf0de97ca1a7d3f1c2354e"),)
     for backend, view in seen.items():
         assert view.backend == backend
         assert view.backends is None
         assert view.revision_for(backend) == ner.revision_for(backend)
         assert view.allow_download is True  # the startup build only
     build_detectors(DetectionConfig(ner=ner))  # any other build
-    assert [view.allow_download for view in seen.values()] == [False, False]
+    assert [view.allow_download for view in seen.values()] == [False, False, False]
 
 
 def test_an_unpinned_backend_view_carries_no_revision(monkeypatch: pytest.MonkeyPatch) -> None:

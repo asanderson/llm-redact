@@ -25,7 +25,8 @@ read [src/llm_redact/user_guide.md](../src/llm_redact/user_guide.md).
 
 | Doc | What it covers |
 | --- | --- |
-| [deployment.md](deployment.md) | The end-to-end guide: bind policy and mTLS, containers, health probes, the Helm chart, SIGHUP reloads, vault lifecycle, service units, log rotation. |
+| [deployment.md](deployment.md) | The end-to-end guide: bind policy and mTLS, containers (the `-ner` image), health probes, the Helm chart, SIGHUP reloads, provisioning NER models, offline installs, vault lifecycle, service units, log rotation. |
+| [air-gapped.md](air-gapped.md) | Running with NER models in an enclave with no internet route: what to carry in (the `-ner` image or a wheelhouse, `models pull --to` folders, a config), offline verification, Helm and systemd settings; the only egress left is your LLM provider. |
 | [observability.md](observability.md) | Prometheus scrape/alert examples and the Grafana dashboard, mapped to the emitted metrics. |
 | [resilience.md](resilience.md) | The failure-mode catalogue: what happens on every upstream fault, stream truncation, and vault write error — and the tests that pin it. |
 | [api-coverage.md](api-coverage.md) | The endpoint matrix: every provider route and how the proxy treats it (pinned by test in both directions). |

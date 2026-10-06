@@ -345,6 +345,14 @@ docker compose up   # demo stack: proxy + bundled fake upstream
 The sqlite vault and audit log live under `/data` — mount a volume to
 persist sessions across container restarts.
 
+The `-ner` image (`ghcr.io/asanderson/llm-redact:latest-ner`, or
+`<version>-ner`) adds the `hf` and `gliner` NER extras on a CPU-only torch.
+NER models are never downloaded by default: fetch them with `llm-redact
+models pull`, or carry them into a network with no internet route as
+portable, checksummed folders — [docs/air-gapped.md](docs/air-gapped.md)
+walks through it, image and Helm chart (`image.variant: ner`,
+`models.volume`) included.
+
 ## Status, metrics, and audit log
 
 Reserved `/__llm-redact/*` paths are answered locally, never forwarded, and

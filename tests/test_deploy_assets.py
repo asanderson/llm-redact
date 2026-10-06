@@ -864,3 +864,90 @@ def test_the_airgap_job_runs_offline_without_a_route() -> None:
         "mount -o remount,bind,ro /models",
     ):
         assert needle in offline
+
+
+# --- the models volume and the -ner image (T17e; docs/air-gapped.md) -------------
+
+_MODELS_PVC = (
+    "models.volume.persistentVolumeClaim.claimName=llm-redact-models",
+    "models.volume.persistentVolumeClaim.readOnly=true",
+)
+
+
+def _proxy_container(docs: list[dict]) -> dict:
+    [deployment] = [d for d in docs if d["kind"] == "Deployment"]
+    pod = deployment["spec"]["template"]["spec"]
+    [proxy_container] = [c for c in pod["containers"] if c["name"] == "llm-redact"]
+    return {"pod": pod, "container": proxy_container}
+
+
+def test_the_models_volume_values_default_off() -> None:
+    values = yaml.safe_load((HELM_CHART / "values.yaml").read_text())
+    assert values["image"]["variant"] == ""
+    assert values["models"] == {"volume": {}}
+
+
+@_needs_helm
+@pytest.mark.parametrize("preset", [(), _STANDALONE], ids=["sidecar", "standalone"])
+def test_helm_models_volume_mounts_read_only_and_goes_offline(preset: tuple[str, ...]) -> None:
+    result = _helm_template(*preset, *_MODELS_PVC, "image.variant=ner")
+    assert result.returncode == 0, result.stderr
+    found = _proxy_container([d for d in yaml.safe_load_all(result.stdout) if d])
+    container, pod = found["container"], found["pod"]
+    assert container["image"] == f"ghcr.io/asanderson/llm-redact:{__version__}-ner"
+    assert {"name": "models", "mountPath": "/models", "readOnly": True} in container["volumeMounts"]
+    [volume] = [v for v in pod["volumes"] if v["name"] == "models"]
+    assert volume == {
+        "name": "models",
+        "persistentVolumeClaim": {"claimName": "llm-redact-models", "readOnly": True},
+    }
+    env = {e["name"]: e.get("value") for e in container["env"]}
+    assert env["HF_HUB_OFFLINE"] == env["TRANSFORMERS_OFFLINE"] == "1"
+    # The hardened container spec is unchanged: the root stays read-only.
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+
+
+@_needs_helm
+def test_helm_without_a_models_volume_renders_neither_mount_nor_offline_env() -> None:
+    result = _helm_template()
+    assert result.returncode == 0, result.stderr
+    found = _proxy_container([d for d in yaml.safe_load_all(result.stdout) if d])
+    container, pod = found["container"], found["pod"]
+    assert container["image"] == f"ghcr.io/asanderson/llm-redact:{__version__}"
+    assert all(m["name"] != "models" for m in container["volumeMounts"])
+    assert all(v["name"] != "models" for v in pod["volumes"])
+    names = {e["name"] for e in container["env"]}
+    assert not names & {"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"}
+
+
+@_needs_helm
+def test_helm_image_variant_keeps_an_explicit_tag() -> None:
+    result = _helm_template("image.tag=1.2.3", "image.variant=ner")
+    assert result.returncode == 0, result.stderr
+    found = _proxy_container([d for d in yaml.safe_load_all(result.stdout) if d])
+    assert found["container"]["image"] == "ghcr.io/asanderson/llm-redact:1.2.3-ner"
+
+
+@_needs_helm
+@pytest.mark.parametrize(
+    ("flag", "message"),
+    [
+        ("image.variant=gpu", 'image.variant must be "" (the stock image) or "ner"'),
+        ("models.volume=llm-redact-models", "models.volume must be a volume source"),
+    ],
+)
+def test_helm_rejects_a_bad_variant_or_models_volume(flag: str, message: str) -> None:
+    result = _helm_template(flag)
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@_needs_helm
+@pytest.mark.parametrize(("variant", "warns"), [("ner", False), ("", True)])
+def test_helm_notes_name_the_models_volume_and_the_stock_image_gap(
+    tmp_path: Path, variant: str, warns: bool
+) -> None:
+    chart = _chart_copy(tmp_path)
+    _, notes = _copy_grace_and_notes(chart, *_MODELS_PVC, f"image.variant={variant}")
+    assert "llm-redact models verify --dir /models" in str(notes)
+    assert ("models.volume is set but image.variant is not" in str(notes)) is warns

@@ -46,8 +46,7 @@ running it.
   check (tldextract) reads the Public Suffix List snapshot its package
   ships instead of fetching publicsuffix.org on first use, and a CI job
   starts the proxy with its NER models inside a network namespace with no
-  route, failing on any connection attempt (the `airgap` job in
-  .github/workflows/ci.yml).
+  route, failing on any connection attempt ([air-gapped.md](air-gapped.md)).
 
 ## The agent plugin commands
 

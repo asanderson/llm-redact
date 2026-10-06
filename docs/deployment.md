@@ -356,7 +356,8 @@ fetches one: every model loads from local files, and a model that is not
 there stops the startup with an error naming it, its revision and
 `llm-redact models pull`. So provisioning is a step of its own, done before
 the proxy starts with NER on (the [model supply chain
-diagram](diagrams/model-supply-chain.png) shows the whole path):
+diagram](diagrams/model-supply-chain.png) shows the whole path; for a network
+with no internet route, follow [air-gapped.md](air-gapped.md)):
 
 - **On the proxy's machine:** run `llm-redact models pull --config PATH` as
   the user the proxy runs as, with network access to huggingface.co. It
@@ -399,7 +400,12 @@ Where the files live under a hardened deployment:
   `[detection.ner.models]` — or mount a pre-filled Hugging Face cache and
   point `HF_HOME` at it (a cache needs a writable `XDG_DATA_HOME` for the
   GLiNER base-model assembly; `/data` is). Either way the pod loads models
-  with no network at all.
+  with no network at all. The Helm chart does the first for you:
+  `image.variant: ner` selects the `-ner` image, and `models.volume` (any
+  volume source, such as a PersistentVolumeClaim) is mounted read-only at
+  `/models` with `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` set;
+  `[detection.ner.models]` goes in `extraConfig`
+  ([air-gapped.md](air-gapped.md#kubernetes-helm)).
 
 ## Offline installs (no container)
 

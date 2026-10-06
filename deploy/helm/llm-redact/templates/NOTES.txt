@@ -91,6 +91,20 @@ lives on an emptyDir, so a pod restart WIPES it and previously issued token
 numbers get reissued (never-wrong-value depends on the dense counter
 surviving). Set persistence.enabled=true with a PersistentVolumeClaim.
 {{- end }}
+{{- if .Values.models.volume }}
+
+NER models: the models volume is mounted read-only at /models, and the proxy
+runs with HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1. Load its folders with the
+[detection.ner.models] lines `llm-redact models pull --to DIR --as /models`
+printed (extraConfig), and check the volume:
+  kubectl exec deploy/{{ include "llm-redact.fullname" . }} -c llm-redact -- llm-redact models verify --dir /models
+{{- if ne (.Values.image.variant | default "") "ner" }}
+
+*** WARNING: models.volume is set but image.variant is not "ner": the stock
+image ships no NER extras, so an enabled hf or gliner backend refuses to
+start. Set image.variant=ner (docs/air-gapped.md).
+{{- end }}
+{{- end }}
 
 Check posture once the pod is up:
   kubectl exec deploy/{{ include "llm-redact.fullname" . }} -c llm-redact -- llm-redact status

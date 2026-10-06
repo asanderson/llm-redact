@@ -1136,8 +1136,18 @@ OSCILLATING_MUTANTS: frozenset[str] = frozenset(
         # main's run of the same tree reported it killed (a selection
         # artifact).
         "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_27",
-        # A SQL keyword case change in _record_row (equivalent): survives when
-        # run alone, but the PR run of 717e710 left it off the survivor list.
-        "llm_redact.vault.xǁSqliteVaultManagerǁ_record_row__mutmut_25",
     }
+)
+
+# Every SQL/PRAGMA keyword-case mutant is oscillating by construction: SQLite
+# reads keywords, identifiers and PRAGMA names case-insensitively, so no test
+# input can tell one apart - the only way it leaves the survivor list is the
+# timing-based per-mutant limit on a slow runner (one dropped per run, a
+# different one each time: _record_row__mutmut_25 on one PR run,
+# _open_connection__mutmut_28 on the next). Listing them one by one chased
+# runner noise; a renumbered or newly surviving mutant still fails the gate
+# as unlisted.
+SQL_CASE_REASON_PREFIX = "SQL/PRAGMA case change only:"
+OSCILLATING_MUTANTS = OSCILLATING_MUTANTS | frozenset(
+    sid for sid, why in EQUIVALENT_MUTANTS.items() if why.startswith(SQL_CASE_REASON_PREFIX)
 )

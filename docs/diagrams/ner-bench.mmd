@@ -1,0 +1,51 @@
+%% The NER bench (python -m llm_redact.bench.ner) beside the unchanged
+%% deterministic gate: datasets → adapters and label maps → the full
+%% detection pipeline → metrics → recorded gates → the CI workflows.
+%% Code: bench/ner.py, ner_metrics.py, ner_corpus.py, ner_fp.py,
+%% ner_latency.py, bench/datasets/; bench/configs/*.toml,
+%% bench/ner_thresholds.toml, bench/ner_ceilings.toml;
+%% .github/workflows/ci.yml (ner-models, bench), ner-eval.yml.
+%% Prose: docs/ner-bench.md, docs/assurance.md.
+%% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+flowchart TB
+    subgraph data["Datasets — never committed"]
+        direction LR
+        synth["synthetic (default)<br/>generated from the seed<br/>at every run"]
+        published["published: openpii, nemotron,<br/>privy, pupa, mapa<br/>downloaded at a pinned revision<br/>into a cache outside any git tree"]
+        local["local: creddata checkout,<br/>agent-eval frozen file<br/>(checked against its SHA-256 manifest)"]
+        negatives["bench/fp_corpus<br/>vendored negatives<br/>(--fp-corpus)"]
+    end
+    data --> adapters["adapters and label maps<br/>a dataset label → a placeholder type,<br/>leak only, not scored, or not personal data;<br/>rows whose spans disagree with their text<br/>are skipped and counted, never repaired;<br/>real-data datasets flagged"]
+    config[/"a configuration<br/>bench/configs/*.toml<br/>models loaded offline at their catalog pins"/] --> pipeline
+    adapters --> pipeline["the full detection pipeline<br/>regex rules + NER backends + overlap resolution<br/>(no allowlist), and the same config with NER off"]
+    pipeline --> metrics["metrics<br/>per type: exact and overlap-typed precision,<br/>recall, F1; character-leak and over-redaction<br/>rates; structured regressions (a rule's exact<br/>match lost to a model span);<br/>--fp-corpus: detections NER adds per file and type;<br/>--latency: p50/p95 per string length"]
+    metrics --> report(["report.md + report.json<br/>types, counts, rates, model ids,<br/>attributions — never text"])
+    metrics -. "--dump-errors (mode 0600, outside any<br/>git tree; real data only with<br/>--allow-real-data-dump)" .-> dump(["error file with text"])
+    metrics --> gates{"--check against the<br/>recorded baseline"}
+    thresholds[/"bench/ner_thresholds.toml<br/>[config.dataset]: recall floors,<br/>leak and over-redaction ceilings;<br/>[config.latency] optional"/] --> gates
+    ceilings[/"bench/ner_ceilings.toml<br/>[config]: per-file, per-type counts,<br/>per_100kb_max"/] --> gates
+    gates -- "within" --> pass([pass])
+    gates -- "crossed, or no entry recorded" --> fail([fail])
+    subgraph ci["CI"]
+        direction LR
+        models["ner-models (every pull request)<br/>pull pinned models → real_model tests<br/>(a skip fails) → synthetic, fp-corpus<br/>and latency runs with --check"]
+        weekly["ner-eval (weekly, manual)<br/>OpenPII and Nemotron slices<br/>of 2,000 rows, report only"]
+    end
+    fail -- "fails the job" --> models
+    report -- "artifact; ner-eval: the run summary" --> weekly
+    subgraph det["Unchanged deterministic gate — no model"]
+        direction LR
+        rules["python -m llm_redact.bench --check<br/>recall == 1.0 per rule on generated positives;<br/>exact counts on bench/fp_corpus (MANIFEST.toml)<br/>CI job: bench"]
+    end
+    negatives -.-> rules
+
+    classDef store fill:#fff8c5,stroke:#9a6700,stroke-width:1px;
+    classDef okPath fill:#dafbe1,stroke:#1a7f37,stroke-width:1px;
+    classDef gate fill:#ddf4ff,stroke:#0969da,stroke-width:1px;
+    classDef refuse fill:#ffebe9,stroke:#cf222e,stroke-width:1px;
+    classDef gap fill:#fff1e5,stroke:#bc4c00,stroke-width:1px;
+    class synth,published,local,negatives,config,thresholds,ceilings store;
+    class adapters,pipeline,metrics,report,pass,models,weekly,rules okPath;
+    class gates gate;
+    class fail refuse;
+    class dump gap;

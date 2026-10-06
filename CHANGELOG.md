@@ -121,6 +121,27 @@ and tags `vX.Y.Z`.
   hits-per-100-KB ceiling in `bench/ner_ceilings.toml`. The corpus gains four
   agent-traffic files with no personal data (tool results as JSON, git output, a CI log, a
   Python module), pinned to zero regex detections in its manifest.
+- Real NER models in CI (docs/ner-bench.md, "CI"): a `ner-models` job pulls the default `hf`
+  and `gliner` models (and those the `real_model` tests load) at their catalog pins into a
+  cached Hugging Face directory, runs `pytest -m real_model` — where
+  `LLM_REDACT_TEST_REAL_MODELS_REQUIRED=1` turns a skipped real-model test into a failure —
+  and gates every `bench/configs/*.toml` with the NER bench: synthetic-corpus floors and
+  ceilings, false-positive ceilings on the negatives corpus, and a latency report. A weekly
+  `ner-eval` workflow scores the same configurations on 2,000-row slices of OpenPII 1.5M and
+  Nemotron-PII, report only. Both install the locked extras with `scripts/ner_ci_env.sh`, every
+  wheel checked against its sha256 (the lock's, and for the CPU-only torch wheel its own pin in
+  `scripts/ner_ci_torch_cpu.txt`). Baselines for
+  `dslim/bert-base-NER` and `urchade/gliner_small-v2.1` are recorded in
+  `bench/ner_thresholds.toml` and `bench/ner_ceilings.toml`, with the date, revisions and
+  measured values. The bench also reports the character-leak rate per type, and
+  `type_leak_max = { TYPE = ceiling }` gates it: the type-agnostic rate counts every type a
+  configuration does not request (about 38% of the synthetic corpus's gold characters for
+  the `PERSON`-only defaults), so the baselines gate `PERSON` leakage on its own.
+- docs/ner-bench.md gains the `ner-bench` diagram (datasets → adapters and label maps → the
+  full pipeline → metrics → recorded gates → the CI jobs, beside the unchanged deterministic
+  gate), and docs/CONTRIBUTING.md an "Adding an NER model or backend" checklist: license and
+  lineage facts, catalog entry and pins, bench configuration, baselines, CI, admission,
+  docs, troubleshooting entries, extras and diagrams.
 - Published datasets for the NER bench: `--dataset openpii` (OpenPII 1.5M, CC BY 4.0,
   Ai4Privacy / Ai Suisse SA; `--language` filters it) and `--dataset nemotron`
   (Nemotron-PII, CC BY 4.0, NVIDIA), downloaded at run time at a pinned revision into
@@ -337,6 +358,9 @@ and tags `vX.Y.Z`.
   startup names `llm-redact models pull --to` instead of calling it neither a folder nor a model
   id, `doctor` no longer reads it as an unpinned Hub model, and `models pull` fails instead of
   skipping it.
+- The NER bench downloads a published dataset before it loads the models: building an `hf`,
+  `gliner` or `gliner2` backend switches the process to offline mode, so a dataset not yet
+  cached failed to download (`could not download … LocalEntryNotFoundError`).
 - The `hf` NER backend could report part of a word as an entity and leave the rest of it
   in the request: `dslim/bert-base-NER` reported "Angela Merk" in "Yesterday Angela Merkel
   met the press.", so "el" went upstream unredacted (also "Ngoz…", "Xu Wen…"). A model whose

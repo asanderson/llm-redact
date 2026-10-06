@@ -914,6 +914,23 @@ The thresholds entry sets a floor for a type the scored samples never
 contain (a `--limit` too small, or a dataset without that type). Raise
 `--limit`, or remove the floor from that dataset's entry.
 
+## NER bench: "type_leak_max for TYPE cannot be checked: the run holds no gold characters of TYPE"
+
+The entry sets a per-type leak ceiling for a type the scored samples never
+contain, as for a recall floor above: raise `--limit`, or remove that type
+from the entry's `type_leak_max`.
+
+## NER CI: "uv.lock pins torch X but scripts/ner_ci_torch_cpu.txt pins Y+cpu: update the pin and its sha256"
+
+`scripts/ner_ci_env.sh` (the `ner-models` and `ner-eval` jobs) installs the
+PyTorch CPU wheel pinned by version and sha256 instead of the locked PyPI
+wheel, and refuses to run when the two versions differ (after `uv lock`
+moved torch). Put the new version in `scripts/ner_ci_torch_cpu.txt` with
+the sha256 that `https://download.pytorch.org/whl/cpu/torch/` lists for
+its `cp313` `manylinux_2_28_x86_64` wheel, checked against the downloaded
+file (`sha256sum`). A hash that does not match fails the install: never
+remove `--require-hashes` to get past it.
+
 ## NER bench: "--dump-errors must name a file outside any git work tree"
 
 `--dump-errors` writes dataset text, so it refuses a path inside a git
@@ -957,7 +974,10 @@ revision and the download failed (no network, a proxy refusing the host, a
 full disk). Files already in the cache directory are reused, so a machine
 without network access can run a dataset whose cache was filled elsewhere:
 copy `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets` across, or
-point `--cache-dir` at the copy.
+point `--cache-dir` at the copy. `LocalEntryNotFoundError` means the Hub
+client was offline (`HF_HUB_OFFLINE=1` in the environment) and the file is
+not in the cache; the bench downloads a dataset before it loads the models,
+whose loading switches the process offline.
 
 ## NER bench: "--cache-dir must be outside any git work tree"
 

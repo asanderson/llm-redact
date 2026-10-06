@@ -19,6 +19,7 @@ def test_sources_exist() -> None:
     assert {s.stem for s in SOURCES} >= {
         "architecture",
         "model-supply-chain",
+        "ner-bench",
         "ner-pipeline",
         "ner-prefetch",
         "security-gates",

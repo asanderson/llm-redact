@@ -109,6 +109,31 @@ def test_wrong_type_is_a_false_positive_and_a_miss() -> None:
     assert result.leak_rate == 0.0
 
 
+def test_leak_per_type_counts_only_that_types_gold() -> None:
+    # Two requested-type values and one the configuration never asks for:
+    # the type-agnostic rate is diluted by the unrequested ADDRESS, the
+    # per-type rate is not.
+    text = "Jane Doe and Bob Roe live at 12 Elm Street, Jane Doe says."
+    spans = (
+        GoldSpan(0, 8, "name"),
+        GoldSpan(13, 20, "name"),
+        GoldSpan(29, 42, "street"),
+        GoldSpan(44, 52, "name"),
+    )
+    labels = {**LABELS, "street": "ADDRESS"}
+    result = evaluate([NerSample(text, spans)], labels, _pipeline({"Jane Doe": "PERSON"}))
+    assert result.type_gold_chars == {"PERSON": 23, "ADDRESS": 13}
+    assert result.type_leaked_chars == {"PERSON": 7, "ADDRESS": 13}
+    assert result.type_leak_rate("PERSON") == pytest.approx(7 / 23)
+    assert result.type_leak_rate("ADDRESS") == 1.0
+    assert result.leak_rate == pytest.approx(20 / 36)
+    assert result.type_leak_rate("EMAIL") == 0.0  # no gold: nothing to leak
+    # A detection of another type still covers the characters (the vault
+    # replaces them), as in the type-agnostic rate.
+    covered = evaluate([NerSample(text, spans)], labels, _pipeline({"Bob Roe": "USERNAME"}))
+    assert covered.type_leaked_chars["PERSON"] == 16
+
+
 def test_leak_ignored_and_not_pii_classes() -> None:
     text = "tax 12-345 in Springfield, ref ABC, by Acme"
     sample = NerSample(
@@ -191,6 +216,9 @@ def test_reports_render_counts() -> None:
     data = to_json_dict(result)
     assert data["overlap"]["PERSON"]["recall"] == 1.0  # type: ignore[index]
     assert data["unmapped_labels"] == {"verb": 1}
+    assert "Character-leak rate per type: PERSON 0.0000 (0 of 8)." in markdown
+    assert data["type_leak"] == {"PERSON": {"gold_chars": 8, "leaked_chars": 0, "leak_rate": 0.0}}
+    assert "per type" not in to_markdown(NerResult())
 
 
 # --- datasets -----------------------------------------------------------------
@@ -222,6 +250,7 @@ def test_rules_dataset_is_generated_and_labelled() -> None:
 
 def _result() -> NerResult:
     result = NerResult()
+    result.type_gold_chars["PERSON"], result.type_leaked_chars["PERSON"] = 50, 4
     result.overlap["PERSON"] = TypeCounts(gold=10, gold_hit=8, pred=9, pred_hit=8)
     result.exact["PERSON"] = TypeCounts(gold=10, gold_hit=6, pred=9, pred_hit=6)
     result.gold_chars, result.leaked_chars = 100, 20
@@ -241,6 +270,7 @@ def test_gate_passes_within_bounds() -> None:
         "recall": {"PERSON": 0.8},
         "exact_recall": {"PERSON": 0.6},
         "leak_max": 0.2,
+        "type_leak_max": {"PERSON": 0.08},
         "over_redaction_max": 0.005,
         "recorded": "2026-10-05",
         "note": "fake",
@@ -253,6 +283,7 @@ def test_gate_reports_each_crossing() -> None:
         "recall": {"PERSON": 0.9, "ADDRESS": 0.5},
         "exact_recall": {"PERSON": 0.7},
         "leak_max": 0.1,
+        "type_leak_max": {"PERSON": 0.07, "ADDRESS": 0.5},
         "over_redaction_max": 0.001,
     }
     failures = _gate(entry)
@@ -260,6 +291,8 @@ def test_gate_reports_each_crossing() -> None:
         "recall floor for ADDRESS cannot be checked: the run holds no gold spans of ADDRESS",
         "PERSON recall 0.800 is below the floor 0.900",
         "PERSON exact_recall 0.600 is below the floor 0.700",
+        "type_leak_max for ADDRESS cannot be checked: the run holds no gold characters of ADDRESS",
+        "PERSON type_leak_max: 0.0800 is above the ceiling 0.0700",
         "leak_max: 0.2000 is above the ceiling 0.1000",
         "over_redaction_max: 0.0050 is above the ceiling 0.0010",
     ]
@@ -296,6 +329,8 @@ def test_gate_missing_entry_says_how_to_record_a_baseline() -> None:
         ({"recall": 0.5}, "recall must be a table of type = floor"),
         ({"recall": {"PERSON": "high"}}, r"recall.PERSON must be a number"),
         ({"leak_max": True}, "leak_max must be a number"),
+        ({"type_leak_max": 0.1}, "type_leak_max must be a table of type = ceiling"),
+        ({"type_leak_max": {"PERSON": "low"}}, r"type_leak_max.PERSON must be a number"),
     ],
 )
 def test_gate_rejects_malformed_entries(entry: dict[str, object], message: str) -> None:

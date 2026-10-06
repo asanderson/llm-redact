@@ -14,6 +14,10 @@ grammar or it is broken, while a model is measured statistically. See
 [assurance.md](assurance.md#statistical-gates-for-ner-models) for how the two
 gates differ.
 
+![Flowchart of the NER bench: datasets that are never committed (generated, downloaded at pinned revisions, or local files) pass through adapters and label maps into the full detection pipeline of a bench configuration; metrics feed metadata-only reports and the --check gate against the recorded thresholds and ceilings, which the ner-models CI job runs on every pull request and the weekly ner-eval workflow reports; beside it the unchanged deterministic gate on the vendored negatives](diagrams/ner-bench.png)
+
+*Static diagram. [Mermaid source](diagrams/ner-bench.mmd).*
+
 ## Running it
 
 ```bash
@@ -92,6 +96,13 @@ Type-agnostic:
   over the characters outside every gold span: how much ordinary text the
   model hides from the provider.
 
+Per type: the **character-leak rate of a type** — characters of that
+type's gold spans that no detection (of any type) covers, over those
+characters. The type-agnostic rate also counts every type the
+configuration does not ask for (always leaked), so it is diluted when a
+configuration requests only some of a dataset's types; a gate on the
+requested types reads the per-type rate.
+
 **Structured-regression check.** The bench also runs the same configuration
 with NER off. Every gold span of a regex rule's type (an email, a phone
 number, an IBAN) that the rules alone find exactly must still be found
@@ -113,22 +124,26 @@ and `@LANGUAGE` with `--language` (quote such keys:
 |---|---|
 | `recall = { TYPE = floor }` | overlap-typed recall floors per type |
 | `exact_recall = { TYPE = floor }` | exact-match recall floors per type |
-| `leak_max` | character-leak rate ceiling |
+| `leak_max` | character-leak rate ceiling, over all gold characters |
+| `type_leak_max = { TYPE = ceiling }` | character-leak rate ceilings per type |
 | `over_redaction_max` | over-redaction rate ceiling |
 | `structured_regressions_max` | regex-type spans NER may cost (default 0) |
 | `recorded`, `note` | when and with which models and revisions the baseline was measured |
 
-A run with no entry fails `--check`, and so does a floor on a type the run
-holds no gold spans of (it cannot be checked). Unknown keys are refused.
+A run with no entry fails `--check`, and so does a floor or a
+`type_leak_max` on a type the run holds no gold spans of (it cannot be
+checked). Unknown keys are refused.
 
 ### Recording a baseline
 
 Run the bench on the configuration and dataset without `--check`, read the
 report, and add an entry: each recall floor at the measured value minus
 0.05, each ceiling at the measured value plus 0.05 (a tighter over-redaction
-ceiling is fine when the measured rate is near zero), `recorded` set to the
-date and `note` naming the model ids and revisions. Commit the entry with
-the change that motivated it.
+ceiling is fine when the measured rate is near zero: the recorded baselines
+use twice the measured rate), `recorded` set to the date and `note` naming
+the model ids and revisions and the measured values. Commit the entry with
+the change that motivated it. Floors round down and ceilings round up, to
+two decimals.
 
 ## False positives on agent traffic: `--fp-corpus`
 
@@ -167,7 +182,10 @@ A config without a section fails; a file or type not listed allows no NER
 detection at all; a ceiling naming a file the corpus does not hold fails
 (a stale entry). Some files hold real names on purpose (the RFC's authors,
 the characters of *Alice's Adventures in Wonderland*): a model finding them
-is right, and their ceilings say so.
+is right, and their ceilings say so. A baseline's count ceilings are the
+measured counts plus 5%, rounded up and at least one more than measured, so
+the same model on another CPU does not fail on one borderline span;
+`per_100kb_max` likewise.
 
 ## Latency: `--latency`
 
@@ -196,6 +214,82 @@ p95_ms = { "2000" = 400.0 }
 many_small_ms = 30000.0         # p50 of the many-small body
 recorded = "2026-10-05"
 note = "CPU model, model ids and revisions"
+```
+
+## CI
+
+Two GitHub Actions workflows run real models; the regular test jobs never
+do (the suite fakes every model, and the `real_model` tests are deselected
+by default).
+
+**`ner-models`** (a job of `.github/workflows/ci.yml`, on pull requests,
+pushes to `main` and the weekly CI schedule):
+
+1. installs the `hf`, `gliner`, `gliner2` and `bench-data` extras with
+   `scripts/ner_ci_env.sh`: every package at the version `uv.lock` pins,
+   each wheel checked against the lock's sha256, except that torch is the
+   PyTorch CPU wheel of the locked version, checked against its own sha256
+   in `scripts/ner_ci_torch_cpu.txt` (the locked PyPI wheel brings CUDA
+   libraries no runner uses, so it and torch's CUDA-only packages are left
+   out of the export by name);
+2. restores the Hugging Face cache, keyed on the model catalog and the
+   configurations below, and runs `llm-redact models pull --config` on each
+   of them, so every model is fetched at its catalog pin (a GLiNER
+   checkpoint's pinned base model included);
+3. runs `pytest -m real_model` with
+   `LLM_REDACT_TEST_REAL_MODELS_REQUIRED=1`, which turns a real-model test
+   that would skip (a model not pulled, an extra missing) into a failure: a
+   green job means every one of them ran;
+4. for every `bench/configs/*.toml`, runs the bench three times with
+   `--check`: the synthetic corpus against `bench/ner_thresholds.toml`, the
+   negatives corpus (`--fp-corpus bench/fp_corpus`) against
+   `bench/ner_ceilings.toml`, and `--latency` with a many-small body of
+   1,000 strings instead of 20,000, which would take an hour or more per
+   model on a runner (report only until a `[<config>.latency]` entry
+   exists). Every run completes before the step
+   fails, so one crossed gate does not hide another report; the reports are
+   uploaded as the `ner-report` artifact.
+
+The models load offline in steps 3 and 4, as a proxy with
+`allow_download = false` loads them: only step 2 contacts the Hub.
+
+**`ner-eval`** (`.github/workflows/ner-eval.yml`, weekly and by
+`workflow_dispatch`): the same environment and models, then every
+`bench/configs/*.toml` on 2,000-row slices of OpenPII 1.5M (`validation`)
+and Nemotron-PII (`test`), downloaded at their pinned revisions into a
+cached directory. It is report only — no `--check` — until baselines for
+those datasets are recorded; the reports are uploaded as the `ner-eval`
+artifact and written to the run's summary.
+
+| Configuration | What it scores | Gated by |
+|---|---|---|
+| `bench/configs/hf-default.toml` | the `hf` backend's default model (`dslim/bert-base-NER`) at its catalog pin, default entities (`PERSON`) | `[hf-default.synthetic]`, `[hf-default]` |
+| `bench/configs/gliner-default.toml` | the `gliner` backend's default model (`urchade/gliner_small-v2.1`, assembled with its pinned base model) at its catalog pin, default entities | `[gliner-default.synthetic]`, `[gliner-default]` |
+| `tests/real_model_configs/*.toml` | not scored: the other models the `real_model` tests load (the `gliner2` default, a Knowledgator ONNX checkpoint), pulled by `ner-models` | — |
+
+A configuration added to `bench/configs/` is pulled, tested and gated by
+both workflows with no workflow change, and fails `ner-models` until its
+baselines are recorded. The recorded entries say when, on which model
+revisions and with which measured values they were taken; with the default
+`PERSON` entities, the synthetic corpus's `ADDRESS`, `DATE_OF_BIRTH`,
+`USERNAME` and `ACCOUNT_NUMBER` values are not requested, so their
+characters (about 38% of the corpus's gold characters) count toward the
+type-agnostic leak rate. A ceiling on that rate alone would let `PERSON`
+leakage grow about fivefold before failing, so each entry also carries a
+`type_leak_max` for every entity its configuration requests.
+
+To reproduce the job locally (CPython 3.13 on Linux x86_64, the platform
+the pinned torch wheel is built for), install as it does; the script
+replaces `.venv`, so run it in a checkout you do not develop in, and the
+models go to the Hugging Face cache. When `uv.lock` moves torch to another
+version, the script refuses to run until `scripts/ner_ci_torch_cpu.txt`
+names that version and its CPU wheel's sha256:
+
+```bash
+scripts/ner_ci_env.sh
+uv run --no-sync llm-redact models pull --config bench/configs/hf-default.toml
+uv run --no-sync pytest -m real_model
+uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/hf-default.toml --check
 ```
 
 ## Seeing the errors: `--dump-errors`

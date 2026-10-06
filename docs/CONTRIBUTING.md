@@ -77,7 +77,12 @@ Other conventions worth knowing before writing tests:
   without any extra installed. Tests that load a real NER model carry the
   `real_model` marker, deselected by default: they read the model from the
   local Hugging Face cache only (never a download) and skip when it or the
-  model's extra is absent (`uv run pytest -m real_model`).
+  model's extra is absent (`uv run pytest -m real_model`). The CI
+  `ner-models` job pulls every model they load and sets
+  `LLM_REDACT_TEST_REAL_MODELS_REQUIRED=1`, which makes such a skip a
+  failure: a new real-model test needs its model in a config the job pulls
+  (`bench/configs/` or `tests/real_model_configs/`, checked by
+  `tests/test_ner_ci.py`).
 - The session never touches your machine (`tests/isolation.py`, applied
   by `conftest.py` before collection): `HOME` and the XDG
   config/data/state dirs point into one throwaway directory — whatever
@@ -115,6 +120,64 @@ Other conventions worth knowing before writing tests:
    legitimate.
 5. Add the rule name to the `enabled` list in `config.example.toml` and a
    CHANGELOG entry.
+
+## Adding an NER model or backend
+
+Models are measured, not trusted: a model or backend lands with its facts,
+its pins, its measurements and its documentation in the same change.
+
+1. **License and lineage.** Read the model card (and its base model's, and
+   the cards of the datasets it was trained on). Record facts only — the
+   license identifier, "not OSI-approved", the backbone, "trained on
+   <dataset> (<license>)", undisclosed training data — never a legal or
+   procurement conclusion (`tests/test_model_catalog.py` rejects
+   conclusion words). Known restricted lineage (non-commercial data,
+   Llama-derived data) keeps a model from "vetted".
+2. **Catalog entry** in `src/llm_redact/detection/model_catalog.py`: status,
+   SPDX license, one neutral reason line with the card link and check date,
+   lineage tags from `LINEAGE_TAGS`, the `main` commit on the check date as
+   `revision` (a base model's commit as `backbone_revision` when the
+   checkpoint ships no tokenizer or encoder configuration), recommended
+   entities, label map or GLiNER prompt overrides, ONNX files, tagging and
+   window. A new backend gets its `DEFAULT_MODELS` entry, its allowed file
+   patterns in `model_files.py`, its `models` CLI and doctor coverage, and
+   the air-gap rules: with downloads off it opens no connection.
+3. **Bench configuration**: `bench/configs/<name>.toml` with
+   `[detection.ner] enabled = true`, the backend and, unless it is the
+   backend's default, the model; downloads stay off (the CI job pulls the
+   model first). A `<backend>-default` name is kept for a backend's default
+   model and names none (`tests/test_ner_ci.py`). Score it on the synthetic corpus, the negatives corpus and
+   for latency ([ner-bench.md](ner-bench.md)), and on the published
+   datasets that cover its types.
+4. **Thresholds and ceilings**: record its baselines in
+   `bench/ner_thresholds.toml` and `bench/ner_ceilings.toml` (dates,
+   revisions and measured values in the notes; tolerances as in
+   [ner-bench.md](ner-bench.md#recording-a-baseline)).
+   `tests/test_ner_ci.py` requires an entry for every bench configuration.
+5. **CI**: nothing to edit for a bench configuration — the `ner-models`
+   job and the weekly `ner-eval` workflow run every `bench/configs/*.toml`.
+   A real-model test of another model needs that model in a config under
+   `tests/real_model_configs/`, or the job fails the skipped test.
+6. **Admission.** "vetted" needs an OSI-approved weights license, no
+   known restricted lineage (undisclosed training data alone does not rule
+   a model out; the catalog states it), and on the bench: PERSON recall
+   ≥ 0.85 and character-leak rate ≤ 0.15 on the synthetic corpus, at most
+   one false positive per 50 KB on the agent-traffic negatives for its
+   recommended entities, and p50 ≤ 100 ms for a 500-character string on
+   the reference CPU (name the CPU). Otherwise "caution", with the numbers
+   shown. A backend's default model changes only by a maintainer's
+   decision.
+7. **Docs**: the "Vetted models" table in `docs/detection.md` (pinned by
+   test), `docs/ner-landscape.md` (the dated verdict and its numbers), a
+   `docs/troubleshooting.md` entry for every new warning or error text,
+   `config.example.toml` for any new key, and a CHANGELOG entry.
+8. **Extras**: a new library goes behind an extra in `pyproject.toml`
+   (with the torch floor if it loads torch weights), `uv lock`, and rows in
+   `docs/dependencies.md` and `docs/SBOM.md` (both test-pinned); add a mypy
+   override if the package has no type hints.
+9. **Diagrams**: update `docs/diagrams/ner-pipeline.mmd` for a new path
+   through a backend (windows, decoding) and `ner-bench.mmd` for a new
+   dataset kind or gate, then re-render (below).
 
 ## Diagrams
 

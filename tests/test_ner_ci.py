@@ -249,6 +249,21 @@ def test_actions_are_pinned_and_checkouts_keep_no_credentials(name: str) -> None
                 assert step["with"]["persist-credentials"] is False
 
 
+def test_claude_md_states_the_ci_invariants() -> None:
+    # The repository's agent instructions name what this file pins.
+    text = (ROOT / "CLAUDE.md").read_text()
+    for needle in (
+        real_models.REQUIRED_ENV,
+        "`ner-models`",
+        "`ner-eval.yml`",
+        "scripts/ner_ci_env.sh",
+        "tests/real_model_configs/*.toml",
+        "BEFORE `build_pipeline`",
+        "`type_leak_max`",
+    ):
+        assert needle in text, needle
+
+
 # --- a skipped real_model test fails where the models are required ---------------
 
 

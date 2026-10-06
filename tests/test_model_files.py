@@ -305,6 +305,9 @@ def test_a_configuration_naming_model_code_is_refused(
 @pytest.mark.parametrize(
     "content",
     [b"not json", b"\xff\xfe", b"[1, 2]", b"{" + b" " * (4 * 1024 * 1024) + b"}"],
+    # Short ids: pytest puts the id in PYTEST_CURRENT_TEST, and Windows refuses
+    # an environment variable over 32,767 characters.
+    ids=["prose", "utf16-bom", "array", "4mib-object"],
 )
 def test_a_configuration_that_is_no_json_object_is_refused(tmp_path: Path, content: bytes) -> None:
     (tmp_path / "config.json").write_bytes(content)

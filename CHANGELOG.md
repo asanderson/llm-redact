@@ -106,6 +106,44 @@ and tags `vX.Y.Z`.
   plus a 20,000-string body redacted end to end; the report names the CPU model.
   Report-only unless `[<config>.latency]` ceilings are recorded in
   `bench/ner_thresholds.toml`.
+- Dev-only corpus tooling in `scripts/pii_corpus/` (not in the wheel): `generate.py` asks a
+  local Ollama teacher for coding-agent artifacts (tool-call JSON, diffs, logs, configs,
+  commit messages) with invented, inline-tagged personal data, keeps only rows whose every
+  span is grounded, and writes them with a run manifest to a mode-0600 file outside any
+  git work tree. Teachers are Apache-2.0 models only, by exact name and size tag (Gemma 4,
+  Apache-2.0 Mistral models), with the Llama, Qwen, DeepSeek, Gemma 1 to 3n and Mistral
+  research/non-production models refused by name and the license re-checked on the server;
+  the server is loopback unless `--allow-remote-server` (https only) is given. A tag of any
+  catalog type is kept (the teacher is asked to tag every personal value), a repeat of a
+  value inside another span (`jdoe` in `jdoe@acme.com`) is left to that span, and tags with
+  JSON-escaped quotes inside a JSON string ground like plain ones. Corpus files are written
+  with `\n` line ends on every platform (no CRT text-mode translation on Windows).
+  `audit.py` has the same teacher read `bench/fp_corpus` beside the detectors and lists
+  candidate misses and false positives (file, offsets as file positions — a CRLF line end
+  counts two —, type, reason; no text) for a human; it never edits `MANIFEST.toml` or
+  `bench/ner_ceilings.toml`.
+- `--dataset agent-eval --path FILE` scores the NER bench on the private, hand-verified
+  agent-traffic evaluation set (docs/ner-bench.md): the file is read by path, never
+  committed, checked against the SHA-256 in its `FILE.manifest.json`, and marked as real
+  data. `scripts/pii_corpus/review.py` is the verification tooling: `review` shows each
+  generated row on the reviewer's terminal (input and output must both be a terminal) for
+  accept, edit (in `$EDITOR`, grounded again and taken as written; a failing editor only
+  skips the edit; a hard negative's edit may hold no tag) or reject, resumably, optionally
+  one `--share K/N` per reviewer; `freeze` validates the verified rows of one or more review
+  outputs (a hard negative with spans and an id in two files refused) and writes the frozen
+  set with a value-free provenance manifest (teachers and digests, seeds, reviewers,
+  counts).
+  Labeling rules: `scripts/pii_corpus/GUIDELINES.md`.
+- A student-model training recipe, documentation and a skeleton only
+  (`scripts/pii_corpus/TRAINING.md`, dev-only): `train_student.py plan` checks each
+  requested source against the data manifest `training_sources.toml` (license, attribution,
+  pinned revision and lineage per dataset), refuses evaluation-only sources (PUPA, MAPA,
+  CredData) and unverified corpus rows, refuses an agent-corpus share that shares a row id,
+  a text or a generator run (teacher and seed) with the frozen `agent-eval` set (named with
+  `--agent-eval FROZEN`, required), refuses OpenPII 1.5M until an owner commit records
+  AI4Privacy's written confirmation in `training_sources.toml` (and then only with
+  `--openpii-confirmation REF` repeating it), and writes the run's data manifest and a model
+  card from `MODEL_CARD_TEMPLATE.md`. Nothing is downloaded or trained; `train` refuses.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

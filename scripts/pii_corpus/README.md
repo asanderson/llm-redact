@@ -1,0 +1,236 @@
+# Out-of-band PII corpus tooling
+
+Dev-only scripts (not part of the `llm-redact-proxy` wheel) that build the
+agent-traffic evaluation corpus no public dataset provides. A local LLM — the
+*teacher* — writes coding-agent artifacts with invented personal data, a
+human verifies every row, and the frozen set is scored by the NER bench
+(`python -m llm_redact.bench.ner --dataset agent-eval --path FILE`,
+[docs/ner-bench.md](../../docs/ner-bench.md)).
+
+The data stays private (plan decision D7): generated, verified and frozen
+files are written outside every git work tree (each script refuses a path
+inside one), as mode-0600 files, by default under
+`${XDG_DATA_HOME:-~/.local/share}/llm-redact/pii-corpus/`. Nothing these
+scripts print or log contains a generated or audited text value: they print
+counts, ids, offsets, types and model names.
+
+| Script | Plan task | What it does |
+|---|---|---|
+| `generate.py` | T40 | Asks the teacher for tagged artifacts, grounds every span, writes unverified JSONL rows and a run manifest. |
+| `review.py` | T42 | Shows each generated row to a human for accept, edit or reject (`review`), then writes the frozen evaluation set with its manifest (`freeze`). Rules: [GUIDELINES.md](GUIDELINES.md). |
+| `train_student.py` | T43 | The student-model recipe skeleton: `plan` checks the training sources against [training_sources.toml](training_sources.toml) (OpenPII refused until an owner commit records the D9 confirmation there; an agent-corpus share must be disjoint from the frozen evaluation set) and writes the data manifest and a model card from [MODEL_CARD_TEMPLATE.md](MODEL_CARD_TEMPLATE.md); it trains nothing. Recipe: [TRAINING.md](TRAINING.md). |
+| `audit.py` | T41 | Has the teacher read `bench/fp_corpus` beside the detectors and lists candidate misses and false positives (file, offsets, type, reason). Report only. |
+
+## Requirements
+
+A local [Ollama](https://ollama.com) server with an allowed teacher already
+pulled (`ollama pull gemma4:e4b`); the scripts never pull a model. They talk
+to `http://127.0.0.1:11434` by default and refuse any non-loopback server
+unless `--allow-remote-server` is given, and then only over https (the
+server receives every prompt and, for the audit, the corpus text). Requests
+ignore proxy environment variables and never follow redirects.
+
+## Generating samples (`generate.py`)
+
+```bash
+uv run python scripts/pii_corpus/generate.py --model gemma4:e4b --count 500 --seed 7
+# -> ~/.local/share/llm-redact/pii-corpus/generated-gemma4-e4b-7.jsonl (+ .manifest.json)
+```
+
+| Option | Meaning |
+|---|---|
+| `--model NAME:TAG` | The teacher (required): an allowlisted Ollama model with a fixed size tag. |
+| `--count N` | Prompts to send (default 100); dropped answers are counted, not retried. |
+| `--seed N` | Seeds the prompt variations and every request (`options.seed`; temperature is always 0). |
+| `--negatives F` | Share of hard-negative prompts (default 0.25). |
+| `--url URL` | The Ollama server (default `http://127.0.0.1:11434`). |
+| `--allow-remote-server` | Permit a non-loopback server, https only. |
+| `--out PATH` | The output JSONL (default under the private data directory; refused inside a git work tree). |
+| `--force` | Replace an existing output file. |
+
+Each row is one JSON line:
+
+```json
+{"id": "gemma4-e4b-7-000012", "text": "...", "spans": [{"start": 10, "end": 17, "type": "PERSON"}],
+ "teacher": "gemma4:e4b", "prompt_id": "tool-args", "seed": 7}
+```
+
+`PATH.manifest.json` records the teacher's digest and license check, the
+server kind (loopback or remote), the prompt catalog's version and SHA-256,
+the options, whether the run completed, and counts (written rows, spans,
+repeats made gold, drops by reason). It holds no text. Exit status: 0 done,
+1 a teacher error cut the run short (rows written so far are kept and the
+manifest says `"complete": false`), 2 an input problem.
+
+### Grounding
+
+The teacher tags every invented value inline as
+`<pii type="TYPE">value</pii>` (inside a JSON string it may escape the
+quotes, `<pii type=\"TYPE\">`, so the artifact stays valid JSON). A row is
+kept only when every span is grounded (`grounding.py`): the tags are well
+formed and name one of the catalog's types (any of them: the system prompt
+asks for every personal value to be tagged, so a mixed record that also
+holds a type the prompt did not ask for is kept; rows that lack an asked
+type are kept and counted); each value is non-empty, unpadded, at most 200
+characters and on one line (an `ADDRESS` may span lines); one value has one
+type; every other whole-token occurrence of a tagged value becomes gold too
+(an untagged repeat would be scored as a miss the labels caused), except
+where it lies entirely inside another span (`jdoe` inside
+`jdoe@acme.com`, `Lee` inside `12 Lee Street`: the outer span covers it),
+and a repeat that only partly overlaps a different span drops the row; a
+hard negative carries no tag, a positive at least one; text holding a
+placeholder guillemet (`«`, `»`) is dropped. Dropped rows are counted by
+reason, never shown.
+
+### Prompt catalog (`prompts.py`, catalog version 1)
+
+One system prompt fixes the tag format, asks for invented values only (names
+from many cultures) and lists the types with a one-line hint each:
+`PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `PASSPORT`, `DRIVER_LICENSE`,
+`USERNAME`, `ACCOUNT_NUMBER` (the canonical NER types) and `EMAIL`, `PHONE`
+(regex-owned, for the bench's structured-regression check). Each user prompt
+draws, from a generator seeded by the run seed and the row index:
+
+| `prompt_id` | Artifact | Formats |
+|---|---|---|
+| `tool-args` | the JSON arguments of a tool call | JSON |
+| `tool-result` | the JSON result a tool returns | JSON |
+| `diff` | a unified git diff of source, fixtures or seed data | Python, TypeScript, Go, Java, Ruby, YAML, SQL |
+| `log` | application or CI log lines | plain text, JSON lines, nginx access log, GitHub Actions log |
+| `config` | a service configuration file | YAML, TOML, .env, JSON, INI |
+| `commit` | a commit message with author and trailers | git log output, a message body |
+| `test-fixture` | a unit test with fixture data | pytest, jest, Go testing, JUnit, RSpec |
+| `sql` | SQL statements or query output | PostgreSQL, MySQL, SQLite |
+| `chat` | a user's message to a coding assistant pasting data | prose, prose with a code block |
+| `traceback` | an exception traceback with locals or the failing request | Python, Java, Node.js |
+
+plus one of twelve scenarios (a CRM migration, an HR onboarding service, a
+clinic scheduler, …) and, for a positive, two to four of the types above. A
+hard negative (`prompt_id` `<artifact>.negative`) asks for the same kind of
+artifact with no personal data at all but with two kinds of name-like
+confusers: tool names that are surnames (Jenkins, Hudson), CamelCase class
+names, UUIDs and hashes, file paths, bare field names, timestamps and
+version numbers. A changed wording bumps `CATALOG_VERSION`.
+
+## Verifying and freezing the evaluation set (`review.py`)
+
+```bash
+uv run python scripts/pii_corpus/review.py review ~/.local/share/llm-redact/pii-corpus/generated-gemma4-e4b-7.jsonl --reviewer alex
+uv run python scripts/pii_corpus/review.py freeze ~/.local/share/llm-redact/pii-corpus/generated-gemma4-e4b-7.verified.jsonl \
+  --out ~/.local/share/llm-redact/pii-corpus/agent-eval.jsonl
+# two reviewers splitting one generated file, each with their own output:
+uv run python scripts/pii_corpus/review.py review GEN.jsonl --reviewer alex --share 1/2 --out alex.verified.jsonl
+uv run python scripts/pii_corpus/review.py review GEN.jsonl --reviewer sam --share 2/2 --out sam.verified.jsonl
+uv run python scripts/pii_corpus/review.py freeze alex.verified.jsonl sam.verified.jsonl --out agent-eval.jsonl
+```
+
+`review` shows each row on your terminal — the text with its spans tagged
+inline, the list of tagged values, and a note when a tagged value also
+occurs untagged — and reads one decision from the terminal (it refuses to
+run unless both its input and its output are a terminal: verification is by
+hand, and a redirected output would write every row into a file): `a`
+accept, `e` edit (the tagged text opens in `--editor`, `$VISUAL`, `$EDITOR`
+or `vi`, from a private temporary file; the saved text is grounded again
+like a teacher answer but taken as written — no repeat is tagged for you,
+so a tool name or timestamp you leave untagged stays untagged — and a hard
+negative's edit may hold no tag; an edit that does not ground, or an editor
+that fails or exits non-zero, is not applied and the row is asked again),
+`r` reject, `s` skip, `q` quit. Accepted and edited rows are appended to
+`GENERATED.verified.jsonl` (or `--out`) with a review record — reviewer,
+decision, guideline version, date, and the generator run's teacher digest
+and catalog digest from its manifest; rejected ids go to
+`GENERATED.verified.jsonl.rejected`. Rows already decided are not asked
+again, so a review can stop and resume. Several reviewers split one
+generated file with `--share K/N` (rows by the SHA-256 of their id, so the
+shares are disjoint whatever the order) and each their own `--out`; two
+reviewers writing the same output file at once is not supported. The
+terminal is the only place rows are shown.
+
+`freeze` validates every verified row of one or more review outputs (keys,
+spans inside the text and not overlapping, placeholder types only, no span
+in a hard negative, a review record under the current guideline version,
+ids unique across all the files) and writes the frozen set, rows sorted by
+id,
+plus `FROZEN.jsonl.manifest.json`: format `llm-redact-agent-eval/1`, the
+file's SHA-256, row and hard-negative counts, spans by type, and rows by
+prompt, teacher, teacher digest, seed, reviewer and decision — no text. An
+existing frozen set is replaced only with `--force`. The NER bench reads it
+with `--dataset agent-eval --path FROZEN.jsonl` and refuses a file that no
+longer matches its manifest. Keep the frozen set private (plan D7): outside
+every git work tree, never in an issue, a chat or a model prompt.
+
+## Auditing the false-positive corpus (`audit.py`)
+
+```bash
+uv run python scripts/pii_corpus/audit.py --model gemma4:e4b                 # the regex rules
+uv run python scripts/pii_corpus/audit.py --model gemma4:e4b --config my-ner.toml --out /tmp/audit.json
+```
+
+Each file of `bench/fp_corpus` (except `MANIFEST.toml`; `--file NAME`
+narrows it) is read in the NER bench's chunks of whole lines (at most 2,000
+characters). For each chunk the detection pipeline of `--config` (default:
+the built-in configuration, i.e. the regex rules) runs with no allowlist,
+and the teacher is asked, in JSON mode, for every personal value with its
+type; its values are grounded by exact whole-token match in the chunk
+(values that do not occur, unknown types and unusable answers are counted).
+The report lists every disagreement:
+
+| Reason | Meaning |
+|---|---|
+| `teacher-only` | The teacher found a value no detection covers: a candidate miss (or a teacher error). |
+| `type-differs` | Detections cover the value, none with the teacher's type. |
+| `detector-only` | A detection the teacher does not support: a candidate false positive (or a teacher miss). |
+
+The report holds the file name, start and end offsets (characters from the
+start of the file as stored, a CRLF line end counting two, so
+`text[start:end]` of the file read without newline translation is the
+value), the type and the reason — never text; `--out PATH`
+writes it as JSON too (refused inside the corpus directory). The audit never
+writes to the corpus, `MANIFEST.toml` or `bench/ner_ceilings.toml`: a human
+reads the candidates and decides, following `bench/fp_corpus/README.md`.
+The corpus text is sent to the teacher, which is why the loopback rule
+applies. The teacher is told the text is data, not instructions; a corpus
+file that talks it out of a finding only costs a candidate, since nothing is
+changed automatically.
+
+## Licensing: why these teachers
+
+The teacher's output becomes evaluation data and, later, possibly training
+data for a student model shipped to users. A model whose terms reach its
+output would pass duties to that student, so only models whose weights are
+published under **Apache-2.0** may teach (plan T40). `teacher.py` enforces it
+three ways:
+
+1. **Allowlist by exact name and size tag** (checked 2026-10-05 against each
+   tag's license layer in the Ollama registry and the weights' Hugging Face
+   card): `gemma4` (`e2b`, `e4b`, `12b`, `26b`, `31b`), `mistral` (`7b`),
+   `mistral-nemo` (`12b`), `mistral-small` (`24b`), `mistral-small3.2`
+   (`24b`), `devstral` (`24b`), `magistral` (`24b`), `ministral-3` (`3b`,
+   `8b`, `14b`), `mixtral` (`8x7b`, `8x22b`). A tag may carry a variant
+   suffix (`gemma4:12b-it-q8_0`). An untagged or `latest` name is refused
+   because it can move to another model (`mistral-small:latest` once pointed
+   at the research-licensed 22B), and so is every `cloud` tag (it runs on
+   Ollama's servers). `mistral-small3.1:24b` is left out: its registry
+   manifest carries no license layer, so the run-time check could not pass.
+2. **Denylist by name**, checked first so the reason is explicit: the Llama
+   family (the Llama Community License attaches naming and use terms to
+   models trained on its output), Qwen and DeepSeek (refused by name for
+   lineage and procurement reasons), Gemma 1 to 3n including CodeGemma
+   (Gemma Terms of Use), Codestral (Mistral AI Non-Production License) and
+   the Mistral AI Research License models (`mistral-large`, `pixtral-large`,
+   the original `ministral`, `mistral-small:22b`).
+3. **Run-time check**: the server must report the Apache License 2.0 text
+   for the model (`/api/show`'s `license`, copied from the registry
+   manifest), the model must be local (not a remote or cloud model) and
+   already pulled, and its digest goes into the run manifest.
+
+To add a teacher, read its tag's license layer
+(`https://registry.ollama.ai/v2/library/NAME/manifests/TAG`, the layer of
+media type `application/vnd.ollama.image.license`) and its card, add it to
+`ALLOWED` with the check date, and extend `tests/test_pii_corpus.py`.
+
+## Tests
+
+`uv run pytest tests/test_pii_corpus.py` runs everything against a fake
+Ollama server (`tests/fake_ollama.py`, an `httpx.MockTransport`); no test
+opens a network connection, and no test needs a real model.

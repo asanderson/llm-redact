@@ -106,6 +106,29 @@ def fold_raw(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) ->
     return bool(request.param)
 
 
+# The Hugging Face libraries' offline switches (detection/model_files.py
+# go_offline) are process-wide and never unset by the proxy; a test whose build
+# set them must not leak them into the next one (the suite's order differs
+# under mutmut).
+_HF_OFFLINE_SWITCHES = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+
+
+@pytest.fixture(autouse=True)
+def _hf_offline_switches_restored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test starts with the offline switches cleared and gets back the
+    environment it had when it ends."""
+    import sys
+
+    for name in _HF_OFFLINE_SWITCHES:
+        # setenv records the original state (present or absent) for teardown;
+        # delenv of an absent variable alone would record nothing.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    constants = sys.modules.get("huggingface_hub.constants")
+    if constants is not None and hasattr(constants, "HF_HUB_OFFLINE"):
+        monkeypatch.setattr(constants, "HF_HUB_OFFLINE", constants.HF_HUB_OFFLINE)
+
+
 @pytest.fixture(autouse=True)
 def _local_refusals_counted_once(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     """Every request any test sends through ``create_app`` — an HTTP

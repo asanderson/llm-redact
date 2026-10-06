@@ -44,6 +44,8 @@ class LoadRequest:
     # A local checkout the dataset is read from (datasets fetched by their
     # own tooling, not from the Hub).
     data_dir: Path | None = None
+    # A local file the dataset is read from (a private set read by path).
+    path: Path | None = None
     # Stand-in for huggingface_hub.hf_hub_download (tests); None = the real one.
     download: Download | None = None
     # Rows the adapter skipped, by reason (counted, reported, never shown).
@@ -81,6 +83,8 @@ class DatasetSpec:
     filters_language: bool = False
     # Whether the rows come from a local checkout (--data-dir).
     needs_data_dir: bool = False
+    # Whether the rows come from a local file (--path).
+    needs_path: bool = False
 
     @property
     def default_split(self) -> str:

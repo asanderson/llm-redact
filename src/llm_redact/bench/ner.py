@@ -16,6 +16,7 @@ real-data dataset unless ``--allow-real-data-dump`` is also given.
 """
 
 import argparse
+import errno
 import itertools
 import json
 import os
@@ -185,6 +186,10 @@ def dump_problem(path: Path) -> str | None:
 def write_dump(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
     """Write the error records as JSON lines to a new or truncated mode-0600
     file (never through a symlink)."""
+    if path.is_symlink():
+        # O_NOFOLLOW refuses it below where the platform has the flag (POSIX);
+        # Windows has none, so the link is refused here too.
+        raise OSError(errno.ELOOP, "refusing to write the dump through a symlink", str(path))
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as out:
@@ -211,6 +216,8 @@ def list_datasets(datasets: Mapping[str, DatasetSpec] = DATASETS) -> str:
             lines.append("  --language filters its rows")
         if spec.needs_data_dir:
             lines.append("  reads a local checkout: --data-dir DIR")
+        if spec.needs_path:
+            lines.append("  reads a local file: --path FILE")
     return "\n".join(lines) + "\n"
 
 
@@ -232,6 +239,8 @@ def report_markdown(
         lines.append(f"Source: {spec.hub_id} at revision {spec.revision}.")
     if request.data_dir is not None:
         lines.append("Source: a local checkout (--data-dir).")
+    if request.path is not None:
+        lines.append("Source: a local file (--path).")
     if request.language is not None:
         lines.append(f"Rows in language {request.language} only.")
     if spec.real_data:
@@ -294,6 +303,13 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="the local checkout a dataset is read from (creddata: a CredData directory"
         " after its download_data.py ran)",
+    )
+    parser.add_argument(
+        "--path",
+        type=Path,
+        metavar="FILE",
+        help="the local file a dataset is read from (agent-eval: the frozen set written by"
+        " scripts/pii_corpus/review.py freeze)",
     )
     parser.add_argument(
         "--cache-dir",
@@ -383,6 +399,12 @@ def _run(args: argparse.Namespace) -> int:
         )
     if args.data_dir is not None and (spec is None or not spec.needs_data_dir):
         raise BenchError("--data-dir applies only to datasets read from a local checkout")
+    if spec is not None and spec.needs_path and args.path is None:
+        raise BenchError(
+            f"dataset {spec.name!r} reads a local file: pass --path (docs/ner-bench.md)"
+        )
+    if args.path is not None and (spec is None or not spec.needs_path):
+        raise BenchError("--path applies only to datasets read from a local file")
     cache_dir = args.cache_dir or default_cache_dir()
     tree = git_work_tree(cache_dir)
     if tree is not None:
@@ -420,6 +442,7 @@ def _run(args: argparse.Namespace) -> int:
             language=args.language,
             cache_dir=cache_dir,
             data_dir=args.data_dir,
+            path=args.path,
         )
         failures = _run_dataset(args, spec, request, pipeline, config_name, backends, errors)
         key = dataset_key(spec, split, args.language)

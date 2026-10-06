@@ -584,58 +584,83 @@ def write_portable(root: Path, pulled: list[Pulled]) -> list[tuple[str, str]]:
     (its files, an assembled GLiNER model's gliner_config.json, and its
     ``llm-redact-model.json``), then the manifest. Returns (backend, folder)
     pairs. A folder of the same name is replaced only when it is one this
-    command wrote (it holds a sidecar)."""
+    command wrote (it holds a sidecar).
+
+    Nothing is replaced until every folder it would replace is checked and
+    every new folder (and the new manifest) is written beside the old ones:
+    a refusal, or a failure while writing, leaves ``root`` as it was. The
+    old manifest goes before the first folder is replaced and the new one
+    comes after the last, so ``root`` never holds a manifest describing
+    folders it no longer holds (a failure while replacing leaves none, and
+    ``models verify --dir`` fails until a pull completes)."""
     from llm_redact import __version__
     from llm_redact.detection.model_manifest import MANIFEST_NAME, manifest_json
     from llm_redact.jsonwalk import json_text
 
     root.mkdir(parents=True, exist_ok=True)
-    models = []
-    written = []
+    named = []
     for item in pulled:
         model_id = item.source.model_id or item.source.model
         name = folder_name(item.source.backend, model_id)
-        models.append(_write_folder(root, name, model_id, item))
-        written.append((item.source.backend, name))
-    temp = root / f".{MANIFEST_NAME}.partial"
-    temp.write_text(json_text(manifest_json(models, __version__)) + "\n", encoding="utf-8")
-    os.replace(temp, root / MANIFEST_NAME)
-    return written
+        _require_replaceable(root / name)
+        named.append((name, model_id, item))
+    staged: list[Path] = []
+    manifest = root / f".{MANIFEST_NAME}.partial"
+    try:
+        models = []
+        for name, model_id, item in named:
+            temp = root / f".{name}.partial"
+            staged.append(temp)
+            models.append(_stage_folder(temp, name, model_id, item))
+        manifest.write_text(json_text(manifest_json(models, __version__)) + "\n", encoding="utf-8")
+        (root / MANIFEST_NAME).unlink(missing_ok=True)
+        for temp, (name, _, _) in zip(staged, named, strict=True):
+            _replace_folder(temp, root / name)
+        os.replace(manifest, root / MANIFEST_NAME)
+    finally:
+        for temp in staged:
+            shutil.rmtree(temp, ignore_errors=True)
+        manifest.unlink(missing_ok=True)
+    return [(item.source.backend, name) for name, _, item in named]
 
 
-def _write_folder(root: Path, name: str, model_id: str, item: Pulled) -> "ManifestModel":
-    from llm_redact.detection.model_catalog import (
-        SIDECAR_NAME,
-        ModelIdentity,
-        sidecar_text,
-    )
-    from llm_redact.detection.model_files import GLINER_CONFIG, config_text
-    from llm_redact.detection.model_manifest import ManifestModel, file_records, folder_files
+def _require_replaceable(final: Path) -> None:
+    """Refuse to replace anything but a folder `pull --to` wrote (one that
+    holds a sidecar)."""
+    from llm_redact.detection.model_catalog import SIDECAR_NAME
 
-    final = root / name
     if final.exists() and not (final / SIDECAR_NAME).is_file():
         raise PullError(
             f"{final} exists and is not a folder `llm-redact models pull --to` wrote; remove it"
             " or choose another --to"
         )
-    temp = root / f".{name}.partial"
-    shutil.rmtree(temp, ignore_errors=True)
-    try:
-        temp.mkdir()
-        for relative, source in item.files.files.items():
-            target = temp / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(os.path.realpath(source), target)
-        if item.files.config is not None:
-            (temp / GLINER_CONFIG).write_text(config_text(item.files.config), encoding="utf-8")
-        identity = ModelIdentity(model_id, item.revision)
-        (temp / SIDECAR_NAME).write_text(sidecar_text(identity), encoding="utf-8")
-        records = file_records(temp, folder_files(temp))
-        if final.exists():
-            shutil.rmtree(final)
-        os.rename(temp, final)
-    finally:
-        shutil.rmtree(temp, ignore_errors=True)
+
+
+def _replace_folder(temp: Path, final: Path) -> None:
+    """Put the folder written at ``temp`` in the place of ``final``."""
+    if final.exists():
+        shutil.rmtree(final)
+    os.rename(temp, final)
+
+
+def _stage_folder(temp: Path, name: str, model_id: str, item: Pulled) -> "ManifestModel":
+    """Write ``item``'s folder at ``temp`` (copies, never links) and return
+    its manifest entry, as the folder will be named."""
+    from llm_redact.detection.model_catalog import SIDECAR_NAME, ModelIdentity, sidecar_text
+    from llm_redact.detection.model_files import GLINER_CONFIG, config_text
+    from llm_redact.detection.model_manifest import ManifestModel, file_records, folder_files
+
+    shutil.rmtree(temp, ignore_errors=True)  # (left by a run that was killed)
+    temp.mkdir()
+    for relative, source in item.files.files.items():
+        target = temp / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(os.path.realpath(source), target)
+    if item.files.config is not None:
+        (temp / GLINER_CONFIG).write_text(config_text(item.files.config), encoding="utf-8")
+    identity = ModelIdentity(model_id, item.revision)
+    (temp / SIDECAR_NAME).write_text(sidecar_text(identity), encoding="utf-8")
+    records = file_records(temp, folder_files(temp))
     # The manifest names a Hub base model only: a local one is no Hub id,
     # whatever its name (its files are in the folder, each with its SHA-256).
     hub_base = not _local_base(item.files)

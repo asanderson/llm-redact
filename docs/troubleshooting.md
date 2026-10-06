@@ -649,9 +649,15 @@ in the Hugging Face cache.
 
 `pull --to` replaces a model folder only when it wrote it before (the folder
 holds an `llm-redact-model.json`); anything else of the same name is left
-alone. Remove it or pull into another directory. "cannot write": `DIR`
-cannot be created or written (a file of that name, no permission, a full
-disk); the message ends with the exception type.
+alone. Remove it or pull into another directory. Every folder it would
+replace is checked, and every new folder written beside the old ones, before
+any is replaced, so after this refusal `DIR` is as it was. "cannot write":
+`DIR` cannot be created or written (a file of that name, no permission, a
+full disk); the message ends with the exception type. When that happens
+while the old folders are being replaced, `DIR` is left without its
+`llm-redact-models.json` (never with one that describes folders it no longer
+holds), and `models verify --dir` fails until a `pull --to` completes: fix
+the cause and pull again.
 
 ## `llm-redact models pull`: "FAIL  pulling needs huggingface_hub, which the hf and gliner extras install; …" / "--as needs --to" / "--as needs an absolute path: where DIR is mounted for the proxy (for example /models)"
 

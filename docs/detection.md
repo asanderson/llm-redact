@@ -359,19 +359,21 @@ llm-redact models verify --dir DIR  # check a folder written by `models pull --t
   load the folders — as they are, or as mounted elsewhere with `--as PATH`
   (`--as /models` for a volume mounted at `/models`; an absolute path, since
   the proxy reads a relative one against its working directory, and one such
-  as `models/hf-…` as a Hugging Face model id). A folder loads with
-  downloads off and no network at all; it takes no `[detection.ner.revisions]`
-  entry (its `llm-redact-model.json` records the revision, so the catalog
-  and `/status` still know which model it is). Only the Hub models `pull`
-  fetches are written: a model configured as a local folder is not copied
-  (carry it yourself — a GLiNER folder without a tokenizer of its own also
-  needs its base model in the Hugging Face cache where it loads). Nothing is
-  written to `DIR` unless every model was fetched; a folder of the same name
-  that `pull --to` did not write is never replaced. Use an empty `DIR`: `verify --dir` checks
-  every file inside the model folders. This is the way to carry models into
-  an air-gapped network: pull on a connected machine, copy `DIR`, run
-  `llm-redact models verify --dir` there, and point the configuration at the
-  folders.
+  as `models/hf-…` as a Hugging Face model id). A folder loads with downloads
+  off and no network at all; it takes no `[detection.ner.revisions]` entry
+  (its `llm-redact-model.json` records the revision, so the catalog and
+  `/status` still know which model it is). Only the Hub models `pull` fetches
+  are written: a model configured as a local folder is not copied (carry it
+  yourself — a GLiNER folder without a tokenizer of its own also needs its
+  base model in the Hugging Face cache where it loads). Nothing is written to
+  `DIR` unless every model was fetched; a folder of the same name that `pull
+  --to` did not write is never replaced, and nothing is replaced until every
+  new folder is written beside the old ones (should replacing them still fail
+  part-way, `DIR` is left without its manifest, so `verify --dir` fails until
+  a pull completes). Use an empty `DIR`: `verify --dir` checks every file
+  inside the model folders. This is the way to carry models into an air-gapped
+  network: pull on a connected machine, copy `DIR`, run `llm-redact models
+  verify --dir` there, and point the configuration at the folders.
 
 - `list` prints, per model, the revision it loads, its catalog status and
   license, whether its files are there (`cached`, `folder` for a local

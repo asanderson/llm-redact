@@ -144,7 +144,8 @@ and tags `vX.Y.Z`.
   folder carries its base model's tokenizer and configuration) and an `llm-redact-models.json`
   manifest of every file's size and SHA-256, then prints the `[detection.ner.models]` lines
   that load them (`--as PATH`: as mounted elsewhere, at an absolute path). Nothing is written
-  to `DIR` unless every model was fetched. Together with `models verify --dir` this carries
+  to `DIR` unless every model was fetched, and nothing in it is replaced until every new
+  folder is written beside the old ones. Together with `models verify --dir` this carries
   models into an air-gapped network.
 
 ### Changed

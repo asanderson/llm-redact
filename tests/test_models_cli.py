@@ -857,6 +857,73 @@ def test_pull_to_never_replaces_a_folder_it_did_not_write(
     )
 
 
+def _tree(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_pull_to_checks_every_folder_before_it_replaces_any(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # hf comes first. A second pull, with a new hf pin, whose gliner folder
+    # may not be replaced (it lost its sidecar) once replaced the hf folder
+    # and then refused: the hf@old folder was gone and the manifest still
+    # described it, so `verify --dir` failed on a folder pull itself wrote.
+    install_hub(monkeypatch, _pull_hub())
+    out_dir = tmp_path / "carry"
+    config = _config(tmp_path, 'backends = ["hf", "gliner"]')
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
+    before = _tree(out_dir)
+    sidecar = out_dir / "gliner-urchade--gliner_small-v2.1" / SIDECAR_NAME
+    sidecar.unlink()
+    config.write_text(config.read_text() + f'[detection.ner.revisions]\nhf = "{HEAD}"\n')
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 1
+    assert out.splitlines()[-1] == (
+        f"FAIL  {out_dir / 'gliner-urchade--gliner_small-v2.1'} exists and is not a folder"
+        " `llm-redact models pull --to` wrote; remove it or choose another --to"
+    )
+    sidecar.write_bytes(before[f"{sidecar.parent.name}/{SIDECAR_NAME}"])
+    assert _tree(out_dir) == before  # nothing replaced, nothing left aside
+    assert _run(capsys, "verify", "--dir", str(out_dir))[0] == 0
+
+
+def test_pull_to_that_fails_while_replacing_leaves_no_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every new folder is written aside first; should replacing the old
+    # ones then fail part-way (a full disk), DIR keeps no manifest that
+    # describes folders it no longer holds.
+    from llm_redact import models_cli
+
+    install_hub(monkeypatch, _pull_hub())
+    out_dir = tmp_path / "carry"
+    config = _config(tmp_path, 'backends = ["hf", "gliner"]')
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
+    replace_folder = models_cli._replace_folder
+    replaced: list[str] = []
+
+    def second_fails(temp: Path, final: Path) -> None:
+        if replaced:
+            raise OSError(28, "No space left on device")
+        replaced.append(final.name)
+        replace_folder(temp, final)
+
+    monkeypatch.setattr(models_cli, "_replace_folder", second_fails)
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 1
+    assert out.splitlines()[-1] == f"FAIL  cannot write the model folders to {out_dir} (OSError)"
+    assert replaced == ["hf-dslim--bert-base-NER"]
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "gliner-urchade--gliner_small-v2.1",
+        "hf-dslim--bert-base-NER",
+    ]  # no manifest, and nothing left aside
+    code, out = _run(capsys, "verify", "--dir", str(out_dir))
+    assert code == 1 and f"no {MANIFEST_NAME} in" in out
+    monkeypatch.setattr(models_cli, "_replace_folder", replace_folder)
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
+    assert _run(capsys, "verify", "--dir", str(out_dir))[0] == 0
+
+
 def test_pull_cannot_write_its_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

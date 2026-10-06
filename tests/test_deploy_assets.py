@@ -759,3 +759,108 @@ def test_the_image_license_label_is_the_declared_license() -> None:
     release = (root / ".github" / "workflows" / "release.yml").read_text()
     pinned = re.findall(r"org\.opencontainers\.image\.licenses=(\S+)", release)
     assert pinned == [declared]
+
+
+# --- the -ner image variant and the air-gap CI jobs (static: CI builds them) -----
+
+WORKFLOWS = DEPLOY.parent / ".github" / "workflows"
+
+
+def _workflow(name: str) -> dict:
+    return yaml.safe_load((WORKFLOWS / name).read_text())
+
+
+def _extras(flags: str) -> set[str]:
+    return set(re.findall(r"--extra (\S+)", flags))
+
+
+def test_the_ner_image_is_built_from_the_same_values_everywhere() -> None:
+    dockerfile = (DEPLOY.parent / "Dockerfile").read_text()
+    (stock,) = re.findall(r'^ARG EXTRAS="([^"]*)"$', dockerfile, re.MULTILINE)
+    assert re.findall(r'^ARG NER_EXTRAS="([^"]*)"$', dockerfile, re.MULTILINE) == [""]
+    assert re.findall(r'^ARG TORCH_INDEX_URL="([^"]*)"$', dockerfile, re.MULTILINE) == [
+        "https://download.pytorch.org/whl/cpu"
+    ]
+    release = _workflow("release.yml")
+    ci = _workflow("ci.yml")
+    # The SBOM describes the image's closure: the stock extras plus the NER ones.
+    assert _extras(release["env"]["IMAGE_EXTRAS"]) == _extras(stock)
+    ner = _extras(release["env"]["NER_EXTRAS"])
+    assert ner == {"hf", "gliner"}
+    assert ner <= set(
+        tomllib.loads((DEPLOY.parent / "pyproject.toml").read_text())["project"][
+            "optional-dependencies"
+        ]
+    )
+    # CI builds and smoke-tests exactly what a release builds.
+    assert _extras(ci["jobs"]["container-ner"]["env"]["NER_EXTRAS"]) == ner
+
+
+def test_the_release_publishes_and_signs_both_images() -> None:
+    job = _workflow("release.yml")["jobs"]["publish-ghcr"]
+    variants = {row["variant"]: row for row in job["strategy"]["matrix"]["include"]}
+    assert set(variants) == {"stock", "ner"}
+    assert (variants["stock"]["suffix"], variants["ner"]["suffix"]) == ("", "-ner")
+    assert (variants["stock"]["ner"], variants["ner"]["ner"]) == (False, True)
+    assert job["strategy"]["fail-fast"] is False
+    steps = {step.get("id") or step.get("name") or step.get("uses"): step for step in job["steps"]}
+    meta = steps["meta"]["with"]
+    assert meta["flavor"].strip() == "suffix=${{ matrix.suffix }},onlatest=true"
+    build = steps["build"]["with"]
+    assert build["platforms"] == "linux/amd64,linux/arm64"
+    assert build["sbom"] is True
+    assert "NER_EXTRAS=${{ matrix.ner && env.NER_EXTRAS || '' }}" in build["build-args"]
+    assert (
+        'cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY}@${DIGEST}"'
+        in (steps["sign the image"]["run"])
+    )
+    sbom = _workflow("release.yml")["jobs"]["build"]["steps"]
+    assert any("llm-redact-ner-image.cdx.json" in step.get("run", "") for step in sbom)
+
+
+def test_the_cpu_torch_recipe_guards_the_ner_image_build() -> None:
+    dockerfile = (DEPLOY.parent / "Dockerfile").read_text()
+    assert "COPY scripts/cpu_torch.py /tmp/cpu_torch.py" in dockerfile
+    assert "python /tmp/cpu_torch.py requirements /tmp/requirements.txt" in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert "/app/.venv/bin/python /tmp/cpu_torch.py check" in dockerfile
+    # The stock image keeps its frozen uv sync.
+    assert "uv sync --frozen --no-dev --no-editable ${EXTRAS}" in dockerfile
+    # The models cache sits on the writable /data volume.
+    assert "HF_HOME=/data/huggingface" in dockerfile
+
+
+def _pinned(steps: list[dict]) -> None:
+    for step in steps:
+        uses = step.get("uses")
+        if uses is None:
+            continue
+        assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", uses), uses
+        if uses.startswith("actions/checkout@"):
+            assert step["with"]["persist-credentials"] is False
+
+
+@pytest.mark.parametrize("job", ["airgap", "container-ner"])
+def test_the_airgap_jobs_pin_their_actions(job: str) -> None:
+    _pinned(_workflow("ci.yml")["jobs"][job]["steps"])
+
+
+def test_the_airgap_job_runs_offline_without_a_route() -> None:
+    steps = _workflow("ci.yml")["jobs"]["airgap"]["steps"]
+    runs = "\n".join(step.get("run", "") for step in steps)
+    assert "sudo unshare --net --mount" in runs
+    assert "tests/airgap/run_offline.sh" in runs
+    assert "sudo unshare --net -- " in runs and "tests/airgap/install_wheelhouse.sh" in runs
+    for config in ("pull.toml", "pull-edge.toml"):
+        assert f"--config tests/airgap/{config}" in runs
+    offline = (DEPLOY.parent / "tests" / "airgap" / "run_offline.sh").read_text()
+    for needle in (
+        "no_network.py",
+        "models verify --dir /models",
+        "serve --check --config tests/airgap/config.toml",
+        "serve --check --config tests/airgap/edge.toml",
+        "preview --config tests/airgap/presidio.toml",
+        "llm-redact models pull --to DIR",
+        "mount -o remount,bind,ro /models",
+    ):
+        assert needle in offline

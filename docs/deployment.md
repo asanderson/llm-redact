@@ -80,6 +80,29 @@ for `[extraction]` (docs/extraction.md). `XDG_DATA_HOME=/data` holds
 the vault and audit DB — mount a volume there for persistence. Released
 images are multi-arch (amd64 + arm64).
 
+**The `-ner` image** (`ghcr.io/asanderson/llm-redact:<version>-ner`,
+`latest-ner`) is the same image plus the `hf` and `gliner` NER extras, with a
+CPU-only torch on both architectures (PyPI's Linux torch wheel brings the
+CUDA libraries, which no CPU host uses): about 1 GB more than the stock
+image (the CI `container-ner` job prints the built size). It is built,
+attested (BuildKit SBOM) and cosign-signed like the stock image, and the
+release carries its closure as `llm-redact-ner-image.cdx.json`. It ships
+no model: provision them as "Provisioning NER models" below describes — the
+image's Hugging Face cache (`HF_HOME`) is `/data/huggingface`, on the data
+volume, and `llm-redact models pull --to` folders mounted read-only at
+`/models` need no cache at all. To carry the image into a network without
+internet access:
+
+```bash
+docker pull ghcr.io/asanderson/llm-redact:<version>-ner        # connected side
+cosign verify ghcr.io/asanderson/llm-redact@<digest> \
+  --certificate-identity-regexp 'https://github.com/asanderson/llm-redact/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+docker save ghcr.io/asanderson/llm-redact:<version>-ner | gzip > llm-redact-ner.tar.gz
+# carry the file in, then on the other side:
+docker load < llm-redact-ner.tar.gz
+```
+
 ### Health probes
 
 Orchestrators should probe the DB-free liveness endpoint, not `/status`
@@ -377,6 +400,48 @@ Where the files live under a hardened deployment:
   point `HF_HOME` at it (a cache needs a writable `XDG_DATA_HOME` for the
   GLiNER base-model assembly; `/data` is). Either way the pod loads models
   with no network at all.
+
+## Offline installs (no container)
+
+For a machine without internet access and without containers, build a
+wheelhouse on a connected machine of the same OS, CPU architecture and
+Python minor version, from a checkout of the release you install. Every
+locked package is downloaded at its `uv.lock` version and checked against
+its hash; torch comes from the PyTorch CPU index at its locked version
+(`scripts/cpu_torch.py` splits it and its GPU-only dependencies out of the
+export):
+
+```bash
+# connected side, in the llm-redact checkout
+mkdir wheelhouse
+uv export --frozen --no-dev --no-emit-project --extra hf --extra gliner \
+  | python3 scripts/cpu_torch.py requirements wheelhouse/requirements.txt > wheelhouse/torch.txt
+python3 -m pip download --require-hashes --no-deps --only-binary=:all: \
+  -r wheelhouse/requirements.txt -d wheelhouse
+python3 -m pip download --no-deps --only-binary=:all: \
+  --index-url https://download.pytorch.org/whl/cpu -r wheelhouse/torch.txt -d wheelhouse
+uv build --wheel --out-dir wheelhouse          # llm-redact-proxy itself
+```
+
+Carry `wheelhouse/` (and `scripts/cpu_torch.py`) in, then install with no
+index at all:
+
+```bash
+python3 -m venv /opt/llm-redact
+pip=/opt/llm-redact/bin/pip
+$pip install --no-index --find-links wheelhouse --no-deps -r wheelhouse/torch.txt
+$pip install --no-index --find-links wheelhouse --no-deps --require-hashes -r wheelhouse/requirements.txt
+$pip install --no-index --find-links wheelhouse --no-deps llm-redact-proxy
+$pip check
+/opt/llm-redact/bin/python scripts/cpu_torch.py check   # no CUDA library got in
+/opt/llm-redact/bin/llm-redact doctor                     # ner: hf, gliner backends importable
+```
+
+Add `--extra presidio`, `--extra gliner2` or `--extra stanza` to the export
+for those backends (spaCy and Stanza models are carried separately:
+`llm-redact models list` prints their install commands). The CI `airgap`
+job runs exactly these commands, the install inside a network namespace
+with no route. Then provision the models as below.
 
 ## Vault lifecycle in production
 

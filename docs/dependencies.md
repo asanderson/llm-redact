@@ -56,6 +56,18 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install 'llm-redact-proxy[hf]'
 ```
 
+From a checkout, `scripts/cpu_torch.py` does the same with every other
+package exactly as `uv.lock` pins it (hash-checked): it splits torch and its
+GPU-only dependencies (`triton`, `nvidia-*`, `cuda-*`, which PyPI's Linux
+torch pulls on x86_64 and aarch64 alike) out of `uv export`, so torch is
+installed at its locked version from the CPU index and the rest with
+`--require-hashes`, then `cpu_torch.py check` fails if a CUDA library got
+in. The `-ner` container image and the offline wheelhouse recipe
+(deployment.md, "Offline installs") are built this way. A `[tool.uv.sources]`
+entry pointing torch at the CPU index was not used: it would change what
+`uv sync --extra hf` installs for every Linux user (a GPU host included)
+and rewrite `uv.lock`, and a `pip install` from PyPI ignores it anyway.
+
 ## Development group
 
 The dev group (`uv sync`) additionally carries the test/lint toolchain

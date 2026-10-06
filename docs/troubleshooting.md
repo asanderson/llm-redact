@@ -443,8 +443,9 @@ backend's Python packages are not in the environment the proxy runs in. Each
 backend has its extra — `hf`, `gliner`, `gliner2`, `presidio`, `stanza`, and
 `ner` for spaCy: `uv sync --extra gliner`, or `pip install
 'llm-redact-proxy[gliner]'`. `llm-redact doctor` lists under `ner` which
-backends are importable. Without network access, install from wheels
-downloaded on a connected machine of the same platform.
+backends are importable. Without network access, install from a wheelhouse
+prepared on a connected machine (docs/deployment.md, "Offline installs"), or
+run the `-ner` image, which carries the `hf` and `gliner` extras.
 
 ## "spaCy model … is not available; download it: …" / "Stanza '…' NER model is not available; download it: …" / "failed to build the Presidio analyzer; is the spaCy model available? …"
 

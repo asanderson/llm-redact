@@ -304,6 +304,31 @@ jobs:
             HF_HOME="$RUNNER_TEMP/empty-hf" \
             tests/airgap/run_offline.sh "$PWD/.venv/bin/python" \
             "$RUNNER_TEMP/models" "$RUNNER_TEMP/models-edge" "$RUNNER_TEMP/empty"
+      # The offline wheelhouse recipe (docs/deployment.md, "Offline installs"):
+      # downloaded here, installed by pip with --no-index inside a namespace
+      # with no route.
+      - name: build the offline wheelhouse (connected side)
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/wheelhouse"
+          mkdir -p "$wheelhouse"
+          python="$(uv python find 3.13)"
+          uv export --frozen --no-dev --no-emit-project --extra hf --extra gliner \
+            | python3 scripts/cpu_torch.py requirements "$wheelhouse/requirements.txt" >"$wheelhouse/torch.txt"
+          "$python" -m venv "$RUNNER_TEMP/pip-download"
+          pip="$RUNNER_TEMP/pip-download/bin/pip"
+          "$pip" download --require-hashes --no-deps --only-binary=:all: \
+            -r "$wheelhouse/requirements.txt" -d "$wheelhouse"
+          "$pip" download --no-deps --only-binary=:all: \
+            --index-url https://download.pytorch.org/whl/cpu -r "$wheelhouse/torch.txt" -d "$wheelhouse"
+          uv build --wheel --out-dir "$wheelhouse"
+          du -sh "$wheelhouse"
+          echo "PYTHON_FOR_WHEELHOUSE=$python" >>"$GITHUB_ENV"
+      - name: install the wheelhouse inside a network namespace with no route
+        run: |
+          sudo unshare --net -- env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP/home" \
+            tests/airgap/install_wheelhouse.sh "$PYTHON_FOR_WHEELHOUSE" \
+            "$RUNNER_TEMP/wheelhouse" "$RUNNER_TEMP/wheelhouse-venv"
 
   rdbms:
     # The RDBMS vault's SQL on REAL engines. The `test` job proves the
@@ -557,6 +582,66 @@ jobs:
       - run: docker build --target runtime -t llm-redact:ci .
       - run: docker build --target fake-upstream -t llm-redact-fake:ci .
       - run: ./scripts/container_smoke.sh docker llm-redact:ci llm-redact-fake:ci
+
+  container-ner:
+    # The -ner image (stock image + the hf and gliner extras on a CPU-only
+    # torch) as release.yml builds it, linux/amd64 only here: the closure is
+    # CPU-only, doctor sees both NER backends, and — with no network, a
+    # read-only root filesystem and models the image itself pulled with
+    # `models pull --to`, mounted read-only at /models — `serve --check`
+    # loads them under tests/airgap/no_network.py. NER_EXTRAS must equal
+    # release.yml's (tests/test_deploy_assets.py).
+    name: container (-ner image, no network)
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      NER_EXTRAS: --extra hf --extra gliner
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build the -ner image
+        run: |
+          docker build --target runtime --build-arg "NER_EXTRAS=$NER_EXTRAS" -t llm-redact:ner-ci .
+          docker image ls llm-redact:ner-ci --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+      - name: the closure is CPU-only (inside the image, no network)
+        run: |
+          docker run --rm --network none --entrypoint python \
+            -v "$PWD/scripts/cpu_torch.py:/smoke/cpu_torch.py:ro" \
+            llm-redact:ner-ci /smoke/cpu_torch.py check
+      - name: doctor sees the hf and gliner backends (inside the image, no network)
+        run: |
+          set -euo pipefail
+          # doctor exits non-zero on its FAIL rows (no models are mounted
+          # yet); the NER rows are what this step is about.
+          docker run --rm --network none -v "$PWD/tests/airgap:/cfg:ro" llm-redact:ner-ci \
+            doctor --config /cfg/config.toml >doctor.txt 2>&1 || true
+          grep -E '^(PASS|WARN|FAIL) +ner:' doctor.txt
+          grep -q '^PASS  ner: hf backend importable' doctor.txt
+          grep -q '^PASS  ner: gliner backend importable' doctor.txt
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/hf
+          key: container-ner-hub-${{ hashFiles('src/llm_redact/detection/model_catalog.py', 'tests/airgap/pull.toml') }}
+          restore-keys: container-ner-hub-
+      - name: pull the models with the image (connected side)
+        run: |
+          mkdir -p "$RUNNER_TEMP/hf" "$RUNNER_TEMP/models"
+          chmod 0777 "$RUNNER_TEMP/hf" "$RUNNER_TEMP/models"
+          docker run --rm -e HF_HOME=/hf -v "$RUNNER_TEMP/hf:/hf" -v "$RUNNER_TEMP/models:/out" \
+            -v "$PWD/tests/airgap:/cfg:ro" llm-redact:ner-ci \
+            models pull --to /out --as /models --config /cfg/pull.toml
+      - name: verify and serve --check with no network and a read-only root
+        run: |
+          set -euo pipefail
+          run() {
+            docker run --rm --network none --read-only --tmpfs /tmp \
+              --mount type=volume,dst=/data -v "$RUNNER_TEMP/models:/models:ro" \
+              -v "$PWD/tests/airgap:/cfg:ro" --entrypoint python llm-redact:ner-ci \
+              /cfg/no_network.py "$@"
+          }
+          run models verify --dir /models
+          run serve --check --config /cfg/config.toml
 
   container-podman:
     name: container (podman, rootless)

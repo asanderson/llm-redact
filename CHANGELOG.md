@@ -244,6 +244,19 @@ and tags `vX.Y.Z`.
   version from the PyTorch CPU index, everything else hash-checked from uv.lock, without the CUDA
   and triton packages).
 
+- A Free `-ner` container image (`<version>-ner`, `latest-ner`): the stock image plus the `hf`
+  and `gliner` NER extras with a CPU-only torch on amd64 and arm64 (`Dockerfile`
+  `NER_EXTRAS`; torch at its locked version from the PyTorch CPU index, every other package
+  hash-checked from uv.lock, and the build fails if a CUDA or triton package got in), built,
+  attested and cosign-signed like the stock image, with its closure as
+  `llm-redact-ner-image.cdx.json` on the Release. The image's Hugging Face cache (`HF_HOME`) is
+  `/data/huggingface`, on the data volume. The CI `container-ner` job builds it and, with no
+  network and a read-only root filesystem, checks the closure, doctor's NER rows and `serve
+  --check` with models the image pulled with `models pull --to`. docs/deployment.md documents
+  carrying the image (`docker save` / `docker load`) and an offline wheelhouse install
+  (hash-checked `pip download`, `pip install --no-index`), which the CI `airgap` job runs inside a
+  network namespace with no route.
+
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
   upload inspector's extracted texts included) and a realtime client frame the proxy collects the

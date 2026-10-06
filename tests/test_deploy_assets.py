@@ -1024,3 +1024,19 @@ def test_helm_notes_name_the_models_volume_and_the_stock_image_gap(
     _, notes = _copy_grace_and_notes(chart, *_MODELS_PVC, f"image.variant={variant}")
     assert "llm-redact models verify --dir /models" in str(notes)
     assert ("models.volume is set but image.variant is not" in str(notes)) is warns
+
+
+AIR_GAPPED = DEPLOY.parent / "docs" / "air-gapped.md"
+
+
+def test_the_air_gapped_pull_never_opens_the_models_folder_to_everyone() -> None:
+    # The manifest is written into the folder its SHA-256 is noted from: a
+    # folder other users can write lets them change a file AND the manifest
+    # before the hash is noted. The pull runs as the operator instead.
+    guide = AIR_GAPPED.read_text()
+    assert not re.search(r"\b0?77[67]\b|a\+w|o\+w", guide)
+    connected = guide[guide.index("## On the connected machine") : guide.index("## Inside")]
+    assert "mkdir -m 0755 models" in connected
+    pull = re.sub(r"\\\n\s*", " ", connected)
+    [command] = [line for line in pull.splitlines() if "models pull --to /out" in line]
+    assert '--user "$(id -u):$(id -g)"' in command and "-e HF_HOME=/tmp/hf" in command

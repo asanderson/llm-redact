@@ -267,8 +267,9 @@ and tags `vX.Y.Z`.
   `helm upgrade --reuse-values` from a release made before these keys renders with both off. A new
   guide, docs/air-gapped.md, walks through running with NER models in an enclave with no internet
   route: what to carry in, offline verification (`models verify --dir`, the manifest's checksum
-  carried separately), Docker, Helm and systemd (`IPAddressDeny=any` with loopback and the
-  provider allowed) settings, and the provider as the only egress.
+  carried separately, pulled as your own user into a folder only you can write), Docker, Helm
+  and systemd (`IPAddressDeny=any` with loopback and the provider allowed) settings, and the
+  provider as the only egress.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

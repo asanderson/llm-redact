@@ -67,8 +67,9 @@ cat > pull.toml <<'EOF'
 enabled = true
 backends = ["hf", "gliner"]
 EOF
-mkdir -m 0777 models     # the image runs as uid 10001
-docker run --rm -v "$PWD/models:/out" -v "$PWD/pull.toml:/cfg/pull.toml:ro" \
+mkdir -m 0755 models     # writable by you alone (see below)
+docker run --rm --user "$(id -u):$(id -g)" -e HF_HOME=/tmp/hf \
+  -v "$PWD/models:/out" -v "$PWD/pull.toml:/cfg/pull.toml:ro" \
   ghcr.io/asanderson/llm-redact:<version>-ner \
   models pull --to /out --as /models --config /cfg/pull.toml
 #   -> prints the [detection.ner.models] lines for the folders mounted at /models
@@ -83,7 +84,13 @@ your `[detection.ner.revisions]` pin), with exactly the files the loader
 reads. It needs network access to huggingface.co (and `HF_TOKEN` for a gated
 model). The manifest makes `verify --dir` catch a damaged or partial copy;
 it travels with the folders, so carry its SHA-256 by a separate channel if
-someone on the way could alter both.
+someone on the way could alter both. For the same reason, nobody but you may
+be able to write into `models/` before you have noted that SHA-256: whoever
+can change a file there can rewrite the manifest to match, and the hash you
+note would then vouch for the changed copy. The pull above therefore runs
+the container as your own user (`--user`, with its Hugging Face cache in the
+container's `/tmp`; rootless Podman: `--userns=keep-id`) into a folder only
+you can write, never into a world-writable one.
 
 ## Inside the enclave
 

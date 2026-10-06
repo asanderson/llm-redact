@@ -233,6 +233,17 @@ and tags `vX.Y.Z`.
   container's read-only root filesystem), and docs/troubleshooting.md the missing NER extra and
   spaCy/Stanza/Presidio model messages.
 
+- CI proves an air-gapped start (AD11): the `airgap` job pulls the default `hf` and GLiNER
+  models (with the GLiNER base model) and Knowledgator's `gliner-pii-edge-v1.0` with `llm-redact
+  models pull --to`, then — inside a network namespace with no route, the folders mounted
+  read-only at `/models` and an empty Hugging Face cache — runs `models verify --dir`, `serve
+  --check` and a Presidio email check, each under a wrapper that fails on any attempt to resolve
+  a host or open a connection; an empty folder must fail with the `models pull` hint. A unit test
+  (`tests/test_airgap_guard.py`) builds every NER backend under a socket guard.
+  `scripts/cpu_torch.py` installs the locked NER extras with a CPU-only torch (torch at its locked
+  version from the PyTorch CPU index, everything else hash-checked from uv.lock, without the CUDA
+  and triton packages).
+
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
   upload inspector's extracted texts included) and a realtime client frame the proxy collects the
@@ -286,6 +297,16 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The `presidio` NER backend no longer reaches the network: Presidio's email check asks
+  tldextract about each address's domain, and tldextract fetched the Public Suffix List from
+  publicsuffix.org (then GitHub) on its first use — on a request — and cached it under
+  `~/.cache`. It now reads the snapshot the tldextract package ships and writes no cache; a
+  tldextract that cannot be set up that way stops the startup.
+- A `[detection.ner.models]` value written as a path (absolute, `./…`, `~/…`, or with more than
+  one `/`) is always a model folder: when nothing is there (an empty or unmounted volume) the
+  startup names `llm-redact models pull --to` instead of calling it neither a folder nor a model
+  id, `doctor` no longer reads it as an unpinned Hub model, and `models pull` fails instead of
+  skipping it.
 - The `hf` NER backend could report part of a word as an entity and leave the rest of it
   in the request: `dslim/bert-base-NER` reported "Angela Merk" in "Yesterday Angela Merkel
   met the press.", so "el" went upstream unredacted (also "Ngoz…", "Xu Wen…"). A model whose

@@ -40,7 +40,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from llm_redact.config import ConfigError
@@ -124,6 +124,21 @@ def is_local(model: str) -> bool:
     return Path(model).is_dir()
 
 
+def names_a_path(model: str) -> bool:
+    """Whether a configured model value that is no Hugging Face model id is
+    written as a filesystem path (absolute on POSIX or Windows, home- or
+    dot-relative, with a backslash or more than one ``/``), so a missing
+    folder — an empty or unmounted volume where ``models pull --to``
+    folders belong — is named as one."""
+    return (
+        PurePosixPath(model).is_absolute()
+        or PureWindowsPath(model).is_absolute()
+        or model.startswith(("~", "."))
+        or "\\" in model
+        or model.count("/") > 1
+    )
+
+
 # The Hugging Face libraries' offline switches. huggingface_hub reads
 # HF_HUB_OFFLINE when it is imported (into huggingface_hub.constants),
 # transformers asks that constant; both refuse every request while set.
@@ -173,6 +188,13 @@ def resolve_model(
             )
         return Path(model)
     if not MODEL_ID_RE.fullmatch(model):
+        if names_a_path(model):
+            raise _config_error(
+                f"[detection.ner] {what} {model!r} is not a directory: a model folder must"
+                " be in place when the proxy starts (nothing mounted or copied there?);"
+                " write one on a connected machine with `llm-redact models pull --to DIR`,"
+                " carry it here, and check it with `llm-redact models verify --dir`"
+            )
         raise _config_error(
             f"[detection.ner] {what} {model!r} is neither a local directory nor a"
             " Hugging Face model id"

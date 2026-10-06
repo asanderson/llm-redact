@@ -134,6 +134,36 @@ class PresidioDetector:
             )
 
 
+def offline_suffix_list() -> None:
+    """Keep Presidio's email check off the network (AD11).
+
+    Presidio's EmailRecognizer asks tldextract whether an address's domain
+    ends in a public suffix, and tldextract's default extractor fetches the
+    Public Suffix List from the internet the first time it is asked — on a
+    request, from inside the proxy — then caches it under ``~/.cache``. The
+    extractor is replaced, process-wide, by one that reads the list snapshot
+    the tldextract package ships and writes no cache: no request ever opens a
+    connection, and an air-gapped host gets the same answers as a connected
+    one. A tldextract laid out otherwise (no ``TLDExtract`` / module-level
+    extractor) fails the build instead of leaving the fetch in place.
+    """
+    import importlib
+
+    from llm_redact.config import ConfigError
+
+    try:
+        module: Any = importlib.import_module("tldextract.tldextract")
+        module.TLD_EXTRACTOR = module.TLDExtract(
+            cache_dir=None, suffix_list_urls=(), fallback_to_snapshot=True
+        )
+    except Exception as exc:  # absent, or not the layout this relies on
+        raise ConfigError(
+            "[detection.ner] presidio: cannot keep tldextract (which Presidio's email check"
+            " uses) from fetching the public suffix list over the network"
+            f" ({type(exc).__name__}); reinstall the presidio extra: uv sync --extra presidio"
+        ) from exc
+
+
 def build_presidio_detector(config: "NerConfig") -> PresidioDetector:
     from llm_redact.config import ConfigError
 
@@ -145,6 +175,7 @@ def build_presidio_detector(config: "NerConfig") -> PresidioDetector:
             '[detection.ner] backend = "presidio" but the presidio extra is not installed;'
             " install it: uv sync --extra presidio"
         ) from exc
+    offline_suffix_list()
     try:
         # Pin the same small model the spacy backend uses instead of
         # Presidio's en_core_web_lg default: tens of MB, and one download

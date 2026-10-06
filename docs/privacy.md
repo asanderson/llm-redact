@@ -42,6 +42,12 @@ running it.
   reload never downloads. `llm-redact models pull` is the explicit way to
   fetch them yourself, and `llm-redact doctor` warns while downloads are
   on.
+  Nothing else in the NER path reaches the network: Presidio's email
+  check (tldextract) reads the Public Suffix List snapshot its package
+  ships instead of fetching publicsuffix.org on first use, and a CI job
+  starts the proxy with its NER models inside a network namespace with no
+  route, failing on any connection attempt (the `airgap` job in
+  .github/workflows/ci.yml).
 
 ## The agent plugin commands
 

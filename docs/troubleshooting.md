@@ -600,6 +600,26 @@ The model value is not a folder that exists and not of the form `ORG/NAME`.
 Check the path (it is read relative to the proxy's working directory unless
 absolute) or the model id.
 
+## "[detection.ner] … model '…' is not a directory: a model folder must be in place when the proxy starts (nothing mounted or copied there?); write one on a connected machine with `llm-redact models pull --to DIR`, carry it here, and check it with `llm-redact models verify --dir`"
+
+The model value is written as a path (absolute, `./…`, `~/…`, or with more
+than one `/`), so it names a model folder — never a Hugging Face model id —
+and nothing is there. In a container or an air-gapped host this is usually a
+volume that is not mounted, or mounted empty: mount the folder `llm-redact
+models pull --to DIR` wrote (at the path `--as` named), run `llm-redact models
+verify --dir` on it, and start again. The same folder shows as `FAIL  BACKEND:
+PATH is not a directory: a local model folder that is not there` in
+`llm-redact models pull`, which never fetches a value written as a path.
+
+## "[detection.ner] presidio: cannot keep tldextract (which Presidio's email check uses) from fetching the public suffix list over the network (…); reinstall the presidio extra: uv sync --extra presidio"
+
+The presidio backend replaces tldextract's default extractor (which fetches
+the Public Suffix List from the internet on first use, on a request) with one
+that reads the snapshot the package ships, and this tldextract could not be set
+up that way: it is missing, or not laid out as tldextract 5.x is. The startup
+stops rather than let a request reach the network. Reinstall the extra (`uv
+sync --extra presidio`, which brings a tldextract Presidio supports).
+
 ## "[detection.ner] … model '…' needs code from its repository (… names auto_map); llm-redact never runs model code"
 
 The model's `config.json`, `tokenizer_config.json` or `gliner_config.json`

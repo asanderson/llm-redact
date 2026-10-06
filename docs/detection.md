@@ -123,6 +123,14 @@ Presidio entity types that overlap the built-in regex rules
 are folded into the built-in placeholder names, so a value gets the same
 `«EMAIL_NNN»` identity whichever detector finds it.
 
+Presidio's email recognizer asks tldextract whether an address's domain ends
+in a public suffix, and tldextract fetches the Public Suffix List from the
+internet the first time it is asked — on a request. The presidio backend
+replaces tldextract's extractor with one that reads the list snapshot the
+tldextract package ships and writes no cache, so no request opens a
+connection and an air-gapped host gets the same answers; a tldextract it
+cannot set up that way stops the startup.
+
 `[detection.ner] language` sets the analyzer language (wired through
 Presidio; the Stanza model to load; implied by the model for spaCy), and
 `model` overrides the default model: a spaCy package name for
@@ -212,7 +220,10 @@ TensorFlow, Flax, ONNX or `original/` copies a repository may also hold. A
 model missing from the cache is a startup error that names the model and the
 revision. A local folder is loaded as it is; a revision for it is a config
 error, and it never takes the catalog's pin, even when its path reads like a
-catalogued model id. Every load checks that the folder or cached snapshot
+catalogued model id. A value written as a path (absolute, `./…`, `~/…`, or
+with more than one `/`) is always a folder, never a Hub id: when nothing is
+there (an empty or unmounted volume) the startup stops with an error naming
+`llm-redact models pull --to`. Every load checks that the folder or cached snapshot
 holds what it reads — `config.json`, the weights (every shard a weight index
 names) and a tokenizer — so an interrupted download counts as a model not in
 the cache. A model whose `config.json` or `tokenizer_config.json` names code

@@ -133,7 +133,10 @@ and tags `vX.Y.Z`.
   `scripts/ner_ci_torch_cpu.txt`). Baselines for
   `dslim/bert-base-NER` and `urchade/gliner_small-v2.1` are recorded in
   `bench/ner_thresholds.toml` and `bench/ner_ceilings.toml`, with the date, revisions and
-  measured values.
+  measured values. The bench also reports the character-leak rate per type, and
+  `type_leak_max = { TYPE = ceiling }` gates it: the type-agnostic rate counts every type a
+  configuration does not request (about 38% of the synthetic corpus's gold characters for
+  the `PERSON`-only defaults), so the baselines gate `PERSON` leakage on its own.
 - docs/ner-bench.md gains the `ner-bench` diagram (datasets → adapters and label maps → the
   full pipeline → metrics → recorded gates → the CI jobs, beside the unchanged deterministic
   gate), and docs/CONTRIBUTING.md an "Adding an NER model or backend" checklist: license and

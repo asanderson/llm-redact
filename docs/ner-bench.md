@@ -96,6 +96,13 @@ Type-agnostic:
   over the characters outside every gold span: how much ordinary text the
   model hides from the provider.
 
+Per type: the **character-leak rate of a type** — characters of that
+type's gold spans that no detection (of any type) covers, over those
+characters. The type-agnostic rate also counts every type the
+configuration does not ask for (always leaked), so it is diluted when a
+configuration requests only some of a dataset's types; a gate on the
+requested types reads the per-type rate.
+
 **Structured-regression check.** The bench also runs the same configuration
 with NER off. Every gold span of a regex rule's type (an email, a phone
 number, an IBAN) that the rules alone find exactly must still be found
@@ -117,13 +124,15 @@ and `@LANGUAGE` with `--language` (quote such keys:
 |---|---|
 | `recall = { TYPE = floor }` | overlap-typed recall floors per type |
 | `exact_recall = { TYPE = floor }` | exact-match recall floors per type |
-| `leak_max` | character-leak rate ceiling |
+| `leak_max` | character-leak rate ceiling, over all gold characters |
+| `type_leak_max = { TYPE = ceiling }` | character-leak rate ceilings per type |
 | `over_redaction_max` | over-redaction rate ceiling |
 | `structured_regressions_max` | regex-type spans NER may cost (default 0) |
 | `recorded`, `note` | when and with which models and revisions the baseline was measured |
 
-A run with no entry fails `--check`, and so does a floor on a type the run
-holds no gold spans of (it cannot be checked). Unknown keys are refused.
+A run with no entry fails `--check`, and so does a floor or a
+`type_leak_max` on a type the run holds no gold spans of (it cannot be
+checked). Unknown keys are refused.
 
 ### Recording a baseline
 
@@ -264,7 +273,10 @@ baselines are recorded. The recorded entries say when, on which model
 revisions and with which measured values they were taken; with the default
 `PERSON` entities, the synthetic corpus's `ADDRESS`, `DATE_OF_BIRTH`,
 `USERNAME` and `ACCOUNT_NUMBER` values are not requested, so their
-characters count toward the leak rate.
+characters (about 38% of the corpus's gold characters) count toward the
+type-agnostic leak rate. A ceiling on that rate alone would let `PERSON`
+leakage grow about fivefold before failing, so each entry also carries a
+`type_leak_max` for every entity its configuration requests.
 
 To reproduce the job locally (CPython 3.13 on Linux x86_64, the platform
 the pinned torch wheel is built for), install as it does; the script

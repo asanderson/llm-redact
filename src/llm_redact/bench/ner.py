@@ -4,7 +4,8 @@ Scores the full detection pipeline (the regex rules plus the configured NER
 backends, overlap resolution, no allowlist) on a labelled dataset with the
 statistical metrics of :mod:`llm_redact.bench.ner_metrics`, and with
 ``--check`` gates the result against ``bench/ner_thresholds.toml`` (recall
-floors per type, character-leak and over-redaction ceilings, keyed
+floors per type, character-leak ceilings over all gold and per type,
+over-redaction ceilings, keyed
 ``[<config name>.<dataset>]``). The deterministic gate
 ``python -m llm_redact.bench --check`` (recall == 1.0 per rule, exact
 false-positive counts) is a different gate and stays unchanged.
@@ -53,7 +54,14 @@ DEFAULT_LIMIT = 2000
 _FLOOR_KEYS = ("recall", "exact_recall")
 _CEILING_KEYS = ("leak_max", "over_redaction_max")
 _THRESHOLD_KEYS = frozenset(
-    {*_FLOOR_KEYS, *_CEILING_KEYS, "structured_regressions_max", "recorded", "note"}
+    {
+        *_FLOOR_KEYS,
+        *_CEILING_KEYS,
+        "type_leak_max",
+        "structured_regressions_max",
+        "recorded",
+        "note",
+    }
 )
 
 
@@ -139,6 +147,21 @@ def threshold_failures(
                 failures.append(
                     f"{type_name} {floor_key} {counts.recall:.3f} is below the floor {floor:.3f}"
                 )
+    ceilings = entry.get("type_leak_max", {})
+    if not isinstance(ceilings, dict):
+        raise BenchError(f"{where} type_leak_max must be a table of type = ceiling")
+    for type_name, raw in sorted(ceilings.items()):
+        ceiling = _number(raw, f"{where} type_leak_max.{type_name}")
+        if not result.type_gold_chars[type_name]:
+            failures.append(
+                f"type_leak_max for {type_name} cannot be checked: the run holds no gold"
+                f" characters of {type_name}"
+            )
+        elif result.type_leak_rate(type_name) > ceiling:
+            failures.append(
+                f"{type_name} type_leak_max: {result.type_leak_rate(type_name):.4f} is above"
+                f" the ceiling {ceiling:.4f}"
+            )
     for ceiling_key, measured in (
         ("leak_max", result.leak_rate),
         ("over_redaction_max", result.over_redaction_rate),

@@ -101,6 +101,11 @@ def test_each_bench_config_has_recorded_baselines(path: Path) -> None:
         for source in hub_sources(load_config(path).detection.ner):
             assert source.model_id in entry["note"] and str(source.revision) in entry["note"]
     assert thresholds[name]["synthetic"]["recall"]["PERSON"] > 0
+    # The type-agnostic leak rate also counts the corpus's types the config
+    # does not request (always leaked); each requested type has its own
+    # leak ceiling, or its leakage could grow severalfold unnoticed.
+    requested = load_config(path).detection.ner.entities
+    assert set(requested) <= set(thresholds[name]["synthetic"]["type_leak_max"])
     assert "per_100kb_max" in ceilings[name]
 
 

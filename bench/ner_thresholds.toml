@@ -12,7 +12,8 @@
 # Keys of an entry (all optional except that the entry must exist):
 #   recall = { TYPE = floor, ... }        overlap-typed recall floors per type
 #   exact_recall = { TYPE = floor, ... }  exact-match recall floors per type
-#   leak_max = 0.15                       character-leak rate ceiling
+#   leak_max = 0.15                       character-leak rate ceiling (all gold)
+#   type_leak_max = { TYPE = ceiling }    character-leak rate ceilings per type
 #   over_redaction_max = 0.01             over-redaction rate ceiling
 #   structured_regressions_max = 0        regex-type spans NER may cost (default 0)
 #   recorded = "YYYY-MM-DD"               when the baseline was measured
@@ -22,7 +23,8 @@
 #   p50_ms = { "500" = 100.0 }  p95_ms = { ... }  many_small_ms = 30000.0
 # A latency run without that table passes, report only.
 #
-# A floor on a type the run holds no gold spans of fails: it cannot be checked.
+# A floor or type_leak_max on a type the run holds no gold spans of fails: it
+# cannot be checked.
 # Record a baseline from a measured run minus a tolerance (recall -0.05,
 # leak +0.05), with the date and the model revisions.
 #
@@ -41,20 +43,24 @@
 # rate rounded up (near zero, +0.05 would gate nothing). The measured values
 # are in each entry's note. The default entities (PERSON) only: ADDRESS,
 # DATE_OF_BIRTH, USERNAME and ACCOUNT_NUMBER are not requested, so their
-# gold characters count toward the leak rate.
+# gold characters count toward the type-agnostic leak rate (about 38% of the
+# corpus's gold characters, always leaked): leak_max alone would let PERSON
+# leakage grow about fivefold, so type_leak_max gates the requested type.
 
 [hf-default.synthetic]
 recall = { PERSON = 0.92 }
 exact_recall = { PERSON = 0.90 }
 leak_max = 0.45
+type_leak_max = { PERSON = 0.09 }
 over_redaction_max = 0.01
 recorded = "2026-10-06"
-note = "dslim/bert-base-NER at d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc; measured PERSON recall 0.974 (exact 0.951), precision 0.913, leak 0.3979, over-redaction 0.0031, structured regressions 0"
+note = "dslim/bert-base-NER at d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc; measured PERSON recall 0.974 (exact 0.951), precision 0.913, leak 0.3979 (PERSON 0.0366), over-redaction 0.0031, structured regressions 0"
 
 [gliner-default.synthetic]
 recall = { PERSON = 0.95 }
 exact_recall = { PERSON = 0.95 }
 leak_max = 0.38
+type_leak_max = { PERSON = 0.05 }
 over_redaction_max = 0.04
 recorded = "2026-10-06"
-note = "urchade/gliner_small-v2.1 at 4e091416cf7c3481db542c2a3d26156916f3a47f with base model microsoft/deberta-v3-small at a36c739020e01763fe789b4b85e2df55d6180012; measured PERSON recall 1.000 (exact 1.000), precision 0.639, leak 0.3244, over-redaction 0.0152, structured regressions 0"
+note = "urchade/gliner_small-v2.1 at 4e091416cf7c3481db542c2a3d26156916f3a47f with base model microsoft/deberta-v3-small at a36c739020e01763fe789b4b85e2df55d6180012; measured PERSON recall 1.000 (exact 1.000), precision 0.639, leak 0.3244 (PERSON 0.0000), over-redaction 0.0152, structured regressions 0"

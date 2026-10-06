@@ -1327,7 +1327,7 @@ def test_verify_dir_runs_the_gliner2_loaders_check(
     assert code == 1
     assert out.splitlines() == [
         "FAIL  gliner2: org/g2 at an unrecorded revision: [detection.ner] gliner2 model"
-        f" '{folder}' is a local directory that lacks what the loader needs: tokenizer files"
+        f" {str(folder)!r} is a local directory that lacks what the loader needs: tokenizer files"
     ]
 
 
@@ -1415,6 +1415,6 @@ def test_verify_dir_requires_a_taggers_calibration_file(
     code, out = _run(capsys, "verify", "--dir", str(root))
     assert code == 1
     assert out.splitlines() == [
-        f"FAIL  hf: {TAGGER} at {TAGGER_PIN}: [detection.ner] hf model '{folder}' is a local"
+        f"FAIL  hf: {TAGGER} at {TAGGER_PIN}: [detection.ner] hf model {str(folder)!r} is a local"
         f" directory that lacks what the loader needs: {CALIBRATION}"
     ]

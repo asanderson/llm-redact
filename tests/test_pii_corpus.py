@@ -1380,22 +1380,41 @@ def test_plan_writes_a_data_manifest_and_a_model_card(
 
 
 def test_openpii_is_refused_without_the_d9_confirmation(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     argv = _plan_args(tmp_path, "--sources", "nemotron,openpii")
-    assert train_student.main(argv) == 2
-    err = capsys.readouterr().err
-    assert "source 'openpii' is refused for training until D9" in err
-    assert "--openpii-confirmation REF" in err
-    assert not (tmp_path / "run").exists()
-    assert train_student.main([*argv, "--openpii-confirmation", "   "]) == 2
-    assert "refused for training until D9" in capsys.readouterr().err
+    # The shipped data manifest records no confirmation: openpii is refused
+    # with or without the flag (a self-typed REF unlocks nothing).
+    assert "confirmation" not in train_student.load_sources()["openpii"]
+    for extra in ([], ["--openpii-confirmation", "x"]):
+        assert train_student.main([*argv, *extra]) == 2
+        err = capsys.readouterr().err
+        assert "source 'openpii' is refused for training until D9" in err
+        assert 'an owner commit adds confirmation = "REF" under [sources.openpii]' in err
+        assert not (tmp_path / "run").exists()
+    # Once an owner commit records it, the flag must repeat it exactly.
     reference = "AI4Privacy letter of 2026-11-02, archived as DOC-17"
+    recorded = tmp_path / "training_sources.toml"
+    shipped = train_student.SOURCES_FILE.read_text(encoding="utf-8")
+    marker = "[sources.openpii]\n"
+    assert marker in shipped
+    recorded.write_text(
+        shipped.replace(marker, f'{marker}confirmation = "{reference}"\n'), encoding="utf-8"
+    )
+    monkeypatch.setattr(train_student, "SOURCES_FILE", recorded)
+    for extra in ([], ["--openpii-confirmation", "   "], ["--openpii-confirmation", "x"]):
+        assert train_student.main([*argv, *extra]) == 2
+        err = capsys.readouterr().err
+        assert "--openpii-confirmation REF must repeat the confirmation recorded" in err
+        assert reference not in err
     assert train_student.main([*argv, "--openpii-confirmation", reference], today="d") == 0
     manifest = json.loads((tmp_path / "run" / "data-manifest.json").read_text())
     assert manifest["sources"][1]["confirmation"] == reference
     card = (tmp_path / "run" / "MODEL_CARD.md").read_text()
-    assert f"OpenPII 1.5M written confirmation (plan D9): {reference}." in card
+    assert (
+        f"OpenPII 1.5M written confirmation (plan D9): {reference} (recorded in"
+        " training_sources.toml)." in card
+    )
 
 
 def test_a_needs_confirmation_source_other_than_openpii_has_no_flag() -> None:
@@ -1464,29 +1483,74 @@ def test_base_without_a_catalog_pin_is_refused(monkeypatch: pytest.MonkeyPatch) 
         train_student.base_model("urchade/gliner_small-v2.1")
 
 
+def _share(tmp_path: Path, name: str, rows: list[dict[str, Any]]) -> Path:
+    path = tmp_path / "shares" / name
+    path.parent.mkdir(exist_ok=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return path
+
+
 def test_the_agent_corpus_must_be_a_verified_training_share(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    verified = _verified(tmp_path)
-    argv = _plan_args(tmp_path, "--sources", "agent-corpus", "--agent-corpus", str(verified))
-    assert train_student.main(argv) == 0
-    manifest = json.loads((tmp_path / "run" / "data-manifest.json").read_text())
     from llm_redact.bench.datasets.agent_eval import file_sha256
 
-    corpus = manifest["sources"][0]
-    assert (corpus["rows"], corpus["sha256"]) == (3, file_sha256(verified))
-    # The frozen evaluation set is never training data.
+    verified = _verified(tmp_path)
     frozen = tmp_path / "frozen" / "agent-eval.jsonl"
     assert review.main(["freeze", str(verified), "--out", str(frozen)]) == 0
     capsys.readouterr()
-    argv = _plan_args(tmp_path, "--sources", "agent-corpus", "--agent-corpus", str(frozen))
-    assert train_student.main([*argv, "--force"]) == 2
+    rows = [row for _, row in read_jsonl(verified)]
+    # A share from another generator run (seed 8), disjoint from the set.
+    other = [
+        {**row, "id": row["id"].replace("-7-", "-8-"), "seed": 8, "text": row["text"] + " (8)"}
+        for row in rows
+    ]
+    share = _share(tmp_path, "train.jsonl", other)
+
+    def plan(corpus: Path, *extra: str) -> int:
+        argv = _plan_args(tmp_path, "--sources", "agent-corpus", "--agent-corpus", str(corpus))
+        return train_student.main([*argv, *extra, "--force"])
+
+    assert plan(share, "--agent-eval", str(frozen)) == 0
+    manifest = json.loads((tmp_path / "run" / "data-manifest.json").read_text())
+    corpus = manifest["sources"][0]
+    assert (corpus["rows"], corpus["sha256"]) == (3, file_sha256(share))
+    assert corpus["disjoint_from"] == {
+        "file": "agent-eval.jsonl",
+        "sha256": file_sha256(frozen),
+        "rows": 3,
+    }
+    capsys.readouterr()
+    # The frozen set must be named, and must match its manifest.
+    assert plan(share) == 2
+    assert "needs --agent-eval FROZEN" in capsys.readouterr().err
+    assert plan(share, "--agent-eval", str(verified)) == 2
+    assert "--agent-eval: agent-eval: cannot read" in capsys.readouterr().err
+    # The frozen evaluation set is never training data: not the frozen file,
+    # not the verified file it was frozen from, not a copy without its
+    # manifest, not a row whose text (reformatted) or generator run it holds.
+    assert plan(frozen, "--agent-eval", str(frozen)) == 2
     assert "is the frozen agent-eval set: it is evaluation-only" in capsys.readouterr().err
+    copy = _share(tmp_path, "copy.jsonl", [row for _, row in read_jsonl(frozen)])
+    for corpus_file in (verified, copy):
+        assert plan(corpus_file, "--agent-eval", str(frozen)) == 2
+        err = capsys.readouterr().err
+        assert "line 1: its id is a frozen agent-eval row's" in err
+        assert "Ann" not in err
+    renamed = [{**other[0], "text": "  " + rows[0]["text"].replace(" ", "\n  ")}, *other[1:]]
+    assert plan(_share(tmp_path, "t.jsonl", renamed), "--agent-eval", str(frozen)) == 2
+    assert "line 1: its text is a frozen agent-eval row's" in capsys.readouterr().err
+    same_run = [*other[:2], {**other[2], "id": "gemma4-e4b-7-000099", "seed": 7}]
+    assert plan(_share(tmp_path, "r.jsonl", same_run), "--agent-eval", str(frozen)) == 2
+    assert "line 3: it comes from the generator run (teacher and seed)" in (capsys.readouterr().err)
     # Unverified rows (a generate.py file) are refused too.
     generated = tmp_path / "corpus" / "generated.jsonl"
-    argv = _plan_args(tmp_path, "--sources", "agent-corpus", "--agent-corpus", str(generated))
-    assert train_student.main([*argv, "--force"]) == 2
+    assert plan(generated, "--agent-eval", str(frozen)) == 2
     assert "line 1: an unverified row" in capsys.readouterr().err
+    # Both flags belong to the agent-corpus source only.
+    argv = _plan_args(tmp_path, "--sources", "privy", "--agent-eval", str(frozen))
+    assert train_student.main([*argv, "--force"]) == 2
+    assert "apply only to the agent-corpus source" in capsys.readouterr().err
 
 
 def test_train_is_a_refusing_stub_and_bad_manifests_are_named(

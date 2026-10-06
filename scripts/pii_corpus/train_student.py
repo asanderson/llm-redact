@@ -5,11 +5,14 @@
 
 ``plan`` checks every requested data source against the data manifest
 (training_sources.toml): a source not listed, or one marked evaluation-only,
-is refused; OpenPII 1.5M is refused unless ``--openpii-confirmation REF``
-names AI4Privacy's written confirmation (plan D9 — set it only after the
-owner has recorded that confirmation; REF goes into the manifest and the
-model card); the private agent corpus must be a VERIFIED training share,
-never the frozen ``agent-eval`` set. It checks the base model (an Apache-2.0
+is refused; OpenPII 1.5M is refused until an owner commit records
+AI4Privacy's written confirmation in the data manifest (plan D9:
+``confirmation = "REF"`` under ``[sources.openpii]``), and then only with
+``--openpii-confirmation REF`` repeating it (REF goes into the manifest and
+the model card); the private agent corpus must be a VERIFIED training share
+disjoint from the frozen ``agent-eval`` set, which ``--agent-eval FROZEN``
+names: no row id, no text (after whitespace normalisation) and no generator
+run (teacher and seed) in common. It checks the base model (an Apache-2.0
 or MIT encoder, or a catalogued GLiNER-PII checkpoint that is not
 restricted), then writes, into a directory outside every git work tree:
 
@@ -25,10 +28,12 @@ and an owner decision; this skeleton never downloads data or trains.
 """
 
 import argparse
+import hashlib
 import json
 import sys
 import tomllib
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -37,7 +42,12 @@ if __package__ in (None, ""):  # run as a file: make the package importable
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from llm_redact.bench.datasets.agent_eval import FORMAT as FROZEN_FORMAT  # noqa: E402
-from llm_redact.bench.datasets.agent_eval import file_sha256, manifest_path  # noqa: E402
+from llm_redact.bench.datasets.agent_eval import (  # noqa: E402
+    check_manifest,
+    file_sha256,
+    manifest_path,
+)
+from llm_redact.bench.datasets.base import DatasetError  # noqa: E402
 from llm_redact.detection.model_catalog import lookup  # noqa: E402
 from pii_corpus.private_files import (  # noqa: E402
     CorpusError,
@@ -74,7 +84,8 @@ NOT_IMPLEMENTED = (
 )
 
 
-def load_sources(path: Path = SOURCES_FILE) -> dict[str, dict[str, Any]]:
+def load_sources(path: Path | None = None) -> dict[str, dict[str, Any]]:
+    path = path or SOURCES_FILE
     try:
         sources = tomllib.loads(path.read_text(encoding="utf-8")).get("sources")
     except (OSError, tomllib.TOMLDecodeError) as exc:
@@ -114,7 +125,70 @@ def base_model(model_id: str) -> dict[str, Any]:
     }
 
 
-def _agent_corpus(path: Path | None) -> dict[str, Any]:
+def text_key(text: object) -> str:
+    """The SHA-256 of a row's text after whitespace normalisation (a
+    reformatted copy of a row has the same key)."""
+    normalised = " ".join(text.split()) if isinstance(text, str) else ""
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class EvaluationSet:
+    """What a training share must not have in common with the frozen set."""
+
+    file: str
+    sha256: str
+    ids: frozenset[str]
+    texts: frozenset[str]
+    runs: frozenset[tuple[str, str]]
+
+    def as_json(self) -> dict[str, Any]:
+        return {"file": self.file, "sha256": self.sha256, "rows": len(self.ids)}
+
+
+def _run_key(row: dict[str, Any]) -> tuple[str, str]:
+    """The generator run a row came from: (teacher, seed)."""
+    return str(row.get("teacher")), str(row.get("seed"))
+
+
+def evaluation_set(path: Path | None) -> EvaluationSet:
+    """The frozen agent-eval set's ids, text keys and generator runs; it must
+    match its manifest (the bench's own check)."""
+    if path is None:
+        raise CorpusError(
+            "source agent-corpus needs --agent-eval FROZEN: the frozen agent-eval set the"
+            " training share must not overlap"
+        )
+    try:
+        check_manifest(path)
+    except DatasetError as exc:
+        raise CorpusError(f"--agent-eval: {exc}") from exc
+    rows = [row for _, row in read_jsonl(path)]
+    return EvaluationSet(
+        file=path.name,
+        sha256=file_sha256(path),
+        ids=frozenset(str(row.get("id")) for row in rows),
+        texts=frozenset(text_key(row.get("text")) for row in rows),
+        runs=frozenset(_run_key(row) for row in rows),
+    )
+
+
+def _overlap(row: dict[str, Any], frozen: EvaluationSet) -> str | None:
+    """What a training row has in common with the frozen set (None =
+    nothing). Names keys, never text."""
+    if str(row.get("id")) in frozen.ids:
+        return "its id is a frozen agent-eval row's"
+    if text_key(row.get("text")) in frozen.texts:
+        return "its text is a frozen agent-eval row's"
+    if _run_key(row) in frozen.runs:
+        return (
+            "it comes from the generator run (teacher and seed) the frozen agent-eval set was"
+            " drawn from: train on a share generated with another seed"
+        )
+    return None
+
+
+def _agent_corpus(path: Path | None, frozen_path: Path | None) -> dict[str, Any]:
     if path is None:
         raise CorpusError("source agent-corpus needs --agent-corpus PATH (a review.py output)")
     try:
@@ -126,12 +200,23 @@ def _agent_corpus(path: Path | None) -> dict[str, Any]:
             f"{path.name} is the frozen agent-eval set: it is evaluation-only and must never be"
             " trained on (use a separately verified training share)"
         )
+    evaluation = evaluation_set(frozen_path)
     rows = 0
     for number, row in read_jsonl(path):
         if not isinstance(row.get("review"), dict):
             raise CorpusError(f"{path.name} line {number}: an unverified row (no review record)")
+        overlap = _overlap(row, evaluation)
+        if overlap is not None:
+            raise CorpusError(
+                f"{path.name} line {number}: {overlap}; the evaluation set is never trained on"
+            )
         rows += 1
-    return {"rows": rows, "sha256": file_sha256(path), "file": path.name}
+    return {
+        "rows": rows,
+        "sha256": file_sha256(path),
+        "file": path.name,
+        "disjoint_from": evaluation.as_json(),
+    }
 
 
 def plan_sources(
@@ -140,11 +225,14 @@ def plan_sources(
     *,
     openpii_confirmation: str | None,
     agent_corpus: Path | None,
+    agent_eval: Path | None = None,
 ) -> list[dict[str, Any]]:
     """The manifest entries of the requested sources; CorpusError for the
     first one the recipe may not train on."""
     if not names:
         raise CorpusError("name at least one source (--sources)")
+    if AGENT_CORPUS not in names and (agent_corpus or agent_eval) is not None:
+        raise CorpusError("--agent-corpus and --agent-eval apply only to the agent-corpus source")
     planned = []
     for name in names:
         entry = sources.get(name)
@@ -156,20 +244,35 @@ def plan_sources(
         if training == "refused":
             raise CorpusError(f"source {name!r} is evaluation-only: {entry.get('reason')}")
         if training == "needs-confirmation":
-            if name != OPENPII or not (openpii_confirmation or "").strip():
-                raise CorpusError(
-                    f"source {name!r} is refused for training until {entry.get('gate')} is"
-                    " recorded: pass --openpii-confirmation REF only once it is (TRAINING.md)"
-                )
+            _confirmed(name, entry, openpii_confirmation)
         elif training != "allowed":
             raise CorpusError(f"source {name!r} has no valid training status in the manifest")
         record = {"name": name, **{k: v for k, v in entry.items() if k != "training"}}
         if name == AGENT_CORPUS:
-            record.update(_agent_corpus(agent_corpus))
+            record.update(_agent_corpus(agent_corpus, agent_eval))
         if name == OPENPII:
-            record["confirmation"] = (openpii_confirmation or "").strip()
+            record["confirmation"] = str(entry["confirmation"]).strip()
         planned.append(record)
     return planned
+
+
+def _confirmed(name: str, entry: Mapping[str, Any], given: str | None) -> None:
+    """Refuse a needs-confirmation source unless the data manifest RECORDS
+    the confirmation (an owner commit: ``confirmation = "REF"`` under its
+    table) and ``--openpii-confirmation`` repeats it. A flag alone unlocks
+    nothing: the model card would state a confirmation nobody recorded."""
+    recorded = entry.get("confirmation")
+    if name != OPENPII or not isinstance(recorded, str) or not recorded.strip():
+        raise CorpusError(
+            f"source {name!r} is refused for training until {entry.get('gate')} is recorded"
+            f' in the data manifest (an owner commit adds confirmation = "REF" under'
+            f" [sources.{name}] in training_sources.toml; TRAINING.md)"
+        )
+    if (given or "").strip() != recorded.strip():
+        raise CorpusError(
+            f"source {name!r}: --openpii-confirmation REF must repeat the confirmation"
+            " recorded in training_sources.toml"
+        )
 
 
 def render_card(template: str, manifest: Mapping[str, Any]) -> str:
@@ -180,7 +283,11 @@ def render_card(template: str, manifest: Mapping[str, Any]) -> str:
         for s in manifest["sources"]
     ]
     confirmation = next(
-        (s["confirmation"] for s in manifest["sources"] if s["name"] == OPENPII),
+        (
+            f"{s['confirmation']} (recorded in training_sources.toml)"
+            for s in manifest["sources"]
+            if s["name"] == OPENPII
+        ),
         "not used",
     )
     values = {
@@ -223,6 +330,7 @@ def plan(args: argparse.Namespace, today: str) -> dict[str, Any]:
             load_sources(),
             openpii_confirmation=args.openpii_confirmation,
             agent_corpus=args.agent_corpus,
+            agent_eval=args.agent_eval,
         ),
         "hyperparameters": dict(HYPERPARAMETERS),
         "evaluation_only": ["the agent-eval frozen set", "the bench's test/validation splits"],
@@ -246,10 +354,17 @@ def _parser() -> argparse.ArgumentParser:
     planned.add_argument("--sources", required=True, help="comma-separated source names")
     planned.add_argument("--agent-corpus", type=Path, help="a verified training share (JSONL)")
     planned.add_argument(
+        "--agent-eval",
+        type=Path,
+        metavar="FROZEN",
+        help="the frozen agent-eval set the training share must not overlap (required with"
+        " agent-corpus)",
+    )
+    planned.add_argument(
         "--openpii-confirmation",
         metavar="REF",
-        help="the reference of AI4Privacy's written confirmation (plan D9); without it the"
-        " openpii source is refused",
+        help="repeats the confirmation of AI4Privacy (plan D9) recorded in"
+        " training_sources.toml; openpii is refused until it is recorded there",
     )
     planned.add_argument("--out", type=Path, required=True, help="the run directory")
     planned.add_argument("--force", action="store_true", help="plan into a non-empty directory")

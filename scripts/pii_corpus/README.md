@@ -18,7 +18,7 @@ counts, ids, offsets, types and model names.
 |---|---|---|
 | `generate.py` | T40 | Asks the teacher for tagged artifacts, grounds every span, writes unverified JSONL rows and a run manifest. |
 | `review.py` | T42 | Shows each generated row to a human for accept, edit or reject (`review`), then writes the frozen evaluation set with its manifest (`freeze`). Rules: [GUIDELINES.md](GUIDELINES.md). |
-| `train_student.py` | T43 | The student-model recipe skeleton: `plan` checks the training sources against [training_sources.toml](training_sources.toml) (OpenPII refused without the D9 confirmation flag) and writes the data manifest and a model card from [MODEL_CARD_TEMPLATE.md](MODEL_CARD_TEMPLATE.md); it trains nothing. Recipe: [TRAINING.md](TRAINING.md). |
+| `train_student.py` | T43 | The student-model recipe skeleton: `plan` checks the training sources against [training_sources.toml](training_sources.toml) (OpenPII refused until an owner commit records the D9 confirmation there; an agent-corpus share must be disjoint from the frozen evaluation set) and writes the data manifest and a model card from [MODEL_CARD_TEMPLATE.md](MODEL_CARD_TEMPLATE.md); it trains nothing. Recipe: [TRAINING.md](TRAINING.md). |
 | `audit.py` | T41 | Has the teacher read `bench/fp_corpus` beside the detectors and lists candidate misses and false positives (file, offsets, type, reason). Report only. |
 
 ## Requirements

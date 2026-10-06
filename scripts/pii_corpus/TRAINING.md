@@ -15,6 +15,7 @@ uv run python scripts/pii_corpus/train_student.py plan --name acme-pii-student \
   --base microsoft/deberta-v3-small \
   --sources nemotron,gretel-pii-masking-en-v1,privy,kiji,agent-corpus \
   --agent-corpus ~/.local/share/llm-redact/pii-corpus/train-share.verified.jsonl \
+  --agent-eval ~/.local/share/llm-redact/pii-corpus/agent-eval.jsonl \
   --out ~/student-runs/acme-pii-student
 ```
 
@@ -26,18 +27,29 @@ uv run python scripts/pii_corpus/train_student.py plan --name acme-pii-student \
   (checked 2026-10-05);
 - an evaluation-only source: PUPA (real prompts), MAPA (real legal
   decisions), CredData (real code);
-- **OpenPII 1.5M** unless `--openpii-confirmation REF` is given. Its card
-  text says CC BY 4.0 while its metadata says `license: other`, and it does
-  not say how the data was generated (its predecessors were generated with
-  Llama models). Plan decision D9: it may be used for evaluation now and for
-  training only after AI4Privacy confirms in writing. Pass the flag only once
-  the owner has recorded that confirmation; `REF` (for example the
-  confirmation's date and archive location) is written into the data
-  manifest and the model card;
-- an `agent-corpus` file that is the frozen `agent-eval` set (evaluation
-  only: training on it would void every score measured on it), or a file
-  holding unverified rows. Train on a separately reviewed share
-  (`review.py review` on a different generator run);
+- **OpenPII 1.5M** until the confirmation is recorded. Its card text says
+  CC BY 4.0 while its metadata says `license: other`, and it does not say
+  how the data was generated (its predecessors were generated with Llama
+  models). Plan decision D9: it may be used for evaluation now and for
+  training only after AI4Privacy confirms in writing. The confirmation is
+  recorded by an owner commit that adds `confirmation = "REF"` (for example
+  the confirmation's date and archive location) under `[sources.openpii]`
+  in `training_sources.toml`, where review sees it; until then openpii is
+  refused whatever is passed. Once recorded, `--openpii-confirmation REF`
+  must repeat it exactly, and `REF` is written into the data manifest and
+  the model card ("recorded in training_sources.toml");
+- an `agent-corpus` file that overlaps the frozen `agent-eval` set
+  (evaluation only: training on it would void every score measured on it):
+  `--agent-eval FROZEN` names the frozen set (checked against its manifest)
+  and is required with `agent-corpus`, and a training row is refused when
+  its id, its text (SHA-256 after whitespace normalisation) or its
+  generator run (teacher and seed) is one of the frozen set's — so the
+  verified file the set was frozen from, a copy of the set without its
+  manifest and a re-run with the eval run's seed are all refused; so is a
+  file holding unverified rows. Train on a separately reviewed share
+  (`review.py review` on a generator run with another seed); the data
+  manifest records the frozen set's file name, SHA-256 and row count the
+  share was checked against;
 - a base model that is neither an allowed encoder
   (`microsoft/deberta-v3-small`, `microsoft/deberta-v3-base`, MIT) nor a
   GLiNER checkpoint in llm-redact's model catalog with an Apache-2.0 or MIT

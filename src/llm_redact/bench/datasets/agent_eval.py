@@ -55,7 +55,9 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _check_manifest(path: Path) -> None:
+def check_manifest(path: Path) -> None:
+    """Refuse a frozen set its manifest does not vouch for (missing, another
+    format, or a SHA-256 that differs). DatasetError names files only."""
     where = manifest_path(path)
     try:
         manifest = json.loads(where.read_text(encoding="utf-8"))
@@ -97,7 +99,7 @@ def adapter(spec: DatasetSpec, request: LoadRequest) -> Iterator[NerSample]:
             " scripts/pii_corpus/review.py freeze; docs/ner-bench.md, 'The agent-traffic"
             " evaluation set')"
         )
-    _check_manifest(path)
+    check_manifest(path)
     for row in jsonl_rows(path, request):
         text = row.get("text") if isinstance(row, dict) else None
         entries = _spans(row) if isinstance(row, dict) else None

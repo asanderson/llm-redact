@@ -134,10 +134,12 @@ and tags `vX.Y.Z`.
   (`scripts/pii_corpus/TRAINING.md`, dev-only): `train_student.py plan` checks each
   requested source against the data manifest `training_sources.toml` (license, attribution,
   pinned revision and lineage per dataset), refuses evaluation-only sources (PUPA, MAPA,
-  CredData), the frozen `agent-eval` set and unverified corpus rows, refuses OpenPII 1.5M
-  unless `--openpii-confirmation REF` records AI4Privacy's written confirmation, and writes
-  the run's data manifest and a model card from `MODEL_CARD_TEMPLATE.md`. Nothing is
-  downloaded or trained; `train` refuses.
+  CredData) and unverified corpus rows, refuses an agent-corpus share that shares a row id,
+  a text or a generator run (teacher and seed) with the frozen `agent-eval` set (named with
+  `--agent-eval FROZEN`, required), refuses OpenPII 1.5M until an owner commit records
+  AI4Privacy's written confirmation in `training_sources.toml` (and then only with
+  `--openpii-confirmation REF` repeating it), and writes the run's data manifest and a model
+  card from `MODEL_CARD_TEMPLATE.md`. Nothing is downloaded or trained; `train` refuses.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

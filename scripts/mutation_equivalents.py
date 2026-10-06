@@ -1136,5 +1136,8 @@ OSCILLATING_MUTANTS: frozenset[str] = frozenset(
         # main's run of the same tree reported it killed (a selection
         # artifact).
         "llm_redact.vault.xǁSqliteVaultManagerǁ_record__mutmut_27",
+        # A SQL keyword case change in _record_row (equivalent): survives when
+        # run alone, but the PR run of 717e710 left it off the survivor list.
+        "llm_redact.vault.xǁSqliteVaultManagerǁ_record_row__mutmut_25",
     }
 )

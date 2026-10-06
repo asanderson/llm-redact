@@ -16,6 +16,7 @@ real-data dataset unless ``--allow-real-data-dump`` is also given.
 """
 
 import argparse
+import errno
 import itertools
 import json
 import os
@@ -185,6 +186,10 @@ def dump_problem(path: Path) -> str | None:
 def write_dump(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
     """Write the error records as JSON lines to a new or truncated mode-0600
     file (never through a symlink)."""
+    if path.is_symlink():
+        # O_NOFOLLOW refuses it below where the platform has the flag (POSIX);
+        # Windows has none, so the link is refused here too.
+        raise OSError(errno.ELOOP, "refusing to write the dump through a symlink", str(path))
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as out:

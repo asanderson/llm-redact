@@ -349,6 +349,21 @@ def test_write_dump_is_private(tmp_path: Path) -> None:
         bench_ner.write_dump(link, [])
 
 
+def test_write_dump_refuses_a_symlink_without_o_nofollow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows has no O_NOFOLLOW: the link must still be refused, and the file
+    # it points at left untouched.
+    target = tmp_path / "errors.jsonl"
+    target.write_text("old")
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(target)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    with pytest.raises(OSError, match="through a symlink"):
+        bench_ner.write_dump(link, [{"kind": "miss"}])
+    assert target.read_text() == "old"
+
+
 # --- the command line, end to end through build_detectors ---------------------
 
 

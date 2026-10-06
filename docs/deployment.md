@@ -83,8 +83,10 @@ images are multi-arch (amd64 + arm64).
 **The `-ner` image** (`ghcr.io/asanderson/llm-redact:<version>-ner`,
 `latest-ner`) is the same image plus the `hf` and `gliner` NER extras, with a
 CPU-only torch on both architectures (PyPI's Linux torch wheel brings the
-CUDA libraries, which no CPU host uses): about 1 GB more than the stock
-image (the CI `container-ner` job prints the built size). It is built,
+CUDA libraries, which no CPU host uses). The packages it adds to the stock
+image unpack to about 940 MB on x86_64, 700 MB of it torch (measured
+2026-10-06 from the locked wheels, before bytecode compilation; the CI
+`container-ner` job prints the built image's size). It is built,
 attested (BuildKit SBOM) and cosign-signed like the stock image, and the
 release carries its closure as `llm-redact-ner-image.cdx.json`. It ships
 no model: provision them as "Provisioning NER models" below describes — the

@@ -477,11 +477,37 @@ another revision does not count: the pin is the commit the message names
 pinned" means the newest cached revision of the default branch). Fetch the
 model once with `llm-redact models pull`, or set `allow_download = true` to
 let a startup fetch the pinned files (with a `HF_HOME` the proxy can write).
+`models pull` also fetches the base model of a GLiNER model configured as a
+local folder (one that ships no tokenizer of its own, such as a clone of an
+urchade model); the folder itself is never fetched.
 A reload (SIGHUP, the dashboard editor) never downloads, whatever
 `allow_download` says: after a reload naming a new model, the running
 configuration is kept — fetch the model, then reload again, or restart.
 "(completely)": the cache holds the revision but not every file the loader
-needs, such as after an interrupted download.
+needs, such as after an interrupted download; the message then ends with
+`; missing: …`, naming the kinds of files absent (`config.json`, `weights`,
+`tokenizer files`, a weight shard's name). `llm-redact doctor` shows the same
+text as a FAIL under `models` before you restart, and `llm-redact models
+verify` checks every configured model the same way.
+
+## "[detection.ner] … model '…' is a local directory that lacks what the loader needs: …" / "… its repository lacks what the loader needs: …"
+
+The model's folder, or (with `allow_download = true`) the files its
+repository offers at the pinned revision, lack something every load reads:
+`config.json` (`gliner_config.json` for GLiNER), the weights (safetensors, or
+`pytorch_model.bin` where allowed; every shard a `*.index.json` names), or
+the tokenizer (`tokenizer.json` or a vocabulary: `vocab.txt`, `vocab.json`
+with `merges.txt`, or a SentencePiece model — plus `tokenizer_config.json` for
+GLiNER). For a folder, copy the missing files in, or write the folder again
+with `llm-redact models pull --to`; for a repository, pick another model or
+revision: llm-redact fetches only the top-level files it names, never other
+formats a repository may hold.
+
+## "[detection.ner] hf model '…': model.safetensors.index.json does not name its weight files"
+
+The weight index of a sharded model is not a JSON object whose `weight_map`
+names plain file names in the same folder (a name with a `/` or `\` is
+refused). Re-fetch the model or fix the folder.
 
 ## "[detection.ner] … model '…' … could not be fetched from the Hugging Face Hub: …"
 
@@ -494,7 +520,23 @@ without a token, a full disk or a cache the proxy cannot write.
 
 `[detection.ner.models]` (or `model`) names a local folder, and
 `[detection.ner.revisions]` pins that backend too. A folder is whatever it
-holds, so a commit id cannot apply to it: remove the backend's revision.
+holds, so a commit id cannot apply to it: remove the backend's revision. This
+holds for a folder whose path reads like a model id (`dslim/bert-base-NER`
+under the proxy's working directory) too, even when the revision is the one
+the model catalog pins for that id. A folder written by `llm-redact models pull
+--to` records its model and revision in its `llm-redact-model.json` instead.
+
+## "[detection.ner] … model: …/llm-redact-model.json: …"
+
+A local model folder carries an `llm-redact-model.json` (written by
+`llm-redact models pull --to`, or by a model bundle) that cannot be read as
+the folder's identity: not a UTF-8 JSON object, larger than 64 KiB, a
+`model_id` that is not a Hugging Face model id, or a `revision` that is not a
+full 40-character lowercase commit id (or null). The message names the file
+and the problem, never its content. The folder is refused rather than loaded
+unidentified: write the folder again with `llm-redact models pull --to`, fix
+the file, or delete it (the folder then loads as an unidentified model, to
+which the model catalog does not apply).
 
 ## "[detection.ner] … model '…' is neither a local directory nor a Hugging Face model id"
 
@@ -562,6 +604,146 @@ configuration load at whatever revision of its default branch the cache
 holds. Prefer a catalogued model or a self-contained checkpoint (one that
 ships its tokenizer and an `encoder_config`), or a folder written by
 `llm-redact models pull --to`.
+
+## `llm-redact doctor` under `models`: "allow_download = true: …" / "allow_pickle_weights = true: …" / "… has no pin: the newest cached revision of its default branch loads; …" / "… is not (completely) in the local Hugging Face cache; the proxy's startup will fetch it (allow_download = true)" / "… takes its tokenizer and encoder configuration from its base model …, whose revision the model catalog does not pin: the newest cached revision loads"
+
+The `models` area of `doctor` lists, for the `gliner` and `hf` backends, where
+each model comes from. Its WARN rows are settings worth a second look, not
+errors:
+
+- `allow_download = true`: the proxy's startup may fetch a missing model from
+  huggingface.co (the model id, revision and file names; never request
+  content). Set it back to `false` once the cache holds the models (`llm-redact
+  models pull` fills it).
+- `allow_pickle_weights = true`: an `hf` model without safetensors weights
+  loads `pytorch_model.bin`, a Python pickle; loading a pickle can run code.
+- `… has no pin`: the model is neither pinned in `[detection.ner.revisions]`
+  nor in the model catalog, so whichever revision of its default branch the
+  cache holds loads. Pin the commit you tested: `llm-redact models pull`
+  prints the one it fetches.
+- `… is not (completely) in the local Hugging Face cache; the proxy's startup
+  will fetch it (allow_download = true)`: the model (or a GLiNER model's base
+  model) is missing from the cache at its pin, or present only in part.
+  With downloads off that is a FAIL row instead (the startup error "… is not
+  (completely) in the local Hugging Face cache, and downloads are off …"
+  above); with `allow_download = true` the next startup fetches it (a reload
+  never does, so a reload naming it is refused). Fetch it now with
+  `llm-redact models pull`, then set `allow_download = false`.
+- `… whose revision the model catalog does not pin`: the GLiNER model takes
+  its tokenizer and encoder configuration from a base model the catalog does
+  not pin (the startup warning below says the same).
+
+A FAIL row there is the startup error of the same text (see the entries
+above): the startup would stop on it.
+
+## `llm-redact doctor` under `models`: "…: the local Hugging Face cache was not checked: huggingface_hub is not installed (the … extra installs it)" / `llm-redact models list|verify`: "…: huggingface_hub is not installed (the hf and gliner extras install it)"
+
+doctor, `models list` and `models verify` look models up in the local
+Hugging Face cache through `huggingface_hub`, which the `hf` and `gliner`
+extras install. Without it, a Hub model's files are reported `unchecked`,
+and `verify` exits 1 (it cannot tell that the model is complete). Install
+the backend's extra (`uv sync --extra hf` / `--extra gliner`); the `ner`
+area's FAIL row in doctor says the same. A model configured as a local
+folder is checked without it (the Hub base model of a GLiNER folder is not).
+
+## `llm-redact models`: "llm-redact models: cannot read PATH (…)"
+
+`llm-redact models list`, `verify` and `pull` could not read the
+configuration file: the one `--config` names, else the one `LLM_REDACT_CONFIG`
+names or the default search finds (the per-user `config.toml`, then
+`/etc/llm-redact/config.toml`). It does not exist (`FileNotFoundError`), is
+a folder, may not be read, or holds bytes that are not text
+(`UnicodeDecodeError`); the message ends with the exception type. The command
+exits 2 without looking at any model — exit 1 is kept for a model that is not
+complete. Check the path; `llm-redact config show --path` prints the file the
+default search finds.
+
+## `llm-redact models pull`: "FAIL  not every model was pulled; nothing was written to DIR"
+
+A model (or a GLiNER model's base model) could not be fetched — the `FAIL`
+line above it names which, and the exception type (no network access to
+huggingface.co, a gated model without `HF_TOKEN`, a model id or revision that
+does not exist, a full disk), or it lacks a file the loader needs. With
+`--to`, nothing is written until every model was fetched, so `DIR` never holds
+a half-pulled set. Fix the cause and run `pull` again; what was fetched stays
+in the Hugging Face cache.
+
+## `llm-redact models pull --to`: "FAIL  DIR/FOLDER exists and is not a folder `llm-redact models pull --to` wrote; remove it or choose another --to" / "cannot write the model folders to DIR (…)"
+
+`pull --to` replaces a model folder only when it wrote it before (the folder
+holds an `llm-redact-model.json`); anything else of the same name is left
+alone. Remove it or pull into another directory. Every folder it would
+replace is checked, and every new folder written beside the old ones, before
+any is replaced, so after this refusal `DIR` is as it was. "cannot write":
+`DIR` cannot be created or written (a file of that name, no permission, a
+full disk); the message ends with the exception type. When that happens
+while the old folders are being replaced, `DIR` is left without its
+`llm-redact-models.json` (never with one that describes folders it no longer
+holds), and `models verify --dir` fails until a `pull --to` completes: fix
+the cause and pull again.
+
+## `llm-redact models pull`: "FAIL  pulling needs huggingface_hub, which the hf and gliner extras install; …" / "--as needs --to" / "--as needs an absolute path: where DIR is mounted for the proxy (for example /models)"
+
+Install the backend's extra on the machine that pulls (`uv sync --extra hf`
+or `--extra gliner`; both bring `huggingface_hub`). `--as PATH` only says
+where the folders written by `--to DIR` will be mounted; give both, and give
+`--as` as an absolute path (`/models`, or `C:\models` on Windows). A relative
+path would be read against the proxy's working directory, and one such as
+`models/hf-dslim--bert-base-NER` also reads as a Hugging Face model id:
+wherever that directory holds no such folder, the proxy would take the
+carried folder for a Hub repository of that name.
+
+## `llm-redact models verify --dir`: "FAIL  …: FOLDER/FILE: SHA-256 differs from the manifest" (or "size differs", "missing", "not listed in the manifest", "the folder is missing", "FOLDER: the manifest lists no llm-redact-model.json", "FOLDER/llm-redact-model.json: names another model or revision than the manifest", "…/llm-redact-model.json: …")
+
+A folder written by `llm-redact models pull --to` no longer holds exactly what
+its `llm-redact-models.json` lists: a file was changed, truncated or removed
+on the way (a partial copy, a disk error), or a file was added to a model
+folder (one a loader could read). Copy the folder again from the machine
+that pulled it, or pull again; do not edit the manifest to match. "names
+another model or revision than the manifest" means a model folder's
+`llm-redact-model.json` and the manifest disagree; "the manifest lists no
+llm-redact-model.json" means the manifest leaves out the file that names the
+folder's model (every folder `pull --to` writes holds one and lists it), so
+nothing would tie the folder to the model the manifest names; a
+`…/llm-redact-model.json: …` problem is that file failing to read as a model
+identity (see "[detection.ner] … model: …/llm-redact-model.json: …" above).
+A folder that matches the manifest but lacks what its loader needs (a
+hand-written manifest) fails with the loader's own message.
+
+## `llm-redact models verify --dir`: "no llm-redact-models.json in DIR" / "… cannot be read (…)" / "… is larger than 4194304 bytes" / "… is not a UTF-8 JSON document" / "… is not an llm-redact models manifest" / "schema N is not one this llm-redact reads" / "…: models must be a list" / "…: two models share a folder" / "models[I]…"
+
+The directory holds no manifest, or one this version cannot read: a file it
+may not read (the message ends with the exception type), one larger than 4
+MiB (a manifest lists tens of files; this is not one `pull --to` wrote), not
+a UTF-8 JSON object of kind `llm-redact-models`, a newer schema (upgrade
+llm-redact), a `models` value that is not a list, two entries naming the same
+model folder, or an entry that is not well formed (`models[I]` that is not
+an object, a backend other than `gliner` or `hf`, a folder name that is not a
+single plain name, a file path that is absolute or contains `..`, a path
+listed twice, a size or SHA-256 of the wrong shape). Point `--dir` at the
+folder `models pull --to` wrote (the one holding `llm-redact-models.json`),
+or pull again.
+
+## `[detection.ner] BACKEND model 'ID' has model catalog status "restricted": …`
+
+A startup warning (also a `doctor` WARN under `models`): llm-redact's model
+catalog lists the configured model as restricted, and the rest of the line
+states the facts it records, with the model card's link and the date they
+were checked: a non-commercial or not OSI-approved license, training data
+generated with Llama models or released under a restrictive license, a
+backbone, or a need for code from the model's repository. llm-redact still
+loads the model — the catalog never refuses one — so whether those terms fit
+your use is for you to decide. To silence the warning, pick a model the
+catalog lists as vetted (docs/detection.md "The model catalog").
+
+## `llm-redact doctor` under `models`: "…: … needs DIST >= VERSION (model catalog), but DIST VERSION is installed; upgrade it: …"
+
+The model catalog records that the configured model needs a newer library
+than the one installed — for example the Knowledgator `-edge` and `-small`
+GLiNER models are built on ModernBERT encoders, which transformers knows from
+4.48.0 on; an older one stops the startup with "names a model type
+transformers does not know". Upgrade it as the line says (or with `pip
+install -U DIST`), or pick another model.
 
 ## "[detection.ner] gliner model '…': cannot assemble its local folder under … (…)"
 

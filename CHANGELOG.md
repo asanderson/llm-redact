@@ -145,6 +145,47 @@ and tags `vX.Y.Z`.
   `--openpii-confirmation REF` repeating it), and writes the run's data manifest and a model
   card from `MODEL_CARD_TEMPLATE.md`. Nothing is downloaded or trained; `train` refuses.
 
+- `llm-redact doctor` has a `models` area while NER is on with the `gliner` or `hf` backend:
+  each model, its pin and where the pin comes from, and whether every file its load reads is
+  in the local Hugging Face cache at that pin (a GLiNER model's base model included) or in its
+  folder. It WARNs while `allow_download` or (for `hf`) `allow_pickle_weights` is on and for a
+  model or GLiNER base model nothing pins, and FAILs, naming `llm-redact models pull`, when a
+  model the startup needs is missing while downloads are off. It never loads or downloads a
+  model.
+- The model catalog's facts are shown wherever a model is: `/status`
+  `detection.ner.backends.BACKEND` fills `revision`, `catalog` and `license` (null until now)
+  and adds `source` (`hub` or `local`), `model_id` and `pinned` for the `gliner` and `hf`
+  backends; a model the catalog lists as restricted logs a startup WARNING (`[detection.ner]
+  BACKEND model 'ID' has model catalog status "restricted": …`, neutral facts with the card's
+  link and check date) and a `doctor` WARN under `models`; `doctor` names each model's catalog
+  status and license (a caution model with its reason) and FAILs when an installed library is
+  older than the catalog says a model needs (transformers 4.48 for the Knowledgator `-edge`
+  and `-small` models). docs/detection.md "The model catalog" lists the vetted, caution and
+  restricted models (kept equal to the catalog by a test). The catalog still never refuses a
+  model.
+- `llm-redact models list|verify` (`--config` like `serve`): `list [--json]` shows each model
+  of the `gliner` and `hf` backends with its revision, catalog status, license, base model and
+  whether its files are in the local Hugging Face cache (or its folder); `verify` exits 1
+  unless every model is complete at its revision (configuration, every weight file, tokenizer,
+  a GLiNER model's base model), which the cache's own lookup does not check; `verify --dir DIR`
+  checks a folder written by `models pull --to` against its `llm-redact-models.json` manifest
+  (sizes, SHA-256, no unlisted files) with no configuration and no network, for air-gapped
+  installs. Both read local files only; spaCy, Presidio and Stanza models get their install
+  commands.
+- `llm-redact models pull` fetches each configured `gliner`/`hf` model (and a GLiNER model's
+  base model) at its revision with the loaders' own file names into the Hugging Face cache —
+  the way to fill it now that the proxy downloads nothing by default — printing the commit and
+  the `[detection.ner.revisions]` line for a model nothing pins and the catalog's facts for a
+  restricted one. A model configured as a local folder is not fetched, but the base model a
+  GLiNER folder without its own tokenizer loads with is. `--to DIR` also writes portable,
+  self-contained folders of the Hub models (each with its `llm-redact-model.json`; a GLiNER
+  folder carries its base model's tokenizer and configuration) and an `llm-redact-models.json`
+  manifest of every file's size and SHA-256, then prints the `[detection.ner.models]` lines
+  that load them (`--as PATH`: as mounted elsewhere, at an absolute path). Nothing is written
+  to `DIR` unless every model was fetched, and nothing in it is replaced until every new
+  folder is written beside the old ones. Together with `models verify --dir` this carries
+  models into an air-gapped network.
+
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
   upload inspector's extracted texts included) and a realtime client frame the proxy collects the
@@ -162,7 +203,9 @@ and tags `vX.Y.Z`.
   `llm-redact models pull`. A reload, the dashboard editor's dry run and `llm-redact preview`
   never download: a reload naming an uncached model is refused and the running configuration
   kept. Model downloads were never listed among what leaves the machine (docs/privacy.md), so
-  this fixes behaviour the documentation never allowed. Upgrading: the default models' pins are
+  this fixes behaviour the documentation never allowed; docs/privacy.md and the per-channel
+  table of docs/security-dataflows.md now list them (opt-in, startup only, the model id and
+  revision, never request content), and docs/threat-model.md the NER model supply chain. Upgrading: the default models' pins are
   the `main` commits of 2026-10-05, so a cache an online load refreshed since then already holds
   them; `urchade/gliner_multi-v2.1` moved on 2025-12-08 (an older cache holds `853ce23e47e5`).
 - NER model labels become placeholder types through one label policy for every backend
@@ -270,8 +313,13 @@ and tags `vX.Y.Z`.
   with an error naming the model and revision. A model whose `config.json` or
   `tokenizer_config.json` names code to import (`auto_map`) is refused; a model that ships only
   `pytorch_model.bin` (a pickle, which can run code when loaded) is refused unless
-  `allow_pickle_weights = true`. Previously the newest revision was downloaded from the Hub on
-  first use.
+  `allow_pickle_weights = true`. A local model folder loads as it is and takes no revision: a
+  `[detection.ner.revisions]` entry for it is a config error, also for a folder named like a
+  catalogued model id (the catalog's pins name Hub snapshots, never a folder's content).
+  Every load checks that the cached snapshot or folder holds what it reads (configuration,
+  every weight shard an index names, a tokenizer), so an interrupted download counts as a model
+  not in the cache and names what is missing. Previously the newest revision was downloaded
+  from the Hub on first use.
 - The `gliner` NER backend loads its model the same way, and no longer fetches a base model
   from the Hub at every load. The default `urchade/gliner_small-v2.1` (like the other urchade
   v2.1 checkpoints) ships no tokenizer or encoder configuration, so GLiNER fetched them from
@@ -279,9 +327,11 @@ and tags `vX.Y.Z`.
   never start offline. llm-redact now resolves that base model's configuration and tokenizer at
   the revision its model catalog pins and assembles a self-contained folder under
   `$XDG_DATA_HOME/llm-redact/models/gliner/`, which GLiNER loads with `local_files_only`. A
-  GLiNER or base-model configuration naming code to import (`auto_map`) or a model type
-  transformers does not know is refused. A GLiNER load failure now names the exception type
-  instead of suggesting network access.
+  base model that is a local folder (a path, or a folder named like its id under the working
+  directory) is read as it is and takes no pin, like a model folder. A GLiNER or base-model
+  configuration naming code to import (`auto_map`) or a model type transformers does not know
+  is refused. A GLiNER load failure now names the exception type instead of suggesting network
+  access.
 - The `gliner`, `stanza` and `hf` extras require `torch>=2.6`, the release that fixed
   CVE-2025-32434 (a bypass of `torch.load(weights_only=True)`, the loader GLiNER uses for
   `pytorch_model.bin` checkpoints); gliner and stanza themselves accept older torch.

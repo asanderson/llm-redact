@@ -259,21 +259,42 @@ def test_a_revision_for_a_local_directory_is_refused(
     )
 
 
-def test_a_directory_named_like_a_catalogued_id_keeps_the_catalog_pin(
+def test_a_directory_named_like_a_catalogued_id_takes_no_catalog_pin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # The catalog pins the id; a directory of that name is not "configured
-    # with a revision" (transformers would load the directory too).
+    # A folder of a catalogued id's name is a folder (transformers would
+    # load it too): the catalog's pin names a Hub snapshot, never a
+    # folder's content, so the folder is not handed one.
     monkeypatch.chdir(tmp_path)
     _folder(tmp_path / DSLIM, FULL_REPO)
-    path = resolve_model(
-        DSLIM,
-        what="hf model",
-        revision=DSLIM_PIN,
-        allow_download=False,
-        allow_patterns=HF_PATTERNS,
-    )
-    assert path == Path(DSLIM)
+    assert NerConfig(enabled=True, backend="hf", model=DSLIM).revision_for("hf") is None
+    pipe, hub = _build(monkeypatch, model=DSLIM)
+    assert hub.calls == []
+    assert pipe.built_with[0]["model"] == DSLIM
+
+
+def test_a_revision_for_a_directory_named_like_a_catalogued_id_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Even the catalog's own pin, once the configuration names it: a
+    # commit id cannot describe a folder (it once passed silently).
+    monkeypatch.chdir(tmp_path)
+    _folder(tmp_path / DSLIM, FULL_REPO)
+    for revision in (DSLIM_PIN, OTHER):
+        with pytest.raises(ConfigError) as caught:
+            _build(monkeypatch, model=DSLIM, revisions=(("hf", revision),))
+        assert str(caught.value) == (
+            f"[detection.ner] hf model {DSLIM!r} is a local directory; a revision in"
+            " [detection.ner.revisions] applies only to a Hugging Face model id"
+        )
+        with pytest.raises(ConfigError, match="is a local directory"):
+            resolve_model(
+                DSLIM,
+                what="hf model",
+                revision=revision,
+                allow_download=False,
+                allow_patterns=HF_PATTERNS,
+            )
 
 
 # --- no model code ------------------------------------------------------------------
@@ -671,6 +692,26 @@ def test_a_sidecar_identified_folder_takes_the_catalog_base_model_pin(
         _gliner(monkeypatch, hub, model=str(folder))
 
 
+def test_a_base_model_folder_named_like_a_catalogued_id_takes_no_catalog_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The default model's base model id names a folder under the working
+    # directory. A folder is whatever it holds, so the catalog's pin of that
+    # base model (a Hub snapshot) does not apply to it, as for a model folder
+    # (T12c): the pin once reached resolve_model, which refused the folder
+    # naming [detection.ner.revisions], a key the configuration never set.
+    monkeypatch.chdir(tmp_path)
+    _folder(tmp_path / DEBERTA, DEBERTA_REPO)
+    hub = FakeHub(repos={GLINER_SMALL: URCHADE_REPO}, default=None)
+    with caplog.at_level("WARNING", logger="llm_redact"):
+        strict, _ = _gliner(monkeypatch, hub)
+    assert [c["repo_id"] for c in hub.calls] == [GLINER_SMALL, GLINER_SMALL]  # never the base
+    config = json.loads((Path(strict.loaded[0][0]) / "gliner_config.json").read_text())
+    assert config["encoder_config"] == DEBERTA_CONFIG
+    # A local base model is no unpinned Hub model: no "pins no revision" warning.
+    assert caplog.records == []
+
+
 def test_a_failed_gliner_load_names_the_exception_type(monkeypatch: pytest.MonkeyPatch) -> None:
     from llm_redact.detection.gliner_ner import build_gliner_detector
     from ner_fakes import FakeGliner, install_gliner
@@ -826,3 +867,199 @@ def test_the_onnx_table_is_validated(table: object, message: str) -> None:
     )
     assert ok.detection.ner.onnx_for("gliner") == "onnx/m-1_q.onnx"
     assert ok.detection.ner.onnx_for("hf") is None
+
+
+# --- complete file sets (what `llm-redact models verify` checks) ------------------
+
+
+def test_an_incomplete_hf_snapshot_counts_as_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.detection.model_files import ModelNotCached
+
+    # A snapshot an interrupted download left without its tokenizer.
+    repo = {"config.json": json.dumps({"model_type": "bert"}), "model.safetensors": ""}
+    with pytest.raises(ModelNotCached) as caught:
+        _build(monkeypatch, FakeHub(default=repo))
+    assert caught.value.missing == ("tokenizer files",)
+    assert str(caught.value).endswith(
+        "to fetch it at startup (a reload never downloads); missing: tokenizer files"
+    )
+    # With downloads on the repository itself lacks it.
+    with pytest.raises(ConfigError) as refused:
+        _build(monkeypatch, FakeHub(default=repo), model="org/ner", allow_download=True)
+    assert not isinstance(refused.value, ModelNotCached)
+    assert str(refused.value) == (
+        "[detection.ner] hf model 'org/ner' (no revision pinned): its repository lacks what"
+        " the loader needs: tokenizer files"
+    )
+
+
+@pytest.mark.parametrize(
+    ("drop", "missing"),
+    [
+        ("config.json", "config.json"),
+        ("model-00002-of-00002.safetensors", "model-00002-of-00002.safetensors"),
+    ],
+)
+def test_a_local_folder_lacking_a_file_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, drop: str, missing: str
+) -> None:
+    shards = {
+        "weight_map": {
+            "a": "model-00001-of-00002.safetensors",
+            "b": "model-00002-of-00002.safetensors",
+        }
+    }
+    files = {
+        "config.json": json.dumps({"model_type": "bert"}),
+        "model.safetensors.index.json": json.dumps(shards),
+        "model-00001-of-00002.safetensors": "",
+        "model-00002-of-00002.safetensors": "",
+        "vocab.json": "{}",
+        "merges.txt": "",
+    }
+    folder = _folder(tmp_path, {k: v for k, v in files.items() if k != drop})
+    with pytest.raises(ConfigError) as caught:
+        _build(monkeypatch, model=str(folder))
+    assert str(caught.value) == (
+        f"[detection.ner] hf model {str(folder)!r} is a local directory that lacks what the"
+        f" loader needs: {missing}"
+    )
+    complete = _folder(tmp_path / "complete", files)
+    pipe, _ = _build(monkeypatch, model=str(complete))
+    assert pipe.built_with[0]["model"] == str(complete)
+
+
+@pytest.mark.parametrize(
+    "index",
+    [
+        {},
+        {"weight_map": {}},
+        {"weight_map": {"a": "../escape.safetensors"}},
+        {"weight_map": {"a": 3}},
+    ],
+)
+def test_a_weight_index_must_name_plain_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, index: dict[str, Any]
+) -> None:
+    folder = _folder(
+        tmp_path,
+        {
+            "config.json": json.dumps({"model_type": "bert"}),
+            "model.safetensors.index.json": json.dumps(index),
+            "vocab.txt": "",
+        },
+    )
+    with pytest.raises(ConfigError, match="model.safetensors.index.json does not name its weight"):
+        _build(monkeypatch, model=str(folder))
+
+
+def test_a_pickle_shard_index_is_checked_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    folder = _folder(
+        tmp_path,
+        {
+            "config.json": json.dumps({"model_type": "bert"}),
+            "pytorch_model.bin.index.json": json.dumps(
+                {"weight_map": {"a": "pytorch_model-1.bin"}}
+            ),
+            "tokenizer.json": "{}",
+        },
+    )
+    with pytest.raises(ConfigError, match="lacks what the loader needs: pytorch_model-1.bin"):
+        _build(monkeypatch, model=str(folder), allow_pickle_weights=True)
+    (folder / "pytorch_model-1.bin").write_text("")
+    pipe, _ = _build(monkeypatch, model=str(folder), allow_pickle_weights=True)
+    assert pipe.built_with[0]["model_kwargs"] == {"use_safetensors": None}
+
+
+def test_the_hf_file_set_is_what_the_patterns_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.detection.model_files import hf_files
+
+    install_hub(monkeypatch, FakeHub(default=FULL_REPO))
+    files = hf_files(DSLIM, revision=DSLIM_PIN, allow_download=False, allow_pickle_weights=True)
+    assert sorted(files.files) == [
+        "config.json",
+        "model.safetensors",
+        "tokenizer_config.json",
+        "vocab.txt",
+    ]
+    assert files.config is None and files.backbone is None
+    assert all(path.parent == files.directory for path in files.files.values())
+
+
+@pytest.mark.parametrize(
+    ("repo", "missing"),
+    [
+        ({**SELF_CONTAINED, "pytorch_model.bin": None}, "weights"),
+        ({**SELF_CONTAINED, "tokenizer.json": None}, "tokenizer files"),
+    ],
+)
+def test_an_incomplete_gliner_checkpoint_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: dict[str, Any], missing: str
+) -> None:
+    from llm_redact.detection.model_files import ModelNotCached
+
+    files = {name: text for name, text in repo.items() if text is not None}
+    hub = FakeHub(repos={"org/gliner-pii": files}, default=None)
+    with pytest.raises(ModelNotCached) as caught:
+        _gliner(monkeypatch, hub, model="org/gliner-pii")
+    assert caught.value.missing == (missing,)
+    folder = _folder(tmp_path, files)
+    with pytest.raises(
+        ConfigError, match=f"local directory that lacks what the loader needs: {missing}"
+    ):
+        _gliner(monkeypatch, hub, model=str(folder))
+
+
+def test_a_base_model_without_a_tokenizer_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.detection.model_files import ModelNotCached
+
+    base = {name: text for name, text in DEBERTA_REPO.items() if name != "spm.model"}
+    with pytest.raises(ModelNotCached) as caught:
+        _gliner(monkeypatch, _two_repos(**{DEBERTA: base}))
+    assert str(caught.value).startswith(
+        f"[detection.ner] gliner base model '{DEBERTA}' at revision {DEBERTA_PIN} is not"
+    )
+    assert caught.value.missing == ("tokenizer files",)
+    # A checkpoint's own incomplete tokenizer is named as the checkpoint's.
+    own = {**URCHADE_REPO, "tokenizer_config.json": "{}"}
+    with pytest.raises(ModelNotCached) as theirs:
+        _gliner(monkeypatch, _two_repos(**{GLINER_SMALL: own, DEBERTA: base}))
+    assert theirs.value.model == GLINER_SMALL
+
+
+def test_a_self_contained_gliner_folder_with_a_broken_sidecar_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    folder = _folder(tmp_path, {**SELF_CONTAINED, SIDECAR_NAME: "{"})
+    with pytest.raises(ConfigError, match=r"\[detection.ner\] gliner model: .*not a UTF-8 JSON"):
+        _gliner(monkeypatch, FakeHub(default=None), model=str(folder))
+
+
+def test_the_assembled_layout_never_links_the_checkpoint_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The folder's gliner_config.json is written by llm-redact; a link to
+    # the cached one would have been written THROUGH, into the cache.
+    from llm_redact.detection.model_files import gliner_files
+
+    hub = _two_repos()
+    install_hub(monkeypatch, hub)
+    layout = gliner_files(
+        GLINER_SMALL, revision=GLINER_PIN, allow_download=False, check_types=False
+    )
+    assert "gliner_config.json" not in layout.files
+    assert sorted(layout.files) == [
+        "config.json",
+        "pytorch_model.bin",
+        "spm.model",
+        "tokenizer_config.json",
+    ]
+    assert layout.config is not None and layout.config["model_name"] == "."
+    assert (layout.backbone, layout.backbone_revision) == (DEBERTA, DEBERTA_PIN)
+    strict, _ = _gliner(monkeypatch, hub)
+    folder = Path(strict.loaded[0][0])
+    assert not (folder / "gliner_config.json").is_symlink()
+    cached = layout.directory / "gliner_config.json"
+    assert json.loads(cached.read_text()) == {"model_name": DEBERTA, "max_len": 384}

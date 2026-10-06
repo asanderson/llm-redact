@@ -85,6 +85,7 @@ deliberate scope decisions rather than gaps:
 | S3 audit sink (opt-in, `[audit.s3]`) | the same audit rows as NDJSON batch objects — shipping them to a bucket is an explicit off-machine trust decision; credentials come from env vars or the workload's cloud identity (`auth = "identity"`), never the config file; failures WARN and drop (under `[audit] required`: END, interrupted and classic rows spool from the audit DB and retry until confirmed — never dropped; START and AMEND rows ship from a bounded in-memory buffer and can be lost, counted in `rows_dropped`) | values, placeholder ids, credentials |
 | OpenTelemetry (opt-in) | same metadata as spans/counters — pointing `endpoint` at a remote collector is an explicit trust decision | values, headers, placeholder ids |
 | Vault | — (never leaves the machine) | — |
+| Model downloads (opt-in, `[detection.ner] allow_download = true`) | at the proxy's startup only, for an NER model (or a GLiNER model's base model) missing from the local Hugging Face cache: its model id, the pinned revision and the file names it needs, to huggingface.co (or `HF_ENDPOINT`). Off by default: every model then loads from the local cache or a folder, the Hugging Face libraries' offline switches are set, and a reload never downloads; `llm-redact models pull` is the explicit, operator-run fetch and `doctor` WARNs while downloads are on | request content, values, placeholders, anything a model read |
 
 ## Realtime WebSocket connections
 

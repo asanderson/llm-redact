@@ -210,12 +210,16 @@ class FakeHub:
     call writes the repository's files its ``allow_patterns`` match
     (fnmatch, as the hub matches them) into one folder per repository and
     revision, and returns it. A repository in ``uncached`` is missing from
-    the cache: a ``local_files_only`` call raises. Every call is recorded.
-    No network, ever."""
+    the cache: a ``local_files_only`` call raises, and a download (a call
+    without it) puts it there. A call without a revision gets the
+    repository's default branch: the folder of its commit in ``heads`` (as
+    the real cache's ``snapshots/<commit>``), else ``main``. Every call is
+    recorded. No network, ever."""
 
     repos: dict[str, dict[str, str]] = field(default_factory=dict)
     default: dict[str, str] | None = field(default_factory=lambda: dict(DEFAULT_REPO))
     uncached: set[str] = field(default_factory=set)
+    heads: dict[str, str] = field(default_factory=dict)
     calls: list[dict[str, Any]] = field(default_factory=list)
     root: Path = field(
         default_factory=lambda: Path(tempfile.mkdtemp(prefix="fake-hub-", dir=os.environ["HOME"]))
@@ -244,7 +248,9 @@ class FakeHub:
             raise NotCached(f"no repository {repo_id}")
         if local_files_only and repo_id in self.uncached:
             raise NotCached(f"{repo_id} is not cached")
-        folder = self.root / repo_id.replace("/", "--") / (revision or "main")
+        self.uncached.discard(repo_id)  # (a download fills the cache)
+        head = revision or self.heads.get(repo_id, "main")
+        folder = self.root / repo_id.replace("/", "--") / head
         for name, content in files.items():
             if allow_patterns is None or any(fnmatch.fnmatch(name, p) for p in allow_patterns):
                 target = folder / name

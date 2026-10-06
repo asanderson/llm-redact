@@ -193,6 +193,26 @@ dashboard offers the same Allow once / Always allow buttons. Access control, req
 checks, size caps and anything under a credential the proxy holds are never
 overridable. Details: `docs/overrides.md`.
 
+## Local NER models (optional)
+
+With `[detection.ner]` enabled on the `gliner` or `hf` backend, the proxy
+runs a local model on every scanned string. Models load from the local
+Hugging Face cache or a local folder, at a pinned revision; nothing is
+downloaded unless `allow_download = true`, and then only at startup.
+
+- `llm-redact models pull` — fetch each configured model (and a GLiNER
+  model's base model) at its revision into the local cache; `--to DIR`
+  also writes portable folders with a SHA-256 manifest for an air-gapped
+  install, and prints the config lines that load them (`--as /models`
+  for where they will be mounted).
+- `llm-redact models list` — each configured model, its revision, catalog
+  status, license, and whether its files are there (offline).
+- `llm-redact models verify` — exit 1 unless every model is complete at its
+  revision; `--dir DIR` checks a folder of portable models against its
+  manifest (offline, no config).
+- `llm-redact doctor` — the `models` area says the same, with warnings for
+  downloads, pickle weights, unpinned and restricted models.
+
 ## Honesty surfaces
 
 Anything that reduces coverage is surfaced, never silent. Configured

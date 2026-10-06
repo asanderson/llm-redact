@@ -177,6 +177,14 @@ hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
   weights. GLiNER loads its `pytorch_model.bin` through torch's
   `weights_only` loader whatever this key says.
 
+`llm-redact doctor` reports these settings under `models` while NER is on,
+without loading a model or touching the network: a WARN while
+`allow_download` or `allow_pickle_weights` is on and for a model with no pin,
+each model's pin and where it comes from, and whether every file its load
+reads is in the local Hugging Face cache at that pin (a GLiNER model's base
+model included) or in its folder — a FAIL, naming `llm-redact models pull`,
+when a model the startup needs is missing while downloads are off.
+
 **How the `hf` backend loads a model.** A Hub model is looked up in the local
 Hugging Face cache at its pinned revision (fetched only when
 `allow_download = true`), with an explicit list of top-level files: its
@@ -184,8 +192,12 @@ Hugging Face cache at its pinned revision (fetched only when
 TensorFlow, Flax, ONNX or `original/` copies a repository may also hold. A
 model missing from the cache is a startup error that names the model and the
 revision. A local folder is loaded as it is; a revision for it is a config
-error. A model whose `config.json` or `tokenizer_config.json` names code to
-import from its repository (`auto_map`) is refused, and nothing is ever
+error, and it never takes the catalog's pin, even when its path reads like a
+catalogued model id. Every load checks that the folder or cached snapshot
+holds what it reads — `config.json`, the weights (every shard a weight index
+names) and a tokenizer — so an interrupted download counts as a model not in
+the cache. A model whose `config.json` or `tokenizer_config.json` names code
+to import from its repository (`auto_map`) is refused, and nothing is ever
 loaded with `trust_remote_code`. The weights must be safetensors: a model
 with only `pytorch_model.bin` is refused unless `allow_pickle_weights = true`,
 and a model with both always loads its safetensors.
@@ -205,9 +217,12 @@ assembles a self-contained folder under `$XDG_DATA_HOME/llm-redact/models/gliner
 links to the checkpoint's weights and the base model's tokenizer, and a
 `gliner_config.json` that embeds the base model's configuration as
 `encoder_config` and names no absolute path. A base model the catalog does
-not pin loads at its newest cached revision, with a startup warning. A
-configuration naming code to import (`auto_map`) or a model type transformers
-does not know is refused.
+not pin loads at its newest cached revision, with a startup warning. A base
+model that is a local folder (the checkpoint's configuration names a path,
+or a folder under the working directory is named like the base model's id)
+is read from that folder as it is, with no pin and no warning, like a local
+model folder. A configuration naming code to import (`auto_map`) or a model
+type transformers does not know is refused.
 
 **ONNX weights for `gliner`.** `[detection.ner.onnx]` loads a GLiNER model's
 ONNX export through onnxruntime (installed with the `gliner` extra) instead
@@ -225,6 +240,163 @@ gliner = "onnx/model_quint8.onnx"   # the int8 export (Knowledgator ships model.
 
 Only `gliner` takes an entry; the value must be a `.onnx` path inside the
 model (no wildcard, no `..`). A model that lacks the file is a startup error.
+
+### The model catalog
+
+llm-redact keeps a catalog of the Hugging Face models the `gliner` and `hf`
+backends may load (`src/llm_redact/detection/model_catalog.py`): each model's
+license, a one-line statement of facts with a link to its model card and the
+date they were checked, the commit it is pinned to, and, for a GLiNER model
+that ships no tokenizer, the base model and the commit that base model is
+pinned to. The catalog only states facts; llm-redact never refuses a model
+for its catalog status (a policy plugin may).
+
+- **vetted**: a known-good choice, pinned to a commit.
+- **caution**: configurable and pinned, with the reason shown — for example,
+  not yet measured by the llm-redact bench.
+- **restricted**: never suggested. A configured restricted model logs a
+  startup WARNING with the catalog's facts:
+  `[detection.ner] BACKEND model 'ID' has model catalog status "restricted": …`.
+
+What the catalog says about each running backend's model is in `/status`
+(`detection.ner.backends.BACKEND`: `source`, `model_id`, `revision`, `pinned`,
+`catalog`, `license`, see "NER coverage counters" below), in `llm-redact
+doctor` under `models` (a WARN for a restricted model and for a model nothing
+pins, and a FAIL when the installed library is older than a model needs) and
+in `llm-redact models list`. A model the catalog does not know loads as
+configured; pin it in `[detection.ner.revisions]`. A local folder is looked up
+by the model its `llm-redact-model.json` names.
+
+<!-- model-catalog:vetted -->
+| Model | Backend | License | Pinned revision | Base model (pinned revision) |
+|---|---|---|---|---|
+| `dslim/bert-base-NER` | hf | MIT | `d1a3e8f13f8c` | — |
+| `urchade/gliner_small-v2.1` | gliner | Apache-2.0 | `4e091416cf7c` | `microsoft/deberta-v3-small` (`a36c739020e0`) |
+| `urchade/gliner_medium-v2.1` | gliner | Apache-2.0 | `40ec419335d0` | `microsoft/deberta-v3-base` (`8ccc9b6f3619`) |
+| `urchade/gliner_multi-v2.1` | gliner | Apache-2.0 | `443d26d654e0` | `microsoft/mdeberta-v3-base` (`a0484667b223`) |
+| `urchade/gliner_multi_pii-v1` | gliner | Apache-2.0 | `1fcf13e85f4e` | `microsoft/mdeberta-v3-base` (`a0484667b223`) |
+<!-- /model-catalog -->
+
+The defaults are `urchade/gliner_small-v2.1` (`gliner`) and
+`dslim/bert-base-NER` (`hf`). A base model is pinned where the GLiNER
+checkpoint ships no tokenizer or encoder configuration of its own.
+
+Configurable, status caution (`not yet measured by the llm-redact bench`;
+their cards do not name the training data). Each ships its tokenizer and
+encoder configuration, so no base model is fetched; `-edge` and `-small` need
+transformers 4.48 or newer:
+
+<!-- model-catalog:caution -->
+| Model | Backend | License | Pinned revision | Base model (pinned revision) |
+|---|---|---|---|---|
+| `knowledgator/gliner-pii-edge-v1.0` | gliner | Apache-2.0 | `9b7f39b0a2da` | `jhu-clsp/ettin-encoder-32m` (—) |
+| `knowledgator/gliner-pii-small-v1.0` | gliner | Apache-2.0 | `d21aad5b4a7e` | `jhu-clsp/ettin-encoder-68m` (—) |
+| `knowledgator/gliner-pii-base-v1.0` | gliner | Apache-2.0 | `61726e0ad791` | `microsoft/deberta-v3-small` (—) |
+| `knowledgator/gliner-pii-large-v1.0` | gliner | Apache-2.0 | `f847f54fbc97` | `microsoft/deberta-v3-large` (—) |
+<!-- /model-catalog -->
+
+Restricted (a startup WARNING names the facts; no pin):
+
+<!-- model-catalog:restricted -->
+| Model | Backend | License | Pinned revision | Base model (pinned revision) |
+|---|---|---|---|---|
+| `iiiorg/piiranha-v1-detect-personal-information` | hf | CC-BY-NC-ND-4.0 | — | — |
+| `Isotonic/deberta-v3-base_finetuned_ai4privacy_v2` | hf | CC-BY-NC-4.0 | — | — |
+| `Isotonic/distilbert_finetuned_ai4privacy_v2` | hf | CC-BY-NC-4.0 | — | — |
+| `urchade/gliner_base` | gliner | CC-BY-NC-4.0 | — | — |
+| `nvidia/gliner-PII` | gliner | LicenseRef-NVIDIA-Open-Model-License | — | — |
+| `bigcode/starpii` | hf | LicenseRef-bigcode-starpii-terms-of-use | — | — |
+| `ai4privacy/llama-ai4privacy-*` | hf | MIT | — | — |
+| `knowledgator/gliner-stream-pii-v1.0` | gliner | Apache-2.0 | — | `Qwen/Qwen3-0.6B` (—) |
+| `perplexity-ai/PII-Tracer` | hf | MIT | — | — |
+| `OpenMed/privacy-filter-multilingual` | hf | Apache-2.0 | — | — |
+| `llm-semantic-router/mmbert32k-pii-detector-merged` | hf | MIT | — | — |
+<!-- /model-catalog -->
+
+`*` marks an id prefix: every model whose id starts with it. The reasons, with
+their links and check dates, are what the startup warning, `doctor` and
+`llm-redact models list --json` print.
+
+### Fetching and checking models: `llm-redact models`
+
+`llm-redact models` works on the models of the `gliner` and `hf` backends the
+configuration names (`--config PATH`, like `serve` and `doctor`; NER need not
+be enabled yet). `pull` is the one subcommand that downloads; `list` and
+`verify` read local files only and never touch the network:
+
+```bash
+llm-redact models pull              # fetch each model (and GLiNER base model) at its revision
+llm-redact models pull --to DIR [--as /models]   # ... and write portable folders + a manifest
+llm-redact models list [--json]     # each model: revision, catalog status, license, files, base model
+llm-redact models verify            # exit 1 unless every model is complete at its revision
+llm-redact models verify --dir DIR  # check a folder written by `models pull --to` (no config)
+```
+
+- `pull` fetches each model at the revision its load asks for (the
+  `[detection.ner.revisions]` pin, else the catalog's), with exactly the file
+  names the loader uses — never TensorFlow, Flax, ONNX or `original/` copies,
+  a `pytorch_model.bin` only where the loader would take it — and a GLiNER
+  model's base model at the catalog's pin, into the Hugging Face cache (the
+  same `HF_HOME` the proxy reads). With `allow_download = false`, the default,
+  this is how a model gets there. For a model nothing pins it prints the
+  commit it fetched and the `[detection.ner.revisions]` line that pins it;
+  for a model the catalog lists as restricted it prints the catalog's facts.
+  A model configured as a local folder is read, never fetched — except that
+  for a GLiNER folder that ships no tokenizer or encoder configuration of its
+  own (a clone of an urchade model), which loads with its base model's from
+  the Hugging Face cache, `pull` fetches that base model (at the catalog's
+  pin when the folder's `llm-redact-model.json` names a catalogued model); a
+  folder that cannot load fails with the startup's message.
+  Downloads need network access to huggingface.co (and `HF_TOKEN` for a gated
+  model); exit 1 when a model cannot be fetched.
+- `pull --to DIR` also writes one self-contained folder per model into `DIR`
+  (`hf-dslim--bert-base-NER`, `gliner-urchade--gliner_small-v2.1`): its files
+  copied, a GLiNER model's base-model tokenizer and configuration included
+  (the folder loads with no base model and no assembly), an
+  `llm-redact-model.json` naming the model and revision, and beside the
+  folders a manifest, `llm-redact-models.json`, listing every file with its
+  size and SHA-256. It then prints the `[detection.ner.models]` lines that
+  load the folders — as they are, or as mounted elsewhere with `--as PATH`
+  (`--as /models` for a volume mounted at `/models`; an absolute path, since
+  the proxy reads a relative one against its working directory, and one such
+  as `models/hf-…` as a Hugging Face model id). A folder loads with downloads
+  off and no network at all; it takes no `[detection.ner.revisions]` entry
+  (its `llm-redact-model.json` records the revision, so the catalog and
+  `/status` still know which model it is). Only the Hub models `pull` fetches
+  are written: a model configured as a local folder is not copied (carry it
+  yourself — a GLiNER folder without a tokenizer of its own also needs its
+  base model in the Hugging Face cache where it loads). Nothing is written to
+  `DIR` unless every model was fetched; a folder of the same name that `pull
+  --to` did not write is never replaced, and nothing is replaced until every
+  new folder is written beside the old ones (should replacing them still fail
+  part-way, `DIR` is left without its manifest, so `verify --dir` fails until
+  a pull completes). Use an empty `DIR`: `verify --dir` checks every file
+  inside the model folders. This is the way to carry models into an air-gapped
+  network: pull on a connected machine, copy `DIR`, run `llm-redact models
+  verify --dir` there, and point the configuration at the folders.
+
+- `list` prints, per model, the revision it loads, its catalog status and
+  license, whether its files are there (`cached`, `folder` for a local
+  folder, `missing`, `incomplete`, `error`) and its base model (a GLiNER
+  model without a tokenizer of its own); `--json` adds the catalog's facts,
+  the libraries a model needs and the problem text. spaCy, Presidio and
+  Stanza models are not Hugging Face snapshots: their install commands are
+  printed instead.
+- `verify` exits 1 unless every model's files are complete where its load
+  reads them, at its revision: its configuration, every weight file and its
+  tokenizer, and a GLiNER model's base model. The Hugging Face cache can hold
+  a revision only in part (after an interrupted download) and still report
+  it as present; `verify` checks what the loader needs, exactly as the
+  proxy's startup does. Exit 2: the configuration cannot be read.
+- `verify --dir DIR` checks a folder of portable models written by
+  `llm-redact models pull --to` against the manifest beside them,
+  `llm-redact-models.json`: every file's size and SHA-256, no file the
+  manifest does not list inside a model folder (a loader could read it), each
+  folder's `llm-redact-model.json` naming the model and revision the manifest
+  does, and each folder complete for its loader. It needs no configuration
+  and no network, so it runs inside an air-gapped enclave before the proxy
+  loads the folder; entries beside the model folders (`lost+found`) are only
+  noted.
 
 ## How NER runs
 
@@ -430,7 +602,9 @@ existing `detection.ner_enabled`):
   "backends": {
     "hf": {
       "model": "dslim/bert-base-NER",
-      "revision": null, "catalog": null, "license": null,
+      "source": "hub", "model_id": "dslim/bert-base-NER",
+      "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc", "pinned": true,
+      "catalog": "vetted", "license": "MIT",
       "counters": {"scanned_whole": 812, "scanned_windowed": 14, "skipped_max_chars": 3,
                    "windows": 61, "windows_truncated": 0, "labels_dropped": 0,
                    "offsets_dropped": 0, "inline_calls": 0, "prefetch_misses": 0}
@@ -456,8 +630,16 @@ Each string a backend is handed counts once, under `scanned_whole`,
 `scanned_windowed` or `skipped_max_chars`; with several backends each one
 counts the strings it was handed. `unmatched_entities` lists the configured
 entities no active backend can ever emit (the startup warning above), and
-`model` the model each backend loaded; `revision`, `catalog` and `license` are
-`null`.
+`model` the model each backend loaded. For the `gliner` and `hf` backends,
+`source` says whether it came from the Hugging Face Hub (`hub`) or a local
+folder (`local`), `model_id` names the Hub model (a folder's: the one its
+`llm-redact-model.json` names, else `null`), `revision` the commit it loads
+(the `[detection.ner.revisions]` pin, else the model catalog's; a folder's from
+its `llm-redact-model.json`), `pinned` whether there is one, and `catalog` and
+`license` what the model catalog records (`vetted`, `caution`, `restricted`,
+or `null` for a model it does not list; see "The model catalog"). These six
+are `null` for the spaCy, Presidio and Stanza backends, whose models are not
+Hub snapshots.
 
 The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
 backend and outcome, `llm_redact_ner_windows_total`,

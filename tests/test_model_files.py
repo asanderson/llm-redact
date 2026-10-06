@@ -259,21 +259,42 @@ def test_a_revision_for_a_local_directory_is_refused(
     )
 
 
-def test_a_directory_named_like_a_catalogued_id_keeps_the_catalog_pin(
+def test_a_directory_named_like_a_catalogued_id_takes_no_catalog_pin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # The catalog pins the id; a directory of that name is not "configured
-    # with a revision" (transformers would load the directory too).
+    # A folder of a catalogued id's name is a folder (transformers would
+    # load it too): the catalog's pin names a Hub snapshot, never a
+    # folder's content, so the folder is not handed one.
     monkeypatch.chdir(tmp_path)
     _folder(tmp_path / DSLIM, FULL_REPO)
-    path = resolve_model(
-        DSLIM,
-        what="hf model",
-        revision=DSLIM_PIN,
-        allow_download=False,
-        allow_patterns=HF_PATTERNS,
-    )
-    assert path == Path(DSLIM)
+    assert NerConfig(enabled=True, backend="hf", model=DSLIM).revision_for("hf") is None
+    pipe, hub = _build(monkeypatch, model=DSLIM)
+    assert hub.calls == []
+    assert pipe.built_with[0]["model"] == DSLIM
+
+
+def test_a_revision_for_a_directory_named_like_a_catalogued_id_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Even the catalog's own pin, once the configuration names it: a
+    # commit id cannot describe a folder (it once passed silently).
+    monkeypatch.chdir(tmp_path)
+    _folder(tmp_path / DSLIM, FULL_REPO)
+    for revision in (DSLIM_PIN, OTHER):
+        with pytest.raises(ConfigError) as caught:
+            _build(monkeypatch, model=DSLIM, revisions=(("hf", revision),))
+        assert str(caught.value) == (
+            f"[detection.ner] hf model {DSLIM!r} is a local directory; a revision in"
+            " [detection.ner.revisions] applies only to a Hugging Face model id"
+        )
+        with pytest.raises(ConfigError, match="is a local directory"):
+            resolve_model(
+                DSLIM,
+                what="hf model",
+                revision=revision,
+                allow_download=False,
+                allow_patterns=HF_PATTERNS,
+            )
 
 
 # --- no model code ------------------------------------------------------------------

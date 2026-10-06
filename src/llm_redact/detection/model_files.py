@@ -40,7 +40,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from llm_redact.detection.model_catalog import MODEL_ID_RE, pinned_revision
+from llm_redact.detection.model_catalog import MODEL_ID_RE
 
 # Tokenizer files, by the names transformers looks for: a fast tokenizer's
 # tokenizer.json, its configuration, and the vocabularies a slow tokenizer
@@ -123,13 +123,14 @@ def resolve_model(
     """The local directory holding ``model``'s files.
 
     ``what`` names the model in messages ("hf model", "gliner model", ...).
-    A local directory is returned as it is; a configured ``revision`` for
-    one (any but the catalog's own pin for the same name) is an error. A
-    Hub model id is looked up at ``revision`` with ``allow_patterns``,
-    from the local Hugging Face cache only unless ``allow_download``.
+    A local directory is returned as it is; any ``revision`` for one is an
+    error (``NerConfig.revision_for`` never hands a folder a catalog pin,
+    so a revision here is one the configuration names). A Hub model id is
+    looked up at ``revision`` with ``allow_patterns``, from the local
+    Hugging Face cache only unless ``allow_download``.
     """
     if is_local(model):
-        if revision is not None and revision != pinned_revision(model):
+        if revision is not None:
             raise _config_error(
                 f"[detection.ner] {what} {model!r} is a local directory; a revision in"
                 " [detection.ner.revisions] applies only to a Hugging Face model id"

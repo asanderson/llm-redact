@@ -184,7 +184,8 @@ Hugging Face cache at its pinned revision (fetched only when
 TensorFlow, Flax, ONNX or `original/` copies a repository may also hold. A
 model missing from the cache is a startup error that names the model and the
 revision. A local folder is loaded as it is; a revision for it is a config
-error. A model whose `config.json` or `tokenizer_config.json` names code to
+error, and it never takes the catalog's pin, even when its path reads like a
+catalogued model id. A model whose `config.json` or `tokenizer_config.json` names code to
 import from its repository (`auto_map`) is refused, and nothing is ever
 loaded with `trust_remote_code`. The weights must be safetensors: a model
 with only `pytorch_model.bin` is refused unless `allow_pickle_weights = true`,

@@ -156,17 +156,27 @@ class NerConfig:
         """The ONNX file ``backend`` loads ([detection.ner.onnx]), or None."""
         return dict(self.onnx).get(backend)
 
-    def revision_for(self, backend: str) -> str | None:
-        """The commit ``backend``'s model is pinned to: its
-        [detection.ner.revisions] entry, else the catalog pin of the model
-        it loads (its configured model, else the backend's default). None:
-        unpinned, or a backend whose models are not Hub snapshots."""
+    def configured_revision(self, backend: str) -> str | None:
+        """``backend``'s [detection.ner.revisions] entry, or None."""
         for name, revision in self.revisions:
             if name == backend:
                 return revision
-        if backend not in HUB_BACKENDS:
-            return None
-        return pinned_revision(self.model_for(backend) or DEFAULT_MODELS[backend])
+        return None
+
+    def revision_for(self, backend: str) -> str | None:
+        """The commit ``backend``'s model is pinned to: its
+        [detection.ner.revisions] entry, else the catalog pin of the Hub
+        model it loads (its configured model, else the backend's default).
+        None: unpinned, a local directory (a catalog pin names a Hub
+        snapshot, never a folder, even one named like a catalogued id), or
+        a backend whose models are not Hub snapshots."""
+        configured = self.configured_revision(backend)
+        if configured is not None or backend not in HUB_BACKENDS:
+            return configured
+        from llm_redact.detection.model_files import is_local
+
+        model = self.model_for(backend) or DEFAULT_MODELS[backend]
+        return None if is_local(model) else pinned_revision(model)
 
 
 @dataclass(frozen=True)

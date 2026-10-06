@@ -494,7 +494,11 @@ without a token, a full disk or a cache the proxy cannot write.
 
 `[detection.ner.models]` (or `model`) names a local folder, and
 `[detection.ner.revisions]` pins that backend too. A folder is whatever it
-holds, so a commit id cannot apply to it: remove the backend's revision.
+holds, so a commit id cannot apply to it: remove the backend's revision. This
+holds for a folder whose path reads like a model id (`dslim/bert-base-NER`
+under the proxy's working directory) too, even when the revision is the one
+the model catalog pins for that id. A folder written by `llm-redact models pull
+--to` records its model and revision in its `llm-redact-model.json` instead.
 
 ## "[detection.ner] … model '…' is neither a local directory nor a Hugging Face model id"
 

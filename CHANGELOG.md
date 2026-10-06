@@ -232,8 +232,10 @@ and tags `vX.Y.Z`.
   with an error naming the model and revision. A model whose `config.json` or
   `tokenizer_config.json` names code to import (`auto_map`) is refused; a model that ships only
   `pytorch_model.bin` (a pickle, which can run code when loaded) is refused unless
-  `allow_pickle_weights = true`. Previously the newest revision was downloaded from the Hub on
-  first use.
+  `allow_pickle_weights = true`. A local model folder loads as it is and takes no revision: a
+  `[detection.ner.revisions]` entry for it is a config error, also for a folder named like a
+  catalogued model id (the catalog's pins name Hub snapshots, never a folder's content).
+  Previously the newest revision was downloaded from the Hub on first use.
 - The `gliner` NER backend loads its model the same way, and no longer fetches a base model
   from the Hub at every load. The default `urchade/gliner_small-v2.1` (like the other urchade
   v2.1 checkpoints) ships no tokenizer or encoder configuration, so GLiNER fetched them from

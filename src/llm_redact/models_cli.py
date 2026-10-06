@@ -7,18 +7,32 @@ model folders — never the network: ``list`` shows each model of the
 its files are there; ``verify`` exits 1 unless every one is complete at its
 revision (a cached snapshot can be incomplete), and ``verify --dir DIR``
 checks a folder written by ``models pull --to`` against its manifest, for
-use inside an air-gapped enclave (AD11). spaCy, Presidio and Stanza models
-are not Hugging Face snapshots: their install commands are printed instead.
+use inside an air-gapped enclave (AD11). ``pull`` is the one subcommand
+that downloads: each model (and GLiNER base model) at its revision, with
+the loaders' own file names, into the Hugging Face cache — and with ``--to``
+also into portable, self-contained folders with a SHA-256 manifest. spaCy,
+Presidio and Stanza models are not Hugging Face snapshots: their install
+commands are printed instead.
 
 Output names backends, model ids, revisions, files and catalog facts only.
 """
 
 import argparse
+import os
+import re
+import shutil
 import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from llm_redact.config import Config, ConfigError, apply_env_overrides, load_config
+
+if TYPE_CHECKING:
+    from llm_redact.detection.engine import NerConfig
+    from llm_redact.detection.model_files import ModelFiles
+    from llm_redact.detection.model_manifest import ManifestModel
+    from llm_redact.detection.model_sources import ModelSource
 
 # Exit codes: 0 fine, 1 a model (or folder) is not complete, 2 the command
 # could not run (an unreadable configuration, bad arguments).
@@ -50,9 +64,31 @@ def add_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]"
         help="check DIR against its llm-redact-models.json (sizes and SHA-256; no config)",
     )
     verify.add_argument("--json", action="store_true", help="machine-readable output")
+    pull = sub.add_parser(
+        "pull",
+        help="download each configured model (and GLiNER base model) at its revision into the"
+        " Hugging Face cache",
+    )
+    pull.add_argument("--config", type=Path, default=None, help="path to config.toml")
+    pull.add_argument(
+        "--to",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="also write portable, self-contained model folders and a SHA-256 manifest to DIR",
+    )
+    pull.add_argument(
+        "--as",
+        dest="mount_as",
+        default=None,
+        metavar="PATH",
+        help="with --to: print the config snippet for DIR mounted at PATH (for example /models)",
+    )
 
 
 def run_models(args: argparse.Namespace) -> int:
+    if args.models_command == "pull":
+        return run_pull(args)
     if args.models_command == "verify":
         if args.dir is not None:
             return run_verify_dir(args)
@@ -336,3 +372,237 @@ def _loader_problems(root: Path, model: Any) -> list[str]:
     except ConfigError as problem:
         return [str(problem)]
     return []
+
+
+# --- pull ----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Pulled:
+    """One model `models pull` fetched: its source, the commit it fetched
+    and the files its load reads."""
+
+    source: "ModelSource"
+    revision: str | None
+    files: "ModelFiles"
+    # [detection.ner.onnx]: the ONNX file the folder carries instead of
+    # torch weights (gliner only).
+    onnx: str | None = None
+
+
+class PullError(Exception):
+    """A pull that cannot write its output (names paths only)."""
+
+
+def snapshot_commit(path: Path | None) -> str | None:
+    """The commit a Hugging Face cache snapshot holds: the cache keeps each
+    revision in ``snapshots/<commit>``. None when the folder is not named
+    like one."""
+    from llm_redact.detection.model_catalog import REVISION_RE
+
+    return path.name if path is not None and REVISION_RE.fullmatch(path.name) else None
+
+
+def folder_name(backend: str, model_id: str) -> str:
+    """A portable model folder's name: the backend and the model id with
+    every run of other characters as ``--`` (``hf-dslim--bert-base-NER``)."""
+    return f"{backend}-{re.sub(r'[^A-Za-z0-9._-]+', '--', model_id)}"
+
+
+def run_pull(args: argparse.Namespace) -> int:
+    if args.mount_as is not None and args.to is None:
+        print("llm-redact models pull: --as needs --to", file=sys.stderr)
+        return UNUSABLE
+    config = _config(args)
+    if config is None:
+        return UNUSABLE
+    from llm_redact.detection.model_sources import hub_sources
+
+    ner = config.detection.ner
+    sources = hub_sources(ner)
+    if not ner.enabled:
+        print("NER is off ([detection.ner] enabled = false); pulling the models it would load")
+    _print_others(config)
+    if not sources:
+        print("no Hugging Face Hub models configured (backends gliner, hf): nothing to pull")
+        return OK
+    if not _hub_installed():
+        print(
+            "FAIL  pulling needs huggingface_hub, which the hf and gliner extras install;"
+            " install the backend's extra (uv sync --extra hf)"
+        )
+        return FAILED
+    pulled: list[Pulled] = []
+    failed = False
+    for source in sources:
+        ok, item = _pull_one(ner, source)
+        failed = failed or not ok
+        if item is not None:
+            pulled.append(item)
+    if failed:
+        if args.to is not None:
+            print(f"FAIL  not every model was pulled; nothing was written to {args.to}")
+        return FAILED
+    if args.to is None:
+        return OK
+    try:
+        written = write_portable(args.to, pulled)
+    except PullError as problem:
+        print(f"FAIL  {problem}")
+        return FAILED
+    except OSError as exc:
+        print(f"FAIL  cannot write the model folders to {args.to} ({type(exc).__name__})")
+        return FAILED
+    _print_snippet(ner, args, written)
+    return OK
+
+
+def _pull_one(ner: "NerConfig", source: "ModelSource") -> tuple[bool, Pulled | None]:
+    """Fetch one model (and its base model) at its revision; print what
+    happened. (ok, the pulled model or None)."""
+    from llm_redact.detection.model_sources import local_files
+
+    where = f"{source.backend}: {source.model}"
+    if source.sidecar_problem is not None:
+        print(f"FAIL  {source.backend}: {source.sidecar_problem}")
+        return False, None
+    if source.local:
+        print(f"skip  {where} is a local folder; nothing to pull")
+        return True, None
+    restricted = source.restricted_warning()
+    if restricted is not None:
+        print(f"warning: {restricted}")
+    revision = ner.revision_for(source.backend)
+    try:
+        files = local_files(ner, source, revision=revision, allow_download=True)
+    except ConfigError as problem:
+        print(f"FAIL  {problem}")
+        return False, None
+    if revision is None:
+        revision = snapshot_commit(files.directory)
+        if revision is not None:
+            print(
+                f"note: {where} has no pin; its default branch is at {revision}. Pin it:"
+                f' [detection.ner.revisions] {source.backend} = "{revision}"'
+            )
+        else:
+            print(
+                f"note: {where} has no pin, and the commit pulled could not be told; pin one"
+                f" in [detection.ner.revisions] {source.backend}"
+            )
+    if files.backbone is not None and files.backbone_revision is None:
+        commit = snapshot_commit(files.backbone_directory)
+        files = replace(files, backbone_revision=commit)
+        print(
+            f"note: {where}: the model catalog pins no revision of its base model"
+            f" {files.backbone}; pulled {commit or 'its default branch'}"
+        )
+    base = (
+        f"; base model {files.backbone} at {files.backbone_revision}"
+        if files.backbone is not None
+        else ""
+    )
+    count = len(files.files) + (files.config is not None)
+    print(f"OK    {where} at {revision}: {count} files{base}")
+    return True, Pulled(source, revision, files, ner.onnx_for(source.backend))
+
+
+def write_portable(root: Path, pulled: list[Pulled]) -> list[tuple[str, str]]:
+    """Write each pulled model as a self-contained folder under ``root``
+    (its files, an assembled GLiNER model's gliner_config.json, and its
+    ``llm-redact-model.json``), then the manifest. Returns (backend, folder)
+    pairs. A folder of the same name is replaced only when it is one this
+    command wrote (it holds a sidecar)."""
+    from llm_redact import __version__
+    from llm_redact.detection.model_manifest import MANIFEST_NAME, manifest_json
+    from llm_redact.jsonwalk import json_text
+
+    root.mkdir(parents=True, exist_ok=True)
+    models = []
+    written = []
+    for item in pulled:
+        model_id = item.source.model_id or item.source.model
+        name = folder_name(item.source.backend, model_id)
+        models.append(_write_folder(root, name, model_id, item))
+        written.append((item.source.backend, name))
+    temp = root / f".{MANIFEST_NAME}.partial"
+    temp.write_text(json_text(manifest_json(models, __version__)) + "\n", encoding="utf-8")
+    os.replace(temp, root / MANIFEST_NAME)
+    return written
+
+
+def _write_folder(root: Path, name: str, model_id: str, item: Pulled) -> "ManifestModel":
+    from llm_redact.detection.model_catalog import (
+        SIDECAR_NAME,
+        ModelIdentity,
+        sidecar_text,
+    )
+    from llm_redact.detection.model_files import GLINER_CONFIG, config_text
+    from llm_redact.detection.model_manifest import ManifestModel, file_records, folder_files
+
+    final = root / name
+    if final.exists() and not (final / SIDECAR_NAME).is_file():
+        raise PullError(
+            f"{final} exists and is not a folder `llm-redact models pull --to` wrote; remove it"
+            " or choose another --to"
+        )
+    temp = root / f".{name}.partial"
+    shutil.rmtree(temp, ignore_errors=True)
+    try:
+        temp.mkdir()
+        for relative, source in item.files.files.items():
+            target = temp / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(os.path.realpath(source), target)
+        if item.files.config is not None:
+            (temp / GLINER_CONFIG).write_text(config_text(item.files.config), encoding="utf-8")
+        identity = ModelIdentity(model_id, item.revision)
+        (temp / SIDECAR_NAME).write_text(sidecar_text(identity), encoding="utf-8")
+        records = file_records(temp, folder_files(temp))
+        if final.exists():
+            shutil.rmtree(final)
+        os.rename(temp, final)
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+    return ManifestModel(
+        backend=item.source.backend,
+        model_id=model_id,
+        revision=item.revision,
+        folder=name,
+        files=tuple((r["path"], r["size"], r["sha256"]) for r in records),
+        backbone=item.files.backbone,
+        backbone_revision=item.files.backbone_revision,
+        onnx=item.onnx,
+    )
+
+
+def _print_snippet(
+    ner: "NerConfig", args: argparse.Namespace, written: list[tuple[str, str]]
+) -> None:
+    """The [detection.ner.models] entries that load the written folders,
+    as they will be mounted (``--as``) or where they are."""
+    from llm_redact.config_write import _toml_str
+    from llm_redact.detection.model_manifest import MANIFEST_NAME
+
+    def place(name: str) -> str:
+        if args.mount_as is not None:
+            return f"{args.mount_as.rstrip('/')}/{name}"
+        return str((args.to / name).resolve())
+
+    where = args.mount_as if args.mount_as is not None else str(args.to.resolve())
+    print(
+        f"wrote {len(written)} model folder(s) and {MANIFEST_NAME} to {args.to}; to load them"
+        f" from {where}, set in the configuration:"
+    )
+    print()
+    print("[detection.ner.models]")
+    for backend, name in sorted(written):
+        print(f"{backend} = {_toml_str(place(name))}")
+    print()
+    pinned = sorted(backend for backend, _ in written if ner.configured_revision(backend))
+    if pinned:
+        print(
+            "and remove these backends' [detection.ner.revisions] entries (a local folder takes"
+            f" none: its llm-redact-model.json records the revision): {', '.join(pinned)}"
+        )
+    print(f"check the folder where it is used with: llm-redact models verify --dir {where}")

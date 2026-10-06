@@ -200,6 +200,11 @@ runs a local model on every scanned string. Models load from the local
 Hugging Face cache or a local folder, at a pinned revision; nothing is
 downloaded unless `allow_download = true`, and then only at startup.
 
+- `llm-redact models pull` — fetch each configured model (and a GLiNER
+  model's base model) at its revision into the local cache; `--to DIR`
+  also writes portable folders with a SHA-256 manifest for an air-gapped
+  install, and prints the config lines that load them (`--as /models`
+  for where they will be mounted).
 - `llm-redact models list` — each configured model, its revision, catalog
   status, license, and whether its files are there (offline).
 - `llm-redact models verify` — exit 1 unless every model is complete at its

@@ -78,6 +78,7 @@
 <h2>Local NER models (optional)</h2>
 <p>With <code>[detection.ner]</code> enabled on the <code>gliner</code> or <code>hf</code> backend, the proxy runs a local model on every scanned string. Models load from the local Hugging Face cache or a local folder, at a pinned revision; nothing is downloaded unless <code>allow_download = true</code>, and then only at startup.</p>
 <ul>
+<li><code>llm-redact models pull</code> — fetch each configured model (and a GLiNER model's base model) at its revision into the local cache; <code>--to DIR</code> also writes portable folders with a SHA-256 manifest for an air-gapped install, and prints the config lines that load them (<code>--as /models</code> for where they will be mounted).</li>
 <li><code>llm-redact models list</code> — each configured model, its revision, catalog status, license, and whether its files are there (offline).</li>
 <li><code>llm-redact models verify</code> — exit 1 unless every model is complete at its revision; <code>--dir DIR</code> checks a folder of portable models against its manifest (offline, no config).</li>
 <li><code>llm-redact doctor</code> — the <code>models</code> area says the same, with warnings for downloads, pickle weights, unpinned and restricted models.</li>

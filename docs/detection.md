@@ -314,18 +314,50 @@ Restricted (a startup WARNING names the facts; no pin):
 their links and check dates, are what the startup warning, `doctor` and
 `llm-redact models list --json` print.
 
-### Checking models: `llm-redact models`
+### Fetching and checking models: `llm-redact models`
 
 `llm-redact models` works on the models of the `gliner` and `hf` backends the
 configuration names (`--config PATH`, like `serve` and `doctor`; NER need not
-be enabled yet). `list` and `verify` read local files only and never touch the
-network:
+be enabled yet). `pull` is the one subcommand that downloads; `list` and
+`verify` read local files only and never touch the network:
 
 ```bash
+llm-redact models pull              # fetch each model (and GLiNER base model) at its revision
+llm-redact models pull --to DIR [--as /models]   # ... and write portable folders + a manifest
 llm-redact models list [--json]     # each model: revision, catalog status, license, files, base model
 llm-redact models verify            # exit 1 unless every model is complete at its revision
 llm-redact models verify --dir DIR  # check a folder written by `models pull --to` (no config)
 ```
+
+- `pull` fetches each model at the revision its load asks for (the
+  `[detection.ner.revisions]` pin, else the catalog's), with exactly the file
+  names the loader uses — never TensorFlow, Flax, ONNX or `original/` copies,
+  a `pytorch_model.bin` only where the loader would take it — and a GLiNER
+  model's base model at the catalog's pin, into the Hugging Face cache (the
+  same `HF_HOME` the proxy reads). With `allow_download = false`, the default,
+  this is how a model gets there. For a model nothing pins it prints the
+  commit it fetched and the `[detection.ner.revisions]` line that pins it;
+  for a model the catalog lists as restricted it prints the catalog's facts.
+  Downloads need network access to huggingface.co (and `HF_TOKEN` for a gated
+  model); exit 1 when a model cannot be fetched.
+- `pull --to DIR` also writes one self-contained folder per model into `DIR`
+  (`hf-dslim--bert-base-NER`, `gliner-urchade--gliner_small-v2.1`): its files
+  copied, a GLiNER model's base-model tokenizer and configuration included
+  (the folder loads with no base model and no assembly), an
+  `llm-redact-model.json` naming the model and revision, and beside the
+  folders a manifest, `llm-redact-models.json`, listing every file with its
+  size and SHA-256. It then prints the `[detection.ner.models]` lines that
+  load the folders — as they are, or as mounted elsewhere with `--as PATH`
+  (`--as /models` for a volume mounted at `/models`). A folder loads with
+  downloads off and no network at all; it takes no `[detection.ner.revisions]`
+  entry (its `llm-redact-model.json` records the revision, so the catalog
+  and `/status` still know which model it is). Nothing is written to `DIR`
+  unless every model was fetched; a folder of the same name that `pull --to`
+  did not write is never replaced. Use an empty `DIR`: `verify --dir` checks
+  every file inside the model folders. This is the way to carry models into
+  an air-gapped network: pull on a connected machine, copy `DIR`, run
+  `llm-redact models verify --dir` there, and point the configuration at the
+  folders.
 
 - `list` prints, per model, the revision it loads, its catalog status and
   license, whether its files are there (`cached`, `folder` for a local

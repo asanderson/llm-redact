@@ -632,6 +632,30 @@ doctor looks models up in the local Hugging Face cache through
 backend's extra (`uv sync --extra hf` / `--extra gliner`); the `ner` area's
 FAIL row says the same.
 
+## `llm-redact models pull`: "FAIL  not every model was pulled; nothing was written to DIR"
+
+A model (or a GLiNER model's base model) could not be fetched — the `FAIL`
+line above it names which, and the exception type (no network access to
+huggingface.co, a gated model without `HF_TOKEN`, a model id or revision that
+does not exist, a full disk), or it lacks a file the loader needs. With
+`--to`, nothing is written until every model was fetched, so `DIR` never holds
+a half-pulled set. Fix the cause and run `pull` again; what was fetched stays
+in the Hugging Face cache.
+
+## `llm-redact models pull --to`: "FAIL  DIR/FOLDER exists and is not a folder `llm-redact models pull --to` wrote; remove it or choose another --to" / "cannot write the model folders to DIR (…)"
+
+`pull --to` replaces a model folder only when it wrote it before (the folder
+holds an `llm-redact-model.json`); anything else of the same name is left
+alone. Remove it or pull into another directory. "cannot write": `DIR`
+cannot be created or written (a file of that name, no permission, a full
+disk); the message ends with the exception type.
+
+## `llm-redact models pull`: "FAIL  pulling needs huggingface_hub, which the hf and gliner extras install; …" / "--as needs --to"
+
+Install the backend's extra on the machine that pulls (`uv sync --extra hf`
+or `--extra gliner`; both bring `huggingface_hub`). `--as PATH` only says
+where the folders written by `--to DIR` will be mounted; give both.
+
 ## `llm-redact models verify --dir`: "FAIL  …: FOLDER/FILE: SHA-256 differs from the manifest" (or "size differs", "missing", "not listed in the manifest", "the folder is missing")
 
 A folder written by `llm-redact models pull --to` no longer holds exactly what

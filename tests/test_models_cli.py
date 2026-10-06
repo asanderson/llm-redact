@@ -457,3 +457,375 @@ def test_the_parser_takes_the_models_command(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["models"])
     assert isinstance(args, argparse.Namespace)
+
+
+# --- pull ------------------------------------------------------------------------------
+
+HEAD = "fedcba9876543210fedcba9876543210fedcba98"
+
+
+def _pull_hub() -> FakeHub:
+    return FakeHub(repos={GLINER_SMALL: URCHADE_REPO, DEBERTA: DEBERTA_REPO})
+
+
+def test_pull_fetches_each_model_at_its_pin_with_the_loader_patterns(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact.detection.model_files import BACKBONE_PATTERNS, GLINER_PATTERNS, HF_PATTERNS
+
+    hub = install_hub(monkeypatch, _pull_hub())
+    config = _config(tmp_path, 'backends = ["gliner", "hf"]')
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 0
+    assert [(c["repo_id"], c["revision"], c["allow_patterns"]) for c in hub.calls] == [
+        (GLINER_SMALL, GLINER_PIN, list(GLINER_PATTERNS)),
+        (GLINER_SMALL, GLINER_PIN, [*GLINER_PATTERNS, "pytorch_model.bin"]),
+        (DEBERTA, DEBERTA_PIN, list(BACKBONE_PATTERNS)),
+        (DSLIM, DSLIM_PIN, list(HF_PATTERNS)),
+    ]
+    assert not any(c["local_files_only"] for c in hub.calls)  # pull downloads
+    assert out.splitlines() == [
+        f"OK    gliner: {GLINER_SMALL} at {GLINER_PIN}: 5 files; base model {DEBERTA} at"
+        f" {DEBERTA_PIN}",
+        f"OK    hf: {DSLIM} at {DSLIM_PIN}: 5 files",
+    ]
+    # With the cache filled, the proxy's own offline check passes.
+    code, _ = _run(capsys, "verify", "--config", str(config))
+    assert code == 0
+
+
+def test_pull_names_the_commit_of_an_unpinned_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub = install_hub(monkeypatch, FakeHub(heads={"org/ner": HEAD}))
+    config = _config(tmp_path, 'backend = "hf"\nmodel = "org/ner"')
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 0
+    assert [c["revision"] for c in hub.calls] == [None]
+    assert out.splitlines() == [
+        f"note: hf: org/ner has no pin; its default branch is at {HEAD}. Pin it:"
+        f' [detection.ner.revisions] hf = "{HEAD}"',
+        f"OK    hf: org/ner at {HEAD}: 5 files",
+    ]
+    # A cache that does not name the commit: said so, never guessed.
+    install_hub(monkeypatch, FakeHub())
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 0
+    assert out.splitlines()[0] == (
+        "note: hf: org/ner has no pin, and the commit pulled could not be told; pin one in"
+        " [detection.ner.revisions] hf"
+    )
+
+
+def test_pull_warns_for_a_restricted_model_and_an_unpinned_base_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub = FakeHub(
+        repos={"nvidia/gliner-PII": URCHADE_REPO, DEBERTA: DEBERTA_REPO},
+        heads={"nvidia/gliner-PII": HEAD, DEBERTA: DEBERTA_PIN},
+    )
+    install_hub(monkeypatch, hub)
+    config = _config(tmp_path, 'backend = "gliner"\nmodel = "nvidia/gliner-PII"')
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0].startswith(
+        "warning: [detection.ner] gliner model 'nvidia/gliner-PII' has model catalog status"
+        ' "restricted": nvidia/gliner-PII: NVIDIA Open Model License: not OSI-approved;'
+    )
+    assert lines[2] == (
+        f"note: gliner: nvidia/gliner-PII: the model catalog pins no revision of its base model"
+        f" {DEBERTA}; pulled {DEBERTA_PIN}"
+    )
+    assert lines[3] == (
+        f"OK    gliner: nvidia/gliner-PII at {HEAD}: 5 files; base model {DEBERTA} at {DEBERTA_PIN}"
+    )
+
+
+def _manifest(root: Path) -> dict[str, Any]:
+    payload: dict[str, Any] = json.loads((root / MANIFEST_NAME).read_text())
+    return payload
+
+
+def test_pull_to_writes_portable_folders_a_manifest_and_the_snippet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+
+    from llm_redact import __version__
+
+    install_hub(monkeypatch, _pull_hub())
+    out_dir = tmp_path / "carry"
+    config = _config(
+        tmp_path, 'backends = ["gliner", "hf"]', f'[detection.ner.revisions]\nhf = "{DSLIM_PIN}"\n'
+    )
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 0
+    gliner_dir = out_dir / "gliner-urchade--gliner_small-v2.1"
+    hf_dir = out_dir / "hf-dslim--bert-base-NER"
+    assert sorted(p.name for p in out_dir.iterdir()) == sorted(
+        [gliner_dir.name, hf_dir.name, MANIFEST_NAME]
+    )
+    # The assembled GLiNER folder: weights, the base model's tokenizer and
+    # configuration, a gliner_config.json naming no absolute path.
+    assert folder_files(gliner_dir) == sorted(
+        ["config.json", "gliner_config.json", "pytorch_model.bin", "spm.model",
+         "tokenizer_config.json", SIDECAR_NAME]
+    )  # fmt: skip
+    written = json.loads((gliner_dir / "gliner_config.json").read_text())
+    assert written["model_name"] == "." and written["encoder_config"] == {
+        "model_type": "deberta-v2"
+    }
+    assert not any(path.is_symlink() for path in gliner_dir.iterdir())
+    assert json.loads((gliner_dir / SIDECAR_NAME).read_text()) == {
+        "model_id": GLINER_SMALL,
+        "revision": GLINER_PIN,
+    }
+    manifest = _manifest(out_dir)
+    assert (manifest["manifest"], manifest["schema"], manifest["llm_redact"]) == (
+        "llm-redact-models",
+        1,
+        __version__,
+    )
+    gliner, hf = manifest["models"]
+    assert {k: gliner[k] for k in ("backend", "model_id", "revision", "folder")} == {
+        "backend": "gliner",
+        "model_id": GLINER_SMALL,
+        "revision": GLINER_PIN,
+        "folder": gliner_dir.name,
+    }
+    assert (gliner["backbone"], gliner["backbone_revision"], gliner["onnx"]) == (
+        DEBERTA,
+        DEBERTA_PIN,
+        None,
+    )
+    assert (hf["backbone"], hf["backbone_revision"]) == (None, None)
+    for record in hf["files"]:
+        data = (hf_dir / record["path"]).read_bytes()
+        assert record["size"] == len(data)
+        assert record["sha256"] == hashlib.sha256(data).hexdigest()
+    assert [r["path"] for r in hf["files"]] == folder_files(hf_dir)
+    # The snippet: local paths, and the revisions a folder no longer takes.
+    lines = out.splitlines()
+    snippet = lines[lines.index("[detection.ner.models]") :]
+    assert snippet[1:3] == [
+        f"gliner = {json.dumps(str(gliner_dir.resolve()))}",
+        f"hf = {json.dumps(str(hf_dir.resolve()))}",
+    ]
+    assert any(
+        line.startswith("and remove these backends' [detection.ner.revisions] entries")
+        and line.endswith(": hf")
+        for line in lines
+    )
+    code, verified = _run(capsys, "verify", "--dir", str(out_dir))
+    assert code == 0, verified
+
+
+def test_pull_to_as_prints_the_mounted_paths(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_hub(monkeypatch)
+    config = _config(tmp_path, 'backend = "hf"')
+    code, out = _run(
+        capsys, "pull", "--config", str(config), "--to", str(tmp_path / "out"), "--as", "/models/"
+    )
+    assert code == 0
+    assert 'hf = "/models/hf-dslim--bert-base-NER"' in out.splitlines()
+    assert (
+        out.splitlines()[-1]
+        == "check the folder where it is used with: llm-redact models verify --dir /models/"
+    )
+    assert "remove these backends" not in out
+
+
+def test_a_pulled_folder_loads_with_every_network_call_failing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # AD11: pull on a connected machine, carry the folder, load it in an
+    # enclave whose hub answers nothing (allow_download unset).
+    from llm_redact.detection.engine import NerConfig
+    from llm_redact.detection.gliner_ner import build_gliner_detector
+    from llm_redact.detection.hf_ner import build_hf_detector
+    from ner_fakes import FakeGliner, FakeHfPipe, install_gliner, install_transformers
+
+    install_hub(monkeypatch, _pull_hub())
+    out_dir = tmp_path / "carry"
+    config = _config(tmp_path, 'backends = ["gliner", "hf"]', "[detection.ner.onnx]\n")
+    code, _ = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 0
+    shutil.rmtree(sys.modules["huggingface_hub"].fake_hub.root)  # the cache is gone
+    offline = FakeHub(default=None)  # and every hub call fails
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "no-assembly"))
+    pipe = FakeHfPipe([])
+    install_transformers(monkeypatch, pipe, offline)
+    hf_folder = str(out_dir / "hf-dslim--bert-base-NER")
+    build_hf_detector(NerConfig(enabled=True, backend="hf", model=hf_folder))
+    assert pipe.built_with[0]["model"] == hf_folder
+    model = FakeGliner([])
+    install_gliner(monkeypatch, model, offline)
+    gliner_folder = str(out_dir / "gliner-urchade--gliner_small-v2.1")
+    build_gliner_detector(NerConfig(enabled=True, backend="gliner", model=gliner_folder))
+    # Loaded from the carried folder itself: self-contained, nothing assembled.
+    assert model.loaded_with[0]["model_id"] == gliner_folder
+    assert offline.calls == []
+    assert not (tmp_path / "no-assembly").exists()
+
+
+def test_pull_to_carries_the_onnx_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = {
+        "gliner_config.json": json.dumps({"model_name": DEBERTA, "encoder_config": {}}),
+        "tokenizer.json": "{}",
+        "tokenizer_config.json": "{}",
+        "model.safetensors": "torch",
+        "onnx/model_quint8.onnx": "int8",
+    }
+    model_id = "knowledgator/gliner-pii-base-v1.0"
+    install_hub(monkeypatch, FakeHub(repos={model_id: repo}))
+    config = _config(
+        tmp_path,
+        f'backend = "gliner"\nmodel = "{model_id}"',
+        '[detection.ner.onnx]\ngliner = "onnx/model_quint8.onnx"\n',
+    )
+    out_dir = tmp_path / "carry"
+    code, _ = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 0
+    folder = out_dir / "gliner-knowledgator--gliner-pii-base-v1.0"
+    assert folder_files(folder) == sorted(
+        [
+            "gliner_config.json",
+            "onnx/model_quint8.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            SIDECAR_NAME,
+        ]
+    )  # fmt: skip  (the ONNX file replaces the torch weights)
+    assert _manifest(out_dir)["models"][0]["onnx"] == "onnx/model_quint8.onnx"
+    code, _ = _run(capsys, "verify", "--dir", str(out_dir))
+    assert code == 0
+
+
+def test_pull_failures(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One model is not on the hub: nothing is written to --to.
+    install_hub(monkeypatch, FakeHub(repos={DSLIM: DEFAULT_REPO}, default=None))
+    out_dir = tmp_path / "carry"
+    config = _config(tmp_path, 'backends = ["gliner", "hf"]')
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 1
+    assert out.splitlines()[0] == (
+        f"FAIL  [detection.ner] gliner model '{GLINER_SMALL}' at revision {GLINER_PIN} could"
+        " not be fetched from the Hugging Face Hub: NotCached"
+    )
+    assert (
+        out.splitlines()[-1]
+        == f"FAIL  not every model was pulled; nothing was written to {out_dir}"
+    )
+    assert not out_dir.exists()
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 1 and "nothing was written" not in out
+
+
+def test_pull_to_never_replaces_a_folder_it_did_not_write(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_hub(monkeypatch)
+    out_dir = tmp_path / "carry"
+    config = _config(tmp_path, 'backend = "hf"')
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
+    marker = out_dir / "hf-dslim--bert-base-NER" / "config.json"
+    marker.write_text("changed")
+    # A folder it wrote (it holds the sidecar) is replaced whole.
+    assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
+    assert marker.read_text() != "changed"
+    assert not any(p.name.endswith(".partial") for p in out_dir.iterdir())
+    (out_dir / "hf-dslim--bert-base-NER" / SIDECAR_NAME).unlink()
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 1
+    assert out.splitlines()[-1] == (
+        f"FAIL  {out_dir / 'hf-dslim--bert-base-NER'} exists and is not a folder `llm-redact"
+        " models pull --to` wrote; remove it or choose another --to"
+    )
+
+
+def test_pull_cannot_write_its_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_hub(monkeypatch)
+    blocked = tmp_path / "a-file"
+    blocked.write_text("")
+    config = _config(tmp_path, 'backend = "hf"')
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(blocked / "out"))
+    assert code == 1
+    assert out.splitlines()[-1].startswith(
+        f"FAIL  cannot write the model folders to {blocked / 'out'} ("
+    )
+
+
+def test_pull_skips_local_folders_and_other_backends(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub = install_hub(monkeypatch)
+    folder = tmp_path / "model"
+    folder.mkdir()
+    config = _config(tmp_path, f'backends = ["hf", "spacy"]\nmodel = {json.dumps(str(folder))}')
+    # The legacy single `model` key applies only with one backend active.
+    config.write_text(
+        '[detection.ner]\nenabled = false\nbackends = ["hf", "spacy"]\n'
+        f"[detection.ner.models]\nhf = {json.dumps(str(folder))}\n"
+    )
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 0
+    assert out.splitlines() == [
+        "NER is off ([detection.ner] enabled = false); pulling the models it would load",
+        "spacy: en_core_web_sm is not a Hugging Face model; install it with:"
+        " uv run python -m spacy download en_core_web_sm",
+        f"skip  hf: {folder} is a local folder; nothing to pull",
+    ]
+    assert hub.calls == []
+    (folder / SIDECAR_NAME).write_text("{")
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 1
+    assert out.splitlines()[-1] == f"FAIL  hf: {folder / SIDECAR_NAME}: not a UTF-8 JSON document"
+
+
+def test_pull_with_nothing_to_pull_or_no_hub_library(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text("port = 1\n")
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 0 and out.splitlines()[-1].startswith("no Hugging Face Hub models configured")
+    monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+    hf = _config(tmp_path, 'backend = "hf"')
+    code, out = _run(capsys, "pull", "--config", str(hf))
+    assert code == 1
+    assert out.startswith("FAIL  pulling needs huggingface_hub")
+
+
+def test_pull_argument_and_config_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path, 'backend = "hf"')
+    args = build_parser().parse_args(["models", "pull", "--config", str(config), "--as", "/m"])
+    assert run_models(args) == 2
+    assert capsys.readouterr().err.strip() == "llm-redact models pull: --as needs --to"
+    config.write_text("[detection.ner]\nbogus = 1\n")
+    args = build_parser().parse_args(["models", "pull", "--config", str(config)])
+    assert run_models(args) == 2
+
+
+def test_folder_names_and_snapshot_commits(tmp_path: Path) -> None:
+    from llm_redact.detection.model_manifest import safe_path
+    from llm_redact.models_cli import folder_name, snapshot_commit
+
+    assert folder_name("hf", DSLIM) == "hf-dslim--bert-base-NER"
+    assert folder_name("gliner", "a/b_c.d-e") == "gliner-a--b_c.d-e"
+    assert all(
+        safe_path(folder_name(b, m), folder=True) for b, m in (("hf", DSLIM), ("gliner", "x"))
+    )
+    assert snapshot_commit(tmp_path / DSLIM_PIN) == DSLIM_PIN
+    assert snapshot_commit(tmp_path / "main") is None
+    assert snapshot_commit(None) is None

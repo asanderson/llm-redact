@@ -47,9 +47,49 @@ def _pulled() -> set[tuple[str, str]]:
 # --- the configurations --------------------------------------------------------
 
 
+DEFAULT_CONFIGS = ("gliner-default", "hf-default")
+
+
+def _bench_config_problems(paths: list[Path]) -> list[str]:
+    """The bench scores the two default models, each from a "<backend>-default"
+    config naming no model ("default" means the backend's default: a config
+    naming one would keep scoring it after the default moved). Any other
+    config (docs/CONTRIBUTING.md, "Adding an NER model or backend") may name
+    its model."""
+    stems = {path.stem for path in paths}
+    problems = [f"{name}.toml is missing" for name in DEFAULT_CONFIGS if name not in stems]
+    for path in paths:
+        if path.stem.endswith("-default"):
+            ner = load_config(path).detection.ner
+            if ner.model is not None or ner.models != ():
+                problems.append(f"{path.name} names a model")
+    return problems
+
+
 def test_the_bench_scores_the_two_default_models() -> None:
-    assert [p.stem for p in BENCH_CONFIGS] == ["gliner-default", "hf-default"]
-    assert [p.stem for p in TEST_CONFIGS] == ["gliner-pii-edge-onnx", "gliner2-default"]
+    assert _bench_config_problems(BENCH_CONFIGS) == []
+    assert {"gliner-pii-edge-onnx", "gliner2-default"} <= {p.stem for p in TEST_CONFIGS}
+
+
+def test_a_bench_config_for_another_model_may_name_it(tmp_path: Path) -> None:
+    # What CONTRIBUTING's checklist step 3 adds for a non-default model.
+    for path in BENCH_CONFIGS:
+        (tmp_path / path.name).write_text(path.read_text())
+    added = tmp_path / "gliner-pii-edge.toml"
+    added.write_text(
+        '[detection.ner]\nenabled = true\nbackend = "gliner"\n'
+        'model = "knowledgator/gliner-pii-edge-v1.0"\n'
+    )
+    assert _bench_config_problems(sorted(tmp_path.glob("*.toml"))) == []
+    # A default config naming a model, or a default missing, is refused.
+    (tmp_path / "hf-default.toml").write_text(
+        '[detection.ner]\nenabled = true\nbackend = "hf"\nmodel = "dslim/bert-base-NER"\n'
+    )
+    (tmp_path / "gliner-default.toml").unlink()
+    assert _bench_config_problems(sorted(tmp_path.glob("*.toml"))) == [
+        "gliner-default.toml is missing",
+        "hf-default.toml names a model",
+    ]
 
 
 @pytest.mark.parametrize("path", BENCH_CONFIGS + TEST_CONFIGS, ids=lambda p: p.stem)
@@ -62,14 +102,6 @@ def test_each_config_loads_pinned_models_with_downloads_off(path: Path) -> None:
     for source in sources:
         assert source.pinned_by == "catalog"
         assert source.entry is not None and source.entry.revision == source.revision
-
-
-def test_the_default_configs_name_no_model() -> None:
-    # "default" means the backend's default model: a config naming one would
-    # keep scoring it after the default moved.
-    for path in BENCH_CONFIGS:
-        ner = load_config(path).detection.ner
-        assert ner.model is None and ner.models == (), path.name
 
 
 def test_ci_pulls_every_model_the_real_model_tests_load() -> None:

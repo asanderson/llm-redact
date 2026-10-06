@@ -145,7 +145,8 @@ its pins, its measurements and its documentation in the same change.
 3. **Bench configuration**: `bench/configs/<name>.toml` with
    `[detection.ner] enabled = true`, the backend and, unless it is the
    backend's default, the model; downloads stay off (the CI job pulls the
-   model first). Score it on the synthetic corpus, the negatives corpus and
+   model first). A `<backend>-default` name is kept for a backend's default
+   model and names none (`tests/test_ner_ci.py`). Score it on the synthetic corpus, the negatives corpus and
    for latency ([ner-bench.md](ner-bench.md)), and on the published
    datasets that cover its types.
 4. **Thresholds and ceilings**: record its baselines in

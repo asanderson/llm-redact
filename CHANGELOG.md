@@ -109,7 +109,11 @@ and tags `vX.Y.Z`.
   git work tree. Teachers are Apache-2.0 models only, by exact name and size tag (Gemma 4,
   Apache-2.0 Mistral models), with the Llama, Qwen, DeepSeek, Gemma 1 to 3n and Mistral
   research/non-production models refused by name and the license re-checked on the server;
-  the server is loopback unless `--allow-remote-server` (https only) is given.
+  the server is loopback unless `--allow-remote-server` (https only) is given. A tag of any
+  catalog type is kept (the teacher is asked to tag every personal value), a repeat of a
+  value inside another span (`jdoe` in `jdoe@acme.com`) is left to that span, and tags with
+  JSON-escaped quotes inside a JSON string ground like plain ones. Corpus files are written
+  with `\n` line ends on every platform (no CRT text-mode translation on Windows).
   `audit.py` has the same teacher read `bench/fp_corpus` beside the detectors and lists
   candidate misses and false positives (file, offsets, type, reason; no text) for a human;
   it never edits `MANIFEST.toml` or `bench/ner_ceilings.toml`.

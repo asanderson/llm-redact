@@ -27,6 +27,7 @@ from pii_corpus import (  # noqa: E402
 )
 from pii_corpus.private_files import (  # noqa: E402
     CorpusError,
+    append_private,
     default_data_dir,
     open_private,
     output_problem,
@@ -314,11 +315,21 @@ def test_ground_keeps_a_part_inside_a_longer_span_of_its_type() -> None:
             False,
             None,
         ),
+        # A repeat that only partly overlaps another span: "Ann Lee" across
+        # the start of the repeated address "Lee Road 4".
         (
-            '<pii type="PERSON">Lee</pii> <pii type="ADDRESS">4 Lee Road</pii>',
+            '<pii type="PERSON">Ann Lee</pii>, <pii type="ADDRESS">Lee Road 4</pii>,'
+            " Ann Lee Road 4",
             False,
             grounding.CONFLICT,
         ),
+        # A repeat of a longer value that contains a span of another type.
+        (
+            '<pii type="ADDRESS">12 Lee Street</pii>; 12 <pii type="PERSON">Lee</pii> Street',
+            False,
+            grounding.CONFLICT,
+        ),
+        ('<pii type=\\"EMAIL">a@b.example</pii>', False, grounding.MALFORMED),
         ('{"ok": true, "who": <pii type="PERSON">Ann</pii>}', True, grounding.NEGATIVE_TAGGED),
         ('{"ok": true}', False, grounding.NO_SPANS),
         ("   \n", None, grounding.EMPTY),
@@ -343,9 +354,64 @@ def test_ground_allows_a_multiline_address_and_strips_one_fence() -> None:
     assert grounding.strip_fence("```\nx\n```\nmore") == "```\nx\n```\nmore"
 
 
-def test_ground_respects_the_asked_types() -> None:
+def test_ground_respects_the_allowed_types() -> None:
     answer = '<pii type="PERSON">Ann</pii>'
     assert grounding.ground(answer, types=("EMAIL",), negative=False) == grounding.UNKNOWN_TYPE
+
+
+def test_ground_skips_a_repeat_inside_a_span_of_another_type() -> None:
+    # The username repeats inside the email; the person's surname inside
+    # the address, and inside an untagged repeat of the address (which
+    # becomes gold first: longer values go first).
+    answer = (
+        '{"username": "<pii type="USERNAME">jdoe</pii>",'
+        ' "email": "<pii type="EMAIL">jdoe@acme.com</pii>"}\n'
+        '<pii type="PERSON">Lee</pii> lives at <pii type="ADDRESS">12 Lee Street</pii>;'
+        " ship to 12 Lee Street, attn Lee"
+    )
+    found = grounding.ground(answer, types=ALL, negative=False)
+    assert isinstance(found, grounding.Grounded)
+    assert _values(found) == [
+        ("jdoe", "USERNAME"),
+        ("jdoe@acme.com", "EMAIL"),
+        ("Lee", "PERSON"),
+        ("12 Lee Street", "ADDRESS"),
+        ("12 Lee Street", "ADDRESS"),
+        ("Lee", "PERSON"),
+    ]
+    assert found.propagated == 2
+
+
+def test_ground_accepts_json_escaped_tag_quotes() -> None:
+    # A teacher keeping its JSON valid escapes the quotes of a tag inside a
+    # string; both forms ground alike.
+    answer = (
+        '{"to": "<pii type=\\"EMAIL\\">ann@x.io</pii>", "cc": "<pii type="EMAIL">bo@x.io</pii>"}'
+    )
+    found = grounding.ground(answer, types=ALL, negative=False)
+    assert isinstance(found, grounding.Grounded)
+    assert found.text == '{"to": "ann@x.io", "cc": "bo@x.io"}'
+    assert json.loads(found.text) == {"to": "ann@x.io", "cc": "bo@x.io"}
+    assert _values(found) == [("ann@x.io", "EMAIL"), ("bo@x.io", "EMAIL")]
+
+
+def test_ground_without_propagation_takes_the_tags_as_written() -> None:
+    # A reviewer tags the person and leaves the CI tool "Hudson" untagged.
+    answer = (
+        '<pii type="PERSON">Ann Hudson</pii> / <pii type="PERSON">Hudson</pii>; ran on Hudson #4'
+    )
+    kept = grounding.ground(answer, types=ALL, negative=None, propagate=False)
+    assert isinstance(kept, grounding.Grounded)
+    assert _values(kept) == [("Ann Hudson", "PERSON"), ("Hudson", "PERSON")]
+    assert kept.propagated == 0
+    assert grounding.untagged_repeats(kept.text, kept.spans) == 1
+    spread = grounding.ground(answer, types=ALL, negative=None)
+    assert isinstance(spread, grounding.Grounded)
+    assert len(spread.spans) == 3 and spread.propagated == 1
+    assert grounding.untagged_repeats(spread.text, spread.spans) == 0
+    # One value with two types is refused either way.
+    two = '<pii type="PERSON">Lee</pii> <pii type="USERNAME">Lee</pii>'
+    assert grounding.ground(two, types=ALL, negative=None, propagate=False) == grounding.TWO_TYPES
 
 
 def test_tagged_round_trips() -> None:
@@ -421,6 +487,36 @@ def test_open_private_refuses_overwrites_and_symlinks(tmp_path: Path) -> None:
             open_private(link, overwrite=True)
 
 
+def test_private_files_are_opened_binary_with_lf_line_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows: without O_BINARY the CRT text-mode fd turns every "\n" into
+    # "\r\n" (on top of the text layer's own translation: "\r\r\n"). The
+    # flag is simulated here with a bit the platform does not use.
+    fake_binary = 1 << 30
+    real_open = os.open
+    real_binary = getattr(os, "O_BINARY", 0)  # Windows: the real flag stands in
+    seen: list[int] = []
+
+    def recording_open(path: Any, flags: int, mode: int = 0o777) -> int:
+        seen.append(flags)
+        binary = real_binary if flags & fake_binary else 0
+        return real_open(path, (flags & ~fake_binary) | binary, mode)
+
+    monkeypatch.setattr(os, "O_BINARY", fake_binary, raising=False)
+    monkeypatch.setattr(os, "open", recording_open)
+    path = tmp_path / "rows.jsonl"
+    with open_private(path, overwrite=False) as out:
+        out.write("{}\n")
+    with append_private(path) as out:
+        out.write("[]\n")
+    if os.name == "posix":  # the reviewer's private copy of a row ("true" saves it as is)
+        assert review.editor_edit("true")("a\nb") == "a\nb"
+    assert len(seen) == (3 if os.name == "posix" else 2)
+    assert all(flags & fake_binary for flags in seen)
+    assert path.read_bytes() == b"{}\n[]\n"
+
+
 def test_read_jsonl_names_lines_not_content(tmp_path: Path) -> None:
     path = tmp_path / "rows.jsonl"
     path.write_text('{"a": 1}\n\n[1]\n')
@@ -482,6 +578,35 @@ def test_generate_writes_grounded_rows_and_a_manifest(
     if os.name == "posix":
         assert out.stat().st_mode & 0o777 == 0o600
         assert generate.manifest_path(out).stat().st_mode & 0o777 == 0o600
+
+
+def test_generate_keeps_a_tagged_type_the_prompt_did_not_ask_for(tmp_path: Path) -> None:
+    # SYSTEM asks for EVERY personal value tagged: a mixed record that also
+    # tags a PHONE (never asked here) is kept; one lacking an asked type is
+    # kept and counted.
+    def answer(body: dict[str, Any]) -> str:
+        user = body["messages"][1]["content"]
+        asked = _ASKED.search(user)
+        assert asked is not None and "PHONE" not in asked.group(1)
+        first = asked.group(1).split(", ")[0]
+        return (
+            f'{{"a": "<pii type="{first}">{VALUES[first]}</pii>",'
+            f' "tel": "<pii type="PHONE">{VALUES["PHONE"]}</pii>"}}'
+        )
+
+    fake = FakeOllama(answer)
+    out = tmp_path / "rows.jsonl"
+    # Seed 3: the first two prompts are positives that do not ask for PHONE.
+    assert all("PHONE" not in prompts.build(3, i, 0.0).types for i in range(2))
+    argv = ["--model", "gemma4:e4b", "--count", "2", "--seed", "3", "--negatives", "0"]
+    assert generate.main([*argv, "--out", str(out)], transport=fake.transport()) == 0
+    rows = [row for _, row in read_jsonl(out)]
+    assert len(rows) == 2
+    assert all("PHONE" in {span["type"] for span in row["spans"]} for row in rows)
+    manifest = json.loads(generate.manifest_path(out).read_text())
+    assert manifest["counts"]["written"] == 2
+    assert manifest["counts"]["rows missing an asked type"] == 2
+    assert not any(key.startswith("dropped") for key in manifest["counts"])
 
 
 def test_generate_default_output_and_teacher_errors(

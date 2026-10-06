@@ -124,11 +124,14 @@ def generate(
             )
         except TeacherError as exc:
             return counts, str(exc)
-        types = prompt.types or prompts.TYPES
-        found = grounding.ground(answer, types=types, negative=prompt.negative)
+        # SYSTEM asks for EVERY personal value tagged with a catalog type, so
+        # a tag of a type this prompt did not ask for is kept, not dropped.
+        found = grounding.ground(answer, types=prompts.TYPES, negative=prompt.negative)
         if isinstance(found, str):
             counts[f"dropped: {found}"] += 1
             continue
+        if not set(prompt.types) <= {span.type for span in found.spans}:
+            counts["rows missing an asked type"] += 1
         out.write(json_line(_row(info, prompt, seed, index, found)))
         out.flush()
         counts["written"] += 1

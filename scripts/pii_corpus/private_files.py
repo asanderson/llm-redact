@@ -37,6 +37,20 @@ def output_problem(path: Path) -> str | None:
     )
 
 
+# Files are written with "\n" line ends on every platform (a frozen set's
+# SHA-256 does not depend on it): no newline translation by the text layer,
+# and the fd opened with O_BINARY (private_flags).
+_NEWLINE = "\n"
+
+
+def private_flags(flags: int) -> int:
+    """``flags`` for a private file: never through a symlink, and O_BINARY —
+    without it the Windows CRT opens the fd in text mode and turns every
+    "\n" written into "\r\n" (Windows has no O_NOFOLLOW and POSIX no
+    O_BINARY, hence the getattrs)."""
+    return flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+
+
 def open_private(path: Path, *, overwrite: bool) -> IO[str]:
     """A new mode-0600 text file (its directory created mode 0700). An
     existing file is refused unless ``overwrite``; a symlink always is."""
@@ -44,7 +58,7 @@ def open_private(path: Path, *, overwrite: bool) -> IO[str]:
     if problem is not None:
         raise CorpusError(problem)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    flags = private_flags(os.O_WRONLY | os.O_CREAT)
     flags |= os.O_TRUNC if overwrite else os.O_EXCL
     try:
         fd = os.open(path, flags, 0o600)
@@ -54,7 +68,7 @@ def open_private(path: Path, *, overwrite: bool) -> IO[str]:
         raise CorpusError(f"cannot write {path}: {type(exc).__name__}") from exc
     if hasattr(os, "fchmod"):  # an overwritten file keeps its old mode otherwise
         os.fchmod(fd, 0o600)
-    return os.fdopen(fd, "w", encoding="utf-8")
+    return os.fdopen(fd, "w", encoding="utf-8", newline=_NEWLINE)
 
 
 def append_private(path: Path) -> IO[str]:
@@ -64,14 +78,14 @@ def append_private(path: Path) -> IO[str]:
     if problem is not None:
         raise CorpusError(problem)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    flags = private_flags(os.O_WRONLY | os.O_CREAT | os.O_APPEND)
     try:
         fd = os.open(path, flags, 0o600)
     except OSError as exc:
         raise CorpusError(f"cannot write {path}: {type(exc).__name__}") from exc
     if hasattr(os, "fchmod"):
         os.fchmod(fd, 0o600)
-    return os.fdopen(fd, "a", encoding="utf-8")
+    return os.fdopen(fd, "a", encoding="utf-8", newline=_NEWLINE)
 
 
 def write_json(path: Path, value: Mapping[str, Any], *, overwrite: bool) -> None:

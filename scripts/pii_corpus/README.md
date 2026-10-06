@@ -65,15 +65,22 @@ manifest says `"complete": false`), 2 an input problem.
 ### Grounding
 
 The teacher tags every invented value inline as
-`<pii type="TYPE">value</pii>`. A row is kept only when every span is
-grounded (`grounding.py`): the tags are well formed and name a type the
-prompt asked for; each value is non-empty, unpadded, at most 200 characters
-and on one line (an `ADDRESS` may span lines); one value has one type; every
-other whole-token occurrence of a tagged value becomes gold too (an
-untagged repeat would be scored as a miss the labels caused), and a repeat
-that overlaps a different span drops the row; a hard negative carries no
-tag, a positive at least one; text holding a placeholder guillemet (`«`,
-`»`) is dropped. Dropped rows are counted by reason, never shown.
+`<pii type="TYPE">value</pii>` (inside a JSON string it may escape the
+quotes, `<pii type=\"TYPE\">`, so the artifact stays valid JSON). A row is
+kept only when every span is grounded (`grounding.py`): the tags are well
+formed and name one of the catalog's types (any of them: the system prompt
+asks for every personal value to be tagged, so a mixed record that also
+holds a type the prompt did not ask for is kept; rows that lack an asked
+type are kept and counted); each value is non-empty, unpadded, at most 200
+characters and on one line (an `ADDRESS` may span lines); one value has one
+type; every other whole-token occurrence of a tagged value becomes gold too
+(an untagged repeat would be scored as a miss the labels caused), except
+where it lies entirely inside another span (`jdoe` inside
+`jdoe@acme.com`, `Lee` inside `12 Lee Street`: the outer span covers it),
+and a repeat that only partly overlaps a different span drops the row; a
+hard negative carries no tag, a positive at least one; text holding a
+placeholder guillemet (`«`, `»`) is dropped. Dropped rows are counted by
+reason, never shown.
 
 ### Prompt catalog (`prompts.py`, catalog version 1)
 

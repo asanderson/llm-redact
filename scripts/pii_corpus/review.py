@@ -53,6 +53,7 @@ from pii_corpus.private_files import (  # noqa: E402
     json_line,
     open_private,
     output_problem,
+    private_flags,
     read_jsonl,
     write_json,
 )
@@ -125,8 +126,8 @@ def editor_edit(command: str) -> Edit:
         directory = tempfile.mkdtemp(prefix="llm-redact-review-")
         path = Path(directory) / "row.txt"
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as out:
+            fd = os.open(path, private_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as out:
                 out.write(text)
             subprocess.run([*shlex.split(command), str(path)], check=True)
             edited = path.read_text(encoding="utf-8")

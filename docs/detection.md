@@ -363,6 +363,39 @@ Restricted (a startup WARNING names the facts; no pin):
 their links and check dates, are what the startup warning, `doctor` and
 `llm-redact models list --json` print.
 
+### Model-load policies (plugins)
+
+The core loads the model the configuration names; it holds no policy that
+refuses one. A plugin package may install one through the registry seam
+`Registry.build_model_policy(config, tier)` (`plugin_api.ModelPolicy`; the
+Free default returns None, so nothing is asked). llm-redact-pro's `[models]`
+section is such a policy: it can restrict models to a list of licenses, refuse
+lineage tags from the catalog and require every model to come from a verified
+offline bundle.
+
+The policy is built once at startup and asked, synchronously, about every NER
+backend's model in every detector build of the process: the startup (`serve`,
+`serve --check`), a reload that rebuilds the detectors, the config editor's
+dry run and `llm-redact preview`. For the `gliner`, `gliner2` and `hf`
+backends it is asked after the model's files are resolved (from the local
+cache, a local folder, or downloaded at startup when `allow_download` lets
+it) and before its weights load, and it is shown a `plugin_api.ModelLoad`:
+the backend, the configured model, the Hub id and commit (a local folder's
+from its `llm-redact-model.json`), the folder and every file the load reads
+(path inside the model folder and the absolute path it is read from; for a
+GLiNER checkpoint assembled with its base model, the base model's tokenizer
+and configuration too), the ONNX file, and the catalog's status, license,
+lineage tags and attribution. A spaCy, Presidio or Stanza model is not a Hub
+snapshot: the policy sees its backend and configured model only (a Stanza
+model is its language).
+
+`None` lets the model load. A reason refuses it: the build fails with
+`[detection.ner] BACKEND model 'MODEL' refused by the model-load policy:
+REASON`, so the startup refuses to serve, a reload keeps the running
+configuration and the editor answers 400. Nothing fails open: an exception,
+an empty string or any other answer refuses too, naming only the exception
+or answer type.
+
 ### Fetching and checking models: `llm-redact models`
 
 `llm-redact models` works on the models of the `gliner`, `gliner2` and `hf`

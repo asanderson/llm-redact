@@ -334,9 +334,9 @@ def test_validate_config_builds_detectors_only_for_a_changed_detection(
     def counting(name: str) -> Any:
         real = getattr(proxy_mod, name)
 
-        def build(detection: DetectionConfig) -> Any:
+        def build(detection: DetectionConfig, **kwargs: Any) -> Any:
             builds.append((name, detection))
-            return real(detection)
+            return real(detection, **kwargs)
 
         return build
 

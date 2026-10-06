@@ -602,13 +602,23 @@ def run_preview(args: argparse.Namespace) -> int:
 
     from llm_redact.config import load_config
     from llm_redact.detection.engine import build_allowlist, build_detectors, build_modes
+    from llm_redact.licensing import resolve_license
     from llm_redact.redactor import BlockedRequest, Redactor
+    from llm_redact.registry import get_registry
     from llm_redact.vault import InMemoryVault
 
     config = apply_env_overrides(load_config(args.config))
     text = args.text if args.text is not None else sys.stdin.read()
+    # A plugin's model-load policy refuses here as it would at startup
+    # (a preview never loads a model serve would not).
+    resolved = resolve_license(
+        env=dict(os.environ),
+        config_key=config.license.key,
+        config_key_file=config.license.key_file,
+    )
+    model_policy = get_registry().build_model_policy(config, resolved.tier)
     redactor = Redactor(
-        build_detectors(config.detection),
+        build_detectors(config.detection, model_policy=model_policy),
         InMemoryVault(),
         build_allowlist(config.detection),
         modes=build_modes(config.detection),

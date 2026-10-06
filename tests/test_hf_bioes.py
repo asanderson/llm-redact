@@ -21,6 +21,7 @@ import math
 import random
 import re
 import sys
+import types
 from collections.abc import Sequence
 from typing import Any
 
@@ -374,23 +375,58 @@ def test_a_malformed_calibration_is_refused(calibration: dict[str, Any], message
 # --- the tagger pipe ----------------------------------------------------------------
 
 
+class TagEncoding(dict[str, list[Any]]):
+    """What a fast tokenizer returns for overflowing windows: the lists by
+    key, and each window's word ids (indices into the whole text's words)."""
+
+    def __init__(self, words: list[list[int | None]]) -> None:
+        super().__init__(input_ids=[], offset_mapping=[], special_tokens_mask=[])
+        self._words = words
+
+    def word_ids(self, batch_index: int = 0) -> list[int | None]:
+        return self._words[batch_index]
+
+
 class TagTokenizer:
     """A fast tokenizer for the tagger: one token per whitespace word (its
-    id an index into ``vocab``), a special token at each end of a window,
-    character offsets into the whole text; windows of ``model_max_length``
-    tokens sharing ``stride``, like the Hugging Face fast tokenizers."""
+    id an index into ``vocab``) — or, for a word in ``pieces``, one token
+    per piece, the later ones marked ``##`` as WordPiece marks them — a
+    special token at each end of a window, character offsets into the whole
+    text and each window's word ids; windows of ``model_max_length`` tokens
+    sharing ``stride``, like the Hugging Face fast tokenizers."""
 
     is_fast = True
     CLS, SEP = -1, -2
 
-    def __init__(self, model_max_length: int = 512) -> None:
+    def __init__(
+        self, model_max_length: int = 512, pieces: dict[str, list[str]] | None = None
+    ) -> None:
         self.model_max_length = model_max_length
         self.vocab: list[str] = []
+        self.pieces = pieces or {}
+
+    @property
+    def _tokenizer(self) -> Any:
+        # The `tokenizers` model a fast tokenizer wraps; WordPiece names the
+        # mark of a word's later pieces (hf_ner.aggregation_for reads it).
+        model = types.SimpleNamespace(continuing_subword_prefix="##" if self.pieces else None)
+        return types.SimpleNamespace(model=model)
 
     def _id(self, word: str) -> int:
         if word not in self.vocab:
             self.vocab.append(word)
         return self.vocab.index(word)
+
+    def _tokens(self, text: str) -> list[tuple[int, tuple[int, int], int]]:
+        """Each token's id, character offsets and word index."""
+        tokens = []
+        for word, match in enumerate(re.finditer(r"\S+", text)):
+            at = match.start()
+            for piece in self.pieces.get(match[0], [match[0]]):
+                size = len(piece.removeprefix("##"))
+                tokens.append((self._id(piece), (at, at + size), word))
+                at += size
+        return tokens
 
     def __call__(
         self,
@@ -401,23 +437,20 @@ class TagTokenizer:
         stride: int = 0,
         return_offsets_mapping: bool = False,
         return_special_tokens_mask: bool = False,
-    ) -> dict[str, list[Any]]:
+    ) -> TagEncoding:
         assert truncation and return_overflowing_tokens
-        spans = [m.span() for m in re.finditer(r"\S+", text)]
-        ids = [self._id(text[s:e]) for s, e in spans]
+        tokens = self._tokens(text)
         content = self.model_max_length - 2
-        out: dict[str, list[Any]] = {
-            "input_ids": [],
-            "offset_mapping": [],
-            "special_tokens_mask": [],
-        }
+        words: list[list[int | None]] = []
+        out = TagEncoding(words)
         start = 0
         while True:
-            chunk = slice(start, start + content)
-            out["input_ids"].append([self.CLS, *ids[chunk], self.SEP])
-            out["offset_mapping"].append([(0, 0), *spans[chunk], (0, 0)])
-            out["special_tokens_mask"].append([1, *([0] * len(ids[chunk])), 1])
-            if start + content >= len(ids):
+            chunk = tokens[start : start + content]
+            out["input_ids"].append([self.CLS, *(token for token, _, _ in chunk), self.SEP])
+            out["offset_mapping"].append([(0, 0), *(offsets for _, offsets, _ in chunk), (0, 0)])
+            out["special_tokens_mask"].append([1, *([0] * len(chunk)), 1])
+            words.append([None, *(word for _, _, word in chunk), None])
+            if start + content >= len(tokens):
                 return out
             start += content - stride
 
@@ -536,6 +569,60 @@ def test_blanks_at_a_span_edge_are_left_out() -> None:
     assert [(e["start"], e["end"]) for e in pipe(text)] == [(4, 8)]
 
 
+# WordPiece cuts "Merkel" into Me ##rk ##el; a tagger trained the Hugging Face
+# way labels each word on its first piece only (the later pieces are never
+# trained), so they score O here.
+MERKEL = {"Merkel": ["Me", "##rk", "##el"]}
+FIRST_PIECES = {"Angela": {"B-person": 6.0}, "Me": {"E-person": 6.0}}
+
+
+def _word_pipe(
+    picks: dict[str, dict[str, float]],
+    *,
+    window: int = 512,
+    biases: dict[str, float] | None = None,
+) -> TaggerPipe:
+    tokenizer = TagTokenizer(window, pieces=MERKEL)
+    model = TagModel(BIOES_PERSON, tokenizer, picks)
+    tags = _tags(BIOES_PERSON)
+    return TaggerPipe(
+        model,
+        tokenizer,
+        window // 4,
+        tags,
+        decoder_for(tags, biases),
+        lambda ids: _log_softmax(model.rows(ids)),
+        by_word=True,
+    )
+
+
+@pytest.mark.parametrize("biases", [None, dict(ZERO_BIASES)])
+def test_word_pieces_are_decoded_word_by_word(biases: dict[str, float] | None) -> None:
+    text = "Ask Angela Merkel today"
+    found = _word_pipe(FIRST_PIECES, biases=biases)(text)
+    assert [(e["entity_group"], text[e["start"] : e["end"]]) for e in found] == [
+        ("person", "Angela Merkel")
+    ]
+    assert found[0]["score"] > 0.9  # the two words' first pieces, not the O pieces
+    # A later piece's label is never read: one tagged S does not cut the name.
+    found = _word_pipe({**FIRST_PIECES, "##el": {"S-person": 9.0}}, biases=biases)(text)
+    assert [text[e["start"] : e["end"]] for e in found] == ["Angela Merkel"]
+
+
+def test_a_word_a_window_edge_cuts_is_read_by_its_first_piece_and_reported_whole() -> None:
+    text = "w0 w1 w2 Angela Merkel w3"
+    # 5 tokens a window, 1 shared: [w0 w1 w2 Angela Me] [Me ##rk ##el w3].
+    # The first window holds only the first piece of "Merkel", which it
+    # still reports whole.
+    found = _word_pipe(FIRST_PIECES, window=7)(text)
+    assert [text[e["start"] : e["end"]] for e in found] == ["Angela Merkel", "Merkel"]
+    # 4 tokens a window: [w0 w1 w2 Angela] [Angela Me ##rk ##el] [##el w3].
+    # The last window opens inside "Merkel", whose first piece it lacks: the
+    # word is not read there, whatever its later piece scores.
+    found = _word_pipe({**FIRST_PIECES, "##el": {"S-person": 9.0}}, window=6)(text)
+    assert [text[e["start"] : e["end"]] for e in found] == ["Angela", "Angela Merkel"]
+
+
 def test_the_torch_scorer_returns_log_probabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     torch = install_torch(monkeypatch)
     tokenizer = TagTokenizer()
@@ -604,6 +691,20 @@ def test_a_bilou_model_is_decoded_too(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(model_catalog, "lookup", lambda model_id: None)
     detector = build_hf_detector(NerConfig(enabled=True, backend="hf", model="org/bilou-ner"))
     assert [d.value for d in detector.detect("Jane Doe and Kim")] == ["Jane Doe", "Kim"]
+
+
+def test_a_wordpiece_tagger_reports_whole_words(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Decoded piece by piece, "Me" (E) would close the name and "rkel" would
+    # go upstream as sent.
+    install_torch(monkeypatch)
+    tokenizer = TagTokenizer(pieces=MERKEL)
+    pipe = FakeHfPipe([], tokenizer=tokenizer)  # type: ignore[arg-type]
+    pipe.model = TagModel(BIOES_PERSON, tokenizer, FIRST_PIECES)
+    install_transformers(monkeypatch, pipe)
+    monkeypatch.setattr(model_catalog, "lookup", lambda model_id: None)
+    detector = build_hf_detector(NerConfig(enabled=True, backend="hf", model="org/bert-bioes"))
+    found = detector.detect("Ask Angela Merkel today")
+    assert [(d.detector_type, d.value) for d in found] == [("PERSON", "Angela Merkel")]
 
 
 def test_a_catalogued_calibration_selects_viterbi(monkeypatch: pytest.MonkeyPatch) -> None:

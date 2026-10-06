@@ -337,7 +337,11 @@ likely label and spans are read greedily: `B` … `E`, a single `S`, `I`
 continuing; a tag that cannot continue the open span starts a new one, and a
 span left open is kept as it is, so no token the model marked is dropped. A
 span's score is the mean probability of its tokens' labels (`score_threshold`
-applies), and its offsets leave out blanks at either edge. The scheme comes
+applies), and its offsets leave out blanks at either edge. With a tokenizer
+that marks word pieces (WordPiece), the decoder reads words instead of tokens,
+each scored by its first piece — the piece such a model is trained to label —
+as the pipeline reads a BIO model, so a span covers whole words and is never
+cut inside one. The scheme comes
 from the model's labels; a model whose labels mix BIOES and BILOU tags is
 refused at startup.
 

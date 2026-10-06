@@ -240,16 +240,68 @@ def torch_scorer(model: Any) -> Scorer:
     return score
 
 
+# What a tagger decodes in one window: per unit — a token, or a word scored
+# by its first piece — the index of its row of label scores, and its start
+# and end in the text.
+Units = list[tuple[int, int, int]]
+# One window as the tokenizer returns it: token ids, character offsets and
+# the special-tokens mask.
+Window = tuple[Sequence[int], Sequence[Sequence[int]], Sequence[int]]
+
+
+def _token_units(windows: Sequence[Window]) -> list[Units]:
+    """Per window, its tokens: every token that is not special and covers a
+    character, at its own offsets."""
+    return [
+        [
+            (index, start, end)
+            for index, (start, end) in enumerate(offsets)
+            if not special[index] and end > start
+        ]
+        for _ids, offsets, special in windows
+    ]
+
+
+def _word_units(encoded: Any, windows: Sequence[Window]) -> list[Units]:
+    """Per window, its words (the tokenizer's ``word_ids``), each scored by
+    the row of its first piece — the piece a tagger is trained to label —
+    at the offsets of the whole word: a word a window's edge cuts after its
+    first piece is still reported whole, and a window that opens after a
+    word's first piece does not read that word (the window before does)."""
+    word_ids = [encoded.word_ids(index) for index in range(len(windows))]
+    extents: dict[int, tuple[int, int]] = {}
+    for words, (_ids, offsets, special) in zip(word_ids, windows, strict=True):
+        for word, (start, end), is_special in zip(words, offsets, special, strict=True):
+            if word is not None and not is_special and end > start:
+                low, high = extents.get(word, (start, end))
+                extents[word] = (min(low, start), max(high, end))
+    units: list[Units] = []
+    for words, (_ids, offsets, special) in zip(word_ids, windows, strict=True):
+        found: Units = []
+        for index, word in enumerate(words):
+            start, end = offsets[index]
+            if word is None or special[index] or end <= start or start != extents[word][0]:
+                continue  # a special token, or not a word's first piece
+            found.append((index, *extents[word]))
+        units.append(found)
+    return units
+
+
 class TaggerPipe:
     """A BIOES/BILOU token-classification model read the way the strided
     pipeline reads a BIO one: the fast tokenizer's overlapping windows
     (``model_max_length`` tokens, ``stride`` shared), and per window one
-    model call whose per-token label scores ``decode`` turns into a label
-    path (tagging.decoder_for). Each span it marks is reported like a
-    pipeline entity — its entity label (the tag dropped), the mean
-    probability of its tokens' labels, and character offsets into the whole
-    text, without the whitespace at either edge. Special tokens and tokens
-    covering no character are not decoded."""
+    model call whose label scores ``decode`` turns into a label path
+    (tagging.decoder_for). With ``by_word`` — a tokenizer that marks word
+    pieces (:func:`aggregation_for`), whose models are trained to label a
+    word on its first piece — the path runs over the window's words, each
+    scored by its first piece as the pipeline's word-level aggregation
+    reads a BIO model, so a span always covers whole words; otherwise over
+    its tokens. Each span it marks is reported like a pipeline entity — its
+    entity label (the tag dropped), the mean probability of its units'
+    labels, and character offsets into the whole text, without the
+    whitespace at either edge. Special tokens and tokens covering no
+    character are not decoded."""
 
     def __init__(
         self,
@@ -259,6 +311,8 @@ class TaggerPipe:
         tagset: TagSet,
         decode: Decoder,
         scorer: Scorer,
+        *,
+        by_word: bool = False,
     ) -> None:
         # Read by HfDetector: the model's config.id2label names what it emits.
         self.model = model
@@ -267,6 +321,7 @@ class TaggerPipe:
         self._tagset = tagset
         self._decode = decode
         self._scorer = scorer
+        self._by_word = by_word
 
     def __call__(self, text: str) -> list[dict[str, Any]]:
         encoded = self._tokenizer(
@@ -277,19 +332,22 @@ class TaggerPipe:
             return_offsets_mapping=True,
             return_special_tokens_mask=True,
         )
+        windows: list[Window] = list(
+            zip(
+                encoded["input_ids"],
+                encoded["offset_mapping"],
+                encoded["special_tokens_mask"],
+                strict=True,
+            )
+        )
+        units = _word_units(encoded, windows) if self._by_word else _token_units(windows)
         entities: list[dict[str, Any]] = []
-        for ids, offsets, special in zip(
-            encoded["input_ids"],
-            encoded["offset_mapping"],
-            encoded["special_tokens_mask"],
-            strict=True,
-        ):
+        for (ids, _offsets, _special), kept in zip(windows, units, strict=True):
             rows = self._scorer(list(ids))
-            kept = [i for i, (start, end) in enumerate(offsets) if not special[i] and end > start]
-            scores = [rows[i] for i in kept]
+            scores = [rows[row] for row, _start, _end in kept]
             path = self._decode(scores)
             for first, last, label in spans_of(path, self._tagset):
-                start, end = offsets[kept[first]][0], offsets[kept[last]][1]
+                start, end = kept[first][1], kept[last][2]
                 # A token's offsets may take in the blank before a word.
                 while start < end and text[start].isspace():
                     start += 1
@@ -374,7 +432,16 @@ def _tagger(
             '[detection.ner] backend = "hf" but torch is not installed;'
             " install the hf extra: uv sync --extra hf"
         ) from exc
-    return TaggerPipe(loaded.model, tokenizer, stride, tagset, decoder_for(tagset, biases), scorer)
+    return TaggerPipe(
+        loaded.model,
+        tokenizer,
+        stride,
+        tagset,
+        decoder_for(tagset, biases),
+        scorer,
+        # Whole words where the tokenizer marks them, as for a BIO model.
+        by_word=aggregation_for(tokenizer) == WORD_AGGREGATION,
+    )
 
 
 def build_hf_detector(config: "NerConfig") -> HfDetector:

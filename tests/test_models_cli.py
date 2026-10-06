@@ -584,12 +584,12 @@ def test_pull_reports_a_base_model_that_is_a_local_folder(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     named_like_its_hub_id: bool,
+    chdir_tmp: Path,
 ) -> None:
     # A GLiNER model whose base model is a local folder — one named like the
     # catalogued base model's id under the working directory, or a path:
     # nothing is pulled for it, no catalog pin applies, and the manifest
     # records no Hub base model (a folder is none, whatever its name).
-    monkeypatch.chdir(tmp_path)
     base = DEBERTA if named_like_its_hub_id else str(tmp_path / "base")
     for name, text in DEBERTA_REPO.items():
         (tmp_path / base).mkdir(parents=True, exist_ok=True)

@@ -260,12 +260,13 @@ def test_a_revision_for_a_local_directory_is_refused(
 
 
 def test_a_directory_named_like_a_catalogued_id_takes_no_catalog_pin(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    chdir_tmp: Path,
 ) -> None:
     # A folder of a catalogued id's name is a folder (transformers would
     # load it too): the catalog's pin names a Hub snapshot, never a
     # folder's content, so the folder is not handed one.
-    monkeypatch.chdir(tmp_path)
     _folder(tmp_path / DSLIM, FULL_REPO)
     assert NerConfig(enabled=True, backend="hf", model=DSLIM).revision_for("hf") is None
     pipe, hub = _build(monkeypatch, model=DSLIM)
@@ -274,11 +275,12 @@ def test_a_directory_named_like_a_catalogued_id_takes_no_catalog_pin(
 
 
 def test_a_revision_for_a_directory_named_like_a_catalogued_id_is_refused(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    chdir_tmp: Path,
 ) -> None:
     # Even the catalog's own pin, once the configuration names it: a
     # commit id cannot describe a folder (it once passed silently).
-    monkeypatch.chdir(tmp_path)
     _folder(tmp_path / DSLIM, FULL_REPO)
     for revision in (DSLIM_PIN, OTHER):
         with pytest.raises(ConfigError) as caught:
@@ -693,14 +695,16 @@ def test_a_sidecar_identified_folder_takes_the_catalog_base_model_pin(
 
 
 def test_a_base_model_folder_named_like_a_catalogued_id_takes_no_catalog_pin(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    chdir_tmp: Path,
 ) -> None:
     # The default model's base model id names a folder under the working
     # directory. A folder is whatever it holds, so the catalog's pin of that
     # base model (a Hub snapshot) does not apply to it, as for a model folder
     # (T12c): the pin once reached resolve_model, which refused the folder
     # naming [detection.ner.revisions], a key the configuration never set.
-    monkeypatch.chdir(tmp_path)
     _folder(tmp_path / DEBERTA, DEBERTA_REPO)
     hub = FakeHub(repos={GLINER_SMALL: URCHADE_REPO}, default=None)
     with caplog.at_level("WARNING", logger="llm_redact"):

@@ -143,9 +143,9 @@ and tags `vX.Y.Z`.
   self-contained folders of the Hub models (each with its `llm-redact-model.json`; a GLiNER
   folder carries its base model's tokenizer and configuration) and an `llm-redact-models.json`
   manifest of every file's size and SHA-256, then prints the `[detection.ner.models]` lines
-  that load them (`--as PATH`: as mounted elsewhere). Nothing is written to `DIR` unless every
-  model was fetched. Together with `models verify --dir` this carries models into an
-  air-gapped network.
+  that load them (`--as PATH`: as mounted elsewhere, at an absolute path). Nothing is written
+  to `DIR` unless every model was fetched. Together with `models verify --dir` this carries
+  models into an air-gapped network.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

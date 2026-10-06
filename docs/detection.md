@@ -357,7 +357,9 @@ llm-redact models verify --dir DIR  # check a folder written by `models pull --t
   folders a manifest, `llm-redact-models.json`, listing every file with its
   size and SHA-256. It then prints the `[detection.ner.models]` lines that
   load the folders — as they are, or as mounted elsewhere with `--as PATH`
-  (`--as /models` for a volume mounted at `/models`). A folder loads with
+  (`--as /models` for a volume mounted at `/models`; an absolute path, since
+  the proxy reads a relative one against its working directory, and one such
+  as `models/hf-…` as a Hugging Face model id). A folder loads with
   downloads off and no network at all; it takes no `[detection.ner.revisions]`
   entry (its `llm-redact-model.json` records the revision, so the catalog
   and `/status` still know which model it is). Only the Hub models `pull`

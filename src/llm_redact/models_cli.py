@@ -23,7 +23,7 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
 from llm_redact.config import Config, ConfigError, apply_env_overrides, load_config
@@ -82,7 +82,8 @@ def add_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]"
         dest="mount_as",
         default=None,
         metavar="PATH",
-        help="with --to: print the config snippet for DIR mounted at PATH (for example /models)",
+        help="with --to: print the config snippet for DIR mounted at the absolute PATH (for"
+        " example /models)",
     )
 
 
@@ -409,9 +410,25 @@ def folder_name(backend: str, model_id: str) -> str:
     return f"{backend}-{re.sub(r'[^A-Za-z0-9._-]+', '--', model_id)}"
 
 
+def absolute_mount(path: str) -> bool:
+    """Whether ``--as`` names an absolute path (POSIX or Windows: the
+    machine that mounts the folders need not be this one). A relative one
+    is read against the proxy's working directory, and the loader reads a
+    value like ``models/hf-dslim--bert-base-NER`` as a Hugging Face model
+    id wherever that directory has no such folder."""
+    return PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()
+
+
 def run_pull(args: argparse.Namespace) -> int:
     if args.mount_as is not None and args.to is None:
         print("llm-redact models pull: --as needs --to", file=sys.stderr)
+        return UNUSABLE
+    if args.mount_as is not None and not absolute_mount(args.mount_as):
+        print(
+            "llm-redact models pull: --as needs an absolute path: where DIR is mounted for the"
+            " proxy (for example /models)",
+            file=sys.stderr,
+        )
         return UNUSABLE
     config = _config(args)
     if config is None:

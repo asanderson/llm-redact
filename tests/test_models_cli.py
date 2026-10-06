@@ -690,6 +690,61 @@ def test_pull_to_as_prints_the_mounted_paths(
     assert "remove these backends" not in out
 
 
+@pytest.mark.parametrize(
+    "mount", ["models", "models/", "./models", "../models", "~/models", "C:models", "\\models"]
+)
+def test_pull_to_as_refuses_a_relative_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    mount: str,
+) -> None:
+    # A relative path is read against the proxy's working directory, and
+    # `models/hf-dslim--bert-base-NER` is also a valid Hugging Face id: where
+    # that directory has no models/ folder, the loader would take the
+    # carried folder for an (uncatalogued, unpinned) Hub repository of
+    # someone else's namespace - and `models pull` would fetch it.
+    from llm_redact.detection.model_catalog import MODEL_ID_RE
+
+    assert MODEL_ID_RE.fullmatch("models/hf-dslim--bert-base-NER")
+    hub = install_hub(monkeypatch)
+    config = _config(tmp_path, 'backend = "hf"')
+    args = build_parser().parse_args(
+        ["models", "pull", "--config", str(config), "--to", str(tmp_path / "out"), "--as", mount]
+    )
+    assert run_models(args) == 2
+    captured = capsys.readouterr()
+    assert captured.err.strip() == (
+        "llm-redact models pull: --as needs an absolute path: where DIR is mounted for the"
+        " proxy (for example /models)"
+    )
+    assert captured.out == ""
+    assert hub.calls == []
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("mount", ["/models", "/", "//srv/models", "C:\\models", "\\\\host\\m"])
+def test_pull_to_as_prints_no_value_the_loader_reads_as_a_hub_id(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    mount: str,
+) -> None:
+    from llm_redact.detection.model_catalog import MODEL_ID_RE
+
+    install_hub(monkeypatch)
+    config = _config(tmp_path, 'backends = ["gliner", "hf"]')
+    out_dir = tmp_path / "out"
+    for argv in ((), ("--as", mount)):
+        code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir), *argv)
+        assert code == 0, out
+        lines = out.splitlines()
+        snippet = lines[lines.index("[detection.ner.models]") + 1 :]
+        values = [json.loads(line.split(" = ", 1)[1]) for line in snippet if " = " in line]
+        assert len(values) == 2
+        assert not any(MODEL_ID_RE.fullmatch(value) for value in values), values
+
+
 def test_a_pulled_folder_loads_with_every_network_call_failing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

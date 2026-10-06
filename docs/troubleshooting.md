@@ -653,11 +653,16 @@ alone. Remove it or pull into another directory. "cannot write": `DIR`
 cannot be created or written (a file of that name, no permission, a full
 disk); the message ends with the exception type.
 
-## `llm-redact models pull`: "FAIL  pulling needs huggingface_hub, which the hf and gliner extras install; …" / "--as needs --to"
+## `llm-redact models pull`: "FAIL  pulling needs huggingface_hub, which the hf and gliner extras install; …" / "--as needs --to" / "--as needs an absolute path: where DIR is mounted for the proxy (for example /models)"
 
 Install the backend's extra on the machine that pulls (`uv sync --extra hf`
 or `--extra gliner`; both bring `huggingface_hub`). `--as PATH` only says
-where the folders written by `--to DIR` will be mounted; give both.
+where the folders written by `--to DIR` will be mounted; give both, and give
+`--as` as an absolute path (`/models`, or `C:\models` on Windows). A relative
+path would be read against the proxy's working directory, and one such as
+`models/hf-dslim--bert-base-NER` also reads as a Hugging Face model id:
+wherever that directory holds no such folder, the proxy would take the
+carried folder for a Hub repository of that name.
 
 ## `llm-redact models verify --dir`: "FAIL  …: FOLDER/FILE: SHA-256 differs from the manifest" (or "size differs", "missing", "not listed in the manifest", "the folder is missing")
 

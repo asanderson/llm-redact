@@ -118,25 +118,39 @@ version numbers. A changed wording bumps `CATALOG_VERSION`.
 uv run python scripts/pii_corpus/review.py review ~/.local/share/llm-redact/pii-corpus/generated-gemma4-e4b-7.jsonl --reviewer alex
 uv run python scripts/pii_corpus/review.py freeze ~/.local/share/llm-redact/pii-corpus/generated-gemma4-e4b-7.verified.jsonl \
   --out ~/.local/share/llm-redact/pii-corpus/agent-eval.jsonl
+# two reviewers splitting one generated file, each with their own output:
+uv run python scripts/pii_corpus/review.py review GEN.jsonl --reviewer alex --share 1/2 --out alex.verified.jsonl
+uv run python scripts/pii_corpus/review.py review GEN.jsonl --reviewer sam --share 2/2 --out sam.verified.jsonl
+uv run python scripts/pii_corpus/review.py freeze alex.verified.jsonl sam.verified.jsonl --out agent-eval.jsonl
 ```
 
 `review` shows each row on your terminal — the text with its spans tagged
-inline and the list of tagged values — and reads one decision from the
-terminal (it refuses piped input: verification is by hand): `a` accept, `e`
-edit (the tagged text opens in `--editor`, `$VISUAL`, `$EDITOR` or `vi`, from
-a private temporary file; the saved text is grounded again exactly like a
-teacher answer, and an edit that does not ground is not applied), `r`
-reject, `s` skip, `q` quit. Accepted and edited rows are appended to
+inline, the list of tagged values, and a note when a tagged value also
+occurs untagged — and reads one decision from the terminal (it refuses to
+run unless both its input and its output are a terminal: verification is by
+hand, and a redirected output would write every row into a file): `a`
+accept, `e` edit (the tagged text opens in `--editor`, `$VISUAL`, `$EDITOR`
+or `vi`, from a private temporary file; the saved text is grounded again
+like a teacher answer but taken as written — no repeat is tagged for you,
+so a tool name or timestamp you leave untagged stays untagged — and a hard
+negative's edit may hold no tag; an edit that does not ground, or an editor
+that fails or exits non-zero, is not applied and the row is asked again),
+`r` reject, `s` skip, `q` quit. Accepted and edited rows are appended to
 `GENERATED.verified.jsonl` (or `--out`) with a review record — reviewer,
 decision, guideline version, date, and the generator run's teacher digest
 and catalog digest from its manifest; rejected ids go to
 `GENERATED.verified.jsonl.rejected`. Rows already decided are not asked
-again, so a review can stop and resume, and several reviewers can each
-review a share. The terminal is the only place rows are shown.
+again, so a review can stop and resume. Several reviewers split one
+generated file with `--share K/N` (rows by the SHA-256 of their id, so the
+shares are disjoint whatever the order) and each their own `--out`; two
+reviewers writing the same output file at once is not supported. The
+terminal is the only place rows are shown.
 
-`freeze` validates every verified row (keys, spans inside the text and not
-overlapping, placeholder types only, a review record under the current
-guideline version, unique ids) and writes the frozen set, rows sorted by id,
+`freeze` validates every verified row of one or more review outputs (keys,
+spans inside the text and not overlapping, placeholder types only, no span
+in a hard negative, a review record under the current guideline version,
+ids unique across all the files) and writes the frozen set, rows sorted by
+id,
 plus `FROZEN.jsonl.manifest.json`: format `llm-redact-agent-eval/1`, the
 file's SHA-256, row and hard-negative counts, spans by type, and rows by
 prompt, teacher, teacher digest, seed, reviewer and decision — no text. An

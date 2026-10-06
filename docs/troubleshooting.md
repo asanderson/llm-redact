@@ -582,6 +582,38 @@ valid UTF-8 CSV — a checkout of a CredData version whose format changed, or
 a damaged file. Check out the commit named in
 [ner-bench.md](ner-bench.md#creddata).
 
+## NER bench: "dataset 'agent-eval' reads a local file: pass --path" / "agent-eval: --path must name the frozen set …"
+
+The agent-traffic evaluation set is private and never downloaded: the bench
+reads it from the file `scripts/pii_corpus/review.py freeze` wrote
+([ner-bench.md](ner-bench.md#the-agent-traffic-evaluation-set)). Pass that
+file with `--path` (for example
+`--path ~/.local/share/llm-redact/pii-corpus/agent-eval.jsonl`); a path
+that does not exist or is a directory is refused the same way.
+
+## NER bench: "--path applies only to datasets read from a local file"
+
+Only `agent-eval` reads a local file; the other datasets are generated,
+downloaded or read from a checkout (`--data-dir`). Drop `--path`, or add
+`--dataset agent-eval`.
+
+## NER bench: "agent-eval: cannot read FILE.manifest.json …" / "agent-eval: FILE.manifest.json is not a llm-redact-agent-eval/1 manifest"
+
+A frozen set is scored only beside the manifest `review.py freeze` wrote
+for it (`FILE.manifest.json`, format `llm-redact-agent-eval/1`). The file
+named by `--path` is not a frozen set — a `generate.py` output or a
+`review.py` verified file, which have no such manifest — or its manifest was
+moved, renamed or replaced. Point `--path` at the frozen file, or freeze the
+verified rows again (`review.py freeze VERIFIED.jsonl --out FROZEN.jsonl`).
+
+## NER bench: "agent-eval: FILE does not match the SHA-256 in FILE.manifest.json; a frozen set changes only by freezing it again"
+
+The frozen file changed after it was frozen (an edit by hand, a line-ending
+conversion, a partial copy), so scores would no longer describe the set its
+manifest records. Restore the frozen file from where you keep it, or freeze
+the verified rows again with `review.py freeze … --force`, which writes a
+new file and manifest together.
+
 ## NER bench: "--fp-corpus and --latency are separate runs; pick one" / "--dump-errors applies to dataset and --fp-corpus runs"
 
 `--latency` times NER; it scores nothing and dumps nothing. Run it on its

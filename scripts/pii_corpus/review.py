@@ -1,23 +1,29 @@
 """Verify generated rows by hand and freeze the agent-traffic evaluation set (plan T42).
 
-    uv run python scripts/pii_corpus/review.py review GENERATED.jsonl --reviewer NAME
-    uv run python scripts/pii_corpus/review.py freeze GENERATED.verified.jsonl --out FROZEN.jsonl
+    uv run python scripts/pii_corpus/review.py review GENERATED.jsonl --reviewer NAME [--share K/N]
+    uv run python scripts/pii_corpus/review.py freeze VERIFIED.jsonl [MORE ...] --out FROZEN.jsonl
 
 ``review`` shows each row of a generate.py file — its text with the spans
 tagged inline and a list of the tagged values — ON THE REVIEWER'S TERMINAL
 and reads one decision per row from it: accept, edit (the tagged text opens
 in ``$VISUAL``/``$EDITOR``; the edit is grounded again like a teacher
-answer), reject, skip or quit. Accepted and edited rows are appended to
-``GENERATED.verified.jsonl`` with a review record (reviewer, decision,
-guideline version, date, the generator run's teacher digest and catalog
-digest); rejected ids go to ``GENERATED.verified.jsonl.rejected``. A row
-already decided is not asked again, so a review can stop and resume. The
-terminal is the only place the text is shown; nothing is logged.
+answer, but taken as written: no repeat is tagged for the reviewer, and a
+hard negative's edit may hold no tag), reject, skip or quit. Accepted and
+edited rows are appended to ``GENERATED.verified.jsonl`` with a review record
+(reviewer, decision, guideline version, date, the generator run's teacher
+digest and catalog digest); rejected ids go to
+``GENERATED.verified.jsonl.rejected``. A row already decided is not asked
+again, so a review can stop and resume. ``--share K/N`` reviews only the
+rows whose id hashes to share K of N, so N reviewers (each with their own
+``--out``) split one generated file. The terminal is the only place the text
+is shown — review refuses to run unless both its input and its output are a
+terminal — and nothing is logged.
 
-``freeze`` validates every verified row and writes the frozen set — rows
-sorted by id — with ``FROZEN.jsonl.manifest.json`` (format, SHA-256, counts
-by type, prompt, teacher, seed and reviewer; no text), which the NER bench's
-``agent-eval`` dataset checks before scoring
+``freeze`` validates every verified row of one or more review outputs and
+writes the frozen set — rows sorted by id, an id in two files refused — with
+``FROZEN.jsonl.manifest.json`` (format, SHA-256, counts by type, prompt,
+teacher, seed and reviewer; no text), which the NER bench's ``agent-eval``
+dataset checks before scoring
 (``python -m llm_redact.bench.ner --dataset agent-eval --path FROZEN.jsonl``).
 
 Every file is written outside every git work tree, mode 0600: the set is
@@ -25,6 +31,7 @@ private (plan D7). The labeling rules are in GUIDELINES.md.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -46,7 +53,13 @@ from llm_redact.bench.datasets.agent_eval import (  # noqa: E402
     manifest_path,
 )
 from llm_redact.detection.labels import TYPE_NAMES  # noqa: E402
-from pii_corpus.grounding import Span, ground, tagged  # noqa: E402
+from pii_corpus.grounding import (  # noqa: E402
+    NEGATIVE_TAGGED,
+    Span,
+    ground,
+    tagged,
+    untagged_repeats,
+)
 from pii_corpus.private_files import (  # noqa: E402
     CorpusError,
     append_private,
@@ -63,10 +76,42 @@ GUIDELINE_VERSION = 1
 ROW_KEYS = ("id", "text", "spans", "teacher", "prompt_id", "seed")
 DECISIONS = ("accepted", "edited")
 PROMPT = "[a]ccept  [e]dit  [r]eject  [s]kip  [q]uit > "
+NEGATIVE_SUFFIX = ".negative"
+NOT_A_TERMINAL = (
+    "review reads each decision from a terminal and shows rows only on one (verification is"
+    " by hand; rows must not land in a file): run it with its input and output on a terminal"
+)
 
 Ask = Callable[[str], str]
 Show = Callable[[str], None]
 Edit = Callable[[str], str]
+
+
+class EditFailed(Exception):
+    """The editor did not produce an edit (it failed, is missing, or saved
+    text that is not UTF-8). The message names the exception type only."""
+
+
+def is_negative(row: dict[str, Any]) -> bool:
+    """Whether the row is a hard negative (its prompt id ends ``.negative``)."""
+    return str(row.get("prompt_id", "")).endswith(NEGATIVE_SUFFIX)
+
+
+def parse_share(value: str) -> tuple[int, int]:
+    """``K/N`` as (K, N) with 1 <= K <= N (the --share argument type)."""
+    k, slash, n = value.partition("/")
+    if not slash or not (k.isdigit() and n.isdigit()) or not 1 <= int(k) <= int(n):
+        raise argparse.ArgumentTypeError("must be K/N with 1 <= K <= N (for example 2/3)")
+    return int(k), int(n)
+
+
+def in_share(row_id: str, share: tuple[int, int] | None) -> bool:
+    """Whether a row belongs to share K of N: its id's SHA-256 modulo N is
+    K - 1 (stable whatever the file order; every share None)."""
+    if share is None:
+        return True
+    k, n = share
+    return int(hashlib.sha256(row_id.encode("utf-8")).hexdigest(), 16) % n == k - 1
 
 
 def verified_path(generated: Path) -> Path:
@@ -115,12 +160,19 @@ def render(row: dict[str, Any], spans: Sequence[Span], index: int, total: int) -
         "--- spans:" if spans else "--- no spans (a hard negative: is there really no PII?)",
     ]
     lines += [f"  {n}. {s.type}: {text[s.start : s.end]}" for n, s in enumerate(spans, 1)]
+    repeats = untagged_repeats(text, spans)
+    if repeats:
+        lines.append(
+            f"--- note: {repeats} untagged whole-token repeat(s) of a tagged value"
+            " (an edit leaves them untagged: tag each that is personal data)"
+        )
     return "\n".join(lines)
 
 
 def editor_edit(command: str) -> Edit:
     """An Edit that opens the tagged text in ``command`` (a private temporary
-    file, removed afterwards) and returns what was saved."""
+    file, removed afterwards) and returns what was saved; EditFailed when
+    the editor exits non-zero or cannot run, or saves text that is not UTF-8."""
 
     def edit(text: str) -> str:
         directory = tempfile.mkdtemp(prefix="llm-redact-review-")
@@ -131,6 +183,9 @@ def editor_edit(command: str) -> Edit:
                 out.write(text)
             subprocess.run([*shlex.split(command), str(path)], check=True)
             edited = path.read_text(encoding="utf-8")
+        except (subprocess.CalledProcessError, OSError, ValueError) as exc:
+            # ValueError: shlex on an unbalanced quote, or a non-UTF-8 save.
+            raise EditFailed(f"the editor failed ({type(exc).__name__})") from exc
         finally:
             path.unlink(missing_ok=True)
             os.rmdir(directory)
@@ -183,9 +238,19 @@ def _decide(
         if answer != "e":
             show("answer a, e, r, s or q")
             continue
-        found = ground(edit(tagged(row["text"], spans)), types=TYPE_NAMES, negative=None)
+        try:
+            text = edit(tagged(row["text"], spans))
+        except EditFailed as exc:
+            show(f"edit not applied: {exc}")
+            continue
+        # Taken as written (no repeat tagged for the reviewer); a hard
+        # negative stays a negative: one holding personal data is rejected.
+        negative = True if is_negative(row) else None
+        found = ground(text, types=TYPE_NAMES, negative=negative, propagate=False)
         if isinstance(found, str):
             show(f"edit not applied: {found}")
+            if found == NEGATIVE_TAGGED:
+                show("a hard negative that holds personal data is rejected (GUIDELINES.md)")
             continue
         row = {**row, "text": found.text}
         spans = list(found.spans)
@@ -201,8 +266,10 @@ def review_file(
     show: Show,
     edit: Edit,
     today: str,
+    share: tuple[int, int] | None = None,
 ) -> Counter[str]:
-    """Review every undecided row of ``generated``; the counts."""
+    """Review every undecided row of ``generated`` (of one share, when
+    ``share`` is (K, N)); the counts."""
     counts: Counter[str] = Counter()
     rows = [row for _, row in read_jsonl(generated)]
     done = _decided(verified)
@@ -212,6 +279,9 @@ def review_file(
             spans = _spans(row)
             if spans is None or not _identified(row):
                 counts["malformed"] += 1
+                continue
+            if not in_share(row["id"], share):
+                counts["other shares"] += 1
                 continue
             if str(row.get("id")) in done:
                 counts["already decided"] += 1
@@ -265,6 +335,8 @@ def row_problem(row: dict[str, Any]) -> str | None:
     for span in spans:
         if span.type not in TYPE_NAMES:
             return f"span type {span.type!r} is not a placeholder type"
+    if spans and is_negative(row):
+        return "a hard negative (prompt id ending .negative) carries spans"
     review = row.get("review")
     if not isinstance(review, dict):
         return "no review record"
@@ -279,18 +351,21 @@ def row_problem(row: dict[str, Any]) -> str | None:
     return None
 
 
-def freeze(verified: Path, out: Path, *, overwrite: bool, today: str) -> dict[str, Any]:
-    """Write the frozen set and its manifest; the manifest."""
+def freeze(verified: Sequence[Path], out: Path, *, overwrite: bool, today: str) -> dict[str, Any]:
+    """Write the frozen set of one or more review outputs and its manifest;
+    the manifest. An id in two places is refused (shares overlap, or a
+    row was reviewed twice): never a silent pick between two decisions."""
     rows: dict[str, dict[str, Any]] = {}
-    for number, row in read_jsonl(verified):
-        problem = row_problem(row)
-        if problem is None and row["id"] in rows:
-            problem = "a duplicate id"
-        if problem is not None:
-            raise CorpusError(f"{verified} line {number}: {problem}")
-        rows[row["id"]] = row
+    for path in verified:
+        for number, row in read_jsonl(path):
+            problem = row_problem(row)
+            if problem is None and row["id"] in rows:
+                problem = "a duplicate id"
+            if problem is not None:
+                raise CorpusError(f"{path} line {number}: {problem}")
+            rows[row["id"]] = row
     if not rows:
-        raise CorpusError(f"{verified} holds no verified row")
+        raise CorpusError(f"{', '.join(str(p) for p in verified)} holds no verified row")
     with open_private(out, overwrite=overwrite) as handle:
         for row_id in sorted(rows):
             handle.write(json_line(rows[row_id]))
@@ -332,8 +407,14 @@ def _parser() -> argparse.ArgumentParser:
     review.add_argument("--reviewer", required=True, help="your name or handle (recorded)")
     review.add_argument("--out", type=Path, help="verified rows (default GENERATED.verified.jsonl)")
     review.add_argument("--editor", help="editor command (default $VISUAL, $EDITOR, vi)")
+    review.add_argument(
+        "--share",
+        type=parse_share,
+        metavar="K/N",
+        help="review only share K of N (rows split by id hash; one --out per reviewer)",
+    )
     frozen = commands.add_parser("freeze", help="write the frozen set and its manifest")
-    frozen.add_argument("verified", type=Path, help="a review output file")
+    frozen.add_argument("verified", type=Path, nargs="+", help="review output files")
     frozen.add_argument("--out", type=Path, required=True, help="the frozen JSONL file")
     frozen.add_argument("--force", action="store_true", help="replace an existing frozen set")
     return parser
@@ -357,11 +438,10 @@ def main(
             )
             return 0
         if ask is None:
-            if not sys.stdin.isatty():
-                print(
-                    "error: review reads each decision from a terminal (verification is by hand)",
-                    file=sys.stderr,
-                )
+            # Rows are shown on stdout: a redirected stdout would write every
+            # row's text into a file (one that may sit in a work tree).
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                print(f"error: {NOT_A_TERMINAL}", file=sys.stderr)
                 return 2
             ask = input
         verified = args.out or verified_path(args.generated)
@@ -377,6 +457,7 @@ def main(
             show=print,
             edit=edit or editor_edit(command),
             today=today,
+            share=args.share,
         )
     except CorpusError as exc:
         print(f"error: {exc}", file=sys.stderr)

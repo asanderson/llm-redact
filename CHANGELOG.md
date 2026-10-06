@@ -122,9 +122,13 @@ and tags `vX.Y.Z`.
   agent-traffic evaluation set (docs/ner-bench.md): the file is read by path, never
   committed, checked against the SHA-256 in its `FILE.manifest.json`, and marked as real
   data. `scripts/pii_corpus/review.py` is the verification tooling: `review` shows each
-  generated row on the reviewer's terminal for accept, edit (in `$EDITOR`, grounded again)
-  or reject, resumably; `freeze` validates the verified rows and writes the frozen set with
-  a value-free provenance manifest (teachers and digests, seeds, reviewers, counts).
+  generated row on the reviewer's terminal (input and output must both be a terminal) for
+  accept, edit (in `$EDITOR`, grounded again and taken as written; a failing editor only
+  skips the edit; a hard negative's edit may hold no tag) or reject, resumably, optionally
+  one `--share K/N` per reviewer; `freeze` validates the verified rows of one or more review
+  outputs (a hard negative with spans and an id in two files refused) and writes the frozen
+  set with a value-free provenance manifest (teachers and digests, seeds, reviewers,
+  counts).
   Labeling rules: `scripts/pii_corpus/GUIDELINES.md`.
 - A student-model training recipe, documentation and a skeleton only
   (`scripts/pii_corpus/TRAINING.md`, dev-only): `train_student.py plan` checks each

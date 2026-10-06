@@ -1,6 +1,7 @@
 """The out-of-band corpus tooling in scripts/pii_corpus (plan T40-T43), run
 against a fake Ollama server (tests/fake_ollama.py; no network)."""
 
+import argparse
 import json
 import os
 import re
@@ -1002,6 +1003,107 @@ def test_review_skip_quit_bad_edits_and_malformed_rows(tmp_path: Path) -> None:
     assert counts == {"already decided": 1, "rejected": 1, "accepted": 1, "malformed": 2}
 
 
+def test_review_edits_are_taken_as_written_and_negatives_stay_negative(tmp_path: Path) -> None:
+    generated = _generated(tmp_path)
+    verified = tmp_path / "out" / "v.jsonl"
+    edits = iter(
+        [
+            # Row 1: the CI tool "Hudson" stays untagged (no repeat tagged for
+            # the reviewer), the person's surname is tagged where written.
+            'author: <pii type="PERSON">Ann Hudson</pii> <<pii type="EMAIL">ann@example.com</pii>>'
+            ' (<pii type="PERSON">Hudson</pii>), built on Hudson',
+            # Row 2, a hard negative: adding a tag is refused, so it is rejected.
+            '{"job": "JenkinsBuild", "who": "<pii type="PERSON">Bo</pii>"}',
+        ]
+    )
+
+    def edit(text: str) -> str:
+        return next(edits)
+
+    script = _Script("e", "a", "e", "r", "s")
+    counts = review.review_file(
+        generated,
+        verified,
+        reviewer="rev4",
+        ask=script.ask,
+        show=script.show,
+        edit=edit,
+        today="2026-10-06",
+    )
+    assert counts == {"edited": 1, "rejected": 1, "skipped": 1}
+    (row,) = [row for _, row in read_jsonl(verified)]
+    assert [row["text"][s["start"] : s["end"]] for s in row["spans"]] == [
+        "Ann Hudson",
+        "ann@example.com",
+        "Hudson",
+    ]
+    assert row["text"].endswith("built on Hudson")
+    # The reviewer is told what an edit leaves untagged.
+    note = "--- note: 1 untagged whole-token repeat(s) of a tagged value"
+    assert any(note in shown for shown in script.shown)
+    assert f"edit not applied: {grounding.NEGATIVE_TAGGED}" in script.shown
+    assert any("a hard negative that holds personal data is rejected" in x for x in script.shown)
+
+
+def test_review_survives_a_failing_editor(tmp_path: Path) -> None:
+    generated = _generated(tmp_path)
+
+    def failing(text: str) -> str:
+        raise review.EditFailed("the editor failed (CalledProcessError)")
+
+    script = _Script("e", "a", "q")
+    counts = review.review_file(
+        generated,
+        tmp_path / "out" / "v.jsonl",
+        reviewer="rev5",
+        ask=script.ask,
+        show=script.show,
+        edit=failing,
+        today="2026-10-06",
+    )
+    assert counts == {"accepted": 1}
+    assert "edit not applied: the editor failed (CalledProcessError)" in script.shown
+
+
+def test_review_shares_split_a_file_and_freeze_joins_them(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    generated = _generated(tmp_path)
+    ids = [row["id"] for _, row in read_jsonl(generated)]
+    assert review.parse_share("2/3") == (2, 3)
+    for bad in ("0/2", "3/2", "1", "a/b", "1/0", "-1/2"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            review.parse_share(bad)
+    shares = [{i for i in ids if review.in_share(i, (k, 2))} for k in (1, 2)]
+    assert shares[0] | shares[1] == set(ids) and not shares[0] & shares[1]
+    assert all(shares)
+    outs = []
+    for k in (1, 2):
+        out = tmp_path / f"rev{k}" / "v.jsonl"
+        script = _Script("a", "a", "a")
+        counts = review.review_file(
+            generated,
+            out,
+            reviewer=f"rev{k}",
+            ask=script.ask,
+            show=script.show,
+            edit=_edit_to(""),
+            today="2026-10-06",
+            share=(k, 2),
+        )
+        assert counts == {"accepted": len(shares[k - 1]), "other shares": 3 - len(shares[k - 1])}
+        assert {row["id"] for _, row in read_jsonl(out)} == shares[k - 1]
+        outs.append(out)
+    frozen = tmp_path / "frozen.jsonl"
+    argv = ["freeze", *map(str, outs), "--out", str(frozen)]
+    assert review.main(argv) == 0
+    assert "3 rows (1 hard negatives)" in capsys.readouterr().out
+    assert [row["id"] for _, row in read_jsonl(frozen)] == sorted(ids)
+    # The same row decided in two files (overlapping shares) is refused.
+    assert review.main(["freeze", str(outs[0]), str(outs[0]), "--out", str(frozen), "--force"]) == 2
+    assert f"{outs[0]} line 1: a duplicate id" in capsys.readouterr().err
+
+
 @pytest.mark.skipif(os.name != "posix", reason="the editor command is split POSIX-style")
 def test_editor_edit_runs_the_editor_on_a_private_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1022,6 +1124,22 @@ def test_editor_edit_runs_the_editor_on_a_private_file(
     assert edit("for Bo") == "for Bea"
     assert edit("for Bo\n") == "for Bea\n\n"
     assert list(temp.iterdir()) == []  # the private copy is removed
+    # An editor that exits non-zero (vi's :cq), a missing editor, a command
+    # shlex cannot split and a non-UTF-8 save are an EditFailed naming the
+    # exception type, never a crash; the private copy is still removed.
+    failing = tmp_path / "failing_editor.py"
+    failing.write_text("import sys\nsys.exit(1)\n")
+    latin = tmp_path / "latin_editor.py"
+    latin.write_text("import sys\nopen(sys.argv[1], 'wb').write(b'caf\\xe9')\n")
+    for command, kind in (
+        (f"{sys.executable} {failing}", "CalledProcessError"),
+        (str(tmp_path / "no-such-editor"), "FileNotFoundError"),
+        ("vi 'unbalanced", "ValueError"),
+        (f"{sys.executable} {latin}", "UnicodeDecodeError"),
+    ):
+        with pytest.raises(review.EditFailed, match=rf"^the editor failed \({kind}\)$"):
+            review.editor_edit(command)("for Bo")
+        assert list(temp.iterdir()) == []
 
 
 def _verified(tmp_path: Path) -> Path:
@@ -1117,6 +1235,10 @@ def test_freeze_writes_a_sorted_set_and_a_value_free_manifest(
             lambda rows: [{**rows[0], "review": {**rows[0]["review"], "guideline": 0}}],
             "guideline version 0",
         ),
+        (
+            lambda rows: [{**rows[0], "prompt_id": "commit.negative"}],
+            "line 1: a hard negative (prompt id ending .negative) carries spans",
+        ),
         (lambda rows: [], "holds no verified row"),
     ],
 )
@@ -1137,10 +1259,21 @@ def test_review_command_line(
 ) -> None:
     generated = _generated(tmp_path)
     argv = ["review", str(generated), "--reviewer", "rev3"]
-    # Decisions come from a terminal; piped input is refused.
+    # Decisions come from a terminal; piped input is refused, and so is a
+    # redirected output (every row's text would land in a file).
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     assert review.main(argv) == 2
     assert "reads each decision from a terminal" in capsys.readouterr().err
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    asked: list[str] = []
+    monkeypatch.setattr("builtins.input", lambda prompt: asked.append(prompt) or "q")
+    assert review.main(argv) == 2
+    printed = capsys.readouterr()
+    assert "with its input and output on a terminal" in printed.err
+    assert asked == [] and "Ann Lee" not in printed.out
+    assert not review.verified_path(generated).exists()
     script = _Script("a", "r", "q")
     assert review.main(argv, ask=script.ask, edit=_edit_to("")) == 0
     printed = capsys.readouterr().out
@@ -1151,10 +1284,14 @@ def test_review_command_line(
     assert review.main([*argv, *out], ask=script.ask, edit=_edit_to("")) == 2
     assert "must never be committed" in capsys.readouterr().err
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "q")
     monkeypatch.setenv("EDITOR", "true")
     assert review.main(argv) == 0
     assert "already decided 2" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        review.main([*argv, "--share", "3/2"])
+    assert "--share: must be K/N with 1 <= K <= N" in capsys.readouterr().err
 
 
 # --- train_student.py (the recipe skeleton) ---------------------------------------

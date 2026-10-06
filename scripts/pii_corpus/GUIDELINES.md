@@ -20,7 +20,12 @@ realistic invented value is labeled exactly as a real one would be.
   the editor (add, remove, retype, move boundaries; you may also fix the
   text). The edit is grounded again: tags must be well formed, values
   unpadded and on one line (an address may span lines), one value one type.
-  Untagged whole-token repeats of a tagged value are tagged for you.
+  The edit is taken as written: a repeat of a tagged value you leave
+  untagged stays untagged (the CI tool "Hudson" beside a person named
+  Hudson, a log timestamp equal to a birth date), so tag every repeat that
+  is personal data yourself — the row view notes how many untagged repeats
+  a row holds. A hard negative's edit may hold no tag (reject it instead,
+  below).
 - **Reject** (`r`) when the row cannot be fixed with a few tag edits:
   - it is not a plausible coding-agent artifact (prose about the task,
     instructions to the model, a refusal, an explanation around the

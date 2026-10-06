@@ -270,8 +270,8 @@ model (no wildcard, no `..`). A model that lacks the file is a startup error.
 
 ### The model catalog
 
-llm-redact keeps a catalog of the Hugging Face models the `gliner` and `hf`
-backends may load (`src/llm_redact/detection/model_catalog.py`): each model's
+llm-redact keeps a catalog of the Hugging Face models the `gliner`, `gliner2`
+and `hf` backends may load (`src/llm_redact/detection/model_catalog.py`): each model's
 license, a one-line statement of facts with a link to its model card and the
 date they were checked, the commit it is pinned to, and, for a GLiNER model
 that ships no tokenizer, the base model and the commit that base model is
@@ -305,13 +305,15 @@ by the model its `llm-redact-model.json` names.
 <!-- /model-catalog -->
 
 The defaults are `urchade/gliner_small-v2.1` (`gliner`) and
-`dslim/bert-base-NER` (`hf`). A base model is pinned where the GLiNER
+`dslim/bert-base-NER` (`hf`); the `gliner2` default, `fastino/gliner2-base-v1`,
+is listed under caution below. A base model is pinned where the GLiNER
 checkpoint ships no tokenizer or encoder configuration of its own.
 
 Configurable, status caution (`not yet measured by the llm-redact bench`;
-their cards do not name the training data). Each ships its tokenizer and
-encoder configuration, so no base model is fetched; `-edge` and `-small` need
-transformers 4.48 or newer:
+their cards do not name the training data): Knowledgator's GLiNER-PII models
+and the `gliner2` backend's default, `fastino/gliner2-base-v1`. Each ships its
+tokenizer and encoder configuration, so no base model is fetched; the
+Knowledgator `-edge` and `-small` need transformers 4.48 or newer:
 
 <!-- model-catalog:caution -->
 | Model | Backend | License | Pinned revision | Base model (pinned revision) |
@@ -320,6 +322,7 @@ transformers 4.48 or newer:
 | `knowledgator/gliner-pii-small-v1.0` | gliner | Apache-2.0 | `d21aad5b4a7e` | `jhu-clsp/ettin-encoder-68m` (—) |
 | `knowledgator/gliner-pii-base-v1.0` | gliner | Apache-2.0 | `61726e0ad791` | `microsoft/deberta-v3-small` (—) |
 | `knowledgator/gliner-pii-large-v1.0` | gliner | Apache-2.0 | `f847f54fbc97` | `microsoft/deberta-v3-large` (—) |
+| `fastino/gliner2-base-v1` | gliner2 | Apache-2.0 | `f9634218e535` | `microsoft/deberta-v3-base` (—) |
 <!-- /model-catalog -->
 
 Restricted (a startup WARNING names the facts; no pin):

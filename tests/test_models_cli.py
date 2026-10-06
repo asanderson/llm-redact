@@ -303,14 +303,29 @@ def test_verify_fails_for_a_missing_or_incomplete_model(
     assert code == 1 and json.loads(out)["ok"] is False
 
 
+def _write_files(folder: Path, files: dict[str, str]) -> Path:
+    """``folder`` holding ``files`` (relative paths, subfolders included)."""
+    for name, text in files.items():
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(text)
+    return folder
+
+
+# The fake repository's files an hf model folder holds.
+HF_FILES = (
+    "config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.txt",
+)
+
+
 def test_verify_a_local_folder(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hub = install_hub(monkeypatch)
-    folder = tmp_path / "model"
-    folder.mkdir()
-    for name, text in DEFAULT_REPO.items():
-        (folder / name).write_text(text)
+    folder = _write_files(tmp_path / "model", DEFAULT_REPO)
     config = _config(tmp_path, f'backend = "hf"\nmodel = {json.dumps(str(folder))}')
     code, out = _run(capsys, "verify", "--config", str(config))
     assert (code, out.splitlines()) == (0, [f"OK    hf: {folder}: 5 files complete in its folder"])
@@ -335,11 +350,12 @@ def test_verify_with_nothing_to_verify(tmp_path: Path, capsys: pytest.CaptureFix
 def _pulled(root: Path) -> Path:
     """A folder as `models pull --to` writes it: one hf model folder with
     its sidecar, and the manifest."""
-    folder = root / "hf-dslim--bert-base-NER"
-    folder.mkdir(parents=True)
-    for name, text in DEFAULT_REPO.items():
-        if name != "gliner_config.json":
-            (folder / name).write_text(text)
+    folder = _write_files(
+        root / "hf-dslim--bert-base-NER",
+        # The hf model's own files (the fake repository also holds a GLiNER
+        # and a GLiNER2 checkpoint's configurations).
+        {k: v for k, v in DEFAULT_REPO.items() if k in HF_FILES},
+    )
     (folder / SIDECAR_NAME).write_text(json.dumps({"model_id": DSLIM, "revision": DSLIM_PIN}))
     records = file_records(folder, folder_files(folder))
     model = ManifestModel(
@@ -1002,11 +1018,7 @@ def test_pull_skips_local_folders_and_other_backends(
 
 
 def _local_gliner(tmp_path: Path, repo: dict[str, str]) -> Path:
-    folder = tmp_path / "gliner-clone"
-    folder.mkdir()
-    for name, text in repo.items():
-        (folder / name).write_text(text)
-    return folder
+    return _write_files(tmp_path / "gliner-clone", repo)
 
 
 def test_pull_fetches_the_base_model_of_a_local_gliner_folder(

@@ -605,7 +605,7 @@ holds. Prefer a catalogued model or a self-contained checkpoint (one that
 ships its tokenizer and an `encoder_config`), or a folder written by
 `llm-redact models pull --to`.
 
-## `llm-redact doctor` under `models`: "allow_download = true: …" / "allow_pickle_weights = true: …" / "… has no pin: the newest cached revision of its default branch loads; …"
+## `llm-redact doctor` under `models`: "allow_download = true: …" / "allow_pickle_weights = true: …" / "… has no pin: the newest cached revision of its default branch loads; …" / "… is not (completely) in the local Hugging Face cache; the proxy's startup will fetch it (allow_download = true)" / "… takes its tokenizer and encoder configuration from its base model …, whose revision the model catalog does not pin: the newest cached revision loads"
 
 The `models` area of `doctor` lists, for the `gliner` and `hf` backends, where
 each model comes from. Its WARN rows are settings worth a second look, not
@@ -621,6 +621,14 @@ errors:
   nor in the model catalog, so whichever revision of its default branch the
   cache holds loads. Pin the commit you tested: `llm-redact models pull`
   prints the one it fetches.
+- `… is not (completely) in the local Hugging Face cache; the proxy's startup
+  will fetch it (allow_download = true)`: the model (or a GLiNER model's base
+  model) is missing from the cache at its pin, or present only in part.
+  With downloads off that is a FAIL row instead (the startup error "… is not
+  (completely) in the local Hugging Face cache, and downloads are off …"
+  above); with `allow_download = true` the next startup fetches it (a reload
+  never does, so a reload naming it is refused). Fetch it now with
+  `llm-redact models pull`, then set `allow_download = false`.
 - `… whose revision the model catalog does not pin`: the GLiNER model takes
   its tokenizer and encoder configuration from a base model the catalog does
   not pin (the startup warning below says the same).
@@ -628,12 +636,15 @@ errors:
 A FAIL row there is the startup error of the same text (see the entries
 above): the startup would stop on it.
 
-## `llm-redact doctor` under `models`: "…: the local Hugging Face cache was not checked: huggingface_hub is not installed (the … extra installs it)"
+## `llm-redact doctor` under `models`: "…: the local Hugging Face cache was not checked: huggingface_hub is not installed (the … extra installs it)" / `llm-redact models list|verify`: "…: huggingface_hub is not installed (the hf and gliner extras install it)"
 
-doctor looks models up in the local Hugging Face cache through
-`huggingface_hub`, which the `hf` and `gliner` extras install. Install the
-backend's extra (`uv sync --extra hf` / `--extra gliner`); the `ner` area's
-FAIL row says the same.
+doctor, `models list` and `models verify` look models up in the local
+Hugging Face cache through `huggingface_hub`, which the `hf` and `gliner`
+extras install. Without it, a Hub model's files are reported `unchecked`,
+and `verify` exits 1 (it cannot tell that the model is complete). Install
+the backend's extra (`uv sync --extra hf` / `--extra gliner`); the `ner`
+area's FAIL row in doctor says the same. A model configured as a local
+folder is checked without it (the Hub base model of a GLiNER folder is not).
 
 ## `llm-redact models`: "llm-redact models: cannot read PATH (…)"
 
@@ -682,7 +693,7 @@ path would be read against the proxy's working directory, and one such as
 wherever that directory holds no such folder, the proxy would take the
 carried folder for a Hub repository of that name.
 
-## `llm-redact models verify --dir`: "FAIL  …: FOLDER/FILE: SHA-256 differs from the manifest" (or "size differs", "missing", "not listed in the manifest", "the folder is missing")
+## `llm-redact models verify --dir`: "FAIL  …: FOLDER/FILE: SHA-256 differs from the manifest" (or "size differs", "missing", "not listed in the manifest", "the folder is missing", "FOLDER: the manifest lists no llm-redact-model.json", "FOLDER/llm-redact-model.json: names another model or revision than the manifest", "…/llm-redact-model.json: …")
 
 A folder written by `llm-redact models pull --to` no longer holds exactly what
 its `llm-redact-models.json` lists: a file was changed, truncated or removed
@@ -690,18 +701,28 @@ on the way (a partial copy, a disk error), or a file was added to a model
 folder (one a loader could read). Copy the folder again from the machine
 that pulled it, or pull again; do not edit the manifest to match. "names
 another model or revision than the manifest" means a model folder's
-`llm-redact-model.json` and the manifest disagree. A folder that matches the
-manifest but lacks what its loader needs (a hand-written manifest) fails
-with the loader's own message.
+`llm-redact-model.json` and the manifest disagree; "the manifest lists no
+llm-redact-model.json" means the manifest leaves out the file that names the
+folder's model (every folder `pull --to` writes holds one and lists it), so
+nothing would tie the folder to the model the manifest names; a
+`…/llm-redact-model.json: …` problem is that file failing to read as a model
+identity (see "[detection.ner] … model: …/llm-redact-model.json: …" above).
+A folder that matches the manifest but lacks what its loader needs (a
+hand-written manifest) fails with the loader's own message.
 
-## `llm-redact models verify --dir`: "no llm-redact-models.json in DIR" / "… is not an llm-redact models manifest" / "schema N is not one this llm-redact reads" / "models[I]. …"
+## `llm-redact models verify --dir`: "no llm-redact-models.json in DIR" / "… cannot be read (…)" / "… is larger than 4194304 bytes" / "… is not a UTF-8 JSON document" / "… is not an llm-redact models manifest" / "schema N is not one this llm-redact reads" / "…: models must be a list" / "…: two models share a folder" / "models[I]…"
 
-The directory holds no manifest, or one this version cannot read: not a
-UTF-8 JSON object of kind `llm-redact-models`, a newer schema (upgrade
-llm-redact), or an entry that is not well formed (a folder name that is not a
-single plain name, a file path that is absolute or contains `..`, a size or
-SHA-256 of the wrong shape). Point `--dir` at the folder `models pull --to`
-wrote (the one holding `llm-redact-models.json`), or pull again.
+The directory holds no manifest, or one this version cannot read: a file it
+may not read (the message ends with the exception type), one larger than 4
+MiB (a manifest lists tens of files; this is not one `pull --to` wrote), not
+a UTF-8 JSON object of kind `llm-redact-models`, a newer schema (upgrade
+llm-redact), a `models` value that is not a list, two entries naming the same
+model folder, or an entry that is not well formed (`models[I]` that is not
+an object, a backend other than `gliner` or `hf`, a folder name that is not a
+single plain name, a file path that is absolute or contains `..`, a path
+listed twice, a size or SHA-256 of the wrong shape). Point `--dir` at the
+folder `models pull --to` wrote (the one holding `llm-redact-models.json`),
+or pull again.
 
 ## `[detection.ner] BACKEND model 'ID' has model catalog status "restricted": …`
 

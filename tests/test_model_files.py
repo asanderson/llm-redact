@@ -271,7 +271,7 @@ def test_a_directory_named_like_a_catalogued_id_takes_no_catalog_pin(
     assert NerConfig(enabled=True, backend="hf", model=DSLIM).revision_for("hf") is None
     pipe, hub = _build(monkeypatch, model=DSLIM)
     assert hub.calls == []
-    assert pipe.built_with[0]["model"] == DSLIM
+    assert pipe.built_with[0]["model"] == str(Path(DSLIM))  # the folder, as the OS spells it
 
 
 def test_a_revision_for_a_directory_named_like_a_catalogued_id_is_refused(

@@ -237,8 +237,10 @@ and tags `vX.Y.Z`.
   models (with the GLiNER base model) and Knowledgator's `gliner-pii-edge-v1.0` with `llm-redact
   models pull --to`, then — inside a network namespace with no route, the folders mounted
   read-only at `/models` and an empty Hugging Face cache — runs `models verify --dir`, `serve
-  --check` and a Presidio email check, each under a wrapper that fails on any attempt to resolve
-  a host or open a connection; an empty folder must fail with the `models pull` hint. A unit test
+  --check` and a Presidio email check, each under a wrapper that fails on any attempt made
+  through Python's `socket` module to resolve a host or open a connection (native code that
+  connects by itself is stopped by the namespace, not seen by the wrapper); an empty folder must
+  fail with the `models pull` hint. A unit test
   (`tests/test_airgap_guard.py`) builds every NER backend under a socket guard.
   `scripts/cpu_torch.py` installs the locked NER extras with a CPU-only torch (torch at its locked
   version from the PyTorch CPU index, checked against the CPU wheels' SHA-256 the script records

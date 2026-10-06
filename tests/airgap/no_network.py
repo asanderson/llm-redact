@@ -3,10 +3,14 @@
 Used by the CI ``airgap`` job inside a network namespace with no route
 (.github/workflows/ci.yml): there every connection fails anyway, and a
 library that swallows the failure (or falls back after it) would leave the
-command green. A Python audit hook records every attempt to resolve a host
-name or connect an IP socket, whoever made it — llm-redact, a model
-library, or anything they import — and the exit status is 3 when there was
-one (the hosts are printed: names and addresses only, never data).
+command green. A Python audit hook records every attempt made through
+Python's ``socket`` module to resolve a host name or connect an IP socket,
+whoever made it — llm-redact, a model library, or anything they import —
+and the exit status is 3 when there was one (the hosts are printed: names
+and addresses only, never data). Native code that resolves and connects by
+itself (hf-xet's Rust download client, for one) is invisible to an audit
+hook: the network namespace with no route is what stops it, and a quiet
+native fallback after such a failed attempt would not turn into exit 3.
 
     python tests/airgap/no_network.py serve --check --config tests/airgap/config.toml
 """

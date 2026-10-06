@@ -245,9 +245,11 @@ jobs:
     # default hf + GLiNER models (base model included) and Knowledgator's
     # gliner-pii-edge, a Presidio email check (tldextract's suffix list), and
     # an empty folder refused with the `models pull` hint. Every command runs
-    # under tests/airgap/no_network.py, which fails on any attempt to resolve
-    # a host or connect an IP socket, so a library that falls back quietly
-    # after a failed connection still fails the job. docs/air-gapped.md
+    # under tests/airgap/no_network.py, which fails on any attempt made
+    # through Python's socket module to resolve a host or connect an IP
+    # socket, so a Python library that falls back quietly after a failed
+    # connection still fails the job (native code connecting by itself is
+    # stopped by the namespace with no route, not seen by the wrapper). docs/air-gapped.md
     # walks an operator through the same steps.
     name: air-gapped start (NER models, no network)
     runs-on: ubuntu-latest

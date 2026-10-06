@@ -1059,3 +1059,15 @@ def test_the_air_gapped_guide_never_claims_an_egress_filter_in_the_user_unit(
     assert "meta skuid" in systemd and "/etc/systemd/system/" in systemd
     # The IPAddressDeny= example sits under the system-unit option only.
     assert systemd.index("IPAddressDeny=any") > systemd.index("A system unit you write yourself")
+
+
+def test_the_network_wrapper_claims_only_what_an_audit_hook_sees() -> None:
+    # A Python audit hook sees the socket module's calls only; native code
+    # (hf-xet's Rust client) resolves and connects past it.
+    wrapper = (DEPLOY.parent / "tests" / "airgap" / "no_network.py").read_text()
+    assert "through\nPython's ``socket`` module" in wrapper
+    assert "invisible to an audit\nhook" in wrapper
+    for path in ("docs/air-gapped.md", "docs/privacy.md", "CHANGELOG.md"):
+        text = re.sub(r"\s+", " ", (DEPLOY.parent / path).read_text())
+        assert "attempt made through Python's `socket` module" in text, path
+        assert "fails on any attempt to resolve a host or open a connection" not in text, path

@@ -12,7 +12,10 @@ switches are set before they are imported, GLiNER folders carry their base
 model's tokenizer and configuration, and Presidio's email check uses the
 public suffix list its package ships. The CI `airgap` job proves this on
 every change: it runs the steps below inside a network namespace with no
-route and fails on any attempt to resolve a host or open a connection
+route, where no connection can succeed, and fails on any attempt made
+through Python's `socket` module to resolve a host or open a connection
+(native code that connects by itself, such as hf-xet's download client, is
+not seen by that check; the namespace still stops it)
 ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml),
 [`tests/airgap/`](../tests/airgap)).
 

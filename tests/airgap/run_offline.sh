@@ -11,9 +11,10 @@
 # tests/airgap/pull.toml and pull-edge.toml; EMPTY_DIR is an empty folder.
 # Each is mounted read-only at /models in turn, as an enclave mounts carried
 # folders. Every llm-redact command runs through no_network.py, which fails
-# (exit 3) on any attempt to resolve a host or connect an IP socket — a
-# library that falls back quietly after a failed connection would otherwise
-# go unnoticed. HF_HOME points at an empty folder: nothing loads from a cache.
+# (exit 3) on any attempt made through Python's socket module to resolve a
+# host or connect an IP socket — a library that falls back quietly after a
+# failed connection would otherwise go unnoticed. Native code connecting by
+# itself is not seen by it; the namespace with no route still stops that. HF_HOME points at an empty folder: nothing loads from a cache.
 set -eu
 
 python=$1

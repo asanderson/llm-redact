@@ -21,7 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from llm_redact.detection.model_catalog import MODEL_ID_RE, REVISION_RE, SIDECAR_NAME
+from llm_redact.detection.model_catalog import (
+    HUB_BACKENDS,
+    MODEL_ID_RE,
+    REVISION_RE,
+    SIDECAR_NAME,
+)
 
 MANIFEST_NAME = "llm-redact-models.json"
 MANIFEST_KIND = "llm-redact-models"
@@ -33,7 +38,8 @@ _CHUNK = 1024 * 1024
 # writes (Hub file names and model-id slugs), never "." or "..".
 _SEGMENT_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-BACKENDS = ("gliner", "hf")
+# The backends whose models a manifest lists: the Hugging Face Hub ones.
+BACKENDS = HUB_BACKENDS
 
 
 def file_digest(path: Path) -> str:

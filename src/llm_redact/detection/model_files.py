@@ -699,29 +699,36 @@ GLINER2_CONFIGS = ("config.json", GLINER2_ENCODER_CONFIG, "tokenizer_config.json
 GLINER2_PATTERNS = ("config.json", GLINER2_ENCODER_CONFIG, "model.safetensors", *TOKENIZER_FILES)
 
 
-def gliner2_model_dir(model: str, *, revision: str | None, allow_download: bool) -> Path:
-    """The local folder a GLiNER2 model loads from with no network access:
-    the checkpoint at its pinned revision, which must ship its
-    configuration, its encoder configuration (a model type transformers
-    knows: gliner2 builds the encoder with ``trust_remote_code=True``) and
-    its tokenizer, none of them naming code to import."""
+def gliner2_files(
+    model: str, *, revision: str | None, allow_download: bool, check_types: bool = True
+) -> ModelFiles:
+    """The files a GLiNER2 model loads from with no network access: the
+    checkpoint at its pinned revision, which must ship its configuration,
+    its encoder configuration (a model type transformers knows: gliner2
+    builds the encoder with ``trust_remote_code=True``), its tokenizer and
+    its weights, none of the configurations naming code to import. A
+    checkpoint is self-contained (no base model, nothing assembled), so
+    ``ModelFiles.files`` holds ``encoder_config/config.json`` under its own
+    subfolder. ``check_types`` (the loader) also refuses an encoder type
+    transformers does not know, which imports transformers; ``llm-redact
+    models`` and doctor check files only."""
     what = "gliner2 model"
+    patterns: tuple[str, ...] = GLINER2_PATTERNS
     path = resolve_model(
-        model,
-        what=what,
-        revision=revision,
-        allow_download=allow_download,
-        allow_patterns=GLINER2_PATTERNS,
+        model, what=what, revision=revision, allow_download=allow_download, allow_patterns=patterns
     )
-    if not (path / "model.safetensors").is_file() and not is_local(model):
-        # No safetensors in the repository: gliner2's weights_only .bin.
-        path = resolve_model(
-            model,
-            what=what,
-            revision=revision,
-            allow_download=allow_download,
-            allow_patterns=(*GLINER2_PATTERNS, GLINER_PICKLE),
-        )
+    if not (path / "model.safetensors").is_file():
+        # No safetensors: gliner2's weights_only .bin (fetched too from a
+        # repository that lists no safetensors file).
+        patterns = (*patterns, GLINER_PICKLE)
+        if not is_local(model):
+            path = resolve_model(
+                model,
+                what=what,
+                revision=revision,
+                allow_download=allow_download,
+                allow_patterns=patterns,
+            )
     configs = check_configs(path, GLINER2_CONFIGS, what=what, model=model)
     for name in GLINER2_CONFIGS:
         if name not in configs:
@@ -729,14 +736,27 @@ def gliner2_model_dir(model: str, *, revision: str | None, allow_download: bool)
                 f"[detection.ner] gliner2 model {model!r} has no {name}; a GLiNER2 checkpoint"
                 " ships its configuration, its encoder configuration and its tokenizer"
             )
-    _require_known_type(
-        configs[GLINER2_ENCODER_CONFIG],
-        default=None,
-        what=what,
-        model=model,
-        name=GLINER2_ENCODER_CONFIG,
-    )
-    return path
+    if check_types:
+        _require_known_type(
+            configs[GLINER2_ENCODER_CONFIG],
+            default=None,
+            what=what,
+            model=model,
+            name=GLINER2_ENCODER_CONFIG,
+        )
+    files = matching_files(path, (p for p in patterns if p != GLINER2_ENCODER_CONFIG))
+    files[GLINER2_ENCODER_CONFIG] = path / GLINER2_ENCODER_CONFIG
+    missing = [] if any(name in files for name in GLINER_WEIGHTS) else ["weights"]
+    if not has_vocabulary(files):
+        missing.append("tokenizer files")
+    _require_complete(what, model, revision, missing, allow_download=allow_download)
+    return ModelFiles(model, path, dict(sorted(files.items())))
+
+
+def gliner2_model_dir(model: str, *, revision: str | None, allow_download: bool) -> Path:
+    """The local folder a GLiNER2 model loads from with no network access
+    (:func:`gliner2_files`): the checkpoint's own directory."""
+    return gliner2_files(model, revision=revision, allow_download=allow_download).directory
 
 
 def config_text(config: Mapping[str, Any]) -> str:

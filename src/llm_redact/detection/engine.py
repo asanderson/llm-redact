@@ -474,7 +474,7 @@ def _mark_unmatched(entities: Sequence[str], backends: Sequence[Detector]) -> No
 
 
 def _mark_source(detector: Detector, ner: NerConfig, backend: str) -> None:
-    """Record on a Hub backend (gliner, hf) which model and revision it
+    """Record on a Hub backend (gliner, gliner2, hf) which model and revision it
     loaded and what the model catalog says about it (model_sources.py),
     once per build: /status and the startup warnings read it, never the
     files again. Backends without a label policy (stand-ins) are left

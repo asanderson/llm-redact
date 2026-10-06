@@ -698,7 +698,8 @@ def _check_ner_labels(report: _Report, config: Config) -> None:
 
 
 def _check_models(report: _Report, config: Config) -> None:
-    """Where the NER models of the Hugging Face Hub backends (gliner, hf)
+    """Where the NER models of the Hugging Face Hub backends (gliner, gliner2,
+    hf)
     come from: the download and pickle switches, each model's pin, and
     whether its files are in the local Hugging Face cache (or its folder)
     at that pin. Never loads a model and never touches the network — file

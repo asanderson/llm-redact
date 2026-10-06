@@ -34,10 +34,12 @@ from llm_redact.detection.model_sources import (
 from llm_redact.proxy import create_app
 from ner_fakes import (
     FakeGliner,
+    FakeGliner2,
     FakeHfPipe,
     FakeHub,
     FakeSpacy,
     install_gliner,
+    install_gliner2,
     install_hub,
     install_spacy,
     install_transformers,
@@ -166,6 +168,21 @@ def test_the_build_records_each_hub_backends_source(monkeypatch: pytest.MonkeyPa
     assert list(block["hf"]) == [
         "model", "source", "model_id", "revision", "pinned", "catalog", "license", "counters",
     ]  # fmt: skip
+
+
+def test_the_build_records_the_gliner2_backends_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_gliner2(monkeypatch, FakeGliner2([]), FakeHub())
+    ner = NerConfig(enabled=True, backend="gliner2")
+    block = ner_status(ner, build_detectors(DetectionConfig(ner=ner)))["backends"]
+    assert {key: block["gliner2"][key] for key in UNKNOWN_SOURCE_FIELDS} == _fields(
+        source="hub",
+        model_id="fastino/gliner2-base-v1",
+        revision="f9634218e53580c56edf0de97ca1a7d3f1c2354e",
+        pinned=True,
+        catalog="caution",
+        license="Apache-2.0",
+    )
+    assert [source.backend for source in hub_sources(ner)] == ["gliner2"]
 
 
 def test_a_restricted_model_warns_after_the_build(monkeypatch: pytest.MonkeyPatch) -> None:

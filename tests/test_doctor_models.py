@@ -1,6 +1,6 @@
 """`llm-redact doctor`'s ``models`` area: where the NER models come from.
 
-Rows for the Hugging Face Hub backends (gliner, hf): the download and pickle
+Rows for the Hugging Face Hub backends (gliner, gliner2, hf): the download and pickle
 switches, each model's pin and whether its files are in the local cache at
 that pin. doctor never loads a model and never touches the network: the
 fake hub (ner_fakes.FakeHub) answers its local-cache lookups.
@@ -91,6 +91,37 @@ def test_a_cached_default_model_passes(
     assert {(c["repo_id"], c["revision"], c["local_files_only"]) for c in hub.calls} == {
         (DSLIM, DSLIM_PIN, True)
     }
+
+
+def test_a_cached_gliner2_model_passes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact.detection.model_catalog import lookup
+
+    fastino = "fastino/gliner2-base-v1"
+    entry = lookup(fastino)
+    assert entry is not None and entry.revision is not None
+    hub = install_hub(monkeypatch)
+    _, rows = _rows(tmp_path, capsys, 'backend = "gliner2"')
+    assert rows[1:] == [
+        (
+            "PASS",
+            f"gliner2: {fastino} pinned at {entry.revision} by the model catalog (model catalog:"
+            f" caution, Apache-2.0): {entry.describe()}",
+        ),
+        (
+            "PASS",
+            f"gliner2: {fastino}: every file the loader reads is in the local Hugging Face cache",
+        ),
+    ]
+    assert {(c["repo_id"], c["revision"], c["local_files_only"]) for c in hub.calls} == {
+        (fastino, entry.revision, True)
+    }
+    # The loader's own completeness check: a snapshot without its weights.
+    hub.default = {k: v for k, v in DEFAULT_REPO.items() if k != "model.safetensors"}
+    hub.root = tmp_path / "other-cache"
+    _, rows = _rows(tmp_path, capsys, 'backend = "gliner2"')
+    assert rows[-1][0] == "FAIL" and rows[-1][1].endswith("; missing: weights")
 
 
 def test_the_three_switch_and_pin_warnings(

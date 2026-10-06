@@ -3,7 +3,7 @@
 ``list`` and ``verify`` read the configuration (``--config`` like ``serve``
 and ``doctor``) and the local files only — the Hugging Face cache, local
 model folders — never the network: ``list`` shows each model of the
-``gliner`` and ``hf`` backends with its revision, catalog facts and whether
+``gliner``, ``gliner2`` and ``hf`` backends with its revision, catalog facts and whether
 its files are there; ``verify`` exits 1 unless every one is complete at its
 revision (a cached snapshot can be incomplete), and ``verify --dir DIR``
 checks a folder written by ``models pull --to`` against its manifest, for
@@ -47,7 +47,7 @@ OK, FAILED, UNUSABLE = 0, 1, 2
 
 def add_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     models = subparsers.add_parser(
-        "models", help="list, verify or pull the NER models the config loads (gliner, hf)"
+        "models", help="list, verify or pull the NER models the config loads (gliner, gliner2, hf)"
     )
     sub = models.add_subparsers(dest="models_command", required=True)
     listing = sub.add_parser(
@@ -199,7 +199,9 @@ def model_state(config: Config, source: Any, *, hub: bool) -> dict[str, Any]:
         state["files"] = "error"
         return state
     if not hub and not source.local:
-        state["problem"] = "huggingface_hub is not installed (the hf and gliner extras install it)"
+        state["problem"] = (
+            "huggingface_hub is not installed (the hf, gliner and gliner2 extras install it)"
+        )
         return state
     try:
         files = local_files(config.detection.ner, source)
@@ -273,7 +275,7 @@ def run_list(args: argparse.Namespace) -> int:
             if state["problem"] is not None:
                 print(f"{state['backend']}: {state['problem']}")
     else:
-        print("no Hugging Face Hub models configured (backends gliner, hf)")
+        print("no Hugging Face Hub models configured (backends gliner, gliner2, hf)")
     _print_others(config)
     return OK
 
@@ -288,7 +290,10 @@ def run_verify(args: argparse.Namespace) -> int:
         _json({"ok": good, "models": states, "other_models": other_models(config)})
         return OK if good else FAILED
     if not states:
-        print("no Hugging Face Hub models configured (backends gliner, hf): nothing to verify")
+        print(
+            "no Hugging Face Hub models configured (backends gliner, gliner2, hf):"
+            " nothing to verify"
+        )
     for state in states:
         where = f"{state['backend']}: {state['model']}"
         if state["files"] in ("cached", "folder"):
@@ -373,12 +378,14 @@ def run_verify_dir(args: argparse.Namespace) -> int:
 def _loader_problems(root: Path, model: Any) -> list[str]:
     """Whether the folder holds what its loader reads (a manifest could
     list an incomplete folder): the loaders' own check, files only."""
-    from llm_redact.detection.model_files import gliner_files, hf_files
+    from llm_redact.detection.model_files import gliner2_files, gliner_files, hf_files
 
     folder = str(root / model.folder)
     try:
         if model.backend == "hf":
             hf_files(folder, revision=None, allow_download=False, allow_pickle_weights=True)
+        elif model.backend == "gliner2":
+            gliner2_files(folder, revision=None, allow_download=False, check_types=False)
         else:
             gliner_files(
                 folder,
@@ -458,11 +465,13 @@ def run_pull(args: argparse.Namespace) -> int:
         print("NER is off ([detection.ner] enabled = false); pulling the models it would load")
     _print_others(config)
     if not sources:
-        print("no Hugging Face Hub models configured (backends gliner, hf): nothing to pull")
+        print(
+            "no Hugging Face Hub models configured (backends gliner, gliner2, hf): nothing to pull"
+        )
         return OK
     if not _hub_installed():
         print(
-            "FAIL  pulling needs huggingface_hub, which the hf and gliner extras install;"
+            "FAIL  pulling needs huggingface_hub, which the hf, gliner and gliner2 extras install;"
             " install the backend's extra (uv sync --extra hf)"
         )
         return FAILED

@@ -20,7 +20,11 @@ and tags `vX.Y.Z`.
   the prompt. The model loads like the other Hub backends: from the local cache at a pinned
   revision (`[detection.ner.revisions] gliner2`), downloaded only at startup with
   `allow_download = true`, from a self-contained checkpoint whose configuration names no code
-  and whose encoder is a model type transformers knows. The default model
+  and whose encoder is a model type transformers knows; a cached snapshot without its weights
+  or its tokenizer's vocabulary (an interrupted download) counts as not cached. `llm-redact
+  models list|verify|pull` (`pull --to` writes a portable `gliner2-…` folder, its
+  `encoder_config/` subfolder included), doctor's `models` area and `/status` cover it like the
+  `gliner` and `hf` backends. The default model
   `fastino/gliner2-base-v1` (Apache-2.0) is catalogued as not yet measured by the llm-redact bench
   and pinned to its `main` commit of 2026-10-06. The extra installs gliner2 2.0+ with torch
   (`>=2.6`), transformers, peft, safetensors and numpy; gliner2's own `local` extra caps
@@ -190,15 +194,15 @@ and tags `vX.Y.Z`.
   restricted models (kept equal to the catalog by a test). The catalog still never refuses a
   model.
 - `llm-redact models list|verify` (`--config` like `serve`): `list [--json]` shows each model
-  of the `gliner` and `hf` backends with its revision, catalog status, license, base model and
+  of the `gliner`, `gliner2` and `hf` backends with its revision, catalog status, license, base model and
   whether its files are in the local Hugging Face cache (or its folder); `verify` exits 1
   unless every model is complete at its revision (configuration, every weight file, tokenizer,
-  a GLiNER model's base model), which the cache's own lookup does not check; `verify --dir DIR`
+  a GLiNER model's base model, a GLiNER2 model's encoder configuration), which the cache's own lookup does not check; `verify --dir DIR`
   checks a folder written by `models pull --to` against its `llm-redact-models.json` manifest
   (sizes, SHA-256, no unlisted files) with no configuration and no network, for air-gapped
   installs. Both read local files only; spaCy, Presidio and Stanza models get their install
   commands.
-- `llm-redact models pull` fetches each configured `gliner`/`hf` model (and a GLiNER model's
+- `llm-redact models pull` fetches each configured `gliner`/`gliner2`/`hf` model (and a GLiNER model's
   base model) at its revision with the loaders' own file names into the Hugging Face cache —
   the way to fill it now that the proxy downloads nothing by default — printing the commit and
   the `[detection.ner.revisions]` line for a model nothing pins and the catalog's facts for a

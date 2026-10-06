@@ -195,7 +195,7 @@ overridable. Details: `docs/overrides.md`.
 
 ## Local NER models (optional)
 
-With `[detection.ner]` enabled on the `gliner` or `hf` backend, the proxy
+With `[detection.ner]` enabled on the `gliner`, `gliner2` or `hf` backend, the proxy
 runs a local model on every scanned string. Models load from the local
 Hugging Face cache or a local folder, at a pinned revision; nothing is
 downloaded unless `allow_download = true`, and then only at startup.

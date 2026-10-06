@@ -661,7 +661,7 @@ errors:
 A FAIL row there is the startup error of the same text (see the entries
 above): the startup would stop on it.
 
-## `llm-redact doctor` under `models`: "…: the local Hugging Face cache was not checked: huggingface_hub is not installed (the … extra installs it)" / `llm-redact models list|verify`: "…: huggingface_hub is not installed (the hf and gliner extras install it)"
+## `llm-redact doctor` under `models`: "…: the local Hugging Face cache was not checked: huggingface_hub is not installed (the … extra installs it)" / `llm-redact models list|verify`: "…: huggingface_hub is not installed (the hf, gliner and gliner2 extras install it)"
 
 doctor, `models list` and `models verify` look models up in the local
 Hugging Face cache through `huggingface_hub`, which the `hf` and `gliner`
@@ -707,7 +707,7 @@ while the old folders are being replaced, `DIR` is left without its
 holds), and `models verify --dir` fails until a `pull --to` completes: fix
 the cause and pull again.
 
-## `llm-redact models pull`: "FAIL  pulling needs huggingface_hub, which the hf and gliner extras install; …" / "--as needs --to" / "--as needs an absolute path: where DIR is mounted for the proxy (for example /models)"
+## `llm-redact models pull`: "FAIL  pulling needs huggingface_hub, which the hf, gliner and gliner2 extras install; …" / "--as needs --to" / "--as needs an absolute path: where DIR is mounted for the proxy (for example /models)"
 
 Install the backend's extra on the machine that pulls (`uv sync --extra hf`
 or `--extra gliner`; both bring `huggingface_hub`). `--as PATH` only says

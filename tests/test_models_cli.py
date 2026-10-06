@@ -175,7 +175,7 @@ def test_list_when_ner_is_off_and_no_hub_backend(
     assert code == 0
     assert out.splitlines() == [
         "NER is off ([detection.ner] enabled = false); the models it would load:",
-        "no Hugging Face Hub models configured (backends gliner, hf)",
+        "no Hugging Face Hub models configured (backends gliner, gliner2, hf)",
         "presidio: de_core_news_sm is not a Hugging Face model; install it with:"
         " uv run python -m spacy download de_core_news_sm",
     ]
@@ -192,7 +192,8 @@ def test_list_without_huggingface_hub(
     [state] = json.loads(out)["models"]
     assert state["files"] == "unchecked"
     assert (
-        state["problem"] == "huggingface_hub is not installed (the hf and gliner extras install it)"
+        state["problem"]
+        == "huggingface_hub is not installed (the hf, gliner and gliner2 extras install it)"
     )
     code, out = _run(capsys, "verify", "--config", str(config))
     assert code == 1
@@ -448,7 +449,7 @@ def test_verify_dir_checks_the_sidecar_and_what_the_loader_needs(
         ({"manifest": "llm-redact-models", "schema": 1, "models": {}}, "models must be a list"),
         (
             {"manifest": "llm-redact-models", "schema": 1, "models": [{"backend": "spacy"}]},
-            "models[0].backend must be one of gliner, hf",
+            "models[0].backend must be one of gliner, gliner2, hf",
         ),
         (
             {
@@ -1151,3 +1152,170 @@ def test_folder_names_and_snapshot_commits(tmp_path: Path) -> None:
     assert snapshot_commit(tmp_path / DSLIM_PIN) == DSLIM_PIN
     assert snapshot_commit(tmp_path / "main") is None
     assert snapshot_commit(None) is None
+
+
+# --- gliner2 -------------------------------------------------------------------------
+
+FASTINO = "fastino/gliner2-base-v1"
+FASTINO_PIN = "f9634218e53580c56edf0de97ca1a7d3f1c2354e"
+# A GLiNER2 checkpoint as fastino/gliner2-base-v1 ships it (README and
+# images aside): self-contained, its encoder configuration in a subfolder.
+GLINER2_REPO = {
+    "config.json": json.dumps({"model_type": "extractor"}),
+    "encoder_config/config.json": json.dumps({"model_type": "deberta-v2"}),
+    "model.safetensors": "weights",
+    "tokenizer.json": "{}",
+    "tokenizer_config.json": "{}",
+    "spm.model": "sentencepiece",
+    "added_tokens.json": "{}",
+    "special_tokens_map.json": "{}",
+    "README.md": "not fetched",
+}
+GLINER2_FILES = sorted(
+    ["added_tokens.json", "config.json", "encoder_config/config.json", "model.safetensors",
+     "special_tokens_map.json", "spm.model", "tokenizer.json", "tokenizer_config.json"]
+)  # fmt: skip
+
+
+def test_list_and_verify_a_gliner2_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub = install_hub(monkeypatch, FakeHub(repos={FASTINO: GLINER2_REPO}))
+    config = _config(tmp_path, 'backend = "gliner2"')
+    code, out = _run(capsys, "list", "--config", str(config), "--json")
+    assert code == 0
+    [state] = json.loads(out)["models"]
+    assert {k: state[k] for k in ("backend", "model", "revision", "catalog", "files")} == {
+        "backend": "gliner2",
+        "model": FASTINO,
+        "revision": FASTINO_PIN,
+        "catalog": "caution",
+        "files": "cached",
+    }
+    assert state["file_count"] == len(GLINER2_FILES)
+    code, out = _run(capsys, "verify", "--config", str(config))
+    assert (code, out.splitlines()) == (
+        0,
+        [
+            f"OK    gliner2: {FASTINO} at {FASTINO_PIN}: {len(GLINER2_FILES)} files complete in"
+            " the local Hugging Face cache"
+        ],
+    )
+    assert [(c["repo_id"], c["revision"]) for c in hub.calls] == [(FASTINO, FASTINO_PIN)] * 2
+    _offline(hub)
+
+
+@pytest.mark.parametrize(
+    ("missing", "fail"),
+    [
+        # An interrupted download: the snapshot lacks the weights or the
+        # tokenizer's vocabulary, and snapshot_download returns it anyway.
+        (("model.safetensors",), "; missing: weights"),
+        (("tokenizer.json", "spm.model"), "; missing: tokenizer files"),
+        # Its encoder configuration (in a subfolder).
+        (("encoder_config/config.json",), "has no encoder_config/config.json"),
+    ],
+)
+def test_verify_fails_for_an_incomplete_gliner2_model(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    missing: tuple[str, ...],
+    fail: str,
+) -> None:
+    repo = {k: v for k, v in GLINER2_REPO.items() if k not in missing}
+    install_hub(monkeypatch, FakeHub(repos={FASTINO: repo}))
+    config = _config(tmp_path, 'backend = "gliner2"')
+    code, out = _run(capsys, "verify", "--config", str(config))
+    assert code == 1
+    [line] = out.splitlines()
+    assert (
+        line.startswith(f"FAIL  gliner2: {FASTINO}: [detection.ner] gliner2 model") and fail in line
+    )
+
+
+def test_pull_to_writes_a_portable_gliner2_folder(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact.detection.engine import NerConfig
+    from llm_redact.detection.gliner2_ner import build_gliner2_detector
+    from llm_redact.detection.model_files import GLINER2_PATTERNS
+    from ner_fakes import FakeGliner2, install_gliner2
+
+    hub = install_hub(monkeypatch, FakeHub(repos={FASTINO: GLINER2_REPO}))
+    out_dir = tmp_path / "carry"
+    config = _config(tmp_path, 'backend = "gliner2"')
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir), "--as", "/m")
+    assert code == 0, out
+    assert [(c["repo_id"], c["revision"], c["allow_patterns"]) for c in hub.calls] == [
+        (FASTINO, FASTINO_PIN, list(GLINER2_PATTERNS))
+    ]
+    assert not hub.calls[0]["local_files_only"]
+    lines = out.splitlines()
+    # The catalog lists the model as caution: no warning, no pin hint.
+    assert lines[0] == f"OK    gliner2: {FASTINO} at {FASTINO_PIN}: {len(GLINER2_FILES)} files"
+    folder = out_dir / "gliner2-fastino--gliner2-base-v1"
+    assert 'gliner2 = "/m/gliner2-fastino--gliner2-base-v1"' in lines
+    # Self-contained as the checkpoint is: its encoder configuration in its
+    # subfolder, a sidecar, no base model and nothing rewritten.
+    assert folder_files(folder) == sorted([*GLINER2_FILES, SIDECAR_NAME])
+    [model] = _manifest(out_dir)["models"]
+    assert {k: model[k] for k in ("backend", "model_id", "revision", "backbone", "onnx")} == {
+        "backend": "gliner2",
+        "model_id": FASTINO,
+        "revision": FASTINO_PIN,
+        "backbone": None,
+        "onnx": None,
+    }
+    assert [r["path"] for r in model["files"]] == folder_files(folder)
+    code, verified = _run(capsys, "verify", "--dir", str(out_dir))
+    assert (code, verified.splitlines()) == (
+        0,
+        [
+            f"OK    gliner2: {FASTINO} at {FASTINO_PIN}: {folder.name}"
+            f" ({len(GLINER2_FILES) + 1} files) matches {MANIFEST_NAME}"
+        ],
+    )
+    # The carried folder loads with the hub answering nothing.
+    offline = FakeHub(default=None)
+    model_fake = FakeGliner2([])
+    install_gliner2(monkeypatch, model_fake, offline)
+    build_gliner2_detector(NerConfig(enabled=True, backend="gliner2", model=str(folder)))
+    assert model_fake.loaded_with[0]["model_id"] == str(folder)
+    assert offline.calls == []
+    # verify --dir checks what the gliner2 loader needs, not a GLiNER one's.
+    (folder / "encoder_config" / "config.json").unlink()
+    code, verified = _run(capsys, "verify", "--dir", str(out_dir))
+    assert code == 1
+    assert "encoder_config/config.json: missing" in verified
+
+
+def test_verify_dir_runs_the_gliner2_loaders_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A manifest that lists a gliner2 folder without its tokenizer: every
+    # listed file is intact, but the loader would refuse the folder.
+    monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+    root = tmp_path / "models"
+    folder = _write_files(
+        root / "gliner2-org--g2",
+        {k: v for k, v in GLINER2_REPO.items() if k in GLINER2_FILES}
+        | {SIDECAR_NAME: json.dumps({"model_id": "org/g2", "revision": None})},
+    )
+    folder.joinpath("spm.model").unlink()
+    folder.joinpath("tokenizer.json").unlink()
+    records = file_records(folder, folder_files(folder))
+    model = ManifestModel(
+        backend="gliner2",
+        model_id="org/g2",
+        revision=None,
+        folder=folder.name,
+        files=tuple((r["path"], r["size"], r["sha256"]) for r in records),
+    )
+    (root / MANIFEST_NAME).write_text(json.dumps(manifest_json([model], "test")))
+    code, out = _run(capsys, "verify", "--dir", str(root))
+    assert code == 1
+    assert out.splitlines() == [
+        "FAIL  gliner2: org/g2 at an unrecorded revision: [detection.ner] gliner2 model"
+        f" '{folder}' is a local directory that lacks what the loader needs: tokenizer files"
+    ]

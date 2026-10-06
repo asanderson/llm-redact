@@ -349,8 +349,8 @@ their links and check dates, are what the startup warning, `doctor` and
 
 ### Fetching and checking models: `llm-redact models`
 
-`llm-redact models` works on the models of the `gliner` and `hf` backends the
-configuration names (`--config PATH`, like `serve` and `doctor`; NER need not
+`llm-redact models` works on the models of the `gliner`, `gliner2` and `hf`
+backends the configuration names (`--config PATH`, like `serve` and `doctor`; NER need not
 be enabled yet). `pull` is the one subcommand that downloads; `list` and
 `verify` read local files only and never touch the network:
 
@@ -380,9 +380,11 @@ llm-redact models verify --dir DIR  # check a folder written by `models pull --t
   Downloads need network access to huggingface.co (and `HF_TOKEN` for a gated
   model); exit 1 when a model cannot be fetched.
 - `pull --to DIR` also writes one self-contained folder per model into `DIR`
-  (`hf-dslim--bert-base-NER`, `gliner-urchade--gliner_small-v2.1`): its files
-  copied, a GLiNER model's base-model tokenizer and configuration included
-  (the folder loads with no base model and no assembly), an
+  (`hf-dslim--bert-base-NER`, `gliner-urchade--gliner_small-v2.1`,
+  `gliner2-fastino--gliner2-base-v1`): its files copied, a GLiNER model's
+  base-model tokenizer and configuration included (the folder loads with no
+  base model and no assembly; a GLiNER2 checkpoint is self-contained, its
+  `encoder_config/config.json` kept in its subfolder), an
   `llm-redact-model.json` naming the model and revision, and beside the
   folders a manifest, `llm-redact-models.json`, listing every file with its
   size and SHA-256. It then prints the `[detection.ner.models]` lines that
@@ -413,8 +415,9 @@ llm-redact models verify --dir DIR  # check a folder written by `models pull --t
   Stanza models are not Hugging Face snapshots: their install commands are
   printed instead.
 - `verify` exits 1 unless every model's files are complete where its load
-  reads them, at its revision: its configuration, every weight file and its
-  tokenizer, and a GLiNER model's base model. The Hugging Face cache can hold
+  reads them, at its revision: its configuration (a GLiNER2 model's encoder
+  configuration too), every weight file and its tokenizer, and a GLiNER
+  model's base model. The Hugging Face cache can hold
   a revision only in part (after an interrupted download) and still report
   it as present; `verify` checks what the loader needs, exactly as the
   proxy's startup does. Exit 2: the configuration cannot be read.

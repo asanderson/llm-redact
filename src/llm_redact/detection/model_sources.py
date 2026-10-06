@@ -90,7 +90,8 @@ UNKNOWN_SOURCE_FIELDS: dict[str, Any] = {
 
 
 def model_source(ner: "NerConfig", backend: str) -> ModelSource:
-    """The model ``backend`` (``gliner`` or ``hf``) loads under ``ner``."""
+    """The model ``backend`` (``gliner``, ``gliner2`` or ``hf``) loads under
+    ``ner``."""
     from llm_redact.detection.model_files import is_local
 
     model = ner.model_for(backend) or DEFAULT_MODELS[backend]
@@ -139,7 +140,7 @@ def local_files(
     it resolved) — checked complete. Model types are not checked (that
     imports transformers); the loader does. Raises ConfigError
     (``ModelNotCached`` for a model the cache lacks)."""
-    from llm_redact.detection.model_files import gliner_files, hf_files
+    from llm_redact.detection.model_files import gliner2_files, gliner_files, hf_files
 
     if revision is None:
         revision = ner.revision_for(source.backend)
@@ -149,6 +150,10 @@ def local_files(
             revision=revision,
             allow_download=allow_download,
             allow_pickle_weights=ner.allow_pickle_weights,
+        )
+    if source.backend == "gliner2":
+        return gliner2_files(
+            source.model, revision=revision, allow_download=allow_download, check_types=False
         )
     return gliner_files(
         source.model,

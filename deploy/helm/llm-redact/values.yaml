@@ -48,7 +48,8 @@ image:
 #     hf = "/models/hf-dslim--bert-base-NER"
 #     gliner = "/models/gliner-urchade--gliner_small-v2.1"
 # Check the volume first: `llm-redact models verify --dir /models` (exec into
-# the pod, or run it where the volume is prepared).
+# the pod, or run it where the volume is prepared). Absent (`helm upgrade
+# --reuse-values` from a release made before this key) = no volume.
 models:
   volume: {}
 

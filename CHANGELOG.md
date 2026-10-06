@@ -263,7 +263,8 @@ and tags `vX.Y.Z`.
   PersistentVolumeClaim holding `llm-redact models pull --to` folders) is mounted read-only at
   `/models` and sets `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`; `image.variant: ner` selects
   the `-ner` image tag. Both default off; an unknown variant or a `models.volume` that is not a
-  volume source fails the render, and NOTES warns about a models volume on the stock image. A new
+  volume source fails the render, and NOTES warns about a models volume on the stock image. A
+  `helm upgrade --reuse-values` from a release made before these keys renders with both off. A new
   guide, docs/air-gapped.md, walks through running with NER models in an enclave with no internet
   route: what to carry in, offline verification (`models verify --dir`, the manifest's checksum
   carried separately), Docker, Helm and systemd (`IPAddressDeny=any` with loopback and the

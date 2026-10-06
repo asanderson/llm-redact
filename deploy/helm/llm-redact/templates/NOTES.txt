@@ -91,7 +91,7 @@ lives on an emptyDir, so a pod restart WIPES it and previously issued token
 numbers get reissued (never-wrong-value depends on the dense counter
 surviving). Set persistence.enabled=true with a PersistentVolumeClaim.
 {{- end }}
-{{- if .Values.models.volume }}
+{{- if (.Values.models | default dict).volume }}
 
 NER models: the models volume is mounted read-only at /models, and the proxy
 runs with HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1. Load its folders with the

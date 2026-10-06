@@ -720,6 +720,40 @@ def test_helm_reuse_values_from_an_older_release_renders_the_prestop(tmp_path: P
     assert spec["terminationGracePeriodSeconds"] == 90
 
 
+def test_helm_templates_read_the_models_table_nil_safely() -> None:
+    # Stdlib needle (no helm needed): an older release's values carry no
+    # `models` table, and `.Values.models.volume` on it fails every render.
+    templates = HELM_CHART / "templates"
+    for path in [*templates.glob("*.tpl"), *templates.glob("*.yaml"), templates / "NOTES.txt"]:
+        assert ".Values.models.volume" not in path.read_text(), path.name
+
+
+@_needs_helm
+@pytest.mark.parametrize("mode", ["sidecar", "standalone"])
+def test_helm_reuse_values_from_an_older_release_renders_without_models(
+    tmp_path: Path, mode: str
+) -> None:
+    # `helm upgrade --reuse-values` from a release made before the models
+    # table: no `models` and no `image.variant` in the old values.
+    old = (HELM_CHART / "values.yaml").read_text()
+    old = re.sub(r"^models:\n(?:  .*\n)+", "", old, flags=re.MULTILINE)
+    old = re.sub(r"^  variant:.*\n", "", old, flags=re.MULTILINE)
+    assert "\nmodels:" not in old and "variant:" not in old
+    docs = _render_copy(_chart_copy(tmp_path, old), *(_STANDALONE if mode == "standalone" else ()))
+    [deployment] = [d for d in docs if d["kind"] == "Deployment"]
+    spec = deployment["spec"]["template"]["spec"]
+    assert all(volume["name"] != "models" for volume in spec["volumes"])
+    [proxy_container] = [c for c in spec["containers"] if c["name"] == "llm-redact"]
+    assert all(mount["mountPath"] != "/models" for mount in proxy_container["volumeMounts"])
+    assert all(env["name"] != "HF_HUB_OFFLINE" for env in proxy_container["env"])
+    [notes] = [
+        d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "rendered-notes"
+    ]
+    assert "NER models" not in notes["data"]["notes"]
+    # An explicit null is the same absence.
+    assert _render_copy(_chart_copy(tmp_path / "null"), "models=null")
+
+
 @_needs_helm
 def test_helm_notes_count_the_prestop_delay_in_standalone_only(tmp_path: Path) -> None:
     chart = _chart_copy(tmp_path)

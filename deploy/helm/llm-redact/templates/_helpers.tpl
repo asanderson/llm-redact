@@ -46,7 +46,10 @@ vault: with a per-pod memory/sqlite vault, replicas would issue divergent
 {{- if not (has (.Values.image.variant | default "") (list "" "ner")) -}}
 {{- fail "llm-redact: image.variant must be \"\" (the stock image) or \"ner\" (the -ner image with the hf and gliner NER extras)." -}}
 {{- end -}}
-{{- if and .Values.models.volume (not (kindIs "map" .Values.models.volume)) -}}
+{{- /* (.Values.models | default dict): a release made with a chart before
+the models table carries no `models` (helm upgrade --reuse-values). */ -}}
+{{- $modelsVolume := (.Values.models | default dict).volume -}}
+{{- if and $modelsVolume (not (kindIs "map" $modelsVolume)) -}}
 {{- fail "llm-redact: models.volume must be a volume source (a map such as { persistentVolumeClaim: { claimName: llm-redact-models } }) — see values.yaml." -}}
 {{- end -}}
 {{- $grace := .Values.terminationGracePeriodSeconds -}}
@@ -210,7 +213,7 @@ binds 0.0.0.0 (cross-pod reach is the point) and keeps httpGet probes.
     - name: LLM_REDACT_LICENSE_KEY
       valueFrom:
         secretKeyRef: { name: {{ .Values.license.secretName | quote }}, key: license-key, optional: true }
-    {{- if .Values.models.volume }}
+    {{- if (.Values.models | default dict).volume }}
     # Models come from the read-only /models volume only: the Hugging Face
     # libraries' own offline switches, on top of [detection.ner]
     # allow_download (off by default).
@@ -259,7 +262,7 @@ binds 0.0.0.0 (cross-pod reach is the point) and keeps httpGet probes.
   volumeMounts:
     - { name: config, mountPath: /etc/llm-redact, readOnly: true }
     - { name: redact-data, mountPath: /data }
-    {{- if .Values.models.volume }}
+    {{- if (.Values.models | default dict).volume }}
     - { name: models, mountPath: /models, readOnly: true }
     {{- end }}
     {{- with .Values.extraVolumeMounts }}
@@ -283,7 +286,7 @@ client-ca Secret can actually be mounted — without it the chart's own
   {{- else }}
   emptyDir: {}
   {{- end }}
-{{- with .Values.models.volume }}
+{{- with (.Values.models | default dict).volume }}
 - name: models
   {{- toYaml . | nindent 2 }}
 {{- end }}

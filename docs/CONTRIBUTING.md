@@ -77,7 +77,12 @@ Other conventions worth knowing before writing tests:
   without any extra installed. Tests that load a real NER model carry the
   `real_model` marker, deselected by default: they read the model from the
   local Hugging Face cache only (never a download) and skip when it or the
-  model's extra is absent (`uv run pytest -m real_model`).
+  model's extra is absent (`uv run pytest -m real_model`). The CI
+  `ner-models` job pulls every model they load and sets
+  `LLM_REDACT_TEST_REAL_MODELS_REQUIRED=1`, which makes such a skip a
+  failure: a new real-model test needs its model in a config the job pulls
+  (`bench/configs/` or `tests/real_model_configs/`, checked by
+  `tests/test_ner_ci.py`).
 - The session never touches your machine (`tests/isolation.py`, applied
   by `conftest.py` before collection): `HOME` and the XDG
   config/data/state dirs point into one throwaway directory — whatever

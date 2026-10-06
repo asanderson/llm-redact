@@ -915,7 +915,10 @@ revision and the download failed (no network, a proxy refusing the host, a
 full disk). Files already in the cache directory are reused, so a machine
 without network access can run a dataset whose cache was filled elsewhere:
 copy `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets` across, or
-point `--cache-dir` at the copy.
+point `--cache-dir` at the copy. `LocalEntryNotFoundError` means the Hub
+client was offline (`HF_HUB_OFFLINE=1` in the environment) and the file is
+not in the cache; the bench downloads a dataset before it loads the models,
+whose loading switches the process offline.
 
 ## NER bench: "--cache-dir must be outside any git work tree"
 

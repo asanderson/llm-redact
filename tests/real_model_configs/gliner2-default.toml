@@ -1,0 +1,6 @@
+# Pulled by the CI ner-models job (`llm-redact models pull --config`) for the
+# real_model tests, not scored by the NER bench: the gliner2 backend's
+# default model at its catalog pin (tests/test_gliner2.py).
+[detection.ner]
+enabled = true
+backend = "gliner2"

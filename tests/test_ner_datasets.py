@@ -442,6 +442,34 @@ def test_cli_scores_a_downloaded_dataset(
     assert "Ann" not in printed
 
 
+def test_cli_downloads_a_dataset_before_the_models_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Building a Hub backend switches the process offline (model_files.go_offline):
+    # a download after it found nothing ("LocalEntryNotFoundError" on every
+    # uncached dataset with an hf, gliner or gliner2 config).
+    install_transformers(monkeypatch, FakeHfPipe(findings=[]))
+    path = _openpii_file(tmp_path)
+    events: list[str] = []
+
+    def download(**kwargs: object) -> str:
+        events.append(f"download {kwargs['filename']}")
+        return str(path)
+
+    built = bench_ner.build_pipeline
+
+    def build(detection: Any) -> Any:
+        events.append("build")
+        return built(detection)
+
+    monkeypatch.setattr(base, "hf_hub_download", download)
+    monkeypatch.setattr(bench_ner, "build_pipeline", build)
+    argv = ["--config", str(_config(tmp_path)), "--dataset", "openpii"]
+    assert bench_ner.main([*argv, "--cache-dir", str(tmp_path / "cache")]) == 0
+    first = f"download {openpii.SPEC.files['validation'][0]}"
+    assert events[:2] == [first, "build"]
+
+
 @pytest.mark.parametrize(
     ("extra", "message"),
     [

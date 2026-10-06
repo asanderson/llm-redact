@@ -236,6 +236,80 @@ jobs:
       # only runs when the extra and the model are both present — i.e. here.
       - run: uv run pytest tests/test_ner.py tests/test_presidio.py -v
 
+  ner-models:
+    # Real NER models (docs/ner-bench.md, "CI"): the real_model tests, then
+    # the NER bench's statistical gates for every bench/configs/*.toml —
+    # synthetic-corpus recall floors and leak/over-redaction ceilings
+    # (bench/ner_thresholds.toml), false-positive ceilings on the negatives
+    # corpus (bench/ner_ceilings.toml) and the latency report. The models are
+    # pulled at their catalog pins (`llm-redact models pull`) into the Hugging
+    # Face cache, which is cached keyed on the catalog and the configs; the
+    # tests and the bench then load them offline, exactly as a proxy with
+    # downloads off does. LLM_REDACT_TEST_REAL_MODELS_REQUIRED turns a
+    # real_model test that skips (a model not pulled, an extra missing) into
+    # a failure instead of a green run that tested nothing.
+    name: ner models (real-model tests + NER bench gates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      LLM_REDACT_TEST_REAL_MODELS_REQUIRED: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: ner-models
+      # The locked environment of the four extras with CPU-only torch: the
+      # locked PyPI torch wheel brings the CUDA libraries (several GB) no CI
+      # runner uses. torch is installed at its locked version from the
+      # PyTorch CPU index, then everything else exactly as uv.lock pins it,
+      # minus torch's CUDA dependencies (docs/dependencies.md).
+      - name: install the hf, gliner, gliner2 and bench-data extras (CPU torch)
+        run: |
+          uv venv
+          export_args="--frozen --no-hashes --no-annotate --no-header --no-emit-project --extra hf --extra gliner --extra gliner2 --extra bench-data"
+          torch=$(uv export $export_args | grep -E '^torch==' | cut -d' ' -f1)
+          uv pip install "$torch" --index-url https://download.pytorch.org/whl/cpu
+          uv export $export_args | grep -vE '^(torch|triton)[=[ ;]|^(nvidia|cuda)-' > "$RUNNER_TEMP/requirements.txt"
+          uv pip install -r "$RUNNER_TEMP/requirements.txt"
+          uv pip install --no-deps -e .
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/huggingface/hub
+          key: ner-models-hub-${{ hashFiles('src/llm_redact/detection/model_catalog.py', 'bench/configs/*.toml', 'tests/real_model_configs/*.toml') }}
+          restore-keys: ner-models-hub-
+      # Every model the bench configs and the real_model tests load, at its
+      # catalog pin (GLiNER base models included).
+      - name: pull the models
+        run: |
+          for config in bench/configs/*.toml tests/real_model_configs/*.toml; do
+            uv run --no-sync llm-redact models pull --config "$config"
+          done
+      - run: uv run --no-sync pytest -m real_model -v
+      # Every config through all three runs, so one crossed gate does not
+      # hide another's report; the step fails if any --check failed.
+      - name: NER bench gates
+        run: |
+          status=0
+          for config in bench/configs/*.toml; do
+            name=$(basename "$config" .toml)
+            uv run --no-sync python -m llm_redact.bench.ner --config "$config" --check --out "ner-report/$name-synthetic" || status=1
+            uv run --no-sync python -m llm_redact.bench.ner --config "$config" --fp-corpus bench/fp_corpus --check --out "ner-report/$name-fp" || status=1
+            uv run --no-sync python -m llm_redact.bench.ner --config "$config" --latency --many-small-strings 1000 --check --out "ner-report/$name-latency" || status=1
+          done
+          exit $status
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: ner-report
+          path: ner-report/
+          if-no-files-found: ignore
+
   rdbms:
     # The RDBMS vault's SQL on REAL engines. The `test` job proves the
     # portable dialect over stdlib sqlite3-as-dbapi and fake drivers; this

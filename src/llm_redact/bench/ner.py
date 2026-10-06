@@ -37,6 +37,7 @@ from llm_redact.bench.datasets import (
     default_cache_dir,
     resolve,
 )
+from llm_redact.bench.datasets.base import fetch
 from llm_redact.bench.latency import MANY_SMALL_STRINGS
 from llm_redact.bench.ner_metrics import NerResult, Pipeline, evaluate, to_json_dict, to_markdown
 from llm_redact.config import ConfigError, load_config
@@ -425,6 +426,12 @@ def _run(args: argparse.Namespace) -> int:
         config = load_config(args.config)
     except (ConfigError, OSError) as exc:
         raise BenchError(f"config {args.config}: {exc}") from exc
+    if spec is not None and spec.hub_id is not None:
+        # A published dataset is downloaded BEFORE the models load: building
+        # a Hub backend switches the process offline for good
+        # (model_files.go_offline), after which the adapter finds the files
+        # in the cache only.
+        fetch(spec, split, LoadRequest(split=split, cache_dir=cache_dir))
     pipeline, detectors = build_pipeline(config.detection)
     config_name = args.name or args.config.stem
     backends = describe_backends(detectors)

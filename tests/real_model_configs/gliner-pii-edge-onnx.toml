@@ -1,0 +1,10 @@
+# Pulled by the CI ner-models job (`llm-redact models pull --config`) for the
+# real_model tests, not scored by the NER bench: knowledgator's edge
+# checkpoint from its int8 ONNX weights only (tests/test_gliner.py).
+[detection.ner]
+enabled = true
+backend = "gliner"
+model = "knowledgator/gliner-pii-edge-v1.0"
+
+[detection.ner.onnx]
+gliner = "onnx/model_quint8.onnx"

@@ -514,8 +514,10 @@ configuration is kept — fetch the model, then reload again, or restart.
 "(completely)": the cache holds the revision but not every file the loader
 needs, such as after an interrupted download; the message then ends with
 `; missing: …`, naming the kinds of files absent (`config.json`, `weights`,
-`tokenizer files`, a weight shard's name, or a file the model catalog lists
-for the model, such as an `hf` tagger's `viterbi_calibration.json`). `llm-redact doctor` shows the same
+`tokenizer files`, a weight shard's name, a GLiNER2 checkpoint's
+`encoder_config/config.json` or `tokenizer_config.json`, or a file the model
+catalog lists for the model, such as an `hf` tagger's
+`viterbi_calibration.json`). `llm-redact doctor` shows the same
 text as a FAIL under `models` before you restart, and `llm-redact models
 verify` checks every configured model the same way.
 
@@ -528,12 +530,13 @@ repository offers at the pinned revision, lack something every load reads:
 the tokenizer (`tokenizer.json` or a vocabulary: `vocab.txt`, `vocab.json`
 with `merges.txt`, or a SentencePiece model — plus `tokenizer_config.json` for
 GLiNER), or a file the model catalog lists for the model (an `hf` tagger's
-calibration file). A `gliner2` checkpoint's `config.json`,
-`encoder_config/config.json` and `tokenizer_config.json` are named by their
-own message (below). For a folder, copy the missing files in, or write the folder again
-with `llm-redact models pull --to`; for a repository, pick another model or
-revision: llm-redact fetches only the top-level files it names, never other
-formats a repository may hold.
+calibration file; a `gliner2` checkpoint's `config.json`,
+`encoder_config/config.json` and `tokenizer_config.json` — in a local folder
+those are named by their own message, below). For a folder, copy the missing
+files in, or write the folder again with `llm-redact models pull --to`; for a
+repository, pick another model or revision: llm-redact fetches only the files
+the loader names (top-level files, plus a GLiNER2 checkpoint's
+`encoder_config/config.json`), never other formats a repository may hold.
 
 ## "[detection.ner] hf model '…': model.safetensors.index.json does not name its weight files"
 
@@ -790,14 +793,19 @@ Helm chart already allow the data directory), or free disk space.
 
 ## "[detection.ner] gliner2 model '…' has no …; a GLiNER2 checkpoint ships its configuration, its encoder configuration and its tokenizer"
 
-From `serve` / `serve --check` with the `gliner2` backend: the model's folder
-or snapshot lacks `config.json`, `encoder_config/config.json` or
+From `serve` / `serve --check`, `llm-redact doctor` (`models`) and
+`llm-redact models list|verify|pull` with the `gliner2` backend: the model's
+local folder lacks `config.json`, `encoder_config/config.json` or
 `tokenizer_config.json`. A GLiNER2 checkpoint (Fastino's, or one trained with
 the gliner2 package) ships all three, and llm-redact loads it only from its
-own files, so nothing is fetched at load time. Check the model id (a GLiNER
-checkpoint belongs to the `gliner` backend), pull the model again (`llm-redact
-models pull`), or, for a local folder, copy the missing files in beside the
-weights.
+own files, so nothing is fetched at load time. Check the folder (a GLiNER
+checkpoint belongs to the `gliner` backend), copy the missing files in beside
+the weights, or write the folder again with `llm-redact models pull --to`. A
+cached snapshot of a Hub model that lacks one of them (an interrupted
+download) is not cached instead: the message ends with `; missing: …` and
+`llm-redact models pull` fetches it (see "… is not (completely) in the local
+Hugging Face cache …" above); with `allow_download = true` the repository
+itself lacks it ("… its repository lacks what the loader needs: …").
 
 ## `backend = "gliner2" but the gliner2 extra is not installed; install it: uv sync --extra gliner2`
 

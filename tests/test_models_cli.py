@@ -1212,8 +1212,15 @@ def test_list_and_verify_a_gliner2_model(
         # tokenizer's vocabulary, and snapshot_download returns it anyway.
         (("model.safetensors",), "; missing: weights"),
         (("tokenizer.json", "spm.model"), "; missing: tokenizer files"),
-        # Its encoder configuration (in a subfolder).
-        (("encoder_config/config.json",), "has no encoder_config/config.json"),
+        # Its configuration files (the encoder's in a subfolder): missing
+        # from a snapshot they are not cached either.
+        (("encoder_config/config.json",), "; missing: encoder_config/config.json"),
+        (("config.json",), "; missing: config.json"),
+        (("tokenizer_config.json",), "; missing: tokenizer_config.json"),
+        (
+            ("config.json", "model.safetensors"),
+            "; missing: config.json, weights",
+        ),
     ],
 )
 def test_verify_fails_for_an_incomplete_gliner2_model(
@@ -1232,6 +1239,9 @@ def test_verify_fails_for_an_incomplete_gliner2_model(
     assert (
         line.startswith(f"FAIL  gliner2: {FASTINO}: [detection.ner] gliner2 model") and fail in line
     )
+    # Every case is a snapshot the cache holds only in part.
+    code, out = _run(capsys, "list", "--config", str(config), "--json")
+    assert json.loads(out)["models"][0]["files"] == "incomplete"
 
 
 def test_pull_to_writes_a_portable_gliner2_folder(

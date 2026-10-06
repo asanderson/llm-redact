@@ -739,12 +739,20 @@ def gliner2_files(
         # hf's are (doctor and `llm-redact models` report it the same way).
         _identify(model, what=what)
     configs = check_configs(path, GLINER2_CONFIGS, what=what, model=model)
-    for name in GLINER2_CONFIGS:
-        if name not in configs:
-            raise _config_error(
-                f"[detection.ner] gliner2 model {model!r} has no {name}; a GLiNER2 checkpoint"
-                " ships its configuration, its encoder configuration and its tokenizer"
-            )
+    # A configuration file a cached snapshot lacks is missing like its
+    # weights (an interrupted download: not cached); a folder's is its own.
+    missing = [name for name in GLINER2_CONFIGS if name not in configs]
+    if missing and is_local(model):
+        raise _config_error(
+            f"[detection.ner] gliner2 model {model!r} has no {missing[0]}; a GLiNER2 checkpoint"
+            " ships its configuration, its encoder configuration and its tokenizer"
+        )
+    files = matching_files(path, (p for p in patterns if p != GLINER2_ENCODER_CONFIG))
+    if not any(name in files for name in GLINER_WEIGHTS):
+        missing.append("weights")
+    if not has_vocabulary(files):
+        missing.append("tokenizer files")
+    _require_complete(what, model, revision, missing, allow_download=allow_download)
     if check_types:
         _require_known_type(
             configs[GLINER2_ENCODER_CONFIG],
@@ -753,12 +761,7 @@ def gliner2_files(
             model=model,
             name=GLINER2_ENCODER_CONFIG,
         )
-    files = matching_files(path, (p for p in patterns if p != GLINER2_ENCODER_CONFIG))
     files[GLINER2_ENCODER_CONFIG] = path / GLINER2_ENCODER_CONFIG
-    missing = [] if any(name in files for name in GLINER_WEIGHTS) else ["weights"]
-    if not has_vocabulary(files):
-        missing.append("tokenizer files")
-    _require_complete(what, model, revision, missing, allow_download=allow_download)
     return ModelFiles(model, path, dict(sorted(files.items())))
 
 

@@ -482,24 +482,64 @@ def _hub_with(files: dict[str, str]) -> FakeHub:
     return FakeHub(repos={"org/g2": files})
 
 
-def test_a_checkpoint_without_its_encoder_configuration_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "absent", ["config.json", "encoder_config/config.json", "tokenizer_config.json"]
+)
+def test_a_snapshot_without_a_configuration_file_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch, absent: str
 ) -> None:
-    files = {k: v for k, v in DEFAULT_REPO.items() if k != "encoder_config/config.json"}
+    # A cached snapshot lacking a configuration file is an interrupted
+    # download like one lacking its weights: `llm-redact models pull`
+    # fetches it, and with downloads on the repository itself lacks it.
+    from llm_redact.detection.model_files import ModelNotCached
+
+    files = {k: v for k, v in DEFAULT_REPO.items() if k != absent}
     install_hub(monkeypatch, _hub_with(files))
-    with pytest.raises(ConfigError) as caught:
+    with pytest.raises(ModelNotCached) as caught:
         gliner2_model_dir("org/g2", revision=None, allow_download=False)
-    assert str(caught.value) == (
-        "[detection.ner] gliner2 model 'org/g2' has no encoder_config/config.json; a GLiNER2"
-        " checkpoint ships its configuration, its encoder configuration and its tokenizer"
+    assert caught.value.missing == (absent,)
+    assert str(caught.value).endswith(
+        f"`llm-redact models pull`, or set [detection.ner]"
+        f" allow_download = true to fetch it at startup (a reload never downloads); missing:"
+        f" {absent}"
+    )
+    with pytest.raises(ConfigError) as caught_on:
+        gliner2_model_dir("org/g2", revision=None, allow_download=True)
+    assert not isinstance(caught_on.value, ModelNotCached)
+    assert str(caught_on.value) == (
+        "[detection.ner] gliner2 model 'org/g2' (no revision pinned): its repository lacks"
+        f" what the loader needs: {absent}"
     )
 
 
-def test_a_checkpoint_without_its_tokenizer_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    files = {k: v for k, v in DEFAULT_REPO.items() if k != "tokenizer_config.json"}
-    install_hub(monkeypatch, _hub_with(files))
-    with pytest.raises(ConfigError, match="has no tokenizer_config.json"):
+def test_a_snapshot_lacking_several_files_names_them_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    from llm_redact.detection.model_files import ModelNotCached
+
+    gone = ("config.json", "encoder_config/config.json", "model.safetensors")
+    install_hub(monkeypatch, _hub_with({k: v for k, v in DEFAULT_REPO.items() if k not in gone}))
+    with pytest.raises(ModelNotCached) as caught:
         gliner2_model_dir("org/g2", revision=None, allow_download=False)
+    assert caught.value.missing == ("config.json", "encoder_config/config.json", "weights")
+
+
+@pytest.mark.parametrize(
+    "absent", ["config.json", "encoder_config/config.json", "tokenizer_config.json"]
+)
+def test_a_local_folder_without_a_configuration_file_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, absent: str
+) -> None:
+    hub = install_hub(monkeypatch)
+    for name, content in DEFAULT_REPO.items():
+        if name != absent:
+            (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / name).write_text(content)
+    with pytest.raises(ConfigError) as caught:
+        gliner2_model_dir(str(tmp_path), revision=None, allow_download=False)
+    assert str(caught.value) == (
+        f"[detection.ner] gliner2 model {str(tmp_path)!r} has no {absent}; a GLiNER2"
+        " checkpoint ships its configuration, its encoder configuration and its tokenizer"
+    )
+    assert hub.calls == []
 
 
 @pytest.mark.parametrize("name", ["config.json", "encoder_config/config.json"])

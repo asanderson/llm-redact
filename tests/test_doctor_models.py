@@ -325,6 +325,30 @@ def test_a_broken_local_folder_fails(
     ]
 
 
+@pytest.mark.parametrize("absent", ["encoder_config/config.json", "model.safetensors"])
+def test_an_incomplete_gliner2_snapshot_is_not_cached(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    absent: str,
+) -> None:
+    # A configuration file is missing from an interrupted download like the
+    # weights: FAIL naming `models pull`, or WARN when the startup fetches it.
+    fastino = "fastino/gliner2-base-v1"
+    install_hub(
+        monkeypatch, FakeHub(default={k: v for k, v in DEFAULT_REPO.items() if k != absent})
+    )
+    _, rows = _rows(tmp_path, capsys, 'backend = "gliner2"')
+    assert rows[-1][0] == "FAIL"
+    assert "`llm-redact models pull`" in rows[-1][1]
+    _, rows = _rows(tmp_path, capsys, 'backend = "gliner2"\nallow_download = true')
+    assert rows[-1] == (
+        "WARN",
+        f"gliner2: gliner2 model {fastino} is not (completely) in the local Hugging Face cache;"
+        " the proxy's startup will fetch it (allow_download = true)",
+    )
+
+
 def test_a_gliner2_folder_with_a_broken_sidecar_fails_as_its_startup_would(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

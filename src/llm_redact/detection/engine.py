@@ -409,6 +409,8 @@ def build_detectors(config: DetectionConfig, *, startup: bool = False) -> list[D
                 from llm_redact.detection.ner import build_ner_detector
 
                 inner = build_ner_detector(single)
+            if backend_name in HUB_BACKENDS:
+                _mark_source(inner, config.ner, backend_name)
             built.append(inner)
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
         _mark_unmatched(config.ner.entities, built)
@@ -466,6 +468,32 @@ def _mark_unmatched(entities: Sequence[str], backends: Sequence[Detector]) -> No
         backend.unmatched_entities = unmatched  # type: ignore[attr-defined]
 
 
+def _mark_source(detector: Detector, ner: NerConfig, backend: str) -> None:
+    """Record on a Hub backend (gliner, hf) which model and revision it
+    loaded and what the model catalog says about it (model_sources.py),
+    once per build: /status and the startup warnings read it, never the
+    files again. Backends without a label policy (stand-ins) are left
+    alone."""
+    if _label_policy(detector) is not None:
+        from llm_redact.detection.model_sources import model_source
+
+        detector.model_source = model_source(ner, backend)  # type: ignore[attr-defined]
+
+
+def _source_of(detector: Detector) -> Any:
+    from llm_redact.detection.model_sources import ModelSource
+
+    source = getattr(detector, "model_source", None)
+    return source if isinstance(source, ModelSource) else None
+
+
+def _source_fields(detector: Detector) -> dict[str, Any]:
+    from llm_redact.detection.model_sources import UNKNOWN_SOURCE_FIELDS
+
+    source = _source_of(detector)
+    return dict(UNKNOWN_SOURCE_FIELDS) if source is None else source.status_fields()
+
+
 def ner_backends(detectors: Sequence[Detector]) -> list[Detector]:
     """The NER backends among ``detectors`` (unwrapped from their type
     filter), in build order."""
@@ -500,20 +528,19 @@ def ner_backend_stats(detectors: Sequence[Detector]) -> list[tuple[str, Detector
 
 def ner_status(ner: NerConfig, detectors: Sequence[Detector]) -> dict[str, Any]:
     """The ``/status`` block ``detection.ner``: whether NER is on, the
-    string limit, each running backend's model and coverage counters, and
-    the configured entities no backend can ever emit. Metadata and counts
-    only. The counters belong to the built detectors: a reload that
-    rebuilds them starts from zero."""
+    string limit, each running backend's model — for a Hugging Face Hub
+    backend also where it comes from, its revision and its model-catalog
+    status and license (model_sources.py; null for the others) — and
+    coverage counters, and the configured entities no backend can ever
+    emit. Metadata and counts only. The counters belong to the built
+    detectors: a reload that rebuilds them starts from zero."""
     return {
         "enabled": ner.enabled,
         "max_chars": ner.max_chars,
         "backends": {
             name: {
                 "model": getattr(backend, "model_name", None),
-                # Not tracked yet: the backends load models by id.
-                "revision": None,
-                "catalog": None,
-                "license": None,
+                **_source_fields(backend),
                 "counters": stats.as_dict(),
             }
             for name, backend, stats in ner_backend_stats(detectors)
@@ -528,7 +555,8 @@ def ner_warnings(config: DetectionConfig, detectors: Sequence[Detector] = ()) ->
     after each detector build and shown by doctor (which builds no model,
     so passes no detectors): configured raw entities whose type changes in
     2.0.0, and, from the built ``detectors``, entities no active backend
-    can ever emit."""
+    can ever emit and models the model catalog lists as restricted (doctor
+    shows those under ``models``)."""
     if not config.ner.enabled:
         return []
     warnings = raw_entity_deprecations(config.ner)
@@ -543,6 +571,11 @@ def ner_warnings(config: DetectionConfig, detectors: Sequence[Detector] = ()) ->
             f'[detection.ner] entities: "{entity}" can never match: no active backend'
             f" emits it ({where})"
         )
+    for backend in backends:
+        source = _source_of(backend)
+        restricted = source.restricted_warning() if source is not None else None
+        if restricted is not None:
+            warnings.append(restricted)
     return warnings
 
 

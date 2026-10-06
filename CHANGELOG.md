@@ -114,6 +114,17 @@ and tags `vX.Y.Z`.
   model or GLiNER base model nothing pins, and FAILs, naming `llm-redact models pull`, when a
   model the startup needs is missing while downloads are off. It never loads or downloads a
   model.
+- The model catalog's facts are shown wherever a model is: `/status`
+  `detection.ner.backends.BACKEND` fills `revision`, `catalog` and `license` (null until now)
+  and adds `source` (`hub` or `local`), `model_id` and `pinned` for the `gliner` and `hf`
+  backends; a model the catalog lists as restricted logs a startup WARNING (`[detection.ner]
+  BACKEND model 'ID' has model catalog status "restricted": …`, neutral facts with the card's
+  link and check date) and a `doctor` WARN under `models`; `doctor` names each model's catalog
+  status and license (a caution model with its reason) and FAILs when an installed library is
+  older than the catalog says a model needs (transformers 4.48 for the Knowledgator `-edge`
+  and `-small` models). docs/detection.md "The model catalog" lists the vetted, caution and
+  restricted models (kept equal to the catalog by a test). The catalog still never refuses a
+  model.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

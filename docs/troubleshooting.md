@@ -632,6 +632,27 @@ doctor looks models up in the local Hugging Face cache through
 backend's extra (`uv sync --extra hf` / `--extra gliner`); the `ner` area's
 FAIL row says the same.
 
+## `[detection.ner] BACKEND model 'ID' has model catalog status "restricted": …`
+
+A startup warning (also a `doctor` WARN under `models`): llm-redact's model
+catalog lists the configured model as restricted, and the rest of the line
+states the facts it records, with the model card's link and the date they
+were checked: a non-commercial or not OSI-approved license, training data
+generated with Llama models or released under a restrictive license, a
+backbone, or a need for code from the model's repository. llm-redact still
+loads the model — the catalog never refuses one — so whether those terms fit
+your use is for you to decide. To silence the warning, pick a model the
+catalog lists as vetted (docs/detection.md "The model catalog").
+
+## `llm-redact doctor` under `models`: "…: … needs DIST >= VERSION (model catalog), but DIST VERSION is installed; upgrade it: …"
+
+The model catalog records that the configured model needs a newer library
+than the one installed — for example the Knowledgator `-edge` and `-small`
+GLiNER models are built on ModernBERT encoders, which transformers knows from
+4.48.0 on; an older one stops the startup with "names a model type
+transformers does not know". Upgrade it as the line says (or with `pip
+install -U DIST`), or pick another model.
+
 ## "[detection.ner] gliner model '…': cannot assemble its local folder under … (…)"
 
 llm-redact could not write the self-contained GLiNER folder it builds from

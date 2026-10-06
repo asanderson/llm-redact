@@ -238,6 +238,82 @@ gliner = "onnx/model_quint8.onnx"   # the int8 export (Knowledgator ships model.
 Only `gliner` takes an entry; the value must be a `.onnx` path inside the
 model (no wildcard, no `..`). A model that lacks the file is a startup error.
 
+### The model catalog
+
+llm-redact keeps a catalog of the Hugging Face models the `gliner` and `hf`
+backends may load (`src/llm_redact/detection/model_catalog.py`): each model's
+license, a one-line statement of facts with a link to its model card and the
+date they were checked, the commit it is pinned to, and, for a GLiNER model
+that ships no tokenizer, the base model and the commit that base model is
+pinned to. The catalog only states facts; llm-redact never refuses a model
+for its catalog status (a policy plugin may).
+
+- **vetted**: a known-good choice, pinned to a commit.
+- **caution**: configurable and pinned, with the reason shown — for example,
+  not yet measured by the llm-redact bench.
+- **restricted**: never suggested. A configured restricted model logs a
+  startup WARNING with the catalog's facts:
+  `[detection.ner] BACKEND model 'ID' has model catalog status "restricted": …`.
+
+What the catalog says about each running backend's model is in `/status`
+(`detection.ner.backends.BACKEND`: `source`, `model_id`, `revision`, `pinned`,
+`catalog`, `license`, see "NER coverage counters" below), in `llm-redact
+doctor` under `models` (a WARN for a restricted model and for a model nothing
+pins, and a FAIL when the installed library is older than a model needs) and
+in `llm-redact models list`. A model the catalog does not know loads as
+configured; pin it in `[detection.ner.revisions]`. A local folder is looked up
+by the model its `llm-redact-model.json` names.
+
+<!-- model-catalog:vetted -->
+| Model | Backend | License | Pinned revision | Base model (pinned revision) |
+|---|---|---|---|---|
+| `dslim/bert-base-NER` | hf | MIT | `d1a3e8f13f8c` | — |
+| `urchade/gliner_small-v2.1` | gliner | Apache-2.0 | `4e091416cf7c` | `microsoft/deberta-v3-small` (`a36c739020e0`) |
+| `urchade/gliner_medium-v2.1` | gliner | Apache-2.0 | `40ec419335d0` | `microsoft/deberta-v3-base` (`8ccc9b6f3619`) |
+| `urchade/gliner_multi-v2.1` | gliner | Apache-2.0 | `443d26d654e0` | `microsoft/mdeberta-v3-base` (`a0484667b223`) |
+| `urchade/gliner_multi_pii-v1` | gliner | Apache-2.0 | `1fcf13e85f4e` | `microsoft/mdeberta-v3-base` (`a0484667b223`) |
+<!-- /model-catalog -->
+
+The defaults are `urchade/gliner_small-v2.1` (`gliner`) and
+`dslim/bert-base-NER` (`hf`). A base model is pinned where the GLiNER
+checkpoint ships no tokenizer or encoder configuration of its own.
+
+Configurable, status caution (`not yet measured by the llm-redact bench`;
+their cards do not name the training data). Each ships its tokenizer and
+encoder configuration, so no base model is fetched; `-edge` and `-small` need
+transformers 4.48 or newer:
+
+<!-- model-catalog:caution -->
+| Model | Backend | License | Pinned revision | Base model (pinned revision) |
+|---|---|---|---|---|
+| `knowledgator/gliner-pii-edge-v1.0` | gliner | Apache-2.0 | `9b7f39b0a2da` | `jhu-clsp/ettin-encoder-32m` (—) |
+| `knowledgator/gliner-pii-small-v1.0` | gliner | Apache-2.0 | `d21aad5b4a7e` | `jhu-clsp/ettin-encoder-68m` (—) |
+| `knowledgator/gliner-pii-base-v1.0` | gliner | Apache-2.0 | `61726e0ad791` | `microsoft/deberta-v3-small` (—) |
+| `knowledgator/gliner-pii-large-v1.0` | gliner | Apache-2.0 | `f847f54fbc97` | `microsoft/deberta-v3-large` (—) |
+<!-- /model-catalog -->
+
+Restricted (a startup WARNING names the facts; no pin):
+
+<!-- model-catalog:restricted -->
+| Model | Backend | License | Pinned revision | Base model (pinned revision) |
+|---|---|---|---|---|
+| `iiiorg/piiranha-v1-detect-personal-information` | hf | CC-BY-NC-ND-4.0 | — | — |
+| `Isotonic/deberta-v3-base_finetuned_ai4privacy_v2` | hf | CC-BY-NC-4.0 | — | — |
+| `Isotonic/distilbert_finetuned_ai4privacy_v2` | hf | CC-BY-NC-4.0 | — | — |
+| `urchade/gliner_base` | gliner | CC-BY-NC-4.0 | — | — |
+| `nvidia/gliner-PII` | gliner | LicenseRef-NVIDIA-Open-Model-License | — | — |
+| `bigcode/starpii` | hf | LicenseRef-bigcode-starpii-terms-of-use | — | — |
+| `ai4privacy/llama-ai4privacy-*` | hf | MIT | — | — |
+| `knowledgator/gliner-stream-pii-v1.0` | gliner | Apache-2.0 | — | `Qwen/Qwen3-0.6B` (—) |
+| `perplexity-ai/PII-Tracer` | hf | MIT | — | — |
+| `OpenMed/privacy-filter-multilingual` | hf | Apache-2.0 | — | — |
+| `llm-semantic-router/mmbert32k-pii-detector-merged` | hf | MIT | — | — |
+<!-- /model-catalog -->
+
+`*` marks an id prefix: every model whose id starts with it. The reasons, with
+their links and check dates, are what the startup warning, `doctor` and
+`llm-redact models list --json` print.
+
 ## How NER runs
 
 ![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model, the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)
@@ -442,7 +518,9 @@ existing `detection.ner_enabled`):
   "backends": {
     "hf": {
       "model": "dslim/bert-base-NER",
-      "revision": null, "catalog": null, "license": null,
+      "source": "hub", "model_id": "dslim/bert-base-NER",
+      "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc", "pinned": true,
+      "catalog": "vetted", "license": "MIT",
       "counters": {"scanned_whole": 812, "scanned_windowed": 14, "skipped_max_chars": 3,
                    "windows": 61, "windows_truncated": 0, "labels_dropped": 0,
                    "offsets_dropped": 0, "inline_calls": 0, "prefetch_misses": 0}
@@ -468,8 +546,16 @@ Each string a backend is handed counts once, under `scanned_whole`,
 `scanned_windowed` or `skipped_max_chars`; with several backends each one
 counts the strings it was handed. `unmatched_entities` lists the configured
 entities no active backend can ever emit (the startup warning above), and
-`model` the model each backend loaded; `revision`, `catalog` and `license` are
-`null`.
+`model` the model each backend loaded. For the `gliner` and `hf` backends,
+`source` says whether it came from the Hugging Face Hub (`hub`) or a local
+folder (`local`), `model_id` names the Hub model (a folder's: the one its
+`llm-redact-model.json` names, else `null`), `revision` the commit it loads
+(the `[detection.ner.revisions]` pin, else the model catalog's; a folder's from
+its `llm-redact-model.json`), `pinned` whether there is one, and `catalog` and
+`license` what the model catalog records (`vetted`, `caution`, `restricted`,
+or `null` for a model it does not list; see "The model catalog"). These six
+are `null` for the spaCy, Presidio and Stanza backends, whose models are not
+Hub snapshots.
 
 The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
 backend and outcome, `llm_redact_ner_windows_total`,

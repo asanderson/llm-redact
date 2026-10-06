@@ -735,11 +735,24 @@ def _check_models(report: _Report, config: Config) -> None:
         _check_model_files(report, ner, source, cache=cache)
 
 
+def _catalog_note(source: Any) -> str:
+    """What the model catalog says, as a row suffix."""
+    entry = source.entry
+    if entry is None:
+        return " (not in the model catalog)" if source.model_id is not None else ""
+    note = f" (model catalog: {entry.status}, {entry.license})"
+    return f"{note}: {entry.describe()}" if entry.status == "caution" else note
+
+
 def _check_model_pin(report: _Report, source: Any) -> None:
-    """Which model and commit one Hub backend loads."""
+    """Which model and commit one Hub backend loads, and what the model
+    catalog says about it: a WARN for a model nothing pins and for a model
+    the catalog lists as restricted (the startup warning's text), a FAIL
+    when an installed library is older than the model needs."""
     from llm_redact.detection.model_catalog import SIDECAR_NAME
 
     where = f"{source.backend}: {source.model}"
+    note = _catalog_note(source)
     if source.sidecar_problem is not None:
         report.line("FAIL", "models", f"{source.backend}: {source.sidecar_problem}")
     elif source.local and source.model_id is None:
@@ -752,19 +765,57 @@ def _check_model_pin(report: _Report, source: Any) -> None:
     elif source.local:
         revision = source.revision or "an unrecorded revision"
         report.line(
-            "PASS", "models", f"{where} is a local folder holding {source.model_id} at {revision}"
+            "PASS",
+            "models",
+            f"{where} is a local folder holding {source.model_id} at {revision}{note}",
         )
     elif source.pinned:
         by = "[detection.ner.revisions]" if source.pinned_by == "config" else "the model catalog"
-        report.line("PASS", "models", f"{where} pinned at {source.revision} by {by}")
+        report.line("PASS", "models", f"{where} pinned at {source.revision} by {by}{note}")
     else:
         report.line(
             "WARN",
             "models",
-            f"{where} has no pin: the newest cached revision of its default branch loads;"
-            f" pin a commit in [detection.ner.revisions] {source.backend} (`llm-redact"
-            " models pull` prints the one it fetches)",
+            f"{where} has no pin{note}: the newest cached revision of its default branch"
+            f" loads; pin a commit in [detection.ner.revisions] {source.backend}"
+            " (`llm-redact models pull` prints the one it fetches)",
         )
+    restricted = source.restricted_warning()
+    if restricted is not None:
+        report.line("WARN", "models", restricted)
+    for problem in _version_problems(source):
+        report.line("FAIL", "models", problem)
+
+
+def _version_problems(source: Any) -> list[str]:
+    """The libraries installed older than the model catalog says ``source``'s
+    model needs (distribution metadata only: nothing is imported). A library
+    that is not installed is the ``ner`` check's FAIL."""
+    entry = source.entry
+    problems = []
+    for distribution, minimum in entry.min_versions if entry is not None else ():
+        try:
+            installed = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        if _version_tuple(installed) < _version_tuple(minimum):
+            problems.append(
+                f"{source.backend}: {source.model} needs {distribution} >= {minimum} (model"
+                f" catalog), but {distribution} {installed} is installed; upgrade it:"
+                f" uv sync --extra {source.backend} --upgrade-package {distribution}"
+            )
+    return problems
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """The leading numeric release segments of a version string."""
+    numbers = []
+    for part in version.split("+", 1)[0].split(".")[:3]:
+        match = re.match(r"\d+", part)
+        if match is None:
+            break
+        numbers.append(int(match[0]))
+    return tuple(numbers)
 
 
 def _check_model_files(report: _Report, ner: Any, source: Any, *, cache: bool) -> None:

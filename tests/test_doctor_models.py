@@ -81,7 +81,10 @@ def test_a_cached_default_model_passes(
             "downloads off (allow_download = false): models load from the local Hugging"
             " Face cache or local folders only",
         ),
-        ("PASS", f"hf: {DSLIM} pinned at {DSLIM_PIN} by the model catalog"),
+        (
+            "PASS",
+            f"hf: {DSLIM} pinned at {DSLIM_PIN} by the model catalog (model catalog: vetted, MIT)",
+        ),
         ("PASS", f"hf: {DSLIM}: every file the loader reads is in the local Hugging Face cache"),
     ]
     # A local-cache lookup at the pin, never a download.
@@ -107,9 +110,9 @@ def test_the_three_switch_and_pin_warnings(
         " downloads)",
         "allow_pickle_weights = true: an hf model without safetensors weights loads"
         " pytorch_model.bin, a pickle (loading a pickle can run code)",
-        "hf: org/ner-model has no pin: the newest cached revision of its default branch"
-        " loads; pin a commit in [detection.ner.revisions] hf (`llm-redact models pull`"
-        " prints the one it fetches)",
+        "hf: org/ner-model has no pin (not in the model catalog): the newest cached revision"
+        " of its default branch loads; pin a commit in [detection.ner.revisions] hf"
+        " (`llm-redact models pull` prints the one it fetches)",
     ]
     assert all(c["local_files_only"] for c in hub.calls)
 
@@ -129,7 +132,10 @@ def test_a_configured_pin_is_named(
     _, rows = _rows(
         tmp_path, capsys, 'backend = "hf"', extra=f'[detection.ner.revisions]\nhf = "{SHA}"\n'
     )
-    assert ("PASS", f"hf: {DSLIM} pinned at {SHA} by [detection.ner.revisions]") in rows
+    assert (
+        "PASS",
+        f"hf: {DSLIM} pinned at {SHA} by [detection.ner.revisions] (model catalog: vetted, MIT)",
+    ) in rows
     assert {c["revision"] for c in hub.calls} == {SHA}
 
 
@@ -244,11 +250,14 @@ def test_local_folders(
     _, rows = _rows(tmp_path, capsys, f'backend = "hf"\nmodel = {json.dumps(str(folder))}')
     assert rows[1] == (
         "PASS",
-        f"hf: {folder} is a local folder holding {DSLIM} at {DSLIM_PIN}",
+        f"hf: {folder} is a local folder holding {DSLIM} at {DSLIM_PIN} (model catalog:"
+        " vetted, MIT)",
     )
     (folder / SIDECAR_NAME).write_text(json.dumps({"model_id": DSLIM}))
     _, rows = _rows(tmp_path, capsys, f'backend = "hf"\nmodel = {json.dumps(str(folder))}')
-    assert rows[1][1].endswith(f"holding {DSLIM} at an unrecorded revision")
+    assert rows[1][1].endswith(
+        f"holding {DSLIM} at an unrecorded revision (model catalog: vetted, MIT)"
+    )
     assert hub.calls == []
 
 
@@ -308,3 +317,83 @@ def test_human_output_groups_the_rows_under_models(
     assert run_doctor(argparse.Namespace(config=config)) == 1
     lines: list[Any] = capsys.readouterr().out.splitlines()
     assert any(line.startswith("FAIL  models: [detection.ner] hf model") for line in lines)
+
+
+# --- what the model catalog says (T14) ---------------------------------------------
+
+
+def test_a_restricted_model_warns_with_the_catalog_facts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_hub(monkeypatch)
+    _, rows = _rows(tmp_path, capsys, 'backend = "gliner"\nmodel = "NVIDIA/GLINER-PII"')
+    warnings = _levels(rows, "WARN")
+    # Unpinned (the catalog pins no restricted model), and restricted: the
+    # lookup ignores letter case, as the Hub does.
+    assert warnings[0].startswith(
+        "gliner: NVIDIA/GLINER-PII has no pin (model catalog: restricted,"
+        " LicenseRef-NVIDIA-Open-Model-License): the newest cached revision"
+    )
+    assert warnings[1] == (
+        "[detection.ner] gliner model 'NVIDIA/GLINER-PII' has model catalog status"
+        ' "restricted": nvidia/gliner-PII: NVIDIA Open Model License: not OSI-approved; its'
+        " text includes termination clauses; built on urchade/gliner_large-v2.1, trained on"
+        " nvidia/Nemotron-PII (CC BY 4.0) (https://huggingface.co/nvidia/gliner-PII, checked"
+        " 2026-10-05)"
+    )
+
+
+def test_a_caution_model_shows_its_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_hub(monkeypatch)
+    model = "knowledgator/gliner-pii-base-v1.0"
+    _, rows = _rows(tmp_path, capsys, f'backend = "gliner"\nmodel = "{model}"')
+    (pin,) = [m for level, m in rows if level == "PASS" and "pinned at" in m]
+    assert pin.startswith(
+        f"gliner: {model} pinned at 61726e0ad791dcab3e29339bbec3ad42ded65641 by the model"
+        f" catalog (model catalog: caution, Apache-2.0): {model}: Apache-2.0;"
+    )
+    assert "not yet measured by the llm-redact bench" in pin
+    assert _levels(rows, "WARN") == []
+
+
+def test_an_older_library_than_the_model_needs_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib.metadata
+
+    install_hub(monkeypatch)
+    versions = {"transformers": "4.47.1"}
+
+    def version(name: str) -> str:
+        if name in versions:
+            return versions[name]
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    model = "knowledgator/gliner-pii-edge-v1.0"
+    code, rows = _rows(tmp_path, capsys, f'backend = "gliner"\nmodel = "{model}"')
+    assert code == 1
+    assert _levels(rows, "FAIL") == [
+        f"gliner: {model} needs transformers >= 4.48.0 (model catalog), but transformers"
+        " 4.47.1 is installed; upgrade it: uv sync --extra gliner --upgrade-package"
+        " transformers"
+    ]
+    for newer in ("4.48.0", "4.48.0.dev0+local", "5.0", "10.1.2"):
+        versions["transformers"] = newer
+        _, rows = _rows(tmp_path, capsys, f'backend = "gliner"\nmodel = "{model}"')
+        assert _levels(rows, "FAIL") == [], newer
+    del versions["transformers"]  # not installed: the ner check's FAIL
+    _, rows = _rows(tmp_path, capsys, f'backend = "gliner"\nmodel = "{model}"')
+    assert _levels(rows, "FAIL") == []
+
+
+def test_version_tuples() -> None:
+    from llm_redact.doctor_cli import _version_tuple
+
+    assert _version_tuple("4.48.0") == (4, 48, 0)
+    assert _version_tuple("4.48.0rc1") == (4, 48, 0)
+    assert _version_tuple("2.6.0+cpu") == (2, 6, 0)
+    assert _version_tuple("5") == (5,)
+    assert _version_tuple("dev") == ()

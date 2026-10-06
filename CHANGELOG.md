@@ -12,6 +12,17 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- A model-load policy seam for plugin packages: `Registry.build_model_policy(config, tier)`
+  builds a `plugin_api.ModelPolicy` once at startup (the Free default builds none, so nothing
+  changes without a plugin), and every detector build — the startup, a reload, the config
+  editor's dry run, `llm-redact preview` — asks it about each NER backend's model after the
+  model's files are resolved and before its weights load. It is shown a `plugin_api.ModelLoad`
+  (backend, configured model, Hub id and commit, every file the load reads, the catalog's
+  status, license, lineage tags and attribution); a refusal fails the build with
+  `[detection.ner] BACKEND model 'MODEL' refused by the model-load policy: REASON`, and an
+  exception or any answer but None or a reason refuses too. `model_sources.model_load` computes
+  the same facts without loading anything (for a plugin's doctor rows). The core holds no
+  policy; llm-redact-pro's `[models]` section is one.
 - A `gliner2` NER backend (`[detection.ner] backend = "gliner2"`, extra `gliner2`): Fastino's
   GLiNER2, zero-shot like `gliner` (the same natural-language prompts for type requests) with a
   confidence per entity (`score_threshold` applies) and each entity's character span, used as

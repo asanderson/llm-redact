@@ -145,6 +145,7 @@ from llm_redact.plugin_api import (
     HopRequest,
     HopResult,
     LocalAnswer,
+    ModelPolicy,
     ResponseContext,
     ResponseObserver,
     RouteDelivery,
@@ -852,9 +853,18 @@ class ProxyState:
         # What a vault fault raises while a request's placeholders are issued
         # (a write, its batch's COMMIT): refused 503, never a bare 500.
         self.vault_faults = vault_fault_types(self.vault_manager)
+        # The model-load policy (plugin_api.ModelPolicy; the Free default is
+        # None): built once, asked by every detector build of this process —
+        # this one, reloads and the editor's dry run — before an NER model
+        # loads. A refusal is a ConfigError: the startup refuses to serve.
+        self.model_policy: ModelPolicy | None = registry.build_model_policy(
+            config, self.license.tier
+        )
         # The startup build: the only one that may download NER model files
         # (with [detection.ner] allow_download); reloads and dry runs never do.
-        self.detectors = build_detectors(config.detection, startup=True)
+        self.detectors = build_detectors(
+            config.detection, startup=True, model_policy=self.model_policy
+        )
         self.allowlist = build_allowlist(config.detection)
         self.modes = build_modes(config.detection)
         _log_ner_warnings(config.detection, self.detectors)
@@ -1784,7 +1794,7 @@ class ProxyState:
             modes = self.modes
             overlay_builds = self.overlay_builds
         else:
-            detectors = build_detectors(effective.detection)
+            detectors = build_detectors(effective.detection, model_policy=self.model_policy)
             allowlist = build_allowlist(effective.detection)
             modes = build_modes(effective.detection)
             _log_ner_warnings(effective.detection, detectors)
@@ -1920,7 +1930,7 @@ class ProxyState:
         no env override, so the candidate's is the one apply would use.)
         """
         if candidate.detection != self.config.detection:
-            build_detectors(candidate.detection)
+            build_detectors(candidate.detection, model_policy=self.model_policy)
             build_allowlist(candidate.detection)
             build_modes(candidate.detection)
         effective = apply_env_overrides(candidate)

@@ -775,6 +775,26 @@ loads the model — the catalog never refuses one — so whether those terms fit
 your use is for you to decide. To silence the warning, pick a model the
 catalog lists as vetted (docs/detection.md "The model catalog").
 
+## "[detection.ner] BACKEND model '…' refused by the model-load policy: …"
+
+A plugin's model-load policy (llm-redact-pro's `[models]` section, for
+example) refused the configured NER model; the rest of the line is the
+policy's own reason, such as a license outside its allowed list, a lineage
+tag it denies or a file that differs from a verified bundle. The model was
+not loaded: `serve` and `serve --check` refuse to start, a reload keeps the
+running configuration, and the config editor answers 400. Choose a model the
+policy allows, or change the policy (for `[models]`, see llm-redact-pro's
+docs/model-bundles.md). docs/detection.md "Model-load policies (plugins)"
+says when the policy is asked.
+
+## "[detection.ner] BACKEND model '…': the model-load policy failed (TYPE); the model is not loaded" / "… the model-load policy answered neither None nor a reason (TYPE); the model is not loaded"
+
+The installed plugin's model-load policy raised an exception (TYPE names it)
+or answered something other than None or a non-empty reason. A policy never
+fails open, so the model is refused as if the policy had said no. This is a
+fault in the plugin (or a plugin and core version that do not match):
+upgrade llm-redact-pro, or report it with the exception type.
+
 ## `llm-redact doctor` under `models`: "…: … needs DIST >= VERSION (model catalog), but DIST VERSION is installed; upgrade it: …"
 
 The model catalog records that the configured model needs a newer library

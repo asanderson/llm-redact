@@ -26,6 +26,7 @@ from llm_redact.detection.model_catalog import (
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
     from llm_redact.detection.model_files import ModelFiles
+    from llm_redact.plugin_api import ModelLoad
 
 
 @dataclass(frozen=True)
@@ -164,4 +165,47 @@ def local_files(
         allow_download=allow_download,
         onnx_file=ner.onnx_for("gliner"),
         check_types=False,
+    )
+
+
+# The model a backend that does not load Hugging Face Hub snapshots names
+# when the configuration names none (the backends' own defaults).
+_OTHER_DEFAULTS: dict[str, str] = {"spacy": "en_core_web_sm", "presidio": "en_core_web_sm"}
+
+
+def model_load(ner: "NerConfig", backend: str, *, allow_download: bool = False) -> "ModelLoad":
+    """What ``backend``'s model load under ``ner`` reads, as the model-load
+    policy (``plugin_api.ModelPolicy``) is shown it: for a Hub backend
+    (``gliner``, ``gliner2``, ``hf``) its files resolved as the loader
+    resolves them (:func:`local_files`, downloading only with
+    ``allow_download``) plus the configuration's and the model catalog's
+    facts; for spaCy, Presidio and Stanza the configured model (a Stanza
+    model is its language). Loads nothing. Raises ConfigError
+    (``ModelNotCached`` for a model the cache lacks) as the loader would."""
+    from llm_redact.plugin_api import ModelLoad
+
+    if backend not in HUB_BACKENDS:
+        if backend == "stanza":
+            return ModelLoad(backend=backend, model=ner.language or "en")
+        model = ner.model_for(backend) or _OTHER_DEFAULTS.get(backend, "")
+        return ModelLoad(backend=backend, model=model)
+    source = model_source(ner, backend)
+    found = local_files(ner, source, allow_download=allow_download)
+    entry = source.entry
+    return ModelLoad(
+        backend=backend,
+        model=source.model,
+        model_id=source.model_id,
+        revision=source.revision,
+        local=source.local,
+        path=str(found.directory),
+        files=tuple(sorted((name, str(path)) for name, path in found.files.items())),
+        assembled=found.config is not None,
+        backbone=found.backbone,
+        backbone_revision=found.backbone_revision,
+        onnx=ner.onnx_for(backend),
+        catalog_status=entry.status if entry is not None else None,
+        license=entry.license if entry is not None else None,
+        lineage=entry.lineage if entry is not None else (),
+        attribution=(entry.attribution or None) if entry is not None else None,
     )

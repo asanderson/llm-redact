@@ -1316,6 +1316,79 @@ class UploadInspector(Protocol):
     async def aclose(self) -> None: ...
 
 
+# --- model-load policy seam -------------------------------------------------------
+# Before an NER backend loads a model, the core hands what it knows about the
+# load to a ``ModelPolicy`` (``Registry.build_model_policy``; the Free default
+# is None: no policy, the core loads what the configuration names). The core
+# holds no policy of its own: the model catalog states facts and the startup
+# warns; a plugin (llm-redact-pro's ``[models]`` section) decides.
+
+
+@dataclass(frozen=True)
+class ModelLoad:
+    """One NER backend's model as it is about to load: the facts a policy
+    decides on, from the configuration, the model catalog and the files
+    found on disk — never anything a model read.
+
+    ``backend`` is the NER backend (``gliner``, ``gliner2``, ``hf``,
+    ``spacy``, ``presidio`` or ``stanza``); ``model`` the configured value
+    (a Hugging Face model id, a local folder, a spaCy pipeline name or a
+    Stanza language). For the Hugging Face Hub backends (``gliner``,
+    ``gliner2``, ``hf``) the files are already RESOLVED (cached or
+    downloaded at the pinned revision, checked complete) and nothing is
+    loaded yet: ``model_id`` is the Hub id (a folder's from its
+    ``llm-redact-model.json`` sidecar; None for a folder without one),
+    ``revision`` the commit (None: unpinned), ``local`` whether ``model``
+    is a local folder, ``path`` the folder the model's own files are read
+    from (a cache snapshot or the local folder), ``files`` every file the
+    load reads as (path inside a self-contained folder, absolute path it is
+    read from) pairs — a GLiNER base model's tokenizer and configuration
+    included —, ``assembled`` whether the load reads a gliner_config.json
+    the core writes (a checkpoint without its own tokenizer, assembled with
+    its base model) instead of the folder as it is, ``backbone`` and
+    ``backbone_revision`` that base model, ``onnx`` the ONNX weight file
+    loaded instead of torch weights; ``catalog_status``, ``license``,
+    ``lineage`` and ``attribution`` the model catalog's facts about
+    ``model_id`` (None/empty: not catalogued). spaCy, Presidio and Stanza
+    models are not Hub snapshots: only ``backend`` and ``model`` are set."""
+
+    backend: str
+    model: str
+    model_id: str | None = None
+    revision: str | None = None
+    local: bool = False
+    path: str | None = None
+    files: tuple[tuple[str, str], ...] = ()
+    assembled: bool = False
+    backbone: str | None = None
+    backbone_revision: str | None = None
+    onnx: str | None = None
+    catalog_status: str | None = None
+    license: str | None = None
+    lineage: tuple[str, ...] = ()
+    attribution: str | None = None
+
+
+class ModelPolicy(Protocol):
+    """Decides whether an NER model may load (``Registry.build_model_policy``,
+    built once at startup with the resolved tier).
+
+    ``check`` is called synchronously for EVERY NER backend of every
+    detector build that loads models — the startup build (``serve``,
+    ``serve --check``), a reload that rebuilds the detectors, the config
+    editor's dry run and ``llm-redact preview`` — after a Hub model's files
+    are resolved and before its weights load. ``None`` lets the model load;
+    a non-empty string refuses it, and the build fails with a
+    ``ConfigError`` carrying it (the startup refuses to serve, a reload
+    keeps the running configuration, the editor answers 400). An
+    exception, an empty string or any other answer refuses too (the core
+    then names the exception TYPE only): nothing fails open. The message is
+    shown and logged: name models, backends, licenses and files, never
+    file content."""
+
+    def check(self, load: ModelLoad) -> str | None: ...
+
+
 # --- vault database credential seam ---------------------------------------------
 # ``Registry.build_db_password(vault_config)`` returns one of these (or None
 # for the static password). The RDBMS vault store calls it synchronously at
@@ -1397,6 +1470,8 @@ __all__ = [
     "Inspection",
     "LocalAnswer",
     "MAX_RESPONSE_ROWS",
+    "ModelLoad",
+    "ModelPolicy",
     "RESPONSE_PRUNE_EVERY",
     "ResponseContext",
     "ResponseObserver",

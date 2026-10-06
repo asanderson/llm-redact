@@ -514,7 +514,8 @@ configuration is kept — fetch the model, then reload again, or restart.
 "(completely)": the cache holds the revision but not every file the loader
 needs, such as after an interrupted download; the message then ends with
 `; missing: …`, naming the kinds of files absent (`config.json`, `weights`,
-`tokenizer files`, a weight shard's name). `llm-redact doctor` shows the same
+`tokenizer files`, a weight shard's name, or a file the model catalog lists
+for the model, such as an `hf` tagger's `viterbi_calibration.json`). `llm-redact doctor` shows the same
 text as a FAIL under `models` before you restart, and `llm-redact models
 verify` checks every configured model the same way.
 
@@ -526,7 +527,10 @@ repository offers at the pinned revision, lack something every load reads:
 `pytorch_model.bin` where allowed; every shard a `*.index.json` names), or
 the tokenizer (`tokenizer.json` or a vocabulary: `vocab.txt`, `vocab.json`
 with `merges.txt`, or a SentencePiece model — plus `tokenizer_config.json` for
-GLiNER). For a folder, copy the missing files in, or write the folder again
+GLiNER), or a file the model catalog lists for the model (an `hf` tagger's
+calibration file). A `gliner2` checkpoint's `config.json`,
+`encoder_config/config.json` and `tokenizer_config.json` are named by their
+own message (below). For a folder, copy the missing files in, or write the folder again
 with `llm-redact models pull --to`; for a repository, pick another model or
 revision: llm-redact fetches only the top-level files it names, never other
 formats a repository may hold.

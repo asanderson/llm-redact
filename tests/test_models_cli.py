@@ -843,6 +843,106 @@ def test_pull_skips_local_folders_and_other_backends(
     assert out.splitlines()[-1] == f"FAIL  hf: {folder / SIDECAR_NAME}: not a UTF-8 JSON document"
 
 
+def _local_gliner(tmp_path: Path, repo: dict[str, str]) -> Path:
+    folder = tmp_path / "gliner-clone"
+    folder.mkdir()
+    for name, text in repo.items():
+        (folder / name).write_text(text)
+    return folder
+
+
+def test_pull_fetches_the_base_model_of_a_local_gliner_folder(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A `git clone` of urchade/gliner_small-v2.1: its configuration names
+    # its base model, and it ships no tokenizer, so it loads with the base
+    # model's tokenizer and configuration from the Hugging Face cache. The
+    # startup, doctor and `verify` name `models pull` while that base model
+    # is missing, so pull fetches it - and only it: the folder is read, not
+    # fetched. (pull once skipped the folder, a dead end that left only
+    # allow_download = true, an unpinned startup fetch.)
+    folder = _local_gliner(tmp_path, URCHADE_REPO)
+    hub = install_hub(
+        monkeypatch,
+        FakeHub(
+            repos={DEBERTA: DEBERTA_REPO},
+            uncached={DEBERTA},
+            heads={DEBERTA: DEBERTA_PIN},
+            default=None,
+        ),
+    )
+    config = _config(tmp_path, f'backend = "gliner"\nmodel = {json.dumps(str(folder))}')
+    code, out = _run(capsys, "verify", "--config", str(config))
+    assert code == 1 and "run `llm-redact models pull`" in out
+    calls = len(hub.calls)
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 0, out
+    assert [(c["repo_id"], c["revision"], c["local_files_only"]) for c in hub.calls[calls:]] == [
+        (DEBERTA, None, False)
+    ]
+    assert out.splitlines() == [
+        f"note: gliner: {folder}: the model catalog pins no revision of its base model"
+        f" {DEBERTA}; pulled {DEBERTA_PIN}",
+        f"OK    gliner: {folder} (a local folder): base model {DEBERTA} at {DEBERTA_PIN}",
+    ]
+    code, out = _run(capsys, "verify", "--config", str(config))
+    assert code == 0, out
+
+
+def test_pull_fetches_a_local_gliner_folders_base_model_at_the_catalog_pin(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The folder's llm-redact-model.json names a catalogued model, whose
+    # base model the catalog pins.
+    sidecar = json.dumps({"model_id": GLINER_SMALL, "revision": GLINER_PIN})
+    folder = _local_gliner(tmp_path, {**URCHADE_REPO, SIDECAR_NAME: sidecar})
+    hub = install_hub(monkeypatch, FakeHub(repos={DEBERTA: DEBERTA_REPO}, default=None))
+    config = _config(tmp_path, f'backend = "gliner"\nmodel = {json.dumps(str(folder))}')
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(tmp_path / "carry"))
+    assert code == 0, out
+    assert [(c["repo_id"], c["revision"]) for c in hub.calls] == [(DEBERTA, DEBERTA_PIN)]
+    assert out.splitlines() == [
+        f"OK    gliner: {folder} (a local folder): base model {DEBERTA} at {DEBERTA_PIN}",
+        f"note: nothing was written to {tmp_path / 'carry'}: `--to` copies the Hub models pull"
+        " fetches, never a local folder",
+    ]
+    assert not (tmp_path / "carry").exists()
+
+
+def test_pull_reads_a_local_gliner_folder_it_has_nothing_to_fetch_for(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub = install_hub(monkeypatch, FakeHub(default=None))
+    # Self-contained (its own tokenizer and encoder_config): nothing to fetch.
+    folder = _local_gliner(tmp_path, {k: v for k, v in DEFAULT_REPO.items() if k != "config.json"})
+    config = _config(tmp_path, f'backend = "gliner"\nmodel = {json.dumps(str(folder))}')
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert (code, out.splitlines()) == (
+        0,
+        [f"skip  gliner: {folder} is a local folder; nothing to pull"],
+    )
+    # One whose base model is a local folder too.
+    base = tmp_path / "base"
+    base.mkdir()
+    for name, text in DEBERTA_REPO.items():
+        (base / name).write_text(text)
+    (folder / "gliner_config.json").write_text(json.dumps({"model_name": str(base)}))
+    (folder / "tokenizer_config.json").unlink()
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert (code, out.splitlines()) == (
+        0,
+        [f"skip  gliner: {folder} is a local folder; nothing to pull"],
+    )
+    assert hub.calls == []
+    # One that cannot load: pull says why, as the startup would.
+    (folder / "gliner_config.json").unlink()
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert (code, out.splitlines()) == (
+        1,
+        [f"FAIL  [detection.ner] gliner model {str(folder)!r} has no gliner_config.json"],
+    )
+
+
 def test_pull_with_nothing_to_pull_or_no_hub_library(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -445,6 +445,12 @@ def run_pull(args: argparse.Namespace) -> int:
         return FAILED
     if args.to is None:
         return OK
+    if not pulled:
+        print(
+            f"note: nothing was written to {args.to}: `--to` copies the Hub models pull fetches,"
+            " never a local folder"
+        )
+        return OK
     try:
         written = write_portable(args.to, pulled)
     except PullError as problem:
@@ -467,8 +473,7 @@ def _pull_one(ner: "NerConfig", source: "ModelSource") -> tuple[bool, Pulled | N
         print(f"FAIL  {source.backend}: {source.sidecar_problem}")
         return False, None
     if source.local:
-        print(f"skip  {where} is a local folder; nothing to pull")
-        return True, None
+        return _pull_local(ner, source, where), None
     restricted = source.restricted_warning()
     if restricted is not None:
         print(f"warning: {restricted}")
@@ -494,6 +499,32 @@ def _pull_one(ner: "NerConfig", source: "ModelSource") -> tuple[bool, Pulled | N
     count = len(files.files) + (files.config is not None)
     print(f"OK    {where} at {revision or _DEFAULT_BRANCH}: {count} files{_base_text(files)}")
     return True, Pulled(source, revision, files, ner.onnx_for(source.backend))
+
+
+def _pull_local(ner: "NerConfig", source: "ModelSource", where: str) -> bool:
+    """A local folder is read, never fetched (nor copied by ``--to``) —
+    but a GLiNER folder that ships no tokenizer or ``encoder_config`` (a
+    clone of an urchade model) loads with its base model's from the
+    Hugging Face cache, and the startup and ``verify`` name ``models pull``
+    while that base model is missing: fetch it (and only it). A folder
+    that cannot load fails as the startup would. Returns ok."""
+    from llm_redact.detection.model_sources import local_files
+
+    if source.backend == "gliner":
+        try:
+            files = local_files(ner, source, allow_download=True)
+        except ConfigError as problem:
+            print(f"FAIL  {problem}")
+            return False
+        if files.backbone is not None and not _local_base(files):
+            files = _unpinned_base(where, files)
+            print(
+                f"OK    {where} (a local folder): base model {files.backbone} at"
+                f" {files.backbone_revision or _DEFAULT_BRANCH}"
+            )
+            return True
+    print(f"skip  {where} is a local folder; nothing to pull")
+    return True
 
 
 # What a revision `models pull` fetched without a pin, and could not name, is.

@@ -138,12 +138,14 @@ and tags `vX.Y.Z`.
   base model) at its revision with the loaders' own file names into the Hugging Face cache —
   the way to fill it now that the proxy downloads nothing by default — printing the commit and
   the `[detection.ner.revisions]` line for a model nothing pins and the catalog's facts for a
-  restricted one. `--to DIR` also writes portable, self-contained folders (each with its
-  `llm-redact-model.json`; a GLiNER folder carries its base model's tokenizer and
-  configuration) and an `llm-redact-models.json` manifest of every file's size and SHA-256,
-  then prints the `[detection.ner.models]` lines that load them (`--as PATH`: as mounted
-  elsewhere). Nothing is written to `DIR` unless every model was fetched. Together with
-  `models verify --dir` this carries models into an air-gapped network.
+  restricted one. A model configured as a local folder is not fetched, but the base model a
+  GLiNER folder without its own tokenizer loads with is. `--to DIR` also writes portable,
+  self-contained folders of the Hub models (each with its `llm-redact-model.json`; a GLiNER
+  folder carries its base model's tokenizer and configuration) and an `llm-redact-models.json`
+  manifest of every file's size and SHA-256, then prints the `[detection.ner.models]` lines
+  that load them (`--as PATH`: as mounted elsewhere). Nothing is written to `DIR` unless every
+  model was fetched. Together with `models verify --dir` this carries models into an
+  air-gapped network.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

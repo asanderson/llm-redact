@@ -27,6 +27,7 @@ COMMANDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
     "run": ((), ("--config", "--port", "--tools", "--set-env", "--proxy-url")),
     "doctor": ((), ("--config", "--json", "--offline")),
+    "models": (("list", "verify", "pull"), ("--config", "--json", "--dir", "--to", "--as")),
     "guide": ((), ()),
     "config": (("show",), ("--config", "--path")),
     "preview": ((), ("--config", "--text", "--json")),

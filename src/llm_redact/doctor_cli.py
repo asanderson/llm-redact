@@ -35,13 +35,19 @@ from llm_redact.config import (
 _NER_MODULES = {
     "spacy": "spacy",
     "gliner": "gliner",
+    "gliner2": "gliner2",
     "presidio": "presidio_analyzer",
     "stanza": "stanza",
     "hf": "transformers",
 }
+# Modules a backend's library imports only when it loads a model, which
+# the library's own import does not need: gliner2 imports peft in its
+# extraction runtime, so without it `serve` fails at the model load.
+_NER_LOAD_MODULES = {"gliner2": ("peft",)}
 _NER_EXTRAS = {
     "spacy": "ner",
     "gliner": "gliner",
+    "gliner2": "gliner2",
     "presidio": "presidio",
     "stanza": "stanza",
     "hf": "hf",
@@ -51,7 +57,7 @@ _NER_EXTRAS = {
 # loads pytorch_model.bin checkpoints that way. An environment built without
 # the extra can hold the library without torch (transformers imports fine
 # and fails only when a model loads) or with an older torch.
-_TORCH_BACKENDS = frozenset({"gliner", "stanza", "hf"})
+_TORCH_BACKENDS = frozenset({"gliner", "gliner2", "stanza", "hf"})
 _TORCH_FLOOR = (2, 6)
 _ENV_OVERRIDES = ("LLM_REDACT_HOST", "LLM_REDACT_PORT", "LLM_REDACT_CONFIG")
 
@@ -549,7 +555,12 @@ def _check_extras(report: _Report, config: Config) -> None:
         # multi-backend config with one missing extra fails serve at startup.
         for backend in config.detection.ner.active_backends():
             hint = f"install it: uv sync --extra {_NER_EXTRAS[backend]}"
-            if importlib.util.find_spec(_NER_MODULES[backend]) is None:
+            modules = (_NER_MODULES[backend], *_NER_LOAD_MODULES.get(backend, ()))
+            if config.detection.ner.onnx_for(backend) is not None:
+                # [detection.ner.onnx]: the gliner extra brings onnxruntime
+                # (gliner >= 0.2.29 no longer depends on it).
+                modules = (*modules, "onnxruntime")
+            if any(importlib.util.find_spec(module) is None for module in modules):
                 report.line(
                     "FAIL", "ner", f'backend "{backend}" but its extra is not installed; {hint}'
                 )
@@ -688,6 +699,186 @@ def _check_ner_labels(report: _Report, config: Config) -> None:
 
     for warning in ner_warnings(config.detection):
         report.line("WARN", "ner", warning)
+
+
+def _check_models(report: _Report, config: Config) -> None:
+    """Where the NER models of the Hugging Face Hub backends (gliner, gliner2,
+    hf)
+    come from: the download and pickle switches, each model's pin, and
+    whether its files are in the local Hugging Face cache (or its folder)
+    at that pin. Never loads a model and never touches the network — file
+    lookups in the local cache only. Silent while NER is off."""
+    from llm_redact.detection.model_sources import hub_sources
+
+    ner = config.detection.ner
+    sources = hub_sources(ner) if ner.enabled else []
+    if not sources:
+        return
+    if ner.allow_download:
+        report.line(
+            "WARN",
+            "models",
+            "allow_download = true: the proxy's startup may download model weights from"
+            " huggingface.co (the model id and revision, never request content; a reload"
+            " never downloads)",
+        )
+    else:
+        report.line(
+            "PASS",
+            "models",
+            "downloads off (allow_download = false): models load from the local Hugging"
+            " Face cache or local folders only",
+        )
+    if ner.allow_pickle_weights and "hf" in ner.active_backends():
+        report.line(
+            "WARN",
+            "models",
+            "allow_pickle_weights = true: an hf model without safetensors weights loads"
+            " pytorch_model.bin, a pickle (loading a pickle can run code)",
+        )
+    try:
+        import huggingface_hub  # noqa: F401  (doctor only asks the local cache)
+
+        cache = True
+    except ImportError:
+        cache = False
+    for source in sources:
+        _check_model_pin(report, source)
+        _check_model_files(report, ner, source, cache=cache)
+
+
+def _catalog_note(source: Any) -> str:
+    """What the model catalog says, as a row suffix."""
+    entry = source.entry
+    if entry is None:
+        return " (not in the model catalog)" if source.model_id is not None else ""
+    note = f" (model catalog: {entry.status}, {entry.license})"
+    return f"{note}: {entry.describe()}" if entry.status == "caution" else note
+
+
+def _check_model_pin(report: _Report, source: Any) -> None:
+    """Which model and commit one Hub backend loads, and what the model
+    catalog says about it: a WARN for a model nothing pins and for a model
+    the catalog lists as restricted (the startup warning's text), a FAIL
+    when an installed library is older than the model needs."""
+    from llm_redact.detection.model_catalog import SIDECAR_NAME
+
+    where = f"{source.backend}: {source.model}"
+    note = _catalog_note(source)
+    if source.sidecar_problem is not None:
+        report.line("FAIL", "models", f"{source.backend}: {source.sidecar_problem}")
+    elif source.local and source.model_id is None:
+        report.line(
+            "PASS",
+            "models",
+            f"{where} is a local folder without {SIDECAR_NAME} (it loads as it is;"
+            " nothing identifies the model)",
+        )
+    elif source.local:
+        revision = source.revision or "an unrecorded revision"
+        report.line(
+            "PASS",
+            "models",
+            f"{where} is a local folder holding {source.model_id} at {revision}{note}",
+        )
+    elif source.pinned:
+        by = "[detection.ner.revisions]" if source.pinned_by == "config" else "the model catalog"
+        report.line("PASS", "models", f"{where} pinned at {source.revision} by {by}{note}")
+    else:
+        report.line(
+            "WARN",
+            "models",
+            f"{where} has no pin{note}: the newest cached revision of its default branch"
+            f" loads; pin a commit in [detection.ner.revisions] {source.backend}"
+            " (`llm-redact models pull` prints the one it fetches)",
+        )
+    restricted = source.restricted_warning()
+    if restricted is not None:
+        report.line("WARN", "models", restricted)
+    for problem in _version_problems(source):
+        report.line("FAIL", "models", problem)
+
+
+def _version_problems(source: Any) -> list[str]:
+    """The libraries installed older than the model catalog says ``source``'s
+    model needs (distribution metadata only: nothing is imported). A library
+    that is not installed is the ``ner`` check's FAIL."""
+    entry = source.entry
+    problems = []
+    for distribution, minimum in entry.min_versions if entry is not None else ():
+        try:
+            installed = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        if _version_tuple(installed) < _version_tuple(minimum):
+            problems.append(
+                f"{source.backend}: {source.model} needs {distribution} >= {minimum} (model"
+                f" catalog), but {distribution} {installed} is installed; upgrade it:"
+                f" uv sync --extra {source.backend} --upgrade-package {distribution}"
+            )
+    return problems
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """The leading numeric release segments of a version string."""
+    numbers = []
+    for part in version.split("+", 1)[0].split(".")[:3]:
+        match = re.match(r"\d+", part)
+        if match is None:
+            break
+        numbers.append(int(match[0]))
+    return tuple(numbers)
+
+
+def _check_model_files(report: _Report, ner: Any, source: Any, *, cache: bool) -> None:
+    """Whether one Hub backend's model files are where its load reads them,
+    complete: the local cache at its pin (base model included), or its
+    folder. A model missing from the cache FAILs while downloads are off —
+    after an upgrade the likeliest startup failure."""
+    from llm_redact.config import ConfigError
+    from llm_redact.detection.model_files import ModelNotCached, is_local
+    from llm_redact.detection.model_sources import local_files
+
+    if not cache and not source.local:
+        report.line(
+            "WARN",
+            "models",
+            f"{source.backend}: {source.model}: the local Hugging Face cache was not checked:"
+            f" huggingface_hub is not installed (the {source.backend} extra installs it)",
+        )
+        return
+    try:
+        files = local_files(ner, source)
+    except ModelNotCached as missing:
+        if ner.allow_download:
+            report.line(
+                "WARN",
+                "models",
+                f"{source.backend}: {missing.what} {missing.model} is not (completely) in the"
+                " local Hugging Face cache; the proxy's startup will fetch it"
+                " (allow_download = true)",
+            )
+        else:
+            report.line("FAIL", "models", str(missing))
+        return
+    except ConfigError as problem:
+        report.line("FAIL", "models", str(problem))
+        return
+    place = "its folder" if source.local else "the local Hugging Face cache"
+    report.line(
+        "PASS",
+        "models",
+        f"{source.backend}: {source.model}: every file the loader reads is in {place}",
+    )
+    backbone = files.backbone
+    if backbone is not None and files.backbone_revision is None and not is_local(backbone):
+        report.line(
+            "WARN",
+            "models",
+            f"{source.backend}: {source.model} takes its tokenizer and encoder"
+            f" configuration from its base model {backbone}, whose revision the model"
+            " catalog does not pin: the newest cached revision loads",
+        )
 
 
 def _check_posture(report: _Report, config: Config) -> None:
@@ -1126,6 +1317,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_extras(report, config)
     _check_posture(report, config)
     _check_ner_labels(report, config)
+    _check_models(report, config)
     _check_extraction(report, config)
     _check_upstream_auth(report, config)
     _check_allowed_hosts(report, config)

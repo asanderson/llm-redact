@@ -106,6 +106,20 @@ def fold_raw(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) ->
     return bool(request.param)
 
 
+@pytest.fixture
+def chdir_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Make ``tmp_path`` the working directory (a model id that names a folder
+    resolves against it). Under mutmut, whose trampolines resolve its relative
+    ``source_paths`` ("src/llm_redact") against the working directory on every
+    mutated call, ``src`` is linked there too: without it the baseline run
+    fails and every mutant reads "not checked"."""
+    src = Path.cwd() / "src"
+    if os.environ.get("MUTANT_UNDER_TEST") and src.is_dir():
+        (tmp_path / "src").symlink_to(src, target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
 # The Hugging Face libraries' offline switches (detection/model_files.py
 # go_offline) are process-wide and never unset by the proxy; a test whose build
 # set them must not leak them into the next one (the suite's order differs

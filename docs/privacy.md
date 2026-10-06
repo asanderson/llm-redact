@@ -33,6 +33,15 @@ running it.
 - **Optional audit sinks you configure.** The S3/Azure audit sinks
   upload the same metadata-only rows to object storage *you* control,
   optionally client-side encrypted. Off by default.
+- **NER model downloads, only if you allow them.** The optional local
+  NER models (`[detection.ner]`, off by default) load from the local
+  Hugging Face cache or a local folder, and nothing is downloaded unless
+  you set `allow_download = true`. Then only the proxy's startup may fetch
+  a missing model from huggingface.co: the request names the model id,
+  the pinned revision and the files, never anything your agent sends; a
+  reload never downloads. `llm-redact models pull` is the explicit way to
+  fetch them yourself, and `llm-redact doctor` warns while downloads are
+  on.
 
 ## The agent plugin commands
 

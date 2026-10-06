@@ -94,7 +94,7 @@ class NerConfig:
     # `presidio` for presidio) and adds per-string latency the regex hot
     # path doesn't have.
     enabled: bool = False
-    backend: str = "spacy"  # or "gliner" / "presidio" / "stanza" / "hf"
+    backend: str = "spacy"  # or "gliner" / "gliner2" / "presidio" / "stanza" / "hf"
     # Multi-backend form: when set it wins over `backend` (which stays the
     # one-element legacy spelling); every listed backend runs concurrently
     # behind the same Detector protocol, and same-span same-type hits
@@ -102,15 +102,16 @@ class NerConfig:
     backends: tuple[str, ...] | None = None
     entities: tuple[str, ...] = ("PERSON",)
     max_chars: int = 20000
-    # Only meaningful for backends that emit confidences (gliner, presidio,
-    # hf); config loading rejects it when no such backend is active (spacy
-    # and stanza emit none).
+    # Only meaningful for backends that emit confidences (gliner, gliner2,
+    # presidio, hf); config loading rejects it when no such backend is active
+    # (spacy and stanza emit none).
     score_threshold: float = 0.5
     # NER language (presidio wires it through the analyzer, stanza selects the
     # language model; for spacy it is implied by the model) and an optional
     # model-name override: the spaCy pipeline for spacy/presidio (default
     # en_core_web_sm), the HF model id for gliner (default
-    # urchade/gliner_small-v2.1) and hf (default dslim/bert-base-NER).
+    # urchade/gliner_small-v2.1), gliner2 (default fastino/gliner2-base-v1)
+    # and hf (default dslim/bert-base-NER).
     language: str = "en"
     model: str | None = None
     # Per-backend model overrides ([detection.ner.models], stored sorted
@@ -124,7 +125,7 @@ class NerConfig:
     # labels AND configured entities alike, so `PER = "PER"` keeps
     # `entities = ["PER"]` emitting PER once raw entities fold.
     labels: tuple[tuple[str, str], ...] = ()
-    # Model sources of the Hugging Face Hub backends (gliner, hf).
+    # Model sources of the Hugging Face Hub backends (gliner, gliner2, hf).
     # [detection.ner.revisions]: backend -> 40-hex commit id, stored sorted
     # (a branch or tag name moves, so the parser refuses one); a backend
     # without an entry is pinned by its model's catalog entry, if any
@@ -156,17 +157,27 @@ class NerConfig:
         """The ONNX file ``backend`` loads ([detection.ner.onnx]), or None."""
         return dict(self.onnx).get(backend)
 
-    def revision_for(self, backend: str) -> str | None:
-        """The commit ``backend``'s model is pinned to: its
-        [detection.ner.revisions] entry, else the catalog pin of the model
-        it loads (its configured model, else the backend's default). None:
-        unpinned, or a backend whose models are not Hub snapshots."""
+    def configured_revision(self, backend: str) -> str | None:
+        """``backend``'s [detection.ner.revisions] entry, or None."""
         for name, revision in self.revisions:
             if name == backend:
                 return revision
-        if backend not in HUB_BACKENDS:
-            return None
-        return pinned_revision(self.model_for(backend) or DEFAULT_MODELS[backend])
+        return None
+
+    def revision_for(self, backend: str) -> str | None:
+        """The commit ``backend``'s model is pinned to: its
+        [detection.ner.revisions] entry, else the catalog pin of the Hub
+        model it loads (its configured model, else the backend's default).
+        None: unpinned, a local directory (a catalog pin names a Hub
+        snapshot, never a folder, even one named like a catalogued id), or
+        a backend whose models are not Hub snapshots."""
+        configured = self.configured_revision(backend)
+        if configured is not None or backend not in HUB_BACKENDS:
+            return configured
+        from llm_redact.detection.model_files import is_local
+
+        model = self.model_for(backend) or DEFAULT_MODELS[backend]
+        return None if is_local(model) else pinned_revision(model)
 
 
 @dataclass(frozen=True)
@@ -383,6 +394,10 @@ def build_detectors(config: DetectionConfig, *, startup: bool = False) -> list[D
                 from llm_redact.detection.gliner_ner import build_gliner_detector
 
                 inner: Detector = build_gliner_detector(single)
+            elif backend_name == "gliner2":
+                from llm_redact.detection.gliner2_ner import build_gliner2_detector
+
+                inner = build_gliner2_detector(single)
             elif backend_name == "presidio":
                 from llm_redact.detection.presidio_ner import build_presidio_detector
 
@@ -399,6 +414,8 @@ def build_detectors(config: DetectionConfig, *, startup: bool = False) -> list[D
                 from llm_redact.detection.ner import build_ner_detector
 
                 inner = build_ner_detector(single)
+            if backend_name in HUB_BACKENDS:
+                _mark_source(inner, config.ner, backend_name)
             built.append(inner)
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
         _mark_unmatched(config.ner.entities, built)
@@ -456,6 +473,32 @@ def _mark_unmatched(entities: Sequence[str], backends: Sequence[Detector]) -> No
         backend.unmatched_entities = unmatched  # type: ignore[attr-defined]
 
 
+def _mark_source(detector: Detector, ner: NerConfig, backend: str) -> None:
+    """Record on a Hub backend (gliner, gliner2, hf) which model and revision it
+    loaded and what the model catalog says about it (model_sources.py),
+    once per build: /status and the startup warnings read it, never the
+    files again. Backends without a label policy (stand-ins) are left
+    alone."""
+    if _label_policy(detector) is not None:
+        from llm_redact.detection.model_sources import model_source
+
+        detector.model_source = model_source(ner, backend)  # type: ignore[attr-defined]
+
+
+def _source_of(detector: Detector) -> Any:
+    from llm_redact.detection.model_sources import ModelSource
+
+    source = getattr(detector, "model_source", None)
+    return source if isinstance(source, ModelSource) else None
+
+
+def _source_fields(detector: Detector) -> dict[str, Any]:
+    from llm_redact.detection.model_sources import UNKNOWN_SOURCE_FIELDS
+
+    source = _source_of(detector)
+    return dict(UNKNOWN_SOURCE_FIELDS) if source is None else source.status_fields()
+
+
 def ner_backends(detectors: Sequence[Detector]) -> list[Detector]:
     """The NER backends among ``detectors`` (unwrapped from their type
     filter), in build order."""
@@ -490,20 +533,19 @@ def ner_backend_stats(detectors: Sequence[Detector]) -> list[tuple[str, Detector
 
 def ner_status(ner: NerConfig, detectors: Sequence[Detector]) -> dict[str, Any]:
     """The ``/status`` block ``detection.ner``: whether NER is on, the
-    string limit, each running backend's model and coverage counters, and
-    the configured entities no backend can ever emit. Metadata and counts
-    only. The counters belong to the built detectors: a reload that
-    rebuilds them starts from zero."""
+    string limit, each running backend's model — for a Hugging Face Hub
+    backend also where it comes from, its revision and its model-catalog
+    status and license (model_sources.py; null for the others) — and
+    coverage counters, and the configured entities no backend can ever
+    emit. Metadata and counts only. The counters belong to the built
+    detectors: a reload that rebuilds them starts from zero."""
     return {
         "enabled": ner.enabled,
         "max_chars": ner.max_chars,
         "backends": {
             name: {
                 "model": getattr(backend, "model_name", None),
-                # Not tracked yet: the backends load models by id.
-                "revision": None,
-                "catalog": None,
-                "license": None,
+                **_source_fields(backend),
                 "counters": stats.as_dict(),
             }
             for name, backend, stats in ner_backend_stats(detectors)
@@ -518,7 +560,8 @@ def ner_warnings(config: DetectionConfig, detectors: Sequence[Detector] = ()) ->
     after each detector build and shown by doctor (which builds no model,
     so passes no detectors): configured raw entities whose type changes in
     2.0.0, and, from the built ``detectors``, entities no active backend
-    can ever emit."""
+    can ever emit and models the model catalog lists as restricted (doctor
+    shows those under ``models``)."""
     if not config.ner.enabled:
         return []
     warnings = raw_entity_deprecations(config.ner)
@@ -533,6 +576,11 @@ def ner_warnings(config: DetectionConfig, detectors: Sequence[Detector] = ()) ->
             f'[detection.ner] entities: "{entity}" can never match: no active backend'
             f" emits it ({where})"
         )
+    for backend in backends:
+        source = _source_of(backend)
+        restricted = source.restricted_warning() if source is not None else None
+        if restricted is not None:
+            warnings.append(restricted)
     return warnings
 
 

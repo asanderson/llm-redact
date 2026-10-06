@@ -213,8 +213,8 @@ def test_missing_ner_extra_fails(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "uv sync --extra gliner" in capsys.readouterr().out
 
 
-_BACKENDS = ("spacy", "gliner", "presidio", "stanza", "hf")
-_LIBRARIES = {"spacy", "gliner", "presidio_analyzer", "stanza", "transformers"}
+_BACKENDS = ("spacy", "gliner", "gliner2", "presidio", "stanza", "hf")
+_LIBRARIES = {"spacy", "gliner", "gliner2", "peft", "presidio_analyzer", "stanza", "transformers"}
 
 
 def _ner_rows(
@@ -223,8 +223,9 @@ def _ner_rows(
     *,
     present: set[str],
     torch_version: str | None = None,
+    extra: str = "",
 ) -> dict[str, tuple[str, str]]:
-    """Run the extras check over all five backends with `present` as the
+    """Run the extras check over all six backends with `present` as the
     importable modules and `torch_version` as torch's installed metadata
     (None: none); return backend -> (level, message)."""
     import importlib.metadata
@@ -236,7 +237,7 @@ def _ner_rows(
     real_find_spec = importlib.util.find_spec
 
     def find_spec(name: str, package: str | None = None) -> Any:
-        if name in _LIBRARIES | {"torch"}:
+        if name in _LIBRARIES | {"torch", "onnxruntime"}:
             return object() if name in present else None
         return real_find_spec(name, package)
 
@@ -249,7 +250,7 @@ def _ner_rows(
     monkeypatch.setattr(importlib.metadata, "version", version)
     backends = ", ".join(f'"{name}"' for name in _BACKENDS)
     config = load_config(
-        _write(tmp_path, f"[detection.ner]\nenabled = true\nbackends = [{backends}]\n")
+        _write(tmp_path, f"[detection.ner]\nenabled = true\nbackends = [{backends}]\n{extra}")
     )
     report = _Report(json_mode=True)
     _check_extras(report, config)
@@ -262,7 +263,7 @@ def test_torch_backends_fail_without_torch(tmp_path: Path, monkeypatch: pytest.M
     # transformers imports without torch (torch is only its own extra), so
     # the library check alone passed an hf backend that cannot load a model.
     rows = _ner_rows(tmp_path, monkeypatch, present=_LIBRARIES)
-    for backend in ("gliner", "stanza", "hf"):
+    for backend in ("gliner", "gliner2", "stanza", "hf"):
         assert rows[backend] == (
             "FAIL",
             f'backend "{backend}" needs torch, which is not installed;'
@@ -287,11 +288,43 @@ def test_a_missing_library_is_reported_before_torch(
     )
 
 
+def test_gliner2_without_peft_is_a_missing_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gliner2 imports without peft and fails only when it loads a model, so
+    # its own importability passed a backend `serve` refuses.
+    rows = _ner_rows(tmp_path, monkeypatch, present=(_LIBRARIES - {"peft"}) | {"torch"})
+    assert rows["gliner2"] == (
+        "FAIL",
+        'backend "gliner2" but its extra is not installed; install it: uv sync --extra gliner2',
+    )
+    assert rows["gliner"] == ("PASS", "gliner backend importable")
+
+
+def test_gliner_onnx_weights_need_onnxruntime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gliner >= 0.2.29 made onnxruntime optional: an environment can hold
+    # gliner without it, and `serve` refuses [detection.ner.onnx] then.
+    onnx = '[detection.ner.onnx]\ngliner = "onnx/model.onnx"\n'
+    present = _LIBRARIES | {"torch"}
+    rows = _ner_rows(tmp_path, monkeypatch, present=present, extra=onnx)
+    assert rows["gliner"] == (
+        "FAIL",
+        'backend "gliner" but its extra is not installed; install it: uv sync --extra gliner',
+    )
+    assert rows["gliner2"] == ("PASS", "gliner2 backend importable")
+    rows = _ner_rows(tmp_path, monkeypatch, present=present | {"onnxruntime"}, extra=onnx)
+    assert rows["gliner"] == ("PASS", "gliner backend importable")
+    # Without ONNX weights, onnxruntime is not needed.
+    assert _ner_rows(tmp_path, monkeypatch, present=present)["gliner"][0] == "PASS"
+
+
 def test_torch_below_the_floor_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rows = _ner_rows(
         tmp_path, monkeypatch, present=_LIBRARIES | {"torch"}, torch_version="2.5.1+cpu"
     )
-    for backend in ("gliner", "stanza", "hf"):
+    for backend in ("gliner", "gliner2", "stanza", "hf"):
         assert rows[backend] == (
             "FAIL",
             f'backend "{backend}" needs torch >= 2.6 (CVE-2025-32434), but torch 2.5.1+cpu'

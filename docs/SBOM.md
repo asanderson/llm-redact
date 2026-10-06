@@ -51,7 +51,8 @@ padding differs), pinned to the published Keccak test vectors.
 | Extra | Packages | Purpose |
 | --- | --- | --- |
 | `ner` | `spacy` | Person-name NER, small-footprint English-first default backend. |
-| `gliner` | `gliner`, `torch` | Zero-shot NER, robust on unusual names; separate extra because it pulls torch + transformers. |
+| `gliner` | `gliner`, `onnxruntime`, `torch` | Zero-shot NER, robust on unusual names; separate extra because it pulls torch + transformers. `onnxruntime` (MIT) runs ONNX weights (`[detection.ner.onnx]`); listed directly since gliner 0.2.29 made it optional. |
+| `gliner2` | `gliner2`, `torch`, `transformers`, `peft`, `safetensors`, `numpy` | Fastino's GLiNER2 zero-shot extraction with character spans; lists gliner2's model dependencies itself (its own `local` extra caps transformers below 5). Its hosted-API client is never used. |
 | `presidio` | `presidio-analyzer` | Microsoft's FOSS PII analyzer layered over spaCy (recognizers + context scoring). |
 | `stanza` | `stanza`, `torch` | Stanford Stanza NER, 60+ languages — the multilingual complement to spaCy. |
 | `hf` | `transformers`, `torch` | Any Hugging Face token-classification checkpoint as a detector; emits confidences. |
@@ -69,7 +70,7 @@ padding differs), pinned to the published Keccak test vectors.
 The NER extras' heavyweight transitive dependencies (torch,
 transformers, pydantic via presidio) never touch the request-forwarding
 path — detectors only read strings and return spans. The `gliner`,
-`stanza` and `hf` extras each require `torch>=2.6` directly (the release
+`gliner2`, `stanza` and `hf` extras each require `torch>=2.6` directly (the release
 that fixed CVE-2025-32434); on Linux, PyPI's torch wheel also brings the
 NVIDIA CUDA libraries, which a CPU-only install avoids by taking torch from
 the PyTorch CPU index ([dependencies.md](dependencies.md)).

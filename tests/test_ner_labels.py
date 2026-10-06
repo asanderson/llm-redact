@@ -30,9 +30,11 @@ from llm_redact.vault import InMemoryVault
 from ner_fakes import (
     FakeAnalyzer,
     FakeGliner,
+    FakeGliner2,
     FakeHfPipe,
     FakeSpacy,
     install_gliner,
+    install_gliner2,
     install_presidio,
     install_spacy,
     install_stanza,
@@ -539,7 +541,7 @@ def test_override_keeps_per_in_both_modes(monkeypatch: pytest.MonkeyPatch, fold_
     assert policy.raw_requested == frozenset()
 
 
-@pytest.mark.parametrize("backend", ["spacy", "stanza", "gliner", "presidio", "hf"])
+@pytest.mark.parametrize("backend", ["spacy", "stanza", "gliner", "gliner2", "presidio", "hf"])
 def test_every_builder_hands_the_overrides_to_its_policy(
     monkeypatch: pytest.MonkeyPatch, backend: str
 ) -> None:
@@ -548,6 +550,7 @@ def test_every_builder_hands_the_overrides_to_its_policy(
     install_spacy(monkeypatch, FakeSpacy([("Springfield", "CITY", 1.0)]))
     install_stanza(monkeypatch, FakeSpacy([("Springfield", "CITY", 1.0)]))
     install_gliner(monkeypatch, FakeGliner([("Springfield", "CITY", 0.9)]))
+    install_gliner2(monkeypatch, FakeGliner2([("Springfield", "CITY", 0.9)]))
     install_transformers(monkeypatch, FakeHfPipe([("Springfield", "CITY", 0.9)]))
     install_presidio(monkeypatch, FakeAnalyzer([("Springfield", "CITY", 0.9)], ("CITY", "PERSON")))
     ner = NerConfig(
@@ -867,7 +870,7 @@ def test_merge_reads_parts_in_text_order() -> None:
     assert (merged.start, merged.end, merged.value) == (0, 8, "Jane Doe")
 
 
-@pytest.mark.parametrize("backend", ["spacy", "stanza", "gliner", "presidio", "hf"])
+@pytest.mark.parametrize("backend", ["spacy", "stanza", "gliner", "gliner2", "presidio", "hf"])
 def test_every_backend_merges_first_and_last_names(
     monkeypatch: pytest.MonkeyPatch, backend: str
 ) -> None:
@@ -875,13 +878,15 @@ def test_every_backend_merges_first_and_last_names(
     install_spacy(monkeypatch, FakeSpacy(findings))
     install_stanza(monkeypatch, FakeSpacy(findings))
     install_gliner(monkeypatch, FakeGliner(findings))
+    install_gliner2(monkeypatch, FakeGliner2(findings))
     install_transformers(monkeypatch, FakeHfPipe(findings))
     install_presidio(monkeypatch, FakeAnalyzer(findings, ("first_name", "last_name")))
-    entities = ("PERSON", "first_name", "last_name") if backend == "gliner" else ("PERSON",)
+    zero_shot = backend in ("gliner", "gliner2")
+    entities = ("PERSON", "first_name", "last_name") if zero_shot else ("PERSON",)
     ner = NerConfig(enabled=True, backend=backend, entities=entities)
     (detector,) = build_detectors(DetectionConfig(enabled=(), ner=ner))
     found = [(d.detector_type, d.value) for d in detector.detect("hi Jane Doe, bye")]
-    if backend == "gliner":  # raw requests keep their own type until 2.0.0
+    if zero_shot:  # raw requests keep their own type until 2.0.0
         assert found == [("FIRST_NAME", "Jane"), ("LAST_NAME", "Doe")]
     else:
         assert found == [("PERSON", "Jane Doe")]

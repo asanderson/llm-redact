@@ -502,8 +502,8 @@ The complete annotated reference is
 strings** (values that must always be redacted, highest precedence,
 never subject to modes), **per-rule modes** (`redact`/`warn`/`block`),
 custom rules with checksum validators, global and per-type allowlists,
-and the optional **person-name NER backends** (spaCy, GLiNER, Presidio,
-Stanza, Hugging Face). The current rule list also ships in
+and the optional **person-name NER backends** (spaCy, GLiNER, GLiNER2,
+Presidio, Stanza, Hugging Face). The current rule list also ships in
 [`config.example.toml`](config.example.toml).
 
 The NER backends are backed by a research survey,
@@ -559,7 +559,7 @@ surface a security tool asks you to trust:
   (websockets) extras activate with zero serve-code changes.
 
 Everything else is stdlib or an opt-in extra: the NER backends (spaCy,
-GLiNER, Presidio, Stanza, Hugging Face `transformers`), `cryptography`
+GLiNER, GLiNER2, Presidio, Stanza, Hugging Face `transformers`), `cryptography`
 for vault encryption at rest, the RDBMS vault drivers (psycopg,
 PyMySQL, oracledb), `keyring`, `uvloop`, `websockets`, and the
 OpenTelemetry SDK. Configuration and CLI ride the standard library

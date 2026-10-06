@@ -25,7 +25,8 @@ checked by the weekly gating pip-audit job.
 | Extra | Package(s) | Why chosen |
 |---|---|---|
 | `ner` | `spacy` | Person-name detection. Chosen over transformer NER for footprint (tens of MB, ~1-5 ms/string on CPU) and MIT license; the `Detector` protocol keeps heavier backends optional rather than default. |
-| `gliner` | `gliner`, `torch` | Zero-shot NER, more robust on unusual names; deliberately separate from `ner` because it hard-depends on torch + transformers (gigabytes). `torch` is listed for its floor (below). |
+| `gliner` | `gliner`, `onnxruntime`, `torch` | Zero-shot NER, more robust on unusual names; deliberately separate from `ner` because it hard-depends on torch + transformers (gigabytes). `torch` is listed for its floor (below). `onnxruntime` (MIT) runs a model's ONNX export (`[detection.ner.onnx]`): gliner required it up to 0.2.28, and 0.2.29 moved it to gliner's own optional `onnx` extra (checked on PyPI 2026-10-06), so this extra lists it itself. |
+| `gliner2` | `gliner2`, `torch`, `transformers`, `peft`, `safetensors`, `numpy` | Fastino's GLiNER2: zero-shot, schema-driven extraction that reports each entity's character span and a confidence (`score_threshold` applies). Separate from `gliner` (a different package and checkpoint format). gliner2's own `local` extra holds its model dependencies but caps transformers below 5, which the `gliner` and `hf` extras resolve to, so this extra lists them itself without that cap (checked 2026-10-06 with gliner2 2.0.0 on transformers 5.10.1); `peft` is imported by gliner2's extraction runtime. The gliner2 package also contains a client for Fastino's hosted API (`requests`); llm-redact never uses it — models run locally only. |
 | `presidio` | `presidio-analyzer` | Microsoft's FOSS PII analyzer: pattern recognizers + checksums + context scoring over the same spaCy pipeline; overlapping entity types fold into the built-in placeholder names. Pulls pydantic — acceptable because extras never touch the body-forwarding path. |
 | `stanza` | `stanza`, `torch` | Stanford Stanza NER for 60+ languages — the multilingual complement to the English-first spaCy default. Runs on torch; separate extra for the same reason as gliner. No per-entity confidence. |
 | `hf` | `transformers`, `torch` | Any Hugging Face `token-classification` checkpoint as a detector (multilingual/domain-tuned models). transformers declares torch only as its own extra, so `hf` lists `torch` itself — without it no model can run. Same class as gliner; emits confidences so `score_threshold` applies. |
@@ -40,10 +41,10 @@ checked by the weekly gating pip-audit job.
 | `extract` | `pypdf` | PDF text layers for [document extraction](extraction.md) (`[extraction]`): pure Python, BSD-3-Clause, imported only in the isolated, resource-limited extraction worker process — never on the request path. The OOXML/ODF, markup and RTF readers are stdlib. |
 | `bench-data` | `huggingface_hub`, `pyarrow` | The [NER bench](ner-bench.md)'s published datasets only (`python -m llm_redact.bench.ner --dataset openpii`, …): `huggingface_hub` downloads a dataset file at a pinned revision, `pyarrow` reads the parquet ones a batch at a time. Never imported by the proxy. Floor `pyarrow>=14.0.1`: 14.0.1 fixed CVE-2023-47248 (code execution when reading an untrusted IPC/Parquet file), and a downloaded dataset is exactly such a file. |
 
-**torch (the `gliner`, `stanza` and `hf` extras).** Each of the three
-extras requires `torch>=2.6`: torch 2.6 fixed CVE-2025-32434, a bypass of
-`torch.load(weights_only=True)`, which is how GLiNER loads a
-`pytorch_model.bin` checkpoint, and none of the three libraries asks for
+**torch (the `gliner`, `gliner2`, `stanza` and `hf` extras).** Each of the
+four extras requires `torch>=2.6`: torch 2.6 fixed CVE-2025-32434, a bypass of
+`torch.load(weights_only=True)`, which is how GLiNER and GLiNER2 load a
+`pytorch_model.bin` checkpoint, and none of the four libraries asks for
 that floor itself. `llm-redact doctor` FAILs a configured torch backend
 when torch is missing or older than 2.6. PyPI's Linux torch wheel brings
 the NVIDIA CUDA libraries (several GB), and `uv sync --extra hf` installs

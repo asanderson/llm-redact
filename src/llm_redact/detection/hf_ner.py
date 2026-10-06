@@ -24,6 +24,13 @@ the pipeline truncates at the tokenizer's maximum length and never reads the
 rest. `stride` needs a fast tokenizer — which also reports the character
 offsets every detection needs — so a model without one is refused at startup.
 
+A model tagging BIOES or BILOU (its labels carry `E-`/`S-` or `L-`/`U-` tags,
+which the pipeline's aggregation does not understand) runs without the
+pipeline: :class:`TaggerPipe` reads the same token windows, takes the model's
+per-token log-probabilities and decodes its spans itself (tagging.py) — with
+the constrained Viterbi decoder when the model catalog lists the model's
+calibration file, else greedily.
+
 Import-lazy: loads only when an `hf` backend is enabled; the model load
 happens at proxy startup (fail fast, no first-request latency spike). The
 files come from a local directory at a pinned revision (model_files.py):
@@ -32,17 +39,30 @@ from the model's repository (`trust_remote_code=False`).
 """
 
 import importlib.util
-from collections.abc import Callable, Iterator, Mapping
+import math
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from llm_redact.detection.base import Detection
 from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
 from llm_redact.detection.stats import NerStats
+from llm_redact.detection.tagging import (
+    BIO,
+    Decoder,
+    TaggingError,
+    TagSet,
+    decoder_for,
+    spans_of,
+    tagging_scheme,
+    viterbi_biases,
+)
 from llm_redact.detection.windows import drop_exact_duplicates
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
+    from llm_redact.detection.model_catalog import CatalogEntry
 
 _MODEL_NAME = "dslim/bert-base-NER"
 # A tokenizer that does not know its model's limit reports a huge sentinel
@@ -202,10 +222,154 @@ def window_counter(tokenizer: Any, stride: int) -> Callable[[str], int]:
     return windows_of
 
 
-def catalog_window(model: str) -> int | None:
-    """The token window the model catalog records for ``model`` (a Hub id,
-    or a local directory its sidecar file identifies) on the ``hf``
-    backend; None when it records none."""
+Scorer = Callable[[list[int]], Sequence[Sequence[float]]]
+
+
+def torch_scorer(model: Any) -> Scorer:
+    """The model's label log-probabilities for one window of token ids, one
+    row per token (torch, imported here: only a loaded model needs it)."""
+    import torch
+
+    def score(input_ids: list[int]) -> Sequence[Sequence[float]]:
+        with torch.inference_mode():
+            ids = torch.tensor([input_ids], device=getattr(model, "device", None))
+            logits = model(input_ids=ids).logits[0]
+            rows: Sequence[Sequence[float]] = torch.log_softmax(logits.float(), dim=-1).tolist()
+            return rows
+
+    return score
+
+
+# What a tagger decodes in one window: per unit — a token, or a word scored
+# by its first piece — the index of its row of label scores, and its start
+# and end in the text.
+Units = list[tuple[int, int, int]]
+# One window as the tokenizer returns it: token ids, character offsets and
+# the special-tokens mask.
+Window = tuple[Sequence[int], Sequence[Sequence[int]], Sequence[int]]
+
+
+def _token_units(windows: Sequence[Window]) -> list[Units]:
+    """Per window, its tokens: every token that is not special and covers a
+    character, at its own offsets."""
+    return [
+        [
+            (index, start, end)
+            for index, (start, end) in enumerate(offsets)
+            if not special[index] and end > start
+        ]
+        for _ids, offsets, special in windows
+    ]
+
+
+def _word_units(encoded: Any, windows: Sequence[Window]) -> list[Units]:
+    """Per window, its words (the tokenizer's ``word_ids``), each scored by
+    the row of its first piece — the piece a tagger is trained to label —
+    at the offsets of the whole word: a word a window's edge cuts after its
+    first piece is still reported whole, and a window that opens after a
+    word's first piece does not read that word (the window before does)."""
+    word_ids = [encoded.word_ids(index) for index in range(len(windows))]
+    extents: dict[int, tuple[int, int]] = {}
+    for words, (_ids, offsets, special) in zip(word_ids, windows, strict=True):
+        for word, (start, end), is_special in zip(words, offsets, special, strict=True):
+            if word is not None and not is_special and end > start:
+                low, high = extents.get(word, (start, end))
+                extents[word] = (min(low, start), max(high, end))
+    units: list[Units] = []
+    for words, (_ids, offsets, special) in zip(word_ids, windows, strict=True):
+        found: Units = []
+        for index, word in enumerate(words):
+            start, end = offsets[index]
+            if word is None or special[index] or end <= start or start != extents[word][0]:
+                continue  # a special token, or not a word's first piece
+            found.append((index, *extents[word]))
+        units.append(found)
+    return units
+
+
+class TaggerPipe:
+    """A BIOES/BILOU token-classification model read the way the strided
+    pipeline reads a BIO one: the fast tokenizer's overlapping windows
+    (``model_max_length`` tokens, ``stride`` shared), and per window one
+    model call whose label scores ``decode`` turns into a label path
+    (tagging.decoder_for). With ``by_word`` — a tokenizer that marks word
+    pieces (:func:`aggregation_for`), whose models are trained to label a
+    word on its first piece — the path runs over the window's words, each
+    scored by its first piece as the pipeline's word-level aggregation
+    reads a BIO model, so a span always covers whole words; otherwise over
+    its tokens. Each span it marks is reported like a pipeline entity — its
+    entity label (the tag dropped), the mean probability of its units'
+    labels, and character offsets into the whole text, without the
+    whitespace at either edge. Special tokens and tokens covering no
+    character are not decoded."""
+
+    def __init__(
+        self,
+        model: Any,
+        tokenizer: Any,
+        stride: int,
+        tagset: TagSet,
+        decode: Decoder,
+        scorer: Scorer,
+        *,
+        by_word: bool = False,
+    ) -> None:
+        # Read by HfDetector: the model's config.id2label names what it emits.
+        self.model = model
+        self._tokenizer = tokenizer
+        self._stride = stride
+        self._tagset = tagset
+        self._decode = decode
+        self._scorer = scorer
+        self._by_word = by_word
+
+    def __call__(self, text: str) -> list[dict[str, Any]]:
+        encoded = self._tokenizer(
+            text,
+            truncation=True,
+            return_overflowing_tokens=True,
+            stride=self._stride,
+            return_offsets_mapping=True,
+            return_special_tokens_mask=True,
+        )
+        windows: list[Window] = list(
+            zip(
+                encoded["input_ids"],
+                encoded["offset_mapping"],
+                encoded["special_tokens_mask"],
+                strict=True,
+            )
+        )
+        units = _word_units(encoded, windows) if self._by_word else _token_units(windows)
+        entities: list[dict[str, Any]] = []
+        for (ids, _offsets, _special), kept in zip(windows, units, strict=True):
+            rows = self._scorer(list(ids))
+            scores = [rows[row] for row, _start, _end in kept]
+            path = self._decode(scores)
+            for first, last, label in spans_of(path, self._tagset):
+                start, end = kept[first][1], kept[last][2]
+                # A token's offsets may take in the blank before a word.
+                while start < end and text[start].isspace():
+                    start += 1
+                while end > start and text[end - 1].isspace():
+                    end -= 1
+                if start == end:
+                    continue
+                probabilities = [math.exp(scores[t][path[t]]) for t in range(first, last + 1)]
+                entities.append(
+                    {
+                        "entity_group": label,
+                        "score": sum(probabilities) / len(probabilities),
+                        "start": start,
+                        "end": end,
+                    }
+                )
+        return entities
+
+
+def _catalog_entry(model: str) -> "CatalogEntry | None":
+    """The model catalog's ``hf`` entry for ``model`` (a Hub id, or a local
+    directory its sidecar file identifies); None when there is none."""
     from llm_redact.config import ConfigError
     from llm_redact.detection.model_catalog import SidecarError, identify, lookup
 
@@ -214,7 +378,66 @@ def catalog_window(model: str) -> int | None:
     except SidecarError as exc:
         raise ConfigError(f"[detection.ner] hf model: {exc}") from exc
     entry = lookup(identity.model_id) if identity is not None else None
-    return entry.window if entry is not None and "hf" in entry.backends else None
+    return entry if entry is not None and "hf" in entry.backends else None
+
+
+def catalog_window(model: str) -> int | None:
+    """The token window the model catalog records for ``model`` (a Hub id,
+    or a local directory its sidecar file identifies) on the ``hf``
+    backend; None when it records none."""
+    entry = _catalog_entry(model)
+    return entry.window if entry is not None else None
+
+
+def _tagger_biases(path: Path, model: str, calibration: str | None) -> dict[str, float] | None:
+    """The Viterbi transition biases of the model's calibration file the
+    catalog lists (``viterbi_calibration``); None when it lists none. The
+    file is there: :func:`model_files.hf_files` requires every file the
+    catalog lists for the model, as ``llm-redact models verify`` does."""
+    from llm_redact.config import ConfigError
+    from llm_redact.detection.model_files import read_config
+
+    if calibration is None:
+        return None
+    try:
+        return viterbi_biases(read_config(path / calibration, what="hf model", model=model))
+    except TaggingError as exc:
+        raise ConfigError(f"[detection.ner] hf model {model!r}: {calibration} {exc}") from exc
+
+
+def _tagger(
+    loaded: Any, tokenizer: Any, stride: int, biases: dict[str, float] | None, model: str
+) -> TaggerPipe | None:
+    """A :class:`TaggerPipe` for a model whose labels tag BIOES or BILOU;
+    None for a BIO model (the pipeline reads it)."""
+    from llm_redact.config import ConfigError
+
+    id2label = getattr(getattr(loaded.model, "config", None), "id2label", None)
+    if not isinstance(id2label, Mapping):
+        return None
+    try:
+        if tagging_scheme(str(label) for label in id2label.values()) == BIO:
+            return None
+        tagset = TagSet.from_labels(id2label)
+    except TaggingError as exc:
+        raise ConfigError(f"[detection.ner] hf model {model!r}: {exc}") from exc
+    try:
+        scorer = torch_scorer(loaded.model)
+    except ImportError as exc:
+        raise ConfigError(
+            '[detection.ner] backend = "hf" but torch is not installed;'
+            " install the hf extra: uv sync --extra hf"
+        ) from exc
+    return TaggerPipe(
+        loaded.model,
+        tokenizer,
+        stride,
+        tagset,
+        decoder_for(tagset, biases),
+        scorer,
+        # Whole words where the tokenizer marks them, as for a BIO model.
+        by_word=aggregation_for(tokenizer) == WORD_AGGREGATION,
+    )
 
 
 def build_hf_detector(config: "NerConfig") -> HfDetector:
@@ -229,14 +452,21 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
             " install it: uv sync --extra hf"
         ) from exc
     model_name = config.model or _MODEL_NAME
+    entry = _catalog_entry(model_name)
+    calibration = entry.viterbi_calibration if entry is not None else None
     # The model's files, local at their pinned revision: configuration,
-    # tokenizer and safetensors weights (a pickle only with the hatch).
+    # tokenizer and safetensors weights (a pickle only with the hatch), and
+    # the calibration file of a BIOES/BILOU tagger the catalog lists one for
+    # (required: a listed file that is missing refuses the model, never a
+    # silent greedy fallback).
     path = hf_model_dir(
         model_name,
         revision=config.revision_for("hf"),
         allow_download=config.allow_download,
         allow_pickle_weights=config.allow_pickle_weights,
+        extra_files=entry.extra_files("hf") if entry is not None else (),
     )
+    biases = _tagger_biases(path, model_name, calibration)
     try:
         # Any: transformers' own types are not part of the checked surface.
         # From the local directory only, never with model code, and from
@@ -272,29 +502,17 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
             f"[detection.ner] hf model {model_name!r} has no fast tokenizer;"
             " character offsets are required"
         )
-    window = model_window(tokenizer, loaded.model, catalog_window(model_name))
+    window = model_window(tokenizer, loaded.model, entry.window if entry is not None else None)
     # The pipeline windows at the tokenizer's limit: make it the model's
     # (a tokenizer that does not know its limit would hand the model the
     # whole text, past its position embeddings).
     if tokenizer.model_max_length != window:
         tokenizer.model_max_length = window
     stride = window // 4
-    try:
-        # The same model and tokenizer, read in overlapping windows: `stride`
-        # is a construction parameter, so every call reads the whole text.
-        # Each entity covers whole words where the tokenizer knows them.
-        pipe: Any = pipeline(
-            "token-classification",
-            model=loaded.model,
-            tokenizer=tokenizer,
-            aggregation_strategy=aggregation_for(tokenizer),
-            stride=stride,
-        )
-    except Exception as exc:  # transformers refuses the windowing settings
-        raise ConfigError(
-            f"failed to load Hugging Face token-classification model {model_name!r}:"
-            f" {type(exc).__name__}"
-        ) from exc
+    # A BIOES/BILOU tagger reads the same windows but decodes its own spans.
+    pipe: Any = _tagger(loaded, tokenizer, stride, biases, model_name)
+    if pipe is None:
+        pipe = _strided_pipeline(pipeline, loaded, tokenizer, stride, model_name)
     detector = HfDetector(
         pipe,
         frozenset(config.entities),
@@ -305,3 +523,27 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
     )
     detector.model_name = model_name
     return detector
+
+
+def _strided_pipeline(
+    pipeline: Callable[..., Any], loaded: Any, tokenizer: Any, stride: int, model: str
+) -> Any:
+    """The transformers pipeline over the loaded BIO model, windowed."""
+    from llm_redact.config import ConfigError
+
+    try:
+        # The same model and tokenizer, read in overlapping windows: `stride`
+        # is a construction parameter, so every call reads the whole text.
+        # Each entity covers whole words where the tokenizer knows them.
+        return pipeline(
+            "token-classification",
+            model=loaded.model,
+            tokenizer=tokenizer,
+            aggregation_strategy=aggregation_for(tokenizer),
+            stride=stride,
+        )
+    except Exception as exc:  # transformers refuses the windowing settings
+        raise ConfigError(
+            f"failed to load Hugging Face token-classification model {model!r}:"
+            f" {type(exc).__name__}"
+        ) from exc

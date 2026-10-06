@@ -170,22 +170,49 @@ put the folders somewhere the service user can read, write the
 configuration with their paths, then `llm-redact service install`. The
 generated unit already runs with `ProtectHome=read-only` and writes only
 the llm-redact data, config and state directories; models load from the
-folders, so it needs no writable cache. To keep the service itself from
-reaching anything but your provider, add a drop-in (`systemctl --user edit
-llm-redact`):
+folders, so it needs no writable cache.
 
-```ini
-[Service]
-IPAddressDeny=any
-IPAddressAllow=localhost
-# your provider's address(es), for example a private endpoint or local model server:
-IPAddressAllow=10.20.0.15/32
-```
+`service install` writes a systemd **user** unit
+(`~/.config/systemd/user/llm-redact.service`). systemd's own egress filter,
+`IPAddressDeny=` / `IPAddressAllow=`, has **no effect** there: a user
+service manager cannot attach the cgroup BPF programs it needs, so systemd
+logs `unit configures an IP firewall, but not running as root.` once and
+starts the service with no filter at all. To keep the proxy from reaching
+anything but your provider, use one of these instead:
 
-`localhost` must stay allowed: your tools reach the proxy over loopback.
-These settings need eBPF control-group support in the kernel and have no
-effect without it (systemd.resource-control(5)); treat them as defense in
-depth beside the enclave's own firewall.
+- **The host's (or the enclave's) firewall**, for the account the proxy
+  runs as. Run it under a dedicated account so the rule limits nothing
+  else; for example, with nftables and an account named `llm-redact`:
+
+  ```
+  table inet llm_redact_egress {
+    chain output {
+      type filter hook output priority 0; policy accept;
+      meta skuid "llm-redact" oif "lo" accept
+      meta skuid "llm-redact" ip daddr 10.20.0.15 accept   # your provider
+      meta skuid "llm-redact" drop
+    }
+  }
+  ```
+
+- **A system unit you write yourself** (`/etc/systemd/system/`, with
+  `User=` a dedicated account and the generated unit's `ExecStart=`), where
+  the system manager applies
+
+  ```ini
+  [Service]
+  IPAddressDeny=any
+  IPAddressAllow=localhost
+  # your provider's address(es), for example a private endpoint or local model server:
+  IPAddressAllow=10.20.0.15/32
+  ```
+
+  on a kernel with eBPF control-group support (systemd.resource-control(5));
+  check that `journalctl -u llm-redact` shows no `configures an IP
+  firewall, but` line.
+
+Either way `localhost` must stay allowed: your tools reach the proxy over
+loopback. Treat both as defense in depth beside the enclave's own firewall.
 
 ## Troubleshooting
 

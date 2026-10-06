@@ -268,8 +268,9 @@ and tags `vX.Y.Z`.
   guide, docs/air-gapped.md, walks through running with NER models in an enclave with no internet
   route: what to carry in, offline verification (`models verify --dir`, the manifest's checksum
   carried separately, pulled as your own user into a folder only you can write), Docker, Helm
-  and systemd (`IPAddressDeny=any` with loopback and the provider allowed) settings, and the
-  provider as the only egress.
+  and systemd settings (an egress limit through the host firewall or a system unit you write:
+  `IPAddressDeny=` has no effect in the user unit `service install` writes), and the provider
+  as the only egress.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

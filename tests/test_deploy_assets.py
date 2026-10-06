@@ -1040,3 +1040,22 @@ def test_the_air_gapped_pull_never_opens_the_models_folder_to_everyone() -> None
     pull = re.sub(r"\\\n\s*", " ", connected)
     [command] = [line for line in pull.splitlines() if "models pull --to /out" in line]
     assert '--user "$(id -u):$(id -g)"' in command and "-e HF_HOME=/tmp/hf" in command
+
+
+def test_the_air_gapped_guide_never_claims_an_egress_filter_in_the_user_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `service install` writes a systemd USER unit, whose manager cannot attach
+    # the cgroup BPF programs IPAddressDeny= needs: systemd ignores it there.
+    from llm_redact import service_cli
+
+    monkeypatch.setattr(service_cli.sys, "platform", "linux")
+    assert "systemd/user" in service_cli._unit_path().as_posix()
+    guide = AIR_GAPPED.read_text()
+    systemd = guide[guide.index("## systemd (native installs)") : guide.index("## Troubleshooting")]
+    assert "systemctl --user edit" not in systemd
+    assert "has **no effect** there" in systemd
+    assert "not running as root." in systemd
+    assert "meta skuid" in systemd and "/etc/systemd/system/" in systemd
+    # The IPAddressDeny= example sits under the system-unit option only.
+    assert systemd.index("IPAddressDeny=any") > systemd.index("A system unit you write yourself")

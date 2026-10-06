@@ -207,6 +207,42 @@ def test_an_unreadable_config_exits_2(tmp_path: Path, capsys: pytest.CaptureFixt
         assert "llm-redact models:" in capsys.readouterr().err
 
 
+def test_a_config_file_that_cannot_be_read_exits_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A --config path that names no file once ended in a traceback with
+    # exit 1, verify's code for "a model is not complete".
+    hub = install_hub(monkeypatch)
+    missing = tmp_path / "nowhere" / "config.toml"
+    for command in ("list", "verify", "pull"):
+        args = build_parser().parse_args(["models", command, "--config", str(missing)])
+        assert run_models(args) == 2
+        captured = capsys.readouterr()
+        assert captured.err.strip() == (
+            f"llm-redact models: cannot read {missing} (FileNotFoundError)"
+        )
+        assert captured.out == ""
+    # A folder (the exception type differs by platform) ...
+    args = build_parser().parse_args(["models", "verify", "--config", str(tmp_path)])
+    assert run_models(args) == 2
+    err = capsys.readouterr().err.strip()
+    assert err.startswith(f"llm-redact models: cannot read {tmp_path} (") and err.endswith(")")
+    # ... and bytes that are no text in UTF-8 (nor in cp1252).
+    garbled = tmp_path / "garbled.toml"
+    garbled.write_bytes(b"\x81\x8d")
+    args = build_parser().parse_args(["models", "verify", "--config", str(garbled)])
+    assert run_models(args) == 2
+    assert capsys.readouterr().err.startswith("llm-redact models: ")
+    # Without --config: LLM_REDACT_CONFIG naming no file is refused too.
+    monkeypatch.setenv("LLM_REDACT_CONFIG", str(missing))
+    args = build_parser().parse_args(["models", "list"])
+    assert run_models(args) == 2
+    assert capsys.readouterr().err.strip() == (
+        f"llm-redact models: LLM_REDACT_CONFIG points to a missing file: {missing}"
+    )
+    assert hub.calls == []
+
+
 # --- verify (configuration) --------------------------------------------------------
 
 

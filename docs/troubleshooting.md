@@ -635,6 +635,18 @@ doctor looks models up in the local Hugging Face cache through
 backend's extra (`uv sync --extra hf` / `--extra gliner`); the `ner` area's
 FAIL row says the same.
 
+## `llm-redact models`: "llm-redact models: cannot read PATH (…)"
+
+`llm-redact models list`, `verify` and `pull` could not read the
+configuration file: the one `--config` names, else the one `LLM_REDACT_CONFIG`
+names or the default search finds (the per-user `config.toml`, then
+`/etc/llm-redact/config.toml`). It does not exist (`FileNotFoundError`), is
+a folder, may not be read, or holds bytes that are not text
+(`UnicodeDecodeError`); the message ends with the exception type. The command
+exits 2 without looking at any model — exit 1 is kept for a model that is not
+complete. Check the path; `llm-redact config show --path` prints the file the
+default search finds.
+
 ## `llm-redact models pull`: "FAIL  not every model was pulled; nothing was written to DIR"
 
 A model (or a GLiNER model's base model) could not be fetched — the `FAIL`

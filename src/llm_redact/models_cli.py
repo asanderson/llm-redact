@@ -26,7 +26,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
-from llm_redact.config import Config, ConfigError, apply_env_overrides, load_config
+from llm_redact.config import (
+    Config,
+    ConfigError,
+    apply_env_overrides,
+    load_config,
+    resolve_config_path,
+)
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
@@ -98,11 +104,22 @@ def run_models(args: argparse.Namespace) -> int:
 
 
 def _config(args: argparse.Namespace) -> Config | None:
+    """The configuration ``--config`` names (else the one ``serve`` would
+    find), or None — after saying why on stderr — when it cannot be read
+    (exit 2): a missing or unreadable file as much as an invalid one."""
     try:
-        return apply_env_overrides(load_config(args.config))
-    except ConfigError as problem:
+        # One resolution: the file a message names is the one read.
+        source = args.config if args.config is not None else resolve_config_path()
+    except ConfigError as problem:  # LLM_REDACT_CONFIG names no file
         print(f"llm-redact models: {problem}", file=sys.stderr)
         return None
+    try:
+        return apply_env_overrides(load_config(source))
+    except ConfigError as problem:
+        print(f"llm-redact models: {problem}", file=sys.stderr)
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"llm-redact models: cannot read {source} ({type(exc).__name__})", file=sys.stderr)
+    return None
 
 
 def _json(value: object) -> None:

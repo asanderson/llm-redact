@@ -107,6 +107,14 @@ and tags `vX.Y.Z`.
   Report-only unless `[<config>.latency]` ceilings are recorded in
   `bench/ner_thresholds.toml`.
 
+- `llm-redact doctor` has a `models` area while NER is on with the `gliner` or `hf` backend:
+  each model, its pin and where the pin comes from, and whether every file its load reads is
+  in the local Hugging Face cache at that pin (a GLiNER model's base model included) or in its
+  folder. It WARNs while `allow_download` or (for `hf`) `allow_pickle_weights` is on and for a
+  model or GLiNER base model nothing pins, and FAILs, naming `llm-redact models pull`, when a
+  model the startup needs is missing while downloads are off. It never loads or downloads a
+  model.
+
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
   upload inspector's extracted texts included) and a realtime client frame the proxy collects the
@@ -124,7 +132,9 @@ and tags `vX.Y.Z`.
   `llm-redact models pull`. A reload, the dashboard editor's dry run and `llm-redact preview`
   never download: a reload naming an uncached model is refused and the running configuration
   kept. Model downloads were never listed among what leaves the machine (docs/privacy.md), so
-  this fixes behaviour the documentation never allowed. Upgrading: the default models' pins are
+  this fixes behaviour the documentation never allowed; docs/privacy.md and the per-channel
+  table of docs/security-dataflows.md now list them (opt-in, startup only, the model id and
+  revision, never request content), and docs/threat-model.md the NER model supply chain. Upgrading: the default models' pins are
   the `main` commits of 2026-10-05, so a cache an online load refreshed since then already holds
   them; `urchade/gliner_multi-v2.1` moved on 2025-12-08 (an older cache holds `853ce23e47e5`).
 - NER model labels become placeholder types through one label policy for every backend
@@ -235,7 +245,10 @@ and tags `vX.Y.Z`.
   `allow_pickle_weights = true`. A local model folder loads as it is and takes no revision: a
   `[detection.ner.revisions]` entry for it is a config error, also for a folder named like a
   catalogued model id (the catalog's pins name Hub snapshots, never a folder's content).
-  Previously the newest revision was downloaded from the Hub on first use.
+  Every load checks that the cached snapshot or folder holds what it reads (configuration,
+  every weight shard an index names, a tokenizer), so an interrupted download counts as a model
+  not in the cache and names what is missing. Previously the newest revision was downloaded
+  from the Hub on first use.
 - The `gliner` NER backend loads its model the same way, and no longer fetches a base model
   from the Hub at every load. The default `urchade/gliner_small-v2.1` (like the other urchade
   v2.1 checkpoints) ships no tokenizer or encoder configuration, so GLiNER fetched them from

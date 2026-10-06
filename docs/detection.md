@@ -177,6 +177,14 @@ hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
   weights. GLiNER loads its `pytorch_model.bin` through torch's
   `weights_only` loader whatever this key says.
 
+`llm-redact doctor` reports these settings under `models` while NER is on,
+without loading a model or touching the network: a WARN while
+`allow_download` or `allow_pickle_weights` is on and for a model with no pin,
+each model's pin and where it comes from, and whether every file its load
+reads is in the local Hugging Face cache at that pin (a GLiNER model's base
+model included) or in its folder — a FAIL, naming `llm-redact models pull`,
+when a model the startup needs is missing while downloads are off.
+
 **How the `hf` backend loads a model.** A Hub model is looked up in the local
 Hugging Face cache at its pinned revision (fetched only when
 `allow_download = true`), with an explicit list of top-level files: its
@@ -185,8 +193,11 @@ TensorFlow, Flax, ONNX or `original/` copies a repository may also hold. A
 model missing from the cache is a startup error that names the model and the
 revision. A local folder is loaded as it is; a revision for it is a config
 error, and it never takes the catalog's pin, even when its path reads like a
-catalogued model id. A model whose `config.json` or `tokenizer_config.json` names code to
-import from its repository (`auto_map`) is refused, and nothing is ever
+catalogued model id. Every load checks that the folder or cached snapshot
+holds what it reads — `config.json`, the weights (every shard a weight index
+names) and a tokenizer — so an interrupted download counts as a model not in
+the cache. A model whose `config.json` or `tokenizer_config.json` names code
+to import from its repository (`auto_map`) is refused, and nothing is ever
 loaded with `trust_remote_code`. The weights must be safetensors: a model
 with only `pytorch_model.bin` is refused unless `allow_pickle_weights = true`,
 and a model with both always loads its safetensors.

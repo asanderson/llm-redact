@@ -28,6 +28,7 @@ nothing else ever fetches a file:
 Messages name the backend, the model id and the revision only.
 """
 
+import fnmatch
 import hashlib
 import json
 import logging
@@ -36,11 +37,13 @@ import re
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from llm_redact.detection.model_catalog import MODEL_ID_RE
+from llm_redact.config import ConfigError
+from llm_redact.detection.model_catalog import MODEL_ID_RE, ModelIdentity
 
 # Tokenizer files, by the names transformers looks for: a fast tokenizer's
 # tokenizer.json, its configuration, and the vocabularies a slow tokenizer
@@ -58,6 +61,17 @@ TOKENIZER_FILES = (
     "sentencepiece.bpe.model",
     "spiece.model",
     "tokenizer.model",
+)
+# The files a tokenizer is built from: any one of these groups (its
+# tokenizer_config.json and special-tokens maps only configure one).
+VOCABULARIES: tuple[tuple[str, ...], ...] = (
+    ("tokenizer.json",),
+    ("vocab.txt",),
+    ("vocab.json", "merges.txt"),
+    ("spm.model",),
+    ("sentencepiece.bpe.model",),
+    ("spiece.model",),
+    ("tokenizer.model",),
 )
 # safetensors weights: one file, or shards with their index.
 SAFETENSORS_FILES = ("model.safetensors", "model.safetensors.index.json")
@@ -78,9 +92,30 @@ MAX_CONFIG_BYTES = 4 * 1024 * 1024
 
 
 def _config_error(message: str) -> Exception:
-    from llm_redact.config import ConfigError
-
     return ConfigError(message)
+
+
+class ModelNotCached(ConfigError):
+    """A Hub model (or a GLiNER model's base model) that the local Hugging
+    Face cache does not hold, or holds only in part, at the revision a
+    build without downloads asks for. ``missing`` names the kinds of files
+    the cached snapshot lacks (empty: no snapshot at all)."""
+
+    def __init__(
+        self, what: str, model: str, revision: str | None, missing: tuple[str, ...] = ()
+    ) -> None:
+        text = (
+            f"[detection.ner] {what} {model!r} {_revision_text(revision)} is not"
+            " (completely) in the local Hugging Face cache, and downloads are off"
+            " (an older revision in the cache does not count); run"
+            " `llm-redact models pull`, or set [detection.ner] allow_download = true"
+            " to fetch it at startup (a reload never downloads)"
+        )
+        super().__init__(f"{text}; missing: {', '.join(missing)}" if missing else text)
+        self.what = what
+        self.model = model
+        self.revision = revision
+        self.missing = missing
 
 
 def is_local(model: str) -> bool:
@@ -157,13 +192,7 @@ def resolve_model(
         )
     except Exception as exc:  # not cached, incomplete, not found, no network
         if not allow_download:
-            raise _config_error(
-                f"[detection.ner] {what} {model!r} {_revision_text(revision)} is not"
-                " (completely) in the local Hugging Face cache, and downloads are off"
-                " (an older revision in the cache does not count); run"
-                " `llm-redact models pull`, or set [detection.ner] allow_download = true"
-                " to fetch it at startup (a reload never downloads)"
-            ) from exc
+            raise ModelNotCached(what, model, revision) from exc
         raise _config_error(
             f"[detection.ner] {what} {model!r} {_revision_text(revision)} could not be"
             f" fetched from the Hugging Face Hub: {type(exc).__name__}"
@@ -243,17 +272,113 @@ def has_files(directory: Path, names: Iterable[str]) -> bool:
     return any((directory / name).is_file() for name in names)
 
 
-def hf_model_dir(
+def has_vocabulary(names: Collection[str]) -> bool:
+    """Whether the file ``names`` include a tokenizer's vocabulary (one of
+    :data:`VOCABULARIES`)."""
+    return any(all(name in names for name in group) for group in VOCABULARIES)
+
+
+def matching_files(directory: Path, patterns: Iterable[str]) -> dict[str, Path]:
+    """The top-level files of ``directory`` whose names match one of the
+    file ``patterns`` (the names a lookup with those patterns fetches), by
+    name, sorted."""
+    patterns = tuple(patterns)
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError:
+        return {}
+    return {
+        entry.name: entry
+        for entry in entries
+        if entry.is_file() and any(fnmatch.fnmatchcase(entry.name, p) for p in patterns)
+    }
+
+
+@dataclass(frozen=True)
+class ModelFiles:
+    """Every file one configured model's load reads, by its path inside a
+    self-contained folder: what ``llm-redact models verify`` checks and
+    ``models pull --to`` copies. Names only, never content."""
+
+    model: str
+    # Where the model's own files are read from: its snapshot in the
+    # Hugging Face cache, or a local folder.
+    directory: Path
+    # Relative POSIX path inside the folder -> the file it is read from.
+    files: Mapping[str, Path]
+    # A gliner_config.json llm-redact writes for an ASSEMBLED folder (the
+    # checkpoint's own configuration with its base model embedded); None:
+    # the directory loads as it is.
+    config: Mapping[str, Any] | None = None
+    backbone: str | None = None
+    backbone_revision: str | None = None
+    backbone_directory: Path | None = field(default=None, compare=False)
+
+
+def _require_complete(
+    what: str, model: str, revision: str | None, missing: Sequence[str], *, allow_download: bool
+) -> None:
+    """Refuse a model directory that lacks files its load needs (``missing``
+    names the kinds of files). A cached snapshot can be incomplete (an
+    interrupted download): with downloads off that is a model not cached."""
+    if not missing:
+        return
+    kinds = ", ".join(missing)
+    if is_local(model):
+        raise _config_error(
+            f"[detection.ner] {what} {model!r} is a local directory that lacks what"
+            f" the loader needs: {kinds}"
+        )
+    if not allow_download:
+        raise ModelNotCached(what, model, revision, tuple(missing))
+    raise _config_error(
+        f"[detection.ner] {what} {model!r} {_revision_text(revision)}: its repository"
+        f" lacks what the loader needs: {kinds}"
+    )
+
+
+def _shards(directory: Path, index: str, *, what: str, model: str) -> list[str]:
+    """The weight files an index file names, each a plain file name."""
+    config = read_config(directory / index, what=what, model=model)
+    weight_map = config.get("weight_map")
+    names = set(weight_map.values()) if isinstance(weight_map, Mapping) else set()
+    if not names or not all(
+        isinstance(name, str) and name and "/" not in name and "\\" not in name for name in names
+    ):
+        raise _config_error(
+            f"[detection.ner] {what} {model!r}: {index} does not name its weight files"
+        )
+    return sorted(names)
+
+
+def _hf_missing(directory: Path, names: Collection[str], *, model: str) -> list[str]:
+    """What an ``hf`` load needs that the files ``names`` lack."""
+    missing = [] if "config.json" in names else ["config.json"]
+    for single, index in (SAFETENSORS_FILES, PICKLE_FILES):
+        if single in names:
+            break
+        if index in names:
+            shards = _shards(directory, index, what="hf model", model=model)
+            missing += [name for name in shards if name not in names]
+            break
+    else:
+        missing.append("weights")
+    if not has_vocabulary(names):
+        missing.append("tokenizer files")
+    return missing
+
+
+def hf_files(
     model: str,
     *,
     revision: str | None,
     allow_download: bool,
     allow_pickle_weights: bool,
-) -> Path:
-    """The local directory an ``hf`` model loads from: its configuration,
-    tokenizer and safetensors weights — or, only with
-    ``allow_pickle_weights`` and only when it has no safetensors weights,
-    its ``pytorch_model.bin``."""
+) -> ModelFiles:
+    """The files an ``hf`` model loads from: its configuration, tokenizer
+    and safetensors weights — or, only with ``allow_pickle_weights`` and
+    only when it has no safetensors weights, its ``pytorch_model.bin``. A
+    directory lacking any of them is refused (:func:`_require_complete`)."""
     what = "hf model"
     path = resolve_model(
         model,
@@ -263,24 +388,45 @@ def hf_model_dir(
         allow_patterns=HF_PATTERNS,
     )
     check_configs(path, CODE_CONFIG_FILES, what=what, model=model)
-    if has_files(path, SAFETENSORS_FILES):
-        return path
-    if not allow_pickle_weights:
-        raise _config_error(
-            f"[detection.ner] hf model {model!r} has no safetensors weights;"
-            " set allow_pickle_weights = true to load pytorch_model.bin"
-        )
-    if is_local(model):
-        return path
-    # The repository lists no safetensors file (else the first lookup would
-    # have needed it): fetch the pickle too.
-    return resolve_model(
+    patterns: tuple[str, ...] = HF_PATTERNS
+    if not has_files(path, SAFETENSORS_FILES):
+        if not allow_pickle_weights:
+            raise _config_error(
+                f"[detection.ner] hf model {model!r} has no safetensors weights;"
+                " set allow_pickle_weights = true to load pytorch_model.bin"
+            )
+        patterns = (*HF_PATTERNS, *HF_PICKLE_PATTERNS)
+        if not is_local(model):
+            # The repository lists no safetensors file (else the first
+            # lookup would have needed it): fetch the pickle too.
+            path = resolve_model(
+                model,
+                what=what,
+                revision=revision,
+                allow_download=allow_download,
+                allow_patterns=patterns,
+            )
+    files = matching_files(path, patterns)
+    _require_complete(
+        what, model, revision, _hf_missing(path, files, model=model), allow_download=allow_download
+    )
+    return ModelFiles(model, path, files)
+
+
+def hf_model_dir(
+    model: str,
+    *,
+    revision: str | None,
+    allow_download: bool,
+    allow_pickle_weights: bool,
+) -> Path:
+    """The local directory an ``hf`` model loads from (:func:`hf_files`)."""
+    return hf_files(
         model,
-        what=what,
         revision=revision,
         allow_download=allow_download,
-        allow_patterns=(*HF_PATTERNS, *HF_PICKLE_PATTERNS),
-    )
+        allow_pickle_weights=allow_pickle_weights,
+    ).directory
 
 
 # --- GLiNER --------------------------------------------------------------------
@@ -338,15 +484,23 @@ def _require_known_type(
         )
 
 
+def _identify(model: str) -> ModelIdentity | None:
+    """Which model the GLiNER ``model`` value is (model_catalog.identify);
+    a folder whose sidecar file cannot be read is a configuration error."""
+    from llm_redact.detection.model_catalog import SidecarError, identify
+
+    try:
+        return identify(model)
+    except SidecarError as exc:
+        raise _config_error(f"[detection.ner] gliner model: {exc}") from exc
+
+
 def _backbone_revision(model: str, backbone: str) -> str | None:
     """The catalog's pin of ``backbone`` for the GLiNER ``model`` (a Hub id,
     or a folder its sidecar names), or None."""
-    from llm_redact.detection.model_catalog import SidecarError, identify, lookup
+    from llm_redact.detection.model_catalog import lookup
 
-    try:
-        identity = identify(model)
-    except SidecarError as exc:
-        raise _config_error(f"[detection.ner] gliner model: {exc}") from exc
+    identity = _identify(model)
     entry = lookup(identity.model_id) if identity is not None else None
     if entry is None or entry.backbone is None:
         return None
@@ -355,24 +509,27 @@ def _backbone_revision(model: str, backbone: str) -> str | None:
     return entry.backbone_revision
 
 
-def gliner_model_dir(
+def gliner_files(
     model: str,
     *,
     revision: str | None,
     allow_download: bool,
     onnx_file: str | None = None,
-) -> Path:
-    """The local folder a GLiNER model loads from with no network access.
+    check_types: bool = True,
+) -> ModelFiles:
+    """The files a GLiNER model loads from with no network access.
 
     A self-contained checkpoint (its own tokenizer and an ``encoder_config``
-    in ``gliner_config.json``) is its own folder. Any other is assembled
-    under :func:`models_dir`: links to its weights, its base model's
-    tokenizer and ``config.json``, and a ``gliner_config.json`` that embeds
-    the base model's configuration as ``encoder_config`` and names
-    :data:`LOCAL_MODEL_NAME` — so GLiNER never asks the Hub for the base
-    model's tokenizer or configuration, which it would at every load, at
-    no fixed revision. The base model is resolved at the catalog's pin
-    (a startup WARNING names one the catalog does not pin)."""
+    in ``gliner_config.json``) loads from its own directory. Any other needs
+    an ASSEMBLED folder: its weights, its base model's tokenizer and
+    ``config.json``, and a ``gliner_config.json`` (``ModelFiles.config``)
+    that embeds the base model's configuration as ``encoder_config`` and
+    names :data:`LOCAL_MODEL_NAME` — so GLiNER never asks the Hub for the
+    base model's tokenizer or configuration, which it would at every load,
+    at no fixed revision. The base model resolves at the catalog's pin.
+    ``check_types`` (the loader) also refuses a model type transformers
+    does not know, which imports transformers; ``llm-redact models`` and
+    doctor check files only."""
     what = "gliner model"
     patterns: tuple[str, ...] = GLINER_PATTERNS
     if onnx_file is not None:
@@ -381,32 +538,49 @@ def gliner_model_dir(
     path = resolve_model(
         model, what=what, revision=revision, allow_download=allow_download, allow_patterns=patterns
     )
-    if onnx_file is None and not (path / "model.safetensors").is_file() and not is_local(model):
-        # No safetensors in the repository: GLiNER's weights_only .bin.
-        path = resolve_model(
-            model,
-            what=what,
-            revision=revision,
-            allow_download=allow_download,
-            allow_patterns=(*patterns, GLINER_PICKLE),
-        )
+    if onnx_file is None and not (path / "model.safetensors").is_file():
+        # No safetensors: GLiNER's weights_only .bin (fetched too from a
+        # repository that lists no safetensors file).
+        patterns = (*patterns, GLINER_PICKLE)
+        if not is_local(model):
+            path = resolve_model(
+                model,
+                what=what,
+                revision=revision,
+                allow_download=allow_download,
+                allow_patterns=patterns,
+            )
     if onnx_file is not None and not (path / onnx_file).is_file():
         raise _config_error(
             f"[detection.ner] gliner model {model!r} {_revision_text(revision)} has no ONNX"
             f" file {onnx_file!r} ([detection.ner.onnx] gliner)"
         )
+    if is_local(model):
+        _identify(model)  # a folder whose sidecar cannot be read is refused
     configs = check_configs(path, (GLINER_CONFIG, "tokenizer_config.json"), what=what, model=model)
     config = configs.get(GLINER_CONFIG)
     if config is None:
         raise _config_error(f"[detection.ner] gliner model {model!r} has no {GLINER_CONFIG}")
-    for key in _ENCODER_CONFIGS:
-        sub = config.get(key)
-        if isinstance(sub, Mapping):
-            default = _DEFAULT_ENCODER_TYPE if key == "encoder_config" else None
-            _require_known_type(sub, default=default, what=what, model=model, name=GLINER_CONFIG)
-    has_tokenizer = (path / "tokenizer_config.json").is_file()
+    if check_types:
+        for key in _ENCODER_CONFIGS:
+            sub = config.get(key)
+            if isinstance(sub, Mapping):
+                default = _DEFAULT_ENCODER_TYPE if key == "encoder_config" else None
+                _require_known_type(
+                    sub, default=default, what=what, model=model, name=GLINER_CONFIG
+                )
+    own = matching_files(path, (p for p in patterns if p != onnx_file))
+    if onnx_file is not None:
+        own[onnx_file] = path / onnx_file
+    elif not any(name in own for name in GLINER_WEIGHTS):
+        _require_complete(what, model, revision, ["weights"], allow_download=allow_download)
+    has_tokenizer = "tokenizer_config.json" in own
     if has_tokenizer and isinstance(config.get("encoder_config"), Mapping):
-        return path
+        if not has_vocabulary(own):
+            _require_complete(
+                what, model, revision, ["tokenizer files"], allow_download=allow_download
+            )
+        return ModelFiles(model, path, own)
     backbone = config.get("model_name")
     if not isinstance(backbone, str) or not backbone:
         raise _config_error(
@@ -414,14 +588,6 @@ def gliner_model_dir(
             " (model_name) for its tokenizer and encoder configuration"
         )
     backbone_revision = _backbone_revision(model, backbone)
-    if backbone_revision is None and not is_local(backbone):
-        logger.warning(
-            "[detection.ner] gliner model %r ships no tokenizer or encoder_config, and the"
-            " model catalog pins no revision of its base model %r: the newest cached"
-            " revision of its default branch loads",
-            model,
-            backbone,
-        )
     base_what = "gliner base model"
     base = resolve_model(
         backbone,
@@ -434,9 +600,10 @@ def gliner_model_dir(
     base_config = base_configs.get("config.json")
     if base_config is None:
         raise _config_error(f"[detection.ner] {base_what} {backbone!r} has no config.json")
-    _require_known_type(
-        base_config, default=None, what=base_what, model=backbone, name="config.json"
-    )
+    if check_types:
+        _require_known_type(
+            base_config, default=None, what=base_what, model=backbone, name="config.json"
+        )
     rewritten = dict(config)
     rewritten["model_name"] = LOCAL_MODEL_NAME
     if not isinstance(config.get("encoder_config"), Mapping):
@@ -446,18 +613,65 @@ def gliner_model_dir(
         if vocab_size != -1:
             encoder["vocab_size"] = vocab_size
         rewritten["encoder_config"] = encoder
-    files: dict[str, Path] = {}
-    names = [*GLINER_WEIGHTS, *([onnx_file] if onnx_file is not None else [])]
-    if has_tokenizer:
-        names += list(TOKENIZER_FILES)
-    for name in names:
-        if (path / name).is_file():
-            files[name] = path / name
-    tokenizer_source = () if has_tokenizer else TOKENIZER_FILES
-    for name in ("config.json", *tokenizer_source):
-        if (base / name).is_file():
-            files[name] = base / name
-    return assemble_folder(model, files, rewritten)
+    # The checkpoint's weights (and its own tokenizer, when it ships one),
+    # the base model's configuration (transformers' tokenizer-class lookup)
+    # and, otherwise, the base model's tokenizer.
+    files = {
+        name: source
+        for name, source in own.items()
+        if name != GLINER_CONFIG and (has_tokenizer or name not in TOKENIZER_FILES)
+    }
+    base_files = matching_files(base, ("config.json", *(() if has_tokenizer else TOKENIZER_FILES)))
+    files.update(base_files)
+    if "tokenizer_config.json" not in files or not has_vocabulary(files):
+        if has_tokenizer:
+            _require_complete(
+                what, model, revision, ["tokenizer files"], allow_download=allow_download
+            )
+        _require_complete(
+            base_what,
+            backbone,
+            backbone_revision,
+            ["tokenizer files"],
+            allow_download=allow_download,
+        )
+    return ModelFiles(
+        model,
+        path,
+        files,
+        config=rewritten,
+        backbone=backbone,
+        backbone_revision=backbone_revision,
+        backbone_directory=base,
+    )
+
+
+def gliner_model_dir(
+    model: str,
+    *,
+    revision: str | None,
+    allow_download: bool,
+    onnx_file: str | None = None,
+) -> Path:
+    """The local folder a GLiNER model loads from with no network access
+    (:func:`gliner_files`): its own directory when it is self-contained,
+    else a folder assembled under :func:`models_dir` (a startup WARNING
+    names a base model the catalog does not pin)."""
+    layout = gliner_files(
+        model, revision=revision, allow_download=allow_download, onnx_file=onnx_file
+    )
+    if layout.config is None:
+        return layout.directory
+    backbone = layout.backbone or ""
+    if layout.backbone_revision is None and not is_local(backbone):
+        logger.warning(
+            "[detection.ner] gliner model %r ships no tokenizer or encoder_config, and the"
+            " model catalog pins no revision of its base model %r: the newest cached"
+            " revision of its default branch loads",
+            model,
+            backbone,
+        )
+    return assemble_folder(model, layout.files, layout.config)
 
 
 def config_text(config: Mapping[str, Any]) -> str:

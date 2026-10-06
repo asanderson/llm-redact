@@ -690,6 +690,134 @@ def _check_ner_labels(report: _Report, config: Config) -> None:
         report.line("WARN", "ner", warning)
 
 
+def _check_models(report: _Report, config: Config) -> None:
+    """Where the NER models of the Hugging Face Hub backends (gliner, hf)
+    come from: the download and pickle switches, each model's pin, and
+    whether its files are in the local Hugging Face cache (or its folder)
+    at that pin. Never loads a model and never touches the network — file
+    lookups in the local cache only. Silent while NER is off."""
+    from llm_redact.detection.model_sources import hub_sources
+
+    ner = config.detection.ner
+    sources = hub_sources(ner) if ner.enabled else []
+    if not sources:
+        return
+    if ner.allow_download:
+        report.line(
+            "WARN",
+            "models",
+            "allow_download = true: the proxy's startup may download model weights from"
+            " huggingface.co (the model id and revision, never request content; a reload"
+            " never downloads)",
+        )
+    else:
+        report.line(
+            "PASS",
+            "models",
+            "downloads off (allow_download = false): models load from the local Hugging"
+            " Face cache or local folders only",
+        )
+    if ner.allow_pickle_weights and "hf" in ner.active_backends():
+        report.line(
+            "WARN",
+            "models",
+            "allow_pickle_weights = true: an hf model without safetensors weights loads"
+            " pytorch_model.bin, a pickle (loading a pickle can run code)",
+        )
+    try:
+        import huggingface_hub  # noqa: F401  (doctor only asks the local cache)
+
+        cache = True
+    except ImportError:
+        cache = False
+    for source in sources:
+        _check_model_pin(report, source)
+        _check_model_files(report, ner, source, cache=cache)
+
+
+def _check_model_pin(report: _Report, source: Any) -> None:
+    """Which model and commit one Hub backend loads."""
+    from llm_redact.detection.model_catalog import SIDECAR_NAME
+
+    where = f"{source.backend}: {source.model}"
+    if source.sidecar_problem is not None:
+        report.line("FAIL", "models", f"{source.backend}: {source.sidecar_problem}")
+    elif source.local and source.model_id is None:
+        report.line(
+            "PASS",
+            "models",
+            f"{where} is a local folder without {SIDECAR_NAME} (it loads as it is;"
+            " nothing identifies the model)",
+        )
+    elif source.local:
+        revision = source.revision or "an unrecorded revision"
+        report.line(
+            "PASS", "models", f"{where} is a local folder holding {source.model_id} at {revision}"
+        )
+    elif source.pinned:
+        by = "[detection.ner.revisions]" if source.pinned_by == "config" else "the model catalog"
+        report.line("PASS", "models", f"{where} pinned at {source.revision} by {by}")
+    else:
+        report.line(
+            "WARN",
+            "models",
+            f"{where} has no pin: the newest cached revision of its default branch loads;"
+            f" pin a commit in [detection.ner.revisions] {source.backend} (`llm-redact"
+            " models pull` prints the one it fetches)",
+        )
+
+
+def _check_model_files(report: _Report, ner: Any, source: Any, *, cache: bool) -> None:
+    """Whether one Hub backend's model files are where its load reads them,
+    complete: the local cache at its pin (base model included), or its
+    folder. A model missing from the cache FAILs while downloads are off —
+    after an upgrade the likeliest startup failure."""
+    from llm_redact.config import ConfigError
+    from llm_redact.detection.model_files import ModelNotCached, is_local
+    from llm_redact.detection.model_sources import local_files
+
+    if not cache and not source.local:
+        report.line(
+            "WARN",
+            "models",
+            f"{source.backend}: {source.model}: the local Hugging Face cache was not checked:"
+            f" huggingface_hub is not installed (the {source.backend} extra installs it)",
+        )
+        return
+    try:
+        files = local_files(ner, source)
+    except ModelNotCached as missing:
+        if ner.allow_download:
+            report.line(
+                "WARN",
+                "models",
+                f"{source.backend}: {missing.what} {missing.model} is not (completely) in the"
+                " local Hugging Face cache; the proxy's startup will fetch it"
+                " (allow_download = true)",
+            )
+        else:
+            report.line("FAIL", "models", str(missing))
+        return
+    except ConfigError as problem:
+        report.line("FAIL", "models", str(problem))
+        return
+    place = "its folder" if source.local else "the local Hugging Face cache"
+    report.line(
+        "PASS",
+        "models",
+        f"{source.backend}: {source.model}: every file the loader reads is in {place}",
+    )
+    backbone = files.backbone
+    if backbone is not None and files.backbone_revision is None and not is_local(backbone):
+        report.line(
+            "WARN",
+            "models",
+            f"{source.backend}: {source.model} takes its tokenizer and encoder"
+            f" configuration from its base model {backbone}, whose revision the model"
+            " catalog does not pin: the newest cached revision loads",
+        )
+
+
 def _check_posture(report: _Report, config: Config) -> None:
     """Loud reminders for every configured coverage opt-out. Each is a
     deliberate feature, so these are WARN (never FAIL) — but an operator
@@ -1126,6 +1254,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_extras(report, config)
     _check_posture(report, config)
     _check_ner_labels(report, config)
+    _check_models(report, config)
     _check_extraction(report, config)
     _check_upstream_auth(report, config)
     _check_allowed_hosts(report, config)

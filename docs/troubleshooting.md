@@ -481,7 +481,30 @@ A reload (SIGHUP, the dashboard editor) never downloads, whatever
 `allow_download` says: after a reload naming a new model, the running
 configuration is kept — fetch the model, then reload again, or restart.
 "(completely)": the cache holds the revision but not every file the loader
-needs, such as after an interrupted download.
+needs, such as after an interrupted download; the message then ends with
+`; missing: …`, naming the kinds of files absent (`config.json`, `weights`,
+`tokenizer files`, a weight shard's name). `llm-redact doctor` shows the same
+text as a FAIL under `models` before you restart, and `llm-redact models
+verify` checks every configured model the same way.
+
+## "[detection.ner] … model '…' is a local directory that lacks what the loader needs: …" / "… its repository lacks what the loader needs: …"
+
+The model's folder, or (with `allow_download = true`) the files its
+repository offers at the pinned revision, lack something every load reads:
+`config.json` (`gliner_config.json` for GLiNER), the weights (safetensors, or
+`pytorch_model.bin` where allowed; every shard a `*.index.json` names), or
+the tokenizer (`tokenizer.json` or a vocabulary: `vocab.txt`, `vocab.json`
+with `merges.txt`, or a SentencePiece model — plus `tokenizer_config.json` for
+GLiNER). For a folder, copy the missing files in, or write the folder again
+with `llm-redact models pull --to`; for a repository, pick another model or
+revision: llm-redact fetches only the top-level files it names, never other
+formats a repository may hold.
+
+## "[detection.ner] hf model '…': model.safetensors.index.json does not name its weight files"
+
+The weight index of a sharded model is not a JSON object whose `weight_map`
+names plain file names in the same folder (a name with a `/` or `\` is
+refused). Re-fetch the model or fix the folder.
 
 ## "[detection.ner] … model '…' … could not be fetched from the Hugging Face Hub: …"
 
@@ -499,6 +522,18 @@ holds for a folder whose path reads like a model id (`dslim/bert-base-NER`
 under the proxy's working directory) too, even when the revision is the one
 the model catalog pins for that id. A folder written by `llm-redact models pull
 --to` records its model and revision in its `llm-redact-model.json` instead.
+
+## "[detection.ner] … model: …/llm-redact-model.json: …"
+
+A local model folder carries an `llm-redact-model.json` (written by
+`llm-redact models pull --to`, or by a model bundle) that cannot be read as
+the folder's identity: not a UTF-8 JSON object, larger than 64 KiB, a
+`model_id` that is not a Hugging Face model id, or a `revision` that is not a
+full 40-character lowercase commit id (or null). The message names the file
+and the problem, never its content. The folder is refused rather than loaded
+unidentified: write the folder again with `llm-redact models pull --to`, fix
+the file, or delete it (the folder then loads as an unidentified model, to
+which the model catalog does not apply).
 
 ## "[detection.ner] … model '…' is neither a local directory nor a Hugging Face model id"
 
@@ -566,6 +601,36 @@ configuration load at whatever revision of its default branch the cache
 holds. Prefer a catalogued model or a self-contained checkpoint (one that
 ships its tokenizer and an `encoder_config`), or a folder written by
 `llm-redact models pull --to`.
+
+## `llm-redact doctor` under `models`: "allow_download = true: …" / "allow_pickle_weights = true: …" / "… has no pin: the newest cached revision of its default branch loads; …"
+
+The `models` area of `doctor` lists, for the `gliner` and `hf` backends, where
+each model comes from. Its WARN rows are settings worth a second look, not
+errors:
+
+- `allow_download = true`: the proxy's startup may fetch a missing model from
+  huggingface.co (the model id, revision and file names; never request
+  content). Set it back to `false` once the cache holds the models (`llm-redact
+  models pull` fills it).
+- `allow_pickle_weights = true`: an `hf` model without safetensors weights
+  loads `pytorch_model.bin`, a Python pickle; loading a pickle can run code.
+- `… has no pin`: the model is neither pinned in `[detection.ner.revisions]`
+  nor in the model catalog, so whichever revision of its default branch the
+  cache holds loads. Pin the commit you tested: `llm-redact models pull`
+  prints the one it fetches.
+- `… whose revision the model catalog does not pin`: the GLiNER model takes
+  its tokenizer and encoder configuration from a base model the catalog does
+  not pin (the startup warning below says the same).
+
+A FAIL row there is the startup error of the same text (see the entries
+above): the startup would stop on it.
+
+## `llm-redact doctor` under `models`: "…: the local Hugging Face cache was not checked: huggingface_hub is not installed (the … extra installs it)"
+
+doctor looks models up in the local Hugging Face cache through
+`huggingface_hub`, which the `hf` and `gliner` extras install. Install the
+backend's extra (`uv sync --extra hf` / `--extra gliner`); the `ner` area's
+FAIL row says the same.
 
 ## "[detection.ner] gliner model '…': cannot assemble its local folder under … (…)"
 

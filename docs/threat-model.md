@@ -519,6 +519,17 @@ silent:
 - The GHCR container image is **cosign keyless-signed over its digest**
   (verifiable against the GitHub Actions OIDC issuer) and ships a BuildKit
   SBOM attestation — signature says who built it, SBOM says what is in it.
+- **NER models** (opt-in) are third-party weights the proxy runs on every
+  scanned string. They load pinned and local-first (docs/detection.md
+  "Model sources"): a Hub model at a full commit id (`[detection.ner.revisions]`,
+  else the model catalog's pin), only the files the loader needs, never
+  with `trust_remote_code` (a configuration naming `auto_map` is refused),
+  `hf` weights only as safetensors unless `allow_pickle_weights`, and a
+  GLiNER model's base model resolved at a catalog pin into a self-contained
+  folder instead of fetched unpinned at every load. Downloads are off by
+  default and, when allowed, happen at startup only. `llm-redact doctor`'s
+  `models` area names every model, its pin and whether its files are in the
+  local cache, and WARNs on downloads, pickle weights and unpinned models.
 
 ### Behavior under fault
 
@@ -555,6 +566,7 @@ row, is [resilience.md](resilience.md).
 | Risk | Mitigation status |
 |---|---|
 | Novel secret formats the rules miss | User-extensible custom rules; NER extras; fp/recall gates keep the shipped set honest |
+| NER model supply chain: weights or a tokenizer from a model repository that changed or was replaced | Models load at a full commit id (the user's pin or the model catalog's; an unpinned model is a `doctor` WARN), with explicit file names, never running repository code (`auto_map` refused, `trust_remote_code` never set) and, for `hf`, safetensors only unless `allow_pickle_weights` (a `doctor` WARN); GLiNER base models are pinned and assembled locally; downloads are off by default and startup-only. Residual: a pinned commit is trusted as published (no signature exists to check), a model the catalog does not know loads unpinned unless the operator pins it, GLiNER still loads a `pytorch_model.bin` through torch's `weights_only` loader (torch >= 2.6), and a base model the catalog does not pin loads at its newest cached revision (a startup WARNING and a `doctor` WARN name it) |
 | LLM mangles a placeholder beyond fuzzy repair | Pass-through verbatim (never a wrong value); bracket swaps deliberately unrestored |
 | History compaction rewrites the session anchor | Fails safe: fresh session, no cross-session restore — verified by the dogfood compaction probe. The fork never issues a token its summary carries: the summary is the fork's anchor, so every request of it carries the summary's tokens and the token floor numbers new values past them |
 | A request carries tokens its session did not issue (a pasted answer, a foreign proxy's token) | The token floor keeps the request (and a realtime connection) that carries them from issuing those names. Residual, documented in [compaction-relink.md](compaction-relink.md): a number the session had already issued before the foreign token arrived, another request sharing the session that does not carry the token, and provider-side history (a `previous_response_id` chain, a realtime model's own output) no request of the session carries — the last is what llm-redact-pro's sealed sessions cover |

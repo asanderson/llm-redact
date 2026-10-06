@@ -689,6 +689,26 @@ def test_a_sidecar_identified_folder_takes_the_catalog_base_model_pin(
         _gliner(monkeypatch, hub, model=str(folder))
 
 
+def test_a_base_model_folder_named_like_a_catalogued_id_takes_no_catalog_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The default model's base model id names a folder under the working
+    # directory. A folder is whatever it holds, so the catalog's pin of that
+    # base model (a Hub snapshot) does not apply to it, as for a model folder
+    # (T12c): the pin once reached resolve_model, which refused the folder
+    # naming [detection.ner.revisions], a key the configuration never set.
+    monkeypatch.chdir(tmp_path)
+    _folder(tmp_path / DEBERTA, DEBERTA_REPO)
+    hub = FakeHub(repos={GLINER_SMALL: URCHADE_REPO}, default=None)
+    with caplog.at_level("WARNING", logger="llm_redact"):
+        strict, _ = _gliner(monkeypatch, hub)
+    assert [c["repo_id"] for c in hub.calls] == [GLINER_SMALL, GLINER_SMALL]  # never the base
+    config = json.loads((Path(strict.loaded[0][0]) / "gliner_config.json").read_text())
+    assert config["encoder_config"] == DEBERTA_CONFIG
+    # A local base model is no unpinned Hub model: no "pins no revision" warning.
+    assert caplog.records == []
+
+
 def test_a_failed_gliner_load_names_the_exception_type(monkeypatch: pytest.MonkeyPatch) -> None:
     from llm_redact.detection.gliner_ner import build_gliner_detector
     from ner_fakes import FakeGliner, install_gliner

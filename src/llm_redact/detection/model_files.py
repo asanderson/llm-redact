@@ -497,9 +497,14 @@ def _identify(model: str) -> ModelIdentity | None:
 
 def _backbone_revision(model: str, backbone: str) -> str | None:
     """The catalog's pin of ``backbone`` for the GLiNER ``model`` (a Hub id,
-    or a folder its sidecar names), or None."""
+    or a folder its sidecar names), or None — always None when ``backbone``
+    names a local directory, even one named like the catalogued base model:
+    a catalog pin names a Hub snapshot, never a folder's content (as
+    ``NerConfig.revision_for`` for the model itself)."""
     from llm_redact.detection.model_catalog import lookup
 
+    if is_local(backbone):
+        return None
     identity = _identify(model)
     entry = lookup(identity.model_id) if identity is not None else None
     if entry is None or entry.backbone is None:

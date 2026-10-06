@@ -542,6 +542,58 @@ def test_pull_warns_for_a_restricted_model_and_an_unpinned_base_model(
     )
 
 
+@pytest.mark.parametrize("named_like_its_hub_id", [True, False])
+def test_pull_reports_a_base_model_that_is_a_local_folder(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    named_like_its_hub_id: bool,
+) -> None:
+    # A GLiNER model whose base model is a local folder — one named like the
+    # catalogued base model's id under the working directory, or a path:
+    # nothing is pulled for it, no catalog pin applies, and the manifest
+    # records no Hub base model (a folder is none, whatever its name).
+    monkeypatch.chdir(tmp_path)
+    base = DEBERTA if named_like_its_hub_id else str(tmp_path / "base")
+    for name, text in DEBERTA_REPO.items():
+        (tmp_path / base).mkdir(parents=True, exist_ok=True)
+        (tmp_path / base / name).write_text(text)
+    model = GLINER_SMALL if named_like_its_hub_id else "org/gliner-x"
+    repo = {"gliner_config.json": json.dumps({"model_name": base}), "pytorch_model.bin": "w"}
+    hub = install_hub(monkeypatch, FakeHub(repos={model: repo}, heads={model: HEAD}, default=None))
+    config = _config(tmp_path, f'backend = "gliner"\nmodel = "{model}"')
+    out_dir = tmp_path / "carry"
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 0, out
+    assert {c["repo_id"] for c in hub.calls} == {model}
+    revision = GLINER_PIN if named_like_its_hub_id else HEAD
+    assert (
+        f"OK    gliner: {model} at {revision}: 5 files; base model {base} (a local folder)"
+        in out.splitlines()
+    )
+    assert "pulled" not in out
+    gliner = _manifest(out_dir)["models"][0]
+    assert (gliner["backbone"], gliner["backbone_revision"]) == (None, None)
+    code, verified = _run(capsys, "verify", "--dir", str(out_dir))
+    assert code == 0, verified
+
+
+def test_pull_names_a_base_model_commit_it_could_not_tell(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub = FakeHub(repos={"org/gliner-x": URCHADE_REPO, DEBERTA: DEBERTA_REPO}, default=None)
+    install_hub(monkeypatch, hub)
+    config = _config(tmp_path, 'backend = "gliner"\nmodel = "org/gliner-x"')
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 0
+    assert out.splitlines()[-2:] == [
+        f"note: gliner: org/gliner-x: the model catalog pins no revision of its base model"
+        f" {DEBERTA}; pulled its default branch",
+        f"OK    gliner: org/gliner-x at its default branch: 5 files; base model {DEBERTA} at its"
+        " default branch",
+    ]
+
+
 def _manifest(root: Path) -> dict[str, Any]:
     payload: dict[str, Any] = json.loads((root / MANIFEST_NAME).read_text())
     return payload

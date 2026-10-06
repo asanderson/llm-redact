@@ -217,9 +217,12 @@ assembles a self-contained folder under `$XDG_DATA_HOME/llm-redact/models/gliner
 links to the checkpoint's weights and the base model's tokenizer, and a
 `gliner_config.json` that embeds the base model's configuration as
 `encoder_config` and names no absolute path. A base model the catalog does
-not pin loads at its newest cached revision, with a startup warning. A
-configuration naming code to import (`auto_map`) or a model type transformers
-does not know is refused.
+not pin loads at its newest cached revision, with a startup warning. A base
+model that is a local folder (the checkpoint's configuration names a path,
+or a folder under the working directory is named like the base model's id)
+is read from that folder as it is, with no pin and no warning, like a local
+model folder. A configuration naming code to import (`auto_map`) or a model
+type transformers does not know is refused.
 
 **ONNX weights for `gliner`.** `[detection.ner.onnx]` loads a GLiNER model's
 ONNX export through onnxruntime (installed with the `gliner` extra) instead

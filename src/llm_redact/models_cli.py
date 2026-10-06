@@ -490,21 +490,45 @@ def _pull_one(ner: "NerConfig", source: "ModelSource") -> tuple[bool, Pulled | N
                 f"note: {where} has no pin, and the commit pulled could not be told; pin one"
                 f" in [detection.ner.revisions] {source.backend}"
             )
-    if files.backbone is not None and files.backbone_revision is None:
-        commit = snapshot_commit(files.backbone_directory)
-        files = replace(files, backbone_revision=commit)
-        print(
-            f"note: {where}: the model catalog pins no revision of its base model"
-            f" {files.backbone}; pulled {commit or 'its default branch'}"
-        )
-    base = (
-        f"; base model {files.backbone} at {files.backbone_revision}"
-        if files.backbone is not None
-        else ""
-    )
+    files = _unpinned_base(where, files)
     count = len(files.files) + (files.config is not None)
-    print(f"OK    {where} at {revision}: {count} files{base}")
+    print(f"OK    {where} at {revision or _DEFAULT_BRANCH}: {count} files{_base_text(files)}")
     return True, Pulled(source, revision, files, ner.onnx_for(source.backend))
+
+
+# What a revision `models pull` fetched without a pin, and could not name, is.
+_DEFAULT_BRANCH = "its default branch"
+
+
+def _local_base(files: "ModelFiles") -> bool:
+    """Whether ``files``' base model is a local folder: read as it is,
+    nothing to pull and no pin — never a Hub snapshot, whatever its name."""
+    from llm_redact.detection.model_files import is_local
+
+    return files.backbone is not None and is_local(files.backbone)
+
+
+def _unpinned_base(where: str, files: "ModelFiles") -> "ModelFiles":
+    """``files`` with the commit of a Hub base model the catalog does not
+    pin, read from the cache folder it was pulled into, and a note saying
+    so."""
+    if files.backbone is None or files.backbone_revision is not None or _local_base(files):
+        return files
+    commit = snapshot_commit(files.backbone_directory)
+    print(
+        f"note: {where}: the model catalog pins no revision of its base model"
+        f" {files.backbone}; pulled {commit or _DEFAULT_BRANCH}"
+    )
+    return replace(files, backbone_revision=commit)
+
+
+def _base_text(files: "ModelFiles") -> str:
+    """The base model, as the end of a pulled model's OK line."""
+    if files.backbone is None:
+        return ""
+    if _local_base(files):
+        return f"; base model {files.backbone} (a local folder)"
+    return f"; base model {files.backbone} at {files.backbone_revision or _DEFAULT_BRANCH}"
 
 
 def write_portable(root: Path, pulled: list[Pulled]) -> list[tuple[str, str]]:
@@ -564,14 +588,17 @@ def _write_folder(root: Path, name: str, model_id: str, item: Pulled) -> "Manife
         os.rename(temp, final)
     finally:
         shutil.rmtree(temp, ignore_errors=True)
+    # The manifest names a Hub base model only: a local one is no Hub id,
+    # whatever its name (its files are in the folder, each with its SHA-256).
+    hub_base = not _local_base(item.files)
     return ManifestModel(
         backend=item.source.backend,
         model_id=model_id,
         revision=item.revision,
         folder=name,
         files=tuple((r["path"], r["size"], r["sha256"]) for r in records),
-        backbone=item.files.backbone,
-        backbone_revision=item.files.backbone_revision,
+        backbone=item.files.backbone if hub_base else None,
+        backbone_revision=item.files.backbone_revision if hub_base else None,
         onnx=item.onnx,
     )
 

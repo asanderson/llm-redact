@@ -286,9 +286,11 @@ and tags `vX.Y.Z`.
   never start offline. llm-redact now resolves that base model's configuration and tokenizer at
   the revision its model catalog pins and assembles a self-contained folder under
   `$XDG_DATA_HOME/llm-redact/models/gliner/`, which GLiNER loads with `local_files_only`. A
-  GLiNER or base-model configuration naming code to import (`auto_map`) or a model type
-  transformers does not know is refused. A GLiNER load failure now names the exception type
-  instead of suggesting network access.
+  base model that is a local folder (a path, or a folder named like its id under the working
+  directory) is read as it is and takes no pin, like a model folder. A GLiNER or base-model
+  configuration naming code to import (`auto_map`) or a model type transformers does not know
+  is refused. A GLiNER load failure now names the exception type instead of suggesting network
+  access.
 - The `gliner`, `stanza` and `hf` extras require `torch>=2.6`, the release that fixed
   CVE-2025-32434 (a bypass of `torch.load(weights_only=True)`, the loader GLiNER uses for
   `pytorch_model.bin` checkpoints); gliner and stanza themselves accept older torch.

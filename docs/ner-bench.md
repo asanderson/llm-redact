@@ -222,8 +222,8 @@ Two GitHub Actions workflows run real models; the regular test jobs never
 do (the suite fakes every model, and the `real_model` tests are deselected
 by default).
 
-**`ner-models`** (a job of `.github/workflows/ci.yml`, on every push and
-pull request):
+**`ner-models`** (a job of `.github/workflows/ci.yml`, on pull requests,
+pushes to `main` and the weekly CI schedule):
 
 1. installs the `hf`, `gliner`, `gliner2` and `bench-data` extras with
    `scripts/ner_ci_env.sh`: every package at the version `uv.lock` pins,

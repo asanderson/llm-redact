@@ -163,6 +163,17 @@ def test_the_ner_models_job() -> None:
     assert "uv sync" not in runs and "uv pip install" not in runs
 
 
+def test_the_docs_name_when_the_ner_models_job_runs() -> None:
+    triggers = _workflow("ci.yml")[True]  # YAML 1.1 reads the key "on" as true
+    assert triggers["push"] == {"branches": ["main"]}
+    assert set(triggers) == {"push", "pull_request", "schedule"}
+    docs = " ".join((ROOT / "docs" / "ner-bench.md").read_text().split())
+    assert (
+        "(a job of `.github/workflows/ci.yml`, on pull requests, pushes to `main` and the"
+        " weekly CI schedule)" in docs
+    )
+
+
 def test_the_weekly_eval_reports_both_datasets() -> None:
     workflow = _workflow("ner-eval.yml")
     triggers = workflow[True]  # YAML 1.1 reads the key "on" as true

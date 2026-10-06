@@ -120,9 +120,10 @@ def test_the_ner_models_job() -> None:
         "--latency --many-small-strings 1000 --check",
     ):
         assert mode in runs
-    # CPU torch at the locked version, never the CUDA wheel.
-    assert "--index-url https://download.pytorch.org/whl/cpu" in runs
-    assert "uv sync" not in runs
+    # The hash-checked environment (below), never the CUDA wheel `uv sync`
+    # would install.
+    assert "scripts/ner_ci_env.sh" in runs
+    assert "uv sync" not in runs and "uv pip install" not in runs
 
 
 def test_the_weekly_eval_reports_both_datasets() -> None:
@@ -134,6 +135,58 @@ def test_the_weekly_eval_reports_both_datasets() -> None:
     assert "for dataset in openpii nemotron" in runs
     assert "--limit 2000" in runs
     assert "--check" not in runs  # report only until baselines are recorded
+
+
+def test_the_weekly_eval_installs_the_same_environment() -> None:
+    steps = _workflow("ner-eval.yml")["jobs"]["ner-eval"]["steps"]
+    runs = "\n".join(step.get("run", "") for step in steps)
+    assert "scripts/ner_ci_env.sh" in runs
+    assert "uv sync" not in runs and "uv pip install" not in runs
+
+
+# --- the environment script: every wheel hash-checked ---------------------------
+
+ENV_SCRIPT = ROOT / "scripts" / "ner_ci_env.sh"
+TORCH_PIN = ROOT / "scripts" / "ner_ci_torch_cpu.txt"
+
+
+def _commands(text: str) -> list[str]:
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def test_the_cpu_torch_wheel_is_the_locked_version_pinned_by_hash() -> None:
+    lock = tomllib.loads((ROOT / "uv.lock").read_text())
+    locked = [p["version"] for p in lock["package"] if p["name"] == "torch"]
+    (pin,) = _commands(TORCH_PIN.read_text())
+    match = re.fullmatch(r"torch==([0-9.]+)\+cpu --hash=sha256:[0-9a-f]{64}", pin)
+    assert match is not None, pin
+    assert locked == [match.group(1)]
+
+
+def test_the_environment_script_checks_every_hash() -> None:
+    commands = _commands(ENV_SCRIPT.read_text())
+    installs = [c for c in commands if c.startswith("uv pip install")]
+    exports = [c for c in commands if c.startswith("uv export")]
+    # The export that is installed keeps the lock's hashes; packages are
+    # left out by name, never by filtering its lines.
+    (installed_export,) = [c for c in exports if "--no-hashes" not in c]
+    assert '"${omit[@]}"' in installed_export and "--frozen" in installed_export
+    assert all("grep" not in c for c in commands)
+    assert "--no-emit-package" in ENV_SCRIPT.read_text()
+    # Both wheel installs require a hash for every requirement and resolve
+    # nothing beyond the files (the export is the whole locked closure).
+    requirements, torch, project = installs
+    assert '--require-hashes --no-deps -r "$requirements"' in requirements
+    assert '--require-hashes --no-deps -r "$pin"' in torch
+    assert "--index-url https://download.pytorch.org/whl/cpu" in torch
+    assert project.endswith("--no-deps -e .")
+    assert commands[-1].startswith("uv pip check")
+    # The venv is the platform the pinned wheel is built for.
+    assert any(c.startswith("uv venv --python 3.13") for c in commands)
 
 
 @pytest.mark.parametrize("name", ["ci.yml", "ner-eval.yml"])

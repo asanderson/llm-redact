@@ -38,17 +38,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
           cache-suffix: ner-models
-      # Same environment as ci.yml's ner-models job: the locked extras with
-      # CPU-only torch at its locked version.
+      # Same environment as ci.yml's ner-models job: the locked extras, hash
+      # checked, with the hash-pinned CPU torch wheel of the locked version.
       - name: install the hf, gliner, gliner2 and bench-data extras (CPU torch)
-        run: |
-          uv venv
-          export_args="--frozen --no-hashes --no-annotate --no-header --no-emit-project --extra hf --extra gliner --extra gliner2 --extra bench-data"
-          torch=$(uv export $export_args | grep -E '^torch==' | cut -d' ' -f1)
-          uv pip install "$torch" --index-url https://download.pytorch.org/whl/cpu
-          uv export $export_args | grep -vE '^(torch|triton)[=[ ;]|^(nvidia|cuda)-' > "$RUNNER_TEMP/requirements.txt"
-          uv pip install -r "$RUNNER_TEMP/requirements.txt"
-          uv pip install --no-deps -e .
+        run: scripts/ner_ci_env.sh
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/huggingface/hub

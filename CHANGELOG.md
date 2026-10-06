@@ -128,7 +128,9 @@ and tags `vX.Y.Z`.
   and gates every `bench/configs/*.toml` with the NER bench: synthetic-corpus floors and
   ceilings, false-positive ceilings on the negatives corpus, and a latency report. A weekly
   `ner-eval` workflow scores the same configurations on 2,000-row slices of OpenPII 1.5M and
-  Nemotron-PII, report only. Both install the locked extras with CPU-only torch. Baselines for
+  Nemotron-PII, report only. Both install the locked extras with `scripts/ner_ci_env.sh`, every
+  wheel checked against its sha256 (the lock's, and for the CPU-only torch wheel its own pin in
+  `scripts/ner_ci_torch_cpu.txt`). Baselines for
   `dslim/bert-base-NER` and `urchade/gliner_small-v2.1` are recorded in
   `bench/ner_thresholds.toml` and `bench/ner_ceilings.toml`, with the date, revisions and
   measured values.

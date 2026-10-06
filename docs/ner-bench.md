@@ -216,10 +216,13 @@ by default).
 **`ner-models`** (a job of `.github/workflows/ci.yml`, on every push and
 pull request):
 
-1. installs the `hf`, `gliner`, `gliner2` and `bench-data` extras exactly
-   as `uv.lock` pins them, except that torch comes from the PyTorch CPU
-   index at its locked version (the locked PyPI wheel brings CUDA libraries
-   no runner uses);
+1. installs the `hf`, `gliner`, `gliner2` and `bench-data` extras with
+   `scripts/ner_ci_env.sh`: every package at the version `uv.lock` pins,
+   each wheel checked against the lock's sha256, except that torch is the
+   PyTorch CPU wheel of the locked version, checked against its own sha256
+   in `scripts/ner_ci_torch_cpu.txt` (the locked PyPI wheel brings CUDA
+   libraries no runner uses, so it and torch's CUDA-only packages are left
+   out of the export by name);
 2. restores the Hugging Face cache, keyed on the model catalog and the
    configurations below, and runs `llm-redact models pull --config` on each
    of them, so every model is fetched at its catalog pin (a GLiNER
@@ -263,16 +266,15 @@ revisions and with which measured values they were taken; with the default
 `USERNAME` and `ACCOUNT_NUMBER` values are not requested, so their
 characters count toward the leak rate.
 
-To reproduce the job locally, install as it does (the locked versions,
-torch from the CPU index, none of torch's CUDA packages) into a fresh
-virtual environment; the models go to the Hugging Face cache:
+To reproduce the job locally (CPython 3.13 on Linux x86_64, the platform
+the pinned torch wheel is built for), install as it does; the script
+replaces `.venv`, so run it in a checkout you do not develop in, and the
+models go to the Hugging Face cache. When `uv.lock` moves torch to another
+version, the script refuses to run until `scripts/ner_ci_torch_cpu.txt`
+names that version and its CPU wheel's sha256:
 
 ```bash
-uv venv
-args="--frozen --no-hashes --no-annotate --no-header --no-emit-project --extra hf --extra gliner --extra gliner2 --extra bench-data"
-uv pip install "$(uv export $args | grep -E '^torch==' | cut -d' ' -f1)" --index-url https://download.pytorch.org/whl/cpu
-uv export $args | grep -vE '^(torch|triton)[=[ ;]|^(nvidia|cuda)-' > /tmp/ner-requirements.txt
-uv pip install -r /tmp/ner-requirements.txt && uv pip install --no-deps -e .
+scripts/ner_ci_env.sh
 uv run --no-sync llm-redact models pull --config bench/configs/hf-default.toml
 uv run --no-sync pytest -m real_model
 uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/hf-default.toml --check

@@ -325,6 +325,20 @@ def test_a_broken_local_folder_fails(
     ]
 
 
+def test_a_gliner2_folder_with_a_broken_sidecar_fails_as_its_startup_would(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The files row is the startup's own refusal, as for gliner and hf.
+    install_hub(monkeypatch)
+    folder = _folder(tmp_path / "model", {**DEFAULT_REPO, SIDECAR_NAME: "[]"})
+    code, rows = _rows(tmp_path, capsys, f'backend = "gliner2"\nmodel = {json.dumps(str(folder))}')
+    assert code == 1
+    assert _levels(rows, "FAIL") == [
+        f"gliner2: {folder / SIDECAR_NAME}: not a JSON object",
+        f"[detection.ner] gliner2 model: {folder / SIDECAR_NAME}: not a JSON object",
+    ]
+
+
 def test_without_huggingface_hub_the_cache_is_not_checked(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

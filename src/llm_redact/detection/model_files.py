@@ -496,15 +496,16 @@ def _require_known_type(
         )
 
 
-def _identify(model: str) -> ModelIdentity | None:
-    """Which model the GLiNER ``model`` value is (model_catalog.identify);
-    a folder whose sidecar file cannot be read is a configuration error."""
+def _identify(model: str, *, what: str = "gliner model") -> ModelIdentity | None:
+    """Which model the GLiNER or GLiNER2 ``model`` value is
+    (model_catalog.identify); a folder whose sidecar file cannot be read is
+    a configuration error (``what`` names the model in it)."""
     from llm_redact.detection.model_catalog import SidecarError, identify
 
     try:
         return identify(model)
     except SidecarError as exc:
-        raise _config_error(f"[detection.ner] gliner model: {exc}") from exc
+        raise _config_error(f"[detection.ner] {what}: {exc}") from exc
 
 
 def _backbone_revision(model: str, backbone: str) -> str | None:
@@ -733,6 +734,10 @@ def gliner2_files(
                 allow_download=allow_download,
                 allow_patterns=patterns,
             )
+    if is_local(model):
+        # A folder whose sidecar cannot be read is refused, as gliner's and
+        # hf's are (doctor and `llm-redact models` report it the same way).
+        _identify(model, what=what)
     configs = check_configs(path, GLINER2_CONFIGS, what=what, model=model)
     for name in GLINER2_CONFIGS:
         if name not in configs:

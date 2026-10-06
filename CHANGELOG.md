@@ -21,7 +21,8 @@ and tags `vX.Y.Z`.
   revision (`[detection.ner.revisions] gliner2`), downloaded only at startup with
   `allow_download = true`, from a self-contained checkpoint whose configuration names no code
   and whose encoder is a model type transformers knows; a cached snapshot without its weights
-  or its tokenizer's vocabulary (an interrupted download) counts as not cached. `llm-redact
+  or its tokenizer's vocabulary (an interrupted download) counts as not cached, and a local
+  folder whose `llm-redact-model.json` cannot be read is refused as for `gliner` and `hf`. `llm-redact
   models list|verify|pull` (`pull --to` writes a portable `gliner2-…` folder, its
   `encoder_config/` subfolder included), doctor's `models` area and `/status` cover it like the
   `gliner` and `hf` backends. The default model

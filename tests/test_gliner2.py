@@ -562,6 +562,36 @@ def test_a_local_folder_loads_as_it_is(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert hub.calls == []
 
 
+@pytest.mark.parametrize("sidecar", ["{not json", "[]", json.dumps({"model_id": "no id"})])
+def test_a_local_folder_with_an_unreadable_sidecar_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sidecar: str
+) -> None:
+    # As gliner and hf refuse it: a folder is identified only through a
+    # sidecar that can be read, and doctor and `llm-redact models` report
+    # the same folder as broken, so the build must not load it unidentified.
+    from llm_redact.detection.model_catalog import SIDECAR_NAME
+    from llm_redact.detection.model_sources import model_source
+
+    hub = FakeHub()
+    model = FakeGliner2([])
+    install_gliner2(monkeypatch, model, hub)
+    for name, content in DEFAULT_REPO.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(content)
+    (tmp_path / SIDECAR_NAME).write_text(sidecar)
+    ner = NerConfig(enabled=True, backend="gliner2", model=str(tmp_path))
+    problem = model_source(ner, "gliner2").sidecar_problem
+    assert problem is not None and problem.startswith(str(tmp_path / SIDECAR_NAME))
+    expected = f"[detection.ner] gliner2 model: {problem}"
+    with pytest.raises(ConfigError) as refused:
+        gliner2_model_dir(str(tmp_path), revision=None, allow_download=False)
+    assert str(refused.value) == expected
+    with pytest.raises(ConfigError) as refused:
+        build_gliner2_detector(ner)
+    assert str(refused.value) == expected
+    assert model.loaded_with == [] and hub.calls == []
+
+
 # --- configuration ------------------------------------------------------------------
 
 

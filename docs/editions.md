@@ -85,8 +85,9 @@ The paid subsystems live in that **separately-installed `llm-redact-pro`
 package**, not in the AGPL wheel — distribution control is the primary
 boundary, the signed key the secondary tier gate. The
 [architecture diagram](diagrams/architecture.png) marks the Pro parts of
-the data flow (the browser dashboard and the audit log with its sinks) in
-dashed boxes. In practice:
+the data flow (the browser dashboard, the access gate and the audit log with
+its sinks) in dashed boxes; everything else in it — the proxy, the vault, the
+local NER model files and their opt-in startup download — is the FOSS core. In practice:
 
 - A paid config without that package **fails closed** with a
   `ConfigError` naming the feature and the package — never a silent

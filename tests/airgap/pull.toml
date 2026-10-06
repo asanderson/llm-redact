@@ -1,0 +1,9 @@
+# The models the CI `airgap` job pulls on the connected side
+# (`llm-redact models pull --to DIR --as /models --config tests/airgap/pull.toml`):
+# the default hf model and the default GLiNER model (with its base model's
+# tokenizer and configuration), each at the model catalog's pin.
+# tests/airgap/config.toml loads the folders it writes; test_airgap_guard.py
+# keeps the two in step. docs/air-gapped.md walks through the same steps.
+[detection.ner]
+enabled = true
+backends = ["hf", "gliner"]

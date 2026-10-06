@@ -236,6 +236,103 @@ jobs:
       # only runs when the extra and the model are both present — i.e. here.
       - run: uv run pytest tests/test_ner.py tests/test_presidio.py -v
 
+  airgap:
+    # AD11: an air-gapped enclave starts the proxy with NER and no network.
+    # The connected side pulls the models (the one step with network), then
+    # tests/airgap/run_offline.sh runs inside a network namespace with NO
+    # route, the pulled folders mounted read-only at /models and an empty
+    # Hugging Face cache: `models verify --dir`, `serve --check` for the
+    # default hf + GLiNER models (base model included) and Knowledgator's
+    # gliner-pii-edge, a Presidio email check (tldextract's suffix list), and
+    # an empty folder refused with the `models pull` hint. Every command runs
+    # under tests/airgap/no_network.py, which fails on any attempt made
+    # through Python's socket module to resolve a host or connect an IP
+    # socket, so a Python library that falls back quietly after a failed
+    # connection still fails the job (native code connecting by itself is
+    # stopped by the namespace with no route, not seen by the wrapper). docs/air-gapped.md
+    # walks an operator through the same steps.
+    name: air-gapped start (NER models, no network)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: airgap
+      # The locked hf, gliner and presidio extras with a CPU-only torch
+      # (scripts/cpu_torch.py: torch at its locked version from the PyTorch
+      # CPU index, checked against the CPU wheels' recorded SHA-256,
+      # everything else hash-checked as uv.lock pins it).
+      - name: install the NER extras (CPU torch)
+        run: |
+          set -euo pipefail
+          uv venv
+          uv export --frozen --no-dev --no-emit-project --extra hf --extra gliner --extra presidio \
+            | python3 scripts/cpu_torch.py requirements "$RUNNER_TEMP/requirements.txt" >"$RUNNER_TEMP/torch.txt"
+          uv pip install --no-deps --require-hashes --index-url https://download.pytorch.org/whl/cpu -r "$RUNNER_TEMP/torch.txt"
+          uv pip install --no-deps --require-hashes -r "$RUNNER_TEMP/requirements.txt"
+          uv pip install --no-deps -e .
+          uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+          .venv/bin/python scripts/cpu_torch.py check
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/huggingface/hub
+          key: airgap-hub-${{ hashFiles('src/llm_redact/detection/model_catalog.py', 'tests/airgap/pull*.toml') }}
+          restore-keys: airgap-hub-
+      - name: pull the models (connected side; prints the config lines)
+        run: |
+          set -euo pipefail
+          .venv/bin/llm-redact models pull --to "$RUNNER_TEMP/models" --as /models \
+            --config tests/airgap/pull.toml | tee "$RUNNER_TEMP/pull.txt"
+          .venv/bin/llm-redact models pull --to "$RUNNER_TEMP/models-edge" --as /models \
+            --config tests/airgap/pull-edge.toml | tee "$RUNNER_TEMP/pull-edge.txt"
+          # The air-gapped configs load exactly the lines pull printed.
+          for pair in pull.txt:config.toml pull-edge.txt:edge.toml; do
+            printed="$RUNNER_TEMP/${pair%%:*}"
+            config="tests/airgap/${pair#*:}"
+            grep -E '^(hf|gliner) = ' "$config" | while IFS= read -r line; do
+              grep -qxF "$line" "$printed" || { echo "::error::$config: '$line' is not what models pull printed"; exit 1; }
+            done
+          done
+      - name: verify, serve --check and preview inside a network namespace with no route
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/empty" "$RUNNER_TEMP/empty-hf" "$RUNNER_TEMP/home"
+          sudo unshare --net --mount -- env -i PATH=/usr/bin:/bin \
+            HOME="$RUNNER_TEMP/home" XDG_DATA_HOME="$RUNNER_TEMP/home/data" \
+            HF_HOME="$RUNNER_TEMP/empty-hf" \
+            tests/airgap/run_offline.sh "$PWD/.venv/bin/python" \
+            "$RUNNER_TEMP/models" "$RUNNER_TEMP/models-edge" "$RUNNER_TEMP/empty"
+      # The offline wheelhouse recipe (docs/deployment.md, "Offline installs"):
+      # downloaded here, installed by pip with --no-index inside a namespace
+      # with no route.
+      - name: build the offline wheelhouse (connected side)
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/wheelhouse"
+          mkdir -p "$wheelhouse"
+          python="$(uv python find 3.13)"
+          uv export --frozen --no-dev --no-emit-project --extra hf --extra gliner \
+            | python3 scripts/cpu_torch.py requirements "$wheelhouse/requirements.txt" >"$wheelhouse/torch.txt"
+          "$python" -m venv "$RUNNER_TEMP/pip-download"
+          pip="$RUNNER_TEMP/pip-download/bin/pip"
+          "$pip" download --require-hashes --no-deps --only-binary=:all: \
+            -r "$wheelhouse/requirements.txt" -d "$wheelhouse"
+          "$pip" download --require-hashes --no-deps --only-binary=:all: \
+            --index-url https://download.pytorch.org/whl/cpu -r "$wheelhouse/torch.txt" -d "$wheelhouse"
+          uv build --wheel --out-dir "$wheelhouse"
+          du -sh "$wheelhouse"
+          echo "PYTHON_FOR_WHEELHOUSE=$python" >>"$GITHUB_ENV"
+      - name: install the wheelhouse inside a network namespace with no route
+        run: |
+          sudo unshare --net -- env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP/home" \
+            tests/airgap/install_wheelhouse.sh "$PYTHON_FOR_WHEELHOUSE" \
+            "$RUNNER_TEMP/wheelhouse" "$RUNNER_TEMP/wheelhouse-venv"
+
   rdbms:
     # The RDBMS vault's SQL on REAL engines. The `test` job proves the
     # portable dialect over stdlib sqlite3-as-dbapi and fake drivers; this
@@ -488,6 +585,66 @@ jobs:
       - run: docker build --target runtime -t llm-redact:ci .
       - run: docker build --target fake-upstream -t llm-redact-fake:ci .
       - run: ./scripts/container_smoke.sh docker llm-redact:ci llm-redact-fake:ci
+
+  container-ner:
+    # The -ner image (stock image + the hf and gliner extras on a CPU-only
+    # torch) as release.yml builds it, linux/amd64 only here: the closure is
+    # CPU-only, doctor sees both NER backends, and — with no network, a
+    # read-only root filesystem and models the image itself pulled with
+    # `models pull --to`, mounted read-only at /models — `serve --check`
+    # loads them under tests/airgap/no_network.py. NER_EXTRAS must equal
+    # release.yml's (tests/test_deploy_assets.py).
+    name: container (-ner image, no network)
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      NER_EXTRAS: --extra hf --extra gliner
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build the -ner image
+        run: |
+          docker build --target runtime --build-arg "NER_EXTRAS=$NER_EXTRAS" -t llm-redact:ner-ci .
+          docker image ls llm-redact:ner-ci --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+      - name: the closure is CPU-only (inside the image, no network)
+        run: |
+          docker run --rm --network none --entrypoint python \
+            -v "$PWD/scripts/cpu_torch.py:/smoke/cpu_torch.py:ro" \
+            llm-redact:ner-ci /smoke/cpu_torch.py check
+      - name: doctor sees the hf and gliner backends (inside the image, no network)
+        run: |
+          set -euo pipefail
+          # doctor exits non-zero on its FAIL rows (no models are mounted
+          # yet); the NER rows are what this step is about.
+          docker run --rm --network none -v "$PWD/tests/airgap:/cfg:ro" llm-redact:ner-ci \
+            doctor --config /cfg/config.toml >doctor.txt 2>&1 || true
+          grep -E '^(PASS|WARN|FAIL) +ner:' doctor.txt
+          grep -q '^PASS  ner: hf backend importable' doctor.txt
+          grep -q '^PASS  ner: gliner backend importable' doctor.txt
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/hf
+          key: container-ner-hub-${{ hashFiles('src/llm_redact/detection/model_catalog.py', 'tests/airgap/pull.toml') }}
+          restore-keys: container-ner-hub-
+      - name: pull the models with the image (connected side)
+        run: |
+          mkdir -p "$RUNNER_TEMP/hf" "$RUNNER_TEMP/models"
+          chmod 0777 "$RUNNER_TEMP/hf" "$RUNNER_TEMP/models"
+          docker run --rm -e HF_HOME=/hf -v "$RUNNER_TEMP/hf:/hf" -v "$RUNNER_TEMP/models:/out" \
+            -v "$PWD/tests/airgap:/cfg:ro" llm-redact:ner-ci \
+            models pull --to /out --as /models --config /cfg/pull.toml
+      - name: verify and serve --check with no network and a read-only root
+        run: |
+          set -euo pipefail
+          run() {
+            docker run --rm --network none --read-only --tmpfs /tmp \
+              --mount type=volume,dst=/data -v "$RUNNER_TEMP/models:/models:ro" \
+              -v "$PWD/tests/airgap:/cfg:ro" --entrypoint python llm-redact:ner-ci \
+              /cfg/no_network.py "$@"
+          }
+          run models verify --dir /models
+          run serve --check --config /cfg/config.toml
 
   container-podman:
     name: container (podman, rootless)

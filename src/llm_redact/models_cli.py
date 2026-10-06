@@ -559,8 +559,12 @@ def _pull_local(ner: "NerConfig", source: "ModelSource", where: str) -> bool:
     Hugging Face cache, and the startup and ``verify`` name ``models pull``
     while that base model is missing: fetch it (and only it). A folder
     that cannot load fails as the startup would. Returns ok."""
+    from llm_redact.detection.model_files import is_local
     from llm_redact.detection.model_sources import local_files
 
+    if not is_local(source.model):  # written as a path, but nothing is there
+        print(f"FAIL  {where} is not a directory: a local model folder that is not there")
+        return False
     if source.backend == "gliner":
         try:
             files = local_files(ner, source, allow_download=True)

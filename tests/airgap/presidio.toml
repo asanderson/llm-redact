@@ -1,0 +1,9 @@
+# The CI `airgap` job's Presidio check: Presidio's email recognizer asks
+# tldextract whether a domain has a public suffix, and tldextract fetches
+# the Public Suffix List from the internet on first use unless llm-redact
+# replaced its extractor with the offline one (presidio_ner.offline_suffix_list).
+# `llm-redact preview` runs the detection on an email address without network.
+[detection.ner]
+enabled = true
+backend = "presidio"
+entities = ["PERSON", "EMAIL"]

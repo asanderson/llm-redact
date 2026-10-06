@@ -13,12 +13,39 @@ WORKDIR /app
 # (adds vault-postgres/vault-mysql/crypto for the Helm standalone shared-vault
 # path — a server DSN without those extras refuses startup).
 ARG EXTRAS="--extra perf --extra realtime --extra extract"
+# The -ner variant (release.yml, tag suffix -ner; docs/deployment.md) adds
+# the NER extras (NER_EXTRAS="--extra hf --extra gliner") with a CPU-only
+# torch: PyPI's Linux torch wheel, on x86_64 and aarch64 alike, pulls the
+# CUDA libraries and triton (gigabytes no CPU host runs). scripts/cpu_torch.py
+# takes torch at its LOCKED version from TORCH_INDEX_URL (the PyTorch CPU
+# index), checked against the CPU wheels' SHA-256 the script records, and
+# every other locked package hash-checked from uv.lock, without
+# torch's GPU dependencies, then fails the build if one got in anyway. Empty
+# NER_EXTRAS (the default) is the stock image, built from uv.lock as before.
+ARG NER_EXTRAS=""
+ARG TORCH_INDEX_URL="https://download.pytorch.org/whl/cpu"
 COPY pyproject.toml uv.lock README.md ./
+COPY scripts/cpu_torch.py /tmp/cpu_torch.py
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project ${EXTRAS}
+    if [ -z "${NER_EXTRAS}" ]; then \
+        uv sync --frozen --no-dev --no-install-project ${EXTRAS}; \
+    else \
+        uv venv /app/.venv && \
+        uv export --frozen --no-dev --no-emit-project ${EXTRAS} ${NER_EXTRAS} \
+            | python /tmp/cpu_torch.py requirements /tmp/requirements.txt > /tmp/torch.txt && \
+        uv pip install --python /app/.venv/bin/python --no-deps --require-hashes \
+            --index-url "${TORCH_INDEX_URL}" -r /tmp/torch.txt && \
+        uv pip install --python /app/.venv/bin/python --no-deps --require-hashes \
+            -r /tmp/requirements.txt; \
+    fi
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable ${EXTRAS}
+    if [ -z "${NER_EXTRAS}" ]; then \
+        uv sync --frozen --no-dev --no-editable ${EXTRAS}; \
+    else \
+        uv pip install --python /app/.venv/bin/python --no-deps . && \
+        /app/.venv/bin/python /tmp/cpu_torch.py check; \
+    fi
 
 FROM python:3.13-slim-bookworm AS runtime
 LABEL org.opencontainers.image.title="llm-redact" \
@@ -34,10 +61,16 @@ COPY --chown=10001:10001 scripts/fake_upstream.py /app/scripts/fake_upstream.py
 # The native (non-container) default stays 127.0.0.1. INSECURE_BIND is the
 # documented hatch for exactly this confined-wider-bind case: outside a
 # container, `serve` refuses any non-loopback bind without mutual TLS.
+# HF_HOME: the Hugging Face cache the -ner image's hf and gliner backends
+# read models from (and `llm-redact models pull` writes) lives on the /data
+# volume: the default (~/.cache/huggingface) is on the root filesystem, which
+# the Helm chart makes read-only. Models pulled with `models pull --to` and
+# mounted at /models need no cache at all (docs/air-gapped.md).
 ENV PATH=/app/.venv/bin:$PATH \
     LLM_REDACT_HOST=0.0.0.0 \
     LLM_REDACT_INSECURE_BIND=1 \
     XDG_DATA_HOME=/data \
+    HF_HOME=/data/huggingface \
     PYTHONUNBUFFERED=1
 USER 10001:10001
 EXPOSE 8787

@@ -223,6 +223,56 @@ and tags `vX.Y.Z`.
   to `DIR` unless every model was fetched, and nothing in it is replaced until every new
   folder is written beside the old ones. Together with `models verify --dir` this carries
   models into an air-gapped network.
+- Docs: a `model-supply-chain` diagram (docs/detection.md "Model sources", docs/threat-model.md)
+  shows where NER model weights come from — the model catalog's pins, `llm-redact models pull`
+  or an opt-in startup download, the local cache, the offline checks and the load — and, beside
+  it, the air-gap path of portable folders with a SHA-256 manifest verified inside the enclave.
+  The `architecture` diagram shows the local NER model files and the opt-in, startup-only Hugging
+  Face Hub download. docs/deployment.md gains "Provisioning NER models" (`models pull`, folders for
+  read-only deployments, `allow_download`, the systemd unit's `ProtectHome=read-only`, the
+  container's read-only root filesystem), and docs/troubleshooting.md the missing NER extra and
+  spaCy/Stanza/Presidio model messages.
+
+- CI proves an air-gapped start (AD11): the `airgap` job pulls the default `hf` and GLiNER
+  models (with the GLiNER base model) and Knowledgator's `gliner-pii-edge-v1.0` with `llm-redact
+  models pull --to`, then — inside a network namespace with no route, the folders mounted
+  read-only at `/models` and an empty Hugging Face cache — runs `models verify --dir`, `serve
+  --check` and a Presidio email check, each under a wrapper that fails on any attempt made
+  through Python's `socket` module to resolve a host or open a connection (native code that
+  connects by itself is stopped by the namespace, not seen by the wrapper); an empty folder must
+  fail with the `models pull` hint. A unit test
+  (`tests/test_airgap_guard.py`) builds every NER backend under a socket guard.
+  `scripts/cpu_torch.py` installs the locked NER extras with a CPU-only torch (torch at its locked
+  version from the PyTorch CPU index, checked against the CPU wheels' SHA-256 the script records
+  for that version, everything else hash-checked from uv.lock, without the CUDA and triton
+  packages).
+
+- A Free `-ner` container image (`<version>-ner`, `latest-ner`): the stock image plus the `hf`
+  and `gliner` NER extras with a CPU-only torch on amd64 and arm64 (`Dockerfile`
+  `NER_EXTRAS`; torch at its locked version from the PyTorch CPU index, hash-checked against the
+  CPU wheels' recorded SHA-256, every other package hash-checked from uv.lock, and the build
+  fails if a CUDA or triton package got in), built,
+  attested and cosign-signed like the stock image, with its closure as
+  `llm-redact-ner-image.cdx.json` on the Release. The image's Hugging Face cache (`HF_HOME`) is
+  `/data/huggingface`, on the data volume. The CI `container-ner` job builds it and, with no
+  network and a read-only root filesystem, checks the closure, doctor's NER rows and `serve
+  --check` with models the image pulled with `models pull --to`. docs/deployment.md documents
+  carrying the image (`docker save` / `docker load`) and an offline wheelhouse install
+  (hash-checked `pip download`, `pip install --no-index`), which the CI `airgap` job runs inside a
+  network namespace with no route.
+
+- The Helm chart takes NER models from a volume: `models.volume` (any volume source, such as a
+  PersistentVolumeClaim holding `llm-redact models pull --to` folders) is mounted read-only at
+  `/models` and sets `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`; `image.variant: ner` selects
+  the `-ner` image tag. Both default off; an unknown variant or a `models.volume` that is not a
+  volume source fails the render, and NOTES warns about a models volume on the stock image. A
+  `helm upgrade --reuse-values` from a release made before these keys renders with both off. A new
+  guide, docs/air-gapped.md, walks through running with NER models in an enclave with no internet
+  route: what to carry in, offline verification (`models verify --dir`, the manifest's checksum
+  carried separately, pulled as your own user into a folder only you can write), Docker, Helm
+  and systemd settings (an egress limit through the host firewall or a system unit you write:
+  `IPAddressDeny=` has no effect in the user unit `service install` writes), and the provider
+  as the only egress.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
@@ -277,6 +327,16 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The `presidio` NER backend no longer reaches the network: Presidio's email check asks
+  tldextract about each address's domain, and tldextract fetched the Public Suffix List from
+  publicsuffix.org (then GitHub) on its first use — on a request — and cached it under
+  `~/.cache`. It now reads the snapshot the tldextract package ships and writes no cache; a
+  tldextract that cannot be set up that way stops the startup.
+- A `[detection.ner.models]` value written as a path (absolute, `./…`, `~/…`, or with more than
+  one `/`) is always a model folder: when nothing is there (an empty or unmounted volume) the
+  startup names `llm-redact models pull --to` instead of calling it neither a folder nor a model
+  id, `doctor` no longer reads it as an unpinned Hub model, and `models pull` fails instead of
+  skipping it.
 - The `hf` NER backend could report part of a word as an entity and leave the rest of it
   in the request: `dslim/bert-base-NER` reported "Angela Merk" in "Yesterday Angela Merkel
   met the press.", so "el" went upstream unredacted (also "Ngoz…", "Xu Wen…"). A model whose

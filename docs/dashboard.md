@@ -16,7 +16,7 @@ headers.
   part of the separately-installed **llm-redact-pro** package (Pro
   license tier; see [editions.md](editions.md) and the llm-redact-pro
   dashboard guide; the [architecture diagram](diagrams/architecture.png)
-  draws it in a dashed Pro box). Without it, those three paths answer a
+  draws it, beside the access gate, in a dashed Pro box). Without it, those three paths answer a
   local 404 that names the package (or, with the package installed but no Pro
   key, says a key is needed) — still answered before routing, never
   forwarded. Everything the page reads is served by the free core

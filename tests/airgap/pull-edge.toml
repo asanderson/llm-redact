@@ -1,0 +1,9 @@
+# The CI `airgap` job's second pull: Knowledgator's self-contained GLiNER-PII
+# edge model (it ships its own tokenizer and encoder configuration), at the
+# model catalog's pin. tests/airgap/edge.toml loads the folder it writes.
+[detection.ner]
+enabled = true
+backends = ["gliner"]
+
+[detection.ner.models]
+gliner = "knowledgator/gliner-pii-edge-v1.0"

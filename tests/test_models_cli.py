@@ -1018,6 +1018,22 @@ def test_pull_skips_local_folders_and_other_backends(
     assert out.splitlines()[-1] == f"FAIL  hf: {folder / SIDECAR_NAME}: not a UTF-8 JSON document"
 
 
+def test_pull_fails_for_a_folder_that_is_not_there(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A value written as a path is a folder (an unmounted volume), never a
+    # Hub model: nothing is fetched, and the missing folder is a failure.
+    hub = install_hub(monkeypatch)
+    missing = tmp_path / "models" / "hf-dslim--bert-base-NER"
+    config = _config(tmp_path, f'backend = "hf"\nmodel = {json.dumps(str(missing))}')
+    code, out = _run(capsys, "pull", "--config", str(config))
+    assert code == 1
+    assert out.splitlines()[-1] == (
+        f"FAIL  hf: {missing} is not a directory: a local model folder that is not there"
+    )
+    assert hub.calls == []
+
+
 def _local_gliner(tmp_path: Path, repo: dict[str, str]) -> Path:
     return _write_files(tmp_path / "gliner-clone", repo)
 

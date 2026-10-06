@@ -92,10 +92,12 @@ UNKNOWN_SOURCE_FIELDS: dict[str, Any] = {
 def model_source(ner: "NerConfig", backend: str) -> ModelSource:
     """The model ``backend`` (``gliner``, ``gliner2`` or ``hf``) loads under
     ``ner``."""
-    from llm_redact.detection.model_files import is_local
+    from llm_redact.detection.model_files import is_local, names_a_path
 
     model = ner.model_for(backend) or DEFAULT_MODELS[backend]
-    if is_local(model):
+    # A value written as a path is a folder even while it is missing (an
+    # unmounted volume): never a Hub model, whatever it would resolve to.
+    if is_local(model) or names_a_path(model):
         try:
             identity = read_sidecar(model)
         except SidecarError as exc:

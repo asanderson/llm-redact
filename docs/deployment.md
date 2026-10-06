@@ -80,6 +80,31 @@ for `[extraction]` (docs/extraction.md). `XDG_DATA_HOME=/data` holds
 the vault and audit DB — mount a volume there for persistence. Released
 images are multi-arch (amd64 + arm64).
 
+**The `-ner` image** (`ghcr.io/asanderson/llm-redact:<version>-ner`,
+`latest-ner`) is the same image plus the `hf` and `gliner` NER extras, with a
+CPU-only torch on both architectures (PyPI's Linux torch wheel brings the
+CUDA libraries, which no CPU host uses). The packages it adds to the stock
+image unpack to about 940 MB on x86_64, 700 MB of it torch (measured
+2026-10-06 from the locked wheels, before bytecode compilation; the CI
+`container-ner` job prints the built image's size). It is built,
+attested (BuildKit SBOM) and cosign-signed like the stock image, and the
+release carries its closure as `llm-redact-ner-image.cdx.json`. It ships
+no model: provision them as "Provisioning NER models" below describes — the
+image's Hugging Face cache (`HF_HOME`) is `/data/huggingface`, on the data
+volume, and `llm-redact models pull --to` folders mounted read-only at
+`/models` need no cache at all. To carry the image into a network without
+internet access:
+
+```bash
+docker pull ghcr.io/asanderson/llm-redact:<version>-ner        # connected side
+cosign verify ghcr.io/asanderson/llm-redact@<digest> \
+  --certificate-identity-regexp 'https://github.com/asanderson/llm-redact/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+docker save ghcr.io/asanderson/llm-redact:<version>-ner | gzip > llm-redact-ner.tar.gz
+# carry the file in, then on the other side:
+docker load < llm-redact-ner.tar.gz
+```
+
 ### Health probes
 
 Orchestrators should probe the DB-free liveness endpoint, not `/status`
@@ -323,6 +348,110 @@ routing) leaves it open.
 A client still writing frames when the proxy closes it may see a connection
 reset instead of the 1012 frame, because the server closes its socket right
 after sending the close frame. Treat either as "reconnect".
+
+## Provisioning NER models
+
+NER is opt-in (`[detection.ner] enabled = true`, docs/detection.md). The
+`gliner`, `gliner2` and `hf` backends load Hugging Face models, and with
+`[detection.ner] allow_download = false` — the default — the proxy never
+fetches one: every model loads from local files, and a model that is not
+there stops the startup with an error naming it, its revision and
+`llm-redact models pull`. So provisioning is a step of its own, done before
+the proxy starts with NER on (the [model supply chain
+diagram](diagrams/model-supply-chain.png) shows the whole path; for a network
+with no internet route, follow [air-gapped.md](air-gapped.md)):
+
+- **On the proxy's machine:** run `llm-redact models pull --config PATH` as
+  the user the proxy runs as, with network access to huggingface.co. It
+  fetches each configured model (and a GLiNER model's base model) at its
+  pinned revision into that user's Hugging Face cache (`HF_HOME`, default
+  `~/.cache/huggingface`), which the proxy reads. `llm-redact models verify`
+  then checks offline that every file the load reads is there, and
+  `llm-redact doctor` reports the same under `models`. spaCy, Presidio and
+  Stanza models are Python packages or library downloads, not Hub
+  snapshots: `llm-redact models list` prints their install commands.
+- **For a machine or container that cannot write a cache** (or must not
+  reach the network): run `llm-redact models pull --to DIR --as /models` on
+  a connected machine. It writes one self-contained folder per model plus a
+  manifest of SHA-256 sums, and prints the `[detection.ner.models]` lines
+  that load them from `/models`. Mount `DIR` there read-only, check it with
+  `llm-redact models verify --dir /models`, and paste the printed lines into
+  the configuration. A folder needs no cache, no base-model assembly and no
+  network.
+- **`allow_download = true`** lets the proxy's startup (`serve`,
+  `serve --check`) fetch what is missing instead — pinned files only, never
+  request content — which needs network access to huggingface.co and a
+  writable `HF_HOME` at every start. Reloads never download: a SIGHUP or
+  config-editor change that names a model not on disk is refused and the
+  running configuration is kept, whatever `allow_download` says.
+
+Where the files live under a hardened deployment:
+
+- **systemd** (`llm-redact service install`): the unit runs with
+  `ProtectHome=read-only` and writes only the llm-redact data, config and
+  state directories. The Hugging Face cache stays readable, so models pulled
+  beforehand load; but the unit cannot write it, so run `llm-redact models
+  pull` as the user outside the unit (and leave `allow_download` off). The
+  folders the `gliner` backend assembles for urchade-style models (under
+  `~/.local/share/llm-redact/models/gliner/`) are inside the writable data
+  directory.
+- **Containers and Helm** (`readOnlyRootFilesystem: true`): the image's
+  home directory, and with it the default Hugging Face cache, is on the
+  read-only root filesystem. Pre-provision a models volume — the `pull --to`
+  folders, mounted read-only at `/models` and named in
+  `[detection.ner.models]` — or mount a pre-filled Hugging Face cache and
+  point `HF_HOME` at it (a cache needs a writable `XDG_DATA_HOME` for the
+  GLiNER base-model assembly; `/data` is). Either way the pod loads models
+  with no network at all. The Helm chart does the first for you:
+  `image.variant: ner` selects the `-ner` image, and `models.volume` (any
+  volume source, such as a PersistentVolumeClaim) is mounted read-only at
+  `/models` with `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` set;
+  `[detection.ner.models]` goes in `extraConfig`
+  ([air-gapped.md](air-gapped.md#kubernetes-helm)).
+
+## Offline installs (no container)
+
+For a machine without internet access and without containers, build a
+wheelhouse on a connected machine of the same OS, CPU architecture and
+Python minor version, from a checkout of the release you install. Every
+locked package is downloaded at its `uv.lock` version and checked against
+its hash; torch comes from the PyTorch CPU index at its locked version
+(`scripts/cpu_torch.py` splits it and its GPU-only dependencies out of the
+export) and is checked against the CPU wheels' SHA-256 the script records,
+on download and again on install. On macOS, pass `requirements --macos`
+(macOS has no `+cpu` torch build; its one wheel is CPU-only):
+
+```bash
+# connected side, in the llm-redact checkout
+mkdir wheelhouse
+uv export --frozen --no-dev --no-emit-project --extra hf --extra gliner \
+  | python3 scripts/cpu_torch.py requirements wheelhouse/requirements.txt > wheelhouse/torch.txt
+python3 -m pip download --require-hashes --no-deps --only-binary=:all: \
+  -r wheelhouse/requirements.txt -d wheelhouse
+python3 -m pip download --require-hashes --no-deps --only-binary=:all: \
+  --index-url https://download.pytorch.org/whl/cpu -r wheelhouse/torch.txt -d wheelhouse
+uv build --wheel --out-dir wheelhouse          # llm-redact-proxy itself
+```
+
+Carry `wheelhouse/` (and `scripts/cpu_torch.py`) in, then install with no
+index at all:
+
+```bash
+python3 -m venv /opt/llm-redact
+pip=/opt/llm-redact/bin/pip
+$pip install --no-index --find-links wheelhouse --no-deps --require-hashes -r wheelhouse/torch.txt
+$pip install --no-index --find-links wheelhouse --no-deps --require-hashes -r wheelhouse/requirements.txt
+$pip install --no-index --find-links wheelhouse --no-deps llm-redact-proxy
+$pip check
+/opt/llm-redact/bin/python scripts/cpu_torch.py check   # no CUDA library got in
+/opt/llm-redact/bin/llm-redact doctor                     # ner: hf, gliner backends importable
+```
+
+Add `--extra presidio`, `--extra gliner2` or `--extra stanza` to the export
+for those backends (spaCy and Stanza models are carried separately:
+`llm-redact models list` prints their install commands). The CI `airgap`
+job runs exactly these commands, the install inside a network namespace
+with no route. Then provision the models as below.
 
 ## Vault lifecycle in production
 

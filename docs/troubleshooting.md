@@ -436,6 +436,28 @@ the `transformers` package is installed but `torch` is not, so no model can
 run. Install the extra, which brings both: `uv sync --extra hf` (or
 `pip install 'llm-redact-proxy[hf]'`), then re-run `serve --check`.
 
+## `[detection.ner] backend = "…" but the … extra is not installed; install it: uv sync --extra …` / "[detection.ner] is enabled but spaCy is not installed; install the extra: uv sync --extra ner"
+
+From `serve` / `serve --check` (and a reload that turns the backend on): the
+backend's Python packages are not in the environment the proxy runs in. Each
+backend has its extra — `hf`, `gliner`, `gliner2`, `presidio`, `stanza`, and
+`ner` for spaCy: `uv sync --extra gliner`, or `pip install
+'llm-redact-proxy[gliner]'`. `llm-redact doctor` lists under `ner` which
+backends are importable. Without network access, install from a wheelhouse
+prepared on a connected machine (docs/deployment.md, "Offline installs"), or
+run the `-ner` image, which carries the `hf` and `gliner` extras.
+
+## "spaCy model … is not available; download it: …" / "Stanza '…' NER model is not available; download it: …" / "failed to build the Presidio analyzer; is the spaCy model available? …"
+
+The library is installed but its model is not. spaCy (and Presidio, which
+runs on spaCy) models are Python packages: install the one named
+(`en_core_web_sm` by default) with the command shown, or, without network
+access, install its wheel from the spaCy models release page carried in.
+Stanza downloads its models into `~/stanza_resources` (`STANZA_RESOURCES_DIR`);
+run the command shown on a connected machine and carry that directory in.
+These models are not Hugging Face snapshots, so `llm-redact models pull`
+does not fetch them; `llm-redact models list` prints their install commands.
+
 ## "[detection.ner] hf model '…' has no fast tokenizer; character offsets are required"
 
 Startup (and `serve --check`) refused an `hf` backend model whose tokenizer
@@ -578,6 +600,26 @@ which the model catalog does not apply).
 The model value is not a folder that exists and not of the form `ORG/NAME`.
 Check the path (it is read relative to the proxy's working directory unless
 absolute) or the model id.
+
+## "[detection.ner] … model '…' is not a directory: a model folder must be in place when the proxy starts (nothing mounted or copied there?); write one on a connected machine with `llm-redact models pull --to DIR`, carry it here, and check it with `llm-redact models verify --dir`"
+
+The model value is written as a path (absolute, `./…`, `~/…`, or with more
+than one `/`), so it names a model folder — never a Hugging Face model id —
+and nothing is there. In a container or an air-gapped host this is usually a
+volume that is not mounted, or mounted empty: mount the folder `llm-redact
+models pull --to DIR` wrote (at the path `--as` named), run `llm-redact models
+verify --dir` on it, and start again. The same folder shows as `FAIL  BACKEND:
+PATH is not a directory: a local model folder that is not there` in
+`llm-redact models pull`, which never fetches a value written as a path.
+
+## "[detection.ner] presidio: cannot keep tldextract (which Presidio's email check uses) from fetching the public suffix list over the network (…); reinstall the presidio extra: uv sync --extra presidio"
+
+The presidio backend replaces tldextract's default extractor (which fetches
+the Public Suffix List from the internet on first use, on a request) with one
+that reads the snapshot the package ships, and this tldextract could not be set
+up that way: it is missing, or not laid out as tldextract 5.x is. The startup
+stops rather than let a request reach the network. Reinstall the extra (`uv
+sync --extra presidio`, which brings a tldextract Presidio supports).
 
 ## "[detection.ner] … model '…' needs code from its repository (… names auto_map); llm-redact never runs model code"
 

@@ -8,7 +8,7 @@
 
 Large Language Model (LLM) information redactor that prevents private information from being sent to LLMs from agentic tools by substituting placeholders for private information on outgoing requests and then replaces the placeholders on the incoming responses seamlessly for the agentic tool users.
 
-![System data flow: agentic tool (with the llm-redact plugin slash commands inside it), proxy, and local vault on your machine; only placeholder tokens reach the LLM provider. Dashed boxes mark as Pro the browser dashboard on your machine (live status, config editor, redaction preview) and the audit log with its object-store sinks, plus the flows into each](docs/diagrams/architecture.png)
+![System data flow: agentic tool (with the llm-redact plugin slash commands inside it), proxy, local vault and local NER model files on your machine; only placeholder tokens reach the LLM provider, and the Hugging Face Hub is reached only by an opt-in startup download of pinned model weights. Dashed boxes mark as Pro the browser dashboard and access gate on your machine and the audit log with its object-store sinks, plus the flows into each](docs/diagrams/architecture.png)
 
 *Animated version: [SVG](docs/diagrams/architecture.svg) · [GIF](docs/diagrams/architecture.gif) — the request and response flow moves.*
 

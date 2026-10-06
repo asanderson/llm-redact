@@ -223,6 +223,15 @@ and tags `vX.Y.Z`.
   to `DIR` unless every model was fetched, and nothing in it is replaced until every new
   folder is written beside the old ones. Together with `models verify --dir` this carries
   models into an air-gapped network.
+- Docs: a `model-supply-chain` diagram (docs/detection.md "Model sources", docs/threat-model.md)
+  shows where NER model weights come from — the model catalog's pins, `llm-redact models pull`
+  or an opt-in startup download, the local cache, the offline checks and the load — and, beside
+  it, the air-gap path of portable folders with a SHA-256 manifest verified inside the enclave.
+  The `architecture` diagram shows the local NER model files and the opt-in, startup-only Hugging
+  Face Hub download. docs/deployment.md gains "Provisioning NER models" (`models pull`, folders for
+  read-only deployments, `allow_download`, the systemd unit's `ProtectHome=read-only`, the
+  container's read-only root filesystem), and docs/troubleshooting.md the missing NER extra and
+  spaCy/Stanza/Presidio model messages.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

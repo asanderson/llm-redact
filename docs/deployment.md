@@ -324,6 +324,60 @@ A client still writing frames when the proxy closes it may see a connection
 reset instead of the 1012 frame, because the server closes its socket right
 after sending the close frame. Treat either as "reconnect".
 
+## Provisioning NER models
+
+NER is opt-in (`[detection.ner] enabled = true`, docs/detection.md). The
+`gliner`, `gliner2` and `hf` backends load Hugging Face models, and with
+`[detection.ner] allow_download = false` — the default — the proxy never
+fetches one: every model loads from local files, and a model that is not
+there stops the startup with an error naming it, its revision and
+`llm-redact models pull`. So provisioning is a step of its own, done before
+the proxy starts with NER on (the [model supply chain
+diagram](diagrams/model-supply-chain.png) shows the whole path):
+
+- **On the proxy's machine:** run `llm-redact models pull --config PATH` as
+  the user the proxy runs as, with network access to huggingface.co. It
+  fetches each configured model (and a GLiNER model's base model) at its
+  pinned revision into that user's Hugging Face cache (`HF_HOME`, default
+  `~/.cache/huggingface`), which the proxy reads. `llm-redact models verify`
+  then checks offline that every file the load reads is there, and
+  `llm-redact doctor` reports the same under `models`. spaCy, Presidio and
+  Stanza models are Python packages or library downloads, not Hub
+  snapshots: `llm-redact models list` prints their install commands.
+- **For a machine or container that cannot write a cache** (or must not
+  reach the network): run `llm-redact models pull --to DIR --as /models` on
+  a connected machine. It writes one self-contained folder per model plus a
+  manifest of SHA-256 sums, and prints the `[detection.ner.models]` lines
+  that load them from `/models`. Mount `DIR` there read-only, check it with
+  `llm-redact models verify --dir /models`, and paste the printed lines into
+  the configuration. A folder needs no cache, no base-model assembly and no
+  network.
+- **`allow_download = true`** lets the proxy's startup (`serve`,
+  `serve --check`) fetch what is missing instead — pinned files only, never
+  request content — which needs network access to huggingface.co and a
+  writable `HF_HOME` at every start. Reloads never download: a SIGHUP or
+  config-editor change that names a model not on disk is refused and the
+  running configuration is kept, whatever `allow_download` says.
+
+Where the files live under a hardened deployment:
+
+- **systemd** (`llm-redact service install`): the unit runs with
+  `ProtectHome=read-only` and writes only the llm-redact data, config and
+  state directories. The Hugging Face cache stays readable, so models pulled
+  beforehand load; but the unit cannot write it, so run `llm-redact models
+  pull` as the user outside the unit (and leave `allow_download` off). The
+  folders the `gliner` backend assembles for urchade-style models (under
+  `~/.local/share/llm-redact/models/gliner/`) are inside the writable data
+  directory.
+- **Containers and Helm** (`readOnlyRootFilesystem: true`): the image's
+  home directory, and with it the default Hugging Face cache, is on the
+  read-only root filesystem. Pre-provision a models volume — the `pull --to`
+  folders, mounted read-only at `/models` and named in
+  `[detection.ner.models]` — or mount a pre-filled Hugging Face cache and
+  point `HF_HOME` at it (a cache needs a writable `XDG_DATA_HOME` for the
+  GLiNER base-model assembly; `/data` is). Either way the pod loads models
+  with no network at all.
+
 ## Vault lifecycle in production
 
 The sqlite vault (`[vault] backend = "sqlite"`) is the one piece of state

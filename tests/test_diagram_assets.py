@@ -18,6 +18,7 @@ ANIMATED = [s for s in SOURCES if re.search(r"^%%\s*animate\b", s.read_text(), r
 def test_sources_exist() -> None:
     assert {s.stem for s in SOURCES} >= {
         "architecture",
+        "model-supply-chain",
         "ner-pipeline",
         "ner-prefetch",
         "security-gates",

@@ -151,6 +151,10 @@ same way — the survey behind the lineup is
 
 ### Model sources: pinned revisions, downloads and pickle weights
 
+![Flowchart of where NER model weights come from: the model catalog's pins and the Hugging Face Hub feed llm-redact models pull (or a startup with allow_download = true), which fills the local Hugging Face cache; GLiNER base models are assembled into a local folder; models verify checks the files offline; the startup loads local files only (safetensors or ONNX, never repository code) and reloads never download. Beside it the air-gap path: models pull --to writes portable folders with a SHA-256 manifest, which are carried into the enclave, checked with models verify --dir and loaded with downloads off](diagrams/model-supply-chain.png)
+
+*Static diagram. [Mermaid source](diagrams/model-supply-chain.mmd).*
+
 The `gliner`, `gliner2` and `hf` backends load models from the Hugging Face
 Hub. Three `[detection.ner]` keys say where those models may come from:
 

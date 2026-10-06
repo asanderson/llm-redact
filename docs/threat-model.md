@@ -531,6 +531,10 @@ silent:
   `models` area names every model, its pin and whether its files are in the
   local cache, and WARNs on downloads, pickle weights and unpinned models.
 
+  ![Flowchart of where NER model weights come from: the catalog's pins and the Hugging Face Hub feed models pull or an opt-in startup download into the local cache, checked offline and loaded from local files only; beside it the air-gap path of portable folders with a SHA-256 manifest, verified inside the enclave](diagrams/model-supply-chain.png)
+
+  *Static diagram. [Mermaid source](diagrams/model-supply-chain.mmd).*
+
 ### Behavior under fault
 
 The security goal must hold when the network drops mid-stream, the upstream

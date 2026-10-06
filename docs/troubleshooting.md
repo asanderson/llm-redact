@@ -436,6 +436,27 @@ the `transformers` package is installed but `torch` is not, so no model can
 run. Install the extra, which brings both: `uv sync --extra hf` (or
 `pip install 'llm-redact-proxy[hf]'`), then re-run `serve --check`.
 
+## `[detection.ner] backend = "…" but the … extra is not installed; install it: uv sync --extra …` / "[detection.ner] is enabled but spaCy is not installed; install the extra: uv sync --extra ner"
+
+From `serve` / `serve --check` (and a reload that turns the backend on): the
+backend's Python packages are not in the environment the proxy runs in. Each
+backend has its extra — `hf`, `gliner`, `gliner2`, `presidio`, `stanza`, and
+`ner` for spaCy: `uv sync --extra gliner`, or `pip install
+'llm-redact-proxy[gliner]'`. `llm-redact doctor` lists under `ner` which
+backends are importable. Without network access, install from wheels
+downloaded on a connected machine of the same platform.
+
+## "spaCy model … is not available; download it: …" / "Stanza '…' NER model is not available; download it: …" / "failed to build the Presidio analyzer; is the spaCy model available? …"
+
+The library is installed but its model is not. spaCy (and Presidio, which
+runs on spaCy) models are Python packages: install the one named
+(`en_core_web_sm` by default) with the command shown, or, without network
+access, install its wheel from the spaCy models release page carried in.
+Stanza downloads its models into `~/stanza_resources` (`STANZA_RESOURCES_DIR`);
+run the command shown on a connected machine and carry that directory in.
+These models are not Hugging Face snapshots, so `llm-redact models pull`
+does not fetch them; `llm-redact models list` prints their install commands.
+
 ## "[detection.ner] hf model '…' has no fast tokenizer; character offsets are required"
 
 Startup (and `serve --check`) refused an `hf` backend model whose tokenizer

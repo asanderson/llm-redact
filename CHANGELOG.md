@@ -115,8 +115,9 @@ and tags `vX.Y.Z`.
   JSON-escaped quotes inside a JSON string ground like plain ones. Corpus files are written
   with `\n` line ends on every platform (no CRT text-mode translation on Windows).
   `audit.py` has the same teacher read `bench/fp_corpus` beside the detectors and lists
-  candidate misses and false positives (file, offsets, type, reason; no text) for a human;
-  it never edits `MANIFEST.toml` or `bench/ner_ceilings.toml`.
+  candidate misses and false positives (file, offsets as file positions — a CRLF line end
+  counts two —, type, reason; no text) for a human; it never edits `MANIFEST.toml` or
+  `bench/ner_ceilings.toml`.
 - `--dataset agent-eval --path FILE` scores the NER bench on the private, hand-verified
   agent-traffic evaluation set (docs/ner-bench.md): the file is read by path, never
   committed, checked against the SHA-256 in its `FILE.manifest.json`, and marked as real

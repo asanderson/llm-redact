@@ -680,9 +680,9 @@ _CORPUS_A = "Contact Ann Lee at ann@example.com\nbuild by Jenkins\nmail foo@bar.
 def _corpus(root: Path) -> Path:
     corpus = root / "fp_corpus"
     corpus.mkdir()
-    (corpus / "MANIFEST.toml").write_text('["a.txt"]\nEMAIL = 2\n')
-    (corpus / "a.txt").write_text(_CORPUS_A)
-    (corpus / "b.txt").write_text("nothing here\n")
+    (corpus / "MANIFEST.toml").write_bytes(b'["a.txt"]\nEMAIL = 2\n')
+    (corpus / "a.txt").write_bytes(_CORPUS_A.encode())
+    (corpus / "b.txt").write_bytes(b"nothing here\n")
     return corpus
 
 
@@ -759,6 +759,23 @@ def test_audit_reports_detector_only_spans_and_audits_chosen_files(
     assert len(rows) == 2 and all(row.endswith("| EMAIL | detector-only |") for row in rows)
     assert "files: 1." in printed and "default configuration" in printed
     assert len(fake.chats) == 1
+
+
+def test_audit_offsets_are_file_positions_in_a_crlf_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    corpus = _corpus(tmp_path)
+    raw = "line one\r\nline two\r\nContact Ann Lee here\r\n"
+    (corpus / "a.txt").write_bytes(raw.encode())
+    fake = FakeOllama(_audit_answer)
+    out = tmp_path / "report.json"
+    argv = ["--model", "gemma4:e4b", "--corpus", str(corpus), "--file", "a.txt"]
+    assert audit.main([*argv, "--out", str(out)], transport=fake.transport()) == 0
+    capsys.readouterr()
+    (finding,) = json.loads(out.read_text())["findings"]
+    # Universal newlines would report it two characters early (one per CRLF).
+    assert raw[finding["start"] : finding["end"]] == "Ann Lee"
+    assert finding["start"] == raw.index("Ann Lee")
 
 
 def test_audit_compare_and_teacher_spans() -> None:

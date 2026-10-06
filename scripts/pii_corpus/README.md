@@ -168,7 +168,9 @@ The report lists every disagreement:
 | `detector-only` | A detection the teacher does not support: a candidate false positive (or a teacher miss). |
 
 The report holds the file name, start and end offsets (characters from the
-start of the file), the type and the reason — never text; `--out PATH`
+start of the file as stored, a CRLF line end counting two, so
+`text[start:end]` of the file read without newline translation is the
+value), the type and the reason — never text; `--out PATH`
 writes it as JSON too (refused inside the corpus directory). The audit never
 writes to the corpus, `MANIFEST.toml` or `bench/ner_ceilings.toml`: a human
 reads the candidates and decides, following `bench/fp_corpus/README.md`.

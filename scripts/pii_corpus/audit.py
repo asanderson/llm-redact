@@ -16,7 +16,8 @@ lists, for a human to judge:
   FALSE POSITIVE, or the teacher missed it).
 
 The report holds file names, offsets (characters from the start of the
-file), types and these reasons only, never text. The audit never writes to
+file as stored: a CRLF line end counts two), types and these reasons only,
+never text. The audit never writes to
 the corpus, ``MANIFEST.toml`` or ``bench/ner_ceilings.toml``: changing a
 pinned count stays a human decision (bench/fp_corpus/README.md).
 """
@@ -166,7 +167,11 @@ def run_audit(
     for name in files:
         if names and name not in names:
             continue
-        text = (corpus / name).read_text(encoding="utf-8")
+        # newline="": every character of the file counts, the "\r" of a CRLF
+        # line end included, so offsets are file positions (universal
+        # newlines would shift them by one per CRLF line before).
+        with (corpus / name).open(encoding="utf-8", newline="") as handle:
+            text = handle.read()
         audit.counts["files"] += 1
         for offset, chunk in chunks(text, CHUNK_CHARS):
             audit.counts["chunks"] += 1
@@ -187,7 +192,7 @@ def to_markdown(audit: Audit, model: str, config: str) -> str:
         f"# fp-corpus audit by {model} ({config})",
         "",
         "Candidates for a human to judge; nothing was changed. Offsets are characters"
-        " from the start of the file.",
+        " from the start of the file as stored (a CRLF line end counts two).",
         "",
         " ".join(f"{key}: {n}." for key, n in sorted(audit.counts.items())),
         "",

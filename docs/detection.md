@@ -434,7 +434,7 @@ llm-redact models verify --dir DIR  # check a folder written by `models pull --t
 
 ## How NER runs
 
-![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model, the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)
+![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model (an hf BIOES/BILOU tagger's spans decoded by llm-redact), the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)
 
 *Static diagram. [Mermaid source](diagrams/ner-pipeline.mmd).*
 

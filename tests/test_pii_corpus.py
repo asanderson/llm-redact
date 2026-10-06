@@ -16,7 +16,15 @@ from fake_ollama import APACHE, DIGEST, FakeOllama
 
 # The tooling is a dev-only package under scripts/, not part of llm_redact.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from pii_corpus import audit, generate, grounding, prompts, review, teacher  # noqa: E402
+from pii_corpus import (  # noqa: E402
+    audit,
+    generate,
+    grounding,
+    prompts,
+    review,
+    teacher,
+    train_student,
+)
 from pii_corpus.private_files import (  # noqa: E402
     CorpusError,
     default_data_dir,
@@ -1005,3 +1013,212 @@ def test_review_command_line(
     monkeypatch.setenv("EDITOR", "true")
     assert review.main(argv) == 0
     assert "already decided 2" in capsys.readouterr().out
+
+
+# --- train_student.py (the recipe skeleton) ---------------------------------------
+
+
+def test_the_data_manifest_lists_every_source_with_its_facts() -> None:
+    sources = train_student.load_sources()
+    allowed = {name for name, entry in sources.items() if entry["training"] == "allowed"}
+    assert allowed == {
+        "nemotron",
+        "gretel-pii-masking-en-v1",
+        "gretel-synthetic-pii-finance-multilingual",
+        "privy",
+        "kiji",
+        "agent-corpus",
+    }
+    assert sources["openpii"]["training"] == "needs-confirmation"
+    assert sources["openpii"]["gate"].startswith("D9")
+    assert {n for n, e in sources.items() if e["training"] == "refused"} == {
+        "pupa",
+        "mapa",
+        "creddata",
+    }
+    for name, entry in sources.items():
+        assert entry["license"] and entry["attribution"], name
+        if "hub_id" in entry:
+            assert re.fullmatch(r"[0-9a-f]{40}", entry["revision"]), name
+    # The bench and the recipe pin the same revisions.
+    from llm_redact.bench.datasets import mapa, nemotron, openpii, privy, pupa
+
+    for name, module in (
+        ("nemotron", nemotron),
+        ("privy", privy),
+        ("openpii", openpii),
+        ("pupa", pupa),
+        ("mapa", mapa),
+    ):
+        assert sources[name]["revision"] == module.REVISION, name
+
+
+def _plan_args(tmp_path: Path, *extra: str) -> list[str]:
+    return [
+        "plan",
+        "--name",
+        "acme-student",
+        "--base",
+        "microsoft/deberta-v3-small",
+        "--out",
+        str(tmp_path / "run"),
+        *extra,
+    ]
+
+
+def test_plan_writes_a_data_manifest_and_a_model_card(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = _plan_args(tmp_path, "--sources", "nemotron, privy,kiji")
+    assert train_student.main(argv, today="2026-10-06") == 0
+    assert "planned acme-student on microsoft/deberta-v3-small" in capsys.readouterr().out
+    run = tmp_path / "run"
+    manifest = json.loads((run / "data-manifest.json").read_text())
+    assert manifest["format"] == train_student.MANIFEST_FORMAT
+    assert manifest["base_model"] == {
+        "id": "microsoft/deberta-v3-small",
+        "backend": "hf",
+        "license": "MIT",
+        "revision": train_student.ENCODERS["microsoft/deberta-v3-small"][1],
+        "lineage": [],
+    }
+    assert [s["name"] for s in manifest["sources"]] == ["nemotron", "privy", "kiji"]
+    assert manifest["sources"][0]["attribution"] == "Nemotron-PII by NVIDIA Corporation (CC BY 4.0)"
+    assert all("training" not in s and "confirmation" not in s for s in manifest["sources"])
+    assert manifest["hyperparameters"] == dict(train_student.HYPERPARAMETERS)
+    card = (run / "MODEL_CARD.md").read_text()
+    assert "# acme-student" in card and "{{" not in card
+    assert "| privy | beki/privy | dc137a6a976f6b5bb8768e9bb51ec58df930ccd1 | MIT |" in card
+    assert "OpenPII 1.5M written confirmation (plan D9): not used." in card
+    assert "- beki/privy by Benjamin Kilimnik (MIT)" in card
+    if os.name == "posix":
+        assert run.stat().st_mode & 0o777 == 0o700
+        assert (run / "data-manifest.json").stat().st_mode & 0o777 == 0o600
+    # A non-empty run directory needs --force.
+    assert train_student.main(argv) == 2
+    assert "is not empty; pass --force" in capsys.readouterr().err
+    assert train_student.main([*argv, "--force"]) == 0
+
+
+def test_openpii_is_refused_without_the_d9_confirmation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = _plan_args(tmp_path, "--sources", "nemotron,openpii")
+    assert train_student.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "source 'openpii' is refused for training until D9" in err
+    assert "--openpii-confirmation REF" in err
+    assert not (tmp_path / "run").exists()
+    assert train_student.main([*argv, "--openpii-confirmation", "   "]) == 2
+    assert "refused for training until D9" in capsys.readouterr().err
+    reference = "AI4Privacy letter of 2026-11-02, archived as DOC-17"
+    assert train_student.main([*argv, "--openpii-confirmation", reference], today="d") == 0
+    manifest = json.loads((tmp_path / "run" / "data-manifest.json").read_text())
+    assert manifest["sources"][1]["confirmation"] == reference
+    card = (tmp_path / "run" / "MODEL_CARD.md").read_text()
+    assert f"OpenPII 1.5M written confirmation (plan D9): {reference}." in card
+
+
+def test_a_needs_confirmation_source_other_than_openpii_has_no_flag() -> None:
+    sources = {"x": {"training": "needs-confirmation", "gate": "a gate"}}
+    with pytest.raises(train_student.CorpusError, match="refused for training until a gate"):
+        train_student.plan_sources(["x"], sources, openpii_confirmation="REF-1", agent_corpus=None)
+    with pytest.raises(train_student.CorpusError, match="no valid training status"):
+        train_student.plan_sources(
+            ["y"], {"y": {"training": "maybe"}}, openpii_confirmation=None, agent_corpus=None
+        )
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--sources", "pupa"], "source 'pupa' is evaluation-only: real user prompts"),
+        (["--sources", "creddata"], "source 'creddata' is evaluation-only"),
+        (["--sources", "wikipedia"], "not in the data manifest"),
+        (["--sources", " , "], "name at least one source"),
+        (["--sources", "agent-corpus"], "needs --agent-corpus PATH"),
+        (["--sources", "privy", "--base", "urchade/gliner_base"], "catalog status restricted"),
+        (["--sources", "privy", "--base", "nvidia/gliner-PII"], "catalog status restricted"),
+        (["--sources", "privy", "--base", "dslim/bert-base-NER"], "not an allowed encoder"),
+        (["--sources", "privy", "--base", "someone/unknown"], "not an allowed encoder"),
+        (["--sources", "privy", "--out", "{repo}/run"], "must never be committed"),
+        (["--sources", "privy", "--out", "{file}"], "is not a directory"),
+    ],
+)
+def test_plan_refusals(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], extra: list[str], message: str
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (tmp_path / "a-file").write_text("x")
+    extra = [
+        a.replace("{repo}", str(repo)).replace("{file}", str(tmp_path / "a-file")) for a in extra
+    ]
+    assert train_student.main([*_plan_args(tmp_path), *extra]) == 2
+    assert message in capsys.readouterr().err
+
+
+def test_gliner_bases_come_from_the_catalog() -> None:
+    from llm_redact.detection.model_catalog import lookup
+
+    base = train_student.base_model("knowledgator/gliner-pii-edge-v1.0")
+    entry = lookup("knowledgator/gliner-pii-edge-v1.0")
+    assert entry is not None
+    assert base == {
+        "id": "knowledgator/gliner-pii-edge-v1.0",
+        "backend": "gliner",
+        "license": "Apache-2.0",
+        "revision": entry.revision,
+        "lineage": ["undisclosed-training-data"],
+    }
+
+
+def test_base_without_a_catalog_pin_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+
+    from llm_redact.detection.model_catalog import lookup
+
+    entry = lookup("urchade/gliner_small-v2.1")
+    assert entry is not None
+    monkeypatch.setattr(train_student, "lookup", lambda model_id: replace(entry, revision=None))
+    with pytest.raises(train_student.CorpusError, match="records no revision pin"):
+        train_student.base_model("urchade/gliner_small-v2.1")
+
+
+def test_the_agent_corpus_must_be_a_verified_training_share(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    verified = _verified(tmp_path)
+    argv = _plan_args(tmp_path, "--sources", "agent-corpus", "--agent-corpus", str(verified))
+    assert train_student.main(argv) == 0
+    manifest = json.loads((tmp_path / "run" / "data-manifest.json").read_text())
+    from llm_redact.bench.datasets.agent_eval import file_sha256
+
+    corpus = manifest["sources"][0]
+    assert (corpus["rows"], corpus["sha256"]) == (3, file_sha256(verified))
+    # The frozen evaluation set is never training data.
+    frozen = tmp_path / "frozen" / "agent-eval.jsonl"
+    assert review.main(["freeze", str(verified), "--out", str(frozen)]) == 0
+    capsys.readouterr()
+    argv = _plan_args(tmp_path, "--sources", "agent-corpus", "--agent-corpus", str(frozen))
+    assert train_student.main([*argv, "--force"]) == 2
+    assert "is the frozen agent-eval set: it is evaluation-only" in capsys.readouterr().err
+    # Unverified rows (a generate.py file) are refused too.
+    generated = tmp_path / "corpus" / "generated.jsonl"
+    argv = _plan_args(tmp_path, "--sources", "agent-corpus", "--agent-corpus", str(generated))
+    assert train_student.main([*argv, "--force"]) == 2
+    assert "line 1: an unverified row" in capsys.readouterr().err
+
+
+def test_train_is_a_refusing_stub_and_bad_manifests_are_named(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert train_student.main(["train", str(tmp_path)]) == 2
+    assert "training is not implemented" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(train_student.CorpusError, match="cannot read missing.toml"):
+        train_student.load_sources(tmp_path / "missing.toml")
+    empty = tmp_path / "empty.toml"
+    empty.write_text('checked = "x"\n')
+    with pytest.raises(train_student.CorpusError, match="holds no \\[sources\\] table"):
+        train_student.load_sources(empty)

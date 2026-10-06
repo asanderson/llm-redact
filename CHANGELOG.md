@@ -12,6 +12,14 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- The `hf` NER backend decodes BIOES and BILOU taggers (models whose labels carry `E-`/`S-`
+  or `L-`/`U-` tags, such as `openai/privacy-filter`'s): the transformers pipeline understands
+  only `B-`/`I-` and cut every such span at its last token, so these models now run without it
+  — the same overlapping token windows, the model's per-token label scores, and a span decoder
+  of llm-redact's own (`detection/tagging.py`). A model whose calibration file the model catalog
+  lists is decoded with a constrained Viterbi decoder using its transition biases; any other is
+  read greedily (a malformed tag sequence starts a new span rather than dropping a token). BIO
+  models keep the pipeline. A model whose labels mix BIOES and BILOU tags is refused at startup.
 - docs/how-it-works.md shows NER off the event loop in a new animated `ner-prefetch`
   diagram; the `sequence-chat` and `security-gates` diagrams and the gate ⑤ row of
   docs/security-dataflows.md include it.

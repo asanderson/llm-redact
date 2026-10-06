@@ -179,6 +179,12 @@ ignore_missing_imports = true
 module = "transformers.*"
 ignore_missing_imports = true
 
+# torch arrives with the gliner/stanza/hf extras (the hf backend's BIOES
+# tagger scores tokens with it); the dev environment installs none of them.
+[[tool.mypy.overrides]]
+module = "torch.*"
+ignore_missing_imports = true
+
 [[tool.mypy.overrides]]
 module = "pyarrow.*"
 ignore_missing_imports = true

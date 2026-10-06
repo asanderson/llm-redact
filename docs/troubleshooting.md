@@ -457,6 +457,28 @@ library's full error: `uv run python -c "from transformers import pipeline;
 pipeline('token-classification', model='/path/to/the/model/folder')"` (the
 folder: the Hugging Face cache's `models--ORG--MODEL/snapshots/<revision>`).
 
+## "[detection.ner] hf model '…': its labels mix BIOES (E-, S-) and BILOU (L-, U-) tags" / "… its id2label does not name every logit index 0 to n-1" / "… its id2label keys are not logit indices"
+
+From `serve` / `serve --check`: the `hf` model's labels (`config.json`
+`id2label`) tag spans with `E-`/`S-` (BIOES) or `L-`/`U-` (BILOU), which
+llm-redact decodes itself (docs/detection.md "BIOES and BILOU taggers"), but
+they cannot be read as one scheme: some labels use BIOES tags and others
+BILOU ones, or the labels do not name each of the model's outputs by its
+position. The checkpoint's configuration is inconsistent; pick another model
+or fix its `config.json` in a local copy and point `[detection.ner.models] hf`
+at that folder.
+
+## "[detection.ner] hf model '…' has no …, which the model catalog lists for its constrained decoding" / "[detection.ner] hf model '…': … must hold exactly …"
+
+From `serve` / `serve --check`: llm-redact's model catalog lists a calibration
+file for this BIOES/BILOU model (the transition biases its spans are decoded
+with), and the file is missing from the model's folder or snapshot, or does
+not have the expected shape (`{"operating_points": {"default": {"biases":
+{...}}}}` with exactly the six `transition_bias_*` numbers). With downloads off,
+a snapshot pulled before the file was listed lacks it: run `llm-redact models
+pull` again (or set `allow_download = true` for one startup). A local folder
+needs the file copied in beside the weights.
+
 ## "[detection.ner] hf model '…' has no safetensors weights; set allow_pickle_weights = true to load pytorch_model.bin"
 
 The `hf` model ships its weights only as `pytorch_model.bin`, a Python

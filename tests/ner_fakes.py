@@ -340,6 +340,56 @@ def install_gliner(
         _ensure_hub(monkeypatch)
 
 
+class FakeTensor:
+    """The sliver of a torch tensor the hf tagger's scorer uses: nested
+    lists, indexing, ``float()`` and ``tolist()``."""
+
+    def __init__(self, data: Any) -> None:
+        self.data = data
+
+    def __getitem__(self, index: int) -> "FakeTensor":
+        return FakeTensor(self.data[index])
+
+    def float(self) -> "FakeTensor":
+        return self
+
+    def tolist(self) -> Any:
+        return self.data
+
+
+def install_torch(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """A fake ``torch`` with what hf_ner.torch_scorer calls: ``tensor``,
+    ``inference_mode`` and ``log_softmax`` over the last dimension of a
+    2-D tensor (computed for real, on lists). Each ``tensor`` call is
+    recorded on ``module.made``."""
+    import contextlib
+    import math
+
+    module = types.ModuleType("torch")
+    module.__spec__ = importlib.machinery.ModuleSpec("torch", None)
+    made: list[dict[str, Any]] = []
+
+    def tensor(data: Any, device: Any = None) -> FakeTensor:
+        made.append({"data": data, "device": device})
+        return FakeTensor(data)
+
+    def log_softmax(value: FakeTensor, dim: int) -> FakeTensor:
+        assert dim == -1
+        rows = []
+        for row in value.data:
+            top = max(row)
+            total = top + math.log(sum(math.exp(x - top) for x in row))
+            rows.append([x - total for x in row])
+        return FakeTensor(rows)
+
+    module.tensor = tensor  # type: ignore[attr-defined]
+    module.inference_mode = contextlib.nullcontext  # type: ignore[attr-defined]
+    module.log_softmax = log_softmax  # type: ignore[attr-defined]
+    module.made = made  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", module)
+    return module
+
+
 def install_spacy(monkeypatch: pytest.MonkeyPatch, nlp: FakeSpacy) -> None:
     module = types.ModuleType("spacy")
     module.load = lambda name, disable=(): nlp  # type: ignore[attr-defined]

@@ -24,7 +24,11 @@ model (the core warns; a policy plugin may enforce):
 * ``prompts``: per placeholder type, the GLiNER prompt the model was trained
   on, sent instead of the generic one (:data:`labels.GLINER_PROMPTS`);
 * ``window``: the longest input one model call takes: tokens for ``hf``,
-  GLiNER words for ``gliner``. None: read it from the model's own config.
+  GLiNER words for ``gliner``. None: read it from the model's own config;
+* ``tagging`` / ``viterbi_calibration``: an ``hf`` model's token-tagging
+  scheme, and the repository file holding the transition biases its BIOES
+  or BILOU spans are decoded with (the constrained Viterbi decoder,
+  detection/tagging.py; without one they are decoded greedily).
 
 Local model directories are identified by an optional sidecar file,
 :data:`SIDECAR_NAME` (``{"model_id": ..., "revision": ...}``), which
@@ -52,7 +56,8 @@ CHECKED = "2026-10-05"
 Status = Literal["vetted", "caution", "restricted"]
 STATUSES: tuple[Status, ...] = ("vetted", "caution", "restricted")
 # Token-tagging schemes of `hf` models (BIO models run the transformers
-# pipeline's aggregation; BIOES/BILOU need constrained decoding).
+# pipeline's aggregation; the hf backend decodes BIOES/BILOU itself,
+# detection/tagging.py).
 TAGGING_SCHEMES = ("bio", "bioes", "bilou")
 
 # Value-free provenance tags a policy can match on (llm-redact-pro's model
@@ -139,6 +144,9 @@ class CatalogEntry:
     # Repo-relative ONNX weight files the gliner backend can load.
     onnx_files: tuple[str, ...] = ()
     tagging: str | None = None
+    # A BIOES/BILOU tagger's calibration file (repo-relative, fetched with
+    # the model): transition biases for the constrained Viterbi decoder.
+    viterbi_calibration: str | None = None
     window: int | None = None
     # (distribution, minimum version) the model needs beyond the extras'.
     min_versions: tuple[tuple[str, str], ...] = ()

@@ -288,6 +288,25 @@ at its exact offsets:
   identifier) gets a window of its own, which the model may read only in part:
   counted as `windows_truncated`.
 
+**BIOES and BILOU taggers (`hf`).** Most token-classification models tag a
+span's first token `B-` and the rest `I-` (BIO), which the transformers
+pipeline reads. A model whose labels also mark a span's last token —
+`E-`nd and `S-`ingle (BIOES), or `L-`ast and `U-`nit (BILOU) — would have every
+span cut at its last token by the pipeline, so llm-redact reads such a model
+itself: the same token windows, the model's per-token label scores, and its
+own span decoder. When llm-redact's model catalog lists the model's
+calibration file (transition biases its publisher ships, fetched with the
+model), spans are decoded with a constrained Viterbi decoder: the best label
+sequence in which every span opens with `B`/`S`, continues with `I` of the
+same entity and closes with `E`/`S`. Otherwise each token takes its most
+likely label and spans are read greedily: `B` … `E`, a single `S`, `I`
+continuing; a tag that cannot continue the open span starts a new one, and a
+span left open is kept as it is, so no token the model marked is dropped. A
+span's score is the mean probability of its tokens' labels (`score_threshold`
+applies), and its offsets leave out blanks at either edge. The scheme comes
+from the model's labels; a model whose labels mix BIOES and BILOU tags is
+refused at startup.
+
 An entity two windows both report counts once; one cut by a window's edge is
 also reported whole by the next window, and the longer span wins. spaCy,
 Stanza and Presidio read each string whole. Windows make a long string cost

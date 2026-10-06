@@ -151,6 +151,10 @@ def test_entry_shape(entry: CatalogEntry) -> None:
     if entry.tagging is not None:
         assert entry.tagging in TAGGING_SCHEMES
         assert entry.backends == ("hf",)
+    if entry.viterbi_calibration is not None:
+        # Fetched with the model as an exact file name (no wildcard, no "..").
+        assert entry.tagging in ("bioes", "bilou")
+        assert re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*\.json", entry.viterbi_calibration)
     for onnx_file in entry.onnx_files:
         assert entry.backends == ("gliner",)
         assert onnx_file.endswith(".onnx")

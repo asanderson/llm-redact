@@ -248,18 +248,22 @@ def hf_model_dir(
     revision: str | None,
     allow_download: bool,
     allow_pickle_weights: bool,
+    extra_files: Sequence[str] = (),
 ) -> Path:
     """The local directory an ``hf`` model loads from: its configuration,
     tokenizer and safetensors weights — or, only with
     ``allow_pickle_weights`` and only when it has no safetensors weights,
-    its ``pytorch_model.bin``."""
+    its ``pytorch_model.bin`` — and the ``extra_files`` (exact names in the
+    repository) the model catalog lists for it, such as a tagger's
+    calibration file."""
     what = "hf model"
+    patterns = (*HF_PATTERNS, *extra_files)
     path = resolve_model(
         model,
         what=what,
         revision=revision,
         allow_download=allow_download,
-        allow_patterns=HF_PATTERNS,
+        allow_patterns=patterns,
     )
     check_configs(path, CODE_CONFIG_FILES, what=what, model=model)
     if has_files(path, SAFETENSORS_FILES):
@@ -278,7 +282,7 @@ def hf_model_dir(
         what=what,
         revision=revision,
         allow_download=allow_download,
-        allow_patterns=(*HF_PATTERNS, *HF_PICKLE_PATTERNS),
+        allow_patterns=(*patterns, *HF_PICKLE_PATTERNS),
     )
 
 

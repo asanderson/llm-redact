@@ -391,20 +391,16 @@ def catalog_window(model: str) -> int | None:
 
 def _tagger_biases(path: Path, model: str, calibration: str | None) -> dict[str, float] | None:
     """The Viterbi transition biases of the model's calibration file the
-    catalog lists (``viterbi_calibration``); None when it lists none."""
+    catalog lists (``viterbi_calibration``); None when it lists none. The
+    file is there: :func:`model_files.hf_files` requires every file the
+    catalog lists for the model, as ``llm-redact models verify`` does."""
     from llm_redact.config import ConfigError
     from llm_redact.detection.model_files import read_config
 
     if calibration is None:
         return None
-    file = path / calibration
-    if not file.is_file():
-        raise ConfigError(
-            f"[detection.ner] hf model {model!r} has no {calibration}, which the model"
-            " catalog lists for its constrained decoding"
-        )
     try:
-        return viterbi_biases(read_config(file, what="hf model", model=model))
+        return viterbi_biases(read_config(path / calibration, what="hf model", model=model))
     except TaggingError as exc:
         raise ConfigError(f"[detection.ner] hf model {model!r}: {calibration} {exc}") from exc
 
@@ -460,13 +456,15 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
     calibration = entry.viterbi_calibration if entry is not None else None
     # The model's files, local at their pinned revision: configuration,
     # tokenizer and safetensors weights (a pickle only with the hatch), and
-    # the calibration file of a BIOES/BILOU tagger the catalog lists one for.
+    # the calibration file of a BIOES/BILOU tagger the catalog lists one for
+    # (required: a listed file that is missing refuses the model, never a
+    # silent greedy fallback).
     path = hf_model_dir(
         model_name,
         revision=config.revision_for("hf"),
         allow_download=config.allow_download,
         allow_pickle_weights=config.allow_pickle_weights,
-        extra_files=(calibration,) if calibration is not None else (),
+        extra_files=entry.extra_files("hf") if entry is not None else (),
     )
     biases = _tagger_biases(path, model_name, calibration)
     try:

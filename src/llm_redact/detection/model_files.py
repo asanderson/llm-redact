@@ -352,8 +352,11 @@ def _shards(directory: Path, index: str, *, what: str, model: str) -> list[str]:
     return sorted(names)
 
 
-def _hf_missing(directory: Path, names: Collection[str], *, model: str) -> list[str]:
-    """What an ``hf`` load needs that the files ``names`` lack."""
+def _hf_missing(
+    directory: Path, names: Collection[str], *, model: str, extra_files: Sequence[str] = ()
+) -> list[str]:
+    """What an ``hf`` load needs that the files ``names`` lack (each of the
+    catalog's ``extra_files`` by its name)."""
     missing = [] if "config.json" in names else ["config.json"]
     for single, index in (SAFETENSORS_FILES, PICKLE_FILES):
         if single in names:
@@ -366,6 +369,7 @@ def _hf_missing(directory: Path, names: Collection[str], *, model: str) -> list[
         missing.append("weights")
     if not has_vocabulary(names):
         missing.append("tokenizer files")
+    missing += [name for name in extra_files if name not in names]
     return missing
 
 
@@ -381,8 +385,9 @@ def hf_files(
     and safetensors weights — or, only with ``allow_pickle_weights`` and
     only when it has no safetensors weights, its ``pytorch_model.bin`` —
     and the ``extra_files`` (exact names in the repository) the model
-    catalog lists for it, such as a tagger's calibration file. A directory
-    lacking any of the files a load needs is refused
+    catalog lists for it (``CatalogEntry.extra_files``: a BIOES/BILOU
+    tagger's calibration file, which the build reads). A directory lacking
+    any of the files a load needs — an extra file included — is refused
     (:func:`_require_complete`)."""
     what = "hf model"
     patterns = (*HF_PATTERNS, *extra_files)
@@ -412,9 +417,8 @@ def hf_files(
                 allow_patterns=patterns,
             )
     files = matching_files(path, patterns)
-    _require_complete(
-        what, model, revision, _hf_missing(path, files, model=model), allow_download=allow_download
-    )
+    missing = _hf_missing(path, files, model=model, extra_files=extra_files)
+    _require_complete(what, model, revision, missing, allow_download=allow_download)
     return ModelFiles(model, path, files)
 
 

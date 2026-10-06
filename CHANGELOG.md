@@ -38,8 +38,10 @@ and tags `vX.Y.Z`.
   only `B-`/`I-` and cut every such span at its last token, so these models now run without it
   — the same overlapping token windows, the model's per-token label scores, and a span decoder
   of llm-redact's own (`detection/tagging.py`). A model whose calibration file the model catalog
-  lists is decoded with a constrained Viterbi decoder using its transition biases; any other is
-  read greedily (a malformed tag sequence starts a new span rather than dropping a token). With
+  lists is decoded with a constrained Viterbi decoder using its transition biases — the file is
+  part of the model: `llm-redact models pull` fetches it, `models verify` (`--dir` too) and
+  doctor require it, and a model without it is refused at startup, never decoded greedily
+  instead; any other is read greedily (a malformed tag sequence starts a new span rather than dropping a token). With
   a WordPiece tokenizer the decoder reads whole words, each scored by its first piece, so a span
   never ends inside a word. BIO models keep the pipeline. A model whose labels mix BIOES and BILOU tags is refused at startup.
 - docs/how-it-works.md shows NER off the event loop in a new animated `ner-prefetch`

@@ -23,6 +23,7 @@ import re
 import sys
 import types
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -31,7 +32,7 @@ from llm_redact.config import ConfigError
 from llm_redact.detection import model_catalog
 from llm_redact.detection.engine import NerConfig
 from llm_redact.detection.hf_ner import TaggerPipe, build_hf_detector, torch_scorer
-from llm_redact.detection.model_catalog import TAGGING_SCHEMES, CatalogEntry
+from llm_redact.detection.model_catalog import SIDECAR_NAME, TAGGING_SCHEMES, CatalogEntry
 from llm_redact.detection.tagging import (
     BIAS_KEYS,
     BILOU,
@@ -740,15 +741,43 @@ def test_a_long_text_is_read_in_windows(monkeypatch: pytest.MonkeyPatch) -> None
     assert detector.stats.windows == 12  # 62 tokens a window, 16 shared
 
 
-def test_a_missing_calibration_file_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    install_transformers(monkeypatch, _tagger_pipe(NAME))
+def test_a_missing_calibration_file_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A file the catalog lists is part of the model: missing, the model is
+    # not (completely) cached — never decoded greedily instead.
+    from llm_redact.detection.model_files import ModelNotCached
+
+    hub = FakeHub()
+    install_transformers(monkeypatch, _tagger_pipe(NAME), hub)
     entry = _entry("org/bioes-ner", viterbi_calibration="viterbi_calibration.json")
     monkeypatch.setattr(model_catalog, "lookup", lambda model_id: entry)
-    with pytest.raises(ConfigError) as caught:
+    with pytest.raises(ModelNotCached) as caught:
         build_hf_detector(NerConfig(enabled=True, backend="hf", model="org/bioes-ner"))
+    assert caught.value.missing == ("viterbi_calibration.json",)
+    assert str(caught.value).endswith("; missing: viterbi_calibration.json")
+    # A repository that lacks it, with downloads on.
+    with pytest.raises(ConfigError) as caught:
+        build_hf_detector(
+            NerConfig(enabled=True, backend="hf", model="org/bioes-ner", allow_download=True)
+        )
     assert str(caught.value) == (
-        "[detection.ner] hf model 'org/bioes-ner' has no viterbi_calibration.json, which the"
-        " model catalog lists for its constrained decoding"
+        "[detection.ner] hf model 'org/bioes-ner' (no revision pinned): its repository lacks"
+        " what the loader needs: viterbi_calibration.json"
+    )
+    # A local folder its sidecar identifies as the catalogued model.
+    assert hub.default is not None
+    for name, text in {
+        **hub.default,
+        SIDECAR_NAME: json.dumps({"model_id": "org/bioes-ner", "revision": None}),
+    }.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    with pytest.raises(ConfigError) as caught:
+        build_hf_detector(NerConfig(enabled=True, backend="hf", model=str(tmp_path)))
+    assert str(caught.value) == (
+        f"[detection.ner] hf model {str(tmp_path)!r} is a local directory that lacks what the"
+        " loader needs: viterbi_calibration.json"
     )
 
 

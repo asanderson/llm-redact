@@ -469,17 +469,21 @@ position. The checkpoint's configuration is inconsistent; pick another model
 or fix its `config.json` in a local copy and point `[detection.ner.models] hf`
 at that folder.
 
-## "[detection.ner] hf model '…' has no …, which the model catalog lists for its constrained decoding" / "[detection.ner] hf model '…': … must hold exactly …" / "… must be a number" / "… must be finite"
+## "[detection.ner] hf model '…' … missing: viterbi_calibration.json" / "… lacks what the loader needs: viterbi_calibration.json" / "[detection.ner] hf model '…': … must hold exactly …" / "… must be a number" / "… must be finite"
 
-From `serve` / `serve --check`: llm-redact's model catalog lists a calibration
+From `serve` / `serve --check`, `llm-redact doctor` (under `models`) or
+`llm-redact models verify`: llm-redact's model catalog lists a calibration
 file for this BIOES/BILOU model (the transition biases its spans are decoded
 with), and the file is missing from the model's folder or snapshot, or does
 not have the expected shape (`{"operating_points": {"default": {"biases":
 {...}}}}` with exactly the six `transition_bias_*` keys, each a finite number:
-the message names the key). With downloads off,
-a snapshot pulled before the file was listed lacks it: run `llm-redact models
-pull` again (or set `allow_download = true` for one startup). A local folder
-needs the file copied in beside the weights.
+the message names the key). A listed file is part of the model, like its
+weights: a model without it is refused rather than decoded greedily. With
+downloads off, a snapshot pulled before the file was listed lacks it: run
+`llm-redact models pull` again (or set `allow_download = true` for one
+startup). A local folder (or one written by an older `models pull --to`)
+needs the file copied in beside the weights; pull it again to refresh its
+manifest.
 
 ## "[detection.ner] hf model '…' has no safetensors weights; set allow_pickle_weights = true to load pytorch_model.bin"
 

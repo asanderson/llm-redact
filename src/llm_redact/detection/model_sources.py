@@ -150,6 +150,9 @@ def local_files(
             revision=revision,
             allow_download=allow_download,
             allow_pickle_weights=ner.allow_pickle_weights,
+            # The files the catalog lists beyond the loader's own (a
+            # tagger's calibration file), as the build fetches and reads.
+            extra_files=source.entry.extra_files("hf") if source.entry is not None else (),
         )
     if source.backend == "gliner2":
         return gliner2_files(

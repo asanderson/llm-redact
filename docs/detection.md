@@ -510,8 +510,14 @@ own span decoder. When llm-redact's model catalog lists the model's
 calibration file (transition biases its publisher ships, fetched with the
 model), spans are decoded with a constrained Viterbi decoder: the best label
 sequence in which every span opens with `B`/`S`, continues with `I` of the
-same entity and closes with `E`/`S`. Otherwise each token takes its most
-likely label and spans are read greedily: `B` … `E`, a single `S`, `I`
+same entity and closes with `E`/`S`. The file is then part of the model:
+`llm-redact models pull` fetches it, `models verify` (and `verify --dir`) and
+doctor require it, and a snapshot or folder without it is refused at startup
+like one missing its weights (a snapshot pulled before the catalog listed
+the file: run `models pull` again) — a model whose catalog entry lists a
+calibration file is never decoded greedily instead. For a model the catalog
+lists no calibration file for, each token takes its most likely label and
+spans are read greedily: `B` … `E`, a single `S`, `I`
 continuing; a tag that cannot continue the open span starts a new one, and a
 span left open is kept as it is, so no token the model marked is dropped. A
 span's score is the mean probability of its tokens' labels (`score_threshold`

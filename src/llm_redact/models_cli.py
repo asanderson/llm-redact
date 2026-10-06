@@ -378,12 +378,20 @@ def run_verify_dir(args: argparse.Namespace) -> int:
 def _loader_problems(root: Path, model: Any) -> list[str]:
     """Whether the folder holds what its loader reads (a manifest could
     list an incomplete folder): the loaders' own check, files only."""
+    from llm_redact.detection.model_catalog import lookup
     from llm_redact.detection.model_files import gliner2_files, gliner_files, hf_files
 
     folder = str(root / model.folder)
+    entry = lookup(model.model_id)
     try:
         if model.backend == "hf":
-            hf_files(folder, revision=None, allow_download=False, allow_pickle_weights=True)
+            hf_files(
+                folder,
+                revision=None,
+                allow_download=False,
+                allow_pickle_weights=True,
+                extra_files=entry.extra_files("hf") if entry is not None else (),
+            )
         elif model.backend == "gliner2":
             gliner2_files(folder, revision=None, allow_download=False, check_types=False)
         else:

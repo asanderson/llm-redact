@@ -164,6 +164,14 @@ class CatalogEntry:
         or None (the generic prompt applies)."""
         return dict(self.prompts).get(type_name)
 
+    def extra_files(self, backend: str) -> tuple[str, ...]:
+        """The repository files beyond ``backend``'s own file list that a
+        load of this model reads, so a pull fetches them and a check
+        requires them: an ``hf`` tagger's calibration file."""
+        if backend == "hf" and "hf" in self.backends and self.viterbi_calibration is not None:
+            return (self.viterbi_calibration,)
+        return ()
+
     def describe(self) -> str:
         """The reason as a warning or a docs row shows it: the facts, the
         card they come from and the date they were checked."""

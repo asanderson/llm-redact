@@ -1319,3 +1319,92 @@ def test_verify_dir_runs_the_gliner2_loaders_check(
         "FAIL  gliner2: org/g2 at an unrecorded revision: [detection.ner] gliner2 model"
         f" '{folder}' is a local directory that lacks what the loader needs: tokenizer files"
     ]
+
+
+# --- an hf tagger's calibration file (CatalogEntry.viterbi_calibration) -----------------
+
+TAGGER = "org/bioes-tagger"
+TAGGER_PIN = "1111111111111111111111111111111111111111"
+CALIBRATION = "viterbi_calibration.json"
+
+
+def _catalogue_tagger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A catalog entry for TAGGER that lists a calibration file (the hf
+    build fetches and reads it)."""
+    from llm_redact.detection import model_catalog
+
+    entry = model_catalog.CatalogEntry(
+        model_id=TAGGER,
+        backends=("hf",),
+        license="Apache-2.0",
+        status="caution",
+        reason="a test tagger",
+        revision=TAGGER_PIN,
+        tagging="bioes",
+        viterbi_calibration=CALIBRATION,
+    )
+    monkeypatch.setattr(model_catalog, "_EXACT", {**model_catalog._EXACT, TAGGER.casefold(): entry})
+
+
+def test_pull_and_verify_carry_a_taggers_calibration_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_redact.detection.model_files import HF_PATTERNS
+
+    _catalogue_tagger(monkeypatch)
+    repo = {k: v for k, v in DEFAULT_REPO.items() if k in HF_FILES}
+    hub = install_hub(monkeypatch, FakeHub(repos={TAGGER: {**repo, CALIBRATION: "{}"}}))
+    config = _config(tmp_path, f'backend = "hf"\nmodel = "{TAGGER}"')
+    out_dir = tmp_path / "carry"
+    code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
+    assert code == 0, out
+    # Fetched with the loader's patterns and the file the catalog lists.
+    assert [(c["revision"], c["allow_patterns"]) for c in hub.calls] == [
+        (TAGGER_PIN, [*HF_PATTERNS, CALIBRATION])
+    ]
+    folder = out_dir / "hf-org--bioes-tagger"
+    assert CALIBRATION in folder_files(folder)
+    assert out.splitlines()[0] == f"OK    hf: {TAGGER} at {TAGGER_PIN}: {len(HF_FILES) + 1} files"
+    code, out = _run(capsys, "verify", "--config", str(config))
+    assert code == 0, out
+    code, out = _run(capsys, "verify", "--dir", str(out_dir))
+    assert code == 0, out
+    # A snapshot pulled before the catalog listed the file lacks it: not
+    # complete, as the build would refuse it (never decoded greedily).
+    hub.repos[TAGGER] = repo
+    hub.root = tmp_path / "older-cache"
+    code, out = _run(capsys, "verify", "--config", str(config))
+    assert code == 1
+    assert out.splitlines()[-1].endswith(f"; missing: {CALIBRATION}")
+    code, out = _run(capsys, "list", "--config", str(config), "--json")
+    assert json.loads(out)["models"][0]["files"] == "incomplete"
+
+
+def test_verify_dir_requires_a_taggers_calibration_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A folder whose manifest is intact but lacks the file the catalog lists
+    # for its model: the hf loader would refuse it.
+    _catalogue_tagger(monkeypatch)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+    root = tmp_path / "models"
+    folder = _write_files(
+        root / "hf-org--bioes-tagger",
+        {k: v for k, v in DEFAULT_REPO.items() if k in HF_FILES}
+        | {SIDECAR_NAME: json.dumps({"model_id": TAGGER, "revision": TAGGER_PIN})},
+    )
+    records = file_records(folder, folder_files(folder))
+    model = ManifestModel(
+        backend="hf",
+        model_id=TAGGER,
+        revision=TAGGER_PIN,
+        folder=folder.name,
+        files=tuple((r["path"], r["size"], r["sha256"]) for r in records),
+    )
+    (root / MANIFEST_NAME).write_text(json.dumps(manifest_json([model], "test")))
+    code, out = _run(capsys, "verify", "--dir", str(root))
+    assert code == 1
+    assert out.splitlines() == [
+        f"FAIL  hf: {TAGGER} at {TAGGER_PIN}: [detection.ner] hf model '{folder}' is a local"
+        f" directory that lacks what the loader needs: {CALIBRATION}"
+    ]

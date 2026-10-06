@@ -469,13 +469,14 @@ position. The checkpoint's configuration is inconsistent; pick another model
 or fix its `config.json` in a local copy and point `[detection.ner.models] hf`
 at that folder.
 
-## "[detection.ner] hf model '…' has no …, which the model catalog lists for its constrained decoding" / "[detection.ner] hf model '…': … must hold exactly …"
+## "[detection.ner] hf model '…' has no …, which the model catalog lists for its constrained decoding" / "[detection.ner] hf model '…': … must hold exactly …" / "… must be a number" / "… must be finite"
 
 From `serve` / `serve --check`: llm-redact's model catalog lists a calibration
 file for this BIOES/BILOU model (the transition biases its spans are decoded
 with), and the file is missing from the model's folder or snapshot, or does
 not have the expected shape (`{"operating_points": {"default": {"biases":
-{...}}}}` with exactly the six `transition_bias_*` numbers). With downloads off,
+{...}}}}` with exactly the six `transition_bias_*` keys, each a finite number:
+the message names the key). With downloads off,
 a snapshot pulled before the file was listed lacks it: run `llm-redact models
 pull` again (or set `allow_download = true` for one startup). A local folder
 needs the file copied in beside the weights.

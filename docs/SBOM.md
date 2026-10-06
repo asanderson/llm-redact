@@ -18,7 +18,8 @@ machine-readable records live. Three layers:
   `hf` and `gliner` extras on a CPU-only torch) gets the same, and the
   Release also carries `llm-redact-ner-image.cdx.json`: that image's Python
   closure (its extras' locked packages without torch's CUDA and triton
-  dependencies, and torch as the PyTorch CPU index's `+cpu` build).
+  dependencies, and torch as the PyTorch CPU index's `+cpu` build with the
+  wheel digests `scripts/cpu_torch.py` records).
 
 Exact pinned versions are deliberately not repeated here — they live in
 [`uv.lock`](../uv.lock) (the committed resolution) and in each
@@ -79,7 +80,8 @@ that fixed CVE-2025-32434); on Linux, PyPI's torch wheel also brings the
 NVIDIA CUDA libraries, which a CPU-only install avoids by taking torch from
 the PyTorch CPU index ([dependencies.md](dependencies.md)); the `-ner` image,
 the CI air-gap job and the offline wheelhouse recipe do so with
-`scripts/cpu_torch.py`.
+`scripts/cpu_torch.py`, which hash-checks that wheel against the CPU index
+digests it records for the locked version.
 
 ## Development toolchain (dev group; never ships in the wheel)
 

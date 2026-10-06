@@ -830,6 +830,45 @@ def test_the_cpu_torch_recipe_guards_the_ner_image_build() -> None:
     assert "HF_HOME=/data/huggingface" in dockerfile
 
 
+def _torch_installs(text: str) -> list[str]:
+    """Every command of ``text`` (backslash continuations joined, ``&&``
+    chains split) that downloads or installs from a ``torch.txt``."""
+    joined = re.sub(r"\\\n\s*", " ", text)
+    commands = [part for line in joined.splitlines() for part in line.split("&&")]
+    return [
+        command
+        for command in commands
+        if "torch.txt" in command and re.search(r"\bpip\"? (?:install|download)\b", command)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "count"),
+    [
+        ("Dockerfile", 1),
+        (".github/workflows/ci.yml", 2),
+        ("tests/airgap/install_wheelhouse.sh", 1),
+        ("docs/deployment.md", 2),
+    ],
+)
+def test_torch_is_installed_hash_checked_everywhere(path: str, count: int) -> None:
+    # torch.txt carries the CPU wheels' SHA-256 (scripts/cpu_torch.py); a
+    # torch download or install without --require-hashes would take any wheel
+    # named like the locked version.
+    installs = _torch_installs((DEPLOY.parent / path).read_text())
+    assert len(installs) == count, installs
+    for command in installs:
+        assert "--require-hashes" in command, command
+
+
+def test_the_ner_sbom_records_torch_with_its_digests() -> None:
+    runs = "\n".join(
+        step.get("run", "") for step in _workflow("release.yml")["jobs"]["build"]["steps"]
+    )
+    assert "cat torch.txt >>sbom-ner-requirements.txt" in runs
+    assert '+cpu" >>' not in runs
+
+
 def _pinned(steps: list[dict]) -> None:
     for step in steps:
         uses = step.get("uses")

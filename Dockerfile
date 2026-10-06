@@ -18,7 +18,8 @@ ARG EXTRAS="--extra perf --extra realtime --extra extract"
 # torch: PyPI's Linux torch wheel, on x86_64 and aarch64 alike, pulls the
 # CUDA libraries and triton (gigabytes no CPU host runs). scripts/cpu_torch.py
 # takes torch at its LOCKED version from TORCH_INDEX_URL (the PyTorch CPU
-# index) and every other locked package hash-checked from uv.lock, without
+# index), checked against the CPU wheels' SHA-256 the script records, and
+# every other locked package hash-checked from uv.lock, without
 # torch's GPU dependencies, then fails the build if one got in anyway. Empty
 # NER_EXTRAS (the default) is the stock image, built from uv.lock as before.
 ARG NER_EXTRAS=""
@@ -32,7 +33,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv venv /app/.venv && \
         uv export --frozen --no-dev --no-emit-project ${EXTRAS} ${NER_EXTRAS} \
             | python /tmp/cpu_torch.py requirements /tmp/requirements.txt > /tmp/torch.txt && \
-        uv pip install --python /app/.venv/bin/python --no-deps \
+        uv pip install --python /app/.venv/bin/python --no-deps --require-hashes \
             --index-url "${TORCH_INDEX_URL}" -r /tmp/torch.txt && \
         uv pip install --python /app/.venv/bin/python --no-deps --require-hashes \
             -r /tmp/requirements.txt; \

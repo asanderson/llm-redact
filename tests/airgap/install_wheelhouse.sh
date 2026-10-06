@@ -8,7 +8,8 @@
 # WHEELHOUSE holds requirements.txt and torch.txt (scripts/cpu_torch.py) and
 # every wheel they name plus llm-redact-proxy's, downloaded on a connected
 # machine of the same platform and Python. pip never looks past it
-# (--no-index); every locked package is hash-checked.
+# (--no-index); every package is hash-checked, torch against the CPU wheels'
+# SHA-256 scripts/cpu_torch.py records.
 set -eu
 
 python=$1
@@ -17,7 +18,8 @@ venv=$3
 
 "$python" -m venv "$venv"
 pip="$venv/bin/pip"
-"$pip" install --no-index --find-links "$wheelhouse" --no-deps -r "$wheelhouse/torch.txt"
+"$pip" install --no-index --find-links "$wheelhouse" --no-deps --require-hashes \
+    -r "$wheelhouse/torch.txt"
 "$pip" install --no-index --find-links "$wheelhouse" --no-deps --require-hashes \
     -r "$wheelhouse/requirements.txt"
 "$pip" install --no-index --find-links "$wheelhouse" --no-deps llm-redact-proxy

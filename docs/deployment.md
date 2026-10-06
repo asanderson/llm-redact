@@ -415,7 +415,9 @@ Python minor version, from a checkout of the release you install. Every
 locked package is downloaded at its `uv.lock` version and checked against
 its hash; torch comes from the PyTorch CPU index at its locked version
 (`scripts/cpu_torch.py` splits it and its GPU-only dependencies out of the
-export):
+export) and is checked against the CPU wheels' SHA-256 the script records,
+on download and again on install. On macOS, pass `requirements --macos`
+(macOS has no `+cpu` torch build; its one wheel is CPU-only):
 
 ```bash
 # connected side, in the llm-redact checkout
@@ -424,7 +426,7 @@ uv export --frozen --no-dev --no-emit-project --extra hf --extra gliner \
   | python3 scripts/cpu_torch.py requirements wheelhouse/requirements.txt > wheelhouse/torch.txt
 python3 -m pip download --require-hashes --no-deps --only-binary=:all: \
   -r wheelhouse/requirements.txt -d wheelhouse
-python3 -m pip download --no-deps --only-binary=:all: \
+python3 -m pip download --require-hashes --no-deps --only-binary=:all: \
   --index-url https://download.pytorch.org/whl/cpu -r wheelhouse/torch.txt -d wheelhouse
 uv build --wheel --out-dir wheelhouse          # llm-redact-proxy itself
 ```
@@ -435,7 +437,7 @@ index at all:
 ```bash
 python3 -m venv /opt/llm-redact
 pip=/opt/llm-redact/bin/pip
-$pip install --no-index --find-links wheelhouse --no-deps -r wheelhouse/torch.txt
+$pip install --no-index --find-links wheelhouse --no-deps --require-hashes -r wheelhouse/torch.txt
 $pip install --no-index --find-links wheelhouse --no-deps --require-hashes -r wheelhouse/requirements.txt
 $pip install --no-index --find-links wheelhouse --no-deps llm-redact-proxy
 $pip check

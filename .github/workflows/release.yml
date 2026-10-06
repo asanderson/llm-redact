@@ -58,14 +58,15 @@ jobs:
             -o sbom/llm-redact-runtime.cdx.json
       # The -ner image's Python closure, as its Dockerfile installs it: every
       # locked package of the image's extras but torch's GPU dependencies,
-      # and torch at its locked version as the CPU index's +cpu build.
+      # and torch at its locked version as the CPU index's +cpu build, with
+      # the CPU wheels' SHA-256 scripts/cpu_torch.py records.
       - name: SBOM (CycloneDX) of the -ner image's closure
         run: |
           set -euo pipefail
           # shellcheck disable=SC2086 # the extras are separate arguments
           uv export --frozen --no-dev --no-emit-project $IMAGE_EXTRAS $NER_EXTRAS \
             | python3 scripts/cpu_torch.py requirements sbom-ner-requirements.txt >torch.txt
-          echo "$(cat torch.txt)+cpu" >>sbom-ner-requirements.txt
+          cat torch.txt >>sbom-ner-requirements.txt
           uvx --from cyclonedx-bom cyclonedx-py requirements sbom-ner-requirements.txt \
             -o sbom/llm-redact-ner-image.cdx.json
       # Signed provenance for the exact bytes attached to the Release:

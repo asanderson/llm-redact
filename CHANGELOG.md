@@ -241,13 +241,15 @@ and tags `vX.Y.Z`.
   a host or open a connection; an empty folder must fail with the `models pull` hint. A unit test
   (`tests/test_airgap_guard.py`) builds every NER backend under a socket guard.
   `scripts/cpu_torch.py` installs the locked NER extras with a CPU-only torch (torch at its locked
-  version from the PyTorch CPU index, everything else hash-checked from uv.lock, without the CUDA
-  and triton packages).
+  version from the PyTorch CPU index, checked against the CPU wheels' SHA-256 the script records
+  for that version, everything else hash-checked from uv.lock, without the CUDA and triton
+  packages).
 
 - A Free `-ner` container image (`<version>-ner`, `latest-ner`): the stock image plus the `hf`
   and `gliner` NER extras with a CPU-only torch on amd64 and arm64 (`Dockerfile`
-  `NER_EXTRAS`; torch at its locked version from the PyTorch CPU index, every other package
-  hash-checked from uv.lock, and the build fails if a CUDA or triton package got in), built,
+  `NER_EXTRAS`; torch at its locked version from the PyTorch CPU index, hash-checked against the
+  CPU wheels' recorded SHA-256, every other package hash-checked from uv.lock, and the build
+  fails if a CUDA or triton package got in), built,
   attested and cosign-signed like the stock image, with its closure as
   `llm-redact-ner-image.cdx.json` on the Release. The image's Hugging Face cache (`HF_HOME`) is
   `/data/huggingface`, on the data volume. The CI `container-ner` job builds it and, with no

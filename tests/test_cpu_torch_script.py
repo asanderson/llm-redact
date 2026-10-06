@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import re
 import sys
+import tomllib
 import types
 from pathlib import Path
 from typing import Any
@@ -71,8 +73,77 @@ def test_requirements_writes_the_rest_and_prints_the_torch_pin(
     monkeypatch.setattr(sys, "stdin", io.StringIO(EXPORT))
     out = tmp_path / "requirements.txt"
     assert cpu_torch.main(["requirements", str(out)]) == 0
-    assert capsys.readouterr().out == "torch==2.13.0\n"
+    printed = capsys.readouterr().out
+    assert printed.startswith("torch==2.13.0+cpu \\\n    --hash=sha256:")
+    assert printed.endswith("\n") and not printed.endswith("\\\n")
     assert "torch" not in out.read_text(encoding="utf-8").replace("transformers", "")
+
+
+def _hashes(pinned: str) -> set[str]:
+    return set(re.findall(r"--hash=sha256:([0-9a-f]{64})", pinned))
+
+
+def test_the_torch_pin_carries_every_recorded_cpu_wheel_digest() -> None:
+    wheels = cpu_torch.CPU_WHEELS["2.13.0"]
+    plus_cpu = {digest for name, digest in wheels.items() if "+cpu-" in name}
+    macos = {digest for name, digest in wheels.items() if "macosx" in name}
+    assert plus_cpu and macos and plus_cpu | macos == set(wheels.values())
+    pinned = cpu_torch.torch_requirement("2.13.0")
+    assert pinned is not None and pinned.splitlines()[0] == "torch==2.13.0+cpu \\"
+    assert _hashes(pinned) == plus_cpu
+    mac = cpu_torch.torch_requirement("2.13.0", macos=True)
+    assert mac is not None and mac.splitlines()[0] == "torch==2.13.0 \\"
+    assert _hashes(mac) == macos
+    # The image's wheel, downloaded and hashed when the table was recorded.
+    assert (
+        wheels["torch-2.13.0+cpu-cp313-cp313-manylinux_2_28_x86_64.whl"]
+        == "3fbf9c9d1f3c10c2d59d04aca426dee9ccc6ceb32d255c61e93acc3b4f75fae6"
+    )
+
+
+def _locked_torch() -> str:
+    lock = tomllib.loads((SCRIPT.parents[1] / "uv.lock").read_text(encoding="utf-8"))
+    (version,) = [package["version"] for package in lock["package"] if package["name"] == "torch"]
+    return str(version)
+
+
+def test_the_recorded_cpu_wheels_are_the_locked_torch() -> None:
+    # A torch bump in uv.lock fails here until CPU_WHEELS records the new
+    # version's CPU wheels (https://download.pytorch.org/whl/cpu/torch/).
+    locked = _locked_torch()
+    assert set(cpu_torch.CPU_WHEELS) == {locked}
+    for name, digest in cpu_torch.CPU_WHEELS[locked].items():
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), name
+        assert re.fullmatch(
+            rf"torch-{re.escape(locked)}(?:\+cpu)?-cp3(?:1[1-9])-cp3(?:1[1-9])t?-[a-z0-9_]+\.whl",
+            name,
+        ), name
+    tags = {name.split("-", 2)[2] for name in cpu_torch.CPU_WHEELS[locked]}
+    # Both architectures of the -ner image (Python 3.13) and the wheelhouse
+    # recipe's Linux and macOS hosts on every supported Python.
+    for python in ("cp311", "cp312", "cp313", "cp314"):
+        for platform in ("manylinux_2_28_x86_64", "manylinux_2_28_aarch64"):
+            assert f"{python}-{python}-{platform}.whl" in tags
+        assert f"{python}-{python}-macosx_14_0_arm64.whl" in tags
+
+
+def test_requirements_without_recorded_wheels_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO("torch==9.9.9 \\\n    --hash=sha256:ab\n"))
+    out = tmp_path / "r.txt"
+    assert cpu_torch.main(["requirements", str(out)]) == 1
+    assert "no CPU wheel hash recorded for torch 9.9.9" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_requirements_for_macos_pins_the_plain_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(EXPORT))
+    assert cpu_torch.main(["requirements", "--macos", str(tmp_path / "r.txt")]) == 0
+    assert capsys.readouterr().out == cpu_torch.torch_requirement("2.13.0", macos=True)
+    assert (tmp_path / "r.txt").exists()
 
 
 def test_requirements_without_torch_fails(

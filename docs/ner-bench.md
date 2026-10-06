@@ -14,6 +14,10 @@ grammar or it is broken, while a model is measured statistically. See
 [assurance.md](assurance.md#statistical-gates-for-ner-models) for how the two
 gates differ.
 
+![Flowchart of the NER bench: datasets that are never committed (generated, downloaded at pinned revisions, or local files) pass through adapters and label maps into the full detection pipeline of a bench configuration; metrics feed metadata-only reports and the --check gate against the recorded thresholds and ceilings, which the ner-models CI job runs on every pull request and the weekly ner-eval workflow reports; beside it the unchanged deterministic gate on the vendored negatives](diagrams/ner-bench.png)
+
+*Static diagram. [Mermaid source](diagrams/ner-bench.mmd).*
+
 ## Running it
 
 ```bash

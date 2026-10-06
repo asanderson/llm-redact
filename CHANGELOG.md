@@ -132,6 +132,11 @@ and tags `vX.Y.Z`.
   `dslim/bert-base-NER` and `urchade/gliner_small-v2.1` are recorded in
   `bench/ner_thresholds.toml` and `bench/ner_ceilings.toml`, with the date, revisions and
   measured values.
+- docs/ner-bench.md gains the `ner-bench` diagram (datasets → adapters and label maps → the
+  full pipeline → metrics → recorded gates → the CI jobs, beside the unchanged deterministic
+  gate), and docs/CONTRIBUTING.md an "Adding an NER model or backend" checklist: license and
+  lineage facts, catalog entry and pins, bench configuration, baselines, CI, admission,
+  docs, troubleshooting entries, extras and diagrams.
 - Published datasets for the NER bench: `--dataset openpii` (OpenPII 1.5M, CC BY 4.0,
   Ai4Privacy / Ai Suisse SA; `--language` filters it) and `--dataset nemotron`
   (Nemotron-PII, CC BY 4.0, NVIDIA), downloaded at run time at a pinned revision into

@@ -615,7 +615,10 @@ newer than your version (`uv sync --extra gliner`), or pick another model.
 model's "Files and versions" page: Knowledgator's GLiNER-PII models ship
 `onnx/model.onnx`, `onnx/model_quint8.onnx` and, except `-large`,
 `onnx/model_fp16.onnx`), or onnxruntime is missing — reinstall the extra:
-`uv sync --extra gliner`. Related: "[detection.ner.onnx] BACKEND: only the
+`uv sync --extra gliner` (gliner 0.2.29 and later no longer install
+onnxruntime themselves; the `gliner` extra lists it, so an environment that
+installed only the `gliner` package lacks it; `llm-redact doctor` FAILs the
+gliner backend then). Related: "[detection.ner.onnx] BACKEND: only the
 gliner backend loads ONNX weights" and "… must be a .onnx file inside the
 model" (no wildcard, no `..`, no absolute path).
 

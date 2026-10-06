@@ -246,7 +246,7 @@ def build_gliner_detector(config: "NerConfig") -> GlinerDetector:
     load: dict[str, Any] = {"local_files_only": True, "map_location": "cpu"}
     if onnx_file is not None:
         # [detection.ner.onnx]: ONNX weights through onnxruntime, which the
-        # gliner package depends on.
+        # gliner extra lists itself (gliner >= 0.2.29 made it optional).
         if importlib.util.find_spec("onnxruntime") is None:
             raise ConfigError(
                 "[detection.ner.onnx] gliner needs onnxruntime, which the gliner extra"

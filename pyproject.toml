@@ -31,7 +31,10 @@ ner = ["spacy>=3.7,<4"]
 # PyPI's Linux torch wheel pulls the CUDA libraries (gigabytes); a CPU-only
 # host installs torch from the PyTorch CPU index (docs/dependencies.md).
 # Heavy (pulls torch + transformers); more robust than spaCy on unusual names.
-gliner = ["gliner>=0.2", "torch>=2.6"]
+# onnxruntime runs [detection.ner.onnx] weights: gliner required it up to
+# 0.2.28, and 0.2.29 moved it to gliner's own `onnx` extra (checked on PyPI
+# 2026-10-06), so the extra lists it itself, which suits every gliner version.
+gliner = ["gliner>=0.2", "onnxruntime>=1.17", "torch>=2.6"]
 # GLiNER2 (Fastino; Apache-2.0): zero-shot schema-driven extraction with
 # character spans. gliner2's own `local` extra caps transformers below 5,
 # which the gliner and hf extras resolve to; its runtime needs are listed

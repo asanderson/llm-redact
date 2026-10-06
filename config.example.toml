@@ -476,7 +476,7 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # catalog knows uses the catalog's pin (the default models included).
 # [detection.ner.revisions]
 # hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
-# Load the gliner model's ONNX export (onnxruntime) instead of its torch
+# Load the gliner model's ONNX export (onnxruntime, in the gliner extra) instead of its torch
 # weights: a .onnx file inside the model; only that file is fetched.
 # [detection.ner.onnx]
 # gliner = "onnx/model_quint8.onnx"

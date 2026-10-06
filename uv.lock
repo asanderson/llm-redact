@@ -1144,6 +1144,7 @@ extract = [
 ]
 gliner = [
     { name = "gliner" },
+    { name = "onnxruntime" },
     { name = "torch" },
 ]
 gliner2 = [
@@ -1216,6 +1217,7 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'bench-data'", specifier = ">=0.23" },
     { name = "keyring", marker = "extra == 'keyring'", specifier = ">=24" },
     { name = "numpy", marker = "extra == 'gliner2'", specifier = ">=1.24,<3" },
+    { name = "onnxruntime", marker = "extra == 'gliner'", specifier = ">=1.17" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.25" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.25" },
     { name = "oracledb", marker = "extra == 'vault-oracle'", specifier = ">=2" },

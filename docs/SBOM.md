@@ -51,7 +51,7 @@ padding differs), pinned to the published Keccak test vectors.
 | Extra | Packages | Purpose |
 | --- | --- | --- |
 | `ner` | `spacy` | Person-name NER, small-footprint English-first default backend. |
-| `gliner` | `gliner`, `torch` | Zero-shot NER, robust on unusual names; separate extra because it pulls torch + transformers. |
+| `gliner` | `gliner`, `onnxruntime`, `torch` | Zero-shot NER, robust on unusual names; separate extra because it pulls torch + transformers. `onnxruntime` (MIT) runs ONNX weights (`[detection.ner.onnx]`); listed directly since gliner 0.2.29 made it optional. |
 | `gliner2` | `gliner2`, `torch`, `transformers`, `peft`, `safetensors`, `numpy` | Fastino's GLiNER2 zero-shot extraction with character spans; lists gliner2's model dependencies itself (its own `local` extra caps transformers below 5). Its hosted-API client is never used. |
 | `presidio` | `presidio-analyzer` | Microsoft's FOSS PII analyzer layered over spaCy (recognizers + context scoring). |
 | `stanza` | `stanza`, `torch` | Stanford Stanza NER, 60+ languages — the multilingual complement to spaCy. |

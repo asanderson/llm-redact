@@ -50,7 +50,10 @@ and tags `vX.Y.Z`.
 - `[detection.ner.onnx]`: the `gliner` backend can load a model's ONNX export through
   onnxruntime (`gliner = "onnx/model_quint8.onnx"`, a file inside the model) instead of its
   torch weights; only that file is fetched, never `model.safetensors` or `pytorch_model.bin`.
-  Only `gliner` takes an entry; a path with a wildcard or `..` is a config error.
+  Only `gliner` takes an entry; a path with a wildcard or `..` is a config error. The `gliner`
+  extra lists onnxruntime itself (gliner 0.2.29 moved it to gliner's own optional `onnx`
+  extra, so a fresh install had none and the setting refused to start), and `llm-redact doctor`
+  FAILs the gliner backend when the setting is present and onnxruntime is not.
 - `[detection.ner]` model-source keys: `allow_download` (default `false`), `allow_pickle_weights`
   (default `false`; `hf` only) and `[detection.ner.revisions]` (per `gliner`/`hf` backend, a full
   40-character commit id; a branch or tag name such as `main` is a config error because it moves).

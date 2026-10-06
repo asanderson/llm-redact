@@ -556,6 +556,10 @@ def _check_extras(report: _Report, config: Config) -> None:
         for backend in config.detection.ner.active_backends():
             hint = f"install it: uv sync --extra {_NER_EXTRAS[backend]}"
             modules = (_NER_MODULES[backend], *_NER_LOAD_MODULES.get(backend, ()))
+            if config.detection.ner.onnx_for(backend) is not None:
+                # [detection.ner.onnx]: the gliner extra brings onnxruntime
+                # (gliner >= 0.2.29 no longer depends on it).
+                modules = (*modules, "onnxruntime")
             if any(importlib.util.find_spec(module) is None for module in modules):
                 report.line(
                     "FAIL", "ner", f'backend "{backend}" but its extra is not installed; {hint}'

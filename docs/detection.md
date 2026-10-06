@@ -252,7 +252,8 @@ configuration with `trust_remote_code`, so an unknown type could run code).
 The model is loaded from that folder alone; nothing is fetched at load time.
 
 **ONNX weights for `gliner`.** `[detection.ner.onnx]` loads a GLiNER model's
-ONNX export through onnxruntime (installed with the `gliner` extra) instead
+ONNX export through onnxruntime (the `gliner` extra lists it itself: gliner
+0.2.29 and later no longer install it) instead
 of its torch weights: name the file inside the model, and only that file —
 never `model.safetensors` or `pytorch_model.bin` — is fetched or read:
 

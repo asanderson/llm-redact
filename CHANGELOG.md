@@ -25,7 +25,10 @@ and tags `vX.Y.Z`.
   and pinned to its `main` commit of 2026-10-06. The extra installs gliner2 2.0+ with torch
   (`>=2.6`), transformers, peft, safetensors and numpy; gliner2's own `local` extra caps
   transformers below 5, which the other extras use, so the extra lists those dependencies itself
-  (checked with gliner2 2.0.0 on transformers 5.10.1). `doctor` checks the extra and torch.
+  (checked with gliner2 2.0.0 on transformers 5.10.1). `doctor` checks the extra (gliner2, and
+  peft, which gliner2 imports only when it loads a model) and torch. gliner2's own log records
+  are silenced: it names words of the text it reads. A span reaching into the "." gliner2 adds
+  to a text that does not end a sentence ends at the text instead of being dropped.
 - The `hf` NER backend decodes BIOES and BILOU taggers (models whose labels carry `E-`/`S-`
   or `L-`/`U-` tags, such as `openai/privacy-filter`'s): the transformers pipeline understands
   only `B-`/`I-` and cut every such span at its last token, so these models now run without it

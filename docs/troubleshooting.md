@@ -609,7 +609,9 @@ weights.
 ## `backend = "gliner2" but the gliner2 extra is not installed; install it: uv sync --extra gliner2`
 
 From `serve` / `serve --check` with the `gliner2` backend: the gliner2 package
-(or torch, transformers or peft, which it imports) is missing. Install the
+(or torch or transformers, which it imports, or peft, which it imports when it
+loads the model) is missing; `llm-redact doctor` checks gliner2, peft and
+torch. Install the
 extra: `uv sync --extra gliner2` (or `pip install 'llm-redact-proxy[gliner2]'`;
 on a CPU-only host take torch from the PyTorch CPU index first, see
 docs/dependencies.md).

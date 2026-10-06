@@ -214,7 +214,7 @@ def test_missing_ner_extra_fails(tmp_path: Path, capsys: pytest.CaptureFixture[s
 
 
 _BACKENDS = ("spacy", "gliner", "gliner2", "presidio", "stanza", "hf")
-_LIBRARIES = {"spacy", "gliner", "gliner2", "presidio_analyzer", "stanza", "transformers"}
+_LIBRARIES = {"spacy", "gliner", "gliner2", "peft", "presidio_analyzer", "stanza", "transformers"}
 
 
 def _ner_rows(
@@ -285,6 +285,19 @@ def test_a_missing_library_is_reported_before_torch(
         "FAIL",
         'backend "spacy" but its extra is not installed; install it: uv sync --extra ner',
     )
+
+
+def test_gliner2_without_peft_is_a_missing_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gliner2 imports without peft and fails only when it loads a model, so
+    # its own importability passed a backend `serve` refuses.
+    rows = _ner_rows(tmp_path, monkeypatch, present=(_LIBRARIES - {"peft"}) | {"torch"})
+    assert rows["gliner2"] == (
+        "FAIL",
+        'backend "gliner2" but its extra is not installed; install it: uv sync --extra gliner2',
+    )
+    assert rows["gliner"] == ("PASS", "gliner backend importable")
 
 
 def test_torch_below_the_floor_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

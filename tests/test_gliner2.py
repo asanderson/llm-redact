@@ -124,6 +124,60 @@ def test_a_span_outside_the_text_or_without_offsets_is_never_redacted() -> None:
     assert detector.stats.offsets_dropped == 4
 
 
+class Punctuating(FakeGliner2):
+    """gliner2 2.0.0 adds a "." to a text ending in none of ".!?" and reads
+    its spans on that text; this model's one span runs from ``start`` to
+    the end of that longer text, the added "." included."""
+
+    def __init__(self, start: int) -> None:
+        super().__init__([])
+        self.start = start
+
+    def extract_entities(self, text: str, entity_types: list[str], **kwargs: Any) -> Any:
+        read = text if text.endswith((".", "!", "?")) else text + "."
+        found = {"text": read[self.start :], "start": self.start, "end": len(read)}
+        return {"entities": {"person": [found]}}
+
+
+@pytest.mark.parametrize(
+    ("text", "start", "value"),
+    [
+        ("hi Jane Roe", 3, "Jane Roe"),  # "Jane Roe." in gliner2's text
+        ("hi Jane Roe ", 3, "Jane Roe"),  # "Jane Roe ." : the blank too
+    ],
+)
+def test_a_span_taking_in_the_added_period_ends_at_the_text(
+    text: str, start: int, value: str
+) -> None:
+    # Dropped as "outside the text", the name inside it went upstream.
+    detector, _ = _detector([], model=Punctuating(start))
+    found = detector.detect(text)
+    assert [(d.start, d.value) for d in found] == [(start, value)]
+    assert detector.stats.offsets_dropped == 0
+
+
+@pytest.mark.parametrize("text", ["hi Jane Roe.", "hi Jane Roe!"])
+def test_no_period_is_added_to_a_text_ending_a_sentence(text: str) -> None:
+    # Nothing was added, so a span past the end is outside the text.
+    class Past(FakeGliner2):
+        def extract_entities(self, text: str, entity_types: list[str], **kwargs: Any) -> Any:
+            return {"entities": {"person": [{"text": "x", "start": 3, "end": len(text) + 1}]}}
+
+    detector, _ = _detector([], model=Past([]))
+    assert detector.detect(text) == []
+    assert detector.stats.offsets_dropped == 1
+
+
+def test_a_span_of_only_the_added_period_is_dropped() -> None:
+    detector, _ = _detector([], model=Punctuating(len("hi Jane")))
+    assert detector.detect("hi Jane") == []
+    assert detector.stats.offsets_dropped == 1
+    # A blank before it leaves nothing either.
+    detector, _ = _detector([], model=Punctuating(len("hi Jane")))
+    assert detector.detect("hi Jane ") == []
+    assert detector.stats.offsets_dropped == 1
+
+
 def test_a_type_outside_the_placeholder_grammar_is_dropped_and_counted() -> None:
     entity = "a" * 40  # a raw request whose type is too long to be a placeholder
     detector, _ = _detector([("Jane", entity, 0.9)], (entity,))
@@ -357,6 +411,44 @@ def test_a_failed_load_names_only_the_exception_type(monkeypatch: pytest.MonkeyP
     with pytest.raises(ConfigError) as caught:
         build_gliner2_detector(NerConfig(enabled=True, backend="gliner2", model="org/m"))
     assert str(caught.value) == "failed to load GLiNER2 model 'org/m': RuntimeError"
+
+
+def test_a_module_gliner2_imports_at_load_is_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    # gliner2 imports peft only when it loads a model: its import succeeds
+    # without it, the load does not.
+    install_gliner2(monkeypatch, FakeGliner2([]))
+
+    def without_peft(name: str, **kwargs: Any) -> Any:
+        raise ModuleNotFoundError("No module named 'peft'", name="peft")
+
+    monkeypatch.setattr(sys.modules["gliner2"].AutoExtractor, "from_pretrained", without_peft)
+    with pytest.raises(ConfigError) as caught:
+        build_gliner2_detector(NerConfig(enabled=True, backend="gliner2", model="org/m"))
+    assert str(caught.value) == (
+        '[detection.ner] backend = "gliner2" but the gliner2 extra is not installed;'
+        " install it: uv sync --extra gliner2"
+    )
+
+
+def test_gliner2s_own_logs_are_silenced(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # gliner2 names a word of the text it reads at WARNING (a word making no
+    # subword) and logs a failed extraction's traceback at ERROR.
+    import logging
+
+    logger = logging.getLogger("gliner2")
+    level = logger.level
+    install_gliner2(monkeypatch, FakeGliner2([]))
+    try:
+        build_gliner2_detector(NerConfig(enabled=True, backend="gliner2"))
+        assert logging.getLogger("gliner2.processor").getEffectiveLevel() > logging.CRITICAL
+        with caplog.at_level(logging.DEBUG):
+            logging.getLogger("gliner2.processor").warning("word %r made no subwords", "x")
+            logging.getLogger("gliner2.inference.runtime").error("extraction failed")
+        assert caplog.records == []
+    finally:
+        logger.setLevel(level)
 
 
 def test_build_detectors_dispatches_and_goes_offline(monkeypatch: pytest.MonkeyPatch) -> None:

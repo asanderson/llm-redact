@@ -26,6 +26,7 @@ hosted API; llm-redact never uses it.
 
 import contextlib
 import io
+import logging
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol
@@ -66,6 +67,11 @@ GLINER2_WORD_RE = re.compile(
 )
 
 Words = Callable[[str], list[tuple[int, int]]]
+
+# Above every level: no record of the gliner2 package's loggers is emitted.
+_SILENT = logging.CRITICAL + 1
+# gliner2 2.0.0 appends a "." to a text ending in none of these.
+_ENDS_SENTENCE = (".", "!", "?")
 
 
 class _ModelLike(Protocol):
@@ -221,6 +227,11 @@ class Gliner2Detector:
         """The model's entities in ``text[start:end]``, at offsets into
         ``text``."""
         piece = text[start:end]
+        # gliner2 adds a "." to a text that does not end in ".", "!" or "?"
+        # and reads its spans on that longer text (processor.py,
+        # collate_fn_inference), so a span may take in that one added
+        # character: it ends at the piece's end then.
+        limit = len(piece) + (0 if piece.endswith(_ENDS_SENTENCE) else 1)
         result = self._model.extract_entities(
             piece,
             self._labels,
@@ -236,6 +247,10 @@ class Gliner2Detector:
                 spanned = isinstance(entity, Mapping)
                 found_start = entity.get("start") if spanned else None
                 found_end = entity.get("end") if spanned else None
+                if isinstance(found_end, int) and len(piece) < found_end <= limit:
+                    found_end = len(piece)
+                    while found_end > 0 and piece[found_end - 1].isspace():
+                        found_end -= 1  # the blank before the added "."
                 if (
                     not isinstance(found_start, int)
                     or not isinstance(found_end, int)
@@ -255,17 +270,24 @@ class Gliner2Detector:
                 )
 
 
+_EXTRA_MISSING = (
+    '[detection.ner] backend = "gliner2" but the gliner2 extra is not installed;'
+    " install it: uv sync --extra gliner2"
+)
+
+
 def build_gliner2_detector(config: "NerConfig") -> Gliner2Detector:
     from llm_redact.config import ConfigError
     from llm_redact.detection.model_files import gliner2_model_dir
 
+    # gliner2 logs words of the text it reads (processor.py: a word that
+    # makes no subword is named at WARNING, a failed extraction's traceback
+    # at ERROR); logs never carry request content.
+    logging.getLogger("gliner2").setLevel(_SILENT)
     try:
         from gliner2 import AutoExtractor
-    except ImportError as exc:  # gliner2 itself, or torch/transformers/peft below it
-        raise ConfigError(
-            '[detection.ner] backend = "gliner2" but the gliner2 extra is not installed;'
-            " install it: uv sync --extra gliner2"
-        ) from exc
+    except ImportError as exc:  # gliner2 itself, or torch/transformers below it
+        raise ConfigError(_EXTRA_MISSING) from exc
     model_name = config.model or _MODEL_NAME
     # A self-contained local folder at the pinned revision (model_files.py).
     folder = gliner2_model_dir(
@@ -280,6 +302,10 @@ def build_gliner2_detector(config: "NerConfig") -> Gliner2Detector:
             model = AutoExtractor.from_pretrained(
                 str(folder), local_files_only=True, map_location="cpu"
             )
+    except ImportError as exc:
+        # A module gliner2 imports only when it loads a model (peft, in its
+        # extraction runtime) is part of the extra too.
+        raise ConfigError(_EXTRA_MISSING) from exc
     except Exception as exc:  # model load can fail many ways; name only what is known
         raise ConfigError(
             f"failed to load GLiNER2 model {model_name!r}: {type(exc).__name__}"

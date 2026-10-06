@@ -40,6 +40,10 @@ _NER_MODULES = {
     "stanza": "stanza",
     "hf": "transformers",
 }
+# Modules a backend's library imports only when it loads a model, which
+# the library's own import does not need: gliner2 imports peft in its
+# extraction runtime, so without it `serve` fails at the model load.
+_NER_LOAD_MODULES = {"gliner2": ("peft",)}
 _NER_EXTRAS = {
     "spacy": "ner",
     "gliner": "gliner",
@@ -551,7 +555,8 @@ def _check_extras(report: _Report, config: Config) -> None:
         # multi-backend config with one missing extra fails serve at startup.
         for backend in config.detection.ner.active_backends():
             hint = f"install it: uv sync --extra {_NER_EXTRAS[backend]}"
-            if importlib.util.find_spec(_NER_MODULES[backend]) is None:
+            modules = (_NER_MODULES[backend], *_NER_LOAD_MODULES.get(backend, ()))
+            if any(importlib.util.find_spec(module) is None for module in modules):
                 report.line(
                     "FAIL", "ner", f'backend "{backend}" but its extra is not installed; {hint}'
                 )

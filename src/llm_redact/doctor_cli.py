@@ -35,13 +35,19 @@ from llm_redact.config import (
 _NER_MODULES = {
     "spacy": "spacy",
     "gliner": "gliner",
+    "gliner2": "gliner2",
     "presidio": "presidio_analyzer",
     "stanza": "stanza",
     "hf": "transformers",
 }
+# Modules a backend's library imports only when it loads a model, which
+# the library's own import does not need: gliner2 imports peft in its
+# extraction runtime, so without it `serve` fails at the model load.
+_NER_LOAD_MODULES = {"gliner2": ("peft",)}
 _NER_EXTRAS = {
     "spacy": "ner",
     "gliner": "gliner",
+    "gliner2": "gliner2",
     "presidio": "presidio",
     "stanza": "stanza",
     "hf": "hf",
@@ -51,7 +57,7 @@ _NER_EXTRAS = {
 # loads pytorch_model.bin checkpoints that way. An environment built without
 # the extra can hold the library without torch (transformers imports fine
 # and fails only when a model loads) or with an older torch.
-_TORCH_BACKENDS = frozenset({"gliner", "stanza", "hf"})
+_TORCH_BACKENDS = frozenset({"gliner", "gliner2", "stanza", "hf"})
 _TORCH_FLOOR = (2, 6)
 _ENV_OVERRIDES = ("LLM_REDACT_HOST", "LLM_REDACT_PORT", "LLM_REDACT_CONFIG")
 
@@ -549,7 +555,8 @@ def _check_extras(report: _Report, config: Config) -> None:
         # multi-backend config with one missing extra fails serve at startup.
         for backend in config.detection.ner.active_backends():
             hint = f"install it: uv sync --extra {_NER_EXTRAS[backend]}"
-            if importlib.util.find_spec(_NER_MODULES[backend]) is None:
+            modules = (_NER_MODULES[backend], *_NER_LOAD_MODULES.get(backend, ()))
+            if any(importlib.util.find_spec(module) is None for module in modules):
                 report.line(
                     "FAIL", "ner", f'backend "{backend}" but its extra is not installed; {hint}'
                 )

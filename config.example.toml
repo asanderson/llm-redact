@@ -416,6 +416,9 @@ allowlist_patterns = ['^10\.', '^192\.168\.']
 #   (~1-5 ms per scanned string on CPU)
 # backend = "gliner": uv sync --extra gliner (heavy: torch + transformers);
 #   more robust on unusual names; supports score_threshold.
+# backend = "gliner2": uv sync --extra gliner2 (heavy: torch + transformers);
+#   Fastino's GLiNER2, zero-shot like gliner, with character spans; supports
+#   score_threshold (default model fastino/gliner2-base-v1).
 # backend = "presidio": uv sync --extra presidio (Microsoft's FOSS PII
 #   analyzer: recognizers + checksums + context scoring over the same
 #   spaCy model; supports score_threshold). Entity types that overlap the
@@ -431,6 +434,7 @@ backend = "spacy"
 # [detection.ner.models]
 # spacy = "en_core_web_md"
 # gliner = "urchade/gliner_medium-v2.1"
+# gliner2 = "fastino/gliner2-base-v1"
 # Model labels become placeholder types through one label policy for every
 # backend (docs/detection.md "Placeholder types from NER models"): synonyms
 # fold into one type (PER, FIRST_NAME, SURNAME -> PERSON; EMAIL_ADDRESS ->
@@ -452,14 +456,15 @@ entities = ["PERSON"]
 max_chars = 20000   # strings longer than this skip NER (regex still applies)
 language = "en"     # presidio wires this through the analyzer; stanza loads its model
 # model = "en_core_web_sm"   # spaCy pipeline (spacy/presidio) or Hugging Face model id
-#                            # (gliner; hf: a token-classification model). Stanza
-#                            # ignores it and loads the `language` model.
-# score_threshold = 0.5      # gliner, presidio and hf only (spacy/stanza give no score)
-# Model sources of the Hugging Face Hub backends (gliner, hf); see
-# docs/detection.md "Model sources". Both load their model from the local
+#                            # (gliner, gliner2; hf: a token-classification model).
+#                            # Stanza ignores it and loads the `language` model.
+# score_threshold = 0.5      # gliner, gliner2, presidio and hf only (spacy/stanza
+#                            # give no score)
+# Model sources of the Hugging Face Hub backends (gliner, gliner2, hf); see
+# docs/detection.md "Model sources". Each loads its model from the local
 # cache at the pinned revision (hf: safetensors only unless
 # allow_pickle_weights; gliner: with its pinned base model's tokenizer, in a
-# self-contained folder).
+# self-contained folder; gliner2: a self-contained checkpoint).
 # allow_download = false        # default: whether the startup may fetch pinned model
 #                               # files from the Hub (false: local cache or folder
 #                               # only; `llm-redact models pull` fills the cache).

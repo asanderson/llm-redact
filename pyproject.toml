@@ -23,7 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ner = ["spacy>=3.7,<4"]
-# torch floor (gliner, stanza, hf): 2.6 fixed CVE-2025-32434, a bypass of
+# torch floor (gliner, gliner2, stanza, hf): 2.6 fixed CVE-2025-32434, a bypass of
 # torch.load(weights_only=True), which is how GLiNER loads a pytorch_model.bin
 # checkpoint. The floor rides each extra because no library asks for it
 # (gliner 0.2.28 requires torch>=2.0, stanza 1.13 torch>=1.13, and
@@ -32,6 +32,21 @@ ner = ["spacy>=3.7,<4"]
 # host installs torch from the PyTorch CPU index (docs/dependencies.md).
 # Heavy (pulls torch + transformers); more robust than spaCy on unusual names.
 gliner = ["gliner>=0.2", "torch>=2.6"]
+# GLiNER2 (Fastino; Apache-2.0): zero-shot schema-driven extraction with
+# character spans. gliner2's own `local` extra caps transformers below 5,
+# which the gliner and hf extras resolve to; its runtime needs are listed
+# here instead, without that cap: checked 2026-10-06 with gliner2 2.0.0 and
+# transformers 5.10.1 (Fastino's own PII checkpoint was saved with
+# transformers 5.8.0). peft is imported by gliner2's extraction runtime.
+# torch floor as above (gliner2 loads a pytorch_model.bin weights_only).
+gliner2 = [
+    "gliner2>=2.0,<3",
+    "torch>=2.6",
+    "transformers>=4.38",
+    "peft>=0.10,<1",
+    "safetensors>=0.4,<1",
+    "numpy>=1.24,<3",
+]
 # Microsoft's FOSS PII analyzer: recognizers + checksums + context scoring
 # over spaCy. Pulls pydantic — extras never touch the request path.
 presidio = ["presidio-analyzer>=2.2,<3"]
@@ -168,6 +183,10 @@ module = "gliner.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = "gliner2.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "presidio_analyzer.*"
 ignore_missing_imports = true
 
@@ -177,6 +196,12 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "transformers.*"
+ignore_missing_imports = true
+
+# torch arrives with the gliner/gliner2/stanza/hf extras (the hf backend's BIOES
+# tagger scores tokens with it); the dev environment installs none of them.
+[[tool.mypy.overrides]]
+module = "torch.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

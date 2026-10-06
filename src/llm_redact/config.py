@@ -1547,7 +1547,7 @@ def _parse_audit_azure(raw: object) -> AzureAuditConfig:
 # One definition for the parser and the emitter: an emitter that knew fewer
 # backends than the parser accepts dropped an hf-only threshold on the way
 # out (`config show`, the pro editor's round-trip check).
-CONFIDENCE_BACKENDS = ("gliner", "presidio", "hf")
+CONFIDENCE_BACKENDS = ("gliner", "gliner2", "presidio", "hf")
 
 
 def _parse_ner_labels(labels_raw: object) -> tuple[tuple[str, str], ...]:
@@ -1594,7 +1594,7 @@ def _parse_ner_revisions(revisions_raw: object) -> tuple[tuple[str, str], ...]:
         if backend not in HUB_BACKENDS:
             raise ConfigError(
                 f"{where} {backend}: a revision pins a Hugging Face Hub model, so only the"
-                f" {' and '.join(HUB_BACKENDS)} backends take one"
+                f" {', '.join(HUB_BACKENDS[:-1])} and {HUB_BACKENDS[-1]} backends take one"
             )
         if not isinstance(revision, str) or not REVISION_RE.fullmatch(revision):
             raise ConfigError(
@@ -2552,7 +2552,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         },
         "[detection.ner]",
     )
-    known_backends = ("spacy", "gliner", "presidio", "stanza", "hf")
+    known_backends = ("spacy", "gliner", "gliner2", "presidio", "stanza", "hf")
     backend_name = str(ner_raw.get("backend", "spacy"))
     if backend_name not in known_backends:
         raise ConfigError(

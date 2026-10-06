@@ -109,6 +109,9 @@ uv pip install https://github.com/explosion/spacy-models/releases/download/en_co
 # or GLiNER (heavy: torch + transformers; more robust on unusual names,
 # supports score_threshold):
 uv sync --extra gliner
+# or GLiNER2 (Fastino; the same weight class; zero-shot with character
+# spans, supports score_threshold):
+uv sync --extra gliner2
 # or Microsoft Presidio (FOSS PII analyzer: recognizers + checksums +
 # context scoring over the same spaCy model; supports score_threshold):
 uv sync --extra presidio
@@ -124,12 +127,23 @@ are folded into the built-in placeholder names, so a value gets the same
 Presidio; the Stanza model to load; implied by the model for spaCy), and
 `model` overrides the default model: a spaCy package name for
 spacy/presidio (default `en_core_web_sm`), a Hugging Face model id for
-GLiNER (default `urchade/gliner_small-v2.1`) or, for the `hf` backend, a
+GLiNER (default `urchade/gliner_small-v2.1`) or GLiNER2 (default
+`fastino/gliner2-base-v1`) or, for the `hf` backend, a
 Hugging Face `token-classification` model id (default
 `dslim/bert-base-NER`); Stanza ignores it. `score_threshold` (default 0.5)
 drops entities below that confidence on the backends that report one —
-gliner, presidio and hf; spaCy and Stanza report none, so the key is a
-config error when only they are active. Multiple backends can run
+gliner, gliner2, presidio and hf; spaCy and Stanza report none, so the key is
+a config error when only they are active.
+
+**GLiNER2 (`gliner2`).** Fastino's GLiNER2 is a schema-driven successor of
+GLiNER: zero-shot like GLiNER (it is prompted with the same natural-language
+prompts, "person", "street address", …), and it reports each entity's
+character span, which llm-redact uses as given — a value that occurs twice is
+redacted at both places. It runs on the `gliner2` extra (the gliner2 package
+with torch, transformers and peft). The default model,
+`fastino/gliner2-base-v1` (Apache-2.0, English), is catalogued as not yet
+measured by the llm-redact bench. The gliner2 package also contains a client
+for Fastino's hosted API, which llm-redact never uses: models run locally. Multiple backends can run
 concurrently (`backends = ["spacy", "presidio"]`), and the multilingual
 Stanza and Hugging Face `token-classification` backends are available the
 same way — the survey behind the lineup is
@@ -137,8 +151,8 @@ same way — the survey behind the lineup is
 
 ### Model sources: pinned revisions, downloads and pickle weights
 
-The `gliner` and `hf` backends load models from the Hugging Face Hub. Three
-`[detection.ner]` keys say where those models may come from:
+The `gliner`, `gliner2` and `hf` backends load models from the Hugging Face
+Hub. Three `[detection.ner]` keys say where those models may come from:
 
 ```toml
 [detection.ner]
@@ -150,15 +164,16 @@ hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
 ```
 
 - `revisions` pins a backend's model to one commit: a full 40-character
-  lowercase hex commit id per backend, `gliner` or `hf` (the other backends'
-  models are not Hub snapshots and take none). A branch or tag name such as
+  lowercase hex commit id per backend, `gliner`, `gliner2` or `hf` (the other
+  backends' models are not Hub snapshots and take none). A branch or tag name such as
   `main` is a config error, because it moves. A backend with no entry uses
   the pin llm-redact's model catalog records for the model it loads, when
   there is one: the default models `urchade/gliner_small-v2.1` and
   `dslim/bert-base-NER`, `urchade/gliner_medium-v2.1`,
   `urchade/gliner_multi-v2.1`, `urchade/gliner_multi_pii-v1` and the four
   `knowledgator/gliner-pii-*-v1.0` sizes are pinned to the commit their
-  `main` branch pointed at on 2026-10-05. An entry for a backend that is not
+  `main` branch pointed at on 2026-10-05, and the `gliner2` default
+  `fastino/gliner2-base-v1` to its `main` commit of 2026-10-06. An entry for a backend that is not
   active is kept and ignored, like a `[detection.ner.models]` entry.
 - `allow_download` (default `false`) decides whether the proxy's startup
   (`serve`, `serve --check`) may fetch a model's pinned files from the Hub
@@ -223,6 +238,18 @@ or a folder under the working directory is named like the base model's id)
 is read from that folder as it is, with no pin and no warning, like a local
 model folder. A configuration naming code to import (`auto_map`) or a model
 type transformers does not know is refused.
+
+**How the `gliner2` backend loads a model.** A GLiNER2 checkpoint is
+self-contained: its `config.json`, its encoder's configuration
+(`encoder_config/config.json`), its tokenizer and `model.safetensors` are
+looked up at the pinned revision, from the local cache unless `allow_download
+= true` (`pytorch_model.bin` only for a checkpoint without safetensors —
+gliner2 loads it with torch's `weights_only` loader). A checkpoint missing
+one of the three configuration files is refused, and so is one whose
+configuration names code to import (`auto_map`) or whose encoder is a model
+type transformers does not know (gliner2 builds the encoder from that
+configuration with `trust_remote_code`, so an unknown type could run code).
+The model is loaded from that folder alone; nothing is fetched at load time.
 
 **ONNX weights for `gliner`.** `[detection.ner.onnx]` loads a GLiNER model's
 ONNX export through onnxruntime (installed with the `gliner` extra) instead
@@ -411,8 +438,8 @@ Every NER backend handles each string the redaction scans the same way:
    `skipped_max_chars`, and the regex rules, deny strings and custom rules
    still scan it.
 2. **One call or windows.** A string that fits the model's window is read in
-   one call, as sent. A longer one is read in overlapping windows (the `hf`
-   and `gliner` backends; below).
+   one call, as sent. A longer one is read in overlapping windows (the `hf`,
+   `gliner` and `gliner2` backends; below).
 3. **The model** reports entities with a label, a score and character offsets.
 4. **The label policy** turns the label into a placeholder type and keeps it
    only when that type was requested (see "Placeholder types from NER
@@ -434,9 +461,9 @@ Every NER backend handles each string the redaction scans the same way:
    (warn) or refuses the request (block).
 
 **Long strings.** A model reads a bounded number of tokens at a time and, left
-alone, ignores the rest of a longer string. The `hf` and `gliner` backends
-read a longer string in overlapping windows, so a name anywhere in it is found
-at its exact offsets:
+alone, ignores the rest of a longer string. The `hf`, `gliner` and `gliner2`
+backends read a longer string in overlapping windows, so a name anywhere in it
+is found at its exact offsets:
 
 - `hf`: a window is the model's limit (the smaller of its tokenizer's
   `model_max_length` and its config's `max_position_embeddings`, 512 when
@@ -449,6 +476,13 @@ at its exact offsets:
   tokenizers (SentencePiece, byte-level BPE) do not tell the pipeline where
   words end, so their models are labelled piece by piece, and a span can
   still end inside a word.
+- `gliner2`: GLiNER2 sets no word limit of its own, but its encoder was
+  trained on 512 positions (Fastino's DeBERTa-v3 encoders) and its cost grows
+  with the square of the length. A window holds at most 200 of GLiNER2's own
+  words — an e-mail address, a URL or an @handle is one word; every other
+  brace, quote, colon and comma is one — and, with the model's fast
+  tokenizer, no more subword tokens than the encoder reads beside the entity
+  prompt; windows overlap and count like GLiNER's below.
 - `gliner`: GLiNER reads at most `max_len` words of a text (384 for the urchade
   v2.1 models) and drops the rest. A window holds at most 200 of GLiNER's own
   words, fewer when the entity prompts leave less room within `max_len`, and —
@@ -459,6 +493,29 @@ at its exact offsets:
   fifth of a window. A single word longer than the encoder reads (a very long
   identifier) gets a window of its own, which the model may read only in part:
   counted as `windows_truncated`.
+
+**BIOES and BILOU taggers (`hf`).** Most token-classification models tag a
+span's first token `B-` and the rest `I-` (BIO), which the transformers
+pipeline reads. A model whose labels also mark a span's last token —
+`E-`nd and `S-`ingle (BIOES), or `L-`ast and `U-`nit (BILOU) — would have every
+span cut at its last token by the pipeline, so llm-redact reads such a model
+itself: the same token windows, the model's per-token label scores, and its
+own span decoder. When llm-redact's model catalog lists the model's
+calibration file (transition biases its publisher ships, fetched with the
+model), spans are decoded with a constrained Viterbi decoder: the best label
+sequence in which every span opens with `B`/`S`, continues with `I` of the
+same entity and closes with `E`/`S`. Otherwise each token takes its most
+likely label and spans are read greedily: `B` … `E`, a single `S`, `I`
+continuing; a tag that cannot continue the open span starts a new one, and a
+span left open is kept as it is, so no token the model marked is dropped. A
+span's score is the mean probability of its tokens' labels (`score_threshold`
+applies), and its offsets leave out blanks at either edge. With a tokenizer
+that marks word pieces (WordPiece), the decoder reads words instead of tokens,
+each scored by its first piece — the piece such a model is trained to label —
+as the pipeline reads a BIO model, so a span covers whole words and is never
+cut inside one. The scheme comes
+from the model's labels; a model whose labels mix BIOES and BILOU tags is
+refused at startup.
 
 An entity two windows both report counts once; one cut by a window's edge is
 also reported whole by the next window, and the longer span wins. spaCy,
@@ -512,15 +569,15 @@ is a placeholder type — `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `PASSPORT`,
 such as `EMAIL` — requests that type from every backend, whatever the model
 calls it. The default `entities = ["PERSON"]` therefore works with spaCy,
 Stanza, Presidio and with a `PER`-emitting `hf` model alike, and a name two
-backends both find gets one token. GLiNER is prompted in natural language for
-a type request (`PERSON` → "person", `ADDRESS` → "street address",
+backends both find gets one token. GLiNER and GLiNER2 are prompted in natural
+language for a type request (`PERSON` → "person", `ADDRESS` → "street address",
 `DATE_OF_BIRTH` → "date of birth", `PASSPORT` → "passport number",
 `DRIVER_LICENSE` → "driver license number", `USERNAME` → "username",
 `ACCOUNT_NUMBER` → "account number", `EMAIL` → "email address", `PHONE` →
 "phone number"; other built-in types send their name in lowercase words).
 
 **Raw requests.** Any other entry (`PER`, `ORG`, `"job title"`) is a raw
-request: GLiNER is sent the text as written, and the backend emits the label's
+request: GLiNER and GLiNER2 are sent the text as written, and the backend emits the label's
 normalized form (`"job title"` → `JOB_TITLE`) — as before, Presidio's
 `EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_SSN`, `IBAN_CODE` and `CREDIT_CARD`
 included, which the presidio backend emits as the built-in `EMAIL`, `PHONE`,
@@ -565,7 +622,8 @@ or longer than 28 characters) is never emitted.
 
 After the models load, each entity is checked against the labels they can
 emit (an `hf` model's `id2label`, a spaCy pipeline's `ner` labels, the
-entities Presidio supports; zero-shot GLiNER and Stanza can emit anything).
+entities Presidio supports; zero-shot GLiNER and GLiNER2, and Stanza, can emit
+anything).
 An entity no active backend can ever emit logs one WARNING naming the entity,
 the backends and their models, so a typo or a label the model lacks no
 longer detects nothing in silence.

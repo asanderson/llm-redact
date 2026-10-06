@@ -24,7 +24,11 @@ model (the core warns; a policy plugin may enforce):
 * ``prompts``: per placeholder type, the GLiNER prompt the model was trained
   on, sent instead of the generic one (:data:`labels.GLINER_PROMPTS`);
 * ``window``: the longest input one model call takes: tokens for ``hf``,
-  GLiNER words for ``gliner``. None: read it from the model's own config.
+  GLiNER words for ``gliner``. None: read it from the model's own config;
+* ``tagging`` / ``viterbi_calibration``: an ``hf`` model's token-tagging
+  scheme, and the repository file holding the transition biases its BIOES
+  or BILOU spans are decoded with (the constrained Viterbi decoder,
+  detection/tagging.py; without one they are decoded greedily).
 
 Local model directories are identified by an optional sidecar file,
 :data:`SIDECAR_NAME` (``{"model_id": ..., "revision": ...}``), which
@@ -52,7 +56,8 @@ CHECKED = "2026-10-05"
 Status = Literal["vetted", "caution", "restricted"]
 STATUSES: tuple[Status, ...] = ("vetted", "caution", "restricted")
 # Token-tagging schemes of `hf` models (BIO models run the transformers
-# pipeline's aggregation; BIOES/BILOU need constrained decoding).
+# pipeline's aggregation; the hf backend decodes BIOES/BILOU itself,
+# detection/tagging.py).
 TAGGING_SCHEMES = ("bio", "bioes", "bilou")
 
 # Value-free provenance tags a policy can match on (llm-redact-pro's model
@@ -74,11 +79,15 @@ LINEAGE_TAGS = frozenset(
 # The NER backends whose models are Hugging Face Hub snapshots: the only
 # ones a revision pin or this catalog applies to (spaCy, Presidio and Stanza
 # load pip-installed or library-managed models).
-HUB_BACKENDS = ("gliner", "hf")
+HUB_BACKENDS = ("gliner", "gliner2", "hf")
 # The model each Hub backend loads when the configuration names none (the
 # backends' own defaults; tests/test_model_catalog.py pins them equal).
 DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(
-    {"gliner": "urchade/gliner_small-v2.1", "hf": "dslim/bert-base-NER"}
+    {
+        "gliner": "urchade/gliner_small-v2.1",
+        "gliner2": "fastino/gliner2-base-v1",
+        "hf": "dslim/bert-base-NER",
+    }
 )
 
 # A full commit id. Branch and tag names move, so a pin is always this.
@@ -139,6 +148,9 @@ class CatalogEntry:
     # Repo-relative ONNX weight files the gliner backend can load.
     onnx_files: tuple[str, ...] = ()
     tagging: str | None = None
+    # A BIOES/BILOU tagger's calibration file (repo-relative, fetched with
+    # the model): transition biases for the constrained Viterbi decoder.
+    viterbi_calibration: str | None = None
     window: int | None = None
     # (distribution, minimum version) the model needs beyond the extras'.
     min_versions: tuple[tuple[str, str], ...] = ()
@@ -332,6 +344,27 @@ CATALOG: tuple[CatalogEntry, ...] = (
         "f847f54fbc97ad6e78bfa20ed9c5e5d5c43327b9",
         "microsoft/deberta-v3-large",
         onnx_files=("onnx/model.onnx", "onnx/model_quint8.onnx"),
+    ),
+    # --- caution: the gliner2 backend's default, not yet measured --------
+    CatalogEntry(
+        # main since 2026-09-28 (card edits; model.safetensors unchanged since
+        # 2025-07-02). Self-contained: config.json, encoder_config/config.json
+        # (deberta-v2), tokenizer files and model.safetensors.
+        model_id="fastino/gliner2-base-v1",
+        backends=("gliner2",),
+        license="Apache-2.0",
+        status="caution",
+        reason=(
+            "Apache-2.0; the gliner2 backend's default model; backbone"
+            " microsoft/deberta-v3-base; the card describes its training data only as"
+            f" multi-domain datasets; {UNMEASURED}"
+        ),
+        checked="2026-10-06",
+        revision="f9634218e53580c56edf0de97ca1a7d3f1c2354e",
+        backbone="microsoft/deberta-v3-base",
+        attribution="GLiNER2 by Fastino AI (Apache-2.0); arXiv:2507.18546",
+        lineage=("undisclosed-training-data",),
+        recommended_entities=("PERSON",),
     ),
     # --- restricted: never suggested; a warning names the reason ----------
     CatalogEntry(

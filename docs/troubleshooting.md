@@ -363,8 +363,9 @@ rebuilds the detectors, once per entity; the parentheses name each active
 backend and its model. Every loaded model was asked which labels it has
 (Hugging Face models through their `id2label` table, spaCy pipelines through
 their `ner` component, Presidio through the entities its analyzer supports),
-and none of them is ever emitted as this entity's type. GLiNER (zero-shot) and
-Stanza publish no label set, so with either of them active this never fires.
+and none of them is ever emitted as this entity's type. GLiNER and GLiNER2
+(zero-shot) and Stanza publish no label set, so with any of them active this
+never fires.
 Common causes:
 
 - a typo (`PERSONS`), or a label this model does not use — check the model
@@ -413,8 +414,8 @@ commit for good, so write the full 40-character lowercase hex id from the
 model's page on the Hugging Face Hub ("Files and versions" → the commit, or
 `https://huggingface.co/api/models/ORG/MODEL/revision/main` → `sha`), not
 `main`, a tag or a shortened id. Related messages from the same table: "…
-BACKEND: a revision pins a Hugging Face Hub model, so only the gliner and hf
-backends take one" (an entry for `spacy`, `presidio` or `stanza`, whose
+BACKEND: a revision pins a Hugging Face Hub model, so only the gliner, gliner2
+and hf backends take one" (an entry for `spacy`, `presidio` or `stanza`, whose
 models are not Hub snapshots: remove it) and "must be a table of BACKEND =
 "<40-character commit id>"". The message names the backend, never the value.
 
@@ -456,6 +457,29 @@ files in the cache, or a full disk. Load the folder once by hand to see the
 library's full error: `uv run python -c "from transformers import pipeline;
 pipeline('token-classification', model='/path/to/the/model/folder')"` (the
 folder: the Hugging Face cache's `models--ORG--MODEL/snapshots/<revision>`).
+
+## "[detection.ner] hf model '…': its labels mix BIOES (E-, S-) and BILOU (L-, U-) tags" / "… its id2label does not name every logit index 0 to n-1" / "… its id2label keys are not logit indices"
+
+From `serve` / `serve --check`: the `hf` model's labels (`config.json`
+`id2label`) tag spans with `E-`/`S-` (BIOES) or `L-`/`U-` (BILOU), which
+llm-redact decodes itself (docs/detection.md "BIOES and BILOU taggers"), but
+they cannot be read as one scheme: some labels use BIOES tags and others
+BILOU ones, or the labels do not name each of the model's outputs by its
+position. The checkpoint's configuration is inconsistent; pick another model
+or fix its `config.json` in a local copy and point `[detection.ner.models] hf`
+at that folder.
+
+## "[detection.ner] hf model '…' has no …, which the model catalog lists for its constrained decoding" / "[detection.ner] hf model '…': … must hold exactly …" / "… must be a number" / "… must be finite"
+
+From `serve` / `serve --check`: llm-redact's model catalog lists a calibration
+file for this BIOES/BILOU model (the transition biases its spans are decoded
+with), and the file is missing from the model's folder or snapshot, or does
+not have the expected shape (`{"operating_points": {"default": {"biases":
+{...}}}}` with exactly the six `transition_bias_*` keys, each a finite number:
+the message names the key). With downloads off,
+a snapshot pulled before the file was listed lacks it: run `llm-redact models
+pull` again (or set `allow_download = true` for one startup). A local folder
+needs the file copied in beside the weights.
 
 ## "[detection.ner] hf model '…' has no safetensors weights; set allow_pickle_weights = true to load pytorch_model.bin"
 
@@ -574,8 +598,9 @@ folder.
 
 ## "[detection.ner] gliner … '…': … names a model type transformers does not know; llm-redact never runs model code"
 
-The GLiNER checkpoint's `encoder_config` (or its base model's `config.json`)
-names an architecture the installed transformers does not ship. GLiNER
+The GLiNER checkpoint's `encoder_config` (or its base model's `config.json`;
+for a `gliner2` model, its `encoder_config/config.json`) names an architecture
+the installed transformers does not ship. GLiNER (and GLiNER2)
 would build that encoder with `trust_remote_code`, which could run code from
 the model repository, so it is refused. Upgrade transformers if the type is
 newer than your version (`uv sync --extra gliner`), or pick another model.
@@ -752,11 +777,41 @@ the checkpoint and its base model (under `$XDG_DATA_HOME/llm-redact/models/`).
 Make that directory writable for the proxy's user (the systemd unit and the
 Helm chart already allow the data directory), or free disk space.
 
-## "[detection.ner] … model '…' needs huggingface_hub, which the hf and gliner extras install; install the backend's extra" / "backend = \"gliner\" needs transformers, which the gliner extra installs"
+## "[detection.ner] gliner2 model '…' has no …; a GLiNER2 checkpoint ships its configuration, its encoder configuration and its tokenizer"
 
-The `huggingface_hub` package is missing, although the `hf` and `gliner`
-extras install it (through transformers and gliner). Re-install the
-backend's extra: `uv sync --extra hf` or `uv sync --extra gliner`.
+From `serve` / `serve --check` with the `gliner2` backend: the model's folder
+or snapshot lacks `config.json`, `encoder_config/config.json` or
+`tokenizer_config.json`. A GLiNER2 checkpoint (Fastino's, or one trained with
+the gliner2 package) ships all three, and llm-redact loads it only from its
+own files, so nothing is fetched at load time. Check the model id (a GLiNER
+checkpoint belongs to the `gliner` backend), pull the model again (`llm-redact
+models pull`), or, for a local folder, copy the missing files in beside the
+weights.
+
+## `backend = "gliner2" but the gliner2 extra is not installed; install it: uv sync --extra gliner2`
+
+From `serve` / `serve --check` with the `gliner2` backend: the gliner2 package
+(or torch or transformers, which it imports, or peft, which it imports when it
+loads the model) is missing; `llm-redact doctor` checks gliner2, peft and
+torch. Install the
+extra: `uv sync --extra gliner2` (or `pip install 'llm-redact-proxy[gliner2]'`;
+on a CPU-only host take torch from the PyTorch CPU index first, see
+docs/dependencies.md).
+
+## "failed to load GLiNER2 model '…': …"
+
+From `serve` / `serve --check`: the model's files are in place and checked,
+but GLiNER2 failed to build the model; the message ends with the exception
+type. Common causes: damaged files in the cache (pull the model again), a
+checkpoint the installed gliner2 version cannot read (the extra needs gliner2
+2.0 or newer), or too little memory.
+
+## "[detection.ner] … model '…' needs huggingface_hub, which the hf, gliner and gliner2 extras install; install the backend's extra" / "backend = \"gliner\" needs transformers, which the gliner extra installs" / "backend = \"gliner2\" needs transformers, which the gliner2 extra installs"
+
+The `huggingface_hub` package (or, for a GLiNER or GLiNER2 model's
+configuration check, `transformers`) is missing, although the `hf`, `gliner`
+and `gliner2` extras install them. Re-install the backend's extra: `uv sync
+--extra hf`, `uv sync --extra gliner` or `uv sync --extra gliner2`.
 
 ## Tool sees `«EMAIL_001»`-style tokens in responses
 

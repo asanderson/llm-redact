@@ -94,7 +94,7 @@ class NerConfig:
     # `presidio` for presidio) and adds per-string latency the regex hot
     # path doesn't have.
     enabled: bool = False
-    backend: str = "spacy"  # or "gliner" / "presidio" / "stanza" / "hf"
+    backend: str = "spacy"  # or "gliner" / "gliner2" / "presidio" / "stanza" / "hf"
     # Multi-backend form: when set it wins over `backend` (which stays the
     # one-element legacy spelling); every listed backend runs concurrently
     # behind the same Detector protocol, and same-span same-type hits
@@ -102,15 +102,16 @@ class NerConfig:
     backends: tuple[str, ...] | None = None
     entities: tuple[str, ...] = ("PERSON",)
     max_chars: int = 20000
-    # Only meaningful for backends that emit confidences (gliner, presidio,
-    # hf); config loading rejects it when no such backend is active (spacy
-    # and stanza emit none).
+    # Only meaningful for backends that emit confidences (gliner, gliner2,
+    # presidio, hf); config loading rejects it when no such backend is active
+    # (spacy and stanza emit none).
     score_threshold: float = 0.5
     # NER language (presidio wires it through the analyzer, stanza selects the
     # language model; for spacy it is implied by the model) and an optional
     # model-name override: the spaCy pipeline for spacy/presidio (default
     # en_core_web_sm), the HF model id for gliner (default
-    # urchade/gliner_small-v2.1) and hf (default dslim/bert-base-NER).
+    # urchade/gliner_small-v2.1), gliner2 (default fastino/gliner2-base-v1)
+    # and hf (default dslim/bert-base-NER).
     language: str = "en"
     model: str | None = None
     # Per-backend model overrides ([detection.ner.models], stored sorted
@@ -124,7 +125,7 @@ class NerConfig:
     # labels AND configured entities alike, so `PER = "PER"` keeps
     # `entities = ["PER"]` emitting PER once raw entities fold.
     labels: tuple[tuple[str, str], ...] = ()
-    # Model sources of the Hugging Face Hub backends (gliner, hf).
+    # Model sources of the Hugging Face Hub backends (gliner, gliner2, hf).
     # [detection.ner.revisions]: backend -> 40-hex commit id, stored sorted
     # (a branch or tag name moves, so the parser refuses one); a backend
     # without an entry is pinned by its model's catalog entry, if any
@@ -393,6 +394,10 @@ def build_detectors(config: DetectionConfig, *, startup: bool = False) -> list[D
                 from llm_redact.detection.gliner_ner import build_gliner_detector
 
                 inner: Detector = build_gliner_detector(single)
+            elif backend_name == "gliner2":
+                from llm_redact.detection.gliner2_ner import build_gliner2_detector
+
+                inner = build_gliner2_detector(single)
             elif backend_name == "presidio":
                 from llm_redact.detection.presidio_ner import build_presidio_detector
 

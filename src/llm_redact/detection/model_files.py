@@ -1,6 +1,6 @@
 """Where NER model files come from: local, pinned, and free of model code.
 
-The ``hf`` and ``gliner`` backends load Hugging Face Hub models. This module
+The ``hf``, ``gliner`` and ``gliner2`` backends load Hugging Face Hub models. This module
 turns a configured model value into a local directory the loaders read, and
 nothing else ever fetches a file:
 
@@ -23,7 +23,8 @@ nothing else ever fetches a file:
 * a GLiNER checkpoint that ships no tokenizer or ``encoder_config`` (the
   urchade v2.1 models) is assembled into a self-contained folder with its
   pinned base model's tokenizer and configuration (owner decision D13), so
-  GLiNER never fetches the base model from the Hub at load time.
+  GLiNER never fetches the base model from the Hub at load time; a GLiNER2
+  checkpoint is self-contained by design and must be.
 
 Messages name the backend, the model id and the revision only.
 """
@@ -180,8 +181,8 @@ def resolve_model(
         from huggingface_hub import snapshot_download
     except ImportError as exc:
         raise _config_error(
-            f"[detection.ner] {what} {model!r} needs huggingface_hub, which the hf and"
-            " gliner extras install; install the backend's extra"
+            f"[detection.ner] {what} {model!r} needs huggingface_hub, which the hf, gliner"
+            " and gliner2 extras install; install the backend's extra"
         ) from exc
     try:
         path: str = snapshot_download(
@@ -374,28 +375,32 @@ def hf_files(
     revision: str | None,
     allow_download: bool,
     allow_pickle_weights: bool,
+    extra_files: Sequence[str] = (),
 ) -> ModelFiles:
     """The files an ``hf`` model loads from: its configuration, tokenizer
     and safetensors weights — or, only with ``allow_pickle_weights`` and
-    only when it has no safetensors weights, its ``pytorch_model.bin``. A
-    directory lacking any of them is refused (:func:`_require_complete`)."""
+    only when it has no safetensors weights, its ``pytorch_model.bin`` —
+    and the ``extra_files`` (exact names in the repository) the model
+    catalog lists for it, such as a tagger's calibration file. A directory
+    lacking any of the files a load needs is refused
+    (:func:`_require_complete`)."""
     what = "hf model"
+    patterns = (*HF_PATTERNS, *extra_files)
     path = resolve_model(
         model,
         what=what,
         revision=revision,
         allow_download=allow_download,
-        allow_patterns=HF_PATTERNS,
+        allow_patterns=patterns,
     )
     check_configs(path, CODE_CONFIG_FILES, what=what, model=model)
-    patterns: tuple[str, ...] = HF_PATTERNS
     if not has_files(path, SAFETENSORS_FILES):
         if not allow_pickle_weights:
             raise _config_error(
                 f"[detection.ner] hf model {model!r} has no safetensors weights;"
                 " set allow_pickle_weights = true to load pytorch_model.bin"
             )
-        patterns = (*HF_PATTERNS, *HF_PICKLE_PATTERNS)
+        patterns = (*patterns, *HF_PICKLE_PATTERNS)
         if not is_local(model):
             # The repository lists no safetensors file (else the first
             # lookup would have needed it): fetch the pickle too.
@@ -419,6 +424,7 @@ def hf_model_dir(
     revision: str | None,
     allow_download: bool,
     allow_pickle_weights: bool,
+    extra_files: Sequence[str] = (),
 ) -> Path:
     """The local directory an ``hf`` model loads from (:func:`hf_files`)."""
     return hf_files(
@@ -426,6 +432,7 @@ def hf_model_dir(
         revision=revision,
         allow_download=allow_download,
         allow_pickle_weights=allow_pickle_weights,
+        extra_files=extra_files,
     ).directory
 
 
@@ -462,13 +469,13 @@ def models_dir() -> Path:
     return Path(xdg) / "llm-redact" / "models"
 
 
-def _known_model_types() -> Callable[[str], bool]:
+def _known_model_types(backend: str) -> Callable[[str], bool]:
     try:
         from transformers import CONFIG_MAPPING
     except ImportError as exc:
         raise _config_error(
-            '[detection.ner] backend = "gliner" needs transformers, which the gliner'
-            " extra installs; install it: uv sync --extra gliner"
+            f'[detection.ner] backend = "{backend}" needs transformers, which the {backend}'
+            f" extra installs; install it: uv sync --extra {backend}"
         ) from exc
     return lambda model_type: model_type in CONFIG_MAPPING
 
@@ -477,7 +484,8 @@ def _require_known_type(
     config: Mapping[str, Any], *, default: str | None, what: str, model: str, name: str
 ) -> None:
     model_type = config.get("model_type", default)
-    if not isinstance(model_type, str) or not _known_model_types()(model_type):
+    backend = what.split()[0]  # "gliner model", "gliner base model", "gliner2 model"
+    if not isinstance(model_type, str) or not _known_model_types(backend)(model_type):
         raise _config_error(
             f"[detection.ner] {what} {model!r}: {name} names a model type transformers"
             " does not know; llm-redact never runs model code"
@@ -677,6 +685,58 @@ def gliner_model_dir(
             backbone,
         )
     return assemble_folder(model, layout.files, layout.config)
+
+
+# --- GLiNER2 ---------------------------------------------------------------------
+
+# A GLiNER2 checkpoint (the gliner2 package) is self-contained: its
+# configuration, its encoder's configuration in a subfolder (gliner2 builds
+# the encoder from it, never from the base model it names), its tokenizer
+# and its weights. pytorch_model.bin only when it has no safetensors
+# (gliner2 loads a .bin with torch's weights_only loader).
+GLINER2_ENCODER_CONFIG = "encoder_config/config.json"
+GLINER2_CONFIGS = ("config.json", GLINER2_ENCODER_CONFIG, "tokenizer_config.json")
+GLINER2_PATTERNS = ("config.json", GLINER2_ENCODER_CONFIG, "model.safetensors", *TOKENIZER_FILES)
+
+
+def gliner2_model_dir(model: str, *, revision: str | None, allow_download: bool) -> Path:
+    """The local folder a GLiNER2 model loads from with no network access:
+    the checkpoint at its pinned revision, which must ship its
+    configuration, its encoder configuration (a model type transformers
+    knows: gliner2 builds the encoder with ``trust_remote_code=True``) and
+    its tokenizer, none of them naming code to import."""
+    what = "gliner2 model"
+    path = resolve_model(
+        model,
+        what=what,
+        revision=revision,
+        allow_download=allow_download,
+        allow_patterns=GLINER2_PATTERNS,
+    )
+    if not (path / "model.safetensors").is_file() and not is_local(model):
+        # No safetensors in the repository: gliner2's weights_only .bin.
+        path = resolve_model(
+            model,
+            what=what,
+            revision=revision,
+            allow_download=allow_download,
+            allow_patterns=(*GLINER2_PATTERNS, GLINER_PICKLE),
+        )
+    configs = check_configs(path, GLINER2_CONFIGS, what=what, model=model)
+    for name in GLINER2_CONFIGS:
+        if name not in configs:
+            raise _config_error(
+                f"[detection.ner] gliner2 model {model!r} has no {name}; a GLiNER2 checkpoint"
+                " ships its configuration, its encoder configuration and its tokenizer"
+            )
+    _require_known_type(
+        configs[GLINER2_ENCODER_CONFIG],
+        default=None,
+        what=what,
+        model=model,
+        name=GLINER2_ENCODER_CONFIG,
+    )
+    return path
 
 
 def config_text(config: Mapping[str, Any]) -> str:

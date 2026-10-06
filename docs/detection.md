@@ -314,6 +314,42 @@ Restricted (a startup WARNING names the facts; no pin):
 their links and check dates, are what the startup warning, `doctor` and
 `llm-redact models list --json` print.
 
+### Checking models: `llm-redact models`
+
+`llm-redact models` works on the models of the `gliner` and `hf` backends the
+configuration names (`--config PATH`, like `serve` and `doctor`; NER need not
+be enabled yet). `list` and `verify` read local files only and never touch the
+network:
+
+```bash
+llm-redact models list [--json]     # each model: revision, catalog status, license, files, base model
+llm-redact models verify            # exit 1 unless every model is complete at its revision
+llm-redact models verify --dir DIR  # check a folder written by `models pull --to` (no config)
+```
+
+- `list` prints, per model, the revision it loads, its catalog status and
+  license, whether its files are there (`cached`, `folder` for a local
+  folder, `missing`, `incomplete`, `error`) and its base model (a GLiNER
+  model without a tokenizer of its own); `--json` adds the catalog's facts,
+  the libraries a model needs and the problem text. spaCy, Presidio and
+  Stanza models are not Hugging Face snapshots: their install commands are
+  printed instead.
+- `verify` exits 1 unless every model's files are complete where its load
+  reads them, at its revision: its configuration, every weight file and its
+  tokenizer, and a GLiNER model's base model. The Hugging Face cache can hold
+  a revision only in part (after an interrupted download) and still report
+  it as present; `verify` checks what the loader needs, exactly as the
+  proxy's startup does. Exit 2: the configuration cannot be read.
+- `verify --dir DIR` checks a folder of portable models written by
+  `llm-redact models pull --to` against the manifest beside them,
+  `llm-redact-models.json`: every file's size and SHA-256, no file the
+  manifest does not list inside a model folder (a loader could read it), each
+  folder's `llm-redact-model.json` naming the model and revision the manifest
+  does, and each folder complete for its loader. It needs no configuration
+  and no network, so it runs inside an air-gapped enclave before the proxy
+  loads the folder; entries beside the model folders (`lost+found`) are only
+  noted.
+
 ## How NER runs
 
 ![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model, the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)

@@ -632,6 +632,27 @@ doctor looks models up in the local Hugging Face cache through
 backend's extra (`uv sync --extra hf` / `--extra gliner`); the `ner` area's
 FAIL row says the same.
 
+## `llm-redact models verify --dir`: "FAIL  …: FOLDER/FILE: SHA-256 differs from the manifest" (or "size differs", "missing", "not listed in the manifest", "the folder is missing")
+
+A folder written by `llm-redact models pull --to` no longer holds exactly what
+its `llm-redact-models.json` lists: a file was changed, truncated or removed
+on the way (a partial copy, a disk error), or a file was added to a model
+folder (one a loader could read). Copy the folder again from the machine
+that pulled it, or pull again; do not edit the manifest to match. "names
+another model or revision than the manifest" means a model folder's
+`llm-redact-model.json` and the manifest disagree. A folder that matches the
+manifest but lacks what its loader needs (a hand-written manifest) fails
+with the loader's own message.
+
+## `llm-redact models verify --dir`: "no llm-redact-models.json in DIR" / "… is not an llm-redact models manifest" / "schema N is not one this llm-redact reads" / "models[I]. …"
+
+The directory holds no manifest, or one this version cannot read: not a
+UTF-8 JSON object of kind `llm-redact-models`, a newer schema (upgrade
+llm-redact), or an entry that is not well formed (a folder name that is not a
+single plain name, a file path that is absolute or contains `..`, a size or
+SHA-256 of the wrong shape). Point `--dir` at the folder `models pull --to`
+wrote (the one holding `llm-redact-models.json`), or pull again.
+
 ## `[detection.ner] BACKEND model 'ID' has model catalog status "restricted": …`
 
 A startup warning (also a `doctor` WARN under `models`): llm-redact's model

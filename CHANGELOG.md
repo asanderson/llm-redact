@@ -125,6 +125,15 @@ and tags `vX.Y.Z`.
   and `-small` models). docs/detection.md "The model catalog" lists the vetted, caution and
   restricted models (kept equal to the catalog by a test). The catalog still never refuses a
   model.
+- `llm-redact models list|verify` (`--config` like `serve`): `list [--json]` shows each model
+  of the `gliner` and `hf` backends with its revision, catalog status, license, base model and
+  whether its files are in the local Hugging Face cache (or its folder); `verify` exits 1
+  unless every model is complete at its revision (configuration, every weight file, tokenizer,
+  a GLiNER model's base model), which the cache's own lookup does not check; `verify --dir DIR`
+  checks a folder written by `models pull --to` against its `llm-redact-models.json` manifest
+  (sizes, SHA-256, no unlisted files) with no configuration and no network, for air-gapped
+  installs. Both read local files only; spaCy, Presidio and Stanza models get their install
+  commands.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an

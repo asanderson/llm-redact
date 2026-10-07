@@ -31,7 +31,7 @@ import pytest
 from llm_redact.config import ConfigError
 from llm_redact.detection import model_catalog
 from llm_redact.detection.engine import NerConfig
-from llm_redact.detection.hf_ner import TaggerPipe, build_hf_detector, torch_scorer
+from llm_redact.detection.hf_ner import HfDetector, TaggerPipe, build_hf_detector, torch_scorer
 from llm_redact.detection.model_catalog import SIDECAR_NAME, TAGGING_SCHEMES, CatalogEntry
 from llm_redact.detection.tagging import (
     BIAS_KEYS,
@@ -976,3 +976,63 @@ def test_a_real_tokenizer_and_model_decode_whole_spans(
     # The long text was read in windows of the real tokenizer.
     assert detector.stats.scanned_windowed == 1
     assert detector.stats.windows == 3
+
+
+# openai/privacy-filter (Apache-2.0) at the catalog pin checked on 2026-10-07,
+# pulled by the CI ner-models job (tests/real_model_configs/hf-openai-
+# privacy-filter.toml): 2.8 GB of weights and about a second per
+# 500-character string on a 4-core CPU, so only short strings here.
+PRIVACY = "openai/privacy-filter"
+PRIVACY_REVISION = "7ffa9a043d54d1be65afb281eddf0ffbe629385b"
+PRIVACY_FILES = [
+    "config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "viterbi_calibration.json",
+]
+PRIVACY_CONFIG = Path(__file__).parent / "real_model_configs" / "hf-openai-privacy-filter.toml"
+PRIVACY_SENTENCE = "Wire it to account 00123456789 for Maria Gonzalez, 42 Elm Street, Springfield."
+
+
+@pytest.mark.real_model
+def test_real_privacy_filter_finds_whole_spans_with_its_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    from llm_redact.config import load_config
+    from llm_redact.detection.engine import build_detectors, ner_backends
+    from llm_redact.detection.model_sources import version_problems
+
+    entry = model_catalog.lookup(PRIVACY)
+    if problems := version_problems(entry, "hf", PRIVACY):
+        pytest.skip(problems[0])  # an older transformers than the model needs
+    offline_hub(monkeypatch)
+    cached_snapshot(PRIVACY, PRIVACY_REVISION, PRIVACY_FILES)
+    # The CI config, through the proxy's own build (downloads off): the
+    # catalog pin, the BIOES tagger and the calibration file it lists.
+    detection = load_config(PRIVACY_CONFIG).detection
+    (detector,) = ner_backends(build_detectors(detection))
+    assert isinstance(detector, HfDetector)
+    assert detector.model_name == PRIVACY
+    pipe = detector._pipe
+    assert isinstance(pipe, TaggerPipe)
+    assert pipe._decode is not argmax_path  # the constrained Viterbi decoder
+    expected = [
+        ("ACCOUNT_NUMBER", "00123456789"),
+        ("PERSON", "Maria Gonzalez"),
+        ("ADDRESS", "42 Elm Street, Springfield"),
+    ]
+    # The same sentence as plain text and inside a JSON string: each value
+    # at its own offsets, no quote or blank taken in.
+    for text in (PRIVACY_SENTENCE, json.dumps({"note": PRIVACY_SENTENCE})):
+        found = sorted(detector.detect(text), key=lambda d: d.start)
+        assert [(d.detector_type, d.value) for d in found] == expected
+        assert [(d.start, d.end) for d in found] == [
+            (text.index(value), text.index(value) + len(value)) for _type, value in expected
+        ]
+    # An empty text is no model call on no token ids (which fails), and a
+    # blank one no span (span edges lose their blanks).
+    assert detector.detect("") == []
+    assert detector.detect("   \n\t ") == []

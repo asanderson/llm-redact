@@ -10,7 +10,8 @@
 # filter.*] and bench/ner_ceilings.toml [hf-openai-privacy-filter]; the
 # numbers and the catalog status they give are in docs/ner-landscape.md.
 # Downloads stay off: pull the model first (`llm-redact models pull --config`
-# on this file).
+# on this file). CI loads the model only for a smoke test on a few short
+# strings (tests/real_model_configs/hf-openai-privacy-filter.toml).
 [detection.ner]
 enabled = true
 backend = "hf"

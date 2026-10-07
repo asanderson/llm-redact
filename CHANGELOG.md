@@ -28,6 +28,14 @@ and tags `vX.Y.Z`.
   seconds per string on a CPU, so its bench configuration lives in `bench/configs/manual/`,
   which neither CI workflow reads: configurations measured by hand, each saying how
   (docs/ner-bench.md).
+- A CI smoke test of `openai/privacy-filter`: the `ner-models` job pulls it at its catalog pin
+  (`tests/real_model_configs/hf-openai-privacy-filter.toml`) and a `real_model` test builds it
+  offline through the proxy's own build, Viterbi decoder and calibration file included, and
+  checks a name, an address and an account number in a short sentence and inside a JSON string,
+  and that an empty and a blank string yield nothing. Its bench configuration stays manual. The
+  job removes the model from the Hugging Face cache after the tests (it is pulled again on every
+  run, never saved in the 10 GB actions cache) and first frees disk by removing preinstalled
+  toolchains it does not use.
 - The startup refuses a model whose library is older than the model catalog says it needs
   (`CatalogEntry.min_versions`, read from package metadata):
   `[detection.ner] hf: openai/privacy-filter needs transformers >= 5.6.0 (model catalog), but

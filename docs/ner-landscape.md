@@ -276,7 +276,9 @@ hours on this CPU).
 counts the corpus's `DATE_OF_BIRTH` and `USERNAME` values, which it is not
 asked for) but neither the false-positive bar nor the latency bar: about a
 second per 500-character string on this CPU, five times the other models.
-Its configuration is measured by hand (`bench/configs/manual/`), not in CI.
+Its bench configuration is measured by hand (`bench/configs/manual/`), not
+in CI; the CI `ner-models` job pulls the model only for a `real_model`
+smoke test on a few short strings (since 2026-10-07).
 The constrained Viterbi decoder with the repository's calibration is what
 the `hf` backend uses for it; greedy decoding finds the same names with more
 than twice the false positives.

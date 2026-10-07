@@ -535,7 +535,8 @@ rules. Measured on the same corpora: `PERSON` recall 0.99, character leak
 0.12, 23 agent-traffic false positives per 50 KB, and about a second per
 500-character string on a 4-core CPU (1.1 s; 19.5 s for 10,000 characters),
 so it stays "caution" and its bench configuration is measured by hand
-(`bench/configs/manual/`, [ner-bench.md](ner-bench.md)).
+(`bench/configs/manual/`, [ner-bench.md](ner-bench.md)); CI pulls it only
+for a smoke test on a few short strings.
 
 ### Model-load policies (plugins)
 

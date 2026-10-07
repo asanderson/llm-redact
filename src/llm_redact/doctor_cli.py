@@ -549,6 +549,14 @@ def _torch_problem() -> str | None:
     return None
 
 
+def _transformers_problem() -> str | None:
+    """Why the installed transformers cannot load an hf model, or None
+    (distribution metadata only, as the build reads it)."""
+    from llm_redact.detection.hf_ner import transformers_problem
+
+    return transformers_problem()
+
+
 def _check_extras(report: _Report, config: Config) -> None:
     if config.detection.ner.enabled:
         # EVERY active backend, not just the legacy single one — a
@@ -566,6 +574,14 @@ def _check_extras(report: _Report, config: Config) -> None:
                 )
             elif backend in _TORCH_BACKENDS and (problem := _torch_problem()) is not None:
                 report.line("FAIL", "ner", f'backend "{backend}" {problem}; {hint}')
+            elif backend == "hf" and (problem := _transformers_problem()) is not None:
+                # What the hf build refuses too (hf_ner.TRANSFORMERS_MINIMUM).
+                report.line(
+                    "FAIL",
+                    "ner",
+                    f'backend "hf" {problem}; upgrade it:'
+                    " uv sync --extra hf --upgrade-package transformers",
+                )
             else:
                 report.line("PASS", "ner", f"{backend} backend importable")
     if config.otel.enabled:

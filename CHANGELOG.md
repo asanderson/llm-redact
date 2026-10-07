@@ -392,6 +392,11 @@ and tags `vX.Y.Z`.
   (`openai/privacy-filter`: 738 against 1,025 ms per 500 characters for the model alone). The
   one load serves the transformers pipeline and the BIOES/BILOU tagger alike. The `gliner`
   and `gliner2` backends are unchanged.
+- The `hf` extra requires transformers 4.56 or newer (was 4.40): the float32 load passes
+  the pipeline's `dtype`, which older versions refuse. The startup (`serve`, `serve
+  --check`) and `llm-redact doctor` refuse an older installed transformers by name
+  (`[detection.ner] backend = "hf" needs transformers >= 4.56 …`) instead of failing the
+  model load with a bare `TypeError`.
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
   upload inspector's extracted texts included) and a realtime client frame the proxy collects the
   strings a request's redaction will scan, runs the NER models over them on a worker

@@ -162,6 +162,54 @@ def test_every_model_loads_in_float32(monkeypatch: pytest.MonkeyPatch) -> None:
     assert strided["model"] is pipe.model and "dtype" not in strided
 
 
+@pytest.mark.parametrize("installed", ["4.40.0", "4.55.4", "4.55.99.dev0"])
+def test_a_transformers_without_pipeline_dtype_is_refused_by_name(
+    monkeypatch: pytest.MonkeyPatch, installed: str
+) -> None:
+    # transformers before 4.56 has no `dtype` in pipeline(): it hands the
+    # keyword to the token-classification pipeline, which refuses it, and
+    # the load failed with a bare TypeError. The hf extra now asks for 4.56;
+    # an environment that kept an older one is refused naming the minimum,
+    # before any model file is touched.
+    import importlib.metadata
+
+    real_version = importlib.metadata.version
+
+    def version(name: str) -> str:
+        return installed if name == "transformers" else real_version(name)
+
+    pipe = FakeHfPipe([("Jane Doe", "PER", 0.9)])
+    install_transformers(monkeypatch, pipe)
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    with pytest.raises(ConfigError) as refused:
+        build_hf_detector(NerConfig(enabled=True, backend="hf"))
+    assert str(refused.value) == (
+        '[detection.ner] backend = "hf" needs transformers >= 4.56 (its pipeline\'s dtype),'
+        f" but transformers {installed} is installed; upgrade it:"
+        " uv sync --extra hf --upgrade-package transformers"
+    )
+    assert pipe.built_with == []
+
+
+@pytest.mark.parametrize("installed", ["4.56.0", "4.56", "5.10.1", "10.0.0rc1", None])
+def test_a_transformers_with_pipeline_dtype_loads(
+    monkeypatch: pytest.MonkeyPatch, installed: str | None
+) -> None:
+    # None: no distribution metadata (a source tree), nothing to compare.
+    import importlib.metadata
+
+    def version(name: str) -> str:
+        if installed is None:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return installed
+
+    pipe = FakeHfPipe([("Jane Doe", "PER", 0.9)])
+    install_transformers(monkeypatch, pipe)
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    build_hf_detector(NerConfig(enabled=True, backend="hf"))
+    assert pipe.built_with[0]["dtype"] == "float32"
+
+
 # --- whole words --------------------------------------------------------------
 
 

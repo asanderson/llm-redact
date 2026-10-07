@@ -198,6 +198,17 @@ files. Install the backend's extra (`uv sync --extra hf`, or
 CPU-only host take torch from the PyTorch CPU index first
 ([dependencies.md](dependencies.md)).
 
+## "[detection.ner] backend = \"hf\" needs transformers >= 4.56 (its pipeline's dtype), but transformers VERSION is installed"
+
+From `serve` / `serve --check`, and from `doctor` for an enabled `hf`
+backend: the `hf` backend loads every model in float32 through the
+transformers pipeline's `dtype` setting, which transformers has taken
+since 4.56; an older one refuses the setting and no model could load. The
+`hf` extra asks for 4.56 or newer, but an environment that already held an
+older transformers keeps it until the extra is installed again: run
+`uv sync --extra hf --upgrade-package transformers` (or
+`pip install -U 'llm-redact-proxy[hf]'`).
+
 ## "config reload failed; keeping current config" / "changes require restart"
 
 Log lines from a `kill -HUP`. The first means the new file failed to parse

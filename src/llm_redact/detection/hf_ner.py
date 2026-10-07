@@ -50,6 +50,7 @@ from the model's repository (`trust_remote_code=False`).
 """
 
 import bisect
+import importlib.metadata
 import importlib.util
 import math
 import re
@@ -90,6 +91,12 @@ _DEFAULT_WINDOW = 512
 # resolves to torch.float32): the pipeline and the BIOES/BILOU tagger both
 # use the one model the first pipeline() call loads.
 MODEL_DTYPE = "float32"
+# transformers' pipeline() takes `dtype` from 4.56 on (`torch_dtype` before
+# it, and an older pipeline hands the unknown keyword to the task pipeline,
+# which refuses it: the load fails with a bare TypeError). The hf extra
+# requires it; an environment that kept an older transformers is refused by
+# name (transformers_problem).
+TRANSFORMERS_MINIMUM = "4.56"
 # The pipeline's aggregation strategies: per word (a word-aware tokenizer)
 # or per token (aggregation_for).
 WORD_AGGREGATION = "first"
@@ -206,6 +213,26 @@ class HfDetector:
                 value=text[start:end],
                 priority=NER_PRIORITY,
             )
+
+
+def transformers_problem() -> str | None:
+    """Why the installed transformers cannot load an hf model the way
+    :func:`build_hf_detector` does — it is older than
+    :data:`TRANSFORMERS_MINIMUM` — or None. Distribution metadata only:
+    nothing is imported, and a transformers without metadata (a source
+    tree) is not judged."""
+    from llm_redact.detection.model_sources import version_tuple
+
+    try:
+        installed = importlib.metadata.version("transformers")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    if version_tuple(installed) < version_tuple(TRANSFORMERS_MINIMUM):
+        return (
+            f"needs transformers >= {TRANSFORMERS_MINIMUM} (its pipeline's dtype),"
+            f" but transformers {installed} is installed"
+        )
+    return None
 
 
 def model_window(tokenizer: Any, model: Any, catalog_window: int | None = None) -> int:
@@ -971,6 +998,12 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
             '[detection.ner] backend = "hf" but the hf extra is not installed;'
             " install it: uv sync --extra hf"
         ) from exc
+    problem = transformers_problem()
+    if problem is not None:
+        raise ConfigError(
+            f'[detection.ner] backend = "hf" {problem}; upgrade it:'
+            " uv sync --extra hf --upgrade-package transformers"
+        )
     model_name = config.model or _MODEL_NAME
     entry = _catalog_entry(model_name)
     calibration = entry.viterbi_calibration if entry is not None else None

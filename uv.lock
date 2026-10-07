@@ -1236,7 +1236,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'hf'", specifier = ">=2.6" },
     { name = "torch", marker = "extra == 'stanza'", specifier = ">=2.6" },
     { name = "transformers", marker = "extra == 'gliner2'", specifier = ">=4.38" },
-    { name = "transformers", marker = "extra == 'hf'", specifier = ">=4.40" },
+    { name = "transformers", marker = "extra == 'hf'", specifier = ">=4.56" },
     { name = "uvicorn", specifier = ">=0.50" },
     { name = "uvloop", marker = "extra == 'perf'", specifier = ">=0.19" },
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0" },

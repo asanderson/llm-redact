@@ -253,7 +253,10 @@ the cache. A model whose `config.json` or `tokenizer_config.json` names code
 to import from its repository (`auto_map`) is refused, and nothing is ever
 loaded with `trust_remote_code`. The weights must be safetensors: a model
 with only `pytorch_model.bin` is refused unless `allow_pickle_weights = true`,
-and a model with both always loads its safetensors.
+and a model with both always loads its safetensors. The load needs
+transformers 4.56 or newer (the first whose pipeline takes the precision
+the model is loaded in, float32); an older one stops the startup with
+`[detection.ner] backend = "hf" needs transformers >= 4.56 …`.
 
 **How the `gliner` backend loads a model.** The same way: the GLiNER
 checkpoint at its pinned revision, from the local cache unless

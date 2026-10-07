@@ -204,8 +204,20 @@ first piece the model leaves untagged or unsure), ettin's `DATE_OF_BIRTH` and
 `USERNAME` recall (0.404 to 0.377, 0.902 to 0.856), precision (OpenMed
 `PERSON` 0.950 to 0.937, ettin `PERSON` 0.968 to 0.938) and over-redaction
 (OpenMed 0.005 to 0.006, ettin 0.003 to 0.005): a word is now redacted whole
-where a piece of it was before. The negatives corpus draws fewer detections
-(OpenMed 551 to 514, ettin 286 to 183).
+where a piece of it was before. ettin's lost recall is recall the
+token-level decoder was credited for one piece of a value: it found ettin's
+six lost usernames by 1 to 6 of their 8 to 13 characters and its three lost
+dates of birth by 1 or 2 of theirs, and the characters of those types left
+uncovered fell (`USERNAME` 241 to 166 of 1,340, `DATE_OF_BIRTH` 1,169 to
+1,153 of 1,443); OpenMed's is real (five usernames lost, one gained, five
+more characters uncovered).
+The negatives corpus draws fewer detections (OpenMed 551 to 514, ettin 286
+to 183). Re-measured after the decoder's review fixes (a span grows over the
+characters the model tags with it, so a password's symbols or a MAC
+address's colons are never sent upstream between its parts; scripts written
+without spaces are read character by character; a word longer than the
+windows' overlap is read in parts): the same numbers, with one more OpenMed
+`USERNAME` detection (precision 0.752 to 0.747).
 
 How a word is labelled was chosen on these numbers. Cutting words at every
 punctuation mark, as BERT's tokenizer does, left the parts of

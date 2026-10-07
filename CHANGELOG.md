@@ -386,7 +386,8 @@ and tags `vX.Y.Z`.
   Small 44M) and 0.03 to 0.87 (ettin), character leak 0.051 to 0.048 and 0.158 to 0.143,
   detections on the negatives corpus 551 to 514 and 286 to 183; their recorded baselines and
   catalog numbers are updated (docs/ner-landscape.md lists what got worse: some recall and
-  precision, and over-redaction).
+  precision, and over-redaction; most of ettin's lost recall counts values the token-level
+  decoder found by one piece, whose uncovered characters fell).
 - The `hf` backend loads every model in float32, whatever precision its checkpoint stores
   (transformers' default keeps it): a bfloat16 checkpoint ran about 30% slower on a CPU
   (`openai/privacy-filter`: 738 against 1,025 ms per 500 characters for the model alone), and

@@ -19,7 +19,7 @@ not seen by that check; the namespace still stops it)
 ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml),
 [`tests/airgap/`](../tests/airgap)).
 
-![Flowchart of where NER model weights come from and the air-gap path: models pull --to writes portable folders with a SHA-256 manifest on a connected machine; they are carried into the enclave, checked with models verify --dir and loaded with downloads off](diagrams/model-supply-chain.png)
+![Flowchart of where NER model weights come from and the air-gap path: models pull --to writes portable folders with a SHA-256 manifest on a connected machine; they are carried into the enclave, checked with models verify --dir, put to a plugin's model-load policy when one is installed, and loaded with downloads off](diagrams/model-supply-chain.png)
 
 *Static diagram. [Mermaid source](diagrams/model-supply-chain.mmd).*
 

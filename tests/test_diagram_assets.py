@@ -91,3 +91,18 @@ def test_the_model_load_policy_is_asked_before_assembly() -> None:
     assert _reaches(graph, "assemble", "load")
     assert not _reaches(graph, "assemble", "policy")
     assert "assemble" not in graph["cache"]
+
+
+def test_every_model_supply_chain_alt_text_names_the_policy_step() -> None:
+    # Every page embedding the diagram describes the model-load policy step
+    # it draws (on both the connected and the enclave path).
+    docs = DIAGRAMS.parent
+    alts = [
+        match[1]
+        for page in sorted(docs.glob("*.md"))
+        for match in re.finditer(
+            r"!\[(.*?)\]\(diagrams/model-supply-chain\.png\)", page.read_text(encoding="utf-8")
+        )
+    ]
+    assert len(alts) >= 3
+    assert all("model-load policy" in alt for alt in alts)

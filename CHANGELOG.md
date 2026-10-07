@@ -12,6 +12,36 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- docs/ner-landscape.md consolidates the decision record for the PII-specific open models the
+  NER bench measured: a verdict table with one row per measured configuration (license and
+  training data, catalog status, `PERSON` recall, character leak, agent-traffic false positives
+  per 50 KB, p50 per 500 characters, and what each is good for), a per-type table of recall and
+  leak for addresses, dates of birth, usernames and account numbers, the bar items for weight
+  provenance (pinned, safetensors or ONNX, no repository code, offline) and long-text coverage
+  (windows and counters), and the decisions in plain words: the `hf` default stays
+  `dslim/bert-base-NER` in 1.x because the switch to OpenMed-PII Small 44M, which the bench
+  supports, is planned together with raw-entity folding in the next major release (2.0.0), and
+  the `gliner` default stays `urchade/gliner_small-v2.1` (it finds more names on published
+  data; the Knowledgator models stay a configurable catalog option). Its section on LLM-based
+  extractors now gives four reasons (threat-model inversion, latency, no portable recall
+  guarantee, and prompt injection: the scanned text can instruct the detector) and describes
+  the out-of-band roles built: the corpus teacher and the student-model recipe.
+- docs/threat-model.md: "Contextual values: rules and models" (addresses, dates of birth,
+  usernames, account numbers and passport and driver's-licence numbers stay outside the rules;
+  a PII model adds best-effort coverage, measured on a generated corpus and published slices,
+  never a guarantee), "Long text and what a model does not read", and residual-risk rows for
+  contextual values, long text and the model supply chain (ONNX, offline loads, carried
+  folders and their manifest, neutral catalog facts, the model-load policy seam).
+- docs/troubleshooting.md entries for the `[detection.allowlist_by_type]` unknown-type error
+  and the INFO line that renames NER keys, and for the NER bench: a crossed recall floor or
+  leak ceiling or a structured regression, a malformed gate file, a missing `--config`, an
+  unknown dataset or split.
+- The README, docs/detection.md and config.example.toml describe the optional NER models for
+  contextual types (the `hf` and `stanza` backends, a PII model example) and the bench that
+  measures them; docs/quickstart.md and the user guide point to `llm-redact models pull`;
+  docs/editions.md lists the NER backends and the free `models` commands in the core row;
+  docs/dashboard.md names the `/status` `detection.ner` block and the NER gaps
+  `llm-redact status` prints; docs/SBOM.md names the `hf` extra's transformers 4.56 floor.
 - Per-model default `score_threshold`: `[detection.ner] score_threshold` is optional, and a
   confidence backend (`gliner`, `gliner2`, `presidio`, `hf`) whose configuration sets none runs
   at the model catalog's default for the model it loads (`CatalogEntry.score_threshold`; a local
@@ -342,7 +372,7 @@ and tags `vX.Y.Z`.
   materials and `[models]` policy (Team and above), and docs/editions.md a row for them; the
   README, docs/editions.md and docs/dashboard.md describe the new box.
 
-- CI proves an air-gapped start (AD11): the `airgap` job pulls the default `hf` and GLiNER
+- CI proves an air-gapped start: the `airgap` job pulls the default `hf` and GLiNER
   models (with the GLiNER base model) and Knowledgator's `gliner-pii-edge-v1.0` with `llm-redact
   models pull --to`, then — inside a network namespace with no route, the folders mounted
   read-only at `/models` and an empty Hugging Face cache — runs `models verify --dir`, `serve
@@ -384,6 +414,9 @@ and tags `vX.Y.Z`.
   as the only egress.
 
 ### Changed
+- tests/test_docs_index.py also checks config.example.toml and the user guide for private
+  planning identifiers, and catches architecture-decision, step and phase numbers beside the
+  owner-decision and task ones; the docs no longer cite any.
 - `[detection.ner] score_threshold`, when present, must be a finite number greater than 0 and at
   most 1; anything else (0, a negative value, above 1, `nan`, `inf`, a non-number) is a
   configuration error naming the key. At 0 every candidate span was redacted, and above 1 or at
@@ -483,6 +516,12 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- docs/ner-landscape.md said the bench gates in-process overhead at about 1 ms. It gates four
+  deliberately generous p50 smoke ceilings (about ten times the healthy numbers) and reports
+  the rest; docs/assurance.md says so, and its CI paragraph names every model the `ner-models`
+  job pulls, not just the two defaults. docs/detection.md's counters table lists `gliner2`
+  among the backends that read in windows and count truncated windows, and docs/ner-landscape.md
+  counts six shipped backends.
 - The `hf` backend's BIOES/BILOU decoding failed on an empty or blank string when the model's
   tokenizer adds no special tokens (`openai/privacy-filter`): a window of no token ids reached
   the model, which refused it, so the request failed. Such a window is no longer scored, and

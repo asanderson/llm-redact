@@ -17,10 +17,13 @@ def test_docs_index_links_every_doc() -> None:
     assert not missing, f"docs/README.md is missing links to: {missing}"
 
 
-# The planning record's owner-decision and task ids (D6, T46, ...) are
-# private: a public reader cannot look them up, so the docs state each
-# rule and decision in plain words instead.
-_PLANNING_ID = re.compile(r"\bowner decision\b|\bD[0-9]{1,2}\b|\bT[0-9]{2}[a-z]?\b")
+# The planning record's owner-decision, architecture-decision, task and phase
+# ids (D6, AD11, T46, P13.7, Phase 18, ...) are private: a public reader cannot
+# look them up, so the docs state each rule and decision in plain words instead.
+_PLANNING_ID = re.compile(
+    r"\bowner decision\b|\bD[0-9]{1,2}\b|\bAD[0-9]{1,2}\b|\bT[0-9]{2}[a-z]?\b"
+    r"|\bP[0-9]{1,2}\.[0-9]+\b|\bPhase [0-9]+\b"
+)
 
 
 def _planning_ids(text: str) -> list[str]:
@@ -31,7 +34,13 @@ def test_public_docs_cite_no_private_planning_ids() -> None:
     root = DOCS.parent
     found = {
         str(path.relative_to(root)): ids
-        for path in [*sorted(DOCS.glob("*.md")), root / "README.md", root / "CHANGELOG.md"]
+        for path in [
+            *sorted(DOCS.glob("*.md")),
+            root / "README.md",
+            root / "CHANGELOG.md",
+            root / "config.example.toml",
+            root / "src" / "llm_redact" / "user_guide.md",
+        ]
         if (ids := _planning_ids(path.read_text()))
     }
     assert found == {}
@@ -45,6 +54,12 @@ def test_the_planning_id_check_finds_them() -> None:
         "T33b",
     ]
     assert _planning_ids("a T4 GPU-free D-Bus run; DATE_OF_BIRTH; 2.0.0") == []
+    assert _planning_ids("air-gapped start (AD11); P13.7's config; Phase 18 proved") == [
+        "AD11",
+        "P13.7",
+        "Phase 18",
+    ]
+    assert _planning_ids("a p50 of 100 ms; P95 latency; the phase 2 notes; ADD11") == []
 
 
 def _fence_problems(text: str) -> list[int]:

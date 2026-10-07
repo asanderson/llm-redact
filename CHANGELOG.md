@@ -380,8 +380,8 @@ and tags `vX.Y.Z`.
   model tags as part of a value is redacted with it; it never takes in a blank, a quote or
   a bracket (a quote inside a value goes upstream between the two parts' placeholders).
   WordPiece models (`dslim/bert-base-NER`, the default) keep the pipeline, unchanged
-  (a differential test over the recall and false-positive corpora, and identical bench
-  numbers).
+  (identical bench numbers; a test compares the detector over that pipeline with a frozen
+  copy of its code from before this change, over the recall and false-positive corpora).
   Re-measured on the synthetic corpus: exact `PERSON` recall 0.67 to 1.00 (OpenMed-PII
   Small 44M) and 0.03 to 0.87 (ettin), character leak 0.051 to 0.048 and 0.158 to 0.143,
   detections on the negatives corpus 551 to 514 and 286 to 183; their recorded baselines and

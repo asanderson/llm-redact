@@ -26,6 +26,7 @@ transformers or a network.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import re
 import types
@@ -40,6 +41,7 @@ from hypothesis import strategies as st
 
 from llm_redact.bench import corpus as recall_corpus
 from llm_redact.detection import model_catalog
+from llm_redact.detection.base import Detection
 from llm_redact.detection.engine import NerConfig
 from llm_redact.detection.hf_ner import (
     HfDetector,
@@ -49,6 +51,7 @@ from llm_redact.detection.hf_ner import (
 )
 from llm_redact.detection.labels import LabelPolicy
 from llm_redact.detection.model_catalog import CatalogEntry
+from llm_redact.detection.ner import NER_PRIORITY
 from llm_redact.detection.tagging import TagSet, decoder_for
 from ner_fakes import FakeHfPipe, FakeTokenizer, install_torch, install_transformers
 
@@ -1134,28 +1137,92 @@ def _corpus_texts() -> list[str]:
     return texts
 
 
+def _detect_before_word_decoding(pipe: FakeHfPipe, text: str) -> list[Detection]:
+    """HfDetector.detect over a pipeline as it was before the hf backend
+    decoded BIO taggers word by word (llm-redact at 4b594b6: HfDetector._found
+    with labels.merge_adjacent_parts and windows.drop_exact_duplicates),
+    copied here so a change to any of them shows: entities above the
+    default threshold, classified, inside the text, without blanks at
+    either edge; exact repeats dropped; adjacent parts of a name or an
+    address (a gap of one or two spaces, tabs or no-break spaces) joined."""
+    policy = LabelPolicy(frozenset({"PERSON"}), backend="hf")
+    found = []
+    for ent in pipe(text):
+        label = policy.classify(str(ent.get("entity_group", ent.get("entity", ""))))
+        if label is None or float(ent.get("score", 1.0)) < 0.5:
+            continue
+        start, end = ent.get("start"), ent.get("end")
+        if start is None or end is None or not 0 <= int(start) < int(end) <= len(text):
+            continue
+        start, end = int(start), int(end)
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if start == end:
+            continue
+        found.append(Detection(start, end, label, text[start:end], NER_PRIORITY))
+    seen: set[tuple[int, int, str]] = set()
+    unique = []
+    for detection in found:
+        key = (detection.start, detection.end, detection.detector_type)
+        if key not in seen:
+            seen.add(key)
+            unique.append(detection)
+    merged: list[Detection] = []
+    last_of_type: dict[str, int] = {}
+    for detection in sorted(unique, key=lambda d: (d.start, d.end)):
+        index = last_of_type.get(detection.detector_type)
+        if index is not None:
+            previous = merged[index]
+            gap = text[previous.end : detection.start]
+            if 1 <= len(gap) <= 2 and set(gap) <= {" ", "\t", "\u00a0"}:
+                merged[index] = dataclasses.replace(
+                    previous, end=detection.end, value=text[previous.start : detection.end]
+                )
+                continue
+        if detection.detector_type in ("PERSON", "ADDRESS"):
+            last_of_type[detection.detector_type] = len(merged)
+        merged.append(detection)
+    return merged
+
+
 def test_a_wordpiece_model_detects_exactly_as_before_over_the_corpora(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The builder hands a WordPiece BIO model to the same strided
-    # transformers pipeline as before this change; the detector over it
-    # reports what the pre-change detector (HfDetector straight over the
-    # pipeline, the pre-change construction) reports, on every text of the
-    # recall corpus and the false-positive corpus.
+    # The builder hands a WordPiece BIO model to the strided transformers
+    # pipeline with word-level aggregation, as before; the detector over it
+    # reports what the detector before word-by-word decoding reported (a
+    # frozen copy of its code), on every text of the recall corpus and the
+    # false-positive corpus. The fake pipeline's findings cover names, a
+    # name whose parts are reported apart, a repeat, a label outside the
+    # requested types, one under the threshold, and blanks at an edge.
     findings = [
         ("Jane Doe", "PER", 0.9),
         ("Smith", "PER", 0.6),
+        ("Jane", "PER", 0.8),
+        (" Doe", "PER", 0.9),
         ("@", "MISC", 0.9),
         ("e", "PER", 0.4),
+        ("a b", "PER", 0.7),
     ]
-    pipe = FakeHfPipe(findings, id2label={0: "O", 1: "B-PER", 2: "I-PER", 3: "B-MISC"})
+    pipe = FakeHfPipe(
+        findings,
+        id2label={0: "O", 1: "B-PER", 2: "I-PER", 3: "B-MISC"},
+        tokenizer=FakeTokenizer(subword_prefix="##"),
+    )
     install_transformers(monkeypatch, pipe)
     built = build_hf_detector(NerConfig(enabled=True, backend="hf", score_threshold=0.5))
-    reference = HfDetector(pipe, frozenset({"PERSON"}), NerConfig().max_chars, 0.5)
+    assert built._pipe is pipe  # type: ignore[attr-defined]
+    assert pipe.built_with[1]["aggregation_strategy"] == "first"
     texts = _corpus_texts()
     assert len(texts) > 100
+    matched = 0
     for text in texts:
-        assert built.detect(text) == reference.detect(text)
+        before = _detect_before_word_decoding(pipe, text)
+        assert built.detect(text) == before
+        matched += bool(before)
+    assert matched > 50  # the findings occur: the comparison is not vacuous
 
 
 # --- a real model (deselected by default) -----------------------------------------

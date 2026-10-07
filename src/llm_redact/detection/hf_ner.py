@@ -20,10 +20,11 @@ by its first piece, and its token-level aggregation makes every piece its own
 value (kalyan-ks/ettin-68m-nemotron-pii tags every piece ``B-``: "Zbigniew
 Brzezinski" was six values). Such a BIO model is decoded by llm-redact
 itself (:class:`TaggerPipe`) over the text's own words (:func:`text_words`:
-cut at blanks, quotes, brackets and value delimiters, each CJK ideograph
-alone), each labelled by its first piece (by its most confidently tagged
-piece for a model the catalog says labels every piece), and a span never
-takes in a quote, a bracket, a colon or a newline (:func:`_text_spans`).
+cut at blanks, quotes, brackets and value delimiters, each character of a
+script written without spaces alone), each labelled by its first piece (by
+its most confidently tagged piece for a model the catalog says labels every
+piece), and a span never takes in a quote, a bracket, a colon or a newline
+(:func:`_cut_spans`).
 
 Long strings are read whole, in overlapping token windows: without `stride`
 the pipeline truncates at the tokenizer's maximum length and never reads the
@@ -51,6 +52,7 @@ import math
 import re
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -317,37 +319,67 @@ def _word_units(encoded: Any, windows: Sequence[Window]) -> list[Units]:
 
 
 # How the BIO decoder of a tokenizer without word-piece marks cuts a text
-# into words (text_words). A word is labelled by its first piece, so what a
-# word holds decides what one label covers: transformers' whitespace
-# fallback made `{"name":"Angela` one word, labelled by its brace, and an
-# unspaced CJK sentence one word, labelled by its first character. Here a
-# word ends at a blank and at every character that delimits values — a quote
-# or a bracket of any script (Unicode Ps, Pe, Pi, Pf) and the ASCII
-# delimiters below — and each CJK ideograph is a word of its own (as BERT's
-# tokenizer reads them). Punctuation inside a word stays: "1985-03-12",
-# "j.doe" and "dev_jo42" are one word each, as the model was trained to label
-# them (cutting them there left their later parts to pieces no model labels).
-# A slash ends a word too, so each part of a path is read on its own.
+# into words (text_words). A word is labelled by one piece, so what a word
+# holds decides what one label covers: transformers' whitespace fallback
+# made `{"name":"Angela` one word, labelled by its brace, and an unspaced
+# sentence one word, labelled by its first character. Here a word ends at a
+# blank and at every character that delimits values — a quote or a bracket
+# of any script (Unicode Ps, Pe, Pi, Pf) and the ASCII delimiters below —
+# and each character of a script written without spaces between words is a
+# word of its own (_UNSPACED). Punctuation inside a word stays:
+# "1985-03-12", "j.doe" and "dev_jo42" are one word each, as the model was
+# trained to label them (cutting them there left their later parts to
+# pieces no model labels). A slash ends a word too, so each part of a path
+# is read on its own.
 _DELIMITERS = frozenset("\"'`()[]{}<>,;:=|/\\")
 _BRACKETS_AND_QUOTES = frozenset({"Ps", "Pe", "Pi", "Pf"})
-_IDEOGRAPHS = (
-    (0x4E00, 0x9FFF),
-    (0x3400, 0x4DBF),
-    (0x20000, 0x2A6DF),
-    (0x2A700, 0x2B73F),
-    (0x2B740, 0x2B81F),
-    (0x2B820, 0x2CEAF),
-    (0xF900, 0xFAFF),
-    (0x2F800, 0x2FA1F),
+# Scripts written without spaces between words (Unicode blocks, first and
+# last code point, sorted): each character — with the combining marks that
+# follow it — is a word of its own, so a name inside a sentence is labelled
+# by its own pieces, as BERT's tokenizer reads CJK ideographs. A run of
+# them made one word was labelled by its first piece, and a name inside it
+# was never redacted.
+_UNSPACED = (
+    (0x0E00, 0x0EFF),  # Thai, Lao
+    (0x0F00, 0x0FFF),  # Tibetan
+    (0x1000, 0x109F),  # Myanmar
+    (0x1780, 0x17FF),  # Khmer
+    (0x1950, 0x19FF),  # Tai Le, New Tai Lue, Khmer Symbols
+    (0x1A20, 0x1AAF),  # Tai Tham
+    (0x2E80, 0x2FDF),  # CJK Radicals Supplement, Kangxi Radicals
+    (0x3005, 0x3007),  # ideographic iteration mark, closing mark, number zero
+    (0x3021, 0x3029),  # Hangzhou numerals
+    (0x3031, 0x3035),  # kana repeat marks
+    (0x3038, 0x303C),  # Hangzhou numerals, ideographic marks
+    (0x3040, 0x30FF),  # Hiragana, Katakana
+    (0x3100, 0x312F),  # Bopomofo
+    (0x31A0, 0x31BF),  # Bopomofo Extended
+    (0x31F0, 0x31FF),  # Katakana Phonetic Extensions
+    (0x3400, 0x4DBF),  # CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0xA000, 0xA4CF),  # Yi Syllables, Yi Radicals
+    (0xA9E0, 0xA9FF),  # Myanmar Extended-B
+    (0xAA60, 0xAADF),  # Myanmar Extended-A, Tai Viet
+    (0xF900, 0xFAFF),  # CJK Compatibility Ideographs
+    (0xFF66, 0xFF9F),  # Halfwidth Katakana
+    (0x1AFF0, 0x1B16F),  # Kana Extended-B, Kana Supplement, Kana Extended-A, Small Kana
+    (0x20000, 0x2A6DF),  # CJK Extension B
+    (0x2A700, 0x2EE5F),  # CJK Extensions C, D, E, F, I
+    (0x2F800, 0x2FA1F),  # CJK Compatibility Ideographs Supplement
+    (0x30000, 0x3347F),  # CJK Extensions G, H, J
 )
+_UNSPACED_LOWS = tuple(low for low, _high in _UNSPACED)
 # Runs of characters that are neither blank nor an ASCII delimiter; a run
 # that is not pure ASCII is cut further (_cut_run).
 _RUN_RE = re.compile(r"[^\s\"'`()\[\]{}<>,;:=|/\\]+")
 
 
-def _ideograph(char: str) -> bool:
+def _unspaced(char: str) -> bool:
+    """Whether ``char`` belongs to a script written without spaces between
+    words (:data:`_UNSPACED`)."""
     code = ord(char)
-    return any(low <= code <= high for low, high in _IDEOGRAPHS)
+    block = bisect.bisect_right(_UNSPACED_LOWS, code) - 1
+    return block >= 0 and code <= _UNSPACED[block][1]
 
 
 def _punctuation(char: str) -> bool:
@@ -370,20 +402,28 @@ def _trimmed(text: str, start: int, end: int) -> tuple[int, int] | None:
 
 def _cut_run(text: str, start: int, end: int) -> Iterator[tuple[int, int]]:
     """The parts of ``text[start:end]`` (a run without blanks or ASCII
-    delimiters) between quotes and brackets of other scripts, each CJK
-    ideograph a part of its own."""
-    begin = start
-    for index in range(start, end):
+    delimiters) between quotes and brackets of other scripts, each
+    character of a script written without spaces a part of its own with
+    the combining marks that follow it."""
+    begin = index = start
+    while index < end:
         char = text[index]
         if char.isascii():
-            continue
-        ideograph = _ideograph(char)
-        if ideograph or unicodedata.category(char) in _BRACKETS_AND_QUOTES:
+            index += 1
+        elif _unspaced(char):
             if begin < index:
                 yield begin, index
-            if ideograph:
-                yield index, index + 1
             begin = index + 1
+            while begin < end and unicodedata.category(text[begin]).startswith("M"):
+                begin += 1
+            yield index, begin
+            index = begin
+        else:
+            if unicodedata.category(char) in _BRACKETS_AND_QUOTES:
+                if begin < index:
+                    yield begin, index
+                begin = index + 1
+            index += 1
     if begin < end:
         yield begin, end
 
@@ -391,9 +431,9 @@ def _cut_run(text: str, start: int, end: int) -> Iterator[tuple[int, int]]:
 def text_words(text: str) -> list[tuple[int, int]]:
     """The (start, end) of each word of ``text`` (see _DELIMITERS above):
     runs of characters between blanks, quotes, brackets and the ASCII
-    delimiters, each CJK ideograph a word of its own, every word without
-    punctuation at either end. Nothing but word characters and the
-    punctuation inside a word is ever part of one."""
+    delimiters, each character of a script written without spaces a word of
+    its own, every word without punctuation at either end. Nothing but word
+    characters and the punctuation inside a word is ever part of one."""
     words: list[tuple[int, int]] = []
     for match in _RUN_RE.finditer(text):
         parts = [match.span()] if match[0].isascii() else _cut_run(text, *match.span())
@@ -404,46 +444,87 @@ def text_words(text: str) -> list[tuple[int, int]]:
     return words
 
 
-# A word unit: the rows of its pieces in one window (first piece first),
-# and its start and end in the text.
+# A word unit: the rows of its pieces in one window (the piece that labels
+# it first), and its start and end in the text.
 WordUnits = list[tuple[tuple[int, ...], int, int]]
+# A piece of a word in one window: its row, start and end.
+_Piece = tuple[int, int, int]
 
 
-def _text_word_units(text: str, windows: Sequence[Window]) -> list[WordUnits]:
-    """Per window, the words of ``text`` (:func:`text_words`) whose first
-    piece — the first token that covers a character of the word — is in
-    that window, each with the rows of its pieces there: a word a window's
-    edge cuts after its first piece is still reported whole, and a window
-    that opens after a word's first piece does not read that word (the
-    window before does). Special tokens and tokens covering no character
+def _word_pieces(
+    text: str, words: Sequence[tuple[int, int]], starts: Sequence[int], window: Window
+) -> dict[int, list[_Piece]]:
+    """The pieces of each word (by index into ``words``) in one window, in
+    token order: every token covering a character of the word, and a token
+    of blanks only right before the word — SentencePiece's lone "▁" before
+    a character its vocabulary has no "▁"-word for is the first piece of
+    that word wherever it stands (at the start of a text its offsets take in
+    the character itself). Special tokens and tokens covering no character
     are no piece."""
-    words = text_words(text)
+    _ids, offsets, special = window
+    pieces: dict[int, list[_Piece]] = {}
+    for row, (start, end) in enumerate(offsets):
+        if special[row] or end <= start:
+            continue
+        word = max(bisect.bisect_right(starts, start) - 1, 0)
+        if word < len(words) and words[word][1] <= start:
+            word += 1  # the token starts after this word ends
+        if text[start:end].isspace():
+            if word < len(words) and words[word][0] == end:
+                pieces.setdefault(word, []).append((row, start, end))
+            continue
+        while word < len(words) and words[word][0] < end:
+            pieces.setdefault(word, []).append((row, start, end))
+            word += 1
+    return pieces
+
+
+def _text_word_units(
+    text: str, words: Sequence[tuple[int, int]], windows: Sequence[Window]
+) -> list[WordUnits]:
+    """Per window, the words of ``text`` (:func:`text_words`) it decodes,
+    each with the rows of its pieces there (:func:`_word_pieces`). A window
+    decodes a word when it holds the word's first piece, so a window that
+    opens after that piece does not read the word (the window before does)
+    and a word a window's edge cuts after its first piece is still reported
+    whole. Unless no window holding the first piece reaches the word's last
+    piece (a word longer than the windows' overlap): then the part those
+    windows read is a unit of its own, and the rest is decoded the same way
+    from its own first piece, in the window that holds it — so every piece
+    of a text is read by some window."""
     starts = [start for start, _end in words]
-    first_piece: dict[int, int] = {}
-    pieces_per_window: list[dict[int, list[int]]] = []
-    for _ids, offsets, special in windows:
-        pieces: dict[int, list[int]] = {}
-        for index, (start, end) in enumerate(offsets):
-            if special[index] or end <= start:
-                continue
-            word = max(bisect.bisect_right(starts, start) - 1, 0)
-            if word < len(words) and words[word][1] <= start:
-                word += 1  # the token starts after this word ends
-            while word < len(words) and words[word][0] < end:
-                if word not in pieces:
-                    first_piece[word] = min(first_piece.get(word, start), start)
-                pieces.setdefault(word, []).append(index)
-                word += 1
-        pieces_per_window.append(pieces)
-    units: list[WordUnits] = []
-    for pieces, (_ids, offsets, _special) in zip(pieces_per_window, windows, strict=True):
-        units.append(
-            [
-                (tuple(rows), *words[word])
-                for word, rows in pieces.items()
-                if offsets[rows[0]][0] == first_piece[word]
+    # Each word's pieces in each window that holds any, windows in order.
+    found: dict[int, list[tuple[int, list[_Piece]]]] = {}
+    for index, window in enumerate(windows):
+        for word, pieces in _word_pieces(text, words, starts, window).items():
+            found.setdefault(word, []).append((index, pieces))
+    units: list[WordUnits] = [[] for _window in windows]
+    for word in sorted(found):
+        word_start, word_end = words[word]
+        begin = word_start
+        while begin < word_end:
+            # The pieces of the part not decoded yet, per window (the lone
+            # blank piece before the word ends where the word starts).
+            rest = [
+                (index, kept)
+                for index, pieces in found[word]
+                if (kept := [piece for piece in pieces if piece[2] > begin])
             ]
-        )
+            if not rest:
+                break  # no token covers the rest of the word
+            first = min(kept[0][1] for _index, kept in rest)
+            holders = [(index, kept) for index, kept in rest if kept[0][1] == first]
+            reach = max(piece[2] for _index, kept in holders for piece in kept)
+            later = any(piece[2] > reach for _index, kept in rest for piece in kept)
+            end = reach if later and reach < word_end else word_end
+            for index, kept in holders:
+                rows = tuple(row for row, _start, _end in kept)
+                if begin == word_start:
+                    # The blank piece before the word comes first.
+                    lead = dict(found[word])[index]
+                    rows = (*(row for row, _s, stop in lead if stop <= begin), *rows)
+                units[index].append((rows, begin, end))
+            begin = end
     return units
 
 
@@ -479,41 +560,97 @@ def _word_row(
     return rows[pieces[0]]
 
 
-# What may separate two words of one span: nothing (CJK ideographs), one or
-# two blanks (labels.is_part_gap), or a comma and a space ("March 3, 1985")
-# or a slash ("03/12/1985") where the model tags the second word as the
-# span's continuation. Never a quote, a bracket, a colon, a newline.
+# What may separate two units of one span: nothing (characters of a script
+# written without spaces), one or two blanks (labels.is_part_gap), or a
+# comma and a space ("March 3, 1985") or a slash ("03/12/1985") where the
+# model tags the second unit as the span's continuation. Anything else — a
+# quote, a bracket, a colon, a newline — cuts the span (_cut_spans).
 _SPAN_GAPS = frozenset({", ", "/"})
 # What may separate two spans of the same label that become one value: a
 # model that labels every word B- ("03" "12" "1985" of "03/12/1985").
 _JOINED_GAPS = frozenset({"", "/"})
 
 
-def _text_spans(
-    spans: Sequence[tuple[int, int, str]], kept: WordUnits, text: str
-) -> list[tuple[int, int, str]]:
-    """``spans`` (word indices into ``kept``) cut wherever two of their
-    words are separated by anything else than :data:`_SPAN_GAPS` or one or
-    two blanks, then neighbouring spans of the same label joined over
-    :data:`_JOINED_GAPS`."""
-    cut: list[tuple[int, int, str]] = []
+@dataclass(slots=True)
+class _Span:
+    """A value decoded in one window: where it starts and ends in the text,
+    its label, and the summed confidence of its units and their number (a
+    span scores the mean of its units)."""
+
+    start: int
+    end: int
+    label: str
+    confidence: float
+    units: int
+
+    def join(self, other: "_Span") -> None:
+        self.end = other.end
+        self.confidence += other.confidence
+        self.units += other.units
+
+
+def _cut_spans(
+    spans: Sequence[tuple[int, int, str]],
+    kept: WordUnits,
+    confidence: Sequence[float],
+    text: str,
+) -> list[_Span]:
+    """``spans`` (unit indices into ``kept``) cut wherever two of their
+    units are separated by anything else than :data:`_SPAN_GAPS` or one or
+    two blanks; each part keeps the confidence of the units the model
+    tagged."""
+    cut: list[_Span] = []
     for first, last, label in spans:
         start = first
-        for word in range(first, last):
-            gap = text[kept[word][2] : kept[word + 1][1]]
-            if gap and gap not in _SPAN_GAPS and not is_part_gap(gap):
-                cut.append((start, word, label))
-                start = word + 1
-        cut.append((start, last, label))
-    joined: list[tuple[int, int, str]] = []
-    for first, last, label in cut:
-        if joined and joined[-1][2] == label:
-            gap = text[kept[joined[-1][1]][2] : kept[first][1]]
-            if gap in _JOINED_GAPS:
-                joined[-1] = (joined[-1][0], last, label)
-                continue
-        joined.append((first, last, label))
+        for unit in range(first, last + 1):
+            if unit < last:
+                gap = text[kept[unit][2] : kept[unit + 1][1]]
+                if not gap or gap in _SPAN_GAPS or is_part_gap(gap):
+                    continue
+            cut.append(
+                _Span(
+                    kept[start][1],
+                    kept[unit][2],
+                    label,
+                    sum(confidence[start : unit + 1]),
+                    unit + 1 - start,
+                )
+            )
+            start = unit + 1
+    return cut
+
+
+def _joined(cut: Sequence[_Span], text: str) -> list[_Span]:
+    """The spans of one window, neighbouring spans of the same label
+    joined over :data:`_JOINED_GAPS`."""
+    joined: list[_Span] = []
+    for span in cut:
+        if (
+            joined
+            and joined[-1].label == span.label
+            and text[joined[-1].end : span.start] in _JOINED_GAPS
+        ):
+            joined[-1].join(span)
+        else:
+            joined.append(span)
     return joined
+
+
+def _joined_across(found: Sequence[_Span]) -> list[_Span]:
+    """The spans every window decoded, sorted, those of one label that meet
+    (one ends where the other starts: the parts of a word no single window
+    reads whole) joined."""
+    spans: list[_Span] = []
+    ending: dict[tuple[str, int], _Span] = {}
+    for span in sorted(found, key=lambda span: (span.start, span.end)):
+        before = ending.pop((span.label, span.start), None)
+        if before is None:
+            spans.append(span)
+            before = span
+        else:
+            before.join(span)
+        ending[(before.label, before.end)] = before
+    return spans
 
 
 class TaggerPipe:
@@ -532,13 +669,14 @@ class TaggerPipe:
     piece as the pipeline's word-level aggregation reads a BIO model; with
     ``by_text_word`` the words of the text itself (:func:`text_words`), each
     scored by :func:`_word_row` (``every_piece``: the model labels every
-    piece of a word), a span cut and joined by
-    :func:`_text_spans`; otherwise the window's tokens. Either way a span
-    covers whole units. Each span is reported like a pipeline entity — its
-    entity label (the tag dropped), the mean probability of the labels of
-    the units the model tagged as one span, and character offsets into the
-    whole text, without the whitespace at either edge. Special tokens and
-    tokens covering no character are not decoded."""
+    piece of a word), a span cut by :func:`_cut_spans` and joined by
+    :func:`_joined`, and the parts of a word no window reads whole joined by
+    :func:`_joined_across`; otherwise the window's tokens. Each span is
+    reported like a pipeline entity — its entity label (the tag dropped),
+    the mean probability of the labels of the units the model tagged as one
+    span, and character offsets into the whole text, without the whitespace
+    at either edge. Special tokens and tokens covering no character are not
+    decoded."""
 
     def __init__(
         self,
@@ -600,9 +738,10 @@ class TaggerPipe:
         return entities
 
     def _text_word_entities(self, text: str, windows: Sequence[Window]) -> list[dict[str, Any]]:
-        entities: list[dict[str, Any]] = []
+        words = text_words(text)
+        cut: list[list[_Span]] = []
         for (ids, _offsets, _special), kept in zip(
-            windows, _text_word_units(text, windows), strict=True
+            windows, _text_word_units(text, words, windows), strict=True
         ):
             if not kept:
                 continue  # no word in this window (see __call__)
@@ -612,7 +751,7 @@ class TaggerPipe:
                 for pieces, _start, _end in kept
             ]
             path = self._decode(scores)
-            # Each word scores the mean probability of the span the model
+            # Each unit scores the mean probability of the span the model
             # tagged it in, whatever cutting and joining makes of the span.
             confidence = [0.0] * len(kept)
             spans = spans_of(path, self._tagset)
@@ -621,10 +760,17 @@ class TaggerPipe:
                 confidence[first : last + 1] = [sum(probabilities) / len(probabilities)] * (
                     last + 1 - first
                 )
-            for first, last, label in _text_spans(spans, kept, text):
-                spanned = confidence[first : last + 1]
-                _add_entity(entities, text, label, spanned, kept[first][1], kept[last][2])
-        return entities
+            cut.append(_cut_spans(spans, kept, confidence, text))
+        found = [span for spans in cut for span in _joined(spans, text)]
+        return [
+            {
+                "entity_group": span.label,
+                "score": span.confidence / span.units,
+                "start": span.start,
+                "end": span.end,
+            }
+            for span in _joined_across(found)
+        ]
 
 
 def _add_entity(

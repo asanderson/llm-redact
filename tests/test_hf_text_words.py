@@ -7,12 +7,15 @@ nemotron-pii labels EVERY piece ``B-``, so "Zbigniew Brzezinski" became six
 PERSON values — and its whitespace fallback glues ``{"name":"Angela`` into one
 "word" labelled by its brace. The ``hf`` backend now decodes such a model
 itself (hf_ner.TaggerPipe) over the text's own words (hf_ner.text_words: cut at
-blanks, quotes, brackets and value delimiters, each CJK ideograph alone,
-trimmed of punctuation), each labelled by its first piece — or by its first
-piece the model tags, when the first is background. A span never takes in a
-quote, a bracket, a colon or a newline; it continues across a comma and a
-space or a slash only where the model continues the entity. WordPiece models
-keep the transformers pipeline, unchanged.
+blanks, quotes, brackets and value delimiters, each character of a script
+written without spaces alone, trimmed of punctuation), each labelled by its
+first piece (a lone blank piece right before it included) — or, for a model
+the catalog says labels every piece, by its most confidently tagged piece. A
+word no window reads whole is decoded in parts, each in the window that holds
+its first piece. A span never takes in a quote, a bracket, a colon or a
+newline; it continues across a comma and a space or a slash only where the
+model continues the entity. WordPiece models keep the transformers pipeline,
+unchanged.
 
 The fakes cut text into pieces the way the two tokenizer families do (a
 piece's offsets take in the blank before its word); nothing here needs torch,
@@ -76,7 +79,17 @@ ENTITIES = ("PERSON", "ACCOUNT_NUMBER", "USERNAME")
         ("王小明的电话？", ["王", "小", "明", "的", "电", "话"]),
         ("李华abc", ["李", "华", "abc"]),
         ("«Jane»—Doe", ["Jane", "Doe"]),
-        ("「田中」さん", ["田", "中", "さん"]),
+        ("「田中」さん", ["田", "中", "さ", "ん"]),
+        # Scripts written without spaces: every character a word, with the
+        # combining marks after it (Thai, kana, Myanmar, CJK extensions F-J).
+        ("ผมชื่อสมชาย", ["ผ", "ม", "ชื่", "อ", "ส", "ม", "ช", "า", "ย"]),
+        ("こんにちはマイケルです", list("こんにちはマイケルです")),
+        ("ﾏｲｹﾙ・ジャクソン", ["ﾏ", "ｲ", "ｹ", "ﾙ", "ジ", "ャ", "ク", "ソ", "ン"]),
+        ("မောင်", ["မော", "င်"]),
+        (
+            "\U0002ceb0\U0002ebf0\U00030000\U000323b0x",
+            ["\U0002ceb0", "\U0002ebf0", "\U00030000", "\U000323b0", "x"],
+        ),
         ("a_b $5 x+y", ["a_b", "5", "x+y"]),
         (
             "1985-03-12 j.doe dev_jo42 (Paris.) @jdoe",
@@ -95,22 +108,74 @@ def test_text_words(text: str, words: list[str]) -> None:
     assert [text[start:end] for start, end in text_words(text)] == words
 
 
-_IDEOGRAPHS = [
-    (0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0x20000, 0x2A6DF), (0x2A700, 0x2B73F),
-    (0x2B740, 0x2B81F), (0x2B820, 0x2CEAF), (0xF900, 0xFAFF), (0x2F800, 0x2FA1F),
-]  # fmt: skip
+# Scripts written without spaces between words, transcribed from the
+# Unicode block list by name (independently of hf_ner._UNSPACED): each of
+# their characters is a word of its own.
+_UNSPACED_BLOCKS = {
+    "Thai": (0x0E00, 0x0E7F),
+    "Lao": (0x0E80, 0x0EFF),
+    "Tibetan": (0x0F00, 0x0FFF),
+    "Myanmar": (0x1000, 0x109F),
+    "Khmer": (0x1780, 0x17FF),
+    "Tai Le": (0x1950, 0x197F),
+    "New Tai Lue": (0x1980, 0x19DF),
+    "Khmer Symbols": (0x19E0, 0x19FF),
+    "Tai Tham": (0x1A20, 0x1AAF),
+    "CJK Radicals Supplement": (0x2E80, 0x2EFF),
+    "Kangxi Radicals": (0x2F00, 0x2FDF),
+    "Hiragana": (0x3040, 0x309F),
+    "Katakana": (0x30A0, 0x30FF),
+    "Bopomofo": (0x3100, 0x312F),
+    "Bopomofo Extended": (0x31A0, 0x31BF),
+    "Katakana Phonetic Extensions": (0x31F0, 0x31FF),
+    "CJK Unified Ideographs Extension A": (0x3400, 0x4DBF),
+    "CJK Unified Ideographs": (0x4E00, 0x9FFF),
+    "Yi Syllables": (0xA000, 0xA48F),
+    "Yi Radicals": (0xA490, 0xA4CF),
+    "Myanmar Extended-B": (0xA9E0, 0xA9FF),
+    "Myanmar Extended-A": (0xAA60, 0xAA7F),
+    "Tai Viet": (0xAA80, 0xAADF),
+    "CJK Compatibility Ideographs": (0xF900, 0xFAFF),
+    "Kana Extended-B": (0x1AFF0, 0x1AFFF),
+    "Kana Supplement": (0x1B000, 0x1B0FF),
+    "Kana Extended-A": (0x1B100, 0x1B12F),
+    "Small Kana Extension": (0x1B130, 0x1B16F),
+    "CJK Unified Ideographs Extension B": (0x20000, 0x2A6DF),
+    "CJK Unified Ideographs Extension C": (0x2A700, 0x2B73F),
+    "CJK Unified Ideographs Extension D": (0x2B740, 0x2B81F),
+    "CJK Unified Ideographs Extension E": (0x2B820, 0x2CEAF),
+    "CJK Unified Ideographs Extension F": (0x2CEB0, 0x2EBEF),
+    "CJK Unified Ideographs Extension I": (0x2EBF0, 0x2EE5F),
+    "CJK Compatibility Ideographs Supplement": (0x2F800, 0x2FA1F),
+    "CJK Unified Ideographs Extension G": (0x30000, 0x3134F),
+    "CJK Unified Ideographs Extension H": (0x31350, 0x323AF),
+    "CJK Unified Ideographs Extension J": (0x323B0, 0x3347F),
+}
+# Ideographic and kana marks of the CJK Symbols and Punctuation block that
+# are letters or numbers (Lm, Lo, Nl), not punctuation.
+_UNSPACED_MARKS = {0x3005, 0x3006, 0x3007, *range(0x3021, 0x302A), *range(0x3031, 0x3036)}
+_UNSPACED_MARKS |= set(range(0x3038, 0x303D)) | set(range(0xFF66, 0xFFA0))  # + halfwidth kana
+
+
+def _unspaced(char: str) -> bool:
+    code = ord(char)
+    in_block = any(low <= code <= high for low, high in _UNSPACED_BLOCKS.values())
+    return in_block or code in _UNSPACED_MARKS
 
 
 def _reference_words(text: str) -> list[tuple[int, int]]:
     """The word cut written character by character: a blank, a quote or a
     bracket of any script (Unicode Ps, Pe, Pi, Pf) or one of the ASCII
-    value delimiters ends a word; a CJK ideograph is a word of its own;
-    each word loses the punctuation (Unicode P*, ASCII symbols) at its
+    value delimiters ends a word; a character of a script written without
+    spaces is a word of its own with the combining marks (Unicode M*) after
+    it; each word loses the punctuation (Unicode P*, ASCII symbols) at its
     ends, and a word of punctuation only is none."""
     delimiters = set("\"'`()[]{}<>,;:=|/\\")
-    words, start = [], None
+    words, start, alone_until = [], None, -1
     for index, char in enumerate(text + " "):
-        alone = index < len(text) and any(low <= ord(char) <= high for low, high in _IDEOGRAPHS)
+        if index < alone_until:
+            continue  # a combining mark of the character before
+        alone = index < len(text) and _unspaced(char)
         ends = char.isspace() or char in delimiters
         ends = ends or unicodedata.category(char) in ("Ps", "Pe", "Pi", "Pf")
         if alone or ends:
@@ -118,7 +183,12 @@ def _reference_words(text: str) -> list[tuple[int, int]]:
                 words.append((start, index))
                 start = None
             if alone:
-                words.append((index, index + 1))
+                alone_until = index + 1
+                while alone_until < len(text) and unicodedata.category(
+                    text[alone_until]
+                ).startswith("M"):
+                    alone_until += 1
+                words.append((index, alone_until))
         elif start is None:
             start = index
 
@@ -141,7 +211,10 @@ def _reference_words(text: str) -> list[tuple[int, int]]:
 @given(
     st.text(max_size=80)
     | st.text(
-        alphabet="ab1 _-.,/:'\"\u00a0\u3000\u4e00\u9fff\u3400\uff01\u00e9\u0301\u20ac\u00ab\u300c",
+        alphabet=(
+            "ab1 _-.,/:'\"\u00a0\u3000\u4e00\u9fff\u3400\uff01\u00e9\u0301\u20ac\u00ab\u300c"
+            "\u0e01\u0e31\u0e48\u30ab\u30fb\u30fc\u3005\u1019\u1031\uff8f\U0002ebf0\U000323b0"
+        ),
         max_size=40,
     )
 )
@@ -535,6 +608,77 @@ def test_one_or_two_blanks_keep_a_span_whole() -> None:
         assert _found(_detector("spm", label), text) == [("PERSON", f"Doe{gap}Jane")]
 
 
+# --- a lone blank piece ---------------------------------------------------------------
+
+
+class LoneBlankTokenizer(PieceTokenizer):
+    """SentencePiece as DeBERTa-v3's reads a word whose first character
+    has no "▁"-piece in its vocabulary (CJK, "Ę", Greek "Ζ"): a lone "▁"
+    piece first — its offsets cover the blank before the word, or, at the
+    start of a text, the word's first character — then the word's own
+    pieces. ``lone`` holds the indices of the lone pieces."""
+
+    def __init__(self, first_chars: str) -> None:
+        super().__init__("spm")
+        self.first_chars = first_chars
+        self.lone: set[int] = set()
+
+    def pieces(self, text: str) -> list[tuple[int, int]]:
+        spans, self.lone = [], set()
+        for start, end in super().pieces(text):
+            body = start + (1 if text[start].isspace() else 0)
+            if body == start and spans and spans[-1][1] == start:
+                spans.append((start, end))  # a later piece of the word
+                continue
+            if text[body] in self.first_chars:
+                self.lone.add(len(spans))
+                spans.append((start, body) if body > start else (body, body + 1))
+                spans.append((body, end))
+                continue
+            spans.append((start, end))
+        return spans
+
+
+@pytest.mark.parametrize("every_piece", [False, True])
+@pytest.mark.parametrize("text", ["Ędward Nowak called", "Name: Ędward Nowak", "call Ędward"])
+def test_a_lone_blank_piece_labels_the_word_after_it_wherever_it_stands(
+    text: str, every_piece: bool
+) -> None:
+    # The lone "▁" is the word's first piece (transformers' word_ids put it
+    # in the word), the piece a first-piece model was trained to label: it
+    # labels "Ędward" at the start of a text, where its offsets overlap the
+    # "Ę", and after a blank, where they cover only the blank (read from
+    # the "Ę" piece there, the word went upstream).
+    tokenizer = LoneBlankTokenizer("Ę")
+
+    def scorer(ids: list[int]) -> list[list[float]]:
+        out = []
+        for token in ids:
+            name = "B-first_name" if token in tokenizer.lone else "O"
+            raw = [6.0 if label == name else 0.0 for label in LABELS]
+            total = math.log(sum(math.exp(x) for x in raw))
+            out.append([x - total for x in raw])
+        return out
+
+    model = PieceModel(tokenizer, lambda *args: "O")
+    tags = TagSet.from_labels(model.config.id2label)
+    pipe = TaggerPipe(
+        model,
+        tokenizer,
+        128,
+        tags,
+        decoder_for(tags, None),
+        scorer,
+        by_text_word=True,
+        every_piece=every_piece,
+    )
+    detector = HfDetector(
+        pipe, frozenset(ENTITIES), 1_000_000, 0.5, policy=LabelPolicy(ENTITIES, backend="hf")
+    )
+    assert len(tokenizer.pieces(text)) == len(PieceTokenizer("spm").pieces(text)) + 1
+    assert _found(detector, text) == [("PERSON", "Ędward")]
+
+
 # --- scripts without spaces ----------------------------------------------------------
 
 
@@ -551,26 +695,83 @@ def test_an_unspaced_cjk_sentence_is_read_character_by_character() -> None:
 # --- windows ---------------------------------------------------------------------------
 
 
+def _later_pieces_another_label(text: str, start: int, end: int, _opens: bool) -> str:
+    # "Brzezinski" labelled by its first piece; its later pieces say
+    # something else.
+    if text[start:end].strip().startswith("Br"):
+        return "B-last_name"
+    return "B-user_name" if text.index("Br") < start < text.index(" ok") else "O"
+
+
 def test_a_word_a_window_edge_cuts_is_reported_whole_once() -> None:
-    filler = " ".join(f"w{i}" for i in range(4))  # one piece each
+    filler = " ".join(f"w{i}" for i in range(4))
     text = f"{filler} Brzezinski ok"
-    # 6 tokens a window, 1 shared: [w0 w1 w2 w3 " Br" "zez"] ["zez" "ins" "ki" " ok"]:
-    # the first window holds the word's first piece and reports the word
-    # whole; the second opens inside the word and does not read it.
+    # Pieces: w 0 " w" 1 " w" 2 " w" 3 " Brz" ezi nsk i " ok"; 6 tokens a
+    # window, 3 shared: [w 0 " w" 1 " w" 2] [1 " w" 2 " w" 3 " Brz"]
+    # [" w" 3 " Brz" ezi nsk i] [nsk i " ok"]. The second window holds the
+    # word's first piece only; the third holds it and the rest: the word is
+    # reported whole, once, by its first piece (the later pieces, which a
+    # first-piece model was never trained on, are not read on their own).
+    for labeler in (_every_piece({"Brzezinski": "last_name"}), _later_pieces_another_label):
+        detector = _detector("bpe", labeler, window=8)
+        detector._pipe._stride = 3  # type: ignore[attr-defined]
+        assert _found(detector, text) == [("PERSON", "Brzezinski")]
+
+
+def test_a_word_no_window_reads_whole_is_read_in_parts() -> None:
+    filler = " ".join(f"w{i}" for i in range(4))
+    text = f"{filler} Brzezinski ok"
+    # 1 token shared: [w 0 " w" 1 " w" 2] [2 " w" 3 " Brz" ezi nsk]
+    # [nsk i " ok"]: no window holding the word's first piece holds its
+    # last. The part the second window reads ("Brzezinsk") is decoded
+    # there; the rest ("i") from its own first piece in the third window —
+    # skipping it would leave a piece of the text no window reads (in an
+    # unspaced script, whole names). Parts of one label join.
     detector = _detector("bpe", _every_piece({"Brzezinski": "last_name"}), window=8)
     detector._pipe._stride = 1  # type: ignore[attr-defined]
     assert _found(detector, text) == [("PERSON", "Brzezinski")]
-
-    # The second window would call its later pieces something else: they
-    # are not read there.
-    def label(text: str, start: int, end: int, opens: bool) -> str:
-        if text[start:end].strip().startswith("Br"):
-            return "B-last_name"
-        return "B-user_name" if text.index("Br") < start < text.index(" ok") else "O"
-
-    detector = _detector("bpe", label, window=8)
+    detector = _detector("bpe", _later_pieces_another_label, window=8)
     detector._pipe._stride = 1  # type: ignore[attr-defined]
-    assert _found(detector, text) == [("PERSON", "Brzezinski")]
+    assert _found(detector, text) == [("PERSON", "Brzezinsk"), ("USERNAME", "i")]
+
+
+@pytest.mark.parametrize("style", ["bpe", "spm"])
+@pytest.mark.parametrize("every_piece", [False, True])
+def test_a_name_deep_in_a_long_unspaced_text_is_found(style: str, every_piece: bool) -> None:
+    # 350 kana characters without a space, read in windows of 62 pieces: a
+    # name past the first window (and an earlier one in it) is found. Read
+    # as one word, the text was labelled by its first piece and nothing
+    # past its first window was read.
+    filler = "かきくけこ" * 70
+    text = f"たなかさん{filler[:300]}スズキイチロウ{filler[300:]}"
+    detector = _detector(
+        style,
+        _every_piece({"たなか": "last_name", "スズキイチロウ": "last_name"}),
+        window=64,
+        size=1,
+        every_piece=every_piece,
+    )
+    assert _found(detector, text) == [("PERSON", "たなか"), ("PERSON", "スズキイチロウ")]
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        ("ผมชื่อสมชายครับ", "สมชาย"),
+        ("こんにちはマイケルです", "マイケル"),
+        ("わたしはスズキです", "スズキ"),
+        ("ຂ້ອຍຊື່ສົມພອນ", "ສົມພອນ"),
+        ("ខ្ញុំឈ្មោះសុខាណាស់", "សុខា"),
+        ("ကျွန်တော်အောင်အောင်ပါ", "အောင်အောင်"),
+    ],
+)
+@pytest.mark.parametrize("style", ["bpe", "spm"])
+@pytest.mark.parametrize("every_piece", [False, True])
+def test_a_name_inside_an_unspaced_sentence_is_found(
+    text: str, name: str, style: str, every_piece: bool
+) -> None:
+    detector = _detector(style, _every_piece({name: "first_name"}), size=1, every_piece=every_piece)
+    assert _found(detector, text) == [("PERSON", name)]
 
 
 @pytest.mark.parametrize("style", ["bpe", "spm"])
@@ -584,7 +785,7 @@ def test_a_name_past_the_first_window_keeps_its_absolute_offsets(style: str) -> 
 
 # --- every span, any text (hypothesis) ----------------------------------------------------
 
-_ALPHABET = "abcXYZ019 \t\n\u00a0\"'{}[]:,.-_@#=/王李é"
+_ALPHABET = "abcXYZ019 \t\n\u00a0\"'{}[]:,.-_@#=/王李éสั\u300c"
 
 
 @settings(max_examples=300, deadline=None)
@@ -615,13 +816,15 @@ def test_spans_cover_whole_words_and_nothing_else(
         every_piece=every_piece,
     )
     words = text_words(text)
-    starts = {start for start, _end in words}
-    ends = {end for _start, end in words}
+    spans = tokenizer.pieces(text)
+    starts = {start for start, _end in words} | {start for start, _end in spans}
+    ends = {end for _start, end in words} | {end for _start, end in spans}
     entities = pipe(text)
     for entity in entities:
         start, end = entity["start"], entity["end"]
         assert 0 <= start < end <= len(text)
-        # A span starts and ends on word boundaries …
+        # A span starts and ends on word boundaries (or the piece a word no
+        # window reads whole is read in parts at) …
         assert start in starts and end in ends
         # … and between its words only nothing, one or two blanks, a comma
         # and a space, or a slash: never a quote, a bracket, a colon, an
@@ -632,9 +835,11 @@ def test_spans_cover_whole_words_and_nothing_else(
                 len(text[left_end:right_start]) <= 2
                 and set(text[left_end:right_start]) <= {" ", "\t", "\u00a0"}
             )
-    # Every word whose first piece scores an entity label is covered.
+    # Every word whose first piece scores an entity label is covered: whole
+    # when one window reads the text, else from its start (a word longer
+    # than the windows' overlap is read in parts, each by its own first
+    # piece).
     covered = {i for e in entities for i in range(e["start"], e["end"])}
-    spans = tokenizer.pieces(text)
     first_pieces: dict[tuple[int, int], int] = {}
     for index, (start, end) in enumerate(spans):
         for word in words:
@@ -642,7 +847,8 @@ def test_spans_cover_whole_words_and_nothing_else(
                 first_pieces[word] = index
     for (word_start, word_end), index in first_pieces.items():
         if label(text, *spans[index], True) != "O":
-            assert set(range(word_start, word_end)) <= covered
+            read = word_end if window == 512 else word_start + 1
+            assert set(range(word_start, read)) <= covered
 
 
 # --- building ---------------------------------------------------------------------------
@@ -796,5 +1002,7 @@ def test_real_model_every_piece_b_tagger_gives_whole_names(monkeypatch: pytest.M
     for text, names in [
         ('billing: charge declined for "Yusuf Lindgren" account=994053910371', ["Yusuf Lindgren"]),
         ("# Reported by Mei Navarro; reproduces only for account", ["Mei Navarro"]),
+        # Read as one word, this kana sentence was one PERSON value.
+        ("こんにちはマイケルです", ["マイケル"]),
     ]:
         assert _found(detector, text) == [("PERSON", name) for name in names]

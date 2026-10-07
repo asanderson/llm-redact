@@ -765,21 +765,32 @@ token windows, word by word:
 
 - the words are the text's own: a word ends at a blank, a quote or a
   bracket of any script, and at `,` `;` `:` `=` `|` `/` `\` and the ASCII
-  quotes and brackets; each CJK ideograph is a word of its own; punctuation
-  at either end of a word is left out ("Paris." is "Paris"), punctuation
-  inside it stays ("1985-03-12", "j.doe" and "dev_jo42" are one word each);
+  quotes and brackets; each character of a script written without spaces
+  between words (Chinese, Japanese kana, Thai, Lao, Khmer, Myanmar,
+  Tibetan, Yi) is a word of its own, with the combining marks after it;
+  punctuation at either end of a word is left out ("Paris." is "Paris"),
+  punctuation inside it stays ("1985-03-12", "j.doe" and "dev_jo42" are one
+  word each);
 - a word is labelled by its first piece, the piece a model trained the
   Hugging Face way labels (its later pieces were never trained and may say
-  anything). For a model llm-redact's model catalog lists as trained on
-  every piece (`kalyan-ks/ettin-68m-nemotron-pii`), which may leave a word's
-  first piece untagged and tag a later one, a word is labelled by the piece
-  tagged most confidently, else by its first piece;
+  anything); a piece of blanks only right before the word — SentencePiece's
+  lone "▁" before a character its vocabulary has no "▁"-piece for, such as
+  "Ę" or a CJK character — is that first piece, wherever the word stands.
+  For a model llm-redact's model catalog lists as trained on every piece
+  (`kalyan-ks/ettin-68m-nemotron-pii`), which may leave a word's first piece
+  untagged and tag a later one, a word is labelled by the piece tagged most
+  confidently, else by its first piece;
+- a window reads the words whose first piece it holds. A word no window
+  holding its first piece reads to its end (longer than the windows'
+  overlap) is read in parts, each from its own first piece in the window
+  that holds it, so every piece of a text is read;
 - labels are read greedily, `B` opening a span and `I` continuing it; a span
-  covers whole words and never takes in a quote, a bracket, a colon, a
-  semicolon, an equals sign or a newline: between two of its words there is
-  only nothing (CJK), one or two blanks, a comma and a space ("March 3,
-  1985") or a slash ("03/12/1985"), else it is cut there; neighbouring spans
-  of one label separated by nothing or a slash are one value;
+  covers whole words (or the parts a long word is read in) and never takes
+  in a quote, a bracket, a colon, a semicolon, an equals sign or a newline:
+  between two of its words there is only nothing (a script written without
+  spaces), one or two blanks, a comma and a space ("March 3, 1985") or a
+  slash ("03/12/1985"), else it is cut there; neighbouring spans of one
+  label separated by nothing or a slash are one value;
 - a span's score is the mean probability of the words the model tagged as
   one span (`score_threshold` applies), also for each part a cut leaves.
 

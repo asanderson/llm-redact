@@ -366,17 +366,21 @@ and tags `vX.Y.Z`.
   word, instead of the transformers pipeline's token-level aggregation, which made every
   piece its own value (`kalyan-ks/ettin-68m-nemotron-pii` tags every piece `B-`: "Zbigniew
   Brzezinski" was six values). The words are the text's own (cut at blanks, quotes,
-  brackets and `, ; : = | / \`, each CJK ideograph alone, punctuation at a word's ends left
-  out); each is labelled by its first piece, or — for a model the model catalog lists as
-  trained on every piece (`piece_labels = "every"`) — by its most confidently tagged piece; a
-  span never takes in a quote, a bracket, a colon or a newline. WordPiece models
-  (`dslim/bert-base-NER`, the default) keep the pipeline, unchanged (a differential test
-  over the recall and false-positive corpora, and identical bench numbers). Re-measured on
-  the synthetic corpus: exact `PERSON` recall 0.67 to 1.00 (OpenMed-PII Small 44M) and 0.03
-  to 0.87 (ettin), character leak 0.051 to 0.048 and 0.158 to 0.143, detections on the
-  negatives corpus 551 to 514 and 286 to 183; their recorded baselines and catalog numbers
-  are updated (docs/ner-landscape.md lists what got worse: some recall and precision, and
-  over-redaction).
+  brackets and `, ; : = | / \`, each character of a script written without spaces —
+  Chinese, Japanese kana, Thai, Lao, Khmer, Myanmar, Tibetan — a word of its own,
+  punctuation at a word's ends left out); each is labelled by its first piece (a lone blank
+  piece right before it, SentencePiece's "▁", counts as that piece), or — for a model the
+  model catalog lists as trained on every piece (`piece_labels = "every"`) — by its most
+  confidently tagged piece; a word no window reads to its end is read in parts, so every
+  piece of a text is read. A span never takes in a quote, a bracket, a colon or a newline.
+  WordPiece models (`dslim/bert-base-NER`, the default) keep the pipeline, unchanged
+  (a differential test over the recall and false-positive corpora, and identical bench
+  numbers).
+  Re-measured on the synthetic corpus: exact `PERSON` recall 0.67 to 1.00 (OpenMed-PII
+  Small 44M) and 0.03 to 0.87 (ettin), character leak 0.051 to 0.048 and 0.158 to 0.143,
+  detections on the negatives corpus 551 to 514 and 286 to 183; their recorded baselines and
+  catalog numbers are updated (docs/ner-landscape.md lists what got worse: some recall and
+  precision, and over-redaction).
 - The `hf` backend loads every model in float32, whatever precision its checkpoint stores
   (transformers' default keeps it): a bfloat16 checkpoint ran about 30% slower on a CPU
   (`openai/privacy-filter`: 738 against 1,025 ms per 500 characters for the model alone). The

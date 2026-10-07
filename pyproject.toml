@@ -269,10 +269,10 @@ only_mutate = [
     "src/llm_redact/vault_writer.py",
 ]
 # mutmut runs pytest from a mutants/ copy; the suite reads repo data by path
-# (docs/api-coverage.md, deploy/*, bench/fp_corpus/*, the checked-in agent
+# (docs/api-coverage.md, deploy/*, bench/fp_corpus/*, CLAUDE.md, the checked-in agent
 # plugin under plugins/ + .claude-plugin/, config.example.toml, README.md),
 # so those must be copied alongside the tests/ and pyproject.toml mutmut
 # copies by default — a path missing here fails the BASELINE run and every
 # mutant reports "not checked".
-also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", ".github", "config.example.toml", "README.md", "CHANGELOG.md", "Dockerfile", "uv.lock"]
+also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", ".github", "config.example.toml", "README.md", "CHANGELOG.md", "CLAUDE.md", "Dockerfile", "uv.lock"]
 pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]

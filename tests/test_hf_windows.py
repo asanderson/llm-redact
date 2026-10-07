@@ -134,6 +134,7 @@ def test_stride_is_set_once_at_construction(monkeypatch: pytest.MonkeyPatch) -> 
         "tokenizer": folder,
         "aggregation_strategy": "simple",
         "trust_remote_code": False,
+        "dtype": "float32",
         "model_kwargs": {"use_safetensors": True},
     }
     assert strided == {
@@ -145,6 +146,20 @@ def test_stride_is_set_once_at_construction(monkeypatch: pytest.MonkeyPatch) -> 
     # Calls keep their one-argument signature: the stride is not per call.
     assert [d.value for d in detector.detect("hi Jane Doe")] == ["Jane Doe"]
     assert pipe.calls == ["hi Jane Doe"]
+
+
+def test_every_model_loads_in_float32(monkeypatch: pytest.MonkeyPatch) -> None:
+    # transformers 5.10.1's pipeline() takes `dtype` (`torch_dtype` is its
+    # deprecated alias) and defaults to "auto", which keeps the precision the
+    # checkpoint stores: a bfloat16 model (openai/privacy-filter) then runs
+    # about 30% slower on a CPU. The one load serves the strided pipeline and
+    # a BIOES/BILOU tagger alike, so the model is never loaded twice.
+    pipe = FakeHfPipe([("Jane Doe", "PER", 0.9)])
+    install_transformers(monkeypatch, pipe)
+    build_hf_detector(NerConfig(enabled=True, backend="hf"))
+    loaded, strided = pipe.built_with
+    assert loaded["dtype"] == "float32"
+    assert strided["model"] is pipe.model and "dtype" not in strided
 
 
 # --- whole words --------------------------------------------------------------
@@ -400,3 +415,39 @@ def test_real_model_sentencepiece_spans_leave_the_blanks_out(
         ("ADDRESS", "12 Oak Street"),
     ]
     assert all(not d.value[0].isspace() and not d.value[-1].isspace() for d in found)
+
+
+@pytest.mark.real_model
+def test_real_model_a_bfloat16_checkpoint_runs_in_float32(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    # A checkpoint saved in bfloat16 (openai/privacy-filter is) loads in
+    # float32 all the same: transformers' default keeps the stored
+    # precision, which runs slower on a CPU. A bfloat16 copy of the default
+    # model, read from a local folder, stands in for one.
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    safetensors_torch = pytest.importorskip("safetensors.torch")
+    import json
+    import shutil
+    from pathlib import Path
+
+    offline_hub(monkeypatch)
+    source = Path(cached_snapshot(DSLIM, DSLIM_REVISION, DSLIM_FILES))
+    for name in DSLIM_FILES:
+        if name != "model.safetensors":
+            shutil.copyfile(source / name, tmp_path / name)
+    weights = safetensors_torch.load_file(str(source / "model.safetensors"))
+    safetensors_torch.save_file(
+        {k: v.to(torch.bfloat16) if v.is_floating_point() else v for k, v in weights.items()},
+        str(tmp_path / "model.safetensors"),
+    )
+    config = json.loads((tmp_path / "config.json").read_text())
+    config["torch_dtype"] = config["dtype"] = "bfloat16"
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    detector = build_hf_detector(NerConfig(enabled=True, backend="hf", model=str(tmp_path)))
+    model = detector._pipe.model  # type: ignore[attr-defined]
+    assert {p.dtype for p in model.parameters()} == {torch.float32}
+    assert [d.value for d in detector.detect("Yesterday Angela Merkel met the press.")] == [
+        "Angela Merkel"
+    ]

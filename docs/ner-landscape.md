@@ -260,10 +260,11 @@ failure modes), and `private_date` and `private_url` are not folded.
 | greedy decoding (the calibration left out) | 0.994 (0.994) | 0.717 | 0.120 | 0.047 | 57 | — | — |
 
 Latency per string: 261 ms at 50 characters, 2.1 s at 2,000, 19.5 s at
-10,000; the 1,000-string many-small body took 57 s. The `hf` backend loads
-the weights in their stored precision (bfloat16); a float32 load measured
-about 30% faster on this CPU (738 against 1,025 ms per 500 characters for
-the model alone), which the backend does not do today. Its
+10,000; the 1,000-string many-small body took 57 s. These latencies were
+measured with the weights in their stored precision (bfloat16); a float32
+load measured about 30% faster on this CPU (738 against 1,025 ms per 500
+characters for the model alone), and since 1.12.0 the `hf` backend loads
+every model in float32. Its
 `ACCOUNT_NUMBER` precision is 0.46: it calls many numeric identifiers
 account numbers (23 in the national-id log of the negatives corpus). On
 OpenPII's first 2,000 English rows: `PERSON` recall 0.898, precision 0.933

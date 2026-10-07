@@ -361,6 +361,11 @@ and tags `vX.Y.Z`.
   as the only egress.
 
 ### Changed
+- The `hf` backend loads every model in float32, whatever precision its checkpoint stores
+  (transformers' default keeps it): a bfloat16 checkpoint ran about 30% slower on a CPU
+  (`openai/privacy-filter`: 738 against 1,025 ms per 500 characters for the model alone). The
+  one load serves the transformers pipeline and the BIOES/BILOU tagger alike. The `gliner`
+  and `gliner2` backends are unchanged.
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
   upload inspector's extracted texts included) and a realtime client frame the proxy collects the
   strings a request's redaction will scan, runs the NER models over them on a worker

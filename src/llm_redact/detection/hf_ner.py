@@ -32,7 +32,9 @@ the constrained Viterbi decoder when the model catalog lists the model's
 calibration file, else greedily.
 
 Import-lazy: loads only when an `hf` backend is enabled; the model load
-happens at proxy startup (fail fast, no first-request latency spike). The
+happens at proxy startup (fail fast, no first-request latency spike), in
+float32 whatever precision the checkpoint stores (a bfloat16 model runs
+slower on a CPU). The
 files come from a local directory at a pinned revision (model_files.py):
 safetensors weights unless `allow_pickle_weights` is set, and never code
 from the model's repository (`trust_remote_code=False`).
@@ -70,6 +72,10 @@ _MODEL_NAME = "dslim/bert-base-NER"
 _SENTINEL_MAX_LENGTH = 1_000_000
 # What an encoder reads when its config does not say (BERT and most others).
 _DEFAULT_WINDOW = 512
+# The precision every hf model runs in (transformers' `dtype`, which it
+# resolves to torch.float32): the pipeline and the BIOES/BILOU tagger both
+# use the one model the first pipeline() call loads.
+MODEL_DTYPE = "float32"
 # The pipeline's aggregation strategies: per word (a word-aware tokenizer)
 # or per token (aggregation_for).
 WORD_AGGREGATION = "first"
@@ -490,6 +496,10 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
             tokenizer=str(path),
             aggregation_strategy=TOKEN_AGGREGATION,
             trust_remote_code=False,
+            # Every weight in float32, whatever precision the checkpoint
+            # stores: transformers' default ("auto") keeps it, and on a CPU
+            # bfloat16 is slower (openai/privacy-filter: about 30%).
+            dtype=MODEL_DTYPE,
             model_kwargs={"use_safetensors": True if has_files(path, SAFETENSORS_FILES) else None},
         )
     except Exception as exc:  # load can fail many ways; name only what is known

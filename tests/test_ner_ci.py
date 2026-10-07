@@ -166,10 +166,12 @@ def test_a_manual_config_has_recorded_baselines_and_says_why(path: Path) -> None
 def test_manual_configs_stay_out_of_the_ci_jobs() -> None:
     assert MANUAL_CONFIGS
     assert not {p.name for p in MANUAL_CONFIGS} & {p.name for p in BENCH_CONFIGS}
-    for name, job in (("ci.yml", "ner-models"), ("ner-eval.yml", "ner-eval")):
-        runs = "\n".join(step.get("run", "") for step in _workflow(name)["jobs"][job]["steps"])
-        assert "bench/configs/*.toml" in runs  # not recursive: manual/ is left out
-        assert "manual" not in runs and "**" not in runs
+    job = _workflow("ci.yml")["jobs"]["ner-models"]
+    runs = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "bench/configs/*.toml" in runs  # not recursive: manual/ is left out
+    assert "manual" not in runs and "**" not in runs
+    # The weekly eval lists its configurations (below): none of them manual.
+    assert not set(_eval_matrix()) & {p.stem for p in MANUAL_CONFIGS}
 
 
 # --- the workflows -------------------------------------------------------------
@@ -205,15 +207,55 @@ def test_the_docs_name_when_the_ner_models_job_runs() -> None:
     )
 
 
+def _eval_matrix() -> list[str]:
+    configs: list[str] = _workflow("ner-eval.yml")["jobs"]["ner-eval"]["strategy"]["matrix"][
+        "config"
+    ]
+    return configs
+
+
 def test_the_weekly_eval_reports_both_datasets() -> None:
     workflow = _workflow("ner-eval.yml")
     triggers = workflow[True]  # YAML 1.1 reads the key "on" as true
     assert set(triggers) == {"schedule", "workflow_dispatch"}
     assert workflow["permissions"] == {"contents": "read"}
-    runs = "\n".join(step.get("run", "") for step in workflow["jobs"]["ner-eval"]["steps"])
+    job = workflow["jobs"]["ner-eval"]
+    runs = "\n".join(step.get("run", "") for step in job["steps"])
     assert "for dataset in openpii nemotron" in runs
     assert "--limit 2000" in runs
     assert "--check" not in runs  # report only until baselines are recorded
+    # One job per configuration, pulling and evaluating only its own.
+    assert job["env"]["CONFIG"] == "bench/configs/${{ matrix.config }}.toml"
+    assert 'models pull --config "$CONFIG"' in runs
+    assert '--config "$CONFIG" --dataset "$dataset"' in runs
+    assert "bench/configs/*.toml" not in runs
+    assert job["strategy"]["fail-fast"] is False
+    upload = [s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-artifact@")]
+    assert [s["with"]["name"] for s in upload] == ["ner-eval-${{ matrix.config }}"]
+
+
+def test_the_weekly_eval_runs_every_bench_config_in_its_own_job() -> None:
+    # A serial loop over every configuration ran past the job's timeout
+    # once the bench grew past two; each job holds one configuration (two
+    # dataset slices), within a GitHub-hosted job's 360-minute cap.
+    matrix = _eval_matrix()
+    assert len(set(matrix)) == len(matrix)
+    assert set(matrix) == {p.stem for p in BENCH_CONFIGS}
+    assert 0 < _workflow("ner-eval.yml")["jobs"]["ner-eval"]["timeout-minutes"] <= 360
+
+
+def test_the_weekly_eval_never_saves_the_shared_model_cache() -> None:
+    # A job pulls only its own model; saving under the key ner-models
+    # restores would hand that job one model and never save the full set.
+    steps = _workflow("ner-eval.yml")["jobs"]["ner-eval"]["steps"]
+    hub = [s for s in steps if s.get("with", {}).get("path") == "~/.cache/huggingface/hub"]
+    assert [s["uses"].split("@")[0] for s in hub] == ["actions/cache/restore"]
+    (models_cache,) = [
+        s
+        for s in _workflow("ci.yml")["jobs"]["ner-models"]["steps"]
+        if s.get("with", {}).get("path") == "~/.cache/huggingface/hub"
+    ]
+    assert hub[0]["with"]["key"] == models_cache["with"]["key"]
 
 
 def test_the_weekly_eval_installs_the_same_environment() -> None:

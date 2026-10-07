@@ -257,12 +257,16 @@ The models load offline in steps 3 and 4, as a proxy with
 `allow_download = false` loads them: only step 2 contacts the Hub.
 
 **`ner-eval`** (`.github/workflows/ner-eval.yml`, weekly and by
-`workflow_dispatch`): the same environment and models, then every
-`bench/configs/*.toml` on 2,000-row slices of OpenPII 1.5M (`validation`)
-and Nemotron-PII (`test`), downloaded at their pinned revisions into a
-cached directory. It is report only — no `--check` — until baselines for
-those datasets are recorded; the reports are uploaded as the `ner-eval`
-artifact and written to the run's summary.
+`workflow_dispatch`): the same environment, then one job per bench
+configuration (its matrix lists every `bench/configs/*.toml`), each pulling
+its own model and scoring it on 2,000-row slices of OpenPII 1.5M
+(`validation`) and Nemotron-PII (`test`), downloaded at their pinned
+revisions into a cached directory. One job per configuration keeps each
+within its 120-minute timeout: the slowest, `gliner2-fastino`, needs an
+estimated 40 minutes for both slices on the reference CPU. It is report only — no
+`--check` — until baselines for those datasets are recorded; each job
+uploads its reports as the `ner-eval-<configuration>` artifact and writes
+them to the run's summary.
 
 | Configuration | What it scores | Gated by |
 |---|---|---|
@@ -276,12 +280,22 @@ artifact and written to the run's summary.
 | `tests/real_model_configs/*.toml` | not scored: the other models the `real_model` tests load (the `gliner2` default, a Knowledgator ONNX checkpoint), pulled by `ner-models` | — |
 
 A configuration added to `bench/configs/` is pulled, tested and gated by
-both workflows with no workflow change, and fails `ner-models` until its
-baselines are recorded.
+`ner-models` with no workflow change, and fails it until its baselines are
+recorded; `tests/test_ner_ci.py` fails until `ner-eval.yml`'s matrix lists
+it. The recorded entries say when, on which model revisions and with which
+measured values they were taken; with the default `PERSON` entities, the
+synthetic corpus's `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and
+`ACCOUNT_NUMBER` values are not requested, so their characters (about 38%
+of the corpus's gold characters) count toward the type-agnostic leak rate
+(the configurations of other models request the contextual types their
+models are recommended for that the corpus labels). A ceiling on that rate alone would let
+`PERSON` leakage grow about fivefold before failing, so each entry also
+carries a `type_leak_max` for every entity its configuration requests.
 
 **Configurations measured by hand.** `bench/configs/manual/` holds
 configurations of models too slow for a CI runner; neither workflow reads
-that directory (its globs are not recursive). `openai/privacy-filter`
+that directory (`ner-models`' globs are not recursive, and `ner-eval`'s
+matrix lists only `bench/configs/*.toml`). `openai/privacy-filter`
 (`bench/configs/manual/hf-openai-privacy-filter.toml`) takes about a second
 per 500-character string on a 4-core CPU, and its latency run alone takes
 twenty minutes. Its baselines are recorded like any other's and checked the
@@ -291,15 +305,7 @@ same way, by hand:
 uv run --no-sync llm-redact models pull --config bench/configs/manual/hf-openai-privacy-filter.toml
 uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/manual/hf-openai-privacy-filter.toml --check
 uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/manual/hf-openai-privacy-filter.toml --fp-corpus bench/fp_corpus --check
-``` The recorded entries say when, on which model
-revisions and with which measured values they were taken; with the default
-`PERSON` entities, the synthetic corpus's `ADDRESS`, `DATE_OF_BIRTH`,
-`USERNAME` and `ACCOUNT_NUMBER` values are not requested, so their
-characters (about 38% of the corpus's gold characters) count toward the
-type-agnostic leak rate (the configurations of other models request the
-five contextual types their models are recommended for). A ceiling on that rate alone would let `PERSON`
-leakage grow about fivefold before failing, so each entry also carries a
-`type_leak_max` for every entity its configuration requests.
+```
 
 To reproduce the job locally (it creates a CPython 3.13 venv; Linux,
 x86_64 or aarch64, where the PyTorch CPU index has a `+cpu` wheel; the

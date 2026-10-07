@@ -45,3 +45,38 @@ def test_the_planning_id_check_finds_them() -> None:
         "T33b",
     ]
     assert _planning_ids("a T4 GPU-free D-Bus run; DATE_OF_BIRTH; 2.0.0") == []
+
+
+def _fence_problems(text: str) -> list[int]:
+    """Lines (1-based) where a ``` fence goes wrong: a closing fence with
+    text after it (CommonMark reads it as content, so the block runs on),
+    or a block still open at the end."""
+    problems: list[int] = []
+    open_at = 0
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped.startswith("```"):
+            continue
+        if not open_at:
+            open_at = number
+        elif stripped == "```":
+            open_at = 0
+        else:
+            problems.append(number)
+    return problems + ([open_at] if open_at else [])
+
+
+def test_docs_code_fences_close() -> None:
+    root = DOCS.parent
+    found = {
+        str(path.relative_to(root)): lines
+        for path in [*sorted(DOCS.glob("*.md")), root / "README.md", root / "CHANGELOG.md"]
+        if (lines := _fence_problems(path.read_text()))
+    }
+    assert found == {}
+
+
+def test_the_fence_check_finds_a_closing_fence_with_text() -> None:
+    assert _fence_problems("```bash\nx\n```\n\n```toml\ny\n```\n") == []
+    assert _fence_problems("```bash\nx\n``` Then prose\nmore\n```\n") == [3]
+    assert _fence_problems("```bash\nx\n") == [1]

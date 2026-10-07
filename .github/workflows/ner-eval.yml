@@ -8,6 +8,14 @@ name: NER eval
 # bench/ner_thresholds.toml. The reports (metadata only: types, counts,
 # rates, model ids, attributions) are uploaded and written to the run
 # summary. Run it by hand with workflow_dispatch.
+#
+# One job per configuration (the matrix below, which tests/test_ner_ci.py
+# ties to bench/configs/*.toml: a configuration added there fails a test
+# until it is listed). On the 4-core reference CPU the slowest,
+# gliner2-fastino (453 ms per 500 characters), needs an estimated 40 minutes for
+# both slices (2,000 Nemotron-PII documents average about 870 characters,
+# OpenPII rows are shorter), and all nine in one serial job would run past
+# its timeout.
 
 on:
   schedule:
@@ -23,11 +31,26 @@ permissions:
 
 jobs:
   ner-eval:
-    name: NER eval (OpenPII + Nemotron slices, report only)
+    name: NER eval ${{ matrix.config }} (OpenPII + Nemotron slices, report only)
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - gliner-default
+          - gliner-knowledgator-base
+          - gliner-knowledgator-base-onnx
+          - gliner-knowledgator-edge
+          - gliner-knowledgator-edge-onnx
+          - gliner2-fastino
+          - hf-default
+          - hf-ettin-68m-nemotron-pii
+          - hf-openmed-pii-small
     env:
       HF_HUB_DISABLE_TELEMETRY: "1"
+      CONFIG: bench/configs/${{ matrix.config }}.toml
+      NAME: ${{ matrix.config }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,40 +65,38 @@ jobs:
       # checked, with the hash-pinned CPU torch wheel of the locked version.
       - name: install the hf, gliner, gliner2 and bench-data extras (CPU torch)
         run: scripts/ner_ci_env.sh
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # The ner-models job's model cache, restored only: a job of this
+      # matrix pulls one model and must never save that partial cache
+      # under the key ner-models restores.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/huggingface/hub
           key: ner-models-hub-${{ hashFiles('src/llm_redact/detection/model_catalog.py', 'bench/configs/*.toml', 'tests/real_model_configs/*.toml') }}
           restore-keys: ner-models-hub-
       # The datasets' files at their pinned revisions (the adapters hold the
-      # revisions, so a changed pin is a new key).
+      # revisions, so a changed pin is a new key). Every job downloads both,
+      # so whichever job saves the key saves both.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/llm-redact/bench-datasets
           key: ner-eval-datasets-${{ hashFiles('src/llm_redact/bench/datasets/openpii.py', 'src/llm_redact/bench/datasets/nemotron.py') }}
-      - name: pull the models
-        run: |
-          for config in bench/configs/*.toml; do
-            uv run --no-sync llm-redact models pull --config "$config"
-          done
-      # Every config on every dataset, so one failing run does not hide the
-      # others' reports; the step fails if any run could not complete.
+      - name: pull the model
+        run: uv run --no-sync llm-redact models pull --config "$CONFIG"
+      # Both datasets, so one failing run does not hide the other's report;
+      # the step fails if either run could not complete.
       - name: evaluate (report only)
         run: |
           status=0
-          for config in bench/configs/*.toml; do
-            name=$(basename "$config" .toml)
-            for dataset in openpii nemotron; do
-              uv run --no-sync python -m llm_redact.bench.ner --config "$config" --dataset "$dataset" --limit 2000 --out "ner-eval/$name-$dataset" || status=1
-              if [ -f "ner-eval/$name-$dataset/report.md" ]; then
-                cat "ner-eval/$name-$dataset/report.md" >> "$GITHUB_STEP_SUMMARY"
-              fi
-            done
+          for dataset in openpii nemotron; do
+            uv run --no-sync python -m llm_redact.bench.ner --config "$CONFIG" --dataset "$dataset" --limit 2000 --out "ner-eval/$NAME-$dataset" || status=1
+            if [ -f "ner-eval/$NAME-$dataset/report.md" ]; then
+              cat "ner-eval/$NAME-$dataset/report.md" >> "$GITHUB_STEP_SUMMARY"
+            fi
           done
           exit $status
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: ner-eval
+          name: ner-eval-${{ matrix.config }}
           path: ner-eval/
           if-no-files-found: ignore

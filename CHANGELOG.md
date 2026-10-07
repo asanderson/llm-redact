@@ -12,6 +12,14 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- `fastino/gliner2-privacy-filter-PII-multi` (Apache-2.0; GLiNER2 on mdeberta-v3-base; seven
+  European languages) in the model catalog for the `gliner2` backend, pinned to its `main`
+  commit of 2026-10-07, with the label spellings it was trained on as its prompts
+  (`street_address`, `date_of_birth`, `passport_number`, `drivers_license_number`, …) and
+  status "caution" with its bench numbers at `score_threshold = 0.9` (agent-traffic false
+  positives and latency above the admission bars). `bench/configs/gliner2-fastino.toml` with
+  recorded baselines puts the `gliner2` backend in the `ner-models` CI job (timeout 180
+  minutes), and a `real_model` test checks its prompts and spans.
 - `openai/privacy-filter` (Apache-2.0; 1.5B parameters, 50M active) in the model catalog for
   the `hf` backend, pinned to its `main` commit of 2026-10-07: BIOES spans decoded with the
   constrained Viterbi decoder and the repository's `viterbi_calibration.json`, recommended for

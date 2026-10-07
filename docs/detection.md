@@ -150,8 +150,31 @@ character span, which llm-redact uses as given — a value that occurs twice is
 redacted at both places. It runs on the `gliner2` extra (the gliner2 package
 with torch, transformers and peft). The default model,
 `fastino/gliner2-base-v1` (Apache-2.0, English), is catalogued as not yet
-measured by the llm-redact bench. The gliner2 package also contains a client
-for Fastino's hosted API, which llm-redact never uses: models run locally. Multiple backends can run
+measured by the llm-redact bench. Fastino's PII model,
+`fastino/gliner2-privacy-filter-PII-multi` (Apache-2.0; 42 labels; English,
+French, Spanish, German, Italian, Portuguese and Dutch; trained on synthetic
+texts its card says GPT-5.4 generated), is catalogued with the label
+spellings it was trained on ("street_address", "date_of_birth",
+"passport_number", "drivers_license_number", …), which llm-redact sends for
+the type requests. Its card reports a precision of 0.35–0.37 on the SPY
+benchmark; on llm-redact's bench a `score_threshold` of 0.9 keeps its recall
+(`PERSON` 0.998, character leak 0.009 for the five contextual types) and
+cuts its agent-traffic false positives from 96 to 26 per 50 KB against 0.5,
+at 453 ms per 500-character string — "caution", with the numbers in [ner-landscape.md](ner-landscape.md#pii-models-measured-by-the-llm-redact-bench):
+
+```toml
+[detection.ner]
+enabled = true
+backend = "gliner2"
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
+score_threshold = 0.9
+
+[detection.ner.models]
+gliner2 = "fastino/gliner2-privacy-filter-PII-multi"
+```
+
+The gliner2 package also contains a client for Fastino's hosted API, which
+llm-redact never uses: models run locally. Multiple backends can run
 concurrently (`backends = ["spacy", "presidio"]`), and the multilingual
 Stanza and Hugging Face `token-classification` backends are available the
 same way — the survey behind the lineup is
@@ -337,7 +360,9 @@ Configurable, status caution (their cards do not name the training data):
 Knowledgator's GLiNER-PII models — `-edge` and `-base` with the bench numbers
 that keep them below the "vetted" bars (see "Choosing a GLiNER model" below),
 `-small` and `-large` not yet measured by the llm-redact bench — and the
-`gliner2` backend's default, `fastino/gliner2-base-v1`, not yet measured.
+`gliner2` backend's default, `fastino/gliner2-base-v1`, not yet measured,
+and Fastino's PII model `fastino/gliner2-privacy-filter-PII-multi`, measured
+below the bars ("GLiNER2" above).
 Each ships its tokenizer and encoder configuration, so no base model is
 fetched; the Knowledgator `-edge` and `-small` need transformers 4.48 or
 newer. Also caution, with their bench numbers: the `hf` PII models trained
@@ -357,6 +382,7 @@ newer too, the privacy filter 5.6.0):
 | `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` | hf | Apache-2.0 | `a2360d3f4252` | `microsoft/deberta-v3-small` (—) |
 | `kalyan-ks/ettin-68m-nemotron-pii` | hf | MIT | `500262a2aaf9` | `jhu-clsp/ettin-encoder-68m` (—) |
 | `openai/privacy-filter` | hf | Apache-2.0 | `7ffa9a043d54` | — |
+| `fastino/gliner2-privacy-filter-PII-multi` | gliner2 | Apache-2.0 | `1cb4166094dc` | `microsoft/mdeberta-v3-base` (—) |
 <!-- /model-catalog -->
 
 Restricted (a startup WARNING names the facts; no pin):

@@ -136,3 +136,12 @@ type_leak_max = { PERSON = 0.06, ADDRESS = 0.12, ACCOUNT_NUMBER = 0.05 }
 over_redaction_max = 0.10
 recorded = "2026-10-07"
 note = "openai/privacy-filter at 7ffa9a043d54d1be65afb281eddf0ffbe629385b, Viterbi decoding with its viterbi_calibration.json; measured by hand (bench/configs/manual); measured PERSON recall 0.994 (exact 0.994), precision 0.768, leak 0.0052; ADDRESS recall 0.930 (exact 0.778), precision 0.778, leak 0.0695; ACCOUNT_NUMBER recall 1.000 (exact 1.000), precision 0.460, leak 0.0000; leak 0.1199, over-redaction 0.0456, structured regressions 0"
+
+[gliner2-fastino.synthetic]
+recall = { PERSON = 0.94, ADDRESS = 0.94, DATE_OF_BIRTH = 0.95, USERNAME = 0.87, ACCOUNT_NUMBER = 0.95 }
+exact_recall = { PERSON = 0.94, ADDRESS = 0.86, DATE_OF_BIRTH = 0.95, USERNAME = 0.87, ACCOUNT_NUMBER = 0.95 }
+leak_max = 0.06
+type_leak_max = { PERSON = 0.06, ADDRESS = 0.08, DATE_OF_BIRTH = 0.05, USERNAME = 0.10, ACCOUNT_NUMBER = 0.05 }
+over_redaction_max = 0.05
+recorded = "2026-10-07"
+note = "fastino/gliner2-privacy-filter-PII-multi at 1cb4166094dc58fa8d836429f060d6c95f62b495, score_threshold 0.9; measured PERSON recall 0.998 (exact 0.998), precision 0.955, leak 0.0022; ADDRESS recall 0.994 (exact 0.918), precision 0.975, leak 0.0261; DATE_OF_BIRTH recall 1.000 (exact 1.000), precision 0.966, leak 0.0000; USERNAME recall 0.924 (exact 0.924), precision 0.517, leak 0.0455; ACCOUNT_NUMBER recall 1.000 (exact 1.000), precision 0.871, leak 0.0000; leak 0.0085, over-redaction 0.0220, structured regressions 0"

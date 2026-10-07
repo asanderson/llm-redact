@@ -409,3 +409,63 @@ ADDRESS = 2
 
 [hf-openai-privacy-filter."synthetic_natids_r10.log"]
 ACCOUNT_NUMBER = 25
+
+[gliner2-fastino]
+recorded = "2026-10-07"
+note = "fastino/gliner2-privacy-filter-PII-multi at 1cb4166094dc58fa8d836429f060d6c95f62b495, score_threshold 0.9; measured 971 NER detections in 269437 bytes, 360.38 per 100 KB"
+per_100kb_max = 379.0
+
+[gliner2-fastino."README.md"]
+PERSON = 4
+
+[gliner2-fastino."gutenberg_prose.txt"]
+PERSON = 874
+
+[gliner2-fastino."rfc_excerpt.txt"]
+ADDRESS = 3
+DATE_OF_BIRTH = 5
+PERSON = 29
+USERNAME = 4
+
+[gliner2-fastino."sqlite_excerpt.c"]
+ACCOUNT_NUMBER = 49
+DATE_OF_BIRTH = 3
+PERSON = 2
+USERNAME = 8
+
+[gliner2-fastino."synthetic_agent_tool_results.json"]
+USERNAME = 4
+
+[gliner2-fastino."synthetic_app.log"]
+ACCOUNT_NUMBER = 5
+USERNAME = 9
+
+[gliner2-fastino."synthetic_bigint.log"]
+ACCOUNT_NUMBER = 3
+
+[gliner2-fastino."synthetic_ci_log.txt"]
+USERNAME = 7
+
+[gliner2-fastino."synthetic_code.py"]
+ACCOUNT_NUMBER = 4
+
+[gliner2-fastino."synthetic_config.yaml"]
+ACCOUNT_NUMBER = 4
+USERNAME = 2
+
+[gliner2-fastino."synthetic_eu_document.txt"]
+ACCOUNT_NUMBER = 5
+ADDRESS = 2
+
+[gliner2-fastino."synthetic_git_log.txt"]
+USERNAME = 2
+
+[gliner2-fastino."synthetic_netdebug.log"]
+ACCOUNT_NUMBER = 3
+USERNAME = 3
+
+[gliner2-fastino."synthetic_runbook.md"]
+USERNAME = 4
+
+[gliner2-fastino."synthetic_web3.ts"]
+USERNAME = 2

@@ -484,6 +484,36 @@ CATALOG: tuple[CatalogEntry, ...] = (
         # transformers learned the model type (openai_privacy_filter) in 5.6.0.
         min_versions=(("transformers", "5.6.0"),),
     ),
+    CatalogEntry(
+        # main since 2026-09-28 (created 2026-05-10). Self-contained:
+        # config.json, encoder_config/config.json, tokenizer and
+        # model.safetensors (1.2 GB). 42 labels; the prompts below are the
+        # card's spellings of the contextual types.
+        model_id="fastino/gliner2-privacy-filter-PII-multi",
+        backends=("gliner2",),
+        license="Apache-2.0",
+        status="caution",
+        reason=(
+            "Apache-2.0; GLiNER2 (backbone microsoft/mdeberta-v3-base) fine-tuned on 4,910"
+            " synthetic texts the card says GPT-5.4 generated; English, French, Spanish,"
+            " German, Italian, Portuguese, Dutch; at score_threshold 0.9, "
+            + measured(recall=1.00, leak=0.01, false_positives=26, p50_ms=453)
+        ),
+        checked="2026-10-07",
+        revision="1cb4166094dc58fa8d836429f060d6c95f62b495",
+        backbone="microsoft/mdeberta-v3-base",
+        attribution="GLiNER2-PII by Fastino AI (Apache-2.0); arXiv:2605.09973",
+        recommended_entities=_CONTEXTUAL,
+        prompts=(
+            ("PERSON", "person"),
+            ("ADDRESS", "street_address"),
+            ("DATE_OF_BIRTH", "date_of_birth"),
+            ("PASSPORT", "passport_number"),
+            ("DRIVER_LICENSE", "drivers_license_number"),
+            ("USERNAME", "username"),
+            ("ACCOUNT_NUMBER", "account_number"),
+        ),
+    ),
     # --- restricted: never suggested; a warning names the reason ----------
     CatalogEntry(
         model_id="iiiorg/piiranha-v1-detect-personal-information",

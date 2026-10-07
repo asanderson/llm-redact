@@ -279,6 +279,51 @@ The constrained Viterbi decoder with the repository's calibration is what
 the `hf` backend uses for it; greedy decoding finds the same names with more
 than twice the false positives.
 
+### Fastino GLiNER2-PII (`gliner2`)
+
+`fastino/gliner2-privacy-filter-PII-multi` (Apache-2.0; created
+2026-05-10; GLiNER2, 205M parameters, on `microsoft/mdeberta-v3-base`;
+fine-tuned on 4,910 synthetic texts its card says GPT-5.4 generated;
+English, French, Spanish, German, Italian, Portuguese, Dutch; 42 labels).
+Self-contained (`config.json`, `encoder_config/config.json`, tokenizer,
+`model.safetensors`, 1.2 GB). The card's label spellings for the contextual
+types — `person`, `street_address`, `date_of_birth`, `passport_number`,
+`drivers_license_number`, `username`, `account_number` — are its catalog
+prompts. Its card reports a precision of 0.35–0.37 on SPY and suggests
+raising the threshold for names; measured at three thresholds (the
+threshold does not change the model's work, so one latency run covers
+them):
+
+| Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
+|---|---|---|---|---|---|---|---|
+| five types, threshold 0.9 (`gliner2-fastino`) | 0.998 (0.998) | 0.955 | 0.009 | 0.022 | 26 | 360 | 453 ms |
+| five types, threshold 0.7 | 0.998 (0.998) | 0.882 | 0.004 | 0.051 | 72 | 445 | — |
+| five types, threshold 0.5 | 1.000 (1.000) | 0.825 | 0.003 | 0.091 | 96 | 503 | 453 ms |
+| `PERSON` only, threshold 0.5 | 1.000 (1.000) | 0.459 | 0.320 | 0.049 | 80 | 503 | — |
+
+On published data (the slices of the Knowledgator section):
+
+| Configuration | OpenPII PERSON recall / precision (leak) | OpenPII English PERSON recall / precision (leak) | Nemotron PERSON recall / precision (leak) |
+|---|---|---|---|
+| five types, threshold 0.9 | 0.614 / 0.997 (0.298) | 0.786 / 0.997 (0.197) | 0.759 / 0.853 (0.186) |
+| `PERSON` only, threshold 0.5 | — | 0.977 / 0.884 (0.025) | — |
+
+(Leak in brackets is the `PERSON` characters left uncovered.) The 0.9
+threshold that holds its synthetic-corpus recall costs it a fifth of
+OpenPII's English names (0.786 against 0.977 at 0.5), where the default
+`hf` and `gliner` models find 0.911 and 0.922: the threshold trades recall
+on real text for false positives on agent traffic.
+
+**Verdict: caution.** It clears the license and lineage bar (its training
+data is synthetic text the card says GPT-5.4 generated: stated as a fact),
+recall and leak bars (at 0.5 its leak, 0.003, ties the lowest measured
+here), but neither the
+false-positive bar nor the latency bar (453 ms per 500 characters; its
+1,000-string body takes 206 s). `bench/configs/gliner2-fastino.toml`
+(threshold 0.9) is gated in CI. The catalog has no per-model default
+threshold: `[detection.ner] score_threshold` is one value for every
+confidence backend, so the 0.9 is the configuration's, not the model's.
+
 ## LLM-based extractors (LangExtract and its class) — rejected as detectors
 
 LangExtract (google/langextract) and similar prompted-extraction tools

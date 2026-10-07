@@ -121,6 +121,7 @@ def test_ci_pulls_every_model_the_real_model_tests_load() -> None:
         (test_gliner.DEBERTA_SMALL, test_gliner.DEBERTA_SMALL_REVISION),
         (test_gliner.EDGE, test_gliner.EDGE_REVISION),
         (test_gliner2.BASE, test_gliner2.BASE_PIN),
+        (test_gliner2.PII, test_gliner2.PII_PIN),
     }
     assert needed <= _pulled()
 

@@ -348,8 +348,9 @@ jobs:
     name: ner models (real-model tests + NER bench gates)
     runs-on: ubuntu-latest
     # Each bench configuration costs about 3 to 10 minutes (synthetic
-    # corpus, negatives corpus, latency) on a 4-core runner.
-    timeout-minutes: 150
+    # corpus, negatives corpus, latency) on a 4-core runner; the gliner2
+    # PII model about 30 (its 1,000-string latency body alone 10).
+    timeout-minutes: 180
     env:
       LLM_REDACT_TEST_REAL_MODELS_REQUIRED: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"

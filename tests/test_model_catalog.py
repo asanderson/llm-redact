@@ -16,6 +16,7 @@ from llm_redact.detection.labels import (
     DEFAULT_FOLDS,
     SENSITIVE_LABELS,
     TYPE_NAMES,
+    ZERO_SHOT_BACKENDS,
     LabelPolicy,
     normalize_label,
 )
@@ -164,7 +165,8 @@ def test_entry_shape(entry: CatalogEntry) -> None:
         assert not onnx_file.startswith("/")
         assert ".." not in onnx_file.split("/")
     if entry.prompts:
-        assert entry.backends == ("gliner",)
+        # Zero-shot models only: they are prompted with label text.
+        assert set(entry.backends) <= ZERO_SHOT_BACKENDS
     assert entry.window is None or entry.window > 0
     for distribution, version in entry.min_versions:
         assert re.fullmatch(r"[a-z0-9-]+", distribution)
@@ -235,6 +237,7 @@ def test_section_4_6_statuses() -> None:
         "fastino/gliner2-base-v1",
         *_NEMOTRON_HF,
         "openai/privacy-filter",
+        "fastino/gliner2-privacy-filter-PII-multi",
     }
     restricted = {e.model_id for e in CATALOG if e.status == "restricted"}
     assert {
@@ -352,6 +355,25 @@ def test_the_openai_privacy_filter_entry() -> None:
     # Its `secret` label is left to the anchored secret rules.
     assert entry.recommended_entities == ("PERSON", "ADDRESS", "ACCOUNT_NUMBER")
     assert entry.lineage == ("undisclosed-training-data",)
+
+
+def test_the_fastino_gliner2_pii_entry() -> None:
+    entry = lookup("fastino/gliner2-privacy-filter-PII-multi")
+    assert entry is not None
+    assert (entry.backends, entry.license, entry.status) == (("gliner2",), "Apache-2.0", "caution")
+    assert f"llm-redact bench {MEASURED}" in entry.reason
+    assert entry.revision is not None and entry.backbone_revision is None
+    assert entry.recommended_entities == CANONICAL_NER_TYPES
+    # The card's label spellings, one per contextual type.
+    assert dict(entry.prompts) == {
+        "PERSON": "person",
+        "ADDRESS": "street_address",
+        "DATE_OF_BIRTH": "date_of_birth",
+        "PASSPORT": "passport_number",
+        "DRIVER_LICENSE": "drivers_license_number",
+        "USERNAME": "username",
+        "ACCOUNT_NUMBER": "account_number",
+    }
 
 
 def test_prompt_for() -> None:

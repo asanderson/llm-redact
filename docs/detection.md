@@ -153,7 +153,7 @@ included (configuration files written before 1.12.0 by `config show` or the
 config editor carry one). `/status` (`detection.ner.backends.<backend>`)
 reports each backend's `score_threshold` and its `score_threshold_source`
 (`config`, `catalog` or `default`), and `llm-redact doctor` names a catalog
-default under `models`; `config show` writes the key only when it is set.
+default under `models` and WARNs when a set value overrides a different one; `config show` writes the key only when it is set.
 
 **GLiNER2 (`gliner2`).** Fastino's GLiNER2 is a schema-driven successor of
 GLiNER: zero-shot like GLiNER (it is prompted with the same natural-language

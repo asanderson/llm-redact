@@ -24,8 +24,9 @@ and tags `vX.Y.Z`.
   it. A set value always wins and applies to
   every backend, 0.5 included. `/status` reports each backend's `score_threshold` and
   `score_threshold_source` (`config`, `catalog` or `default`) under `detection.ner.backends`,
-  `llm-redact doctor` names a catalog default under `models`, and `config show` writes the key
-  only when it is set.
+  `llm-redact doctor` names a catalog default under `models` and WARNs when a set
+  `score_threshold` overrides a different one (a file written before 1.12.0 by `config show` or
+  the config editor carries 0.5), and `config show` writes the key only when it is set.
 - `fastino/gliner2-privacy-filter-PII-multi` (Apache-2.0; GLiNER2 on mdeberta-v3-base; seven
   European languages) in the model catalog for the `gliner2` backend, pinned to its `main`
   commit of 2026-10-07, with the label spellings it was trained on as its prompts

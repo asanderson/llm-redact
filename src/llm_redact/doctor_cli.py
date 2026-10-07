@@ -9,6 +9,7 @@ requires but that is not installed).
 """
 
 import argparse
+import dataclasses
 import importlib.metadata
 import importlib.util
 import os
@@ -749,11 +750,14 @@ def _check_models(report: _Report, config: Config) -> None:
 
 
 def _check_model_threshold(report: _Report, ner: Any, source: Any) -> None:
-    """A row naming the confidence threshold a Hub backend runs at when it
-    comes from the model catalog (``NerConfig.score_threshold_for``): the
-    configuration does not show it. Silent for a configured or the
-    historical default threshold, and for a folder whose sidecar cannot be
-    read (its pin row FAILs already)."""
+    """A row naming the confidence threshold a Hub backend runs at when the
+    model catalog has a default for its model (``NerConfig.score_threshold_
+    for``): PASS when the catalog's default applies (the configuration does
+    not show it), WARN when a configured ``score_threshold`` overrides a
+    different catalog default — files written before 1.12.0 by ``config
+    show`` or the config editor carry 0.5, which would otherwise look
+    deliberate. Silent for a model without a catalog default, and for a
+    folder whose sidecar cannot be read (its pin row FAILs already)."""
     if source.sidecar_problem is not None:
         return
     value, origin = ner.score_threshold_for(source.backend)
@@ -763,6 +767,19 @@ def _check_model_threshold(report: _Report, ner: Any, source: Any) -> None:
             "models",
             f"{source.backend}: score_threshold {value} is the model catalog's default for"
             f" {source.model_id} ([detection.ner] score_threshold overrides it)",
+        )
+        return
+    default, default_origin = dataclasses.replace(ner, score_threshold=None).score_threshold_for(
+        source.backend
+    )
+    if origin == "config" and default_origin == "catalog" and default != value:
+        report.line(
+            "WARN",
+            "models",
+            f"{source.backend}: [detection.ner] score_threshold {value} overrides the model"
+            f" catalog's default {default} for {source.model_id}; delete the key to run at"
+            " the default (files written before 1.12.0 by `config show` or the config"
+            " editor carry 0.5)",
         )
 
 

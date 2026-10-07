@@ -424,10 +424,44 @@ def test_doctor_names_a_catalog_threshold(
         " ([detection.ner] score_threshold overrides it)"
     )
     assert row in _model_rows(tmp_path, capsys, f'model = "{FASTINO_PII}"')
-    # Silent for a configured threshold and for the historical default.
-    configured = _model_rows(tmp_path, capsys, f'model = "{FASTINO_PII}"\nscore_threshold = 0.5')
-    assert not any("catalog's default" in message for message in configured)
+    # Silent for the historical default and a model without a catalog one.
     assert not any("catalog's default" in message for message in _model_rows(tmp_path, capsys, ""))
+    for model in ("", 'model = "org/unknown-model"\n'):
+        rows = _model_rows(tmp_path, capsys, f"{model}score_threshold = 0.5")
+        assert not any("catalog's default" in message for message in rows)
+
+
+def _model_checks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], ner: str
+) -> list[tuple[str, str]]:
+    config = tmp_path / "config.toml"
+    config.write_text(f'port = 1\n[detection.ner]\nenabled = true\nbackend = "gliner2"\n{ner}\n')
+    run_doctor(argparse.Namespace(config=config, json=True))
+    checks = json.loads(capsys.readouterr().out)["checks"]
+    return [(row["level"], row["message"]) for row in checks if row["area"] == "models"]
+
+
+def test_doctor_warns_when_a_set_threshold_overrides_a_catalog_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A pre-1.12.0 file written by `config show` or the editor carries 0.5:
+    # with the Fastino model it runs at about four times the false positives
+    # the default exists to prevent, and /status's "config" looks deliberate.
+    install_hub(monkeypatch)
+    warning = (
+        "WARN",
+        f"gliner2: [detection.ner] score_threshold 0.5 overrides the model catalog's default"
+        f" 0.9 for {FASTINO_PII}; delete the key to run at the default (files written before"
+        " 1.12.0 by `config show` or the config editor carry 0.5)",
+    )
+    rows = _model_checks(tmp_path, capsys, f'model = "{FASTINO_PII}"\nscore_threshold = 0.5')
+    assert warning in rows
+    # The catalog's own value set explicitly is no override.
+    rows = _model_checks(tmp_path, capsys, f'model = "{FASTINO_PII}"\nscore_threshold = 0.9')
+    assert not any("catalog's default" in message for _, message in rows)
+    # Unset: the catalog default's PASS row, no warning.
+    rows = _model_checks(tmp_path, capsys, f'model = "{FASTINO_PII}"')
+    assert [status for status, message in rows if "catalog's default" in message] == ["PASS"]
 
 
 # --- docs --------------------------------------------------------------------------

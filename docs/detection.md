@@ -138,10 +138,22 @@ spacy/presidio (default `en_core_web_sm`), a Hugging Face model id for
 GLiNER (default `urchade/gliner_small-v2.1`) or GLiNER2 (default
 `fastino/gliner2-base-v1`) or, for the `hf` backend, a
 Hugging Face `token-classification` model id (default
-`dslim/bert-base-NER`); Stanza ignores it. `score_threshold` (default 0.5)
-drops entities below that confidence on the backends that report one —
-gliner, gliner2, presidio and hf; spaCy and Stanza report none, so the key is
-a config error when only they are active.
+`dslim/bert-base-NER`); Stanza ignores it. `score_threshold` (a number
+greater than 0 and at most 1) drops entities below that confidence on the backends that report one — gliner, gliner2,
+presidio and hf; spaCy and Stanza report none, so the key is a config error
+when only they are active. Left unset, each of those backends runs at its
+model's **catalog default** — the threshold the model catalog records for the
+model that backend loads (its configured model, else the backend's default; a
+local folder by the model id its `llm-redact-model.json` names), recorded
+only where the llm-redact bench measured one: 0.9 for
+`fastino/gliner2-privacy-filter-PII-multi` (measured below), and no other
+entry has one (the Knowledgator GLiNER-PII cards use 0.3 in their examples;
+the bench has not measured it, so it is not adopted) — else 0.5. A set value always wins and applies to every backend, 0.5
+included (configuration files written before 1.12.0 by `config show` or the
+config editor carry one). `/status` (`detection.ner.backends.<backend>`)
+reports each backend's `score_threshold` and its `score_threshold_source`
+(`config`, `catalog` or `default`), and `llm-redact doctor` names a catalog
+default under `models` and WARNs when a set value overrides a different one; `config show` writes the key only when it is set.
 
 **GLiNER2 (`gliner2`).** Fastino's GLiNER2 is a schema-driven successor of
 GLiNER: zero-shot like GLiNER (it is prompted with the same natural-language
@@ -160,14 +172,20 @@ the type requests. Its card reports a precision of 0.35–0.37 on the SPY
 benchmark; on llm-redact's bench a `score_threshold` of 0.9 keeps its recall
 (`PERSON` 0.998, character leak 0.009 for the five contextual types) and
 cuts its agent-traffic false positives from 96 to 26 per 50 KB against 0.5,
-at 453 ms per 500-character string — "caution", with the numbers in [ner-landscape.md](ner-landscape.md#pii-models-measured-by-the-llm-redact-bench):
+at 453 ms per 500-character string — "caution", with the numbers in [ner-landscape.md](ner-landscape.md#pii-models-measured-by-the-llm-redact-bench).
+0.9 is the model's catalog default, so a configuration naming the model
+runs at it without a `score_threshold` of its own (one set wins). The default
+trades recall on real text for fewer false positives on agent traffic: on the
+published OpenPII data it finds 0.786 of the English names at 0.9 (the
+default `hf` and `gliner` models find 0.911 and 0.922; see
+[ner-landscape.md](ner-landscape.md#fastino-gliner2-pii-gliner2)), so a
+deployment that prefers recall sets `score_threshold` lower:
 
 ```toml
 [detection.ner]
 enabled = true
 backend = "gliner2"
 entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
-score_threshold = 0.9
 
 [detection.ner.models]
 gliner2 = "fastino/gliner2-privacy-filter-PII-multi"
@@ -675,7 +693,8 @@ Every NER backend handles each string the redaction scans the same way:
    models" below).
 5. **The type guard** drops a type that cannot be a placeholder type
    (`labels_dropped`).
-6. **Score and offsets.** An entity scored below `score_threshold` (on the
+6. **Score and offsets.** An entity scored below the backend's score
+   threshold (`score_threshold`, else its model's catalog default; on the
    backends that report a score) is dropped;
    one whose span the string does not contain is never redacted
    (`offsets_dropped`): only the exact text sent can be restored.
@@ -902,6 +921,7 @@ existing `detection.ner_enabled`):
       "source": "hub", "model_id": "dslim/bert-base-NER",
       "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc", "pinned": true,
       "catalog": "vetted", "license": "MIT",
+      "score_threshold": 0.5, "score_threshold_source": "default",
       "counters": {"scanned_whole": 812, "scanned_windowed": 14, "skipped_max_chars": 3,
                    "windows": 61, "windows_truncated": 0, "labels_dropped": 0,
                    "offsets_dropped": 0, "inline_calls": 0, "prefetch_misses": 0}
@@ -936,7 +956,10 @@ its `llm-redact-model.json`), `pinned` whether there is one, and `catalog` and
 `license` what the model catalog records (`vetted`, `caution`, `restricted`,
 or `null` for a model it does not list; see "The model catalog"). These six
 are `null` for the spaCy, Presidio and Stanza backends, whose models are not
-Hub snapshots.
+Hub snapshots. `score_threshold` is the confidence threshold a backend runs at
+and `score_threshold_source` where it comes from: `config` (`[detection.ner]
+score_threshold`), `catalog` (the model's catalog default) or `default` (0.5);
+both are `null` for spaCy and Stanza, which report no confidences.
 
 The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
 backend and outcome, `llm_redact_ner_windows_total`,

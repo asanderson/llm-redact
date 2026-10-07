@@ -199,7 +199,7 @@ def build_presidio_detector(config: "NerConfig") -> PresidioDetector:
         analyzer,
         frozenset(config.entities),
         config.max_chars,
-        config.score_threshold,
+        config.score_threshold_for("presidio")[0],
         language=config.language,
         policy=LabelPolicy(config.entities, backend="presidio", overrides=config.labels),
     )

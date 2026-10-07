@@ -264,6 +264,8 @@ def test_status_block_names_each_backend(monkeypatch: pytest.MonkeyPatch) -> Non
                 "pinned": True,
                 "catalog": "vetted",
                 "license": "MIT",
+                "score_threshold": 0.5,
+                "score_threshold_source": "default",
                 "counters": zero,
             },
             "gliner": {
@@ -274,6 +276,8 @@ def test_status_block_names_each_backend(monkeypatch: pytest.MonkeyPatch) -> Non
                 "pinned": True,
                 "catalog": "vetted",
                 "license": "Apache-2.0",
+                "score_threshold": 0.5,
+                "score_threshold_source": "default",
                 "counters": {**zero, "scanned_whole": 1},
             },
         },

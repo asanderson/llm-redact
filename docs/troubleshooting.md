@@ -397,6 +397,31 @@ hold names (pasted documents, large tool results), raise `max_chars`; if the
 skipped strings are logs or files you do not need NER on, the line is the
 expected cost of the cap.
 
+## "[detection.ner] score_threshold must be a number greater than 0 and at most 1 (leave it out to run each model at its default threshold)"
+
+`serve --check` / `serve` / `doctor` / SIGHUP (and the llm-redact-pro config
+editor's save) refuse a `score_threshold` of 0 or below, above 1, `nan` or
+`inf`, or one that is not a number. Every confidence backend compares a score
+between 0 and 1 with it: at 0 NER redacts every candidate span, and above 1
+(or at `nan`) it redacts nothing, silently. Write a value such as `0.5`, or
+delete the key: each backend then runs at its model's default threshold (the
+model catalog's, else 0.5). Since 1.12.0 an unset threshold is no longer
+served as 0.5; the config editor of an llm-redact-pro older than 0.17.0 shows
+it as an empty field and saves 0, which this check refuses: upgrade
+llm-redact-pro, or edit the file. A file such an editor saved earlier with
+`score_threshold = 0` (an emptied field) fails here too: delete the key.
+
+## doctor: "BACKEND: [detection.ner] score_threshold X overrides the model catalog's default Y for MODEL; delete the key to run at the default …" (WARN)
+
+The configuration sets `score_threshold`, so every confidence backend runs at
+it, while the model catalog records a different default for this model
+(`fastino/gliner2-privacy-filter-PII-multi`: 0.9). Files that `config show` or
+the config editor wrote before 1.12.0 carry `score_threshold = 0.5` whether
+or not anyone chose it; at 0.5 that model makes about four times the
+agent-traffic false positives. Delete the key to run each model at its
+default, or keep it if you chose it (a lower value trades false positives
+for recall on real text; docs/detection.md).
+
 ## "[detection.ner.labels] LABEL: the type must match [A-Z][A-Z0-9_]* and be at most 20 characters, or be "" to drop the label"
 
 A `[detection.ner.labels]` value is not a placeholder type. Write the type in

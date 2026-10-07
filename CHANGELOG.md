@@ -12,6 +12,21 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- Per-model default `score_threshold`: `[detection.ner] score_threshold` is optional, and a
+  confidence backend (`gliner`, `gliner2`, `presidio`, `hf`) whose configuration sets none runs
+  at the model catalog's default for the model it loads (`CatalogEntry.score_threshold`; a local
+  folder by its sidecar's model id), else 0.5 as before. Only
+  `fastino/gliner2-privacy-filter-PII-multi` has one, 0.9, the threshold the NER bench measured it
+  at (at 0.5 it makes about four times the agent-traffic false positives). It trades recall on
+  real text for that: at 0.9 the model finds 0.786 of OpenPII's English names, where the default
+  `hf` and `gliner` models find 0.911 and 0.922 (docs/ner-landscape.md); a deployment that
+  prefers recall sets `score_threshold` lower. `bench/configs/gliner2-fastino.toml` now relies on
+  it. A set value always wins and applies to
+  every backend, 0.5 included. `/status` reports each backend's `score_threshold` and
+  `score_threshold_source` (`config`, `catalog` or `default`) under `detection.ner.backends`,
+  `llm-redact doctor` names a catalog default under `models` and WARNs when a set
+  `score_threshold` overrides a different one (a file written before 1.12.0 by `config show` or
+  the config editor carries 0.5), and `config show` writes the key only when it is set.
 - `fastino/gliner2-privacy-filter-PII-multi` (Apache-2.0; GLiNER2 on mdeberta-v3-base; seven
   European languages) in the model catalog for the `gliner2` backend, pinned to its `main`
   commit of 2026-10-07, with the label spellings it was trained on as its prompts
@@ -361,6 +376,14 @@ and tags `vX.Y.Z`.
   as the only egress.
 
 ### Changed
+- `[detection.ner] score_threshold`, when present, must be a finite number greater than 0 and at
+  most 1; anything else (0, a negative value, above 1, `nan`, `inf`, a non-number) is a
+  configuration error naming the key. At 0 every candidate span was redacted, and above 1 or at
+  `nan` NER silently found nothing. Upgrade note: a file with `score_threshold = 0` (which the
+  config editor wrote for an emptied field) now fails `serve --check`; delete the key. The 1.12.0
+  config editor needs llm-redact-pro 0.17.0: an older one shows the now-unset threshold as an
+  empty field and saves 0, which this check refuses instead of writing it, so release
+  llm-redact-pro 0.17.0 before (or with) this core.
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
   upload inspector's extracted texts included) and a realtime client frame the proxy collects the
   strings a request's redaction will scan, runs the NER models over them on a worker

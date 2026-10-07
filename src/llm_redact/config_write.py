@@ -428,8 +428,12 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
     lines.append(f"language = {_toml_str(ner.language)}")
     if ner.model is not None:
         lines.append(f"model = {_toml_str(ner.model)}")
-    if any(b in CONFIDENCE_BACKENDS for b in ner.active_backends()):
-        # parse_config rejects score_threshold without a confidence backend.
+    if ner.score_threshold is not None and any(
+        b in CONFIDENCE_BACKENDS for b in ner.active_backends()
+    ):
+        # Written only when set: an unset threshold means each model's
+        # catalog default, which a written 0.5 would override. parse_config
+        # rejects it without a confidence backend.
         lines.append(f"score_threshold = {ner.score_threshold}")
     # The model-source switches loosen a safe default, so (like [audit]
     # tamper_evident) each is written only when turned on.

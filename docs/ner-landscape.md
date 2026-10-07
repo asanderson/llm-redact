@@ -322,9 +322,11 @@ recall and leak bars (at 0.5 its leak, 0.003, ties the lowest measured
 here), but neither the
 false-positive bar nor the latency bar (453 ms per 500 characters; its
 1,000-string body takes 206 s). `bench/configs/gliner2-fastino.toml`
-(threshold 0.9) is gated in CI. The catalog has no per-model default
-threshold: `[detection.ner] score_threshold` is one value for every
-confidence backend, so the 0.9 is the configuration's, not the model's.
+(threshold 0.9) is gated in CI. Update 2026-10-07: the catalog records 0.9
+as this model's default threshold, so a configuration naming it runs at 0.9
+unless it sets `[detection.ner] score_threshold` (which wins, for every
+backend); the bench configuration now relies on that default, and its
+baselines stay the 0.9 measurement above.
 
 ## LLM-based extractors (LangExtract and its class) — rejected as detectors
 

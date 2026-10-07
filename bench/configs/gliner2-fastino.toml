@@ -2,10 +2,12 @@
 # backend with fastino/gliner2-privacy-filter-PII-multi at its catalog pin,
 # asked for the five contextual types the synthetic corpus labels (the catalog
 # sends the card's own label spellings: "street_address", "date_of_birth", …)
-# with score_threshold 0.9, the high threshold its card's precision (0.35 to
-# 0.37 on SPY) calls for. Scored in CI by the ner-models job against
-# bench/ner_thresholds.toml [gliner2-fastino.*] and bench/ner_ceilings.toml
-# [gliner2-fastino]; the numbers at 0.5, 0.7 and 0.9 and the catalog status
+# at score_threshold 0.9, the high threshold its card's precision (0.35 to
+# 0.37 on SPY) calls for. 0.9 is the model's catalog default, so this file
+# sets no score_threshold: the bench measures what a configuration naming
+# the model gets (tests/test_score_threshold_defaults.py pins the 0.9).
+# Scored in CI by the ner-models job against bench/ner_thresholds.toml
+# [gliner2-fastino.*] and bench/ner_ceilings.toml [gliner2-fastino]; the numbers at 0.5, 0.7 and 0.9 and the catalog status
 # they give are in docs/ner-landscape.md. Downloads stay off: the job pulls
 # the model first (`llm-redact models pull --config` on this file).
 [detection.ner]
@@ -13,4 +15,3 @@ enabled = true
 backend = "gliner2"
 model = "fastino/gliner2-privacy-filter-PII-multi"
 entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
-score_threshold = 0.9

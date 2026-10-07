@@ -1579,6 +1579,29 @@ def _parse_ner_labels(labels_raw: object) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(labels.items()))
 
 
+def _score_threshold(raw: object) -> float:
+    """A present ``[detection.ner] score_threshold``: a finite number greater
+    than 0 and at most 1. Every confidence backend compares a score in [0, 1]
+    with it, so 0 (or below) keeps every candidate span and NaN, infinity or
+    anything above 1 keeps none (NER silently off). An older config editor
+    shows an unset threshold as an empty field and saves it as 0; refusing it
+    keeps that save from replacing each model's default. The message names
+    the key, never the value."""
+    message = (
+        "[detection.ner] score_threshold must be a number greater than 0 and at most 1"
+        " (leave it out to run each model at its default threshold)"
+    )
+    if isinstance(raw, bool):
+        raise ConfigError(message)
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise ConfigError(message) from None
+    if not (math.isfinite(value) and 0.0 < value <= 1.0):
+        raise ConfigError(message)
+    return value
+
+
 def _parse_ner_revisions(revisions_raw: object) -> tuple[tuple[str, str], ...]:
     """[detection.ner.revisions] BACKEND = "<commit>" -> sorted (backend,
     commit) pairs. Only the Hugging Face Hub backends take a pin, and only
@@ -2585,7 +2608,11 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         backends=backends,
         entities=_str_list(ner_raw, "entities", default_ner.entities, "[detection.ner]"),
         max_chars=int(ner_raw.get("max_chars", default_ner.max_chars)),
-        score_threshold=float(ner_raw.get("score_threshold", default_ner.score_threshold)),
+        # Absent = not set (None): each confidence backend then runs at its
+        # model's catalog default, else 0.5 (NerConfig.score_threshold_for).
+        score_threshold=(
+            _score_threshold(ner_raw["score_threshold"]) if "score_threshold" in ner_raw else None
+        ),
         language=str(ner_raw.get("language", default_ner.language)),
         model=str(ner_raw["model"]) if "model" in ner_raw else None,
         models=models,

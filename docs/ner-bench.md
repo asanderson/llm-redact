@@ -314,9 +314,10 @@ uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/manual/hf
 manual configuration asks for, the job pulls it with the others, and
 `tests/test_hf_bioes.py` builds it offline through the proxy's own build
 (the catalog pin, the BIOES tagger and the `viterbi_calibration.json` it
-lists) and reads four short strings: a name, an address and an account
-number in a sentence, the same sentence inside a JSON string, an empty and
-a blank string. Its 2.8 GB are pulled again on every run instead of being
+lists), checks that the decoder got that file's biases and keeps a span
+whole where the greedy reading would cut it, and reads four short strings:
+a name, an address and an account number in a sentence, the same sentence
+inside a JSON string, an empty and a blank string. Its 2.8 GB are pulled again on every run instead of being
 saved with the model cache: GitHub keeps 10 GB of caches per repository
 and evicts the least recently used beyond that, and this entry, saved anew
 whenever the catalog or a configuration changes, would push the other

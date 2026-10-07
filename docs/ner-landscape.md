@@ -72,7 +72,7 @@ models loaded offline at their catalog pins, `score_threshold` 0.5 unless a
 row says otherwise. Accuracy numbers are deterministic for a model and
 revision; latency is this machine's.
 
-**The admission bar ("vetted", owner decision D11).** An OSI-approved
+**The admission bar ("vetted").** An OSI-approved
 weights license and no known restricted training-data lineage (undisclosed
 training data is stated as a fact, not disqualifying); on the synthetic
 corpus PERSON recall ≥ 0.85 and a character-leak rate ≤ 0.15; at most one
@@ -156,12 +156,11 @@ above 100 ms). `-small` and `-large` were not measured. The bench configs
 are gated in CI. On these numbers `-base` (int8 ONNX for speed) leaks less
 and draws fewer agent-traffic false positives than the default
 `urchade/gliner_small-v2.1` asked for the same five types, at the same
-latency class; changing the `gliner` default is an owner decision (D13
-follow-up), not made here. Asked for `PERSON` only, `-edge` (PyTorch)
-would clear every bar if the leak bar were read for the requested types
+latency class; the `gliner` default model is unchanged here. Asked for
+`PERSON` only, `-edge` (PyTorch) would clear every bar if the leak bar were read for the requested types
 (its `PERSON` leak is 0.000; the all-type leak counts the corpus's other
-types, never requested) — that reading is the open D11 measurement-scope
-question.
+types, never requested); the bar is read here over every type the corpus
+labels.
 
 ### OpenMed-PII Small 44M and ettin-68m-nemotron-pii (`hf`)
 
@@ -171,8 +170,9 @@ microsoft/deberta-v3-small, MIT, fine-tuned on nvidia/Nemotron-PII, CC BY
 sequence length of 384 tokens is the catalog window) and
 `kalyan-ks/ettin-68m-nemotron-pii` (MIT; jhu-clsp/ettin-encoder-68m, MIT,
 fine-tuned on the same dataset; 55 entity types). Both fold every
-recommended type from their labels; their D10 labels (gender, race or
-ethnicity, religious belief, political view, sexuality) are never folded.
+recommended type from their labels; their sensitive-attribute labels
+(gender, race or ethnicity, religious belief, political view, sexuality)
+are never folded.
 Measured after a fix found here: the `hf` backend now leaves out the blank a
 SentencePiece or byte-level BPE token's offsets take in before its word
 (OpenMed's " Jane" + " Doe" were two placeholders that swallowed the
@@ -219,7 +219,7 @@ latency bars too. Bench configs
 `bench/configs/hf-openmed-pii-small.toml` and
 `bench/configs/hf-ettin-68m-nemotron-pii.toml` are gated in CI.
 
-**The `hf` default (owner decision D6, open).** Compared as the default
+**The `hf` default.** Compared as the default
 configuration runs (`entities = ["PERSON"]`), OpenMed-PII Small 44M finds
 more names than `dslim/bert-base-NER` everywhere it was measured outside its
 own training distribution — synthetic corpus 1.000 against 0.974 (leaking
@@ -229,12 +229,11 @@ false positives (none in the agent-traffic files for either; 198 against
 210 detections per 100 KB of the whole negatives corpus) and equal latency
 (175 against 176 ms). Its exact-span `PERSON` recall is lower (0.674 against
 0.951: its spans are often a word wider or narrower than the annotation,
-which still covers the name). D6's condition (better `PERSON` recall at equal
-or lower false positives) holds on these numbers; switching the default is
-the owner's decision and would ship in 2.0.0 (T46), not 1.12.0: in 1.x a
-configured `entities = ["PER"]` would match nothing from OpenMed, which
-never emits `PER`. Its weights are 566 MB (`dslim/bert-base-NER`: 433 MB),
-and redistributing it carries the Nemotron-PII attribution.
+which still covers the name). The `hf` default model is unchanged; a
+change would be a 2.0.0 decision, not a 1.12.0 one: in 1.x a configured
+`entities = ["PER"]` would match nothing from OpenMed, which never emits
+`PER`. Its weights are 566 MB (`dslim/bert-base-NER`: 433 MB), and
+redistributing it carries the Nemotron-PII attribution.
 
 ### OpenAI Privacy Filter (`hf`)
 

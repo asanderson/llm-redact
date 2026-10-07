@@ -47,6 +47,11 @@ and tags `vX.Y.Z`.
   instead; any other is read greedily (a malformed tag sequence starts a new span rather than dropping a token). With
   a WordPiece tokenizer the decoder reads whole words, each scored by its first piece, so a span
   never ends inside a word. BIO models keep the pipeline. A model whose labels mix BIOES and BILOU tags is refused at startup.
+- docs/playground-plan.md: a proposal, nothing built yet, for public online playgrounds linked from each
+  repository: the llm-redact proxy running entirely in the visitor's browser under Pyodide, and a private,
+  short-lived sandbox per visitor for llm-redact-pro, both with rule-category toggles. Its appendix lists
+  detection gaps found while preparing samples (`belgian_nn`, `swiss_ahv` and `ipv6` miss a value that ends
+  a sentence; `iban` misses the spaced paper format).
 - docs/how-it-works.md shows NER off the event loop in a new animated `ner-prefetch`
   diagram; the `sequence-chat` and `security-gates` diagrams and the gate ⑤ row of
   docs/security-dataflows.md include it.

@@ -107,18 +107,37 @@ UNMEASURED = "not yet measured by the llm-redact bench"
 MEASURED = "2026-10-07"
 
 
-def measured(recall: float, leak: float, false_positives: float, p50_ms: float) -> str:
+def measured(
+    recall: float,
+    leak: float,
+    false_positives: float,
+    p50_ms: float,
+    *,
+    unrequested: tuple[str, ...] = (),
+) -> str:
     """The bench's numbers as a catalog reason states them (owner decision
     D11: a model that misses an admission bar stays "caution", with its
-    numbers shown). Measured with the model's recommended entities the
-    synthetic corpus labels: PERSON recall and the character-leak rate on
-    the synthetic corpus, the false positives per 50 KB of the agent-traffic
+    numbers shown). Measured with the entities the model's bench
+    configuration requests (bench/configs): its recommended entities that
+    the synthetic corpus labels. ``unrequested`` names the recommended ones
+    left out (the corpus labels no PASSPORT or DRIVER_LICENSE), so the
+    reason says every number — the false positives too — is for that
+    narrower request. PERSON recall and the character-leak rate on the
+    synthetic corpus, the false positives per 50 KB of the agent-traffic
     negatives, and the full pipeline's p50 for a 500-character string."""
+    scope = f", {_joined(unrequested)} not requested" if unrequested else ""
     return (
-        f"llm-redact bench {MEASURED}: synthetic-corpus PERSON recall {recall:.2f}, character"
-        f" leak {leak:.2f}; {false_positives:.0f} false positives per 50 KB of agent-traffic"
-        f" negatives; p50 {p50_ms:.0f} ms per 500 characters"
+        f"llm-redact bench {MEASURED}{scope}: synthetic-corpus PERSON recall {recall:.2f},"
+        f" character leak {leak:.2f}; {false_positives:.0f} false positives per 50 KB of"
+        f" agent-traffic negatives; p50 {p50_ms:.0f} ms per 500 characters"
     )
+
+
+def _joined(names: tuple[str, ...]) -> str:
+    """Names joined for a sentence: A; A and B; A, B and C."""
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 # The seven contextual types a PII model is recommended for (structured
@@ -133,6 +152,11 @@ _CONTEXTUAL = (
     "USERNAME",
     "ACCOUNT_NUMBER",
 )
+
+
+# The recommended contextual types the synthetic corpus labels no value of:
+# a bench configuration cannot score them, so it does not request them.
+_UNSCORED = ("PASSPORT", "DRIVER_LICENSE")
 
 
 @dataclass(frozen=True)
@@ -355,7 +379,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         min_versions=_MODERNBERT,
         # PyTorch weights; the int8 ONNX export measures lower (PERSON
         # recall 0.77, leak 0.27: docs/ner-landscape.md).
-        bench=measured(recall=0.99, leak=0.08, false_positives=109, p50_ms=93),
+        bench=measured(
+            recall=0.99, leak=0.08, false_positives=109, p50_ms=93, unrequested=_UNSCORED
+        ),
     ),
     _knowledgator(
         # main since 2025-09-27.
@@ -371,7 +397,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         "microsoft/deberta-v3-small",
         # PyTorch weights; the int8 ONNX export: PERSON recall 0.96, leak
         # 0.03, 13 false positives per 50 KB, p50 182 ms.
-        bench=measured(recall=0.97, leak=0.02, false_positives=8, p50_ms=234),
+        bench=measured(
+            recall=0.97, leak=0.02, false_positives=8, p50_ms=234, unrequested=_UNSCORED
+        ),
     ),
     _knowledgator(
         # main since 2026-05-07 (README edit); ships no fp16 ONNX file.
@@ -497,7 +525,13 @@ CATALOG: tuple[CatalogEntry, ...] = (
             "Apache-2.0; GLiNER2 (backbone microsoft/mdeberta-v3-base) fine-tuned on 4,910"
             " synthetic texts the card says GPT-5.4 generated; English, French, Spanish,"
             " German, Italian, Portuguese, Dutch; at score_threshold 0.9, "
-            + measured(recall=1.00, leak=0.01, false_positives=26, p50_ms=453)
+            + measured(
+                recall=1.00,
+                leak=0.01,
+                false_positives=26,
+                p50_ms=453,
+                unrequested=_UNSCORED,
+            )
         ),
         checked="2026-10-07",
         revision="1cb4166094dc58fa8d836429f060d6c95f62b495",

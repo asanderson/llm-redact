@@ -84,7 +84,10 @@ numbers in its catalog reason. How each is measured here:
   labels (`PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME`,
   `ACCOUNT_NUMBER`; fewer when the model recommends fewer), so the
   character-leak rate covers what the model is asked for plus the corpus's
-  `EMAIL` and `PHONE` values, which the rules find;
+  `EMAIL` and `PHONE` values, which the rules find. A model also
+  recommended for `PASSPORT` and `DRIVER_LICENSE`, which the corpus does
+  not label, is not asked for them, and its catalog reason says so: its
+  false-positive count is for the narrower request;
 - false positives are the NER detections the rules alone do not make in the
   four agent-traffic files of `bench/fp_corpus`
   (`synthetic_agent_tool_results.json`, `synthetic_git_log.txt`,

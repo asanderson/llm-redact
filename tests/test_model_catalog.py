@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_redact.config import ConfigError, parse_config
+from llm_redact.config import ConfigError, load_config, parse_config
 from llm_redact.detection import gliner2_ner, gliner_ner, hf_ner, model_catalog
 from llm_redact.detection.engine import DetectionConfig, NerConfig, build_detectors
 from llm_redact.detection.labels import (
@@ -295,7 +295,10 @@ def test_knowledgator_gliner_pii_is_a_configurable_option(model_id: str) -> None
     # -edge and -base carry their bench numbers (D11: caution, with the
     # numbers shown); -small and -large are not yet measured.
     if model_id.split("-")[-2] in ("edge", "base"):
-        assert f"llm-redact bench {MEASURED}: synthetic-corpus PERSON recall" in entry.reason
+        assert (
+            f"llm-redact bench {MEASURED}, PASSPORT and DRIVER_LICENSE not requested:"
+            " synthetic-corpus PERSON recall"
+        ) in entry.reason
     else:
         assert UNMEASURED in entry.reason
     assert entry.revision is not None
@@ -680,3 +683,39 @@ def test_a_measured_reason_quotes_the_bench() -> None:
         " 0.08; 109 false positives per 50 KB of agent-traffic negatives; p50 93 ms per 500"
         " characters"
     )
+    # A narrower request than the recommended entities is named.
+    assert measured(1, 0, 0, 1, unrequested=("PASSPORT",)).startswith(
+        "llm-redact bench 2026-10-07, PASSPORT not requested: synthetic"
+    )
+    assert measured(1, 0, 0, 1, unrequested=("PASSPORT", "DRIVER_LICENSE")).startswith(
+        "llm-redact bench 2026-10-07, PASSPORT and DRIVER_LICENSE not requested: synthetic"
+    )
+    assert measured(1, 0, 0, 1, unrequested=("A", "B", "C")).startswith(
+        "llm-redact bench 2026-10-07, A, B and C not requested: synthetic"
+    )
+
+
+_BENCH = Path(__file__).resolve().parent.parent / "bench" / "configs"
+_MEASURED_ENTRIES = [e for e in CATALOG if f"llm-redact bench {MEASURED}" in e.reason]
+
+
+@pytest.mark.parametrize("entry", _MEASURED_ENTRIES, ids=lambda e: e.model_id)
+def test_a_measured_reason_names_what_its_bench_config_left_unrequested(
+    entry: CatalogEntry,
+) -> None:
+    # The numbers a reason quotes are its bench configuration's; when that
+    # configuration requests fewer types than the model is recommended for,
+    # the reason says so (the false-positive count of a narrower request
+    # may be lower than the recommended one's).
+    configs = [
+        load_config(path).detection.ner
+        for path in sorted(_BENCH.glob("*.toml")) + sorted(_BENCH.glob("manual/*.toml"))
+    ]
+    measured_by = [ner for ner in configs if ner.model == entry.model_id]
+    assert measured_by, entry.model_id
+    for ner in measured_by:
+        unrequested = [t for t in entry.recommended_entities if t not in ner.entities]
+        assert len(unrequested) <= 2
+        scope = f", {' and '.join(unrequested)} not requested" if unrequested else ""
+        assert f"llm-redact bench {MEASURED}{scope}: " in entry.reason
+    assert len(_MEASURED_ENTRIES) == 6

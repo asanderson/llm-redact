@@ -424,7 +424,10 @@ def test_a_caution_model_shows_its_reason(
         f" catalog (model catalog: caution, Apache-2.0): {model}: Apache-2.0;"
     )
     # A measured caution model's reason quotes the bench (D11).
-    assert "llm-redact bench 2026-10-07: synthetic-corpus PERSON recall" in pin
+    assert (
+        "llm-redact bench 2026-10-07, PASSPORT and DRIVER_LICENSE not requested:"
+        " synthetic-corpus PERSON recall"
+    ) in pin
     assert _levels(rows, "WARN") == []
 
 

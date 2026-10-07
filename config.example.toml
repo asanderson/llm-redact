@@ -459,7 +459,7 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 #                            # (gliner, gliner2; hf: a token-classification model).
 #                            # Stanza ignores it and loads the `language` model.
 # score_threshold = 0.5      # gliner, gliner2, presidio and hf only (spacy/stanza
-#                            # give no score). Unset: each backend runs at its
+#                            # give no score); 0 < value <= 1. Unset: each backend runs at its
 #                            # model's catalog default (0.9 for
 #                            # fastino/gliner2-privacy-filter-PII-multi), else
 #                            # 0.5; a set value applies to every backend.

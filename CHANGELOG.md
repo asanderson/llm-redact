@@ -372,6 +372,14 @@ and tags `vX.Y.Z`.
   as the only egress.
 
 ### Changed
+- `[detection.ner] score_threshold`, when present, must be a finite number greater than 0 and at
+  most 1; anything else (0, a negative value, above 1, `nan`, `inf`, a non-number) is a
+  configuration error naming the key. At 0 every candidate span was redacted, and above 1 or at
+  `nan` NER silently found nothing. Upgrade note: a file with `score_threshold = 0` (which the
+  config editor wrote for an emptied field) now fails `serve --check`; delete the key. The 1.12.0
+  config editor needs llm-redact-pro 0.17.0: an older one shows the now-unset threshold as an
+  empty field and saves 0, which this check refuses instead of writing it, so release
+  llm-redact-pro 0.17.0 before (or with) this core.
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
   upload inspector's extracted texts included) and a realtime client frame the proxy collects the
   strings a request's redaction will scan, runs the NER models over them on a worker

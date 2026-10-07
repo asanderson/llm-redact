@@ -138,8 +138,8 @@ spacy/presidio (default `en_core_web_sm`), a Hugging Face model id for
 GLiNER (default `urchade/gliner_small-v2.1`) or GLiNER2 (default
 `fastino/gliner2-base-v1`) or, for the `hf` backend, a
 Hugging Face `token-classification` model id (default
-`dslim/bert-base-NER`); Stanza ignores it. `score_threshold` drops entities
-below that confidence on the backends that report one — gliner, gliner2,
+`dslim/bert-base-NER`); Stanza ignores it. `score_threshold` (a number
+greater than 0 and at most 1) drops entities below that confidence on the backends that report one — gliner, gliner2,
 presidio and hf; spaCy and Stanza report none, so the key is a config error
 when only they are active. Left unset, each of those backends runs at its
 model's **catalog default** — the threshold the model catalog records for the

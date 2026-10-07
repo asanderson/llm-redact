@@ -336,6 +336,64 @@ def test_the_parser_still_refuses_it_without_a_confidence_backend() -> None:
         parse_config({"detection": {"ner": {"backend": "spacy", "score_threshold": 0.5}}}, "t")
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        # What an llm-redact-pro editor older than 0.17.0 posts for the
+        # empty field it shows an unset threshold as (Number("") === 0): a
+        # save must fail, never pin 0 over each model's default.
+        0,
+        0.0,
+        -3,
+        1.0000001,
+        2,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        True,
+        False,
+        "x",
+        "nan",
+        None,
+        [0.5],
+    ],
+)
+def test_a_threshold_outside_0_to_1_is_refused(value: object) -> None:
+    # At 0 every candidate span is redacted; above 1 or at nan NER finds
+    # nothing, silently (and nan/inf in /status are not JSON).
+    with pytest.raises(ConfigError) as refused:
+        parse_config(
+            {
+                "detection": {
+                    "ner": {"backend": "gliner2", "model": FASTINO_PII, "score_threshold": value}
+                }
+            },
+            "t",
+        )
+    message = str(refused.value)
+    assert message == (
+        "[detection.ner] score_threshold must be a number greater than 0 and at most 1"
+        " (leave it out to run each model at its default threshold)"
+    )
+
+
+@pytest.mark.parametrize(("value", "expected"), [(1, 1.0), (1.0, 1.0), (1e-9, 1e-9), ("0.7", 0.7)])
+def test_the_range_is_inclusive_of_1(value: object, expected: float) -> None:
+    parsed = parse_config({"detection": {"ner": {"backend": "hf", "score_threshold": value}}}, "t")
+    assert parsed.detection.ner.score_threshold_for("hf") == (expected, "config")
+
+
+def test_a_refused_threshold_in_a_file_names_the_key_not_the_value(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text('[detection.ner]\nbackend = "gliner2"\nscore_threshold = 0\n')
+    with pytest.raises(ConfigError, match="score_threshold must be a number"):
+        load_config(config)
+    config.write_text('[detection.ner]\nbackend = "gliner2"\nscore_threshold = nan\n')
+    with pytest.raises(ConfigError, match="score_threshold must be a number") as refused:
+        load_config(config)
+    assert "nan" not in str(refused.value)
+
+
 def test_the_fastino_bench_config_runs_at_the_catalog_default() -> None:
     # bench/configs/gliner2-fastino.toml relies on the catalog default; its
     # baselines (bench/ner_thresholds.toml, ner_ceilings.toml) were measured

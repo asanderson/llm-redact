@@ -417,6 +417,9 @@ and tags `vX.Y.Z`.
 - tests/test_docs_index.py also checks config.example.toml and the user guide for private
   planning identifiers, and catches architecture-decision, step and phase numbers beside the
   owner-decision and task ones; the docs no longer cite any.
+- The `/llm-redact:status` agent command lists the NER posture lines (strings no model read
+  because they were longer than `max_chars`, entities no backend can emit) among those it
+  reports verbatim; the checked-in Claude Code plugin is re-rendered.
 - `[detection.ner] score_threshold`, when present, must be a finite number greater than 0 and at
   most 1; anything else (0, a negative value, above 1, `nan`, `inf`, a non-number) is a
   configuration error naming the key. At 0 every candidate span was redacted, and above 1 or at
@@ -520,8 +523,10 @@ and tags `vX.Y.Z`.
   deliberately generous p50 smoke ceilings (about ten times the healthy numbers) and reports
   the rest; docs/assurance.md says so, and its CI paragraph names every model the `ner-models`
   job pulls, not just the two defaults. docs/detection.md's counters table lists `gliner2`
-  among the backends that read in windows and count truncated windows, and docs/ner-landscape.md
-  counts six shipped backends.
+  among the backends that read in windows and count truncated windows, and its pin sentence
+  covers every catalogued model (dated 2026-10-05 to 2026-10-07, not only the first five);
+  docs/ner-landscape.md counts six shipped backends; docs/plugins.md points to the
+  model-load policy documentation.
 - The `hf` backend's BIOES/BILOU decoding failed on an empty or blank string when the model's
   tokenizer adds no special tokens (`openai/privacy-filter`): a window of no token ids reached
   the model, which refused it, so the request failed. Such a window is no longer scored, and

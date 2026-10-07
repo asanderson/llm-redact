@@ -449,7 +449,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         reason=(
             "Apache-2.0; microsoft/deberta-v3-small (MIT) fine-tuned on nvidia/Nemotron-PII"
             " (CC BY 4.0); 54 entity types; "
-            + measured(recall=1.00, leak=0.05, false_positives=18, p50_ms=175)
+            + measured(recall=1.00, leak=0.05, false_positives=18, p50_ms=136)
         ),
         checked="2026-10-07",
         revision="a2360d3f42526fc660ac3b2b2301e1c2d94eba61",
@@ -474,8 +474,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         status="caution",
         reason=(
             "MIT; jhu-clsp/ettin-encoder-68m (MIT) fine-tuned on nvidia/Nemotron-PII"
-            " (CC BY 4.0); 55 entity types; every sub-word piece tagged B-, read as separate"
-            " values; " + measured(recall=0.99, leak=0.16, false_positives=21, p50_ms=277)
+            " (CC BY 4.0); 55 entity types; tags every sub-word piece B- (read word by word,"
+            " by the most confidently tagged piece); "
+            + measured(recall=0.98, leak=0.14, false_positives=16, p50_ms=127)
         ),
         checked="2026-10-07",
         revision="500262a2aaf913825ef750ef255c3fe437cd8e64",

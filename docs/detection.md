@@ -502,22 +502,24 @@ hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
 ```
 
 Measured by the NER bench (2026-10-07, the same machine and rules as the
-GLiNER table above):
+GLiNER table above; the two PII models re-measured that day with
+word-by-word decoding, while other jobs ran on the machine, so their
+latencies are indicative only):
 
 | Model, entities | PERSON recall (exact) | Character leak | Over-redaction | Agent-traffic false positives per 50 KB | p50, 500 characters |
 |---|---|---|---|---|---|
 | `dslim/bert-base-NER` (the default), `PERSON` | 0.97 (0.95) | 0.40 | 0.003 | 0 | 176 ms |
-| OpenMed-PII Small 44M, `PERSON` | 1.00 (0.67) | 0.39 | 0.002 | 0 | — |
-| OpenMed-PII Small 44M, five types | 1.00 (0.67) | 0.05 | 0.005 | 18 | 175 ms |
-| ettin-68m-nemotron-pii, five types | 0.99 (0.03) | 0.16 | 0.003 | 21 | 277 ms |
+| OpenMed-PII Small 44M, `PERSON` | 1.00 (1.00) | 0.39 | 0.002 | 0 | — |
+| OpenMed-PII Small 44M, five types | 1.00 (1.00) | 0.05 | 0.006 | 18 | 136 ms |
+| ettin-68m-nemotron-pii, five types | 0.98 (0.87) | 0.14 | 0.005 | 16 | 127 ms |
 
 `kalyan-ks/ettin-68m-nemotron-pii` tags every sub-word piece of a value as
-the start of a value, so the `hf` backend reports names and numbers as
-fragments ("Z", "b", "ign", …): each fragment becomes its own placeholder,
-and pieces the model labels with another type are sent as they are (a
-quarter of the synthetic corpus's account numbers is found; three quarters
-of their digits leak). It stays "caution" with these numbers. The
-`PERSON`-only rows request what the default configuration requests, so
+the start of a value; read word by word ("BIO taggers without word-piece
+marks" above), its names are whole values, but most of its account numbers
+carry labels that are not folded into `ACCOUNT_NUMBER` (`customer_id`,
+`unique_id`, …), so a quarter of the synthetic corpus's account numbers is
+found and three quarters of their digits leak. Both stay "caution" with
+these numbers. The `PERSON`-only rows request what the default configuration requests, so
 their character leak counts every other labelled value as leaked; the
 default model is unchanged (a change would be a 2.0.0 decision).
 

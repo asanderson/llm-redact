@@ -176,17 +176,50 @@ fine-tuned on the same dataset; 55 entity types). Both fold every
 recommended type from their labels; their sensitive-attribute labels
 (gender, race or ethnicity, religious belief, political view, sexuality)
 are never folded.
-Measured after a fix found here: the `hf` backend now leaves out the blank a
+Measured after two fixes found here: the `hf` backend leaves out the blank a
 SentencePiece or byte-level BPE token's offsets take in before its word
 (OpenMed's " Jane" + " Doe" were two placeholders that swallowed the
-spaces; exact `PERSON` recall rose from 0.00 to 0.67).
+spaces; exact `PERSON` recall rose from 0.00 to 0.67), and — since 1.12.0 —
+it decodes a BIO tagger whose tokenizer does not mark word pieces word by
+word ([detection.md](detection.md), "BIO taggers without word-piece marks"),
+in float32 (ettin's weights are stored in bfloat16). The numbers below are
+2026-10-07's re-measurement; the latencies were taken while other jobs ran
+on the same 4-core machine, so they are indicative only.
 
 | Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
 |---|---|---|---|---|---|---|---|
-| OpenMed, five types (`hf-openmed-pii-small`) | 1.000 (0.674) | 0.950 | 0.051 | 0.005 | 18 | 205 | 175 ms |
-| OpenMed, `PERSON` only | 1.000 (0.674) | 0.950 | 0.385 | 0.002 | 0 | 198 | — |
-| ettin, five types (`hf-ettin-68m-nemotron-pii`) | 0.990 (0.030) | 0.968 | 0.158 | 0.003 | 21 | 106 | 277 ms |
-| ettin, `PERSON` only | 0.990 (0.030) | 0.968 | 0.421 | 0.002 | 0 | 96 | — |
+| OpenMed, five types (`hf-openmed-pii-small`) | 1.000 (1.000) | 0.937 | 0.048 | 0.006 | 18 | 191 | 136 ms |
+| OpenMed, `PERSON` only | 1.000 (1.000) | 0.937 | 0.385 | 0.002 | 0 | 186 | — |
+| ettin, five types (`hf-ettin-68m-nemotron-pii`) | 0.984 (0.866) | 0.938 | 0.143 | 0.005 | 16 | 68 | 127 ms |
+| ettin, `PERSON` only | 0.984 (0.866) | 0.938 | 0.413 | 0.003 | 0 | 63 | — |
+
+Against the token-level aggregation they were first measured with (same
+corpora; ettin then in bfloat16): exact `PERSON` recall rose from 0.674 to
+1.000 (OpenMed) and from 0.030 to 0.866 (ettin), exact recall rose for every
+type, and the character leak fell (OpenMed 0.051 to 0.048, ettin 0.158 to
+0.143; ettin's `PERSON` leak 0.077 to 0.054, `USERNAME` 0.180 to 0.124,
+OpenMed's `ACCOUNT_NUMBER` 0.036 to 0.007). What got worse: OpenMed's
+`USERNAME` recall (0.924 to 0.894, leak 0.069 to 0.072: four usernames whose
+first piece the model leaves untagged or unsure), ettin's `DATE_OF_BIRTH` and
+`USERNAME` recall (0.404 to 0.377, 0.902 to 0.856), precision (OpenMed
+`PERSON` 0.950 to 0.937, ettin `PERSON` 0.968 to 0.938) and over-redaction
+(OpenMed 0.005 to 0.006, ettin 0.003 to 0.005): a word is now redacted whole
+where a piece of it was before. The negatives corpus draws fewer detections
+(OpenMed 551 to 514, ettin 286 to 183).
+
+How a word is labelled was chosen on these numbers. Cutting words at every
+punctuation mark, as BERT's tokenizer does, left the parts of
+"1985-03-12", "j.doe" and "dev_jo42" to pieces OpenMed never labels (its
+`USERNAME` leak rose to 0.135): words are cut only at blanks, quotes,
+brackets and value delimiters. Reading a word by its most confidently tagged
+piece leaked least for ettin (`PERSON` 0.054 against 0.085 for its first
+piece), but for OpenMed, which labels first pieces only, its untrained later
+pieces turned seven hyphenated reference numbers of the national-id
+negatives into account numbers: the model catalog records which pieces a
+model labels (`piece_labels`), and only ettin is read by its most confident
+piece. A span continues across a comma and a space where the model
+continues it ("March 3, 1985"; OpenMed's exact `DATE_OF_BIRTH` recall 0.307
+without, 0.465 with).
 
 On published data (the slices of the Knowledgator section; Nemotron-PII is
 the training distribution of both models, so its numbers favour them):
@@ -194,31 +227,33 @@ the training distribution of both models, so its numbers favour them):
 | Configuration | OpenPII PERSON recall / precision (leak) | OpenPII English PERSON recall / precision (leak) | Nemotron PERSON recall / precision (leak) |
 |---|---|---|---|
 | `dslim/bert-base-NER`, `PERSON` (`hf-default`) | 0.527 / 0.757 (0.389) | 0.911 / 0.994 (0.097) | 0.888 / 0.965 (0.092) |
-| OpenMed, `PERSON` only | 0.829 / 0.793 (0.227) | 0.989 / 0.995 (0.030) | — |
-| OpenMed, five types | 0.829 / 0.793 (0.166) | 0.989 / 0.995 (0.028) | 0.995 / 0.996 (0.006) |
-| ettin, `PERSON` only | 0.581 / 0.922 (0.452) | 0.951 / 0.997 (0.141) | — |
-| ettin, five types | 0.580 / 0.922 (0.428) | 0.951 / 0.997 (0.138) | 0.987 / 0.988 (0.032) |
+| OpenMed, `PERSON` only | 0.829 / 0.793 (0.227) ¹ | 0.989 / 0.995 (0.030) ¹ | — |
+| OpenMed, five types | 0.829 / 0.793 (0.166) ¹ | 0.980 / 0.994 (0.017) | 0.995 / 0.996 (0.006) ¹ |
+| ettin, `PERSON` only | 0.581 / 0.922 (0.452) ¹ | 0.951 / 0.997 (0.141) ¹ | — |
+| ettin, five types | 0.580 / 0.922 (0.428) ¹ | 0.948 / 0.993 (0.092) ² | 0.987 / 0.988 (0.032) ¹ |
 
 (Leak in brackets is the `PERSON` characters left uncovered; the
-five-type rows cover some names under another type.)
+five-type rows cover some names under another type. ¹ Measured with the
+token-level aggregation, before word-by-word decoding; not re-run. Re-run on
+OpenPII English, the five-type rows were 0.989 / 0.995 (0.028) for OpenMed
+and 0.951 / 0.997 (0.138) for ettin before. ² With one structured
+regression: a value a rule finds that a wider span took over.)
 
-**ettin's fragments.** The model labels every sub-word piece `B-…`, and the
-`hf` backend's transformers aggregation for a tokenizer without
-continuing-word markers (`simple`) turns each piece into its own value:
-"Zbigniew Brzezinski" becomes six `PERSON` values, and an account number
-whose pieces the model labels `customer_id` or `medical_record_number`
-loses those digits upstream (synthetic `ACCOUNT_NUMBER` recall 0.24, 76% of
-its characters leaked; `PERSON` 8% leaked). The `hf` backend does not yet
-decode such a tokenizer's pieces word by word (it does for WordPiece
-tokenizers and for BIOES/BILOU taggers); until it does, this model's
-numbers leak in part.
+**ettin's labels.** The model labels every sub-word piece `B-…`; read word
+by word, "Zbigniew Brzezinski" is one value, no longer six. Its account
+numbers still leak (synthetic `ACCOUNT_NUMBER` recall 0.24, 74% of their
+characters leaked): the model labels most of them `customer_id`,
+`unique_id`, `credit_debit_card` or `phone_number`, which are not folded
+into `ACCOUNT_NUMBER`, so decoding cannot recover them. Some of its
+probabilities are low (the pieces of a surname scoring 0.3 to 0.4), so the
+default `score_threshold` of 0.5 drops some names it finds.
 
 **Verdict: caution** for both. OpenMed clears the license, recall and leak
 bars but not one false positive per 50 KB of agent traffic with its five
 types (all seven are `USERNAME` detections, six of them in the tool-result
-JSON) nor 100 ms per 500 characters (175 ms, the same as
-`dslim/bert-base-NER`'s 176 ms on this machine); ettin misses the leak and
-latency bars too. Bench configs
+JSON) nor 100 ms per 500 characters (136 ms); ettin now clears the recall
+and leak bars too (`PERSON` recall 0.98, leak 0.143) but not the
+false-positive bar (16 per 50 KB) nor latency (127 ms). Bench configs
 `bench/configs/hf-openmed-pii-small.toml` and
 `bench/configs/hf-ettin-68m-nemotron-pii.toml` are gated in CI.
 
@@ -226,13 +261,15 @@ latency bars too. Bench configs
 configuration runs (`entities = ["PERSON"]`), OpenMed-PII Small 44M finds
 more names than `dslim/bert-base-NER` everywhere it was measured outside its
 own training distribution — synthetic corpus 1.000 against 0.974 (leaking
-0.0005 of the name characters against 0.037), OpenPII English 0.989 against
-0.911, OpenPII's first 2,000 rows 0.829 against 0.527 — at equal
-false positives (none in the agent-traffic files for either; 198 against
-210 detections per 100 KB of the whole negatives corpus) and equal latency
-(175 against 176 ms). Its exact-span `PERSON` recall is lower (0.674 against
-0.951: its spans are often a word wider or narrower than the annotation,
-which still covers the name). The `hf` default model is unchanged; a
+none of the name characters against 0.037), OpenPII English 0.989 against
+0.911, OpenPII's first 2,000 rows 0.829 against 0.527 (both measured before
+word-by-word decoding) — at equal false positives (none in the
+agent-traffic files for either; 186 against 210 detections per 100 KB of
+the whole negatives corpus) and similar latency (175 against 176 ms when
+measured side by side; 136 ms in the busier re-measurement). Read word by
+word, its exact-span `PERSON` recall is 1.000 (0.951 for
+`dslim/bert-base-NER`; 0.674 before, when its spans were often a word wider
+or narrower than the annotation). The `hf` default model is unchanged; a
 change would be a 2.0.0 decision, not a 1.12.0 one: in 1.x a configured
 `entities = ["PER"]` would match nothing from OpenMed, which never emits
 `PER`. Its weights are 566 MB (`dslim/bert-base-NER`: 433 MB), and

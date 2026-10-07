@@ -38,8 +38,8 @@ and tags `vX.Y.Z`.
   Nemotron-PII (CC BY 4.0) and measured by the NER bench: `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`
   (Apache-2.0, a 384-token window) and `kalyan-ks/ettin-68m-nemotron-pii` (MIT, ModernBERT:
   transformers 4.48 or newer), pinned to their `main` commits of 2026-10-07, status "caution"
-  with their numbers (agent-traffic false positives above the admission bar; ettin's sub-word
-  fragments leak part of numbers). Bench configs `bench/configs/hf-openmed-pii-small.toml` and
+  with their numbers (agent-traffic false positives above the admission bar; ettin's account
+  numbers carry labels that are not folded into `ACCOUNT_NUMBER`). Bench configs `bench/configs/hf-openmed-pii-small.toml` and
   `hf-ettin-68m-nemotron-pii.toml` with recorded baselines, gated by the `ner-models` CI job,
   and a `real_model` test of OpenMed's spans. docs/detection.md gains "PII models for the
   `hf` backend"; docs/ner-landscape.md records the numbers. The `hf` default model is
@@ -371,7 +371,12 @@ and tags `vX.Y.Z`.
   trained on every piece (`piece_labels = "every"`) — by its most confidently tagged piece; a
   span never takes in a quote, a bracket, a colon or a newline. WordPiece models
   (`dslim/bert-base-NER`, the default) keep the pipeline, unchanged (a differential test
-  over the recall and false-positive corpora, and identical bench numbers).
+  over the recall and false-positive corpora, and identical bench numbers). Re-measured on
+  the synthetic corpus: exact `PERSON` recall 0.67 to 1.00 (OpenMed-PII Small 44M) and 0.03
+  to 0.87 (ettin), character leak 0.051 to 0.048 and 0.158 to 0.143, detections on the
+  negatives corpus 551 to 514 and 286 to 183; their recorded baselines and catalog numbers
+  are updated (docs/ner-landscape.md lists what got worse: some recall and precision, and
+  over-redaction).
 - The `hf` backend loads every model in float32, whatever precision its checkpoint stores
   (transformers' default keeps it): a bfloat16 checkpoint ran about 30% slower on a CPU
   (`openai/privacy-filter`: 738 against 1,025 ms per 500 characters for the model alone). The

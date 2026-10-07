@@ -493,10 +493,13 @@ folder: the Hugging Face cache's `models--ORG--MODEL/snapshots/<revision>`).
 
 ## "[detection.ner] hf model '…': its labels mix BIOES (E-, S-) and BILOU (L-, U-) tags" / "… its id2label does not name every logit index 0 to n-1" / "… its id2label keys are not logit indices"
 
-From `serve` / `serve --check`: the `hf` model's labels (`config.json`
-`id2label`) tag spans with `E-`/`S-` (BIOES) or `L-`/`U-` (BILOU), which
-llm-redact decodes itself (docs/detection.md "BIOES and BILOU taggers"), but
-they cannot be read as one scheme: some labels use BIOES tags and others
+From `serve` / `serve --check`: llm-redact decodes the `hf` model's labels
+(`config.json` `id2label`) itself — those of a model that tags spans with
+`E-`/`S-` (BIOES) or `L-`/`U-` (BILOU) (docs/detection.md "BIOES and BILOU
+taggers"), and those of a `B-`/`I-` (BIO) model whose tokenizer does not
+mark word pieces, a SentencePiece or byte-level BPE one (DeBERTa-v3, XLM-R,
+RoBERTa, ModernBERT; docs/detection.md "BIO taggers without word-piece
+marks") — but they cannot be read: some labels use BIOES tags and others
 BILOU ones, or the labels do not name each of the model's outputs by its
 position. The checkpoint's configuration is inconsistent; pick another model
 or fix its `config.json` in a local copy and point `[detection.ner.models] hf`

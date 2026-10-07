@@ -509,6 +509,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
             "Apache-2.0; 1.5B parameters, 50M active (sparse mixture of experts); BIOES"
             " tags; the card does not name the training data; "
             + measured(recall=0.99, leak=0.12, false_positives=23, p50_ms=1108)
+            # Measured before the hf backend loaded float32 (about 30% faster
+            # for the model alone on that CPU; twice the memory, about 6 GB).
+            + " (with its bfloat16 weights as stored, before the hf backend loaded float32)"
         ),
         checked="2026-10-07",
         revision="7ffa9a043d54d1be65afb281eddf0ffbe629385b",

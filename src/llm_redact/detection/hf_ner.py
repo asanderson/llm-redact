@@ -36,10 +36,10 @@ offsets every detection needs — so a model without one is refused at startup.
 
 A model tagging BIOES or BILOU (its labels carry `E-`/`S-` or `L-`/`U-` tags,
 which the pipeline's aggregation does not understand) runs without the
-pipeline: :class:`TaggerPipe` reads the same token windows, takes the model's
-per-token log-probabilities and decodes its spans itself (tagging.py) — with
-the constrained Viterbi decoder when the model catalog lists the model's
-calibration file, else greedily.
+pipeline too: :class:`TaggerPipe` reads the same token windows, takes the
+model's per-token log-probabilities and decodes its spans itself (tagging.py)
+— with the constrained Viterbi decoder when the model catalog lists the
+model's calibration file, else greedily.
 
 Import-lazy: loads only when an `hf` backend is enabled; the model load
 happens at proxy startup (fail fast, no first-request latency spike), in
@@ -88,8 +88,8 @@ _SENTINEL_MAX_LENGTH = 1_000_000
 # What an encoder reads when its config does not say (BERT and most others).
 _DEFAULT_WINDOW = 512
 # The precision every hf model runs in (transformers' `dtype`, which it
-# resolves to torch.float32): the pipeline and the BIOES/BILOU tagger both
-# use the one model the first pipeline() call loads.
+# resolves to torch.float32): the pipeline and the tagger both use the one
+# model the first pipeline() call loads.
 MODEL_DTYPE = "float32"
 # transformers' pipeline() takes `dtype` from 4.56 on (`torch_dtype` before
 # it, and an older pipeline hands the unknown keyword to the task pipeline,
@@ -1066,7 +1066,8 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
     if tokenizer.model_max_length != window:
         tokenizer.model_max_length = window
     stride = window // 4
-    # A BIOES/BILOU tagger reads the same windows but decodes its own spans.
+    # A BIOES/BILOU tagger, and a BIO tagger whose tokenizer does not mark
+    # word pieces, read the same windows but decode their own spans.
     every_piece = entry is not None and entry.piece_labels == "every"
     pipe: Any = _tagger(loaded, tokenizer, stride, biases, model_name, every_piece=every_piece)
     if pipe is None:

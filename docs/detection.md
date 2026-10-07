@@ -253,9 +253,12 @@ the cache. A model whose `config.json` or `tokenizer_config.json` names code
 to import from its repository (`auto_map`) is refused, and nothing is ever
 loaded with `trust_remote_code`. The weights must be safetensors: a model
 with only `pytorch_model.bin` is refused unless `allow_pickle_weights = true`,
-and a model with both always loads its safetensors. The load needs
-transformers 4.56 or newer (the first whose pipeline takes the precision
-the model is loaded in, float32); an older one stops the startup with
+and a model with both always loads its safetensors. Every model runs in
+float32, whatever precision its weights are stored in: a model stored in
+bfloat16 runs slower on a CPU, and loaded in float32 it takes twice the
+memory of its weight files (size a container or Helm memory limit for
+that). The load needs transformers 4.56 or newer (the first whose
+pipeline takes the precision); an older one stops the startup with
 `[detection.ner] backend = "hf" needs transformers >= 4.56 …`.
 
 **How the `gliner` backend loads a model.** The same way: the GLiNER
@@ -540,7 +543,12 @@ rules. Measured on the same corpora: `PERSON` recall 0.99, character leak
 0.12, 23 agent-traffic false positives per 50 KB, and about a second per
 500-character string on a 4-core CPU (1.1 s; 19.5 s for 10,000 characters),
 so it stays "caution" and its bench configuration is measured by hand
-(`bench/configs/manual/`, [ner-bench.md](ner-bench.md)).
+(`bench/configs/manual/`, [ner-bench.md](ner-bench.md)). Those latencies were
+measured with its weights in bfloat16, as the repository stores them; the
+`hf` backend now loads every model in float32, which measured about 30%
+faster on that CPU for the model alone, and which takes twice the memory of
+bfloat16 weights: about 6 GB of RAM for its 2.8 GB of weights, so a
+container or Helm memory limit sized for bfloat16 is too small.
 
 ### Model-load policies (plugins)
 

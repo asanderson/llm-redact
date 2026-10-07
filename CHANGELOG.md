@@ -389,9 +389,11 @@ and tags `vX.Y.Z`.
   precision, and over-redaction).
 - The `hf` backend loads every model in float32, whatever precision its checkpoint stores
   (transformers' default keeps it): a bfloat16 checkpoint ran about 30% slower on a CPU
-  (`openai/privacy-filter`: 738 against 1,025 ms per 500 characters for the model alone). The
-  one load serves the transformers pipeline and the BIOES/BILOU tagger alike. The `gliner`
-  and `gliner2` backends are unchanged.
+  (`openai/privacy-filter`: 738 against 1,025 ms per 500 characters for the model alone), and
+  takes twice its stored size in memory — about 6 GB of RAM for `openai/privacy-filter`'s
+  2.8 GB of weights, so a container or Helm memory limit sized for bfloat16 is too small.
+  The one load serves the transformers pipeline and the llm-redact tagger alike. The
+  `gliner` and `gliner2` backends are unchanged.
 - The `hf` extra requires transformers 4.56 or newer (was 4.40): the float32 load passes
   the pipeline's `dtype`, which older versions refuse. The startup (`serve`, `serve
   --check`) and `llm-redact doctor` refuse an older installed transformers by name

@@ -365,8 +365,9 @@ jobs:
       # locked PyPI torch wheel brings the CUDA libraries (several GB) no CI
       # runner uses. Everything else is installed exactly as uv.lock pins
       # it, every wheel checked against the lock's sha256, and torch is the
-      # PyTorch CPU wheel of the locked version pinned by its own sha256
-      # (scripts/ner_ci_torch_cpu.txt; docs/dependencies.md).
+      # PyTorch CPU wheel of the locked version checked against the SHA-256
+      # scripts/cpu_torch.py records (the same recipe as the airgap job and
+      # the -ner image; docs/dependencies.md).
       - name: install the hf, gliner, gliner2 and bench-data extras (CPU torch)
         run: scripts/ner_ci_env.sh
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

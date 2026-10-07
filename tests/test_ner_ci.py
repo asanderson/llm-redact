@@ -194,47 +194,54 @@ def test_the_weekly_eval_installs_the_same_environment() -> None:
 
 # --- the environment script: every wheel hash-checked ---------------------------
 
-ENV_SCRIPT = ROOT / "scripts" / "ner_ci_env.sh"
-TORCH_PIN = ROOT / "scripts" / "ner_ci_torch_cpu.txt"
+SCRIPTS = ROOT / "scripts"
+ENV_SCRIPT = SCRIPTS / "ner_ci_env.sh"
 
 
 def _commands(text: str) -> list[str]:
+    """The script's commands, comments dropped and backslash continuations
+    joined."""
+    joined = re.sub(r"\\\n\s*", " ", text)
     return [
         line.strip()
-        for line in text.splitlines()
+        for line in joined.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
 
 
-def test_the_cpu_torch_wheel_is_the_locked_version_pinned_by_hash() -> None:
-    lock = tomllib.loads((ROOT / "uv.lock").read_text())
-    locked = [p["version"] for p in lock["package"] if p["name"] == "torch"]
-    (pin,) = _commands(TORCH_PIN.read_text())
-    match = re.fullmatch(r"torch==([0-9.]+)\+cpu --hash=sha256:[0-9a-f]{64}", pin)
-    assert match is not None, pin
-    assert locked == [match.group(1)]
+def test_the_cpu_torch_recipe_is_the_only_one() -> None:
+    # One CPU-torch recipe: scripts/cpu_torch.py (its SHA-256 table pinned to
+    # uv.lock's torch by tests/test_cpu_torch_script.py). No second pin file.
+    assert not (SCRIPTS / "ner_ci_torch_cpu.txt").exists()
+    assert "ner_ci_torch_cpu" not in ENV_SCRIPT.read_text()
 
 
 def test_the_environment_script_checks_every_hash() -> None:
     commands = _commands(ENV_SCRIPT.read_text())
-    installs = [c for c in commands if c.startswith("uv pip install")]
-    exports = [c for c in commands if c.startswith("uv export")]
-    # The export that is installed keeps the lock's hashes; packages are
-    # left out by name, never by filtering its lines.
-    (installed_export,) = [c for c in exports if "--no-hashes" not in c]
-    assert '"${omit[@]}"' in installed_export and "--frozen" in installed_export
-    assert all("grep" not in c for c in commands)
-    assert "--no-emit-package" in ENV_SCRIPT.read_text()
+    # The export keeps the lock's hashes and goes through cpu_torch.py,
+    # which takes torch and its GPU-only packages out whole and pins the
+    # locked torch's CPU wheels by SHA-256 (never a line filter here).
+    (export,) = [c for c in commands if c.startswith("uv export")]
+    assert "--frozen" in export and "--no-hashes" not in export
+    assert '| python3 "$here/cpu_torch.py" requirements "$work/requirements.txt"' in export
+    assert export.endswith('>"$work/torch.txt"')
+    assert all("grep" not in c and "sed " not in c for c in commands)
     # Both wheel installs require a hash for every requirement and resolve
     # nothing beyond the files (the export is the whole locked closure).
-    requirements, torch, project = installs
-    assert '--require-hashes --no-deps -r "$requirements"' in requirements
-    assert '--require-hashes --no-deps -r "$pin"' in torch
-    assert "--index-url https://download.pytorch.org/whl/cpu" in torch
+    installs = [c for c in commands if c.startswith("uv pip install")]
+    torch, requirements, project = installs
+    assert '--require-hashes --no-deps -r "$work/torch.txt"' in torch
+    assert torch.endswith("--index-url https://download.pytorch.org/whl/cpu")
+    assert '--require-hashes --no-deps -r "$work/requirements.txt"' in requirements
+    assert "--index-url" not in requirements
     assert project.endswith("--no-deps -e .")
+    # Then: no CUDA or triton distribution and a +cpu torch, and a
+    # consistent environment.
+    assert commands[-2] == '"$venv/bin/python" "$here/cpu_torch.py" check'
     assert commands[-1].startswith("uv pip check")
-    # The venv is the platform the pinned wheel is built for.
+    # The venv is the Python the CI jobs run.
     assert any(c.startswith("uv venv --python 3.13") for c in commands)
+    assert commands[0] == "set -euo pipefail"
 
 
 @pytest.mark.parametrize("name", ["ci.yml", "ner-eval.yml"])

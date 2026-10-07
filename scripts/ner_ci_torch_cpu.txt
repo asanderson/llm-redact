@@ -1,7 +1,0 @@
-# The PyTorch CPU wheel the ner-models and ner-eval CI jobs install
-# (scripts/ner_ci_env.sh) instead of the locked PyPI torch wheel, which
-# brings CUDA libraries no runner uses. Its version is the one uv.lock pins
-# (scripts/ner_ci_env.sh refuses another; tests/test_ner_ci.py pins it too),
-# and its sha256 is the one download.pytorch.org/whl/cpu lists for the
-# CPython 3.13 Linux x86_64 wheel (cp313, manylinux_2_28), checked against the downloaded file.
-torch==2.13.0+cpu --hash=sha256:3fbf9c9d1f3c10c2d59d04aca426dee9ccc6ceb32d255c61e93acc3b4f75fae6

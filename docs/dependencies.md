@@ -67,8 +67,12 @@ digests, so the script records the CPU index's SHA-256 of every wheel of
 the locked torch (`CPU_WHEELS`, a test pins it to `uv.lock`'s version) and
 writes them under the `torch==<version>+cpu` pin it prints
 (`requirements --macos`: the plain macOS wheel, which has no `+cpu`
-build), which is installed with `--require-hashes` as well. The `-ner` container image and the offline wheelhouse recipe
-(deployment.md, "Offline installs") are built this way. A `[tool.uv.sources]`
+build), which is installed with `--require-hashes` as well. It is the one
+CPU-torch recipe: the `-ner` container image, its release SBOM, the CI
+`airgap` job, the offline wheelhouse recipe (deployment.md, "Offline
+installs") and `scripts/ner_ci_env.sh` (the environment of the
+`ner-models` and `ner-eval` CI jobs, docs/ner-bench.md "CI") are all
+built this way. A `[tool.uv.sources]`
 entry pointing torch at the CPU index was not used: it would change what
 `uv sync --extra hf` installs for every Linux user (a GPU host included)
 and rewrite `uv.lock`, and a `pip install` from PyPI ignores it anyway.

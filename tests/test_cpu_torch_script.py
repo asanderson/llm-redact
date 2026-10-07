@@ -1,9 +1,10 @@
 """scripts/cpu_torch.py: the locked NER extras with a CPU-only torch.
 
-The `-ner` image, the CI `airgap` job and the offline wheelhouse recipe
-install torch at its locked version from the PyTorch CPU index and every
-other locked package hash-checked from the export — without torch's GPU
-dependencies, which PyPI's Linux torch pulls on every architecture.
+The `-ner` image, the CI `airgap` job, the real-model CI jobs
+(scripts/ner_ci_env.sh) and the offline wheelhouse recipe install torch at
+its locked version from the PyTorch CPU index and every other locked
+package hash-checked from the export — without torch's GPU dependencies,
+which PyPI's Linux torch pulls on every architecture.
 """
 
 from __future__ import annotations

@@ -228,10 +228,13 @@ pushes to `main` and the weekly CI schedule):
 1. installs the `hf`, `gliner`, `gliner2` and `bench-data` extras with
    `scripts/ner_ci_env.sh`: every package at the version `uv.lock` pins,
    each wheel checked against the lock's sha256, except that torch is the
-   PyTorch CPU wheel of the locked version, checked against its own sha256
-   in `scripts/ner_ci_torch_cpu.txt` (the locked PyPI wheel brings CUDA
-   libraries no runner uses, so it and torch's CUDA-only packages are left
-   out of the export by name);
+   PyTorch CPU wheel of the locked version, checked against the CPU wheels'
+   SHA-256 that `scripts/cpu_torch.py` records (the locked PyPI wheel
+   brings CUDA libraries no runner uses, so `cpu_torch.py` takes it and
+   torch's GPU-only packages out of the export; it is the same recipe the
+   `-ner` image and the `airgap` job use, docs/dependencies.md), then
+   `cpu_torch.py check` refuses any CUDA or triton package and
+   `uv pip check` the result's consistency;
 2. restores the Hugging Face cache, keyed on the model catalog and the
    configurations below, and runs `llm-redact models pull --config` on each
    of them, so every model is fetched at its catalog pin (a GLiNER
@@ -278,12 +281,13 @@ type-agnostic leak rate. A ceiling on that rate alone would let `PERSON`
 leakage grow about fivefold before failing, so each entry also carries a
 `type_leak_max` for every entity its configuration requests.
 
-To reproduce the job locally (CPython 3.13 on Linux x86_64, the platform
-the pinned torch wheel is built for), install as it does; the script
-replaces `.venv`, so run it in a checkout you do not develop in, and the
-models go to the Hugging Face cache. When `uv.lock` moves torch to another
-version, the script refuses to run until `scripts/ner_ci_torch_cpu.txt`
-names that version and its CPU wheel's sha256:
+To reproduce the job locally (it creates a CPython 3.13 venv; Linux or
+Windows, x86_64 or aarch64, where the PyTorch CPU index has a `+cpu`
+wheel), install as it does; the script replaces `.venv`, so run it in a
+checkout you do not develop in, and the models go to the Hugging Face
+cache. When `uv.lock` moves torch to another version, the script refuses
+to run until `CPU_WHEELS` in `scripts/cpu_torch.py` records that
+version's CPU wheels (a test fails until then too):
 
 ```bash
 scripts/ner_ci_env.sh

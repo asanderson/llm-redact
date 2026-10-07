@@ -10,8 +10,10 @@ version from the CPU index and everything else exactly as uv.lock pins it
 uv.lock holds only the PyPI wheels' hashes, so ``CPU_WHEELS`` below records
 the CPU index's SHA-256 of every wheel of the locked version (a test pins
 the table to uv.lock's torch, so a torch bump fails until it is updated).
-Used by the `-ner` image (Dockerfile), the CI `airgap` job and the offline
-wheelhouse recipe (docs/deployment.md, "Offline installs"):
+It is the one CPU-torch recipe: the `-ner` image (Dockerfile), its release
+SBOM, the CI `airgap` job, scripts/ner_ci_env.sh (the CI `ner-models` and
+`ner-eval` jobs) and the offline wheelhouse recipe (docs/deployment.md,
+"Offline installs") all use it:
 
     uv export --frozen --no-dev --no-emit-project --extra hf --extra gliner \\
         | python scripts/cpu_torch.py requirements requirements.txt > torch.txt

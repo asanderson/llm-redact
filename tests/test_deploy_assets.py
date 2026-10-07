@@ -882,6 +882,7 @@ def _torch_installs(text: str) -> list[str]:
         ("Dockerfile", 1),
         (".github/workflows/ci.yml", 2),
         ("tests/airgap/install_wheelhouse.sh", 1),
+        ("scripts/ner_ci_env.sh", 1),
         ("docs/deployment.md", 2),
     ],
 )

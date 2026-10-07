@@ -940,16 +940,20 @@ The entry sets a per-type leak ceiling for a type the scored samples never
 contain, as for a recall floor above: raise `--limit`, or remove that type
 from the entry's `type_leak_max`.
 
-## NER CI: "uv.lock pins torch X but scripts/ner_ci_torch_cpu.txt pins Y+cpu: update the pin and its sha256"
+## "FAIL  no CPU wheel hash recorded for torch X: add every wheel of it from https://download.pytorch.org/whl/cpu/torch/ to CPU_WHEELS (scripts/cpu_torch.py)"
 
-`scripts/ner_ci_env.sh` (the `ner-models` and `ner-eval` jobs) installs the
-PyTorch CPU wheel pinned by version and sha256 instead of the locked PyPI
-wheel, and refuses to run when the two versions differ (after `uv lock`
-moved torch). Put the new version in `scripts/ner_ci_torch_cpu.txt` with
-the sha256 that `https://download.pytorch.org/whl/cpu/torch/` lists for
-its `cp313` `manylinux_2_28_x86_64` wheel, checked against the downloaded
-file (`sha256sum`). A hash that does not match fails the install: never
-remove `--require-hashes` to get past it.
+`scripts/cpu_torch.py requirements` (the `-ner` image build, the release
+SBOM, the CI `airgap`, `ner-models` and `ner-eval` jobs through
+`scripts/ner_ci_env.sh`, and the offline wheelhouse recipe) installs torch
+at the version `uv.lock` pins from the PyTorch CPU index, hash-checked
+against the SHA-256 table `CPU_WHEELS` records, and refuses a locked torch
+version the table does not cover (after `uv lock` moved torch). Replace the
+table with every wheel of the new version as
+`https://download.pytorch.org/whl/cpu/torch/` lists them (`sha256sum`
+format: digest, two spaces, wheel file name), and check at least one
+against the downloaded file. `tests/test_cpu_torch_script.py` fails until
+the table matches `uv.lock`. A hash that does not match fails the install:
+never remove `--require-hashes` to get past it.
 
 ## NER bench: "--dump-errors must name a file outside any git work tree"
 

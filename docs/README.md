@@ -72,6 +72,7 @@ reference and enforcement internals ship with it.
 | [versioning.md](versioning.md) | SemVer policy: what counts as breaking, deprecation windows, release verification. |
 | [ner-landscape.md](ner-landscape.md) | The FOSS NER landscape survey behind the optional backends. |
 | [compaction-relink.md](compaction-relink.md) | The rejected design record for relinking history-compaction session forks — read before re-attempting — and the token floor that keeps a fork (or any request carrying tokens its session never issued) from giving one token two meanings, with its exact residual. |
+| [playground-plan.md](playground-plan.md) | The proposal (not yet built) for public online playgrounds: the real proxy running in the visitor's browser under Pyodide for llm-redact, a private short-lived sandbox per visitor for llm-redact-pro, rule-category toggles, isolation and privacy, hosting, CI and the owner decisions it needs. |
 
 ## Contributing and releasing
 

@@ -526,7 +526,10 @@ and tags `vX.Y.Z`.
   among the backends that read in windows and count truncated windows, and its pin sentence
   covers every catalogued model (dated 2026-10-05 to 2026-10-07, not only the first five);
   docs/ner-landscape.md counts six shipped backends; docs/plugins.md points to the
-  model-load policy documentation.
+  model-load policy documentation. The troubleshooting entries for `models`, `doctor`
+  and the torch check and docs/detection.md's `/status` paragraph named only `gliner`
+  and `hf` among the Hugging Face Hub backends and now name `gliner2` too, and the entry
+  for a refused bench gate file quotes every message it covers.
 - The `hf` backend's BIOES/BILOU decoding failed on an empty or blank string when the model's
   tokenizer adds no special tokens (`openai/privacy-filter`): a window of no token ids reached
   the model, which refused it, so the request failed. Such a window is no longer scored, and

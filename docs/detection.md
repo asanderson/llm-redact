@@ -1030,7 +1030,7 @@ Each string a backend is handed counts once, under `scanned_whole`,
 `scanned_windowed` or `skipped_max_chars`; with several backends each one
 counts the strings it was handed. `unmatched_entities` lists the configured
 entities no active backend can ever emit (the startup warning above), and
-`model` the model each backend loaded. For the `gliner` and `hf` backends,
+`model` the model each backend loaded. For the `gliner`, `gliner2` and `hf` backends,
 `source` says whether it came from the Hugging Face Hub (`hub`) or a local
 folder (`local`), `model_id` names the Hub model (a folder's: the one its
 `llm-redact-model.json` names, else `null`), `revision` the commit it loads

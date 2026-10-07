@@ -253,6 +253,70 @@ own answer decides whether the page may read a response).
   hold the real credential to call the MCP server on the model's behalf.
   MCP call content is redacted/restored like any other content.
 
+### Contextual values: rules and models
+
+Some personal values have no grammar a rule can trust: street addresses,
+passport and driver's-licence numbers, dates of birth, usernames and
+account numbers (and names themselves) look like ordinary words and numbers,
+and a rule loose enough to catch them would redact code, logs and prose. They
+stay outside the *rules* by design. Optional NER models (`[detection.ner]`,
+off by default, and `entities = ["PERSON"]` when on) add **best-effort**
+coverage once the operator enables a model and asks for the types
+(`entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME",
+"ACCOUNT_NUMBER"]`; [detection.md](detection.md#pii-models-for-the-hf-backend)).
+What that claim rests on, and what it does not:
+
+- **Measured, per model.** The NER bench ([ner-bench.md](ner-bench.md))
+  scores each catalogued model on a generated corpus shaped like
+  coding-agent traffic (seeded, regenerated at every run, never committed)
+  and, report only, on 2,000-row slices of two published datasets (OpenPII
+  1.5M, Nemotron-PII). On the generated corpus the models measured found
+  0.65 to 1.00 of addresses, 0.05 to 1.00 of dates of birth, 0.27 to 0.92 of
+  usernames and 0.24 to 1.00 of account numbers, depending on the model, each
+  with its character leak beside it
+  ([ner-landscape.md](ner-landscape.md#verdicts-at-a-glance)).
+- **Not a guarantee.** The generated corpus draws names, streets and handles
+  from small embedded lists and is friendlier than real traffic: on the
+  published slices the same models find less (the Knowledgator models find
+  0.24 to 0.55 of the names in OpenPII's first 2,000 rows, mostly in other
+  languages, and 0.36 to 0.71 in Nemotron-PII's test slice). A model misses
+  values, and a PII model draws false positives on identifiers (usernames
+  above all). The recorded floors catch a model's measured behavior
+  regressing; they promise nothing about your traffic.
+- **Passport and driver's-licence numbers** are requested from the models
+  that list them, but the generated corpus labels neither and no recorded
+  baseline covers them.
+- **Only what is asked for.** A type missing from `entities` is never
+  redacted by a model, and with no model enabled (the default) no address,
+  date of birth or username is: they reach the provider as typed.
+- **Structured values stay with the rules.** A model span longer than a
+  rule's match wins overlap resolution (the longest span wins) and replaces
+  it; the bench counts such cases as structured regressions (none on the
+  generated corpus for any configuration measured; one for ettin and two for
+  `openai/privacy-filter` on OpenPII's English slice).
+- **Gaps are surfaced, not hidden.** An entity no backend can emit warns at
+  startup, and what a model did not read is counted (long text, below).
+
+#### Long text and what a model does not read
+
+A model reads a bounded window. The `hf`, `gliner` and `gliner2` backends
+read a longer string in overlapping windows, so a name anywhere in it is
+found at its exact offsets; a string longer than `[detection.ner]
+max_chars` (default 20,000 characters, a latency cap) is read by no model,
+while the regex rules, deny strings and custom rules still scan it. Every
+skipped string is counted (`/status` `detection.ner`, `llm_redact_ner_strings_total{outcome="skipped_max_chars"}`,
+a posture line in `llm-redact status`, the `LlmRedactNerSkippingLongStrings`
+alert), and so is a single word longer than the encoder reads (read only
+in part: `windows_truncated`), a model entity whose span the string does not
+contain (never redacted: `offsets_dropped`) and a label that cannot be a
+placeholder type (`labels_dropped`). The residual: a long document pasted as
+one string is not read past `max_chars`, so names and other contextual values
+in it reach the provider. A second one, for an `hf` model decoded word by
+word (SentencePiece and byte-level BPE tokenizers, such as OpenMed's and
+ettin's): a span never takes a quote or a bracket in, so one inside a value
+(a password holding a double quote) goes upstream between the placeholders of
+the value's two parts ([detection.md](detection.md#how-ner-runs)).
+
 ### The vault (the mapping at rest)
 
 - Default backend is **in-memory**: nothing on disk, dies with the
@@ -530,6 +594,9 @@ silent:
   default and, when allowed, happen at startup only. `llm-redact doctor`'s
   `models` area names every model, its pin and whether its files are in the
   local cache, and WARNs on downloads, pickle weights and unpinned models.
+  The model catalog records neutral, dated facts about each model (license,
+  training data, pin, measured numbers) and the core never refuses a model
+  for them; a plugin may (the model-load policy seam, docs/detection.md).
 
   ![Flowchart of where NER model weights come from: the catalog's pins and the Hugging Face Hub feed models pull or an opt-in startup download into the local cache, checked offline, put to a plugin's model-load policy when one is installed and loaded from local files only; beside it the air-gap path of portable folders with a SHA-256 manifest, verified inside the enclave](diagrams/model-supply-chain.png)
 
@@ -562,7 +629,7 @@ row, is [resilience.md](resilience.md).
 | Binary file uploads | The same non-goal for multipart uploads: a file part that is not text (by its content — a PDF, even an all-ASCII one, an image, an archive, a Latin-1 text) is never rewritten. With the client's own key it is forwarded unscanned by default (`[detection] binary_uploads`, counted and surfaced) or refused; under a credential the proxy holds it is refused. An upload inspector (the core's `[extraction]`) may read it as text first: a value found refuses the upload (or, in opt-in convert mode, replaces the file with its redacted text — the model then sees text, not the file), a complete clean reading lets the file go out byte-identical — the scan covers the extracted text only; a cloud OCR service configured there receives the file (`trusted = true` required) |
 | Values a client deliberately encodes | base64 inside a JSON string: the proxy scans the bytes it receives. What the proxy could not read as its plain bytes is refused instead of forwarded wherever redaction applies (and under any credential the proxy holds): a `Content-Encoding` other than identity (415), a declared multipart Content-Transfer-Encoding or charset (400) |
 | Structural names | JSON object keys, header names and a multipart part's `name` are protocol, not content; values are scanned — string values, and an upload's `filename` / `filename*` |
-| Shapes the rules exclude | Bare-digit phones, street addresses, passport/DL numbers: collision-prone with no reliable grammar |
+| Shapes the rules exclude | Bare-digit phones, street addresses, passport/DL numbers, dates of birth, usernames: collision-prone with no reliable grammar, so no rule matches them. Optional NER models give best-effort, measured coverage of addresses, dates of birth, usernames and account numbers ("Contextual values" above) — never a guarantee |
 | SigV4-signed provider traffic (AWS Bedrock via SDK credentials) | Permanent non-goal: the signature covers the payload hash, so a body-rewriting proxy can never transit a signature the CLIENT computed, and it never holds the user's AWS credentials to re-sign. The proxy MAY sign with its OWN identity (`[providers.bedrock] auth = "identity"`, llm-redact-pro): the client's credentials are stripped and the redacted body is signed by credentials the operator gave the proxy (a body the proxy could not redact — non-JSON, a top-level array or scalar, content-encoded in any Content-Encoding header (415), sent with a repeated Content-Type, or multipart on a route it does not scan — is refused 400, never signed verbatim; the same scanned-body rule holds for key-authorized routes wherever redaction applies) — which any client that reaches the proxy can then spend, so pair it with the access gate or a loopback bind. Bearer-token Bedrock (API keys) IS supported: the proxy parses AWS's binary CRC-framed eventstream encoding natively (both CRCs validated per frame; a framing violation degrades to verbatim pass-through, so unrestored placeholders — never corrupted frames — are the worst case), and invoke-route bodies are rewritten only for positively recognized model-native shapes (Claude), with everything else forwarded verbatim |
 
 ## Residual risks
@@ -570,7 +637,9 @@ row, is [resilience.md](resilience.md).
 | Risk | Mitigation status |
 |---|---|
 | Novel secret formats the rules miss | User-extensible custom rules; NER extras; fp/recall gates keep the shipped set honest |
-| NER model supply chain: weights or a tokenizer from a model repository that changed or was replaced | Models load at a full commit id (the user's pin or the model catalog's; an unpinned model is a `doctor` WARN), with explicit file names, never running repository code (`auto_map` refused, `trust_remote_code` never set) and, for `hf`, safetensors only unless `allow_pickle_weights` (a `doctor` WARN); GLiNER base models are pinned and assembled locally; downloads are off by default and startup-only. Residual: a pinned commit is trusted as published (no signature exists to check), a model the catalog does not know loads unpinned unless the operator pins it, GLiNER still loads a `pytorch_model.bin` through torch's `weights_only` loader (torch >= 2.6), and a base model the catalog does not pin loads at its newest cached revision (a startup WARNING and a `doctor` WARN name it) |
+| Contextual personal values no rule can match (addresses, passport and driver's-licence numbers, dates of birth, usernames, account numbers, most names) | Outside the rules by design. With a PII model enabled and the types requested, redacted on a best-effort basis: measured per model on a generated corpus and published slices ([ner-landscape.md](ner-landscape.md#verdicts-at-a-glance)), never guaranteed on your traffic; a model misses values and draws false positives; passport and driver's-licence numbers have no recorded baseline; the default configuration asks for names only, and `llm-redact preview` shows what fires on a text |
+| Text beyond what an NER model reads | Longer strings are read in overlapping windows (`hf`, `gliner`, `gliner2`); a string over `max_chars` (default 20,000 characters) is read by no model, the rules still scan it, and every skip is counted (`/status`, `/metrics`, a `llm-redact status` posture line, the `LlmRedactNerSkippingLongStrings` alert). Residual: names in such a string reach the provider; a word longer than the encoder reads is read in part (`windows_truncated`); an `hf` model decoded word by word never takes a quote or bracket into a value, so one inside a value goes upstream between the placeholders of its two parts |
+| NER model supply chain: weights or a tokenizer from a model repository that changed or was replaced | Models load at a full commit id (the user's pin or the model catalog's; an unpinned model is a `doctor` WARN), with explicit file names, never running repository code (`auto_map` refused, `trust_remote_code` never set) and, for `hf`, safetensors only unless `allow_pickle_weights` (a `doctor` WARN); a GLiNER ONNX export (`[detection.ner.onnx]`) fetches and reads only the one named file; GLiNER base models are pinned and assembled locally; downloads are off by default and startup-only, and with them off the Hugging Face libraries' own offline switches are set before they are imported, so no model load opens a connection (a CI job proves a start inside a network namespace with no route). Models carried into an enclave travel as portable folders checked against a SHA-256 manifest (`llm-redact models verify --dir`); the manifest travels with the folders, so its hash needs a separate channel. The model catalog states neutral facts (license, training data, a pin, measured numbers) and the core refuses nothing for them: a restricted model logs a startup WARNING, and a plugin's model-load policy (llm-redact-pro's `[models]`) may refuse. Residual: a pinned commit is trusted as published (no signature exists to check), a model the catalog does not know loads unpinned unless the operator pins it, GLiNER still loads a `pytorch_model.bin` through torch's `weights_only` loader (torch >= 2.6), a base model the catalog does not pin loads at its newest cached revision (a startup WARNING and a `doctor` WARN name it), and a model, though loaded as data and never as code, reads every scanned string inside the proxy's process |
 | LLM mangles a placeholder beyond fuzzy repair | Pass-through verbatim (never a wrong value); bracket swaps deliberately unrestored |
 | History compaction rewrites the session anchor | Fails safe: fresh session, no cross-session restore — verified by the dogfood compaction probe. The fork never issues a token its summary carries: the summary is the fork's anchor, so every request of it carries the summary's tokens and the token floor numbers new values past them |
 | A request carries tokens its session did not issue (a pasted answer, a foreign proxy's token) | The token floor keeps the request (and a realtime connection) that carries them from issuing those names. Residual, documented in [compaction-relink.md](compaction-relink.md): a number the session had already issued before the foreign token arrived, another request sharing the session that does not carry the token, and provider-side history (a `previous_response_id` chain, a realtime model's own output) no request of the session carries — the last is what llm-redact-pro's sealed sessions cover |

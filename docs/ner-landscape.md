@@ -236,6 +236,49 @@ configured `entities = ["PER"]` would match nothing from OpenMed, which
 never emits `PER`. Its weights are 566 MB (`dslim/bert-base-NER`: 433 MB),
 and redistributing it carries the Nemotron-PII attribution.
 
+### OpenAI Privacy Filter (`hf`)
+
+`openai/privacy-filter` (Apache-2.0; created 2026-04-17; 1.5B parameters,
+50M active per token — a sparse mixture of experts — with banded attention;
+the card does not name the training data). It loads on the locked
+transformers 5.10.1 without remote code (transformers knows the model type
+from 5.6.0; the catalog records that minimum and every build checks it).
+Only `model.safetensors` (2.8 GB), `config.json`, `tokenizer.json`,
+`tokenizer_config.json` and `viterbi_calibration.json` are fetched, never
+the `original/` copy or the ONNX exports. Eight span labels, BIOES-tagged;
+`private_person`, `private_address`, `account_number` fold into `PERSON`,
+`ADDRESS` and `ACCOUNT_NUMBER`, the types it is recommended for; its
+`secret` label is left to the anchored secret rules (its card lists
+over-redaction of hashes, placeholders and sample credentials among its
+failure modes), and `private_date` and `private_url` are not folded.
+
+| Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
+|---|---|---|---|---|---|---|---|
+| Viterbi decoding (`bench/configs/manual/hf-openai-privacy-filter.toml`) | 0.994 (0.994) | 0.768 | 0.120 | 0.046 | 23 | 27 | 1,108 ms |
+| greedy decoding (the calibration left out) | 0.994 (0.994) | 0.717 | 0.120 | 0.047 | 57 | — | — |
+
+Latency per string: 261 ms at 50 characters, 2.1 s at 2,000, 19.5 s at
+10,000; the 1,000-string many-small body took 57 s. The `hf` backend loads
+the weights in their stored precision (bfloat16); a float32 load measured
+about 30% faster on this CPU (738 against 1,025 ms per 500 characters for
+the model alone), which the backend does not do today. Its
+`ACCOUNT_NUMBER` precision is 0.46: it calls many numeric identifiers
+account numbers (23 in the national-id log of the negatives corpus). On
+OpenPII's first 2,000 English rows: `PERSON` recall 0.898, precision 0.933
+(`PERSON` leak 0.082; character leak 0.145 over the types asked for and
+the rest), with two structured regressions (a wider span over a value a
+rule finds); the other published slices were not run (each would take
+hours on this CPU).
+
+**Verdict: caution.** It clears the license, recall and leak bars (the leak
+counts the corpus's `DATE_OF_BIRTH` and `USERNAME` values, which it is not
+asked for) but neither the false-positive bar nor the latency bar: about a
+second per 500-character string on this CPU, five times the other models.
+Its configuration is measured by hand (`bench/configs/manual/`), not in CI.
+The constrained Viterbi decoder with the repository's calibration is what
+the `hf` backend uses for it; greedy decoding finds the same names with more
+than twice the false positives.
+
 ## LLM-based extractors (LangExtract and its class) — rejected as detectors
 
 LangExtract (google/langextract) and similar prompted-extraction tools

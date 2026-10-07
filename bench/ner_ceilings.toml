@@ -370,3 +370,42 @@ USERNAME = 3
 
 [hf-ettin-68m-nemotron-pii."synthetic_natids_r10.log"]
 PERSON = 4
+
+[hf-openai-privacy-filter]
+recorded = "2026-10-07"
+note = "openai/privacy-filter at 7ffa9a043d54d1be65afb281eddf0ffbe629385b, Viterbi decoding with its viterbi_calibration.json; measured by hand (bench/configs/manual); measured 72 NER detections in 269437 bytes, 26.72 per 100 KB"
+per_100kb_max = 29.0
+
+[hf-openai-privacy-filter."README.md"]
+ADDRESS = 2
+
+[hf-openai-privacy-filter."gutenberg_prose.txt"]
+PERSON = 17
+
+[hf-openai-privacy-filter."rfc_excerpt.txt"]
+PERSON = 3
+
+[hf-openai-privacy-filter."synthetic_agent_tool_results.json"]
+ADDRESS = 2
+PERSON = 4
+
+[hf-openai-privacy-filter."synthetic_app.log"]
+ACCOUNT_NUMBER = 4
+PERSON = 2
+
+[hf-openai-privacy-filter."synthetic_bigint.log"]
+ACCOUNT_NUMBER = 3
+
+[hf-openai-privacy-filter."synthetic_ci_log.txt"]
+ACCOUNT_NUMBER = 5
+PERSON = 2
+
+[hf-openai-privacy-filter."synthetic_config.yaml"]
+ACCOUNT_NUMBER = 2
+
+[hf-openai-privacy-filter."synthetic_eu_document.txt"]
+ACCOUNT_NUMBER = 14
+ADDRESS = 2
+
+[hf-openai-privacy-filter."synthetic_natids_r10.log"]
+ACCOUNT_NUMBER = 25

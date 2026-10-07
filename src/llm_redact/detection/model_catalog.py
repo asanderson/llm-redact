@@ -455,6 +455,35 @@ CATALOG: tuple[CatalogEntry, ...] = (
         window=1024,
         min_versions=_MODERNBERT,
     ),
+    CatalogEntry(
+        # main since 2026-04-22 (created 2026-04-17). 1.5B parameters, 50M
+        # active (sparse mixture of experts); model.safetensors is 2.8 GB
+        # (the repository also holds original/ and ONNX copies, never
+        # fetched). Eight span labels, each B-/I-/E-/S- tagged.
+        model_id="openai/privacy-filter",
+        backends=("hf",),
+        license="Apache-2.0",
+        status="caution",
+        reason=(
+            "Apache-2.0; 1.5B parameters, 50M active (sparse mixture of experts); BIOES"
+            " tags; the card does not name the training data; "
+            + measured(recall=0.99, leak=0.12, false_positives=23, p50_ms=1108)
+        ),
+        checked="2026-10-07",
+        revision="7ffa9a043d54d1be65afb281eddf0ffbe629385b",
+        attribution="OpenAI Privacy Filter by OpenAI (Apache-2.0)",
+        lineage=("undisclosed-training-data",),
+        # Its `secret` label is left to the anchored secret rules: the card
+        # lists over-redaction of hashes, placeholders and sample
+        # credentials among its failure modes.
+        recommended_entities=("PERSON", "ADDRESS", "ACCOUNT_NUMBER"),
+        tagging="bioes",
+        viterbi_calibration="viterbi_calibration.json",
+        # The card's 128,000-token context window.
+        window=128000,
+        # transformers learned the model type (openai_privacy_filter) in 5.6.0.
+        min_versions=(("transformers", "5.6.0"),),
+    ),
     # --- restricted: never suggested; a warning names the reason ----------
     CatalogEntry(
         model_id="iiiorg/piiranha-v1-detect-personal-information",

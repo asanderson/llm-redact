@@ -460,7 +460,7 @@ def test_an_older_library_than_the_model_needs_fails(
 
 
 def test_version_tuples() -> None:
-    from llm_redact.doctor_cli import _version_tuple
+    from llm_redact.detection.model_sources import version_tuple as _version_tuple
 
     assert _version_tuple("4.48.0") == (4, 48, 0)
     assert _version_tuple("4.48.0rc1") == (4, 48, 0)

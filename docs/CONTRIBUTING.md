@@ -156,6 +156,8 @@ its pins, its measurements and its documentation in the same change.
    `tests/test_ner_ci.py` requires an entry for every bench configuration.
 5. **CI**: nothing to edit for a bench configuration — the `ner-models`
    job and the weekly `ner-eval` workflow run every `bench/configs/*.toml`.
+   A model too slow for a runner goes to `bench/configs/manual/` instead
+   (measured by hand; its comment and baseline note say how).
    A real-model test of another model needs that model in a config under
    `tests/real_model_configs/`, or the job fails the skipped test.
 6. **Admission.** "vetted" needs an OSI-approved weights license, no

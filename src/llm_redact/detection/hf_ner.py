@@ -242,7 +242,8 @@ def torch_scorer(model: Any) -> Scorer:
 
     def score(input_ids: list[int]) -> Sequence[Sequence[float]]:
         with torch.inference_mode():
-            ids = torch.tensor([input_ids], device=getattr(model, "device", None))
+            # Token ids are integers, whatever the list holds.
+            ids = torch.tensor([input_ids], dtype=torch.long, device=getattr(model, "device", None))
             logits = model(input_ids=ids).logits[0]
             rows: Sequence[Sequence[float]] = torch.log_softmax(logits.float(), dim=-1).tolist()
             return rows
@@ -353,6 +354,11 @@ class TaggerPipe:
         units = _word_units(encoded, windows) if self._by_word else _token_units(windows)
         entities: list[dict[str, Any]] = []
         for (ids, _offsets, _special), kept in zip(windows, units, strict=True):
+            if not kept:
+                # No token covers a character (an empty or blank text, a
+                # tokenizer without special tokens): nothing to decode, and
+                # a model call on no token ids fails.
+                continue
             rows = self._scorer(list(ids))
             scores = [rows[row] for row, _start, _end in kept]
             path = self._decode(scores)

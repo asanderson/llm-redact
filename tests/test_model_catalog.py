@@ -230,7 +230,12 @@ def test_section_4_6_statuses() -> None:
     }
     # Configurable, below a D11 bar or not yet measured: the Knowledgator
     # sizes and the gliner2 backend's default model.
-    assert caution == {*_KNOWLEDGATOR, "fastino/gliner2-base-v1", *_NEMOTRON_HF}
+    assert caution == {
+        *_KNOWLEDGATOR,
+        "fastino/gliner2-base-v1",
+        *_NEMOTRON_HF,
+        "openai/privacy-filter",
+    }
     restricted = {e.model_id for e in CATALOG if e.status == "restricted"}
     assert {
         "iiiorg/piiranha-v1-detect-personal-information",
@@ -330,6 +335,23 @@ def test_the_nemotron_trained_hf_models_carry_their_attribution(model_id: str) -
     assert entry.window == {"OpenMed": 384, "kalyan-ks": 1024}[model_id.split("/")[0]]
     modernbert = entry.backbone == "jhu-clsp/ettin-encoder-68m"
     assert (("transformers", "4.48.0") in entry.min_versions) == modernbert
+
+
+def test_the_openai_privacy_filter_entry() -> None:
+    entry = lookup("openai/privacy-filter")
+    assert entry is not None
+    assert (entry.backends, entry.license, entry.status) == (("hf",), "Apache-2.0", "caution")
+    assert f"llm-redact bench {MEASURED}" in entry.reason
+    # BIOES spans decoded with the repository's Viterbi calibration, which a
+    # pull fetches and a check requires.
+    assert entry.tagging == "bioes"
+    assert entry.extra_files("hf") == ("viterbi_calibration.json",)
+    # transformers learned the model type in 5.6.0; the build checks it.
+    assert entry.min_versions == (("transformers", "5.6.0"),)
+    assert entry.window == 128000
+    # Its `secret` label is left to the anchored secret rules.
+    assert entry.recommended_entities == ("PERSON", "ADDRESS", "ACCOUNT_NUMBER")
+    assert entry.lineage == ("undisclosed-training-data",)
 
 
 def test_prompt_for() -> None:

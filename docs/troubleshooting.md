@@ -837,14 +837,18 @@ fails open, so the model is refused as if the policy had said no. This is a
 fault in the plugin (or a plugin and core version that do not match):
 upgrade llm-redact-pro, or report it with the exception type.
 
-## `llm-redact doctor` under `models`: "…: … needs DIST >= VERSION (model catalog), but DIST VERSION is installed; upgrade it: …"
+## "[detection.ner] BACKEND: MODEL needs DIST >= VERSION (model catalog), but DIST VERSION is installed; upgrade it: …" / `llm-redact doctor` under `models`: "…: … needs DIST >= VERSION (model catalog), …"
 
 The model catalog records that the configured model needs a newer library
-than the one installed — for example the Knowledgator `-edge` and `-small`
-GLiNER models are built on ModernBERT encoders, which transformers knows from
-4.48.0 on; an older one stops the startup with "names a model type
-transformers does not know". Upgrade it as the line says (or with `pip
-install -U DIST`), or pick another model.
+than the one installed — for example `openai/privacy-filter` is a model type
+transformers knows from 5.6.0 on, and the Knowledgator `-edge` and `-small`
+GLiNER models and `kalyan-ks/ettin-68m-nemotron-pii` are built on ModernBERT
+encoders, which transformers knows from 4.48.0 on (the `hf` and `gliner`
+extras allow older releases). The startup (`serve`, `serve --check`), a
+reload, the config editor's dry run and `llm-redact preview` refuse to build
+the backend with the first message, before any weights load; doctor shows
+the same line as a FAIL. Upgrade the library as the line says (or with
+`pip install -U DIST`), or pick another model.
 
 ## "[detection.ner] gliner model '…': cannot assemble its local folder under … (…)"
 

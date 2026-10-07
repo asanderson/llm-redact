@@ -803,31 +803,9 @@ def _version_problems(source: Any) -> list[str]:
     """The libraries installed older than the model catalog says ``source``'s
     model needs (distribution metadata only: nothing is imported). A library
     that is not installed is the ``ner`` check's FAIL."""
-    entry = source.entry
-    problems = []
-    for distribution, minimum in entry.min_versions if entry is not None else ():
-        try:
-            installed = importlib.metadata.version(distribution)
-        except importlib.metadata.PackageNotFoundError:
-            continue
-        if _version_tuple(installed) < _version_tuple(minimum):
-            problems.append(
-                f"{source.backend}: {source.model} needs {distribution} >= {minimum} (model"
-                f" catalog), but {distribution} {installed} is installed; upgrade it:"
-                f" uv sync --extra {source.backend} --upgrade-package {distribution}"
-            )
-    return problems
+    from llm_redact.detection.model_sources import version_problems
 
-
-def _version_tuple(version: str) -> tuple[int, ...]:
-    """The leading numeric release segments of a version string."""
-    numbers = []
-    for part in version.split("+", 1)[0].split(".")[:3]:
-        match = re.match(r"\d+", part)
-        if match is None:
-            break
-        numbers.append(int(match[0]))
-    return tuple(numbers)
+    return version_problems(source.entry, source.backend, source.model)
 
 
 def _check_model_files(report: _Report, ner: Any, source: Any, *, cache: bool) -> None:

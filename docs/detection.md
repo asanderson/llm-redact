@@ -342,8 +342,9 @@ Each ships its tokenizer and encoder configuration, so no base model is
 fetched; the Knowledgator `-edge` and `-small` need transformers 4.48 or
 newer. Also caution, with their bench numbers: the `hf` PII models trained
 on NVIDIA Nemotron-PII (CC BY 4.0), OpenMed-PII Small 44M and
-ettin-68m-nemotron-pii ("PII models for the `hf` backend" below; the
-ModernBERT ettin model needs transformers 4.48 or newer too):
+ettin-68m-nemotron-pii, and `openai/privacy-filter` ("PII models for the
+`hf` backend" below; the ModernBERT ettin model needs transformers 4.48 or
+newer too, the privacy filter 5.6.0):
 
 <!-- model-catalog:caution -->
 | Model | Backend | License | Pinned revision | Base model (pinned revision) |
@@ -355,6 +356,7 @@ ModernBERT ettin model needs transformers 4.48 or newer too):
 | `fastino/gliner2-base-v1` | gliner2 | Apache-2.0 | `f9634218e535` | `microsoft/deberta-v3-base` (—) |
 | `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` | hf | Apache-2.0 | `a2360d3f4252` | `microsoft/deberta-v3-small` (—) |
 | `kalyan-ks/ettin-68m-nemotron-pii` | hf | MIT | `500262a2aaf9` | `jhu-clsp/ettin-encoder-68m` (—) |
+| `openai/privacy-filter` | hf | Apache-2.0 | `7ffa9a043d54` | — |
 <!-- /model-catalog -->
 
 Restricted (a startup WARNING names the facts; no pin):
@@ -492,6 +494,22 @@ of their digits leak). It stays "caution" with these numbers. The
 `PERSON`-only rows request what the default configuration requests, so
 their character leak counts every other labelled value as leaked; the
 default model is unchanged (a change would be a 2.0.0 decision).
+
+`openai/privacy-filter` (Apache-2.0; a 1.5B-parameter mixture of experts,
+50M parameters active, 2.8 GB of weights) labels `private_person`,
+`private_address`, `account_number`, `private_email`, `private_phone`,
+`private_url`, `private_date` and `secret` with BIOES tags, which the `hf`
+backend decodes with the constrained Viterbi decoder and the
+`viterbi_calibration.json` the repository ships (fetched with the model). It
+needs transformers 5.6.0 or newer: an older one stops the startup with
+`[detection.ner] hf: openai/privacy-filter needs transformers >= 5.6.0 (model
+catalog), …` before any weights load. Ask it for `PERSON`, `ADDRESS` and
+`ACCOUNT_NUMBER`; its `secret` label is better left to the anchored secret
+rules. Measured on the same corpora: `PERSON` recall 0.99, character leak
+0.12, 23 agent-traffic false positives per 50 KB, and about a second per
+500-character string on a 4-core CPU (1.1 s; 19.5 s for 10,000 characters),
+so it stays "caution" and its bench configuration is measured by hand
+(`bench/configs/manual/`, [ner-bench.md](ner-bench.md)).
 
 ### Model-load policies (plugins)
 

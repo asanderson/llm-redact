@@ -12,6 +12,20 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- `openai/privacy-filter` (Apache-2.0; 1.5B parameters, 50M active) in the model catalog for
+  the `hf` backend, pinned to its `main` commit of 2026-10-07: BIOES spans decoded with the
+  constrained Viterbi decoder and the repository's `viterbi_calibration.json`, recommended for
+  `PERSON`, `ADDRESS` and `ACCOUNT_NUMBER` only (its `secret` label is left to the anchored
+  secret rules), status "caution" with its bench numbers (docs/ner-landscape.md). It takes
+  seconds per string on a CPU, so its bench configuration lives in `bench/configs/manual/`,
+  which neither CI workflow reads: configurations measured by hand, each saying how
+  (docs/ner-bench.md).
+- The startup refuses a model whose library is older than the model catalog says it needs
+  (`CatalogEntry.min_versions`, read from package metadata):
+  `[detection.ner] hf: openai/privacy-filter needs transformers >= 5.6.0 (model catalog), but
+  transformers 5.5.4 is installed; upgrade it: …`, before any weights load — the text doctor's
+  `models` FAIL row already showed. It applies to every catalogued `gliner`, `gliner2` and `hf`
+  model, on every build (startup, reload, the config editor's dry run, `llm-redact preview`).
 - Two PII models for the `hf` backend in the model catalog, both trained on NVIDIA
   Nemotron-PII (CC BY 4.0) and measured by the NER bench: `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`
   (Apache-2.0, a 384-token window) and `kalyan-ks/ettin-68m-nemotron-pii` (MIT, ModernBERT:
@@ -386,6 +400,10 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The `hf` backend's BIOES/BILOU decoding failed on an empty or blank string when the model's
+  tokenizer adds no special tokens (`openai/privacy-filter`): a window of no token ids reached
+  the model, which refused it, so the request failed. Such a window is no longer scored, and
+  token ids always reach the model as integers.
 - The `hf` NER backend's spans took in the blank before a word when the model's tokenizer is a
   SentencePiece or byte-level BPE one (DeBERTa-v3, ModernBERT, RoBERTa): the placeholder
   swallowed the space before the value, and a name reported in parts (" Jane", " Doe") stayed

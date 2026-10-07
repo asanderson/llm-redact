@@ -417,8 +417,8 @@ def install_torch(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     module.__spec__ = importlib.machinery.ModuleSpec("torch", None)
     made: list[dict[str, Any]] = []
 
-    def tensor(data: Any, device: Any = None) -> FakeTensor:
-        made.append({"data": data, "device": device})
+    def tensor(data: Any, dtype: Any = None, device: Any = None) -> FakeTensor:
+        made.append({"data": data, "dtype": dtype, "device": device})
         return FakeTensor(data)
 
     def log_softmax(value: FakeTensor, dim: int) -> FakeTensor:
@@ -431,6 +431,7 @@ def install_torch(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
         return FakeTensor(rows)
 
     module.tensor = tensor  # type: ignore[attr-defined]
+    module.long = "torch.long"  # type: ignore[attr-defined]
     module.inference_mode = contextlib.nullcontext  # type: ignore[attr-defined]
     module.log_softmax = log_softmax  # type: ignore[attr-defined]
     module.made = made  # type: ignore[attr-defined]

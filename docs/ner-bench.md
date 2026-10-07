@@ -271,11 +271,26 @@ artifact and written to the run's summary.
 | `bench/configs/gliner-knowledgator-edge.toml`, `-edge-onnx.toml` | `knowledgator/gliner-pii-edge-v1.0` at its catalog pin, PyTorch weights and the int8 ONNX export, asked for `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and `ACCOUNT_NUMBER` | `[gliner-knowledgator-edge.synthetic]`, `[gliner-knowledgator-edge]`, and the same for `-edge-onnx` |
 | `bench/configs/gliner-knowledgator-base.toml`, `-base-onnx.toml` | `knowledgator/gliner-pii-base-v1.0`, the same way | `[gliner-knowledgator-base.synthetic]`, `[gliner-knowledgator-base]`, and the same for `-base-onnx` |
 | `bench/configs/hf-openmed-pii-small.toml`, `hf-ettin-68m-nemotron-pii.toml` | `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` and `kalyan-ks/ettin-68m-nemotron-pii` at their catalog pins, asked for the same five types | `[hf-openmed-pii-small.synthetic]`, `[hf-openmed-pii-small]`, and the same for `hf-ettin-68m-nemotron-pii` |
+| `bench/configs/manual/hf-openai-privacy-filter.toml` | not run by CI: `openai/privacy-filter` at its catalog pin, Viterbi-decoded, asked for `PERSON`, `ADDRESS` and `ACCOUNT_NUMBER`; measured by hand (below) | `[hf-openai-privacy-filter.synthetic]`, `[hf-openai-privacy-filter]`, checked by hand |
 | `tests/real_model_configs/*.toml` | not scored: the other models the `real_model` tests load (the `gliner2` default, a Knowledgator ONNX checkpoint), pulled by `ner-models` | — |
 
 A configuration added to `bench/configs/` is pulled, tested and gated by
 both workflows with no workflow change, and fails `ner-models` until its
-baselines are recorded. The recorded entries say when, on which model
+baselines are recorded.
+
+**Configurations measured by hand.** `bench/configs/manual/` holds
+configurations of models too slow for a CI runner; neither workflow reads
+that directory (its globs are not recursive). `openai/privacy-filter`
+(`bench/configs/manual/hf-openai-privacy-filter.toml`) takes about a second
+per 500-character string on a 4-core CPU, and its latency run alone takes
+twenty minutes. Its baselines are recorded like any other's and checked the
+same way, by hand:
+
+```bash
+uv run --no-sync llm-redact models pull --config bench/configs/manual/hf-openai-privacy-filter.toml
+uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/manual/hf-openai-privacy-filter.toml --check
+uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/manual/hf-openai-privacy-filter.toml --fp-corpus bench/fp_corpus --check
+``` The recorded entries say when, on which model
 revisions and with which measured values they were taken; with the default
 `PERSON` entities, the synthetic corpus's `ADDRESS`, `DATE_OF_BIRTH`,
 `USERNAME` and `ACCOUNT_NUMBER` values are not requested, so their

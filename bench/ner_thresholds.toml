@@ -127,3 +127,12 @@ type_leak_max = { PERSON = 0.13, ADDRESS = 0.07, DATE_OF_BIRTH = 0.87, USERNAME 
 over_redaction_max = 0.01
 recorded = "2026-10-07"
 note = "kalyan-ks/ettin-68m-nemotron-pii at 500262a2aaf913825ef750ef255c3fe437cd8e64; measured PERSON recall 0.990 (exact 0.030), precision 0.968, leak 0.0770; ADDRESS recall 1.000 (exact 0.297), precision 0.930, leak 0.0163; DATE_OF_BIRTH recall 0.404 (exact 0.000), precision 1.000, leak 0.8101; USERNAME recall 0.902 (exact 0.000), precision 0.848, leak 0.1799; ACCOUNT_NUMBER recall 0.243 (exact 0.000), precision 1.000, leak 0.7595; leak 0.1577, over-redaction 0.0034, structured regressions 0"
+
+[hf-openai-privacy-filter.synthetic]
+recall = { PERSON = 0.94, ADDRESS = 0.88, ACCOUNT_NUMBER = 0.95 }
+exact_recall = { PERSON = 0.94, ADDRESS = 0.72, ACCOUNT_NUMBER = 0.95 }
+leak_max = 0.17
+type_leak_max = { PERSON = 0.06, ADDRESS = 0.12, ACCOUNT_NUMBER = 0.05 }
+over_redaction_max = 0.10
+recorded = "2026-10-07"
+note = "openai/privacy-filter at 7ffa9a043d54d1be65afb281eddf0ffbe629385b, Viterbi decoding with its viterbi_calibration.json; measured by hand (bench/configs/manual); measured PERSON recall 0.994 (exact 0.994), precision 0.768, leak 0.0052; ADDRESS recall 0.930 (exact 0.778), precision 0.778, leak 0.0695; ACCOUNT_NUMBER recall 1.000 (exact 1.000), precision 0.460, leak 0.0000; leak 0.1199, over-redaction 0.0456, structured regressions 0"

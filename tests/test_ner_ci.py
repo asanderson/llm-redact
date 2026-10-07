@@ -20,6 +20,9 @@ from llm_redact.detection.model_sources import hub_sources
 ROOT = Path(__file__).resolve().parent.parent
 BENCH_CONFIGS = sorted((ROOT / "bench" / "configs").glob("*.toml"))
 TEST_CONFIGS = sorted((ROOT / "tests" / "real_model_configs").glob("*.toml"))
+# Measured by hand, never by CI: a model too slow for a CI runner
+# (docs/ner-bench.md, "Configurations measured by hand").
+MANUAL_CONFIGS = sorted((ROOT / "bench" / "configs" / "manual").glob("*.toml"))
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 
@@ -92,7 +95,9 @@ def test_a_bench_config_for_another_model_may_name_it(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize("path", BENCH_CONFIGS + TEST_CONFIGS, ids=lambda p: p.stem)
+@pytest.mark.parametrize(
+    "path", BENCH_CONFIGS + TEST_CONFIGS + MANUAL_CONFIGS, ids=lambda p: p.stem
+)
 def test_each_config_loads_pinned_models_with_downloads_off(path: Path) -> None:
     ner = load_config(path).detection.ner
     assert ner.enabled
@@ -140,6 +145,30 @@ def test_each_bench_config_has_recorded_baselines(path: Path) -> None:
     requested = load_config(path).detection.ner.entities
     assert set(requested) <= set(thresholds[name]["synthetic"]["type_leak_max"])
     assert "per_100kb_max" in ceilings[name]
+
+
+@pytest.mark.parametrize("path", MANUAL_CONFIGS, ids=lambda p: p.stem)
+def test_a_manual_config_has_recorded_baselines_and_says_why(path: Path) -> None:
+    thresholds = tomllib.loads((ROOT / "bench" / "ner_thresholds.toml").read_text())
+    entry = thresholds[path.stem]["synthetic"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry["recorded"])
+    for source in hub_sources(load_config(path).detection.ner):
+        assert source.model_id in entry["note"] and str(source.revision) in entry["note"]
+    requested = load_config(path).detection.ner.entities
+    assert set(requested) <= set(entry["type_leak_max"])
+    ceilings = tomllib.loads((ROOT / "bench" / "ner_ceilings.toml").read_text())
+    assert "per_100kb_max" in ceilings[path.stem]
+    # Its comment says why CI does not run it.
+    assert "by hand" in path.read_text()
+
+
+def test_manual_configs_stay_out_of_the_ci_jobs() -> None:
+    assert MANUAL_CONFIGS
+    assert not {p.name for p in MANUAL_CONFIGS} & {p.name for p in BENCH_CONFIGS}
+    for name, job in (("ci.yml", "ner-models"), ("ner-eval.yml", "ner-eval")):
+        runs = "\n".join(step.get("run", "") for step in _workflow(name)["jobs"][job]["steps"])
+        assert "bench/configs/*.toml" in runs  # not recursive: manual/ is left out
+        assert "manual" not in runs and "**" not in runs
 
 
 # --- the workflows -------------------------------------------------------------

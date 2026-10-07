@@ -14,7 +14,7 @@ read [src/llm_redact/user_guide.md](../src/llm_redact/user_guide.md).
 | [quickstart.md](quickstart.md) | Redacting your first session in five minutes: install, init, run, verify. |
 | [how-it-works.md](how-it-works.md) | The mechanism end to end: the round-trip diagrams, a worked example (placeholder body, vault rows, audit row), persistence and fuzzy token restoration, and session isolation. |
 | [providers.md](providers.md) | Per-provider setup: Azure/Vertex/Bedrock/Ollama/custom upstreams, embeddings, batch APIs, the realtime relay, and the opt-out switches. |
-| [detection.md](detection.md) | The full detection reference: built-in rules, deny strings, per-rule modes, allowlists, and the person-name NER backends — how they run (windows, label policy; the `ner-pipeline` diagram) and their coverage counters. |
+| [detection.md](detection.md) | The full detection reference: built-in rules, deny strings, per-rule modes, allowlists, and the person-name NER backends — how they run (windows, label policy; the `ner-pipeline` diagram), where their models come from (the `model-supply-chain` diagram) and their coverage counters. |
 | [extraction.md](extraction.md) | Document extraction for binary uploads (`[extraction]`): PDFs, Office files and scans read as text (isolated worker processes; Tika, docling-serve, unstructured, AWS Textract, Google Document AI or Azure Document Intelligence for OCR) so the proxy can scan them — a value found refuses the upload or, in convert mode, sends its redacted text; a complete clean reading sends the file as is. |
 | [dashboard.md](dashboard.md) | The local ops surface: status/metrics/health endpoints, the recent-request and event feeds, `llm-redact preview`, and the agent plugins (the browser dashboard — config editor, redaction preview — is part of llm-redact-pro). |
 | [overrides.md](overrides.md) | Refusal overrides (opt-in, off by default: `[overrides] enabled = true`): the single-use code a detection refusal then carries, approving it once or always on the terminal (or the llm-redact-pro dashboard), what can and cannot be overridden, and where every use is recorded. |
@@ -25,7 +25,8 @@ read [src/llm_redact/user_guide.md](../src/llm_redact/user_guide.md).
 
 | Doc | What it covers |
 | --- | --- |
-| [deployment.md](deployment.md) | The end-to-end guide: bind policy and mTLS, containers, health probes, the Helm chart, SIGHUP reloads, vault lifecycle, service units, log rotation. |
+| [deployment.md](deployment.md) | The end-to-end guide: bind policy and mTLS, containers (the `-ner` image), health probes, the Helm chart, SIGHUP reloads, provisioning NER models, offline installs, vault lifecycle, service units, log rotation. |
+| [air-gapped.md](air-gapped.md) | Running with NER models in an enclave with no internet route: what to carry in (the `-ner` image or a wheelhouse, `models pull --to` folders, a config), offline verification, Helm and systemd settings; the only egress left is your LLM provider. |
 | [observability.md](observability.md) | Prometheus scrape/alert examples and the Grafana dashboard, mapped to the emitted metrics. |
 | [resilience.md](resilience.md) | The failure-mode catalogue: what happens on every upstream fault, stream truncation, and vault write error — and the tests that pin it. |
 | [api-coverage.md](api-coverage.md) | The endpoint matrix: every provider route and how the proxy treats it (pinned by test in both directions). |
@@ -66,7 +67,7 @@ reference and enforcement internals ship with it.
 | Doc | What it covers |
 | --- | --- |
 | [assurance.md](assurance.md) | Proving the suites have teeth: mutation testing, property tests, differential fuzzing, the complexity-coverage gate, and how the NER bench's statistical gates differ from the deterministic rule gate. |
-| [ner-bench.md](ner-bench.md) | The NER bench: scoring regex rules plus NER models on labelled datasets — per-type exact and overlap-typed scores, character-leak and over-redaction rates, the structured-regression check, the statistical thresholds gate and the error-dump guard. |
+| [ner-bench.md](ner-bench.md) | The NER bench: scoring regex rules plus NER models on labelled datasets — per-type exact and overlap-typed scores, character-leak and over-redaction rates, the structured-regression check, false-positive ceilings and latency, the statistical gates and their recorded baselines, the datasets with their licenses and attributions, the CI jobs that run real models (`ner-models`, weekly `ner-eval`) and the error-dump guard; the `ner-bench` diagram. |
 | [dependencies.md](dependencies.md) | What ships and why: the three runtime deps, every extra, and the vendored-code policy (pinned to pyproject by test). |
 | [SBOM.md](SBOM.md) | The software bill of materials: every package by install path — runtime closure, extras, dev toolchain — and how to verify the per-release CycloneDX artifact (pinned to pyproject by test). |
 | [versioning.md](versioning.md) | SemVer policy: what counts as breaking, deprecation windows, release verification. |

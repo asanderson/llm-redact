@@ -720,6 +720,40 @@ def test_helm_reuse_values_from_an_older_release_renders_the_prestop(tmp_path: P
     assert spec["terminationGracePeriodSeconds"] == 90
 
 
+def test_helm_templates_read_the_models_table_nil_safely() -> None:
+    # Stdlib needle (no helm needed): an older release's values carry no
+    # `models` table, and `.Values.models.volume` on it fails every render.
+    templates = HELM_CHART / "templates"
+    for path in [*templates.glob("*.tpl"), *templates.glob("*.yaml"), templates / "NOTES.txt"]:
+        assert ".Values.models.volume" not in path.read_text(), path.name
+
+
+@_needs_helm
+@pytest.mark.parametrize("mode", ["sidecar", "standalone"])
+def test_helm_reuse_values_from_an_older_release_renders_without_models(
+    tmp_path: Path, mode: str
+) -> None:
+    # `helm upgrade --reuse-values` from a release made before the models
+    # table: no `models` and no `image.variant` in the old values.
+    old = (HELM_CHART / "values.yaml").read_text()
+    old = re.sub(r"^models:\n(?:  .*\n)+", "", old, flags=re.MULTILINE)
+    old = re.sub(r"^  variant:.*\n", "", old, flags=re.MULTILINE)
+    assert "\nmodels:" not in old and "variant:" not in old
+    docs = _render_copy(_chart_copy(tmp_path, old), *(_STANDALONE if mode == "standalone" else ()))
+    [deployment] = [d for d in docs if d["kind"] == "Deployment"]
+    spec = deployment["spec"]["template"]["spec"]
+    assert all(volume["name"] != "models" for volume in spec["volumes"])
+    [proxy_container] = [c for c in spec["containers"] if c["name"] == "llm-redact"]
+    assert all(mount["mountPath"] != "/models" for mount in proxy_container["volumeMounts"])
+    assert all(env["name"] != "HF_HUB_OFFLINE" for env in proxy_container["env"])
+    [notes] = [
+        d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "rendered-notes"
+    ]
+    assert "NER models" not in notes["data"]["notes"]
+    # An explicit null is the same absence.
+    assert _render_copy(_chart_copy(tmp_path / "null"), "models=null")
+
+
 @_needs_helm
 def test_helm_notes_count_the_prestop_delay_in_standalone_only(tmp_path: Path) -> None:
     chart = _chart_copy(tmp_path)
@@ -759,3 +793,282 @@ def test_the_image_license_label_is_the_declared_license() -> None:
     release = (root / ".github" / "workflows" / "release.yml").read_text()
     pinned = re.findall(r"org\.opencontainers\.image\.licenses=(\S+)", release)
     assert pinned == [declared]
+
+
+# --- the -ner image variant and the air-gap CI jobs (static: CI builds them) -----
+
+WORKFLOWS = DEPLOY.parent / ".github" / "workflows"
+
+
+def _workflow(name: str) -> dict:
+    return yaml.safe_load((WORKFLOWS / name).read_text())
+
+
+def _extras(flags: str) -> set[str]:
+    return set(re.findall(r"--extra (\S+)", flags))
+
+
+def test_the_ner_image_is_built_from_the_same_values_everywhere() -> None:
+    dockerfile = (DEPLOY.parent / "Dockerfile").read_text()
+    (stock,) = re.findall(r'^ARG EXTRAS="([^"]*)"$', dockerfile, re.MULTILINE)
+    assert re.findall(r'^ARG NER_EXTRAS="([^"]*)"$', dockerfile, re.MULTILINE) == [""]
+    assert re.findall(r'^ARG TORCH_INDEX_URL="([^"]*)"$', dockerfile, re.MULTILINE) == [
+        "https://download.pytorch.org/whl/cpu"
+    ]
+    release = _workflow("release.yml")
+    ci = _workflow("ci.yml")
+    # The SBOM describes the image's closure: the stock extras plus the NER ones.
+    assert _extras(release["env"]["IMAGE_EXTRAS"]) == _extras(stock)
+    ner = _extras(release["env"]["NER_EXTRAS"])
+    assert ner == {"hf", "gliner"}
+    assert ner <= set(
+        tomllib.loads((DEPLOY.parent / "pyproject.toml").read_text())["project"][
+            "optional-dependencies"
+        ]
+    )
+    # CI builds and smoke-tests exactly what a release builds.
+    assert _extras(ci["jobs"]["container-ner"]["env"]["NER_EXTRAS"]) == ner
+
+
+def test_the_release_publishes_and_signs_both_images() -> None:
+    job = _workflow("release.yml")["jobs"]["publish-ghcr"]
+    variants = {row["variant"]: row for row in job["strategy"]["matrix"]["include"]}
+    assert set(variants) == {"stock", "ner"}
+    assert (variants["stock"]["suffix"], variants["ner"]["suffix"]) == ("", "-ner")
+    assert (variants["stock"]["ner"], variants["ner"]["ner"]) == (False, True)
+    assert job["strategy"]["fail-fast"] is False
+    steps = {step.get("id") or step.get("name") or step.get("uses"): step for step in job["steps"]}
+    meta = steps["meta"]["with"]
+    assert meta["flavor"].strip() == "suffix=${{ matrix.suffix }},onlatest=true"
+    build = steps["build"]["with"]
+    assert build["platforms"] == "linux/amd64,linux/arm64"
+    assert build["sbom"] is True
+    assert "NER_EXTRAS=${{ matrix.ner && env.NER_EXTRAS || '' }}" in build["build-args"]
+    assert (
+        'cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY}@${DIGEST}"'
+        in (steps["sign the image"]["run"])
+    )
+    sbom = _workflow("release.yml")["jobs"]["build"]["steps"]
+    assert any("llm-redact-ner-image.cdx.json" in step.get("run", "") for step in sbom)
+
+
+def test_the_cpu_torch_recipe_guards_the_ner_image_build() -> None:
+    dockerfile = (DEPLOY.parent / "Dockerfile").read_text()
+    assert "COPY scripts/cpu_torch.py /tmp/cpu_torch.py" in dockerfile
+    assert "python /tmp/cpu_torch.py requirements /tmp/requirements.txt" in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert "/app/.venv/bin/python /tmp/cpu_torch.py check" in dockerfile
+    # The stock image keeps its frozen uv sync.
+    assert "uv sync --frozen --no-dev --no-editable ${EXTRAS}" in dockerfile
+    # The models cache sits on the writable /data volume.
+    assert "HF_HOME=/data/huggingface" in dockerfile
+
+
+def _torch_installs(text: str) -> list[str]:
+    """Every command of ``text`` (backslash continuations joined, ``&&``
+    chains split) that downloads or installs from a ``torch.txt``."""
+    joined = re.sub(r"\\\n\s*", " ", text)
+    commands = [part for line in joined.splitlines() for part in line.split("&&")]
+    return [
+        command
+        for command in commands
+        if "torch.txt" in command and re.search(r"\bpip\"? (?:install|download)\b", command)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "count"),
+    [
+        ("Dockerfile", 1),
+        (".github/workflows/ci.yml", 2),
+        ("tests/airgap/install_wheelhouse.sh", 1),
+        ("scripts/ner_ci_env.sh", 1),
+        ("docs/deployment.md", 2),
+    ],
+)
+def test_torch_is_installed_hash_checked_everywhere(path: str, count: int) -> None:
+    # torch.txt carries the CPU wheels' SHA-256 (scripts/cpu_torch.py); a
+    # torch download or install without --require-hashes would take any wheel
+    # named like the locked version.
+    installs = _torch_installs((DEPLOY.parent / path).read_text())
+    assert len(installs) == count, installs
+    for command in installs:
+        assert "--require-hashes" in command, command
+
+
+def test_the_ner_sbom_records_torch_with_its_digests() -> None:
+    runs = "\n".join(
+        step.get("run", "") for step in _workflow("release.yml")["jobs"]["build"]["steps"]
+    )
+    assert "cat torch.txt >>sbom-ner-requirements.txt" in runs
+    assert '+cpu" >>' not in runs
+
+
+def _pinned(steps: list[dict]) -> None:
+    for step in steps:
+        uses = step.get("uses")
+        if uses is None:
+            continue
+        assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", uses), uses
+        if uses.startswith("actions/checkout@"):
+            assert step["with"]["persist-credentials"] is False
+
+
+@pytest.mark.parametrize("job", ["airgap", "container-ner"])
+def test_the_airgap_jobs_pin_their_actions(job: str) -> None:
+    _pinned(_workflow("ci.yml")["jobs"][job]["steps"])
+
+
+def test_the_airgap_job_runs_offline_without_a_route() -> None:
+    steps = _workflow("ci.yml")["jobs"]["airgap"]["steps"]
+    runs = "\n".join(step.get("run", "") for step in steps)
+    assert "sudo unshare --net --mount" in runs
+    assert "tests/airgap/run_offline.sh" in runs
+    assert "sudo unshare --net -- " in runs and "tests/airgap/install_wheelhouse.sh" in runs
+    for config in ("pull.toml", "pull-edge.toml"):
+        assert f"--config tests/airgap/{config}" in runs
+    offline = (DEPLOY.parent / "tests" / "airgap" / "run_offline.sh").read_text()
+    for needle in (
+        "no_network.py",
+        "models verify --dir /models",
+        "serve --check --config tests/airgap/config.toml",
+        "serve --check --config tests/airgap/edge.toml",
+        "preview --config tests/airgap/presidio.toml",
+        "llm-redact models pull --to DIR",
+        "mount -o remount,bind,ro /models",
+    ):
+        assert needle in offline
+
+
+# --- the models volume and the -ner image (T17e; docs/air-gapped.md) -------------
+
+_MODELS_PVC = (
+    "models.volume.persistentVolumeClaim.claimName=llm-redact-models",
+    "models.volume.persistentVolumeClaim.readOnly=true",
+)
+
+
+def _proxy_container(docs: list[dict]) -> dict:
+    [deployment] = [d for d in docs if d["kind"] == "Deployment"]
+    pod = deployment["spec"]["template"]["spec"]
+    [proxy_container] = [c for c in pod["containers"] if c["name"] == "llm-redact"]
+    return {"pod": pod, "container": proxy_container}
+
+
+def test_the_models_volume_values_default_off() -> None:
+    values = yaml.safe_load((HELM_CHART / "values.yaml").read_text())
+    assert values["image"]["variant"] == ""
+    assert values["models"] == {"volume": {}}
+
+
+@_needs_helm
+@pytest.mark.parametrize("preset", [(), _STANDALONE], ids=["sidecar", "standalone"])
+def test_helm_models_volume_mounts_read_only_and_goes_offline(preset: tuple[str, ...]) -> None:
+    result = _helm_template(*preset, *_MODELS_PVC, "image.variant=ner")
+    assert result.returncode == 0, result.stderr
+    found = _proxy_container([d for d in yaml.safe_load_all(result.stdout) if d])
+    container, pod = found["container"], found["pod"]
+    assert container["image"] == f"ghcr.io/asanderson/llm-redact:{__version__}-ner"
+    assert {"name": "models", "mountPath": "/models", "readOnly": True} in container["volumeMounts"]
+    [volume] = [v for v in pod["volumes"] if v["name"] == "models"]
+    assert volume == {
+        "name": "models",
+        "persistentVolumeClaim": {"claimName": "llm-redact-models", "readOnly": True},
+    }
+    env = {e["name"]: e.get("value") for e in container["env"]}
+    assert env["HF_HUB_OFFLINE"] == env["TRANSFORMERS_OFFLINE"] == "1"
+    # The hardened container spec is unchanged: the root stays read-only.
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+
+
+@_needs_helm
+def test_helm_without_a_models_volume_renders_neither_mount_nor_offline_env() -> None:
+    result = _helm_template()
+    assert result.returncode == 0, result.stderr
+    found = _proxy_container([d for d in yaml.safe_load_all(result.stdout) if d])
+    container, pod = found["container"], found["pod"]
+    assert container["image"] == f"ghcr.io/asanderson/llm-redact:{__version__}"
+    assert all(m["name"] != "models" for m in container["volumeMounts"])
+    assert all(v["name"] != "models" for v in pod["volumes"])
+    names = {e["name"] for e in container["env"]}
+    assert not names & {"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"}
+
+
+@_needs_helm
+def test_helm_image_variant_keeps_an_explicit_tag() -> None:
+    result = _helm_template("image.tag=1.2.3", "image.variant=ner")
+    assert result.returncode == 0, result.stderr
+    found = _proxy_container([d for d in yaml.safe_load_all(result.stdout) if d])
+    assert found["container"]["image"] == "ghcr.io/asanderson/llm-redact:1.2.3-ner"
+
+
+@_needs_helm
+@pytest.mark.parametrize(
+    ("flag", "message"),
+    [
+        ("image.variant=gpu", 'image.variant must be "" (the stock image) or "ner"'),
+        ("models.volume=llm-redact-models", "models.volume must be a volume source"),
+    ],
+)
+def test_helm_rejects_a_bad_variant_or_models_volume(flag: str, message: str) -> None:
+    result = _helm_template(flag)
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@_needs_helm
+@pytest.mark.parametrize(("variant", "warns"), [("ner", False), ("", True)])
+def test_helm_notes_name_the_models_volume_and_the_stock_image_gap(
+    tmp_path: Path, variant: str, warns: bool
+) -> None:
+    chart = _chart_copy(tmp_path)
+    _, notes = _copy_grace_and_notes(chart, *_MODELS_PVC, f"image.variant={variant}")
+    assert "llm-redact models verify --dir /models" in str(notes)
+    assert ("models.volume is set but image.variant is not" in str(notes)) is warns
+
+
+AIR_GAPPED = DEPLOY.parent / "docs" / "air-gapped.md"
+
+
+def test_the_air_gapped_pull_never_opens_the_models_folder_to_everyone() -> None:
+    # The manifest is written into the folder its SHA-256 is noted from: a
+    # folder other users can write lets them change a file AND the manifest
+    # before the hash is noted. The pull runs as the operator instead.
+    guide = AIR_GAPPED.read_text()
+    assert not re.search(r"\b0?77[67]\b|a\+w|o\+w", guide)
+    connected = guide[guide.index("## On the connected machine") : guide.index("## Inside")]
+    assert "mkdir -m 0755 models" in connected
+    pull = re.sub(r"\\\n\s*", " ", connected)
+    [command] = [line for line in pull.splitlines() if "models pull --to /out" in line]
+    assert '--user "$(id -u):$(id -g)"' in command and "-e HF_HOME=/tmp/hf" in command
+
+
+def test_the_air_gapped_guide_never_claims_an_egress_filter_in_the_user_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `service install` writes a systemd USER unit, whose manager cannot attach
+    # the cgroup BPF programs IPAddressDeny= needs: systemd ignores it there.
+    from llm_redact import service_cli
+
+    monkeypatch.setattr(service_cli.sys, "platform", "linux")
+    assert "systemd/user" in service_cli._unit_path().as_posix()
+    guide = AIR_GAPPED.read_text()
+    systemd = guide[guide.index("## systemd (native installs)") : guide.index("## Troubleshooting")]
+    assert "systemctl --user edit" not in systemd
+    assert "has **no effect** there" in systemd
+    assert "not running as root." in systemd
+    assert "meta skuid" in systemd and "/etc/systemd/system/" in systemd
+    # The IPAddressDeny= example sits under the system-unit option only.
+    assert systemd.index("IPAddressDeny=any") > systemd.index("A system unit you write yourself")
+
+
+def test_the_network_wrapper_claims_only_what_an_audit_hook_sees() -> None:
+    # A Python audit hook sees the socket module's calls only; native code
+    # (hf-xet's Rust client) resolves and connects past it.
+    wrapper = (DEPLOY.parent / "tests" / "airgap" / "no_network.py").read_text()
+    assert "through\nPython's ``socket`` module" in wrapper
+    assert "invisible to an audit\nhook" in wrapper
+    for path in ("docs/air-gapped.md", "docs/privacy.md", "CHANGELOG.md"):
+        text = re.sub(r"\s+", " ", (DEPLOY.parent / path).read_text())
+        assert "attempt made through Python's `socket` module" in text, path
+        assert "fails on any attempt to resolve a host or open a connection" not in text, path

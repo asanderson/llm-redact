@@ -12,6 +12,17 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- A model-load policy seam for plugin packages: `Registry.build_model_policy(config, tier)`
+  builds a `plugin_api.ModelPolicy` once at startup (the Free default builds none, so nothing
+  changes without a plugin), and every detector build — the startup, a reload, the config
+  editor's dry run, `llm-redact preview` — asks it about each NER backend's model after the
+  model's files are resolved and before its weights load. It is shown a `plugin_api.ModelLoad`
+  (backend, configured model, Hub id and commit, every file the load reads, the catalog's
+  status, license, lineage tags and attribution); a refusal fails the build with
+  `[detection.ner] BACKEND model 'MODEL' refused by the model-load policy: REASON`, and an
+  exception or any answer but None or a reason refuses too. `model_sources.model_load` computes
+  the same facts without loading anything (for a plugin's doctor rows). The core holds no
+  policy; llm-redact-pro's `[models]` section is one.
 - A `gliner2` NER backend (`[detection.ner] backend = "gliner2"`, extra `gliner2`): Fastino's
   GLiNER2, zero-shot like `gliner` (the same natural-language prompts for type requests) with a
   confidence per entity (`score_threshold` applies) and each entity's character span, used as
@@ -126,6 +137,28 @@ and tags `vX.Y.Z`.
   hits-per-100-KB ceiling in `bench/ner_ceilings.toml`. The corpus gains four
   agent-traffic files with no personal data (tool results as JSON, git output, a CI log, a
   Python module), pinned to zero regex detections in its manifest.
+- Real NER models in CI (docs/ner-bench.md, "CI"): a `ner-models` job pulls the default `hf`
+  and `gliner` models (and those the `real_model` tests load) at their catalog pins into a
+  cached Hugging Face directory, runs `pytest -m real_model` — where
+  `LLM_REDACT_TEST_REAL_MODELS_REQUIRED=1` turns a skipped real-model test into a failure —
+  and gates every `bench/configs/*.toml` with the NER bench: synthetic-corpus floors and
+  ceilings, false-positive ceilings on the negatives corpus, and a latency report. A weekly
+  `ner-eval` workflow scores the same configurations on 2,000-row slices of OpenPII 1.5M and
+  Nemotron-PII, report only. Both install the locked extras with `scripts/ner_ci_env.sh`, every
+  wheel checked against its sha256 (the lock's, and for the CPU-only torch wheel the CPU wheels'
+  SHA-256 that `scripts/cpu_torch.py` records: one CPU-torch recipe for these jobs, the `airgap`
+  job, the `-ner` image and the offline wheelhouse). Baselines for
+  `dslim/bert-base-NER` and `urchade/gliner_small-v2.1` are recorded in
+  `bench/ner_thresholds.toml` and `bench/ner_ceilings.toml`, with the date, revisions and
+  measured values. The bench also reports the character-leak rate per type, and
+  `type_leak_max = { TYPE = ceiling }` gates it: the type-agnostic rate counts every type a
+  configuration does not request (about 38% of the synthetic corpus's gold characters for
+  the `PERSON`-only defaults), so the baselines gate `PERSON` leakage on its own.
+- docs/ner-bench.md gains the `ner-bench` diagram (datasets → adapters and label maps → the
+  full pipeline → metrics → recorded gates → the CI jobs, beside the unchanged deterministic
+  gate), and docs/CONTRIBUTING.md an "Adding an NER model or backend" checklist: license and
+  lineage facts, catalog entry and pins, bench configuration, baselines, CI, admission,
+  docs, troubleshooting entries, extras and diagrams.
 - Published datasets for the NER bench: `--dataset openpii` (OpenPII 1.5M, CC BY 4.0,
   Ai4Privacy / Ai Suisse SA; `--language` filters it) and `--dataset nemotron`
   (Nemotron-PII, CC BY 4.0, NVIDIA), downloaded at run time at a pinned revision into
@@ -228,6 +261,62 @@ and tags `vX.Y.Z`.
   to `DIR` unless every model was fetched, and nothing in it is replaced until every new
   folder is written beside the old ones. Together with `models verify --dir` this carries
   models into an air-gapped network.
+- Docs: a `model-supply-chain` diagram (docs/detection.md "Model sources", docs/threat-model.md)
+  shows where NER model weights come from — the model catalog's pins, `llm-redact models pull`
+  or an opt-in startup download, the local cache, the offline checks and the load — and, beside
+  it, the air-gap path of portable folders with a SHA-256 manifest verified inside the enclave.
+  The `architecture` diagram shows the local NER model files and the opt-in, startup-only Hugging
+  Face Hub download. docs/deployment.md gains "Provisioning NER models" (`models pull`, folders for
+  read-only deployments, `allow_download`, the systemd unit's `ProtectHome=read-only`, the
+  container's read-only root filesystem), and docs/troubleshooting.md the missing NER extra and
+  spaCy/Stanza/Presidio model messages.
+- Docs: the `model-supply-chain` diagram shows the model-load policy step (a plugin's
+  `Registry.build_model_policy`, asked once a model's files are resolved and before its weights
+  load; none in the Free core), on the connected side and in the enclave. The `architecture`
+  diagram gains a dashed Pro box for llm-redact-pro's offline model bundles with their AI bill of
+  materials and `[models]` policy (Team and above), and docs/editions.md a row for them; the
+  README, docs/editions.md and docs/dashboard.md describe the new box.
+
+- CI proves an air-gapped start (AD11): the `airgap` job pulls the default `hf` and GLiNER
+  models (with the GLiNER base model) and Knowledgator's `gliner-pii-edge-v1.0` with `llm-redact
+  models pull --to`, then — inside a network namespace with no route, the folders mounted
+  read-only at `/models` and an empty Hugging Face cache — runs `models verify --dir`, `serve
+  --check` and a Presidio email check, each under a wrapper that fails on any attempt made
+  through Python's `socket` module to resolve a host or open a connection (native code that
+  connects by itself is stopped by the namespace, not seen by the wrapper); an empty folder must
+  fail with the `models pull` hint. A unit test
+  (`tests/test_airgap_guard.py`) builds every NER backend under a socket guard.
+  `scripts/cpu_torch.py` installs the locked NER extras with a CPU-only torch (torch at its locked
+  version from the PyTorch CPU index, checked against the CPU wheels' SHA-256 the script records
+  for that version, everything else hash-checked from uv.lock, without the CUDA and triton
+  packages).
+
+- A Free `-ner` container image (`<version>-ner`, `latest-ner`): the stock image plus the `hf`
+  and `gliner` NER extras with a CPU-only torch on amd64 and arm64 (`Dockerfile`
+  `NER_EXTRAS`; torch at its locked version from the PyTorch CPU index, hash-checked against the
+  CPU wheels' recorded SHA-256, every other package hash-checked from uv.lock, and the build
+  fails if a CUDA or triton package got in), built,
+  attested and cosign-signed like the stock image, with its closure as
+  `llm-redact-ner-image.cdx.json` on the Release. The image's Hugging Face cache (`HF_HOME`) is
+  `/data/huggingface`, on the data volume. The CI `container-ner` job builds it and, with no
+  network and a read-only root filesystem, checks the closure, doctor's NER rows and `serve
+  --check` with models the image pulled with `models pull --to`. docs/deployment.md documents
+  carrying the image (`docker save` / `docker load`) and an offline wheelhouse install
+  (hash-checked `pip download`, `pip install --no-index`), which the CI `airgap` job runs inside a
+  network namespace with no route.
+
+- The Helm chart takes NER models from a volume: `models.volume` (any volume source, such as a
+  PersistentVolumeClaim holding `llm-redact models pull --to` folders) is mounted read-only at
+  `/models` and sets `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`; `image.variant: ner` selects
+  the `-ner` image tag. Both default off; an unknown variant or a `models.volume` that is not a
+  volume source fails the render, and NOTES warns about a models volume on the stock image. A
+  `helm upgrade --reuse-values` from a release made before these keys renders with both off. A new
+  guide, docs/air-gapped.md, walks through running with NER models in an enclave with no internet
+  route: what to carry in, offline verification (`models verify --dir`, the manifest's checksum
+  carried separately, pulled as your own user into a folder only you can write), Docker, Helm
+  and systemd settings (an egress limit through the host firewall or a system unit you write:
+  `IPAddressDeny=` has no effect in the user unit `service install` writes), and the provider
+  as the only egress.
 
 ### Changed
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
@@ -282,6 +371,19 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The `presidio` NER backend no longer reaches the network: Presidio's email check asks
+  tldextract about each address's domain, and tldextract fetched the Public Suffix List from
+  publicsuffix.org (then GitHub) on its first use — on a request — and cached it under
+  `~/.cache`. It now reads the snapshot the tldextract package ships and writes no cache; a
+  tldextract that cannot be set up that way stops the startup.
+- A `[detection.ner.models]` value written as a path (absolute, `./…`, `~/…`, or with more than
+  one `/`) is always a model folder: when nothing is there (an empty or unmounted volume) the
+  startup names `llm-redact models pull --to` instead of calling it neither a folder nor a model
+  id, `doctor` no longer reads it as an unpinned Hub model, and `models pull` fails instead of
+  skipping it.
+- The NER bench downloads a published dataset before it loads the models: building an `hf`,
+  `gliner` or `gliner2` backend switches the process to offline mode, so a dataset not yet
+  cached failed to download (`could not download … LocalEntryNotFoundError`).
 - The `hf` NER backend could report part of a word as an entity and leave the rest of it
   in the request: `dslim/bert-base-NER` reported "Angela Merk" in "Yesterday Angela Merkel
   met the press.", so "el" went upstream unredacted (also "Ngoz…", "Xu Wen…"). A model whose

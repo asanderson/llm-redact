@@ -1,0 +1,8 @@
+# The air-gapped side of the CI `airgap` job's second pull
+# (tests/airgap/pull-edge.toml), mounted read-only at /models.
+[detection.ner]
+enabled = true
+backends = ["gliner"]
+
+[detection.ner.models]
+gliner = "/models/gliner-knowledgator--gliner-pii-edge-v1.0"

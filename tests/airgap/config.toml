@@ -1,0 +1,13 @@
+# The air-gapped side of the CI `airgap` job: the folders
+# `llm-redact models pull --to DIR --as /models --config tests/airgap/pull.toml`
+# writes, mounted read-only at /models, loaded with downloads off (no
+# allow_download, no [detection.ner.revisions]: each folder's
+# llm-redact-model.json records its revision). These are the
+# [detection.ner.models] lines that pull prints.
+[detection.ner]
+enabled = true
+backends = ["hf", "gliner"]
+
+[detection.ner.models]
+hf = "/models/hf-dslim--bert-base-NER"
+gliner = "/models/gliner-urchade--gliner_small-v2.1"

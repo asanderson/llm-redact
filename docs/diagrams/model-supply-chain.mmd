@@ -1,0 +1,65 @@
+%% Where the weights of an NER model (backends gliner, gliner2, hf) come from
+%% and how they reach the detector: the model catalog's pins, the one step
+%% that may download (`llm-redact models pull`, or a startup with
+%% [detection.ner] allow_download = true), the local Hugging Face cache, the
+%% offline checks, the model-load policy a plugin may install (asked once the
+%% files are resolved in the cache, before the load; none in the Free core) and
+%% the load, which assembles a GLiNER base model first when it must. Beside it the air-gap path: portable folders written on a connected
+%% machine, carried in and verified inside the enclave.
+%% Code: detection/model_catalog.py, model_files.py, model_sources.py,
+%% model_manifest.py; models_cli.py; engine.check_model_policy,
+%% Registry.build_model_policy. Prose: docs/detection.md "Model sources" and
+%% "Model-load policies (plugins)".
+%% Render: scripts/render_diagrams.sh (PNG committed next to this source).
+%%{init: {"flowchart": {"wrappingWidth": 340}}}%%
+flowchart TB
+    hub[("Hugging Face Hub<br/>model repositories")]
+    catalog["model catalog (model_catalog.py)<br/>a pinned commit per model and per GLiNER base model,<br/>license and lineage facts, status vetted · caution · restricted<br/>(a [detection.ner.revisions] pin overrides it)"]
+
+    subgraph connected["A machine with network access"]
+        direction TB
+        pull["llm-redact models pull<br/>or a startup (serve, serve --check) with<br/>[detection.ner] allow_download = true —<br/>off by default"]
+        cache[("local Hugging Face cache (HF_HOME)<br/>a snapshot per pinned commit")]
+        assemble["the load, first for a GLiNER model without a tokenizer:<br/>base model assembly into a self-contained folder under<br/>$XDG_DATA_HOME/llm-redact/models/gliner/"]
+        verify["llm-redact models verify<br/>offline: every file the load reads,<br/>at its pin"]
+        load["the proxy's startup loads local files only:<br/>safetensors or [detection.ner.onnx] weights<br/>(pickle: hf only with allow_pickle_weights;<br/>GLiNER, GLiNER2 through torch's weights_only loader),<br/>never repository code (auto_map refused)"]
+        policy["model-load policy — only when a plugin installs one<br/>(Registry.build_model_policy), e.g. llm-redact-pro's<br/>[models]: allowed licenses, denied lineage,<br/>verified bundle only. Shown the cached files,<br/>the catalog facts and whether<br/>the load assembles them,<br/>before anything loads;<br/>a reason or a fault refuses the build"]
+        reload["reload (SIGHUP, the config editor),<br/>its dry run, llm-redact preview:<br/>local files only, never a download"]
+        detector(["NER detector"])
+        portable[("models pull --to DIR --as /models:<br/>a self-contained folder per model,<br/>its llm-redact-model.json,<br/>and llm-redact-models.json (sizes, SHA-256)")]
+    end
+
+    subgraph enclave["Air-gapped enclave — no route to the Hub"]
+        direction TB
+        carried[("the carried folder, mounted<br/>read-only at /models")]
+        verifydir["llm-redact models verify --dir /models<br/>no configuration, no network"]
+        loadE["serve with [detection.ner.models] = /models/…<br/>allow_download unset: the Hugging Face<br/>libraries' offline switches are set first"]
+        policyE["model-load policy (when installed),<br/>then the weights load (same rules)"]
+        detectorE(["NER detector"])
+    end
+
+    catalog -- "revision + explicit file names" --> pull
+    hub == "pinned files only (the one network step)" ==> pull
+    pull --> cache
+    cache --> verify
+    cache --> policy
+    policy -- "None: allowed" --> assemble
+    assemble -- "(skipped when the checkpoint is self-contained)" --> load
+    verify -. "before the startup" .-> load
+    reload -. "same checks and policy,<br/>no download" .-> policy
+    load --> detector
+    pull -- "--to" --> portable
+    portable == "carried in (copy, image, volume)" ==> carried
+    carried --> verifydir
+    verifydir --> loadE
+    loadE --> policyE
+    policyE --> detectorE
+
+    classDef boundary fill:#f6f8fa,stroke:#57606a,stroke-width:1px;
+    classDef store fill:#fff8c5,stroke:#9a6700,stroke-width:1.5px;
+    classDef upstream fill:#ddf4ff,stroke:#0969da,stroke-width:1px;
+    classDef seam fill:#ffffff,stroke:#8250df,stroke-width:1.5px,stroke-dasharray:6 4;
+    class connected,enclave boundary;
+    class policy,policyE seam;
+    class cache,portable,carried store;
+    class hub upstream;

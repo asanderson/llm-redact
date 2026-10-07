@@ -436,6 +436,28 @@ the `transformers` package is installed but `torch` is not, so no model can
 run. Install the extra, which brings both: `uv sync --extra hf` (or
 `pip install 'llm-redact-proxy[hf]'`), then re-run `serve --check`.
 
+## `[detection.ner] backend = "…" but the … extra is not installed; install it: uv sync --extra …` / "[detection.ner] is enabled but spaCy is not installed; install the extra: uv sync --extra ner"
+
+From `serve` / `serve --check` (and a reload that turns the backend on): the
+backend's Python packages are not in the environment the proxy runs in. Each
+backend has its extra — `hf`, `gliner`, `gliner2`, `presidio`, `stanza`, and
+`ner` for spaCy: `uv sync --extra gliner`, or `pip install
+'llm-redact-proxy[gliner]'`. `llm-redact doctor` lists under `ner` which
+backends are importable. Without network access, install from a wheelhouse
+prepared on a connected machine (docs/deployment.md, "Offline installs"), or
+run the `-ner` image, which carries the `hf` and `gliner` extras.
+
+## "spaCy model … is not available; download it: …" / "Stanza '…' NER model is not available; download it: …" / "failed to build the Presidio analyzer; is the spaCy model available? …"
+
+The library is installed but its model is not. spaCy (and Presidio, which
+runs on spaCy) models are Python packages: install the one named
+(`en_core_web_sm` by default) with the command shown, or, without network
+access, install its wheel from the spaCy models release page carried in.
+Stanza downloads its models into `~/stanza_resources` (`STANZA_RESOURCES_DIR`);
+run the command shown on a connected machine and carry that directory in.
+These models are not Hugging Face snapshots, so `llm-redact models pull`
+does not fetch them; `llm-redact models list` prints their install commands.
+
 ## "[detection.ner] hf model '…' has no fast tokenizer; character offsets are required"
 
 Startup (and `serve --check`) refused an `hf` backend model whose tokenizer
@@ -578,6 +600,26 @@ which the model catalog does not apply).
 The model value is not a folder that exists and not of the form `ORG/NAME`.
 Check the path (it is read relative to the proxy's working directory unless
 absolute) or the model id.
+
+## "[detection.ner] … model '…' is not a directory: a model folder must be in place when the proxy starts (nothing mounted or copied there?); write one on a connected machine with `llm-redact models pull --to DIR`, carry it here, and check it with `llm-redact models verify --dir`"
+
+The model value is written as a path (absolute, `./…`, `~/…`, or with more
+than one `/`), so it names a model folder — never a Hugging Face model id —
+and nothing is there. In a container or an air-gapped host this is usually a
+volume that is not mounted, or mounted empty: mount the folder `llm-redact
+models pull --to DIR` wrote (at the path `--as` named), run `llm-redact models
+verify --dir` on it, and start again. The same folder shows as `FAIL  BACKEND:
+PATH is not a directory: a local model folder that is not there` in
+`llm-redact models pull`, which never fetches a value written as a path.
+
+## "[detection.ner] presidio: cannot keep tldextract (which Presidio's email check uses) from fetching the public suffix list over the network (…); reinstall the presidio extra: uv sync --extra presidio"
+
+The presidio backend replaces tldextract's default extractor (which fetches
+the Public Suffix List from the internet on first use, on a request) with one
+that reads the snapshot the package ships, and this tldextract could not be set
+up that way: it is missing, or not laid out as tldextract 5.x is. The startup
+stops rather than let a request reach the network. Reinstall the extra (`uv
+sync --extra presidio`, which brings a tldextract Presidio supports).
 
 ## "[detection.ner] … model '…' needs code from its repository (… names auto_map); llm-redact never runs model code"
 
@@ -775,6 +817,26 @@ loads the model — the catalog never refuses one — so whether those terms fit
 your use is for you to decide. To silence the warning, pick a model the
 catalog lists as vetted (docs/detection.md "The model catalog").
 
+## "[detection.ner] BACKEND model '…' refused by the model-load policy: …"
+
+A plugin's model-load policy (llm-redact-pro's `[models]` section, for
+example) refused the configured NER model; the rest of the line is the
+policy's own reason, such as a license outside its allowed list, a lineage
+tag it denies or a file that differs from a verified bundle. The model was
+not loaded: `serve` and `serve --check` refuse to start, a reload keeps the
+running configuration, and the config editor answers 400. Choose a model the
+policy allows, or change the policy (for `[models]`, see llm-redact-pro's
+docs/model-bundles.md). docs/detection.md "Model-load policies (plugins)"
+says when the policy is asked.
+
+## "[detection.ner] BACKEND model '…': the model-load policy failed (TYPE); the model is not loaded" / "… the model-load policy answered neither None nor a reason (TYPE); the model is not loaded"
+
+The installed plugin's model-load policy raised an exception (TYPE names it)
+or answered something other than None or a non-empty reason. A policy never
+fails open, so the model is refused as if the policy had said no. This is a
+fault in the plugin (or a plugin and core version that do not match):
+upgrade llm-redact-pro, or report it with the exception type.
+
 ## `llm-redact doctor` under `models`: "…: … needs DIST >= VERSION (model catalog), but DIST VERSION is installed; upgrade it: …"
 
 The model catalog records that the configured model needs a newer library
@@ -872,6 +934,27 @@ The thresholds entry sets a floor for a type the scored samples never
 contain (a `--limit` too small, or a dataset without that type). Raise
 `--limit`, or remove the floor from that dataset's entry.
 
+## NER bench: "type_leak_max for TYPE cannot be checked: the run holds no gold characters of TYPE"
+
+The entry sets a per-type leak ceiling for a type the scored samples never
+contain, as for a recall floor above: raise `--limit`, or remove that type
+from the entry's `type_leak_max`.
+
+## "FAIL  no CPU wheel hash recorded for torch X: add every wheel of it from https://download.pytorch.org/whl/cpu/torch/ to CPU_WHEELS (scripts/cpu_torch.py)"
+
+`scripts/cpu_torch.py requirements` (the `-ner` image build, the release
+SBOM, the CI `airgap`, `ner-models` and `ner-eval` jobs through
+`scripts/ner_ci_env.sh`, and the offline wheelhouse recipe) installs torch
+at the version `uv.lock` pins from the PyTorch CPU index, hash-checked
+against the SHA-256 table `CPU_WHEELS` records, and refuses a locked torch
+version the table does not cover (after `uv lock` moved torch). Replace the
+table with every wheel of the new version as
+`https://download.pytorch.org/whl/cpu/torch/` lists them (`sha256sum`
+format: digest, two spaces, wheel file name), and check at least one
+against the downloaded file. `tests/test_cpu_torch_script.py` fails until
+the table matches `uv.lock`. A hash that does not match fails the install:
+never remove `--require-hashes` to get past it.
+
 ## NER bench: "--dump-errors must name a file outside any git work tree"
 
 `--dump-errors` writes dataset text, so it refuses a path inside a git
@@ -915,7 +998,10 @@ revision and the download failed (no network, a proxy refusing the host, a
 full disk). Files already in the cache directory are reused, so a machine
 without network access can run a dataset whose cache was filled elsewhere:
 copy `${XDG_CACHE_HOME:-~/.cache}/llm-redact/bench-datasets` across, or
-point `--cache-dir` at the copy.
+point `--cache-dir` at the copy. `LocalEntryNotFoundError` means the Hub
+client was offline (`HF_HUB_OFFLINE=1` in the environment) and the file is
+not in the cache; the bench downloads a dataset before it loads the models,
+whose loading switches the process offline.
 
 ## NER bench: "--cache-dir must be outside any git work tree"
 

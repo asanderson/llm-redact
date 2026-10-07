@@ -237,6 +237,16 @@ Neither gate replaces the other: the deterministic gate stays unchanged and
 runs without any model; the statistical one needs a model and states what it
 measured.
 
+Both run in CI. The `ner-models` job pulls the default `hf` and `gliner`
+models at their catalog pins and, on every pull request, gates each
+configuration in `bench/configs/` against its recorded floors and
+ceilings — the synthetic corpus and the false-positive ceilings of
+`bench/ner_ceilings.toml` — after running the `real_model` tests, where a
+test that would skip for a missing model or extra fails the job instead. A
+weekly `ner-eval` workflow scores the same configurations on slices of two
+published datasets, report only until their baselines are recorded
+([ner-bench.md](ner-bench.md#ci)).
+
 ## Reproducible builds
 
 Two builds of the same tree under a pinned `SOURCE_DATE_EPOCH` produce

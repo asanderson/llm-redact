@@ -1,13 +1,14 @@
 """Assemble the detector list from configuration."""
 
 import functools
+import inspect
 import logging
 import re
 import threading
 import weakref
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
@@ -15,6 +16,9 @@ from llm_redact.detection.labels import LabelPolicy, raw_entity_deprecations
 from llm_redact.detection.model_catalog import DEFAULT_MODELS, HUB_BACKENDS, pinned_revision
 from llm_redact.detection.regex_rules import BUILTIN_RULES, PreparedText, RegexDetector, RegexRule
 from llm_redact.detection.stats import NerStats
+
+if TYPE_CHECKING:
+    from llm_redact.plugin_api import ModelPolicy
 
 
 @dataclass
@@ -323,12 +327,20 @@ def active_rule_names(config: DetectionConfig) -> list[str]:
     return [name for name in config.enabled if _language_active(known[name], config.languages)]
 
 
-def build_detectors(config: DetectionConfig, *, startup: bool = False) -> list[Detector]:
+def build_detectors(
+    config: DetectionConfig,
+    *,
+    startup: bool = False,
+    model_policy: "ModelPolicy | None" = None,
+) -> list[Detector]:
     """The detectors ``config`` asks for. ``startup`` marks the process's
     startup build (``serve``, ``serve --check``), the only one that may
     download NER model files (and only with ``[detection.ner]
     allow_download``); every other build — a reload, a config dry run, a
-    preview — loads them from local files only."""
+    preview — loads them from local files only. ``model_policy`` (a
+    plugin's, ``Registry.build_model_policy``) is asked about every NER
+    backend's model once its files are resolved and before it loads
+    (:func:`check_model_policy`); None loads what the configuration names."""
     known = {rule.name: rule for rule in BUILTIN_RULES}
     active = active_rule_names(config)
     detectors: list[Detector] = [RegexDetector(known[name]) for name in active]
@@ -388,6 +400,10 @@ def build_detectors(config: DetectionConfig, *, startup: bool = False) -> list[D
                 from llm_redact.detection.model_files import go_offline
 
                 go_offline()
+            if model_policy is not None:
+                check_model_policy(
+                    model_policy, config.ner, backend_name, allow_download=single.allow_download
+                )
             # Imported only when enabled: the NER dependencies stay
             # optional and startup fails fast per backend if missing.
             if backend_name == "gliner":
@@ -420,6 +436,48 @@ def build_detectors(config: DetectionConfig, *, startup: bool = False) -> list[D
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
         _mark_unmatched(config.ner.entities, built)
     return detectors
+
+
+# How much of a policy's refusal a ConfigError carries (it is shown and logged).
+POLICY_REASON_CHARS = 500
+
+
+def check_model_policy(
+    policy: "ModelPolicy", ner: NerConfig, backend: str, *, allow_download: bool = False
+) -> None:
+    """Ask ``policy`` whether ``backend``'s model may load: its files are
+    resolved first (``model_sources.model_load``: downloaded only with
+    ``allow_download``, as the loader would), nothing is loaded. A refusal
+    raises ConfigError carrying the policy's reason (non-printable
+    characters escaped, cut to :data:`POLICY_REASON_CHARS`); an exception,
+    an empty string or any other answer refuses too, naming the answer's
+    TYPE only — a policy never fails open."""
+    from llm_redact.config import ConfigError
+    from llm_redact.detection.model_sources import model_load
+    from llm_redact.overrides import printable
+
+    load = model_load(ner, backend, allow_download=allow_download)
+    where = f"[detection.ner] {backend} model {load.model!r}"
+    try:
+        answer: object = policy.check(load)
+    except Exception as exc:
+        raise ConfigError(
+            f"{where}: the model-load policy failed ({type(exc).__name__}); the model is not loaded"
+        ) from None
+    if answer is None:
+        return
+    if isinstance(answer, str) and answer:
+        reason = printable(answer)
+        if len(reason) > POLICY_REASON_CHARS:
+            reason = reason[:POLICY_REASON_CHARS] + "..."
+        raise ConfigError(f"{where} refused by the model-load policy: {reason}")
+    close = getattr(answer, "close", None)
+    if inspect.iscoroutine(answer) and callable(close):
+        close()  # a coroutine is never awaited: the check is synchronous
+    raise ConfigError(
+        f"{where}: the model-load policy answered neither None nor a reason"
+        f" ({type(answer).__name__}); the model is not loaded"
+    )
 
 
 def _single_backend_view(ner: NerConfig, backend: str, *, startup: bool = False) -> NerConfig:

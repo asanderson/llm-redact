@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         AccessGate,
         Dashboard,
         DbPasswordProvider,
+        ModelPolicy,
         Router,
         Telemetry,
         UploadInspector,
@@ -140,6 +141,17 @@ def build_upload_inspector(config: Config, tier: str) -> UploadInspector | None:
     from .extraction import build_inspector  # lazy: only an enabled section pays for it
 
     return build_inspector(config.extraction)
+
+
+def build_model_policy(config: Config, tier: str) -> ModelPolicy | None:
+    """None: no model-load policy — the core loads the NER models the
+    configuration names (the model catalog states facts, the startup warns
+    about a restricted model, nothing refuses). A plugin may replace this
+    factory (llm-redact-pro's ``[models]`` section); ``config`` and ``tier``
+    are part of the factory contract and unused here (the core gates
+    nothing)."""
+    del config, tier
+    return None
 
 
 def build_access_gate(config: Config, license: ResolvedLicense) -> AccessGate | None:

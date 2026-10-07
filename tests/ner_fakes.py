@@ -9,6 +9,7 @@ the test chose — never anything derived from the text beyond offsets. The
 scripted repository, writing its files into the session's throwaway home.
 """
 
+import contextlib
 import fnmatch
 import importlib.machinery
 import json
@@ -210,11 +211,17 @@ class FakeAnalyzer:
         self.calls.append(entities)
         if entities is not None and not set(entities) & set(self.supported):
             raise ValueError("No matching recognizers were found to serve the request.")
-        return [
+        found = [
             types.SimpleNamespace(entity_type=label, start=s, end=e, score=score)
             for s, e, label, score in _spans(text, self.findings)
             if (entities is None or label in entities) and score >= score_threshold
         ]
+        tld = sys.modules.get("tldextract")
+        for item in found:
+            if item.entity_type == "EMAIL_ADDRESS" and tld is not None:
+                # Presidio's EmailRecognizer.validate_result asks tldextract.
+                tld.extract(text[item.start : item.end])
+        return found
 
 
 # A repository every backend's fake loads from: an hf model (config.json,
@@ -481,3 +488,65 @@ def install_presidio(monkeypatch: pytest.MonkeyPatch, analyzer: FakeAnalyzer) ->
     engine.NlpEngineProvider = _Provider  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "presidio_analyzer", module)
     monkeypatch.setitem(sys.modules, "presidio_analyzer.nlp_engine", engine)
+    install_tldextract(monkeypatch)
+
+
+class FakeTldExtract:
+    """tldextract's ``TLDExtract``: like the real one (5.x), an extractor
+    built with ``suffix_list_urls`` fetches the Public Suffix List the first
+    time it is called — through ``fetch``, which the default makes a test
+    failure (no test may touch the network; the air-gap guard test points
+    it at a real socket call) — and one built with ``suffix_list_urls=()``
+    reads the snapshot the package ships."""
+
+    fetch: Any = None  # (host) -> None; set per test
+    asked: list[str] = []  # every value checked (reset by install_tldextract)
+
+    def __init__(
+        self,
+        cache_dir: str | None = "~/.cache/python-tldextract",
+        suffix_list_urls: tuple[str, ...] = (
+            "https://publicsuffix.org/list/public_suffix_list.dat",
+        ),
+        fallback_to_snapshot: bool = True,
+    ) -> None:
+        self.cache_dir = cache_dir
+        self.suffix_list_urls = tuple(suffix_list_urls)
+        self.fallback_to_snapshot = fallback_to_snapshot
+        self.fetched = False
+
+    def __call__(self, url: str) -> Any:
+        FakeTldExtract.asked.append(url)
+        if self.suffix_list_urls and not self.fetched:
+            self.fetched = True
+            fetch = FakeTldExtract.fetch
+            if fetch is None:
+                raise AssertionError("tldextract would fetch the public suffix list")
+            with contextlib.suppress(OSError):  # the real one falls back to its snapshot
+                fetch("publicsuffix.org")
+        domain = url.rpartition("@")[2]
+        return types.SimpleNamespace(fqdn=domain if "." in domain else "")
+
+
+def install_tldextract(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """A fake ``tldextract`` package laid out like the real one: the
+    package's ``extract`` calls the module-level ``TLD_EXTRACTOR`` of
+    ``tldextract.tldextract`` at call time (what presidio_ner replaces)."""
+    inner = types.ModuleType("tldextract.tldextract")
+    inner.TLDExtract = FakeTldExtract  # type: ignore[attr-defined]
+    inner.TLD_EXTRACTOR = FakeTldExtract()  # type: ignore[attr-defined]
+
+    def extract(url: str) -> Any:
+        return inner.TLD_EXTRACTOR(url)  # type: ignore[attr-defined]
+
+    inner.extract = extract  # type: ignore[attr-defined]
+    package = types.ModuleType("tldextract")
+    package.__path__ = []  # type: ignore[attr-defined]
+    package.tldextract = inner  # type: ignore[attr-defined]
+    package.extract = extract  # type: ignore[attr-defined]
+    package.TLDExtract = FakeTldExtract  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tldextract", package)
+    monkeypatch.setitem(sys.modules, "tldextract.tldextract", inner)
+    monkeypatch.setattr(FakeTldExtract, "fetch", None)
+    monkeypatch.setattr(FakeTldExtract, "asked", [])
+    return inner

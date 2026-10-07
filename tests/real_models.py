@@ -11,6 +11,8 @@ imported earlier in the session.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pytest
 
 
@@ -33,3 +35,34 @@ def cached_snapshot(repo_id: str, revision: str, files: list[str]) -> str:
     except Exception:  # not cached here (LocalEntryNotFoundError and kin)
         pytest.skip(f"{repo_id} at {revision} is not in the Hugging Face cache")
     return path
+
+
+# The CI ner-models job pulls every model these tests load and sets this
+# variable, so a real_model test that skips there (a model missing from the
+# cache, an extra missing from the environment) FAILS the job instead of
+# turning it green without having run (as LLM_REDACT_TEST_REAL_DB_REQUIRED
+# does for the RDBMS job).
+REQUIRED_ENV = "LLM_REDACT_TEST_REAL_MODELS_REQUIRED"
+
+
+def required_skip_failure(
+    report: pytest.TestReport, marked: bool, environ: Mapping[str, str]
+) -> str | None:
+    """Why ``report`` must fail instead of skip: a skipped ``real_model``
+    test while REQUIRED_ENV is "1"; else None."""
+    if not (report.skipped and marked and environ.get(REQUIRED_ENV) == "1"):
+        return None
+    longrepr = report.longrepr
+    reason = longrepr[2] if isinstance(longrepr, tuple) else str(longrepr)
+    return f"{REQUIRED_ENV}=1 but this real_model test skipped: {reason}"
+
+
+def fail_required_skips(
+    item: pytest.Item, report: pytest.TestReport, environ: Mapping[str, str]
+) -> None:
+    """Turn ``report`` into a failure when ``required_skip_failure`` says so."""
+    marked = item.get_closest_marker("real_model") is not None
+    message = required_skip_failure(report, marked, environ)
+    if message is not None:
+        report.outcome = "failed"
+        report.longrepr = message

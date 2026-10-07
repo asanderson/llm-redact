@@ -9,7 +9,9 @@
 #   PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium scripts/render_diagrams.sh
 #
 # PNGs are committed so the README renders without any toolchain; run this
-# whenever a .mmd source changes and commit both.
+# whenever a .mmd source changes and commit both. DIAGRAMS names another
+# folder of sources (llm-redact-pro's scripts/render_diagrams.sh sets it to
+# its own docs/diagrams); both the PNGs and the animations are rendered there.
 set -eu
 
 cd "$(dirname "$0")/.." || exit 1
@@ -24,7 +26,7 @@ trap 'rm -f "$PUPPETEER_CONFIG"' EXIT
     printf '}'
 } > "$PUPPETEER_CONFIG"
 
-for src in docs/diagrams/*.mmd; do
+for src in "${DIAGRAMS:-docs/diagrams}"/*.mmd; do
     out="${src%.mmd}.png"
     # -s 2: 2x pixel density so text stays crisp; white background because
     # GitHub renders READMEs on both light and dark pages.

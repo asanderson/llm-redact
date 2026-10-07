@@ -132,6 +132,7 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
             "delivery": "(self) -> 'RouteDelivery'",
         },
     ),
+    "ModelPolicy": ((), {"check": "(self, load: 'ModelLoad') -> 'str | None'"}),
     "UpstreamAuth": (
         (),
         {
@@ -175,6 +176,15 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
 
 # Frozen dataclass name -> its generated __init__ signature.
 DATACLASSES: dict[str, str] = {
+    "ModelLoad": (
+        "(backend: 'str', model: 'str', model_id: 'str | None' = None,"
+        " revision: 'str | None' = None, local: 'bool' = False, path: 'str | None' = None,"
+        " files: 'tuple[tuple[str, str], ...]' = (), assembled: 'bool' = False,"
+        " backbone: 'str | None' = None, backbone_revision: 'str | None' = None,"
+        " onnx: 'str | None' = None, catalog_status: 'str | None' = None,"
+        " license: 'str | None' = None, lineage: 'tuple[str, ...]' = (),"
+        " attribution: 'str | None' = None) -> None"
+    ),
     "Admission": (
         "(subject: 'str | None' = None, refusal: 'str | None' = None,"
         " redirect: 'str | None' = None, grant: 'str | None' = None,"
@@ -249,6 +259,8 @@ ALL: tuple[str, ...] = (
     "Inspection",
     "LocalAnswer",
     "MAX_RESPONSE_ROWS",
+    "ModelLoad",
+    "ModelPolicy",
     "RESPONSE_PRUNE_EVERY",
     "ResponseContext",
     "ResponseObserver",

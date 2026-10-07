@@ -27,3 +27,68 @@
 #   per_100kb_max = 2.0
 #   [hf-default."rfc_excerpt.txt"]
 #   PERSON = 4
+
+# --- Recorded baselines --------------------------------------------------------
+# Measured 2026-10-06 (same environment as bench/ner_thresholds.toml's
+# baselines): each ceiling is the measured count plus 5% rounded up, at least
+# one more than measured, so the same models on another CPU do not fail on a
+# borderline span; per_100kb_max likewise. Files not listed had no NER
+# detection and allow none. gutenberg_prose.txt (Alice's Adventures in
+# Wonderland), rfc_excerpt.txt (the RFC's authors) and README.md (the corpus's
+# own attributions) hold real names on purpose: a model finding them is
+# right. The others' hits are false positives, kept as measured.
+
+[hf-default]
+recorded = "2026-10-06"
+note = "dslim/bert-base-NER at d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc; measured 566 NER detections in 269437 bytes, 210.07 per 100 KB"
+per_100kb_max = 221.0
+
+[hf-default."README.md"]
+PERSON = 6
+
+[hf-default."gutenberg_prose.txt"]
+PERSON = 537
+
+[hf-default."rfc_excerpt.txt"]
+PERSON = 49
+
+[hf-default."sqlite_excerpt.c"]
+PERSON = 2
+
+[hf-default."synthetic_config.yaml"]
+PERSON = 3
+
+[hf-default."synthetic_natids_r10.log"]
+PERSON = 2
+
+[gliner-default]
+recorded = "2026-10-06"
+note = "urchade/gliner_small-v2.1 at 4e091416cf7c3481db542c2a3d26156916f3a47f with base model microsoft/deberta-v3-small at a36c739020e01763fe789b4b85e2df55d6180012; measured 1206 NER detections in 269437 bytes, 447.60 per 100 KB"
+per_100kb_max = 470.0
+
+[gliner-default."README.md"]
+PERSON = 5
+
+[gliner-default."gutenberg_prose.txt"]
+PERSON = 1189
+
+[gliner-default."rfc_excerpt.txt"]
+PERSON = 33
+
+[gliner-default."sqlite_excerpt.c"]
+PERSON = 13
+
+[gliner-default."synthetic_agent_tool_results.json"]
+PERSON = 10
+
+[gliner-default."synthetic_config.yaml"]
+PERSON = 2
+
+[gliner-default."synthetic_natids_r10.log"]
+PERSON = 7
+
+[gliner-default."synthetic_python_module.py"]
+PERSON = 10
+
+[gliner-default."synthetic_runbook.md"]
+PERSON = 3

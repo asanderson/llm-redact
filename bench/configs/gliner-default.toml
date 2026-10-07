@@ -1,0 +1,11 @@
+# NER bench configuration "gliner-default" (docs/ner-bench.md): the gliner
+# backend with its default model (urchade/gliner_small-v2.1 at its catalog
+# pin, assembled with its pinned base model microsoft/deberta-v3-small) and
+# the default entities (PERSON). Scored in CI by the ner-models job against
+# bench/ner_thresholds.toml [gliner-default.*] and bench/ner_ceilings.toml
+# [gliner-default]. Downloads stay off (the default): the CI job and a local
+# run fetch the model first with `llm-redact models pull --config` on this
+# file.
+[detection.ner]
+enabled = true
+backend = "gliner"

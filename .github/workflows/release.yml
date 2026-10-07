@@ -4,6 +4,16 @@ on:
   push:
     tags: ["v*"]
 
+# The -ner image variant (tags suffixed -ner): the stock image plus the hf
+# and gliner NER extras on a CPU-only torch (Dockerfile NER_EXTRAS;
+# scripts/cpu_torch.py). NER is Free, so the variant ships no capability it
+# fails closed on. The SBOM step below describes the same closure, and the
+# CI `container-ner` job builds and smoke-tests it with these values
+# (tests/test_deploy_assets.py keeps them equal).
+env:
+  IMAGE_EXTRAS: --extra perf --extra realtime --extra extract
+  NER_EXTRAS: --extra hf --extra gliner
+
 permissions:
   contents: read
 
@@ -46,6 +56,19 @@ jobs:
           mkdir -p sbom
           uvx --from cyclonedx-bom cyclonedx-py requirements sbom-requirements.txt \
             -o sbom/llm-redact-runtime.cdx.json
+      # The -ner image's Python closure, as its Dockerfile installs it: every
+      # locked package of the image's extras but torch's GPU dependencies,
+      # and torch at its locked version as the CPU index's +cpu build, with
+      # the CPU wheels' SHA-256 scripts/cpu_torch.py records.
+      - name: SBOM (CycloneDX) of the -ner image's closure
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # the extras are separate arguments
+          uv export --frozen --no-dev --no-emit-project $IMAGE_EXTRAS $NER_EXTRAS \
+            | python3 scripts/cpu_torch.py requirements sbom-ner-requirements.txt >torch.txt
+          cat torch.txt >>sbom-ner-requirements.txt
+          uvx --from cyclonedx-bom cyclonedx-py requirements sbom-ner-requirements.txt \
+            -o sbom/llm-redact-ner-image.cdx.json
       # Signed provenance for the exact bytes attached to the Release:
       # verifiable with `gh attestation verify <file> --repo <this repo>`.
       # (PyPI uploads get separate PEP 740 attestations from the trusted
@@ -114,9 +137,25 @@ jobs:
       - run: uv build
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
 
+  # One job per image: the stock image (tags X.Y.Z, X.Y, latest) and its
+  # -ner variant (X.Y.Z-ner, X.Y-ner, latest-ner). Everything but NER_EXTRAS —
+  # platforms, the BuildKit SBOM attestation, the pinned license label, the
+  # cosign signature — is shared. fail-fast is off so a -ner failure never
+  # cancels the stock push.
   publish-ghcr:
+    name: publish-ghcr (${{ matrix.variant }})
     runs-on: ubuntu-latest
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: stock
+            suffix: ""
+            ner: false
+          - variant: ner
+            suffix: "-ner"
+            ner: true
     permissions:
       contents: read
       packages: write
@@ -142,6 +181,11 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+          # The variant's suffix goes on every tag, `latest` included
+          # (onlatest): without it the -ner job would push `latest` over the
+          # stock image.
+          flavor: |
+            suffix=${{ matrix.suffix }},onlatest=true
           # metadata-action labels the image with the repository's GitHub-detected
           # license (pro: NOASSERTION, core: AGPL-3.0), overriding the Dockerfile
           # LABEL; pin it to pyproject's `license` (tests/test_license_metadata.py /
@@ -154,6 +198,11 @@ jobs:
           context: .
           target: runtime
           platforms: linux/amd64,linux/arm64
+          # Empty for the stock image (the Dockerfile's default); the -ner
+          # variant adds the NER extras on a CPU-only torch, on both
+          # architectures (PyPI's aarch64 torch pulls CUDA too).
+          build-args: |
+            NER_EXTRAS=${{ matrix.ner && env.NER_EXTRAS || '' }}
           # BuildKit-generated image SBOM attestation, stored alongside the
           # manifest in GHCR (docker buildx imagetools inspect shows it).
           sbom: true
@@ -172,7 +221,7 @@ jobs:
       # vault-postgres/vault-mysql/crypto extras for a server RDBMS vault) moved
       # to the private llm-redact-pro release — the server RDBMS vault is a Pro
       # feature, so a Free public image that bundled those drivers would ship a
-      # capability it fails closed on. The Free image below is the only artifact.
+      # capability it fails closed on. NER is Free: the -ner variant stays here.
       - name: sign the image
         env:
           DIGEST: ${{ steps.build.outputs.digest }}

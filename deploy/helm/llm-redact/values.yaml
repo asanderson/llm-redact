@@ -24,7 +24,34 @@ image:
   # paid llm-redact-pro distribution (NOTES.txt warns when the values ask for
   # an RDBMS backend on the stock FOSS image). See docs/editions.md.
   tag: ""
+  # "" = the stock image; "ner" = its -ner variant (tag <version>-ner): the
+  # hf and gliner NER extras on a CPU-only torch. NER is Free; the variant
+  # ships no model — mount them with models.volume below.
+  variant: ""
   pullPolicy: IfNotPresent
+
+# NER models for [detection.ner] (docs/air-gapped.md, docs/deployment.md
+# "Provisioning NER models"): a volume holding the folders `llm-redact models
+# pull --to DIR --as /models` wrote on a connected machine, mounted READ-ONLY
+# at /models. Any volume source, for example an existing PVC:
+#   models:
+#     volume:
+#       persistentVolumeClaim: { claimName: llm-redact-models, readOnly: true }
+# With a volume set the proxy also runs with HF_HUB_OFFLINE=1 and
+# TRANSFORMERS_OFFLINE=1. Load the folders from extraConfig with the lines
+# `models pull` printed, and leave allow_download unset:
+#   extraConfig: |
+#     [detection.ner]
+#     enabled = true
+#     backends = ["hf", "gliner"]
+#     [detection.ner.models]
+#     hf = "/models/hf-dslim--bert-base-NER"
+#     gliner = "/models/gliner-urchade--gliner_small-v2.1"
+# Check the volume first: `llm-redact models verify --dir /models` (exec into
+# the pod, or run it where the volume is prepared). Absent (`helm upgrade
+# --reuse-values` from a release made before this key) = no volume.
+models:
+  volume: {}
 
 # Pull secrets for the pod (private registries — the tool image in sidecar
 # mode is typically yours): [{ name: my-registry-cred }]

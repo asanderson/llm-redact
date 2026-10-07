@@ -28,7 +28,11 @@ detection overlapping no typed gold span but a ``LEAK``/``None`` one is
 NEUTRAL: not counted for precision. Type-agnostic: the character-leak rate
 (gold characters, typed or ``LEAK``, that no detection covers, over all
 such characters) and the over-redaction rate (detected characters outside
-every gold span, over the characters outside every gold span). The
+every gold span, over the characters outside every gold span). Per type:
+the type's character-leak rate (characters of that type's gold spans no
+detection of any type covers, over those characters), which a gate on the
+requested types reads: the type-agnostic rate also counts every type the
+configuration does not request. The
 STRUCTURED-REGRESSION check compares against the same configuration with
 NER off: a gold span of a regex rule's type that the rules alone find
 exactly must still be found exactly with NER on (a model drawing a wider
@@ -123,6 +127,10 @@ class NerResult:
     leaked_chars: int = 0
     outside_chars: int = 0
     over_redacted_chars: int = 0
+    # Per placeholder type: characters of its gold spans, and how many of
+    # them no detection (of any type) covers.
+    type_gold_chars: Counter[str] = field(default_factory=Counter)
+    type_leaked_chars: Counter[str] = field(default_factory=Counter)
     structured: dict[str, StructuredCounts] = field(default_factory=dict)
     neutral_detections: int = 0
     unmapped: Counter[str] = field(default_factory=Counter)
@@ -132,6 +140,10 @@ class NerResult:
     @property
     def leak_rate(self) -> float:
         return self.leaked_chars / self.gold_chars if self.gold_chars else 0.0
+
+    def type_leak_rate(self, type_name: str) -> float:
+        gold = self.type_gold_chars[type_name]
+        return self.type_leaked_chars[type_name] / gold if gold else 0.0
 
     @property
     def over_redaction_rate(self) -> float:
@@ -311,6 +323,11 @@ def score_sample(
     result.leaked_chars += gold_chars - _intersection(gold_pii, covered)
     result.outside_chars += len(sample.text) - _length(every_gold)
     result.over_redacted_chars += _length(covered) - _intersection(covered, every_gold)
+    for type_name in sorted({t for _, _, t in typed}):
+        of_type = _merged((s, e) for s, e, t in typed if t == type_name)
+        type_chars = _length(of_type)
+        result.type_gold_chars[type_name] += type_chars
+        result.type_leaked_chars[type_name] += type_chars - _intersection(of_type, covered)
     if errors is not None:
         for start, end in leak:
             if _intersection([(start, end)], covered) < end - start:
@@ -369,6 +386,17 @@ def _table(title: str, table: Mapping[str, TypeCounts]) -> list[str]:
     return [*lines, ""]
 
 
+def _type_leaks(result: NerResult) -> list[str]:
+    if not result.type_gold_chars:
+        return []
+    leaks = ", ".join(
+        f"{name} {result.type_leak_rate(name):.4f}"
+        f" ({result.type_leaked_chars[name]} of {result.type_gold_chars[name]})"
+        for name in sorted(result.type_gold_chars)
+    )
+    return [f"Character-leak rate per type: {leaks}."]
+
+
 def to_markdown(result: NerResult) -> str:
     """The metrics section of a report: counts and rates, never text."""
     lines = [
@@ -376,6 +404,7 @@ def to_markdown(result: NerResult) -> str:
         "",
         f"**Character-leak rate**: {result.leak_rate:.4f}"
         f" ({result.leaked_chars} of {result.gold_chars} gold characters uncovered).",
+        *_type_leaks(result),
         f"**Over-redaction rate**: {result.over_redaction_rate:.4f}"
         f" ({result.over_redacted_chars} of {result.outside_chars} non-gold characters"
         " detected).",
@@ -428,6 +457,14 @@ def to_json_dict(result: NerResult) -> dict[str, object]:
         "leak_rate": result.leak_rate,
         "gold_chars": result.gold_chars,
         "leaked_chars": result.leaked_chars,
+        "type_leak": {
+            name: {
+                "gold_chars": result.type_gold_chars[name],
+                "leaked_chars": result.type_leaked_chars[name],
+                "leak_rate": result.type_leak_rate(name),
+            }
+            for name in sorted(result.type_gold_chars)
+        },
         "over_redaction_rate": result.over_redaction_rate,
         "outside_chars": result.outside_chars,
         "over_redacted_chars": result.over_redacted_chars,

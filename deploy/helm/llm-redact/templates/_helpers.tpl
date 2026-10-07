@@ -26,8 +26,14 @@ app.kubernetes.io/name: {{ include "llm-redact.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/*
+The proxy image: image.variant "ner" selects the -ner tag (the hf and gliner
+NER extras on a CPU-only torch; docs/deployment.md), "" the stock image.
+*/}}
 {{- define "llm-redact.image" -}}
-{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- $variant := .Values.image.variant | default "" -}}
+{{- $suffix := ternary (printf "-%s" $variant) "" (ne $variant "") -}}
+{{- printf "%s:%s%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) $suffix -}}
 {{- end -}}
 
 {{/*
@@ -37,6 +43,15 @@ vault: with a per-pod memory/sqlite vault, replicas would issue divergent
 «TYPE_NNN» tokens and one pod could rehydrate another's secret. Fail the render.
 */}}
 {{- define "llm-redact.validate" -}}
+{{- if not (has (.Values.image.variant | default "") (list "" "ner")) -}}
+{{- fail "llm-redact: image.variant must be \"\" (the stock image) or \"ner\" (the -ner image with the hf and gliner NER extras)." -}}
+{{- end -}}
+{{- /* (.Values.models | default dict): a release made with a chart before
+the models table carries no `models` (helm upgrade --reuse-values). */ -}}
+{{- $modelsVolume := (.Values.models | default dict).volume -}}
+{{- if and $modelsVolume (not (kindIs "map" $modelsVolume)) -}}
+{{- fail "llm-redact: models.volume must be a volume source (a map such as { persistentVolumeClaim: { claimName: llm-redact-models } }) — see values.yaml." -}}
+{{- end -}}
 {{- $grace := .Values.terminationGracePeriodSeconds -}}
 {{- if not (kindIs "invalid" $grace) -}}
 {{- if not (or (kindIs "int" $grace) (kindIs "int64" $grace) (kindIs "float64" $grace)) -}}
@@ -198,6 +213,13 @@ binds 0.0.0.0 (cross-pod reach is the point) and keeps httpGet probes.
     - name: LLM_REDACT_LICENSE_KEY
       valueFrom:
         secretKeyRef: { name: {{ .Values.license.secretName | quote }}, key: license-key, optional: true }
+    {{- if (.Values.models | default dict).volume }}
+    # Models come from the read-only /models volume only: the Hugging Face
+    # libraries' own offline switches, on top of [detection.ner]
+    # allow_download (off by default).
+    - { name: HF_HUB_OFFLINE, value: "1" }
+    - { name: TRANSFORMERS_OFFLINE, value: "1" }
+    {{- end }}
     {{- with .Values.extraEnv }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -240,6 +262,9 @@ binds 0.0.0.0 (cross-pod reach is the point) and keeps httpGet probes.
   volumeMounts:
     - { name: config, mountPath: /etc/llm-redact, readOnly: true }
     - { name: redact-data, mountPath: /data }
+    {{- if (.Values.models | default dict).volume }}
+    - { name: models, mountPath: /models, readOnly: true }
+    {{- end }}
     {{- with .Values.extraVolumeMounts }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -261,6 +286,10 @@ client-ca Secret can actually be mounted — without it the chart's own
   {{- else }}
   emptyDir: {}
   {{- end }}
+{{- with (.Values.models | default dict).volume }}
+- name: models
+  {{- toYaml . | nindent 2 }}
+{{- end }}
 {{- with .Values.extraVolumes }}
 {{ toYaml . }}
 {{- end }}

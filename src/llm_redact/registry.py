@@ -28,6 +28,7 @@ from .audit_s3 import build_audit_sinks as _build_audit_sinks
 from .free_defaults import build_access_gate as _build_access_gate
 from .free_defaults import build_dashboard as _build_dashboard
 from .free_defaults import build_db_password as _build_db_password
+from .free_defaults import build_model_policy as _build_model_policy
 from .free_defaults import build_router as _build_router
 from .free_defaults import build_telemetry as _build_telemetry
 from .free_defaults import build_upload_inspector as _build_upload_inspector
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
         ConfigSection,
         Dashboard,
         DbPasswordProvider,
+        ModelPolicy,
         Router,
         SessionRouter,
         Telemetry,
@@ -107,6 +109,7 @@ class Registry:
     build_dashboard: Callable[[str], Dashboard | None]
     build_upstream_auth: Callable[[str, ProviderConfig], UpstreamAuth | None]
     build_upload_inspector: Callable[[Config, str], UploadInspector | None]
+    build_model_policy: Callable[[Config, str], ModelPolicy | None]
     tool_base_url: Callable[[str], str]
     cli_commands: list[CliCommand]
     config_sections: list[ConfigSection]
@@ -166,6 +169,14 @@ class Registry:
         # at startup with the resolved tier (its config section is the
         # plugin's own, restart-only).
         self.build_upload_inspector = _build_upload_inspector
+        # Whether an NER model may load (plugin_api.ModelPolicy: asked for
+        # every backend's model once its files are resolved, before its
+        # weights load). The Free default is None — the core holds no
+        # policy; llm-redact-pro's [models] section is one. Built once at
+        # startup with the resolved tier and used by every detector build
+        # of the process (reloads, the editor's dry run); `llm-redact
+        # preview` builds its own.
+        self.build_model_policy = _build_model_policy
         # `llm-redact run` passes the base URL it exports to wrapped tools
         # through this hook (identity-free in the core).
         self.tool_base_url = _tool_base_url

@@ -9,6 +9,7 @@ import pytest
 
 import isolation
 import mutation_limits
+import real_models
 from llm_redact.detection.engine import DetectionConfig, build_allowlist, build_detectors
 from llm_redact.redactor import Redactor
 from llm_redact.rehydrate import Rehydrator
@@ -49,6 +50,15 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_unconfigure(config: pytest.Config) -> None:
     if ISOLATION_ROOT is not None:
         shutil.rmtree(ISOLATION_ROOT, ignore_errors=True)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Any:
+    """With LLM_REDACT_TEST_REAL_MODELS_REQUIRED=1 (the CI ner-models job), a
+    real_model test that skips is a failure (tests/real_models.py)."""
+    report = yield
+    real_models.fail_required_skips(item, report, os.environ)
+    return report
 
 
 @pytest.fixture(scope="session")

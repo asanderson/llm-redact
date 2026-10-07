@@ -1,12 +1,16 @@
 %% System data flow: what leaves the machine and what never does.
 %% The dashed "Pro" boxes mark what the separately-installed llm-redact-pro
-%% package supplies: the browser dashboard and the access gate (named users,
-%% per-user keys, seats — the core has no authentication code) on your
-%% machine, and the audit log + object-store sinks; everything else is the
-%% FOSS core.
+%% package supplies: the browser dashboard, the access gate (named users,
+%% per-user keys, seats — the core has no authentication code) and offline
+%% model bundles with their AI-BOM and the [models] policy (Team and above;
+%% asked through the core's model-load policy seam) on your machine, and the
+%% audit log + object-store sinks; everything else is the FOSS core. The Hugging Face Hub edge is opt-in: NER model weights, fetched
+%% at startup only and only with allow_download (docs/detection.md "Model sources";
+%% docs/diagrams/model-supply-chain.mmd).
 %% Render: scripts/render_diagrams.sh (PNG committed next to this source).
 %% padding: the extra node padding keeps the ① label clear of the plugin box
-%% and the tool box inside "Your machine" under mermaid-cli 11.x.
+%% and the tool box inside "Your machine" under mermaid-cli 11.x; the ① and ④
+%% links are one rank longer (--->) so their labels stay clear of the plugin's.
 %% animate: the request/response flow moves; scripts/animate_diagrams.py renders the
 %% animated SVG + GIF committed next to this source (a '%% animate' marker opts in).
 %%{init: {"flowchart": {"padding": 30}}}%%
@@ -16,25 +20,31 @@ flowchart LR
         subgraph tool["Agentic tool — Claude Code, Codex CLI, OpenCode,<br/>Cursor, or anything speaking a provider API"]
             plugins["llm-redact plugin<br/>slash commands:<br/>/llm-redact:status · :recent ·<br/>:preview · :config-edit · ..."]
         end
-        proxy["llm-redact proxy<br/><br/>outbound: detection (regex rules +<br/>checksum validators, optional NER),<br/>redactor substitutes placeholders<br/><br/>inbound: rehydrator restores values,<br/>streaming-safe across chunk splits<br/>(SSE / NDJSON / eventstream / WS)"]
+        models[("NER model files — local<br/>Hugging Face cache or folders<br/>from llm-redact models pull")]
+        proxy["llm-redact proxy<br/><br/>outbound: detection (regex rules +<br/>checksum validators, optional local<br/>NER models: windowed, off the event loop),<br/>redactor substitutes placeholders<br/><br/>inbound: rehydrator restores values,<br/>streaming-safe across chunk splits<br/>(SSE / NDJSON / eventstream / WS)"]
         vault[("Vault — local only<br/>«EMAIL_001» ↔ real value<br/>in-memory or SQLite")]
         subgraph proLocal["Pro"]
             dashboard["browser dashboard<br/>/__llm-redact/ — live status,<br/>recent requests, sessions,<br/>config editor, redaction preview"]
             gate["access gate<br/>named users · per-user keys · seats ·<br/>client certificates · OIDC/SSO ·<br/>access-proxy headers · Basic/LDAP ·<br/>SCIM · llm-redact users/login/connect"]
+            bundles["model bundles + AI-BOM<br/>(Team and above):<br/>llm-redact bundle<br/>build · verify;<br/>[models] policy — allowed<br/>licenses, denied lineage,<br/>verified bundle only"]
         end
     end
     provider["LLM provider<br/>Anthropic, OpenAI, Gemini,<br/>Azure, Vertex, Bedrock, Ollama,<br/>Cohere, custom upstreams<br/>(/custom/NAME: vLLM, LM Studio, ...)"]
+    hub["Hugging Face Hub<br/>(NER model weights)"]
     subgraph pro["Pro"]
         s3[("audit log + object-store sinks<br/>[audit.s3] aws / MinIO / Ceph / GCS,<br/>[audit.azure] Azure Blob — default off;<br/>metadata rows only")]
     end
 
-    tool -- "① request<br/>(may contain secrets)" --> proxy
+    tool -- "① request<br/>(may contain secrets)" ---> proxy
     proxy == "② placeholders only" ==> provider
     provider == "③ response with<br/>placeholders" ==> proxy
-    proxy -- "④ restored response" --> tool
+    proxy -- "④ restored response" ---> tool
     vault -. "issue deterministic tokens,<br/>reverse lookups" .- proxy
+    models -. "loaded at startup: local,<br/>pinned, no model code" .- proxy
+    proxy -. "startup only, opt-in<br/>(allow_download): pinned<br/>model weights; never<br/>request content" .-> hub
     dashboard -. "local ops only: metadata<br/>APIs + guarded config /<br/>preview POSTs" .- proxy
     gate -. "admits or refuses each<br/>request before routing" .- proxy
+    bundles -. "verified bundle folders;<br/>[models] asked before<br/>each model loads" .- models
     plugins -. "local ops only: status,<br/>recent, preview, guarded<br/>config-edit" .- proxy
     proxy -. "audit rows, batched (opt-in):<br/>types + counts, paths, durations —<br/>never values" .-> s3
 
@@ -45,8 +55,8 @@ flowchart LR
     classDef toolBox fill:#ffffff,stroke:#57606a,stroke-width:1px;
     classDef proBox fill:none,stroke:#8250df,stroke-width:1.5px,stroke-dasharray:6 4;
     class machine boundary;
-    class vault vaultBox;
-    class provider,s3 upstream;
-    class plugins,dashboard,gate pluginBox;
+    class vault,models vaultBox;
+    class provider,s3,hub upstream;
+    class plugins,dashboard,gate,bundles pluginBox;
     class tool toolBox;
     class pro,proLocal proBox;

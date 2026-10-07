@@ -36,7 +36,13 @@ CLI-tag path, so write the release notes yourself in the UI).
 
 - **GitHub Release** `vX.Y.Z` with `llm_redact_proxy-X.Y.Z.tar.gz` and
   `llm_redact_proxy-X.Y.Z-py3-none-any.whl` attached and auto-generated notes.
-- **GHCR image** `ghcr.io/asanderson/llm-redact:X.Y.Z` and `:X.Y`.
+- **GHCR images** `ghcr.io/asanderson/llm-redact:X.Y.Z` and `:X.Y`, and the
+  `-ner` variant `:X.Y.Z-ner` and `:X.Y-ner` (the `hf` and `gliner` NER
+  extras on a CPU-only torch; one `publish-ghcr` job each, so a failed `-ner`
+  build never holds back the stock image). The Release also carries the
+  `-ner` image's closure as `llm-redact-ner-image.cdx.json`. The CI
+  `container-ner` job builds the variant on every push, so a broken `-ner`
+  build shows before a tag does.
 - **PyPI release** `llm-redact-proxy X.Y.Z` via trusted publishing (OIDC, no
   stored secrets) — **held while the repository is private**: the
   `publish-pypi` job self-skips on private repos, because publishing the

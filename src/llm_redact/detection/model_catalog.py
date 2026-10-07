@@ -102,6 +102,24 @@ MAX_SIDECAR_BYTES = 64 * 1024
 
 # The reason a configurable model carries until the bench has measured it.
 UNMEASURED = "not yet measured by the llm-redact bench"
+# The day the llm-redact bench measured the models whose reasons quote it
+# (docs/ner-landscape.md, "PII models measured by the llm-redact bench").
+MEASURED = "2026-10-07"
+
+
+def measured(recall: float, leak: float, false_positives: float, p50_ms: float) -> str:
+    """The bench's numbers as a catalog reason states them (owner decision
+    D11: a model that misses an admission bar stays "caution", with its
+    numbers shown). Measured with the model's recommended entities the
+    synthetic corpus labels: PERSON recall and the character-leak rate on
+    the synthetic corpus, the false positives per 50 KB of the agent-traffic
+    negatives, and the full pipeline's p50 for a 500-character string."""
+    return (
+        f"llm-redact bench {MEASURED}: synthetic-corpus PERSON recall {recall:.2f}, character"
+        f" leak {leak:.2f}; {false_positives:.0f} false positives per 50 KB of agent-traffic"
+        f" negatives; p50 {p50_ms:.0f} ms per 500 characters"
+    )
+
 
 # The seven contextual types a PII model is recommended for (structured
 # types stay with the regex rules: models draw wider spans, and the longest
@@ -232,6 +250,7 @@ def _knowledgator(
     *,
     onnx_files: tuple[str, ...] = _ONNX_ALL,
     min_versions: tuple[tuple[str, str], ...] = (),
+    bench: str = UNMEASURED,
 ) -> CatalogEntry:
     return CatalogEntry(
         model_id=f"knowledgator/gliner-pii-{size}-v1.0",
@@ -239,9 +258,9 @@ def _knowledgator(
         license="Apache-2.0",
         status="caution",
         reason=(
-            f"Apache-2.0; backbone {backbone}; the card does not name the training"
-            f" data; {UNMEASURED}"
+            f"Apache-2.0; backbone {backbone}; the card does not name the training data; {bench}"
         ),
+        checked="2026-10-07",
         revision=revision,
         backbone=backbone,
         attribution="GLiNER-PII by Knowledgator and Wordcab (Apache-2.0)",
@@ -325,13 +344,18 @@ CATALOG: tuple[CatalogEntry, ...] = (
         attribution="urchade/gliner_multi_pii-v1 (Apache-2.0); GLiNER, arXiv:2311.08526",
         recommended_entities=_CONTEXTUAL,
     ),
-    # --- caution: configurable, not yet measured (owner decision D13) -----
+    # --- caution: configurable (owner decision D13); -edge and -base measured
+    # by the bench below every D11 bar but agent-traffic false positives
+    # (-base: latency too); -small and -large not yet measured ----------
     _knowledgator(
         # main since 2026-03-26 (README edit).
         "edge",
         "9b7f39b0a2da971a5beea78d35f1539d4009c891",
         "jhu-clsp/ettin-encoder-32m",
         min_versions=_MODERNBERT,
+        # PyTorch weights; the int8 ONNX export measures lower (PERSON
+        # recall 0.77, leak 0.27: docs/ner-landscape.md).
+        bench=measured(recall=0.99, leak=0.08, false_positives=109, p50_ms=93),
     ),
     _knowledgator(
         # main since 2025-09-27.
@@ -345,6 +369,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         "base",
         "61726e0ad791dcab3e29339bbec3ad42ded65641",
         "microsoft/deberta-v3-small",
+        # PyTorch weights; the int8 ONNX export: PERSON recall 0.96, leak
+        # 0.03, 13 false positives per 50 KB, p50 182 ms.
+        bench=measured(recall=0.97, leak=0.02, false_positives=8, p50_ms=234),
     ),
     _knowledgator(
         # main since 2026-05-07 (README edit); ships no fp16 ONNX file.

@@ -347,7 +347,9 @@ jobs:
     # a failure instead of a green run that tested nothing.
     name: ner models (real-model tests + NER bench gates)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Each bench configuration costs about 3 to 10 minutes (synthetic
+    # corpus, negatives corpus, latency) on a 4-core runner.
+    timeout-minutes: 150
     env:
       LLM_REDACT_TEST_REAL_MODELS_REQUIRED: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"

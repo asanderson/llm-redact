@@ -1,0 +1,19 @@
+# NER bench configuration "gliner-knowledgator-base-onnx" (docs/ner-bench.md):
+# the gliner backend with knowledgator/gliner-pii-base-v1.0 at its catalog
+# pin, from its int8 ONNX export (onnx/model_quint8.onnx, through onnxruntime;
+# no other weight file is fetched), asked for the five contextual types the
+# synthetic corpus labels (the catalog sends each the prompt the model was
+# trained on: "name" for PERSON). Scored in CI by the ner-models job against
+# bench/ner_thresholds.toml [gliner-knowledgator-base-onnx.*] and
+# bench/ner_ceilings.toml [gliner-knowledgator-base-onnx]; the numbers and the
+# catalog status they give are in docs/ner-landscape.md. Downloads stay off:
+# the job pulls the model first (`llm-redact models pull --config` on this
+# file).
+[detection.ner]
+enabled = true
+backend = "gliner"
+model = "knowledgator/gliner-pii-base-v1.0"
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
+
+[detection.ner.onnx]
+gliner = "onnx/model_quint8.onnx"

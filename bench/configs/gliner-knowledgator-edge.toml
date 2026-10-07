@@ -1,0 +1,16 @@
+# NER bench configuration "gliner-knowledgator-edge" (docs/ner-bench.md): the
+# gliner backend with knowledgator/gliner-pii-edge-v1.0 at its catalog pin,
+# from its PyTorch weights (pytorch_model.bin, read with torch's weights_only
+# loader), asked for the five contextual types the synthetic corpus labels
+# (the catalog sends each the prompt the model was trained on: "name" for
+# PERSON). Scored in CI by the ner-models job against
+# bench/ner_thresholds.toml [gliner-knowledgator-edge.*] and
+# bench/ner_ceilings.toml [gliner-knowledgator-edge]; the numbers and the
+# catalog status they give are in docs/ner-landscape.md. Downloads stay off:
+# the job pulls the model first (`llm-redact models pull --config` on this
+# file).
+[detection.ner]
+enabled = true
+backend = "gliner"
+model = "knowledgator/gliner-pii-edge-v1.0"
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]

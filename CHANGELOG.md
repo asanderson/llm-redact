@@ -12,6 +12,16 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- Knowledgator's GLiNER-PII models measured by the NER bench (docs/ner-landscape.md, "PII
+  models measured by the llm-redact bench"): `bench/configs/gliner-knowledgator-edge.toml`,
+  `-edge-onnx.toml`, `-base.toml` and `-base-onnx.toml` (the PyTorch weights and the int8 ONNX
+  export, asked for `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and `ACCOUNT_NUMBER`) with
+  recorded baselines in `bench/ner_thresholds.toml` and `bench/ner_ceilings.toml`, gated by the
+  `ner-models` CI job. Their catalog reasons quote the numbers; `-edge` and `-base` stay
+  "caution" (agent-traffic false positives above the admission bar; `-base` above 100 ms per
+  500 characters too). docs/detection.md gains "Choosing a GLiNER model": a working
+  Knowledgator configuration (ONNX included), what each measured, and Presidio's GLiNER
+  default `urchade/gliner_multi_pii-v1`. The `gliner` default model is unchanged.
 - A model-load policy seam for plugin packages: `Registry.build_model_policy(config, tier)`
   builds a `plugin_api.ModelPolicy` once at startup (the Free default builds none, so nothing
   changes without a plugin), and every detector build — the startup, a reload, the config
@@ -366,6 +376,13 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The prompts the model catalog records for a GLiNER model (the label text the model was
+  trained on) never reached the model: every GLiNER and GLiNER2 model was asked for the generic
+  prompts ("person", "street address", …). A type request now sends the catalogued model's own
+  prompt — Knowledgator's GLiNER-PII models are asked for "name", "location address", "dob",
+  … — and a model folder takes the prompts of the model its `llm-redact-model.json` names.
+  Measured on the synthetic corpus, `knowledgator/gliner-pii-edge-v1.0` (int8 ONNX) found 0.27
+  of the names with "person" and 0.77 with "name".
 - The `presidio` NER backend no longer reaches the network: Presidio's email check asks
   tldextract about each address's domain, and tldextract fetched the Public Suffix List from
   publicsuffix.org (then GitHub) on its first use — on a request — and cached it under

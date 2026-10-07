@@ -256,6 +256,7 @@ class LabelPolicy:
         "entities",
         "fold_raw",
         "overrides",
+        "prompt_overrides",
         "prompt_types",
         "prompts",
         "raw_requested",
@@ -269,6 +270,7 @@ class LabelPolicy:
         backend: str = "",
         overrides: Mapping[str, str] | Iterable[tuple[str, str]] = (),
         fold_raw: bool | None = None,
+        prompts: Mapping[str, str] | Iterable[tuple[str, str]] = (),
     ) -> None:
         self.backend = backend
         self.entities = tuple(entities)
@@ -277,6 +279,12 @@ class LabelPolicy:
         self.overrides: Mapping[str, str] = MappingProxyType(
             {normalize_label(label): type_name for label, type_name in pairs}
         )
+        # A zero-shot model's own prompts (the model catalog's `prompts`:
+        # placeholder type -> the label text the model was trained on, such
+        # as "name" for PERSON), sent for a type request instead of the
+        # generic gliner_prompt.
+        prompt_pairs = prompts.items() if isinstance(prompts, Mapping) else prompts
+        self.prompt_overrides: Mapping[str, str] = MappingProxyType(dict(prompt_pairs))
         requested: set[str] = set()
         raw_requested: set[str] = set()
         # GLiNER prompts: a type request's natural-language prompt first,
@@ -291,7 +299,8 @@ class LabelPolicy:
                 type_name = self.fold(label)
                 if type_name:
                     requested.add(type_name)
-                    prompt_types.setdefault(gliner_prompt(label), type_name)
+                    prompt = self.prompt_overrides.get(label) or gliner_prompt(label)
+                    prompt_types.setdefault(prompt, type_name)
                 continue
             raw_prompts.setdefault(entity, None)
             if not self.fold_raw and label not in self.overrides:

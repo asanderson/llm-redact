@@ -92,3 +92,206 @@ PERSON = 10
 
 [gliner-default."synthetic_runbook.md"]
 PERSON = 3
+
+# Measured 2026-10-07 (same environment as bench/ner_thresholds.toml's
+# 2026-10-07 baselines), same rounding.
+
+[gliner-knowledgator-edge]
+recorded = "2026-10-07"
+note = "knowledgator/gliner-pii-edge-v1.0 at 9b7f39b0a2da971a5beea78d35f1539d4009c891, PyTorch weights; measured 372 NER detections in 269437 bytes, 138.07 per 100 KB"
+per_100kb_max = 145.0
+
+[gliner-knowledgator-edge."README.md"]
+PERSON = 3
+USERNAME = 9
+
+[gliner-knowledgator-edge."gutenberg_prose.txt"]
+PERSON = 130
+USERNAME = 44
+
+[gliner-knowledgator-edge."rfc_excerpt.txt"]
+ADDRESS = 5
+PERSON = 5
+
+[gliner-knowledgator-edge."sqlite_excerpt.c"]
+ACCOUNT_NUMBER = 25
+DATE_OF_BIRTH = 2
+PERSON = 2
+USERNAME = 34
+
+[gliner-knowledgator-edge."synthetic_agent_tool_results.json"]
+USERNAME = 15
+
+[gliner-knowledgator-edge."synthetic_agentstack.env"]
+USERNAME = 4
+
+[gliner-knowledgator-edge."synthetic_app.log"]
+ACCOUNT_NUMBER = 5
+USERNAME = 2
+
+[gliner-knowledgator-edge."synthetic_bigint.log"]
+ACCOUNT_NUMBER = 11
+
+[gliner-knowledgator-edge."synthetic_ci_log.txt"]
+USERNAME = 11
+
+[gliner-knowledgator-edge."synthetic_code.py"]
+ACCOUNT_NUMBER = 5
+USERNAME = 11
+
+[gliner-knowledgator-edge."synthetic_config.yaml"]
+ACCOUNT_NUMBER = 4
+PERSON = 2
+USERNAME = 11
+
+[gliner-knowledgator-edge."synthetic_eu_document.txt"]
+ACCOUNT_NUMBER = 10
+ADDRESS = 2
+USERNAME = 2
+
+[gliner-knowledgator-edge."synthetic_git_log.txt"]
+USERNAME = 11
+
+[gliner-knowledgator-edge."synthetic_k8s.yaml"]
+USERNAME = 2
+
+[gliner-knowledgator-edge."synthetic_natids_r10.log"]
+ACCOUNT_NUMBER = 11
+USERNAME = 2
+
+[gliner-knowledgator-edge."synthetic_netdebug.log"]
+USERNAME = 4
+
+[gliner-knowledgator-edge."synthetic_python_module.py"]
+USERNAME = 9
+
+[gliner-knowledgator-edge."synthetic_runbook.md"]
+USERNAME = 10
+
+[gliner-knowledgator-edge."synthetic_terraform.tf"]
+USERNAME = 7
+
+[gliner-knowledgator-edge."synthetic_web3.ts"]
+USERNAME = 5
+
+[gliner-knowledgator-edge-onnx]
+recorded = "2026-10-07"
+note = "knowledgator/gliner-pii-edge-v1.0 at 9b7f39b0a2da971a5beea78d35f1539d4009c891, onnx/model_quint8.onnx; measured 28 NER detections in 269437 bytes, 10.39 per 100 KB"
+per_100kb_max = 11.0
+
+[gliner-knowledgator-edge-onnx."README.md"]
+PERSON = 2
+
+[gliner-knowledgator-edge-onnx."gutenberg_prose.txt"]
+USERNAME = 4
+
+[gliner-knowledgator-edge-onnx."rfc_excerpt.txt"]
+ADDRESS = 2
+
+[gliner-knowledgator-edge-onnx."sqlite_excerpt.c"]
+ACCOUNT_NUMBER = 9
+PERSON = 2
+USERNAME = 2
+
+[gliner-knowledgator-edge-onnx."synthetic_agent_tool_results.json"]
+ACCOUNT_NUMBER = 2
+USERNAME = 2
+
+[gliner-knowledgator-edge-onnx."synthetic_bigint.log"]
+ACCOUNT_NUMBER = 4
+
+[gliner-knowledgator-edge-onnx."synthetic_ci_log.txt"]
+ACCOUNT_NUMBER = 2
+USERNAME = 4
+
+[gliner-knowledgator-edge-onnx."synthetic_code.py"]
+ACCOUNT_NUMBER = 3
+
+[gliner-knowledgator-edge-onnx."synthetic_k8s.yaml"]
+ADDRESS = 2
+
+[gliner-knowledgator-edge-onnx."synthetic_terraform.tf"]
+USERNAME = 2
+
+[gliner-knowledgator-base]
+recorded = "2026-10-07"
+note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, PyTorch weights; measured 205 NER detections in 269437 bytes, 76.08 per 100 KB"
+per_100kb_max = 80.0
+
+[gliner-knowledgator-base."README.md"]
+PERSON = 4
+
+[gliner-knowledgator-base."gutenberg_prose.txt"]
+PERSON = 168
+
+[gliner-knowledgator-base."rfc_excerpt.txt"]
+PERSON = 24
+
+[gliner-knowledgator-base."sqlite_excerpt.c"]
+ACCOUNT_NUMBER = 2
+DATE_OF_BIRTH = 4
+
+[gliner-knowledgator-base."synthetic_app.log"]
+ACCOUNT_NUMBER = 2
+
+[gliner-knowledgator-base."synthetic_config.yaml"]
+ACCOUNT_NUMBER = 2
+USERNAME = 2
+
+[gliner-knowledgator-base."synthetic_eu_document.txt"]
+ACCOUNT_NUMBER = 8
+ADDRESS = 2
+
+[gliner-knowledgator-base."synthetic_natids_r10.log"]
+USERNAME = 2
+
+[gliner-knowledgator-base."synthetic_netdebug.log"]
+USERNAME = 2
+
+[gliner-knowledgator-base."synthetic_python_module.py"]
+PERSON = 4
+
+[gliner-knowledgator-base-onnx]
+recorded = "2026-10-07"
+note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, onnx/model_quint8.onnx; measured 250 NER detections in 269437 bytes, 92.79 per 100 KB"
+per_100kb_max = 98.0
+
+[gliner-knowledgator-base-onnx."README.md"]
+PERSON = 2
+
+[gliner-knowledgator-base-onnx."gutenberg_prose.txt"]
+PERSON = 238
+USERNAME = 3
+
+[gliner-knowledgator-base-onnx."rfc_excerpt.txt"]
+PERSON = 8
+
+[gliner-knowledgator-base-onnx."sqlite_excerpt.c"]
+ACCOUNT_NUMBER = 2
+DATE_OF_BIRTH = 2
+PERSON = 2
+
+[gliner-knowledgator-base-onnx."synthetic_agent_tool_results.json"]
+USERNAME = 2
+
+[gliner-knowledgator-base-onnx."synthetic_app.log"]
+USERNAME = 2
+
+[gliner-knowledgator-base-onnx."synthetic_ci_log.txt"]
+ACCOUNT_NUMBER = 3
+USERNAME = 2
+
+[gliner-knowledgator-base-onnx."synthetic_config.yaml"]
+ACCOUNT_NUMBER = 2
+
+[gliner-knowledgator-base-onnx."synthetic_eu_document.txt"]
+ACCOUNT_NUMBER = 3
+
+[gliner-knowledgator-base-onnx."synthetic_natids_r10.log"]
+USERNAME = 2
+
+[gliner-knowledgator-base-onnx."synthetic_python_module.py"]
+PERSON = 2
+
+[gliner-knowledgator-base-onnx."synthetic_runbook.md"]
+USERNAME = 2

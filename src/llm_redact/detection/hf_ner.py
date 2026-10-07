@@ -370,15 +370,9 @@ class TaggerPipe:
 def _catalog_entry(model: str) -> "CatalogEntry | None":
     """The model catalog's ``hf`` entry for ``model`` (a Hub id, or a local
     directory its sidecar file identifies); None when there is none."""
-    from llm_redact.config import ConfigError
-    from llm_redact.detection.model_catalog import SidecarError, identify, lookup
+    from llm_redact.detection.model_files import catalog_entry
 
-    try:
-        identity = identify(model)
-    except SidecarError as exc:
-        raise ConfigError(f"[detection.ner] hf model: {exc}") from exc
-    entry = lookup(identity.model_id) if identity is not None else None
-    return entry if entry is not None and "hf" in entry.backends else None
+    return catalog_entry(model, "hf")
 
 
 def catalog_window(model: str) -> int | None:

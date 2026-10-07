@@ -26,6 +26,7 @@ from llm_redact.detection.model_catalog import (
     HUB_BACKENDS,
     LINEAGE_TAGS,
     MAX_SIDECAR_BYTES,
+    MEASURED,
     MODEL_ID_RE,
     REVISION_RE,
     SIDECAR_NAME,
@@ -37,6 +38,7 @@ from llm_redact.detection.model_catalog import (
     SidecarError,
     identify,
     lookup,
+    measured,
     pinned_revision,
     read_sidecar,
     sidecar_text,
@@ -226,8 +228,8 @@ def test_section_4_6_statuses() -> None:
         "urchade/gliner_multi-v2.1",
         "urchade/gliner_multi_pii-v1",
     }
-    # Not yet measured by the bench: the Knowledgator sizes and the gliner2
-    # backend's default model.
+    # Configurable, below a D11 bar or not yet measured: the Knowledgator
+    # sizes and the gliner2 backend's default model.
     assert caution == {*_KNOWLEDGATOR, "fastino/gliner2-base-v1"}
     restricted = {e.model_id for e in CATALOG if e.status == "restricted"}
     assert {
@@ -282,7 +284,12 @@ def test_knowledgator_gliner_pii_is_a_configurable_option(model_id: str) -> None
     entry = lookup(model_id)
     assert entry is not None
     assert entry.status == "caution"
-    assert UNMEASURED in entry.reason
+    # -edge and -base carry their bench numbers (D11: caution, with the
+    # numbers shown); -small and -large are not yet measured.
+    if model_id.split("-")[-2] in ("edge", "base"):
+        assert f"llm-redact bench {MEASURED}: synthetic-corpus PERSON recall" in entry.reason
+    else:
+        assert UNMEASURED in entry.reason
     assert entry.revision is not None
     # Self-contained checkpoints: no backbone snapshot to pin.
     assert entry.backbone is not None
@@ -592,3 +599,11 @@ def test_an_unpinned_backend_view_carries_no_revision(monkeypatch: pytest.Monkey
     assert seen["hf"].model == "org/private-model"
     assert seen["hf"].revisions == ()
     assert seen["hf"].revision_for("hf") is None
+
+
+def test_a_measured_reason_quotes_the_bench() -> None:
+    assert measured(recall=0.991, leak=0.0821, false_positives=108.6, p50_ms=92.7) == (
+        "llm-redact bench 2026-10-07: synthetic-corpus PERSON recall 0.99, character leak"
+        " 0.08; 109 false positives per 50 KB of agent-traffic negatives; p50 93 ms per 500"
+        " characters"
+    )

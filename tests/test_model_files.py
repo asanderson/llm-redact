@@ -812,6 +812,46 @@ def test_onnx_weights_load_through_gliner_and_only_they_are_fetched(
     }
 
 
+# --- the prompts a catalogued GLiNER model was trained on -------------------------
+
+KNOWLEDGATOR_EDGE = "knowledgator/gliner-pii-edge-v1.0"
+
+
+def test_a_catalogued_gliner_model_is_sent_the_prompts_it_was_trained_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Knowledgator's checkpoints were trained on "name" for people, not on
+    # the generic "person": the catalog's prompts reach the model.
+    hub = FakeHub(repos={KNOWLEDGATOR_EDGE: SELF_CONTAINED}, default=None)
+    _, detector = _gliner(
+        monkeypatch, hub, model=KNOWLEDGATOR_EDGE, entities=("PERSON", "ADDRESS", "EMAIL")
+    )
+    assert detector.label_policy.prompts == ("name", "location address", "email address")
+    assert detector.label_policy.classify_gliner("name") == "PERSON"
+
+
+def test_a_folder_takes_the_prompts_of_the_model_its_sidecar_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sidecar = json.dumps({"model_id": KNOWLEDGATOR_EDGE})
+    folder = _folder(tmp_path, {**SELF_CONTAINED, SIDECAR_NAME: sidecar})
+    _, detector = _gliner(monkeypatch, FakeHub(default=None), model=str(folder))
+    assert detector.label_policy.prompts == ("name",)
+
+
+def test_an_uncatalogued_gliner_model_is_sent_the_generic_prompts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    hub = FakeHub(repos={"org/gliner-pii": SELF_CONTAINED}, default=None)
+    _, detector = _gliner(monkeypatch, hub, model="org/gliner-pii", entities=("PERSON",))
+    assert detector.label_policy.prompts == ("person",)
+    # A folder without a sidecar is no catalogued model either.
+    _, local = _gliner(
+        monkeypatch, FakeHub(default=None), model=str(_folder(tmp_path, SELF_CONTAINED))
+    )
+    assert local.label_policy.prompts == ("person",)
+
+
 def test_an_assembled_folder_carries_the_onnx_file(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = {**URCHADE_REPO, "onnx/model.onnx": "onnx"}
     strict, _ = _gliner(

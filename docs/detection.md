@@ -294,9 +294,17 @@ that ships no tokenizer, the base model and the commit that base model is
 pinned to. The catalog only states facts; llm-redact never refuses a model
 for its catalog status (a policy plugin may).
 
-- **vetted**: a known-good choice, pinned to a commit.
+- **vetted**: a known-good choice, pinned to a commit. A model the
+  llm-redact bench measures is vetted only when it clears every admission
+  bar: an OSI-approved weights license and no known restricted
+  training-data lineage, PERSON recall of at least 0.85 and a character
+  leak of at most 0.15 on the synthetic corpus, at most one false positive
+  per 50 KB of agent-traffic negatives, and a p50 of at most 100 ms per
+  500-character string ([CONTRIBUTING.md](CONTRIBUTING.md#adding-an-ner-model-or-backend),
+  step 6).
 - **caution**: configurable and pinned, with the reason shown — for example,
-  not yet measured by the llm-redact bench.
+  not yet measured by the llm-redact bench, or measured below a bar (the
+  reason then quotes the numbers).
 - **restricted**: never suggested. A configured restricted model logs a
   startup WARNING with the catalog's facts:
   `[detection.ner] BACKEND model 'ID' has model catalog status "restricted": …`.
@@ -325,11 +333,14 @@ The defaults are `urchade/gliner_small-v2.1` (`gliner`) and
 is listed under caution below. A base model is pinned where the GLiNER
 checkpoint ships no tokenizer or encoder configuration of its own.
 
-Configurable, status caution (`not yet measured by the llm-redact bench`;
-their cards do not name the training data): Knowledgator's GLiNER-PII models
-and the `gliner2` backend's default, `fastino/gliner2-base-v1`. Each ships its
-tokenizer and encoder configuration, so no base model is fetched; the
-Knowledgator `-edge` and `-small` need transformers 4.48 or newer:
+Configurable, status caution (their cards do not name the training data):
+Knowledgator's GLiNER-PII models — `-edge` and `-base` with the bench numbers
+that keep them below the "vetted" bars (see "Choosing a GLiNER model" below),
+`-small` and `-large` not yet measured by the llm-redact bench — and the
+`gliner2` backend's default, `fastino/gliner2-base-v1`, not yet measured.
+Each ships its tokenizer and encoder configuration, so no base model is
+fetched; the Knowledgator `-edge` and `-small` need transformers 4.48 or
+newer:
 
 <!-- model-catalog:caution -->
 | Model | Backend | License | Pinned revision | Base model (pinned revision) |
@@ -362,6 +373,75 @@ Restricted (a startup WARNING names the facts; no pin):
 `*` marks an id prefix: every model whose id starts with it. The reasons, with
 their links and check dates, are what the startup warning, `doctor` and
 `llm-redact models list --json` print.
+
+### Choosing a GLiNER model
+
+The `gliner` backend loads `urchade/gliner_small-v2.1` unless
+`[detection.ner.models] gliner` names another model. Knowledgator's
+GLiNER-PII models (`knowledgator/gliner-pii-edge-v1.0`, `-small-`, `-base-`,
+`-large-v1.0`, Apache-2.0, developed with Wordcab) are GLiNER checkpoints
+trained on PII labels; each ships its own tokenizer and encoder
+configuration, so nothing beyond the checkpoint is fetched, and an int8
+ONNX export of each can be loaded instead of the PyTorch weights. The
+catalog records the prompt each was trained on and llm-redact sends it for
+a type request: "name" for `PERSON` (the generic prompt is "person"),
+"location address" for `ADDRESS`, "dob" for `DATE_OF_BIRTH`, "passport
+number", "driver license", "username" and "account number".
+`urchade/gliner_multi_pii-v1` (Apache-2.0, multilingual) is the default
+model of Presidio's own GLiNER recognizer; it is in the catalog but not
+measured here.
+
+A working configuration (fetch the model once with `llm-redact models
+pull`, then start; downloads stay off):
+
+```toml
+[detection.ner]
+enabled = true
+backend = "gliner"
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
+
+[detection.ner.models]
+gliner = "knowledgator/gliner-pii-base-v1.0"
+
+[detection.ner.onnx]
+gliner = "onnx/model_quint8.onnx"   # the int8 export; leave the table out for the PyTorch weights
+```
+
+What the NER bench measured (2026-10-07, one shared 4-core
+`Intel(R) Xeon(R) Processor @ 2.80GHz`, threshold 0.5; the synthetic corpus
+with the five entities above requested; false positives are NER detections
+the rules alone do not make in the four agent-traffic files of
+`bench/fp_corpus`, 19,808 bytes; p50 is the whole pipeline per
+500-character string; [ner-bench.md](ner-bench.md) explains each metric,
+[ner-landscape.md](ner-landscape.md#pii-models-measured-by-the-llm-redact-bench)
+has the full record):
+
+| Model (weights) | PERSON recall | Character leak | Over-redaction | Agent-traffic false positives per 50 KB | p50, 500 characters |
+|---|---|---|---|---|---|
+| `urchade/gliner_small-v2.1` (the default) | 0.79 | 0.05 | 0.050 | 34 | 189 ms |
+| `knowledgator/gliner-pii-edge-v1.0` (PyTorch) | 0.99 | 0.08 | 0.100 | 109 | 93 ms |
+| `knowledgator/gliner-pii-edge-v1.0` (int8 ONNX) | 0.77 | 0.27 | 0.050 | 16 | 97 ms |
+| `knowledgator/gliner-pii-base-v1.0` (PyTorch) | 0.97 | 0.02 | 0.055 | 8 | 234 ms |
+| `knowledgator/gliner-pii-base-v1.0` (int8 ONNX) | 0.96 | 0.03 | 0.028 | 13 | 182 ms |
+
+- `-base` leaks the least of the five types and draws the fewest false
+  positives on agent traffic; its int8 export keeps that at about three
+  quarters of the PyTorch latency. `-edge` is the fast one, but its int8
+  export loses a quarter of the names (PERSON recall 0.99 → 0.77).
+- Most false positives on agent traffic are `USERNAME` (identifiers and
+  commit authors' handles read as user names). Asked for `PERSON` only,
+  `-edge` (PyTorch) finds every name of the corpus and makes no detection
+  in the agent-traffic files.
+- Knowledgator's card suggests a threshold of 0.3: on the int8 exports it
+  raises recall (`-base` PERSON 0.998, leak 0.003) and the false positives
+  with it (from 13 to 57 per 50 KB for `-base`, from 16 to 114 for
+  `-edge`), and on `-edge` it costs four email addresses their exact
+  match (a wider model span over the address wins the overlap).
+
+None of them meets every bar of the catalog's "vetted" status (agent-traffic
+false positives above one per 50 KB; `-base` above 100 ms too), so they stay
+"caution" with these numbers in their catalog reasons; the default model is
+unchanged. `-small` and `-large` are not measured yet.
 
 ### Model-load policies (plugins)
 
@@ -635,7 +715,11 @@ language for a type request (`PERSON` → "person", `ADDRESS` → "street addres
 `DATE_OF_BIRTH` → "date of birth", `PASSPORT` → "passport number",
 `DRIVER_LICENSE` → "driver license number", `USERNAME` → "username",
 `ACCOUNT_NUMBER` → "account number", `EMAIL` → "email address", `PHONE` →
-"phone number"; other built-in types send their name in lowercase words).
+"phone number"; other built-in types send their name in lowercase words) —
+unless the model catalog records the prompt the loaded model was trained on
+for that type, which is sent instead (Knowledgator's GLiNER-PII models are
+asked for "name", not "person": "Choosing a GLiNER model" above). A model
+folder takes the prompts of the model its `llm-redact-model.json` names.
 
 **Raw requests.** Any other entry (`PER`, `ORG`, `"job title"`) is a raw
 request: GLiNER and GLiNER2 are sent the text as written, and the backend emits the label's

@@ -60,6 +60,104 @@ snapshot; the conclusions, not the version numbers, are the deliverable).
    accuracy, or runtime-class bars without adding coverage the first two
    don't.
 
+## PII models measured by the llm-redact bench
+
+Dated decision record (2026-10-07) of the open PII models measured with the
+NER bench ([ner-bench.md](ner-bench.md)) and the catalog status each was
+given ([detection.md](detection.md#the-model-catalog)). Every number comes
+from one shared machine: an `Intel(R) Xeon(R) Processor @ 2.80GHz` with 4
+cores (other work ran beside some of the accuracy runs, never beside a
+latency run), torch 2.13.0 (CPU build), transformers 5.10.1, gliner 0.2.28,
+models loaded offline at their catalog pins, `score_threshold` 0.5 unless a
+row says otherwise. Accuracy numbers are deterministic for a model and
+revision; latency is this machine's.
+
+**The admission bar ("vetted", owner decision D11).** An OSI-approved
+weights license and no known restricted training-data lineage (undisclosed
+training data is stated as a fact, not disqualifying); on the synthetic
+corpus PERSON recall ≥ 0.85 and a character-leak rate ≤ 0.15; at most one
+false positive per 50 KB on the agent-traffic negatives; p50 ≤ 100 ms for a
+500-character string. A model that misses a bar stays "caution", with its
+numbers in its catalog reason. How each is measured here:
+
+- each model runs with its recommended entities that the synthetic corpus
+  labels (`PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME`,
+  `ACCOUNT_NUMBER`; fewer when the model recommends fewer), so the
+  character-leak rate covers what the model is asked for plus the corpus's
+  `EMAIL` and `PHONE` values, which the rules find;
+- false positives are the NER detections the rules alone do not make in the
+  four agent-traffic files of `bench/fp_corpus`
+  (`synthetic_agent_tool_results.json`, `synthetic_git_log.txt`,
+  `synthetic_ci_log.txt`, `synthetic_python_module.py`; 19,808 bytes),
+  scaled to 50 KB (51,200 bytes). "Whole corpus" is every file of
+  `bench/fp_corpus` per 100 KB, real names included (a novel, an RFC's
+  authors), so it is not a false-positive rate;
+- latency is the whole pipeline's p50 per 500-character string
+  (`--latency`).
+
+The two default models, measured the same way for comparison (their
+recorded baselines request `PERSON` only):
+
+| Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
+|---|---|---|---|---|---|---|---|
+| `urchade/gliner_small-v2.1`, `PERSON` (`gliner-default`) | 1.000 (1.000) | 0.639 | 0.324 | 0.015 | 52 | 448 | 189 ms |
+| `urchade/gliner_small-v2.1`, five types | 0.791 (0.791) | 0.916 | 0.049 | 0.050 | 34 | 457 | — |
+| `dslim/bert-base-NER`, `PERSON` (`hf-default`) | 0.974 (0.951) | 0.913 | 0.398 | 0.003 | 0 | 210 | 176 ms |
+
+### Knowledgator GLiNER-PII (`gliner`)
+
+`knowledgator/gliner-pii-{edge,small,base,large}-v1.0` (Apache-2.0,
+Knowledgator with Wordcab, created 2025-09-24; the card does not name the
+training data). Self-contained checkpoints with int8 ONNX exports. Measured
+with the prompts the card lists ("name", "location address", "dob",
+"username", "account number"); before this measurement llm-redact sent the
+generic prompts ("person", …), with which `-edge` (int8) found 0.27 of the
+names instead of 0.77.
+
+| Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
+|---|---|---|---|---|---|---|---|
+| `-edge`, PyTorch (`gliner-knowledgator-edge`) | 0.992 (0.992) | 0.961 | 0.082 | 0.100 | 109 | 138 | 93 ms |
+| `-edge`, int8 ONNX (`gliner-knowledgator-edge-onnx`) | 0.771 (0.757) | 0.934 | 0.270 | 0.050 | 16 | 10 | 97 ms |
+| `-base`, PyTorch (`gliner-knowledgator-base`) | 0.966 (0.966) | 0.921 | 0.021 | 0.055 | 8 | 76 | 234 ms |
+| `-base`, int8 ONNX (`gliner-knowledgator-base-onnx`) | 0.964 (0.964) | 0.915 | 0.029 | 0.028 | 13 | 93 | 182 ms |
+| `-edge`, PyTorch, `PERSON` only | 1.000 (1.000) | 0.862 | 0.368 | 0.006 | 0 | 166 | — |
+| `-base`, PyTorch, `PERSON` only | 1.000 (1.000) | 0.734 | 0.330 | 0.007 | 8 | 141 | — |
+| `-edge`, int8 ONNX, threshold 0.3 | 0.968 (0.929) | 0.868 | 0.118 | 0.141 | 114 | 200 | — |
+| `-base`, int8 ONNX, threshold 0.3 | 0.998 (0.998) | 0.854 | 0.003 | 0.114 | 57 | 303 | — |
+
+On published data (2,000-row slices in file order: OpenPII 1.5M `validation`,
+whose first 2,000 rows hold eight languages — Chinese, Japanese,
+Vietnamese, Tagalog, Indonesian, Malay, Korean and 236 English rows —
+and, with `--language en`, its first 2,000 English rows; Nemotron-PII
+`test`, US-locale English documents, 142 rows skipped for spans that
+disagree with their text):
+
+| Configuration | OpenPII PERSON recall / precision | OpenPII character leak | Nemotron PERSON recall / precision | Nemotron character leak |
+|---|---|---|---|---|
+| `-edge`, PyTorch | 0.485 / 0.848 | 0.362 | 0.706 / 0.890 | 0.140 |
+| `-edge`, int8 ONNX | 0.243 / 0.765 | 0.618 | 0.358 / 0.834 | 0.365 |
+| `-base`, PyTorch | 0.551 / 0.946 | 0.459 | 0.682 / 0.943 | 0.192 |
+| `-base`, int8 ONNX | 0.321 / 0.957 | 0.520 | 0.669 / 0.961 | 0.207 |
+
+The int8 exports lose more on published data than on the synthetic corpus
+(`-base` int8: OpenPII PERSON recall 0.32 against 0.55 for PyTorch).
+
+**Verdict: caution** for `-edge` and `-base`: both clear the license,
+recall and leak bars, and `-edge` the latency bar, but neither clears one
+false positive per 50 KB of agent traffic with its recommended entities
+(most are `USERNAME` detections of identifiers and handles; `-base` is also
+above 100 ms). `-small` and `-large` were not measured. The bench configs
+`bench/configs/gliner-knowledgator-{edge,edge-onnx,base,base-onnx}.toml`
+are gated in CI. On these numbers `-base` (int8 ONNX for speed) leaks less
+and draws fewer agent-traffic false positives than the default
+`urchade/gliner_small-v2.1` asked for the same five types, at the same
+latency class; changing the `gliner` default is an owner decision (D13
+follow-up), not made here. Asked for `PERSON` only, `-edge` (PyTorch)
+would clear every bar if the leak bar were read for the requested types
+(its `PERSON` leak is 0.000; the all-type leak counts the corpus's other
+types, never requested) — that reading is the open D11 measurement-scope
+question.
+
 ## LLM-based extractors (LangExtract and its class) — rejected as detectors
 
 LangExtract (google/langextract) and similar prompted-extraction tools

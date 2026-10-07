@@ -423,7 +423,8 @@ def test_a_caution_model_shows_its_reason(
         f"gliner: {model} pinned at 61726e0ad791dcab3e29339bbec3ad42ded65641 by the model"
         f" catalog (model catalog: caution, Apache-2.0): {model}: Apache-2.0;"
     )
-    assert "not yet measured by the llm-redact bench" in pin
+    # A measured caution model's reason quotes the bench (D11).
+    assert "llm-redact bench 2026-10-07: synthetic-corpus PERSON recall" in pin
     assert _levels(rows, "WARN") == []
 
 

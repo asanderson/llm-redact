@@ -268,6 +268,8 @@ artifact and written to the run's summary.
 |---|---|---|
 | `bench/configs/hf-default.toml` | the `hf` backend's default model (`dslim/bert-base-NER`) at its catalog pin, default entities (`PERSON`) | `[hf-default.synthetic]`, `[hf-default]` |
 | `bench/configs/gliner-default.toml` | the `gliner` backend's default model (`urchade/gliner_small-v2.1`, assembled with its pinned base model) at its catalog pin, default entities | `[gliner-default.synthetic]`, `[gliner-default]` |
+| `bench/configs/gliner-knowledgator-edge.toml`, `-edge-onnx.toml` | `knowledgator/gliner-pii-edge-v1.0` at its catalog pin, PyTorch weights and the int8 ONNX export, asked for `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and `ACCOUNT_NUMBER` | `[gliner-knowledgator-edge.synthetic]`, `[gliner-knowledgator-edge]`, and the same for `-edge-onnx` |
+| `bench/configs/gliner-knowledgator-base.toml`, `-base-onnx.toml` | `knowledgator/gliner-pii-base-v1.0`, the same way | `[gliner-knowledgator-base.synthetic]`, `[gliner-knowledgator-base]`, and the same for `-base-onnx` |
 | `tests/real_model_configs/*.toml` | not scored: the other models the `real_model` tests load (the `gliner2` default, a Knowledgator ONNX checkpoint), pulled by `ner-models` | — |
 
 A configuration added to `bench/configs/` is pulled, tested and gated by
@@ -277,7 +279,8 @@ revisions and with which measured values they were taken; with the default
 `PERSON` entities, the synthetic corpus's `ADDRESS`, `DATE_OF_BIRTH`,
 `USERNAME` and `ACCOUNT_NUMBER` values are not requested, so their
 characters (about 38% of the corpus's gold characters) count toward the
-type-agnostic leak rate. A ceiling on that rate alone would let `PERSON`
+type-agnostic leak rate (the configurations of other models request the
+five contextual types their models are recommended for). A ceiling on that rate alone would let `PERSON`
 leakage grow about fivefold before failing, so each entry also carries a
 `type_leak_max` for every entity its configuration requests.
 
@@ -371,7 +374,12 @@ Facts found when the adapters were checked against the data (2026-10-05):
   unmapped and do not score them. The card's metadata says
   `license: other` with `license_name: cc-by-4.0`; its text grants CC BY
   4.0 and asks for the credit "Ai4Privacy / Ai Suisse SA". The validation
-  file is about 1 GB, downloaded whole on first use.
+  file is about 1 GB, downloaded whole on first use. Its rows are grouped
+  by language: the first 2,000 (a default `--limit` slice) hold Chinese,
+  Japanese, Vietnamese, Tagalog, Indonesian, Malay, Korean and 236 English
+  rows (checked 2026-10-07), so an English-only model is measured mostly
+  on languages it was not trained on; `--language en` scores English rows
+  only.
 - **Nemotron-PII** (`data/test-00000-of-00001.parquet`,
   `data/train-00000-of-00001.parquet`, about 150 MB each). The `spans`
   column is a string holding a Python-literal list (single quotes, not

@@ -278,7 +278,7 @@ _EXTRA_MISSING = (
 
 def build_gliner2_detector(config: "NerConfig") -> Gliner2Detector:
     from llm_redact.config import ConfigError
-    from llm_redact.detection.model_files import gliner2_model_dir
+    from llm_redact.detection.model_files import catalog_entry, gliner2_model_dir
 
     # gliner2 logs words of the text it reads (processor.py: a word that
     # makes no subword is named at WARNING, a failed extraction's traceback
@@ -295,6 +295,7 @@ def build_gliner2_detector(config: "NerConfig") -> Gliner2Detector:
         revision=config.revision_for("gliner2"),
         allow_download=config.allow_download,
     )
+    entry = catalog_entry(model_name, "gliner2")
     try:
         # gliner2 prints its model configuration to stdout while it builds
         # a model; stdout belongs to the command (`--json` output).
@@ -315,7 +316,13 @@ def build_gliner2_detector(config: "NerConfig") -> Gliner2Detector:
         frozenset(config.entities),
         config.max_chars,
         config.score_threshold,
-        policy=LabelPolicy(config.entities, backend="gliner2", overrides=config.labels),
+        policy=LabelPolicy(
+            config.entities,
+            backend="gliner2",
+            overrides=config.labels,
+            # The prompts the model was trained on, where the catalog knows them.
+            prompts=entry.prompts if entry is not None else (),
+        ),
     )
     detector.model_name = model_name
     return detector

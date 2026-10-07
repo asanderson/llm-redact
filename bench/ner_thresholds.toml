@@ -64,3 +64,48 @@ type_leak_max = { PERSON = 0.05 }
 over_redaction_max = 0.04
 recorded = "2026-10-06"
 note = "urchade/gliner_small-v2.1 at 4e091416cf7c3481db542c2a3d26156916f3a47f with base model microsoft/deberta-v3-small at a36c739020e01763fe789b4b85e2df55d6180012; measured PERSON recall 1.000 (exact 1.000), precision 0.639, leak 0.3244 (PERSON 0.0000), over-redaction 0.0152, structured regressions 0"
+
+# Measured 2026-10-07 on the same kind of machine (one shared x86-64 CPU,
+# Intel(R) Xeon(R) Processor @ 2.80GHz, 4 cores; torch 2.13.0 CPU build,
+# transformers 5.10.1, gliner 0.2.28, onnxruntime from the lock), offline
+# from models pulled at their catalog pins, with the same rounding. These
+# configurations request the five contextual types the corpus labels, so
+# the type-agnostic leak rate counts only EMAIL and PHONE beyond them (the
+# rules find both). docs/ner-landscape.md has the numbers and the catalog
+# status they give each model.
+
+[gliner-knowledgator-edge.synthetic]
+recall = { PERSON = 0.94, ADDRESS = 0.94, DATE_OF_BIRTH = 0.39, USERNAME = 0.57, ACCOUNT_NUMBER = 0.88 }
+exact_recall = { PERSON = 0.94, ADDRESS = 0.94, DATE_OF_BIRTH = 0.39, USERNAME = 0.54, ACCOUNT_NUMBER = 0.88 }
+leak_max = 0.14
+type_leak_max = { PERSON = 0.06, ADDRESS = 0.06, DATE_OF_BIRTH = 0.62, USERNAME = 0.43, ACCOUNT_NUMBER = 0.12 }
+over_redaction_max = 0.20
+recorded = "2026-10-07"
+note = "knowledgator/gliner-pii-edge-v1.0 at 9b7f39b0a2da971a5beea78d35f1539d4009c891, PyTorch weights; measured PERSON recall 0.992 (exact 0.992), precision 0.961, leak 0.0070; ADDRESS recall 0.994 (exact 0.994), precision 0.994, leak 0.0078; DATE_OF_BIRTH recall 0.447 (exact 0.447), precision 1.000, leak 0.5627; USERNAME recall 0.629 (exact 0.598), precision 0.126, leak 0.3799; ACCOUNT_NUMBER recall 0.930 (exact 0.930), precision 0.836, leak 0.0683; leak 0.0820, over-redaction 0.1000, structured regressions 0"
+
+[gliner-knowledgator-edge-onnx.synthetic]
+recall = { PERSON = 0.72, ADDRESS = 0.59, DATE_OF_BIRTH = 0.00, USERNAME = 0.22, ACCOUNT_NUMBER = 0.84 }
+exact_recall = { PERSON = 0.70, ADDRESS = 0.56, DATE_OF_BIRTH = 0.00, USERNAME = 0.19, ACCOUNT_NUMBER = 0.84 }
+leak_max = 0.33
+type_leak_max = { PERSON = 0.28, ADDRESS = 0.39, DATE_OF_BIRTH = 1.00, USERNAME = 0.76, ACCOUNT_NUMBER = 0.15 }
+over_redaction_max = 0.11
+recorded = "2026-10-07"
+note = "knowledgator/gliner-pii-edge-v1.0 at 9b7f39b0a2da971a5beea78d35f1539d4009c891, onnx/model_quint8.onnx; measured PERSON recall 0.771 (exact 0.757), precision 0.934, leak 0.2239; ADDRESS recall 0.646 (exact 0.614), precision 0.729, leak 0.3340; DATE_OF_BIRTH recall 0.053 (exact 0.053), precision 1.000, leak 0.9584; USERNAME recall 0.273 (exact 0.242), precision 0.120, leak 0.7045; ACCOUNT_NUMBER recall 0.896 (exact 0.896), precision 0.972, leak 0.0960; leak 0.2703, over-redaction 0.0504, structured regressions 0"
+
+[gliner-knowledgator-base.synthetic]
+recall = { PERSON = 0.91, ADDRESS = 0.95, DATE_OF_BIRTH = 0.94, USERNAME = 0.82, ACCOUNT_NUMBER = 0.95 }
+exact_recall = { PERSON = 0.91, ADDRESS = 0.95, DATE_OF_BIRTH = 0.94, USERNAME = 0.80, ACCOUNT_NUMBER = 0.95 }
+leak_max = 0.08
+type_leak_max = { PERSON = 0.09, ADDRESS = 0.05, DATE_OF_BIRTH = 0.06, USERNAME = 0.16, ACCOUNT_NUMBER = 0.05 }
+over_redaction_max = 0.11
+recorded = "2026-10-07"
+note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, PyTorch weights; measured PERSON recall 0.966 (exact 0.966), precision 0.921, leak 0.0339; ADDRESS recall 1.000 (exact 1.000), precision 1.000, leak 0.0000; DATE_OF_BIRTH recall 0.991 (exact 0.991), precision 0.706, leak 0.0097; USERNAME recall 0.879 (exact 0.856), precision 0.586, leak 0.1060; ACCOUNT_NUMBER recall 1.000 (exact 1.000), precision 0.414, leak 0.0000; leak 0.0207, over-redaction 0.0545, structured regressions 0"
+
+[gliner-knowledgator-base-onnx.synthetic]
+recall = { PERSON = 0.91, ADDRESS = 0.94, DATE_OF_BIRTH = 0.93, USERNAME = 0.73, ACCOUNT_NUMBER = 0.95 }
+exact_recall = { PERSON = 0.91, ADDRESS = 0.94, DATE_OF_BIRTH = 0.93, USERNAME = 0.70, ACCOUNT_NUMBER = 0.95 }
+leak_max = 0.08
+type_leak_max = { PERSON = 0.09, ADDRESS = 0.06, DATE_OF_BIRTH = 0.07, USERNAME = 0.24, ACCOUNT_NUMBER = 0.05 }
+over_redaction_max = 0.06
+recorded = "2026-10-07"
+note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, onnx/model_quint8.onnx; measured PERSON recall 0.964 (exact 0.964), precision 0.915, leak 0.0366; ADDRESS recall 0.994 (exact 0.994), precision 1.000, leak 0.0058; DATE_OF_BIRTH recall 0.982 (exact 0.982), precision 0.727, leak 0.0180; USERNAME recall 0.788 (exact 0.750), precision 0.612, leak 0.1806; ACCOUNT_NUMBER recall 1.000 (exact 1.000), precision 0.599, leak 0.0000; leak 0.0288, over-redaction 0.0279, structured regressions 0"

@@ -58,8 +58,10 @@ presidio = ["presidio-analyzer>=2.2,<3"]
 stanza = ["stanza>=1.7,<2", "torch>=2.6"]
 # Any Hugging Face token-classification model as a detector (multilingual
 # XLM-R NER, domain-tuned checkpoints, ...). Pulls transformers + torch;
-# emits confidences (score_threshold applies).
-hf = ["transformers>=4.40", "torch>=2.6"]
+# emits confidences (score_threshold applies). transformers 4.56 is the
+# first whose pipeline() takes `dtype` (the hf backend loads every model in
+# float32; an older one fails the load, and the build refuses it by name).
+hf = ["transformers>=4.56", "torch>=2.6"]
 # At-rest encryption for the sqlite vault ([vault] encryption = "fernet").
 crypto = ["cryptography>=42"]
 # Pro persistent vault on a server RDBMS ([vault] backend = "postgresql" /

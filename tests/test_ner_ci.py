@@ -112,11 +112,13 @@ def test_each_config_loads_pinned_models_with_downloads_off(path: Path) -> None:
 def test_ci_pulls_every_model_the_real_model_tests_load() -> None:
     import test_gliner
     import test_gliner2
+    import test_hf_text_words
     import test_hf_windows
 
     needed = {
         (test_hf_windows.DSLIM, test_hf_windows.DSLIM_REVISION),
         (test_hf_windows.OPENMED, test_hf_windows.OPENMED_REVISION),
+        (test_hf_text_words.ETTIN, test_hf_text_words.ETTIN_REVISION),
         (test_gliner.GLINER_SMALL, test_gliner.GLINER_SMALL_REVISION),
         (test_gliner.DEBERTA_SMALL, test_gliner.DEBERTA_SMALL_REVISION),
         (test_gliner.EDGE, test_gliner.EDGE_REVISION),

@@ -700,6 +700,8 @@ def test_a_bioes_model_is_decoded_without_the_pipeline(
         NerConfig(enabled=True, backend="hf", model="org/bioes-ner", entities=("PERSON",))
     )
     assert len(pipe.built_with) == 1  # loaded only: no strided pipeline
+    # The tagger decodes the model that load made, in float32.
+    assert pipe.built_with[0]["dtype"] == "float32"
     assert detector.emittable_types == frozenset({"PERSON"})
     text = "Ask Jane Q. Doe or Kim"
     # No calibration in the catalog: greedy, so the O between cuts the name.

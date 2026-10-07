@@ -298,20 +298,20 @@ USERNAME = 2
 
 [hf-openmed-pii-small]
 recorded = "2026-10-07"
-note = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at a2360d3f42526fc660ac3b2b2301e1c2d94eba61; measured 551 NER detections in 269437 bytes, 204.50 per 100 KB"
-per_100kb_max = 215.0
+note = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at a2360d3f42526fc660ac3b2b2301e1c2d94eba61, float32, word-by-word decoding (re-measured 2026-10-07); measured 514 NER detections in 269437 bytes, 190.77 per 100 KB"
+per_100kb_max = 201.0
 
 [hf-openmed-pii-small."README.md"]
 PERSON = 4
 
 [hf-openmed-pii-small."gutenberg_prose.txt"]
 ADDRESS = 3
-PERSON = 477
+PERSON = 466
 USERNAME = 2
 
 [hf-openmed-pii-small."rfc_excerpt.txt"]
-ADDRESS = 5
-PERSON = 78
+ADDRESS = 3
+PERSON = 57
 
 [hf-openmed-pii-small."sqlite_excerpt.c"]
 PERSON = 2
@@ -322,54 +322,46 @@ USERNAME = 7
 [hf-openmed-pii-small."synthetic_ci_log.txt"]
 USERNAME = 2
 
-[hf-openmed-pii-small."synthetic_config.yaml"]
-PERSON = 2
-
 [hf-openmed-pii-small."synthetic_eu_document.txt"]
-ADDRESS = 3
-
-[hf-openmed-pii-small."synthetic_natids_r10.log"]
-ACCOUNT_NUMBER = 2
-PERSON = 2
+ADDRESS = 2
 
 [hf-ettin-68m-nemotron-pii]
 recorded = "2026-10-07"
-note = "kalyan-ks/ettin-68m-nemotron-pii at 500262a2aaf913825ef750ef255c3fe437cd8e64; measured 286 NER detections in 269437 bytes, 106.15 per 100 KB"
-per_100kb_max = 112.0
+note = "kalyan-ks/ettin-68m-nemotron-pii at 500262a2aaf913825ef750ef255c3fe437cd8e64, float32, word-by-word decoding (re-measured 2026-10-07); measured 183 NER detections in 269437 bytes, 67.92 per 100 KB"
+per_100kb_max = 72.0
 
 [hf-ettin-68m-nemotron-pii."README.md"]
-PERSON = 6
+PERSON = 5
 
 [hf-ettin-68m-nemotron-pii."gutenberg_prose.txt"]
-ADDRESS = 3
-PERSON = 181
+ADDRESS = 2
+PERSON = 135
 
 [hf-ettin-68m-nemotron-pii."rfc_excerpt.txt"]
-ADDRESS = 5
-PERSON = 81
+ADDRESS = 3
+PERSON = 38
 
 [hf-ettin-68m-nemotron-pii."sqlite_excerpt.c"]
-DATE_OF_BIRTH = 4
+DATE_OF_BIRTH = 2
 PERSON = 2
-USERNAME = 3
 
 [hf-ettin-68m-nemotron-pii."synthetic_agent_tool_results.json"]
-USERNAME = 7
+USERNAME = 6
 
 [hf-ettin-68m-nemotron-pii."synthetic_app.log"]
-ACCOUNT_NUMBER = 6
+ACCOUNT_NUMBER = 2
 
 [hf-ettin-68m-nemotron-pii."synthetic_bigint.log"]
-ACCOUNT_NUMBER = 4
+ACCOUNT_NUMBER = 2
 
 [hf-ettin-68m-nemotron-pii."synthetic_eu_document.txt"]
 ADDRESS = 2
 
 [hf-ettin-68m-nemotron-pii."synthetic_git_log.txt"]
-USERNAME = 3
+USERNAME = 2
 
 [hf-ettin-68m-nemotron-pii."synthetic_natids_r10.log"]
-PERSON = 4
+PERSON = 2
 
 [hf-openai-privacy-filter]
 recorded = "2026-10-07"

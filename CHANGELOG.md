@@ -53,8 +53,8 @@ and tags `vX.Y.Z`.
   Nemotron-PII (CC BY 4.0) and measured by the NER bench: `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`
   (Apache-2.0, a 384-token window) and `kalyan-ks/ettin-68m-nemotron-pii` (MIT, ModernBERT:
   transformers 4.48 or newer), pinned to their `main` commits of 2026-10-07, status "caution"
-  with their numbers (agent-traffic false positives above the admission bar; ettin's sub-word
-  fragments leak part of numbers). Bench configs `bench/configs/hf-openmed-pii-small.toml` and
+  with their numbers (agent-traffic false positives above the admission bar; ettin's account
+  numbers carry labels that are not folded into `ACCOUNT_NUMBER`). Bench configs `bench/configs/hf-openmed-pii-small.toml` and
   `hf-ettin-68m-nemotron-pii.toml` with recorded baselines, gated by the `ner-models` CI job,
   and a `real_model` test of OpenMed's spans. docs/detection.md gains "PII models for the
   `hf` backend"; docs/ner-landscape.md records the numbers. The `hf` default model is
@@ -384,6 +384,45 @@ and tags `vX.Y.Z`.
   config editor needs llm-redact-pro 0.17.0: an older one shows the now-unset threshold as an
   empty field and saves 0, which this check refuses instead of writing it, so release
   llm-redact-pro 0.17.0 before (or with) this core.
+- The `hf` backend decodes a BIO model whose tokenizer does not mark word pieces
+  (SentencePiece, byte-level BPE: DeBERTa-v3, XLM-R, RoBERTa, ModernBERT) itself, word by
+  word, instead of the transformers pipeline's token-level aggregation, which made every
+  piece its own value (`kalyan-ks/ettin-68m-nemotron-pii` tags every piece `B-`: "Zbigniew
+  Brzezinski" was six values). The words are the text's own (cut at blanks, quotes,
+  brackets and `, ; : = | / \`, each character of a script written without spaces —
+  Chinese, Japanese kana, Thai, Lao, Khmer, Myanmar, Tibetan — a word of its own,
+  punctuation at a word's ends left out); each is labelled by its first piece (a lone blank
+  piece right before it, SentencePiece's "▁", counts as that piece), or — for a model the
+  model catalog lists as trained on every piece (`piece_labels = "every"`) — by its most
+  confidently tagged piece; a word no window reads to its end is read in parts, so every
+  piece of a text is read. A span is cut where anything but one or two blanks, a comma and a
+  space or a slash separates its words (a comma and a space only where the model continues
+  the entity across it: "March 3, 1985", but also two numbers of a list), then grows over
+  the characters beside it that a piece the model tags with the span's entity covers — a
+  password's edge symbols and inner colons, a MAC address's colons — so every character the
+  model tags as part of a value is redacted with it; it never takes in a blank, a quote or
+  a bracket (a quote inside a value goes upstream between the two parts' placeholders).
+  WordPiece models (`dslim/bert-base-NER`, the default) keep the pipeline, unchanged
+  (identical bench numbers; a test compares the detector over that pipeline with a frozen
+  copy of its code from before this change, over the recall and false-positive corpora).
+  Re-measured on the synthetic corpus: exact `PERSON` recall 0.67 to 1.00 (OpenMed-PII
+  Small 44M) and 0.03 to 0.87 (ettin), character leak 0.051 to 0.048 and 0.158 to 0.143,
+  detections on the negatives corpus 551 to 514 and 286 to 183; their recorded baselines and
+  catalog numbers are updated (docs/ner-landscape.md lists what got worse: some recall and
+  precision, and over-redaction; most of ettin's lost recall counts values the token-level
+  decoder found by one piece, whose uncovered characters fell).
+- The `hf` backend loads every model in float32, whatever precision its checkpoint stores
+  (transformers' default keeps it): a bfloat16 checkpoint ran about 30% slower on a CPU
+  (`openai/privacy-filter`: 738 against 1,025 ms per 500 characters for the model alone), and
+  takes twice its stored size in memory — about 6 GB of RAM for `openai/privacy-filter`'s
+  2.8 GB of weights, so a container or Helm memory limit sized for bfloat16 is too small.
+  The one load serves the transformers pipeline and the llm-redact tagger alike. The
+  `gliner` and `gliner2` backends are unchanged.
+- The `hf` extra requires transformers 4.56 or newer (was 4.40): the float32 load passes
+  the pipeline's `dtype`, which older versions refuse. The startup (`serve`, `serve
+  --check`) and `llm-redact doctor` refuse an older installed transformers by name
+  (`[detection.ner] backend = "hf" needs transformers >= 4.56 …`) instead of failing the
+  model load with a bare `TypeError`.
 - NER no longer runs on the event loop: for a JSON request body, a multipart upload (an
   upload inspector's extracted texts included) and a realtime client frame the proxy collects the
   strings a request's redaction will scan, runs the NER models over them on a worker

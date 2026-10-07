@@ -271,7 +271,13 @@ the cache. A model whose `config.json` or `tokenizer_config.json` names code
 to import from its repository (`auto_map`) is refused, and nothing is ever
 loaded with `trust_remote_code`. The weights must be safetensors: a model
 with only `pytorch_model.bin` is refused unless `allow_pickle_weights = true`,
-and a model with both always loads its safetensors.
+and a model with both always loads its safetensors. Every model runs in
+float32, whatever precision its weights are stored in: a model stored in
+bfloat16 runs slower on a CPU, and loaded in float32 it takes twice the
+memory of its weight files (size a container or Helm memory limit for
+that). The load needs transformers 4.56 or newer (the first whose
+pipeline takes the precision); an older one stops the startup with
+`[detection.ner] backend = "hf" needs transformers >= 4.56 …`.
 
 **How the `gliner` backend loads a model.** The same way: the GLiNER
 checkpoint at its pinned revision, from the local cache unless
@@ -520,22 +526,24 @@ hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
 ```
 
 Measured by the NER bench (2026-10-07, the same machine and rules as the
-GLiNER table above):
+GLiNER table above; the two PII models re-measured that day with
+word-by-word decoding, while other jobs ran on the machine, so their
+latencies are indicative only):
 
 | Model, entities | PERSON recall (exact) | Character leak | Over-redaction | Agent-traffic false positives per 50 KB | p50, 500 characters |
 |---|---|---|---|---|---|
 | `dslim/bert-base-NER` (the default), `PERSON` | 0.97 (0.95) | 0.40 | 0.003 | 0 | 176 ms |
-| OpenMed-PII Small 44M, `PERSON` | 1.00 (0.67) | 0.39 | 0.002 | 0 | — |
-| OpenMed-PII Small 44M, five types | 1.00 (0.67) | 0.05 | 0.005 | 18 | 175 ms |
-| ettin-68m-nemotron-pii, five types | 0.99 (0.03) | 0.16 | 0.003 | 21 | 277 ms |
+| OpenMed-PII Small 44M, `PERSON` | 1.00 (1.00) | 0.39 | 0.002 | 0 | — |
+| OpenMed-PII Small 44M, five types | 1.00 (1.00) | 0.05 | 0.006 | 18 | 136 ms |
+| ettin-68m-nemotron-pii, five types | 0.98 (0.87) | 0.14 | 0.005 | 16 | 127 ms |
 
 `kalyan-ks/ettin-68m-nemotron-pii` tags every sub-word piece of a value as
-the start of a value, so the `hf` backend reports names and numbers as
-fragments ("Z", "b", "ign", …): each fragment becomes its own placeholder,
-and pieces the model labels with another type are sent as they are (a
-quarter of the synthetic corpus's account numbers is found; three quarters
-of their digits leak). It stays "caution" with these numbers. The
-`PERSON`-only rows request what the default configuration requests, so
+the start of a value; read word by word ("BIO taggers without word-piece
+marks" above), its names are whole values, but most of its account numbers
+carry labels that are not folded into `ACCOUNT_NUMBER` (`customer_id`,
+`unique_id`, …), so a quarter of the synthetic corpus's account numbers is
+found and three quarters of their digits leak. Both stay "caution" with
+these numbers. The `PERSON`-only rows request what the default configuration requests, so
 their character leak counts every other labelled value as leaked; the
 default model is unchanged (a change would be a 2.0.0 decision).
 
@@ -553,7 +561,12 @@ rules. Measured on the same corpora: `PERSON` recall 0.99, character leak
 0.12, 23 agent-traffic false positives per 50 KB, and about a second per
 500-character string on a 4-core CPU (1.1 s; 19.5 s for 10,000 characters),
 so it stays "caution" and its bench configuration is measured by hand
-(`bench/configs/manual/`, [ner-bench.md](ner-bench.md)).
+(`bench/configs/manual/`, [ner-bench.md](ner-bench.md)). Those latencies were
+measured with its weights in bfloat16, as the repository stores them; the
+`hf` backend now loads every model in float32, which measured about 30%
+faster on that CPU for the model alone, and which takes twice the memory of
+bfloat16 weights: about 6 GB of RAM for its 2.8 GB of weights, so a
+container or Helm memory limit sized for bfloat16 is too small.
 
 ### Model-load policies (plugins)
 
@@ -722,8 +735,8 @@ is found at its exact offsets:
   `dslim/bert-base-NER` use) labels each word by its first piece, so a name
   is reported as whole words, never cut inside one ("Angela Merk"). Other
   tokenizers (SentencePiece, byte-level BPE) do not tell the pipeline where
-  words end, so their models are labelled piece by piece, and a span can
-  still end inside a word.
+  words end, so llm-redact decodes a BIO model with such a tokenizer itself,
+  word by word (below).
 - `gliner2`: GLiNER2 sets no word limit of its own, but its encoder was
   trained on 512 positions (Fastino's DeBERTa-v3 encoders) and its cost grows
   with the square of the length. A window holds at most 200 of GLiNER2's own
@@ -770,6 +783,59 @@ as the pipeline reads a BIO model, so a span covers whole words and is never
 cut inside one. The scheme comes
 from the model's labels; a model whose labels mix BIOES and BILOU tags is
 refused at startup.
+
+**BIO taggers without word-piece marks (`hf`).** A SentencePiece or
+byte-level BPE tokenizer (DeBERTa-v3, XLM-R, RoBERTa, ModernBERT) does not
+tell the transformers pipeline where words end: labelled piece by piece, a
+name became one value per piece (`kalyan-ks/ettin-68m-nemotron-pii` tags
+every piece `B-`, so "Zbigniew Brzezinski" was six values), and the
+pipeline's whitespace fallback would read `{"name":"Angela` as one word
+labelled by its brace. llm-redact reads such a model itself, over the same
+token windows, word by word:
+
+- the words are the text's own: a word ends at a blank, a quote or a
+  bracket of any script, and at `,` `;` `:` `=` `|` `/` `\` and the ASCII
+  quotes and brackets; each character of a script written without spaces
+  between words (Chinese, Japanese kana, Thai, Lao, Khmer, Myanmar,
+  Tibetan, Yi) is a word of its own, with the combining marks after it;
+  punctuation at either end of a word is left out ("Paris." is "Paris"),
+  punctuation inside it stays ("1985-03-12", "j.doe" and "dev_jo42" are one
+  word each). The words decide which piece labels what; what a value covers
+  can grow past them (below);
+- a word is labelled by its first piece, the piece a model trained the
+  Hugging Face way labels (its later pieces were never trained and may say
+  anything); a piece of blanks only right before the word — SentencePiece's
+  lone "▁" before a character its vocabulary has no "▁"-piece for, such as
+  "Ę" or a CJK character — is that first piece, wherever the word stands.
+  For a model llm-redact's model catalog lists as trained on every piece
+  (`kalyan-ks/ettin-68m-nemotron-pii`), which may leave a word's first piece
+  untagged and tag a later one, a word is labelled by the piece tagged most
+  confidently, else by its first piece;
+- a window reads the words whose first piece it holds. A word no window
+  holding its first piece reads to its end (longer than the windows'
+  overlap) is read in parts, each from its own first piece in the window
+  that holds it, so every piece of a text is read;
+- labels are read greedily, `B` opening a span and `I` continuing it; a span
+  is cut where anything but one or two blanks, a comma and a space or a
+  slash separates two of its words — a quote, a bracket, a colon, a
+  semicolon, an equals sign, a newline. A span continues across a comma and
+  a space or a slash only where the model continues it ("March 3, 1985",
+  "03/12/1985"; also two numbers of a list, "4417123456, 5512345678", when
+  the model tags the second as the first one's continuation);
+- a span then grows over the characters beside it that no word holds and
+  that a piece the model tags with the span's entity covers: the symbols at
+  a password's edges ("$ecret!"), a colon or an equals sign inside one
+  ("p@ss:w0rd=x9"), the colons of a MAC address — every character the model
+  tags as part of a value is redacted with it. It never grows over a blank,
+  a quote or a bracket: a quote inside a value (a password holding `"`)
+  goes upstream as sent, between the two parts of the value, each its own
+  placeholder. Neighbouring spans of one label then separated by nothing or
+  a slash are one value;
+- a span's score is the mean probability of the words the model tagged as
+  one span (`score_threshold` applies), also for each part a cut leaves.
+
+A label without a tag (`PER`) is read as `I-PER`, as the pipeline reads it.
+WordPiece models keep the pipeline, unchanged.
 
 An entity two windows both report counts once; one cut by a window's edge is
 also reported whole by the next window, and the longer span wins. spaCy,

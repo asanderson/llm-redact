@@ -223,11 +223,12 @@ def _ner_rows(
     *,
     present: set[str],
     torch_version: str | None = None,
+    transformers_version: str | None = None,
     extra: str = "",
 ) -> dict[str, tuple[str, str]]:
     """Run the extras check over all six backends with `present` as the
-    importable modules and `torch_version` as torch's installed metadata
-    (None: none); return backend -> (level, message)."""
+    importable modules and `torch_version`/`transformers_version` as the
+    installed metadata (None: none); return backend -> (level, message)."""
     import importlib.metadata
     import importlib.util
 
@@ -244,6 +245,8 @@ def _ner_rows(
     def version(name: str) -> str:
         if name == "torch" and torch_version is not None:
             return torch_version
+        if name == "transformers" and transformers_version is not None:
+            return transformers_version
         raise importlib.metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr(importlib.util, "find_spec", find_spec)
@@ -331,6 +334,36 @@ def test_torch_below_the_floor_fails(tmp_path: Path, monkeypatch: pytest.MonkeyP
             f" is installed; install it: uv sync --extra {backend}",
         )
     assert rows["spacy"][0] == "PASS"
+
+
+def test_an_hf_backend_with_a_transformers_without_pipeline_dtype_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The hf build refuses a transformers before 4.56 (no `dtype` in its
+    # pipeline); doctor says so first. Other backends do not care.
+    present = _LIBRARIES | {"torch"}
+    rows = _ner_rows(
+        tmp_path,
+        monkeypatch,
+        present=present,
+        torch_version="2.13.0",
+        transformers_version="4.55.4",
+    )
+    assert rows["hf"] == (
+        "FAIL",
+        'backend "hf" needs transformers >= 4.56 (its pipeline\'s dtype), but transformers'
+        " 4.55.4 is installed; upgrade it: uv sync --extra hf --upgrade-package transformers",
+    )
+    assert all(rows[name][0] == "PASS" for name in _BACKENDS if name != "hf")
+    for version in ("4.56.0", "5.10.1"):
+        rows = _ner_rows(
+            tmp_path,
+            monkeypatch,
+            present=present,
+            torch_version="2.13.0",
+            transformers_version=version,
+        )
+        assert rows["hf"] == ("PASS", "hf backend importable")
 
 
 @pytest.mark.parametrize("torch_version", ["2.6.0", "2.13.0+cpu", "10.0", "3.0.0", None])

@@ -381,6 +381,12 @@ MERGED_TYPES = frozenset({"PERSON", "ADDRESS"})
 _PART_GAP_CHARS = frozenset(" \t\u00a0")
 
 
+def is_part_gap(gap: str) -> bool:
+    """Whether ``gap`` may separate two parts of one value: one or two
+    spaces, tabs or no-break spaces."""
+    return 1 <= len(gap) <= 2 and set(gap) <= _PART_GAP_CHARS
+
+
 def merge_adjacent_parts(detections: Iterable[Detection], text: str) -> list[Detection]:
     """One backend's detections with adjacent parts of one name or address
     joined: consecutive detections of the same type in MERGED_TYPES whose
@@ -393,8 +399,7 @@ def merge_adjacent_parts(detections: Iterable[Detection], text: str) -> list[Det
         index = last_of_type.get(detection.detector_type)
         if index is not None:
             previous = merged[index]
-            gap = text[previous.end : detection.start]
-            if 1 <= len(gap) <= 2 and set(gap) <= _PART_GAP_CHARS:
+            if is_part_gap(text[previous.end : detection.start]):
                 merged[index] = replace(
                     previous, end=detection.end, value=text[previous.start : detection.end]
                 )

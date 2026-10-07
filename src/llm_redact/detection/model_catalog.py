@@ -59,6 +59,8 @@ STATUSES: tuple[Status, ...] = ("vetted", "caution", "restricted")
 # pipeline's aggregation; the hf backend decodes BIOES/BILOU itself,
 # detection/tagging.py).
 TAGGING_SCHEMES = ("bio", "bioes", "bilou")
+# CatalogEntry.piece_labels: which pieces of a word a BIO tagger labels.
+PIECE_LABELS = ("first", "every")
 
 # Value-free provenance tags a policy can match on (llm-redact-pro's model
 # policy). Each is a neutral fact about the weights or their training data.
@@ -190,6 +192,12 @@ class CatalogEntry:
     # Repo-relative ONNX weight files the gliner backend can load.
     onnx_files: tuple[str, ...] = ()
     tagging: str | None = None
+    # Which sub-word pieces a BIO tagger was trained to label, for a
+    # tokenizer without word-piece marks (hf_ner._word_row): "first" (the
+    # Hugging Face convention: a word's first piece, the others never
+    # trained) or "every" (every piece, so a later piece's tag is evidence
+    # too). An uncatalogued model is read as "first".
+    piece_labels: str = "first"
     # A BIOES/BILOU tagger's calibration file (repo-relative, fetched with
     # the model): transition biases for the constrained Viterbi decoder.
     viterbi_calibration: str | None = None
@@ -447,7 +455,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         reason=(
             "Apache-2.0; microsoft/deberta-v3-small (MIT) fine-tuned on nvidia/Nemotron-PII"
             " (CC BY 4.0); 54 entity types; "
-            + measured(recall=1.00, leak=0.05, false_positives=18, p50_ms=175)
+            + measured(recall=1.00, leak=0.05, false_positives=18, p50_ms=136)
         ),
         checked="2026-10-07",
         revision="a2360d3f42526fc660ac3b2b2301e1c2d94eba61",
@@ -472,8 +480,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         status="caution",
         reason=(
             "MIT; jhu-clsp/ettin-encoder-68m (MIT) fine-tuned on nvidia/Nemotron-PII"
-            " (CC BY 4.0); 55 entity types; every sub-word piece tagged B-, read as separate"
-            " values; " + measured(recall=0.99, leak=0.16, false_positives=21, p50_ms=277)
+            " (CC BY 4.0); 55 entity types; tags every sub-word piece B- (read word by word,"
+            " by the most confidently tagged piece); "
+            + measured(recall=0.98, leak=0.14, false_positives=16, p50_ms=127)
         ),
         checked="2026-10-07",
         revision="500262a2aaf913825ef750ef255c3fe437cd8e64",
@@ -484,6 +493,10 @@ CATALOG: tuple[CatalogEntry, ...] = (
         lineage=("nemotron-cc-by",),
         recommended_entities=("PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"),
         tagging="bio",
+        # Measured 2026-10-07: it tags every sub-word piece (each B-), and a
+        # word's first piece is often untagged or unsure while a later one
+        # is sure.
+        piece_labels="every",
         # tokenizer_config.json's max_length (the tokenizer reports 8192,
         # the encoder takes 7999 positions).
         window=1024,
@@ -502,6 +515,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
             "Apache-2.0; 1.5B parameters, 50M active (sparse mixture of experts); BIOES"
             " tags; the card does not name the training data; "
             + measured(recall=0.99, leak=0.12, false_positives=23, p50_ms=1108)
+            # Measured before the hf backend loaded float32 (about 30% faster
+            # for the model alone on that CPU; twice the memory, about 6 GB).
+            + " (with its bfloat16 weights as stored, before the hf backend loaded float32)"
         ),
         checked="2026-10-07",
         revision="7ffa9a043d54d1be65afb281eddf0ffbe629385b",

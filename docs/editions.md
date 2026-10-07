@@ -28,6 +28,7 @@ proprietary **`llm-redact-pro`** package.
 | Document extraction: binary uploads (PDF, Office, scans via OCR services, …) read as text and scanned before they are sent (`[extraction]`, [extraction.md](extraction.md)) — part of the free core | ✓ | ✓ | ✓ | ✓ |
 | Non-loopback (mTLS) serving; Kubernetes deployment (Helm chart + HPA) | ✓ | ✓ | ✓ | ✓ |
 | Server persistent vault (PostgreSQL / MySQL / Oracle / any DB-API RDBMS, incl. cloud-managed DBMS), vault encryption at rest, audit log + tamper chain + backup sinks (with batch encryption), OTel, per-conversation sessions, named users, rule-based upstream routing (named upstreams, fallback chains with cooldown + Anthropic plan-limit detection, monthly budgets) | | ✓ | ✓ | ✓ |
+| Offline NER model bundles with an AI bill of materials (`llm-redact bundle build\|verify`: pinned model files with their SHA-256, a NOTICE with licenses and attributions, a CycloneDX AI-BOM) and the `[models]` policy (allowed licenses, denied lineage, models only from a verified bundle), asked through the core's model-load policy seam. The core's own `llm-redact models pull --to` and `models verify --dir` (portable folders with a SHA-256 manifest) stay free | | | ✓ | ✓ |
 | Team deployment kit: one installer for a shared mutual-TLS team server on Docker, Podman and Kubernetes (its own Helm chart), with named users, an encrypted vault and a tamper-evident audit log | | | ✓ | ✓ |
 
 ## How keys work
@@ -85,8 +86,9 @@ The paid subsystems live in that **separately-installed `llm-redact-pro`
 package**, not in the AGPL wheel — distribution control is the primary
 boundary, the signed key the secondary tier gate. The
 [architecture diagram](diagrams/architecture.png) marks the Pro parts of
-the data flow (the browser dashboard, the access gate and the audit log with
-its sinks) in dashed boxes; everything else in it — the proxy, the vault, the
+the data flow (the browser dashboard, the access gate, offline model bundles
+with their AI-BOM and `[models]` policy, and the audit log with its sinks) in
+dashed boxes; everything else in it — the proxy, the vault, the
 local NER model files and their opt-in startup download — is the FOSS core. In practice:
 
 - A paid config without that package **fails closed** with a

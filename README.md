@@ -8,7 +8,7 @@
 
 Large Language Model (LLM) information redactor that prevents private information from being sent to LLMs from agentic tools by substituting placeholders for private information on outgoing requests and then replaces the placeholders on the incoming responses seamlessly for the agentic tool users.
 
-![System data flow: agentic tool (with the llm-redact plugin slash commands inside it), proxy, local vault and local NER model files on your machine; only placeholder tokens reach the LLM provider, and the Hugging Face Hub is reached only by an opt-in startup download of pinned model weights. Dashed boxes mark as Pro the browser dashboard and access gate on your machine and the audit log with its object-store sinks, plus the flows into each](docs/diagrams/architecture.png)
+![System data flow: agentic tool (with the llm-redact plugin slash commands inside it), proxy, local vault and local NER model files on your machine; only placeholder tokens reach the LLM provider, and the Hugging Face Hub is reached only by an opt-in startup download of pinned model weights. Dashed boxes mark as Pro the browser dashboard, the access gate and the offline model bundles with their AI-BOM and model policy (Team and above) on your machine, and the audit log with its object-store sinks, plus the flows into each](docs/diagrams/architecture.png)
 
 *Animated version: [SVG](docs/diagrams/architecture.svg) · [GIF](docs/diagrams/architecture.gif) — the request and response flow moves.*
 
@@ -17,8 +17,10 @@ leaves your machine. The dashed boxes mark what is **Pro** — supplied by
 the proprietary `llm-redact-pro` package: the browser dashboard at
 `/__llm-redact/` (live status view, config editor, redaction preview —
 it stays on your machine and reads the same metadata-only APIs the core
-serves) and the audit subsystem (the audit log, its object-store sinks,
-and the audit-row flow into them). Vault at-rest encryption, the server
+serves), the access gate (named users and client authentication), offline
+NER model bundles with their AI bill of materials and the `[models]`
+model-load policy (Team and above), and the audit subsystem (the audit
+log, its object-store sinks, and the audit-row flow into them). Vault at-rest encryption, the server
 RDBMS vault backends, and upstream routing are Pro too but not drawn;
 everything else pictured is part of this repository's **FOSS core**
 (matrix in [docs/editions.md](docs/editions.md)). The full
@@ -317,7 +319,8 @@ operational subsystems — persistent server vaults and encryption at
 rest, the audit log and its off-machine sinks, OTel, per-conversation
 sessions, and named users with every client-authentication feature
 (this repository contains no authentication code) — and, on Team and
-above, a deployment kit for one shared mutual-TLS team server.
+above, a deployment kit for one shared mutual-TLS team server and offline
+NER model bundles with an AI bill of materials and a model-load policy.
 Configuring one of those without the package fails closed naming it —
 never a silent downgrade. The matrix and
 licensing model are in [docs/editions.md](docs/editions.md).

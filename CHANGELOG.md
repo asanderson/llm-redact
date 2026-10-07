@@ -265,6 +265,12 @@ and tags `vX.Y.Z`.
   read-only deployments, `allow_download`, the systemd unit's `ProtectHome=read-only`, the
   container's read-only root filesystem), and docs/troubleshooting.md the missing NER extra and
   spaCy/Stanza/Presidio model messages.
+- Docs: the `model-supply-chain` diagram shows the model-load policy step (a plugin's
+  `Registry.build_model_policy`, asked once a model's files are resolved and before its weights
+  load; none in the Free core), on the connected side and in the enclave. The `architecture`
+  diagram gains a dashed Pro box for llm-redact-pro's offline model bundles with their AI bill of
+  materials and `[models]` policy (Team and above), and docs/editions.md a row for them; the
+  README, docs/editions.md and docs/dashboard.md describe the new box.
 
 - CI proves an air-gapped start (AD11): the `airgap` job pulls the default `hf` and GLiNER
   models (with the GLiNER base model) and Knowledgator's `gliner-pii-edge-v1.0` with `llm-redact

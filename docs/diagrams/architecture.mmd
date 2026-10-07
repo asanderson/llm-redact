@@ -1,9 +1,10 @@
 %% System data flow: what leaves the machine and what never does.
 %% The dashed "Pro" boxes mark what the separately-installed llm-redact-pro
-%% package supplies: the browser dashboard and the access gate (named users,
-%% per-user keys, seats — the core has no authentication code) on your
-%% machine, and the audit log + object-store sinks; everything else is the
-%% FOSS core. The Hugging Face Hub edge is opt-in: NER model weights, fetched
+%% package supplies: the browser dashboard, the access gate (named users,
+%% per-user keys, seats — the core has no authentication code) and offline
+%% model bundles with their AI-BOM and the [models] policy (Team and above;
+%% asked through the core's model-load policy seam) on your machine, and the
+%% audit log + object-store sinks; everything else is the FOSS core. The Hugging Face Hub edge is opt-in: NER model weights, fetched
 %% at startup only and only with allow_download (docs/detection.md "Model sources";
 %% docs/diagrams/model-supply-chain.mmd).
 %% Render: scripts/render_diagrams.sh (PNG committed next to this source).
@@ -25,6 +26,7 @@ flowchart LR
         subgraph proLocal["Pro"]
             dashboard["browser dashboard<br/>/__llm-redact/ — live status,<br/>recent requests, sessions,<br/>config editor, redaction preview"]
             gate["access gate<br/>named users · per-user keys · seats ·<br/>client certificates · OIDC/SSO ·<br/>access-proxy headers · Basic/LDAP ·<br/>SCIM · llm-redact users/login/connect"]
+            bundles["model bundles + AI-BOM<br/>(Team and above):<br/>llm-redact bundle<br/>build · verify;<br/>[models] policy — allowed<br/>licenses, denied lineage,<br/>verified bundle only"]
         end
     end
     provider["LLM provider<br/>Anthropic, OpenAI, Gemini,<br/>Azure, Vertex, Bedrock, Ollama,<br/>Cohere, custom upstreams<br/>(/custom/NAME: vLLM, LM Studio, ...)"]
@@ -42,6 +44,7 @@ flowchart LR
     proxy -. "startup only, opt-in<br/>(allow_download): pinned<br/>model weights; never<br/>request content" .-> hub
     dashboard -. "local ops only: metadata<br/>APIs + guarded config /<br/>preview POSTs" .- proxy
     gate -. "admits or refuses each<br/>request before routing" .- proxy
+    bundles -. "verified bundle folders;<br/>[models] asked before<br/>each model loads" .- models
     plugins -. "local ops only: status,<br/>recent, preview, guarded<br/>config-edit" .- proxy
     proxy -. "audit rows, batched (opt-in):<br/>types + counts, paths, durations —<br/>never values" .-> s3
 
@@ -54,6 +57,6 @@ flowchart LR
     class machine boundary;
     class vault,models vaultBox;
     class provider,s3,hub upstream;
-    class plugins,dashboard,gate pluginBox;
+    class plugins,dashboard,gate,bundles pluginBox;
     class tool toolBox;
     class pro,proLocal proBox;

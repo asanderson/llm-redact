@@ -222,6 +222,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the routing upstream reachability probes (HEAD/GET on each base_url)",
     )
 
+    from llm_redact.models_cli import add_parser as add_models_parser
+
+    add_models_parser(subparsers)
+
     config_cmd = subparsers.add_parser("config", help="inspect the effective configuration")
     config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
     config_show = config_sub.add_parser(
@@ -544,6 +548,10 @@ def main(argv: list[str] | None = None) -> None:
         from llm_redact.doctor_cli import run_doctor
 
         raise SystemExit(run_doctor(args))
+    elif args.command == "models":
+        from llm_redact.models_cli import run_models
+
+        raise SystemExit(run_models(args))
     elif args.command == "config":
         from llm_redact.doctor_cli import run_config_show
 

@@ -258,16 +258,22 @@ def test_status_block_names_each_backend(monkeypatch: pytest.MonkeyPatch) -> Non
         "backends": {
             "hf": {
                 "model": "dslim/bert-base-NER",
-                "revision": None,
-                "catalog": None,
-                "license": None,
+                "source": "hub",
+                "model_id": "dslim/bert-base-NER",
+                "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",
+                "pinned": True,
+                "catalog": "vetted",
+                "license": "MIT",
                 "counters": zero,
             },
             "gliner": {
                 "model": "urchade/gliner_small-v2.1",
-                "revision": None,
-                "catalog": None,
-                "license": None,
+                "source": "hub",
+                "model_id": "urchade/gliner_small-v2.1",
+                "revision": "4e091416cf7c3481db542c2a3d26156916f3a47f",
+                "pinned": True,
+                "catalog": "vetted",
+                "license": "Apache-2.0",
                 "counters": {**zero, "scanned_whole": 1},
             },
         },
@@ -352,6 +358,12 @@ async def test_status_counts_requests_previews_and_resets_on_rebuild(
         assert sent == ["hi «PERSON_001»", LONG]
         hf = after["detection"]["ner"]["backends"]["hf"]
         assert hf["model"] == "dslim/bert-base-NER"
+        assert (hf["revision"], hf["catalog"], hf["license"], hf["pinned"]) == (
+            "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",
+            "vetted",
+            "MIT",
+            True,
+        )
         assert hf["counters"]["scanned_whole"] == 1
         assert hf["counters"]["skipped_max_chars"] == 1
         assert after["detection"]["ner"]["enabled"] is True

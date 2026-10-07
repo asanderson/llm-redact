@@ -198,8 +198,9 @@ class CatalogEntry:
     min_versions: tuple[tuple[str, str], ...] = ()
     # The confidence threshold a backend runs this model at when
     # [detection.ner] score_threshold is not set (NerConfig.score_threshold_for):
-    # set only where the llm-redact bench measured one or the card states
-    # one, never guessed.
+    # set only where the llm-redact bench measured one, never guessed or
+    # taken from a card's example (the Knowledgator GLiNER-PII cards call
+    # predict_entities with 0.3; the bench has not measured it).
     score_threshold: float | None = None
 
     @property
@@ -544,8 +545,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         attribution="GLiNER2-PII by Fastino AI (Apache-2.0); arXiv:2605.09973",
         recommended_entities=_CONTEXTUAL,
         # The bench's threshold (docs/ner-landscape.md): against 0.5 it keeps
-        # PERSON recall and cuts agent-traffic false positives from 96 to 26
-        # per 50 KB.
+        # synthetic PERSON recall and cuts agent-traffic false positives from
+        # 96 to 26 per 50 KB, at a recall cost on real text (OpenPII English
+        # PERSON 0.786).
         score_threshold=0.9,
         prompts=(
             ("PERSON", "person"),

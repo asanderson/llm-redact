@@ -145,9 +145,10 @@ when only they are active. Left unset, each of those backends runs at its
 model's **catalog default** — the threshold the model catalog records for the
 model that backend loads (its configured model, else the backend's default; a
 local folder by the model id its `llm-redact-model.json` names), recorded
-only where the llm-redact bench measured one or the model card states one:
-0.9 for `fastino/gliner2-privacy-filter-PII-multi` (measured below), and no
-other entry has one — else 0.5. A set value always wins and applies to every backend, 0.5
+only where the llm-redact bench measured one: 0.9 for
+`fastino/gliner2-privacy-filter-PII-multi` (measured below), and no other
+entry has one (the Knowledgator GLiNER-PII cards use 0.3 in their examples;
+the bench has not measured it, so it is not adopted) — else 0.5. A set value always wins and applies to every backend, 0.5
 included (configuration files written before 1.12.0 by `config show` or the
 config editor carry one). `/status` (`detection.ner.backends.<backend>`)
 reports each backend's `score_threshold` and its `score_threshold_source`
@@ -173,7 +174,12 @@ benchmark; on llm-redact's bench a `score_threshold` of 0.9 keeps its recall
 cuts its agent-traffic false positives from 96 to 26 per 50 KB against 0.5,
 at 453 ms per 500-character string — "caution", with the numbers in [ner-landscape.md](ner-landscape.md#pii-models-measured-by-the-llm-redact-bench).
 0.9 is the model's catalog default, so a configuration naming the model
-runs at it without a `score_threshold` of its own (one set wins):
+runs at it without a `score_threshold` of its own (one set wins). The default
+trades recall on real text for fewer false positives on agent traffic: on the
+published OpenPII data it finds 0.786 of the English names at 0.9 (the
+default `hf` and `gliner` models find 0.911 and 0.922; see
+[ner-landscape.md](ner-landscape.md#fastino-gliner2-pii-gliner2)), so a
+deployment that prefers recall sets `score_threshold` lower:
 
 ```toml
 [detection.ner]

@@ -78,8 +78,9 @@ def _sidecar(model_id: str, revision: str | None = None) -> str:
 
 
 def test_only_measured_models_carry_a_catalog_threshold() -> None:
-    # Set only where the bench measured one or a card states one (the
-    # Fastino PII model: 0.9, docs/ner-landscape.md); never guessed.
+    # Set only where the bench measured one (the Fastino PII model: 0.9,
+    # docs/ner-landscape.md); never guessed, and the Knowledgator cards'
+    # example 0.3 is not adopted (the bench has not measured it).
     assert {e.model_id: e.score_threshold for e in CATALOG if e.score_threshold is not None} == {
         FASTINO_PII: 0.9
     }
@@ -427,3 +428,28 @@ def test_doctor_names_a_catalog_threshold(
     configured = _model_rows(tmp_path, capsys, f'model = "{FASTINO_PII}"\nscore_threshold = 0.5')
     assert not any("catalog's default" in message for message in configured)
     assert not any("catalog's default" in message for message in _model_rows(tmp_path, capsys, ""))
+
+
+# --- docs --------------------------------------------------------------------------
+
+
+def test_the_docs_name_each_catalog_default_with_its_recall_cost() -> None:
+    # The default applies without any user action, so detection.md names
+    # each one beside what it costs on real text (docs/ner-landscape.md),
+    # and claims no source the catalog does not use: a card's example
+    # threshold (Knowledgator's 0.3) is not a catalog default.
+    root = Path(__file__).resolve().parents[1]
+    detection = (root / "docs" / "detection.md").read_text("utf-8")
+    flat = " ".join(detection.split())
+    assert "the model card states one" not in flat
+    assert "only where the llm-redact bench measured one:" in flat
+    defaults = {e.model_id: e.score_threshold for e in CATALOG if e.score_threshold is not None}
+    assert defaults == {FASTINO_PII: 0.9}
+    assert f"0.9 for `{FASTINO_PII}`" in flat
+    assert "on the published OpenPII data it finds 0.786 of the English names at 0.9" in flat
+    landscape = " ".join((root / "docs" / "ner-landscape.md").read_text("utf-8").split())
+    assert "| five types, threshold 0.9 | 0.614 / 0.997 (0.298) | 0.786 / 0.997 (0.197) |" in (
+        landscape
+    )
+    changelog = " ".join((root / "CHANGELOG.md").read_text("utf-8").split())
+    assert "at 0.9 the model finds 0.786 of OpenPII's English names" in changelog

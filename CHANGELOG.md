@@ -17,8 +17,11 @@ and tags `vX.Y.Z`.
   at the model catalog's default for the model it loads (`CatalogEntry.score_threshold`; a local
   folder by its sidecar's model id), else 0.5 as before. Only
   `fastino/gliner2-privacy-filter-PII-multi` has one, 0.9, the threshold the NER bench measured it
-  at (at 0.5 it makes about four times the agent-traffic false positives);
-  `bench/configs/gliner2-fastino.toml` now relies on it. A set value always wins and applies to
+  at (at 0.5 it makes about four times the agent-traffic false positives). It trades recall on
+  real text for that: at 0.9 the model finds 0.786 of OpenPII's English names, where the default
+  `hf` and `gliner` models find 0.911 and 0.922 (docs/ner-landscape.md); a deployment that
+  prefers recall sets `score_threshold` lower. `bench/configs/gliner2-fastino.toml` now relies on
+  it. A set value always wins and applies to
   every backend, 0.5 included. `/status` reports each backend's `score_threshold` and
   `score_threshold_source` (`config`, `catalog` or `default`) under `detection.ner.backends`,
   `llm-redact doctor` names a catalog default under `models`, and `config show` writes the key

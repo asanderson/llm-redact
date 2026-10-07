@@ -108,6 +108,22 @@ class TagSet:
                 entities.append("")
         return cls(tuple(tags), tuple(entities))
 
+    @classmethod
+    def from_bio_labels(cls, id2label: Mapping[int, str] | Mapping[str, str]) -> "TagSet":
+        """The tag set of a BIO model read as the transformers pipeline
+        reads one: a label without a tag ("PER") is ``I`` of itself."""
+        tagged = cls.from_labels(id2label)
+        labels = {int(index): str(label).strip() for index, label in id2label.items()}
+        return cls(
+            tuple("I" if tag is None else tag for tag in tagged.tags),
+            tuple(
+                labels[index] if tag is None else entity
+                for index, (tag, entity) in enumerate(
+                    zip(tagged.tags, tagged.entities, strict=True)
+                )
+            ),
+        )
+
     def __len__(self) -> int:
         return len(self.tags)
 

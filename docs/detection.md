@@ -703,8 +703,8 @@ is found at its exact offsets:
   `dslim/bert-base-NER` use) labels each word by its first piece, so a name
   is reported as whole words, never cut inside one ("Angela Merk"). Other
   tokenizers (SentencePiece, byte-level BPE) do not tell the pipeline where
-  words end, so their models are labelled piece by piece, and a span can
-  still end inside a word.
+  words end, so llm-redact decodes a BIO model with such a tokenizer itself,
+  word by word (below).
 - `gliner2`: GLiNER2 sets no word limit of its own, but its encoder was
   trained on 512 positions (Fastino's DeBERTa-v3 encoders) and its cost grows
   with the square of the length. A window holds at most 200 of GLiNER2's own
@@ -751,6 +751,38 @@ as the pipeline reads a BIO model, so a span covers whole words and is never
 cut inside one. The scheme comes
 from the model's labels; a model whose labels mix BIOES and BILOU tags is
 refused at startup.
+
+**BIO taggers without word-piece marks (`hf`).** A SentencePiece or
+byte-level BPE tokenizer (DeBERTa-v3, XLM-R, RoBERTa, ModernBERT) does not
+tell the transformers pipeline where words end: labelled piece by piece, a
+name became one value per piece (`kalyan-ks/ettin-68m-nemotron-pii` tags
+every piece `B-`, so "Zbigniew Brzezinski" was six values), and the
+pipeline's whitespace fallback would read `{"name":"Angela` as one word
+labelled by its brace. llm-redact reads such a model itself, over the same
+token windows, word by word:
+
+- the words are the text's own: a word ends at a blank, a quote or a
+  bracket of any script, and at `,` `;` `:` `=` `|` `/` `\` and the ASCII
+  quotes and brackets; each CJK ideograph is a word of its own; punctuation
+  at either end of a word is left out ("Paris." is "Paris"), punctuation
+  inside it stays ("1985-03-12", "j.doe" and "dev_jo42" are one word each);
+- a word is labelled by its first piece, the piece a model trained the
+  Hugging Face way labels (its later pieces were never trained and may say
+  anything). For a model llm-redact's model catalog lists as trained on
+  every piece (`kalyan-ks/ettin-68m-nemotron-pii`), which may leave a word's
+  first piece untagged and tag a later one, a word is labelled by the piece
+  tagged most confidently, else by its first piece;
+- labels are read greedily, `B` opening a span and `I` continuing it; a span
+  covers whole words and never takes in a quote, a bracket, a colon, a
+  semicolon, an equals sign or a newline: between two of its words there is
+  only nothing (CJK), one or two blanks, a comma and a space ("March 3,
+  1985") or a slash ("03/12/1985"), else it is cut there; neighbouring spans
+  of one label separated by nothing or a slash are one value;
+- a span's score is the mean probability of the words the model tagged as
+  one span (`score_threshold` applies), also for each part a cut leaves.
+
+A label without a tag (`PER`) is read as `I-PER`, as the pipeline reads it.
+WordPiece models keep the pipeline, unchanged.
 
 An entity two windows both report counts once; one cut by a window's edge is
 also reported whole by the next window, and the longer span wins. spaCy,

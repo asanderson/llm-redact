@@ -361,6 +361,17 @@ and tags `vX.Y.Z`.
   as the only egress.
 
 ### Changed
+- The `hf` backend decodes a BIO model whose tokenizer does not mark word pieces
+  (SentencePiece, byte-level BPE: DeBERTa-v3, XLM-R, RoBERTa, ModernBERT) itself, word by
+  word, instead of the transformers pipeline's token-level aggregation, which made every
+  piece its own value (`kalyan-ks/ettin-68m-nemotron-pii` tags every piece `B-`: "Zbigniew
+  Brzezinski" was six values). The words are the text's own (cut at blanks, quotes,
+  brackets and `, ; : = | / \`, each CJK ideograph alone, punctuation at a word's ends left
+  out); each is labelled by its first piece, or — for a model the model catalog lists as
+  trained on every piece (`piece_labels = "every"`) — by its most confidently tagged piece; a
+  span never takes in a quote, a bracket, a colon or a newline. WordPiece models
+  (`dslim/bert-base-NER`, the default) keep the pipeline, unchanged (a differential test
+  over the recall and false-positive corpora, and identical bench numbers).
 - The `hf` backend loads every model in float32, whatever precision its checkpoint stores
   (transformers' default keeps it): a bfloat16 checkpoint ran about 30% slower on a CPU
   (`openai/privacy-filter`: 738 against 1,025 ms per 500 characters for the model alone). The

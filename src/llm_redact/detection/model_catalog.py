@@ -59,6 +59,8 @@ STATUSES: tuple[Status, ...] = ("vetted", "caution", "restricted")
 # pipeline's aggregation; the hf backend decodes BIOES/BILOU itself,
 # detection/tagging.py).
 TAGGING_SCHEMES = ("bio", "bioes", "bilou")
+# CatalogEntry.piece_labels: which pieces of a word a BIO tagger labels.
+PIECE_LABELS = ("first", "every")
 
 # Value-free provenance tags a policy can match on (llm-redact-pro's model
 # policy). Each is a neutral fact about the weights or their training data.
@@ -190,6 +192,12 @@ class CatalogEntry:
     # Repo-relative ONNX weight files the gliner backend can load.
     onnx_files: tuple[str, ...] = ()
     tagging: str | None = None
+    # Which sub-word pieces a BIO tagger was trained to label, for a
+    # tokenizer without word-piece marks (hf_ner._word_row): "first" (the
+    # Hugging Face convention: a word's first piece, the others never
+    # trained) or "every" (every piece, so a later piece's tag is evidence
+    # too). An uncatalogued model is read as "first".
+    piece_labels: str = "first"
     # A BIOES/BILOU tagger's calibration file (repo-relative, fetched with
     # the model): transition biases for the constrained Viterbi decoder.
     viterbi_calibration: str | None = None
@@ -478,6 +486,10 @@ CATALOG: tuple[CatalogEntry, ...] = (
         lineage=("nemotron-cc-by",),
         recommended_entities=("PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"),
         tagging="bio",
+        # Measured 2026-10-07: it tags every sub-word piece (each B-), and a
+        # word's first piece is often untagged or unsure while a later one
+        # is sure.
+        piece_labels="every",
         # tokenizer_config.json's max_length (the tokenizer reports 8192,
         # the encoder takes 7999 positions).
         window=1024,

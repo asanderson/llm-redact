@@ -514,5 +514,7 @@ def test_real_model_loads_onnx_weights(monkeypatch: pytest.MonkeyPatch) -> None:
         NerConfig(enabled=True, backend="gliner", model=EDGE, onnx=(("gliner", EDGE_ONNX),))
     )
     assert getattr(detector._model, "onnx_model", False) is True
+    # Asked for the label the model was trained on (the catalog's prompt).
+    assert detector.label_policy.prompts == ("name",)
     found = detector.detect("Please ask Jane Doe about the invoice.")
     assert [(d.detector_type, d.value) for d in found] == [("PERSON", "Jane Doe")]

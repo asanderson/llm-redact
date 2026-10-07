@@ -102,6 +102,43 @@ MAX_SIDECAR_BYTES = 64 * 1024
 
 # The reason a configurable model carries until the bench has measured it.
 UNMEASURED = "not yet measured by the llm-redact bench"
+# The day the llm-redact bench measured the models whose reasons quote it
+# (docs/ner-landscape.md, "PII models measured by the llm-redact bench").
+MEASURED = "2026-10-07"
+
+
+def measured(
+    recall: float,
+    leak: float,
+    false_positives: float,
+    p50_ms: float,
+    *,
+    unrequested: tuple[str, ...] = (),
+) -> str:
+    """The bench's numbers as a catalog reason states them (owner decision
+    D11: a model that misses an admission bar stays "caution", with its
+    numbers shown). Measured with the entities the model's bench
+    configuration requests (bench/configs): its recommended entities that
+    the synthetic corpus labels. ``unrequested`` names the recommended ones
+    left out (the corpus labels no PASSPORT or DRIVER_LICENSE), so the
+    reason says every number — the false positives too — is for that
+    narrower request. PERSON recall and the character-leak rate on the
+    synthetic corpus, the false positives per 50 KB of the agent-traffic
+    negatives, and the full pipeline's p50 for a 500-character string."""
+    scope = f", {_joined(unrequested)} not requested" if unrequested else ""
+    return (
+        f"llm-redact bench {MEASURED}{scope}: synthetic-corpus PERSON recall {recall:.2f},"
+        f" character leak {leak:.2f}; {false_positives:.0f} false positives per 50 KB of"
+        f" agent-traffic negatives; p50 {p50_ms:.0f} ms per 500 characters"
+    )
+
+
+def _joined(names: tuple[str, ...]) -> str:
+    """Names joined for a sentence: A; A and B; A, B and C."""
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
 
 # The seven contextual types a PII model is recommended for (structured
 # types stay with the regex rules: models draw wider spans, and the longest
@@ -115,6 +152,11 @@ _CONTEXTUAL = (
     "USERNAME",
     "ACCOUNT_NUMBER",
 )
+
+
+# The recommended contextual types the synthetic corpus labels no value of:
+# a bench configuration cannot score them, so it does not request them.
+_UNSCORED = ("PASSPORT", "DRIVER_LICENSE")
 
 
 @dataclass(frozen=True)
@@ -232,6 +274,7 @@ def _knowledgator(
     *,
     onnx_files: tuple[str, ...] = _ONNX_ALL,
     min_versions: tuple[tuple[str, str], ...] = (),
+    bench: str = UNMEASURED,
 ) -> CatalogEntry:
     return CatalogEntry(
         model_id=f"knowledgator/gliner-pii-{size}-v1.0",
@@ -239,9 +282,9 @@ def _knowledgator(
         license="Apache-2.0",
         status="caution",
         reason=(
-            f"Apache-2.0; backbone {backbone}; the card does not name the training"
-            f" data; {UNMEASURED}"
+            f"Apache-2.0; backbone {backbone}; the card does not name the training data; {bench}"
         ),
+        checked="2026-10-07",
         revision=revision,
         backbone=backbone,
         attribution="GLiNER-PII by Knowledgator and Wordcab (Apache-2.0)",
@@ -325,13 +368,20 @@ CATALOG: tuple[CatalogEntry, ...] = (
         attribution="urchade/gliner_multi_pii-v1 (Apache-2.0); GLiNER, arXiv:2311.08526",
         recommended_entities=_CONTEXTUAL,
     ),
-    # --- caution: configurable, not yet measured (owner decision D13) -----
+    # --- caution: configurable (owner decision D13); -edge and -base measured
+    # by the bench below every D11 bar but agent-traffic false positives
+    # (-base: latency too); -small and -large not yet measured ----------
     _knowledgator(
         # main since 2026-03-26 (README edit).
         "edge",
         "9b7f39b0a2da971a5beea78d35f1539d4009c891",
         "jhu-clsp/ettin-encoder-32m",
         min_versions=_MODERNBERT,
+        # PyTorch weights; the int8 ONNX export measures lower (PERSON
+        # recall 0.77, leak 0.27: docs/ner-landscape.md).
+        bench=measured(
+            recall=0.99, leak=0.08, false_positives=109, p50_ms=93, unrequested=_UNSCORED
+        ),
     ),
     _knowledgator(
         # main since 2025-09-27.
@@ -345,6 +395,11 @@ CATALOG: tuple[CatalogEntry, ...] = (
         "base",
         "61726e0ad791dcab3e29339bbec3ad42ded65641",
         "microsoft/deberta-v3-small",
+        # PyTorch weights; the int8 ONNX export: PERSON recall 0.96, leak
+        # 0.03, 13 false positives per 50 KB, p50 182 ms.
+        bench=measured(
+            recall=0.97, leak=0.02, false_positives=8, p50_ms=234, unrequested=_UNSCORED
+        ),
     ),
     _knowledgator(
         # main since 2026-05-07 (README edit); ships no fp16 ONNX file.
@@ -373,6 +428,125 @@ CATALOG: tuple[CatalogEntry, ...] = (
         attribution="GLiNER2 by Fastino AI (Apache-2.0); arXiv:2507.18546",
         lineage=("undisclosed-training-data",),
         recommended_entities=("PERSON",),
+    ),
+    # --- caution: PII models the bench measured below a D11 bar (their
+    # numbers in the reason; docs/ner-landscape.md) ------------------------
+    CatalogEntry(
+        # main since 2026-01-13. BIO tags, first sub-token labelled only;
+        # 54 entity types, 5 of them sensitive attributes (D10: not folded).
+        model_id="OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1",
+        backends=("hf",),
+        license="Apache-2.0",
+        status="caution",
+        reason=(
+            "Apache-2.0; microsoft/deberta-v3-small (MIT) fine-tuned on nvidia/Nemotron-PII"
+            " (CC BY 4.0); 54 entity types; "
+            + measured(recall=1.00, leak=0.05, false_positives=18, p50_ms=175)
+        ),
+        checked="2026-10-07",
+        revision="a2360d3f42526fc660ac3b2b2301e1c2d94eba61",
+        backbone="microsoft/deberta-v3-small",
+        attribution=(
+            "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 (Apache-2.0); trained on NVIDIA"
+            " Nemotron-PII, CC BY 4.0"
+        ),
+        lineage=("nemotron-cc-by",),
+        recommended_entities=("PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"),
+        tagging="bio",
+        # The card's "Max Sequence Length: 384 tokens" (the model takes 512
+        # positions).
+        window=384,
+    ),
+    CatalogEntry(
+        # main since 2026-05-22. BIO tags; 55 entity types, 5 of them
+        # sensitive attributes (D10: not folded).
+        model_id="kalyan-ks/ettin-68m-nemotron-pii",
+        backends=("hf",),
+        license="MIT",
+        status="caution",
+        reason=(
+            "MIT; jhu-clsp/ettin-encoder-68m (MIT) fine-tuned on nvidia/Nemotron-PII"
+            " (CC BY 4.0); 55 entity types; every sub-word piece tagged B-, read as separate"
+            " values; " + measured(recall=0.99, leak=0.16, false_positives=21, p50_ms=277)
+        ),
+        checked="2026-10-07",
+        revision="500262a2aaf913825ef750ef255c3fe437cd8e64",
+        backbone="jhu-clsp/ettin-encoder-68m",
+        attribution=(
+            "kalyan-ks/ettin-68m-nemotron-pii (MIT); trained on NVIDIA Nemotron-PII, CC BY 4.0"
+        ),
+        lineage=("nemotron-cc-by",),
+        recommended_entities=("PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"),
+        tagging="bio",
+        # tokenizer_config.json's max_length (the tokenizer reports 8192,
+        # the encoder takes 7999 positions).
+        window=1024,
+        min_versions=_MODERNBERT,
+    ),
+    CatalogEntry(
+        # main since 2026-04-22 (created 2026-04-17). 1.5B parameters, 50M
+        # active (sparse mixture of experts); model.safetensors is 2.8 GB
+        # (the repository also holds original/ and ONNX copies, never
+        # fetched). Eight span labels, each B-/I-/E-/S- tagged.
+        model_id="openai/privacy-filter",
+        backends=("hf",),
+        license="Apache-2.0",
+        status="caution",
+        reason=(
+            "Apache-2.0; 1.5B parameters, 50M active (sparse mixture of experts); BIOES"
+            " tags; the card does not name the training data; "
+            + measured(recall=0.99, leak=0.12, false_positives=23, p50_ms=1108)
+        ),
+        checked="2026-10-07",
+        revision="7ffa9a043d54d1be65afb281eddf0ffbe629385b",
+        attribution="OpenAI Privacy Filter by OpenAI (Apache-2.0)",
+        lineage=("undisclosed-training-data",),
+        # Its `secret` label is left to the anchored secret rules: the card
+        # lists over-redaction of hashes, placeholders and sample
+        # credentials among its failure modes.
+        recommended_entities=("PERSON", "ADDRESS", "ACCOUNT_NUMBER"),
+        tagging="bioes",
+        viterbi_calibration="viterbi_calibration.json",
+        # The card's 128,000-token context window.
+        window=128000,
+        # transformers learned the model type (openai_privacy_filter) in 5.6.0.
+        min_versions=(("transformers", "5.6.0"),),
+    ),
+    CatalogEntry(
+        # main since 2026-09-28 (created 2026-05-10). Self-contained:
+        # config.json, encoder_config/config.json, tokenizer and
+        # model.safetensors (1.2 GB). 42 labels; the prompts below are the
+        # card's spellings of the contextual types.
+        model_id="fastino/gliner2-privacy-filter-PII-multi",
+        backends=("gliner2",),
+        license="Apache-2.0",
+        status="caution",
+        reason=(
+            "Apache-2.0; GLiNER2 (backbone microsoft/mdeberta-v3-base) fine-tuned on 4,910"
+            " synthetic texts the card says GPT-5.4 generated; English, French, Spanish,"
+            " German, Italian, Portuguese, Dutch; at score_threshold 0.9, "
+            + measured(
+                recall=1.00,
+                leak=0.01,
+                false_positives=26,
+                p50_ms=453,
+                unrequested=_UNSCORED,
+            )
+        ),
+        checked="2026-10-07",
+        revision="1cb4166094dc58fa8d836429f060d6c95f62b495",
+        backbone="microsoft/mdeberta-v3-base",
+        attribution="GLiNER2-PII by Fastino AI (Apache-2.0); arXiv:2605.09973",
+        recommended_entities=_CONTEXTUAL,
+        prompts=(
+            ("PERSON", "person"),
+            ("ADDRESS", "street_address"),
+            ("DATE_OF_BIRTH", "date_of_birth"),
+            ("PASSPORT", "passport_number"),
+            ("DRIVER_LICENSE", "drivers_license_number"),
+            ("USERNAME", "username"),
+            ("ACCOUNT_NUMBER", "account_number"),
+        ),
     ),
     # --- restricted: never suggested; a warning names the reason ----------
     CatalogEntry(

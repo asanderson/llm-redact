@@ -150,8 +150,31 @@ character span, which llm-redact uses as given — a value that occurs twice is
 redacted at both places. It runs on the `gliner2` extra (the gliner2 package
 with torch, transformers and peft). The default model,
 `fastino/gliner2-base-v1` (Apache-2.0, English), is catalogued as not yet
-measured by the llm-redact bench. The gliner2 package also contains a client
-for Fastino's hosted API, which llm-redact never uses: models run locally. Multiple backends can run
+measured by the llm-redact bench. Fastino's PII model,
+`fastino/gliner2-privacy-filter-PII-multi` (Apache-2.0; 42 labels; English,
+French, Spanish, German, Italian, Portuguese and Dutch; trained on synthetic
+texts its card says GPT-5.4 generated), is catalogued with the label
+spellings it was trained on ("street_address", "date_of_birth",
+"passport_number", "drivers_license_number", …), which llm-redact sends for
+the type requests. Its card reports a precision of 0.35–0.37 on the SPY
+benchmark; on llm-redact's bench a `score_threshold` of 0.9 keeps its recall
+(`PERSON` 0.998, character leak 0.009 for the five contextual types) and
+cuts its agent-traffic false positives from 96 to 26 per 50 KB against 0.5,
+at 453 ms per 500-character string — "caution", with the numbers in [ner-landscape.md](ner-landscape.md#pii-models-measured-by-the-llm-redact-bench):
+
+```toml
+[detection.ner]
+enabled = true
+backend = "gliner2"
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
+score_threshold = 0.9
+
+[detection.ner.models]
+gliner2 = "fastino/gliner2-privacy-filter-PII-multi"
+```
+
+The gliner2 package also contains a client for Fastino's hosted API, which
+llm-redact never uses: models run locally. Multiple backends can run
 concurrently (`backends = ["spacy", "presidio"]`), and the multilingual
 Stanza and Hugging Face `token-classification` backends are available the
 same way — the survey behind the lineup is
@@ -294,9 +317,17 @@ that ships no tokenizer, the base model and the commit that base model is
 pinned to. The catalog only states facts; llm-redact never refuses a model
 for its catalog status (a policy plugin may).
 
-- **vetted**: a known-good choice, pinned to a commit.
+- **vetted**: a known-good choice, pinned to a commit. A model the
+  llm-redact bench measures is vetted only when it clears every admission
+  bar: an OSI-approved weights license and no known restricted
+  training-data lineage, PERSON recall of at least 0.85 and a character
+  leak of at most 0.15 on the synthetic corpus, at most one false positive
+  per 50 KB of agent-traffic negatives, and a p50 of at most 100 ms per
+  500-character string ([CONTRIBUTING.md](CONTRIBUTING.md#adding-an-ner-model-or-backend),
+  step 6).
 - **caution**: configurable and pinned, with the reason shown — for example,
-  not yet measured by the llm-redact bench.
+  not yet measured by the llm-redact bench, or measured below a bar (the
+  reason then quotes the numbers).
 - **restricted**: never suggested. A configured restricted model logs a
   startup WARNING with the catalog's facts:
   `[detection.ner] BACKEND model 'ID' has model catalog status "restricted": …`.
@@ -325,11 +356,20 @@ The defaults are `urchade/gliner_small-v2.1` (`gliner`) and
 is listed under caution below. A base model is pinned where the GLiNER
 checkpoint ships no tokenizer or encoder configuration of its own.
 
-Configurable, status caution (`not yet measured by the llm-redact bench`;
-their cards do not name the training data): Knowledgator's GLiNER-PII models
-and the `gliner2` backend's default, `fastino/gliner2-base-v1`. Each ships its
-tokenizer and encoder configuration, so no base model is fetched; the
-Knowledgator `-edge` and `-small` need transformers 4.48 or newer:
+Configurable, status caution (their cards do not name the training data):
+Knowledgator's GLiNER-PII models — `-edge` and `-base` with the bench numbers
+that keep them below the "vetted" bars (see "Choosing a GLiNER model" below),
+`-small` and `-large` not yet measured by the llm-redact bench — and the
+`gliner2` backend's default, `fastino/gliner2-base-v1`, not yet measured,
+and Fastino's PII model `fastino/gliner2-privacy-filter-PII-multi`, measured
+below the bars ("GLiNER2" above).
+Each ships its tokenizer and encoder configuration, so no base model is
+fetched; the Knowledgator `-edge` and `-small` need transformers 4.48 or
+newer. Also caution, with their bench numbers: the `hf` PII models trained
+on NVIDIA Nemotron-PII (CC BY 4.0), OpenMed-PII Small 44M and
+ettin-68m-nemotron-pii, and `openai/privacy-filter` ("PII models for the
+`hf` backend" below; the ModernBERT ettin model needs transformers 4.48 or
+newer too, the privacy filter 5.6.0):
 
 <!-- model-catalog:caution -->
 | Model | Backend | License | Pinned revision | Base model (pinned revision) |
@@ -339,6 +379,10 @@ Knowledgator `-edge` and `-small` need transformers 4.48 or newer:
 | `knowledgator/gliner-pii-base-v1.0` | gliner | Apache-2.0 | `61726e0ad791` | `microsoft/deberta-v3-small` (—) |
 | `knowledgator/gliner-pii-large-v1.0` | gliner | Apache-2.0 | `f847f54fbc97` | `microsoft/deberta-v3-large` (—) |
 | `fastino/gliner2-base-v1` | gliner2 | Apache-2.0 | `f9634218e535` | `microsoft/deberta-v3-base` (—) |
+| `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` | hf | Apache-2.0 | `a2360d3f4252` | `microsoft/deberta-v3-small` (—) |
+| `kalyan-ks/ettin-68m-nemotron-pii` | hf | MIT | `500262a2aaf9` | `jhu-clsp/ettin-encoder-68m` (—) |
+| `openai/privacy-filter` | hf | Apache-2.0 | `7ffa9a043d54` | — |
+| `fastino/gliner2-privacy-filter-PII-multi` | gliner2 | Apache-2.0 | `1cb4166094dc` | `microsoft/mdeberta-v3-base` (—) |
 <!-- /model-catalog -->
 
 Restricted (a startup WARNING names the facts; no pin):
@@ -362,6 +406,136 @@ Restricted (a startup WARNING names the facts; no pin):
 `*` marks an id prefix: every model whose id starts with it. The reasons, with
 their links and check dates, are what the startup warning, `doctor` and
 `llm-redact models list --json` print.
+
+### Choosing a GLiNER model
+
+The `gliner` backend loads `urchade/gliner_small-v2.1` unless
+`[detection.ner.models] gliner` names another model. Knowledgator's
+GLiNER-PII models (`knowledgator/gliner-pii-edge-v1.0`, `-small-`, `-base-`,
+`-large-v1.0`, Apache-2.0, developed with Wordcab) are GLiNER checkpoints
+trained on PII labels; each ships its own tokenizer and encoder
+configuration, so nothing beyond the checkpoint is fetched, and an int8
+ONNX export of each can be loaded instead of the PyTorch weights. The
+catalog records the prompt each was trained on and llm-redact sends it for
+a type request: "name" for `PERSON` (the generic prompt is "person"),
+"location address" for `ADDRESS`, "dob" for `DATE_OF_BIRTH`, "passport
+number", "driver license", "username" and "account number".
+`urchade/gliner_multi_pii-v1` (Apache-2.0, multilingual) is the default
+model of Presidio's own GLiNER recognizer; it is in the catalog but not
+measured here.
+
+A working configuration (fetch the model once with `llm-redact models
+pull`, then start; downloads stay off):
+
+```toml
+[detection.ner]
+enabled = true
+backend = "gliner"
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
+
+[detection.ner.models]
+gliner = "knowledgator/gliner-pii-base-v1.0"
+
+[detection.ner.onnx]
+gliner = "onnx/model_quint8.onnx"   # the int8 export; leave the table out for the PyTorch weights
+```
+
+What the NER bench measured (2026-10-07, one shared 4-core
+`Intel(R) Xeon(R) Processor @ 2.80GHz`, threshold 0.5; the synthetic corpus
+with the five entities above requested; false positives are NER detections
+the rules alone do not make in the four agent-traffic files of
+`bench/fp_corpus`, 19,808 bytes; p50 is the whole pipeline per
+500-character string; [ner-bench.md](ner-bench.md) explains each metric,
+[ner-landscape.md](ner-landscape.md#pii-models-measured-by-the-llm-redact-bench)
+has the full record):
+
+| Model (weights) | PERSON recall | Character leak | Over-redaction | Agent-traffic false positives per 50 KB | p50, 500 characters |
+|---|---|---|---|---|---|
+| `urchade/gliner_small-v2.1` (the default) | 0.79 | 0.05 | 0.050 | 34 | — (189 ms asked for `PERSON` only) |
+| `knowledgator/gliner-pii-edge-v1.0` (PyTorch) | 0.99 | 0.08 | 0.100 | 109 | 93 ms |
+| `knowledgator/gliner-pii-edge-v1.0` (int8 ONNX) | 0.77 | 0.27 | 0.050 | 16 | 97 ms |
+| `knowledgator/gliner-pii-base-v1.0` (PyTorch) | 0.97 | 0.02 | 0.055 | 8 | 234 ms |
+| `knowledgator/gliner-pii-base-v1.0` (int8 ONNX) | 0.96 | 0.03 | 0.028 | 13 | 182 ms |
+
+- `-base` leaks the least of the five types and draws the fewest false
+  positives on agent traffic; its int8 export keeps that at about three
+  quarters of the PyTorch latency. `-edge` is the fast one, but its int8
+  export loses a quarter of the names (PERSON recall 0.99 → 0.77).
+- Most false positives on agent traffic are `USERNAME` (identifiers and
+  commit authors' handles read as user names). Asked for `PERSON` only,
+  `-edge` (PyTorch) finds every name of the corpus and makes no detection
+  in the agent-traffic files.
+- Knowledgator's card suggests a threshold of 0.3: on the int8 exports it
+  raises recall (`-base` PERSON 0.998, leak 0.003) and the false positives
+  with it (from 13 to 57 per 50 KB for `-base`, from 16 to 114 for
+  `-edge`), and on `-edge` it costs four email addresses their exact
+  match (a wider model span over the address wins the overlap).
+
+None of them meets every bar of the catalog's "vetted" status (agent-traffic
+false positives above one per 50 KB; `-base` above 100 ms too), so they stay
+"caution" with these numbers in their catalog reasons; the default model is
+unchanged. `-small` and `-large` are not measured yet.
+
+### PII models for the `hf` backend
+
+The `hf` backend's default, `dslim/bert-base-NER`, is a general NER model
+(people, organizations, places). Two PII models trained on NVIDIA's
+Nemotron-PII (CC BY 4.0, which asks for attribution: "Trained on NVIDIA
+Nemotron-PII, CC BY 4.0") are catalogued: `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`
+(Apache-2.0, DeBERTa-v3-small, read in windows of 384 tokens, its card's
+sequence length) and `kalyan-ks/ettin-68m-nemotron-pii` (MIT, a ModernBERT
+encoder: transformers 4.48 or newer). Both label 54–55 kinds of data; their
+`first_name`/`last_name`, `street_address`, `date_of_birth`, `user_name` and
+`account_number` labels fold into `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`,
+`USERNAME` and `ACCOUNT_NUMBER`, and their sensitive-attribute labels
+(gender, race or ethnicity, religious belief, political view, sexuality)
+are never folded:
+
+```toml
+[detection.ner]
+enabled = true
+backend = "hf"
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
+
+[detection.ner.models]
+hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+```
+
+Measured by the NER bench (2026-10-07, the same machine and rules as the
+GLiNER table above):
+
+| Model, entities | PERSON recall (exact) | Character leak | Over-redaction | Agent-traffic false positives per 50 KB | p50, 500 characters |
+|---|---|---|---|---|---|
+| `dslim/bert-base-NER` (the default), `PERSON` | 0.97 (0.95) | 0.40 | 0.003 | 0 | 176 ms |
+| OpenMed-PII Small 44M, `PERSON` | 1.00 (0.67) | 0.39 | 0.002 | 0 | — |
+| OpenMed-PII Small 44M, five types | 1.00 (0.67) | 0.05 | 0.005 | 18 | 175 ms |
+| ettin-68m-nemotron-pii, five types | 0.99 (0.03) | 0.16 | 0.003 | 21 | 277 ms |
+
+`kalyan-ks/ettin-68m-nemotron-pii` tags every sub-word piece of a value as
+the start of a value, so the `hf` backend reports names and numbers as
+fragments ("Z", "b", "ign", …): each fragment becomes its own placeholder,
+and pieces the model labels with another type are sent as they are (a
+quarter of the synthetic corpus's account numbers is found; three quarters
+of their digits leak). It stays "caution" with these numbers. The
+`PERSON`-only rows request what the default configuration requests, so
+their character leak counts every other labelled value as leaked; the
+default model is unchanged (a change would be a 2.0.0 decision).
+
+`openai/privacy-filter` (Apache-2.0; a 1.5B-parameter mixture of experts,
+50M parameters active, 2.8 GB of weights) labels `private_person`,
+`private_address`, `account_number`, `private_email`, `private_phone`,
+`private_url`, `private_date` and `secret` with BIOES tags, which the `hf`
+backend decodes with the constrained Viterbi decoder and the
+`viterbi_calibration.json` the repository ships (fetched with the model). It
+needs transformers 5.6.0 or newer: an older one stops the startup with
+`[detection.ner] hf: openai/privacy-filter needs transformers >= 5.6.0 (model
+catalog), …` before any weights load. Ask it for `PERSON`, `ADDRESS` and
+`ACCOUNT_NUMBER`; its `secret` label is better left to the anchored secret
+rules. Measured on the same corpora: `PERSON` recall 0.99, character leak
+0.12, 23 agent-traffic false positives per 50 KB, and about a second per
+500-character string on a 4-core CPU (1.1 s; 19.5 s for 10,000 characters),
+so it stays "caution" and its bench configuration is measured by hand
+(`bench/configs/manual/`, [ner-bench.md](ner-bench.md)).
 
 ### Model-load policies (plugins)
 
@@ -635,7 +809,11 @@ language for a type request (`PERSON` → "person", `ADDRESS` → "street addres
 `DATE_OF_BIRTH` → "date of birth", `PASSPORT` → "passport number",
 `DRIVER_LICENSE` → "driver license number", `USERNAME` → "username",
 `ACCOUNT_NUMBER` → "account number", `EMAIL` → "email address", `PHONE` →
-"phone number"; other built-in types send their name in lowercase words).
+"phone number"; other built-in types send their name in lowercase words) —
+unless the model catalog records the prompt the loaded model was trained on
+for that type, which is sent instead (Knowledgator's GLiNER-PII models are
+asked for "name", not "person": "Choosing a GLiNER model" above). A model
+folder takes the prompts of the model its `llm-redact-model.json` names.
 
 **Raw requests.** Any other entry (`PER`, `ORG`, `"job title"`) is a raw
 request: GLiNER and GLiNER2 are sent the text as written, and the backend emits the label's

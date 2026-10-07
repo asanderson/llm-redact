@@ -391,6 +391,27 @@ def test_the_builder_hands_the_overrides_and_threshold_on(
     assert detector.model_name == "org/gliner2-pii"
 
 
+def test_a_catalogued_model_is_sent_the_prompts_it_was_trained_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fastino's PII checkpoint knows "street_address", not "street address".
+    model = FakeGliner2([("12 Oak Street", "street_address", 0.9), ("Jane Roe", "person", 0.9)])
+    install_gliner2(monkeypatch, model)
+    ner = NerConfig(
+        enabled=True,
+        backend="gliner2",
+        model="fastino/gliner2-privacy-filter-PII-multi",
+        entities=("PERSON", "ADDRESS", "DRIVER_LICENSE"),
+    )
+    detector = build_gliner2_detector(ner)
+    assert detector.label_policy.prompts == ("person", "street_address", "drivers_license_number")
+    found = detector.detect("Jane Roe, 12 Oak Street")
+    assert [(d.detector_type, d.value) for d in found] == [
+        ("PERSON", "Jane Roe"),
+        ("ADDRESS", "12 Oak Street"),
+    ]
+
+
 def test_a_missing_extra_is_a_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "gliner2", None)
     with pytest.raises(ConfigError) as caught:
@@ -693,6 +714,35 @@ def test_real_model_finds_names_at_their_own_offsets(monkeypatch: pytest.MonkeyP
     assert [d.value for d in found] == ["Angela Merkel", "Barack Obama"]
     assert all(long_text[d.start : d.end] == d.value for d in found)
     assert detector.stats.scanned_windowed == 1
+
+
+# fastino/gliner2-privacy-filter-PII-multi (Apache-2.0) at the catalog pin,
+# checked 2026-10-07: prompted with the card's own label spellings.
+PII = "fastino/gliner2-privacy-filter-PII-multi"
+PII_PIN = "1cb4166094dc58fa8d836429f060d6c95f62b495"
+
+
+@pytest.mark.real_model
+def test_real_pii_model_takes_its_own_label_spellings(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("torch")
+    pytest.importorskip("gliner2")
+    offline_hub(monkeypatch)
+    cached_snapshot(PII, PII_PIN, BASE_FILES)
+    entities = ("PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER")
+    detector = build_gliner2_detector(
+        NerConfig(enabled=True, backend="gliner2", model=PII, entities=entities)
+    )
+    assert detector.label_policy.prompts == (
+        "person",
+        "street_address",
+        "date_of_birth",
+        "username",
+        "account_number",
+    )
+    text = "Alice Smith lives at 12 Oak Street; her login is jdoe42."
+    found = {(d.detector_type, d.value) for d in detector.detect(text)}
+    assert {("PERSON", "Alice Smith"), ("ADDRESS", "12 Oak Street")} <= found
+    assert all(text[d.start : d.end] == d.value for d in detector.detect(text))
 
 
 def test_module_constants() -> None:

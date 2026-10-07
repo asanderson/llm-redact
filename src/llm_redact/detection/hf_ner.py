@@ -164,6 +164,16 @@ class HfDetector:
                 self.stats.offsets_dropped += 1
                 continue
             start, end = int(start), int(end)
+            # A SentencePiece or byte-level BPE token's offsets take in the
+            # blank before its word (" Jane"): the span is the value, never
+            # the blank around it, so the two parts of a name stay adjacent
+            # parts (one placeholder) and the text keeps its spaces.
+            while start < end and text[start].isspace():
+                start += 1
+            while end > start and text[end - 1].isspace():
+                end -= 1
+            if start == end:
+                continue
             yield Detection(
                 start=start,
                 end=end,
@@ -232,7 +242,8 @@ def torch_scorer(model: Any) -> Scorer:
 
     def score(input_ids: list[int]) -> Sequence[Sequence[float]]:
         with torch.inference_mode():
-            ids = torch.tensor([input_ids], device=getattr(model, "device", None))
+            # Token ids are integers, whatever the list holds.
+            ids = torch.tensor([input_ids], dtype=torch.long, device=getattr(model, "device", None))
             logits = model(input_ids=ids).logits[0]
             rows: Sequence[Sequence[float]] = torch.log_softmax(logits.float(), dim=-1).tolist()
             return rows
@@ -343,6 +354,11 @@ class TaggerPipe:
         units = _word_units(encoded, windows) if self._by_word else _token_units(windows)
         entities: list[dict[str, Any]] = []
         for (ids, _offsets, _special), kept in zip(windows, units, strict=True):
+            if not kept:
+                # No token covers a character (an empty or blank text, a
+                # tokenizer without special tokens): nothing to decode, and
+                # a model call on no token ids fails.
+                continue
             rows = self._scorer(list(ids))
             scores = [rows[row] for row, _start, _end in kept]
             path = self._decode(scores)
@@ -370,15 +386,9 @@ class TaggerPipe:
 def _catalog_entry(model: str) -> "CatalogEntry | None":
     """The model catalog's ``hf`` entry for ``model`` (a Hub id, or a local
     directory its sidecar file identifies); None when there is none."""
-    from llm_redact.config import ConfigError
-    from llm_redact.detection.model_catalog import SidecarError, identify, lookup
+    from llm_redact.detection.model_files import catalog_entry
 
-    try:
-        identity = identify(model)
-    except SidecarError as exc:
-        raise ConfigError(f"[detection.ner] hf model: {exc}") from exc
-    entry = lookup(identity.model_id) if identity is not None else None
-    return entry if entry is not None and "hf" in entry.backends else None
+    return catalog_entry(model, "hf")
 
 
 def catalog_window(model: str) -> int | None:

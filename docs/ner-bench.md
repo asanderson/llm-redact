@@ -257,29 +257,55 @@ The models load offline in steps 3 and 4, as a proxy with
 `allow_download = false` loads them: only step 2 contacts the Hub.
 
 **`ner-eval`** (`.github/workflows/ner-eval.yml`, weekly and by
-`workflow_dispatch`): the same environment and models, then every
-`bench/configs/*.toml` on 2,000-row slices of OpenPII 1.5M (`validation`)
-and Nemotron-PII (`test`), downloaded at their pinned revisions into a
-cached directory. It is report only — no `--check` — until baselines for
-those datasets are recorded; the reports are uploaded as the `ner-eval`
-artifact and written to the run's summary.
+`workflow_dispatch`): the same environment, then one job per bench
+configuration (its matrix lists every `bench/configs/*.toml`), each pulling
+its own model and scoring it on 2,000-row slices of OpenPII 1.5M
+(`validation`) and Nemotron-PII (`test`), downloaded at their pinned
+revisions into a cached directory. One job per configuration keeps each
+within its 120-minute timeout: the slowest, `gliner2-fastino`, needs an
+estimated 40 minutes for both slices on the reference CPU. It is report only — no
+`--check` — until baselines for those datasets are recorded; each job
+uploads its reports as the `ner-eval-<configuration>` artifact and writes
+them to the run's summary.
 
 | Configuration | What it scores | Gated by |
 |---|---|---|
 | `bench/configs/hf-default.toml` | the `hf` backend's default model (`dslim/bert-base-NER`) at its catalog pin, default entities (`PERSON`) | `[hf-default.synthetic]`, `[hf-default]` |
 | `bench/configs/gliner-default.toml` | the `gliner` backend's default model (`urchade/gliner_small-v2.1`, assembled with its pinned base model) at its catalog pin, default entities | `[gliner-default.synthetic]`, `[gliner-default]` |
+| `bench/configs/gliner-knowledgator-edge.toml`, `-edge-onnx.toml` | `knowledgator/gliner-pii-edge-v1.0` at its catalog pin, PyTorch weights and the int8 ONNX export, asked for `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and `ACCOUNT_NUMBER` | `[gliner-knowledgator-edge.synthetic]`, `[gliner-knowledgator-edge]`, and the same for `-edge-onnx` |
+| `bench/configs/gliner-knowledgator-base.toml`, `-base-onnx.toml` | `knowledgator/gliner-pii-base-v1.0`, the same way | `[gliner-knowledgator-base.synthetic]`, `[gliner-knowledgator-base]`, and the same for `-base-onnx` |
+| `bench/configs/hf-openmed-pii-small.toml`, `hf-ettin-68m-nemotron-pii.toml` | `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` and `kalyan-ks/ettin-68m-nemotron-pii` at their catalog pins, asked for the same five types | `[hf-openmed-pii-small.synthetic]`, `[hf-openmed-pii-small]`, and the same for `hf-ettin-68m-nemotron-pii` |
+| `bench/configs/gliner2-fastino.toml` | `fastino/gliner2-privacy-filter-PII-multi` at its catalog pin (the `gliner2` backend), asked for the same five types with `score_threshold = 0.9` | `[gliner2-fastino.synthetic]`, `[gliner2-fastino]` |
+| `bench/configs/manual/hf-openai-privacy-filter.toml` | not run by CI: `openai/privacy-filter` at its catalog pin, Viterbi-decoded, asked for `PERSON`, `ADDRESS` and `ACCOUNT_NUMBER`; measured by hand (below) | `[hf-openai-privacy-filter.synthetic]`, `[hf-openai-privacy-filter]`, checked by hand |
 | `tests/real_model_configs/*.toml` | not scored: the other models the `real_model` tests load (the `gliner2` default, a Knowledgator ONNX checkpoint), pulled by `ner-models` | — |
 
 A configuration added to `bench/configs/` is pulled, tested and gated by
-both workflows with no workflow change, and fails `ner-models` until its
-baselines are recorded. The recorded entries say when, on which model
-revisions and with which measured values they were taken; with the default
-`PERSON` entities, the synthetic corpus's `ADDRESS`, `DATE_OF_BIRTH`,
-`USERNAME` and `ACCOUNT_NUMBER` values are not requested, so their
-characters (about 38% of the corpus's gold characters) count toward the
-type-agnostic leak rate. A ceiling on that rate alone would let `PERSON`
-leakage grow about fivefold before failing, so each entry also carries a
-`type_leak_max` for every entity its configuration requests.
+`ner-models` with no workflow change, and fails it until its baselines are
+recorded; `tests/test_ner_ci.py` fails until `ner-eval.yml`'s matrix lists
+it. The recorded entries say when, on which model revisions and with which
+measured values they were taken; with the default `PERSON` entities, the
+synthetic corpus's `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and
+`ACCOUNT_NUMBER` values are not requested, so their characters (about 38%
+of the corpus's gold characters) count toward the type-agnostic leak rate
+(the configurations of other models request the contextual types their
+models are recommended for that the corpus labels). A ceiling on that rate alone would let
+`PERSON` leakage grow about fivefold before failing, so each entry also
+carries a `type_leak_max` for every entity its configuration requests.
+
+**Configurations measured by hand.** `bench/configs/manual/` holds
+configurations of models too slow for a CI runner; neither workflow reads
+that directory (`ner-models`' globs are not recursive, and `ner-eval`'s
+matrix lists only `bench/configs/*.toml`). `openai/privacy-filter`
+(`bench/configs/manual/hf-openai-privacy-filter.toml`) takes about a second
+per 500-character string on a 4-core CPU, and its latency run alone takes
+twenty minutes. Its baselines are recorded like any other's and checked the
+same way, by hand:
+
+```bash
+uv run --no-sync llm-redact models pull --config bench/configs/manual/hf-openai-privacy-filter.toml
+uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/manual/hf-openai-privacy-filter.toml --check
+uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/manual/hf-openai-privacy-filter.toml --fp-corpus bench/fp_corpus --check
+```
 
 To reproduce the job locally (it creates a CPython 3.13 venv; Linux,
 x86_64 or aarch64, where the PyTorch CPU index has a `+cpu` wheel; the
@@ -371,7 +397,12 @@ Facts found when the adapters were checked against the data (2026-10-05):
   unmapped and do not score them. The card's metadata says
   `license: other` with `license_name: cc-by-4.0`; its text grants CC BY
   4.0 and asks for the credit "Ai4Privacy / Ai Suisse SA". The validation
-  file is about 1 GB, downloaded whole on first use.
+  file is about 1 GB, downloaded whole on first use. Its rows are grouped
+  by language: the first 2,000 (a default `--limit` slice) hold Chinese,
+  Japanese, Vietnamese, Tagalog, Indonesian, Malay, Korean and 236 English
+  rows (checked 2026-10-07), so an English-only model is measured mostly
+  on languages it was not trained on; `--language en` scores English rows
+  only.
 - **Nemotron-PII** (`data/test-00000-of-00001.parquet`,
   `data/train-00000-of-00001.parquet`, about 150 MB each). The `spans`
   column is a string holding a Python-literal list (single quotes, not

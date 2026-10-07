@@ -44,7 +44,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from llm_redact.config import ConfigError
-from llm_redact.detection.model_catalog import MODEL_ID_RE, ModelIdentity
+from llm_redact.detection.model_catalog import MODEL_ID_RE, CatalogEntry, ModelIdentity
 
 # Tokenizer files, by the names transformers looks for: a fast tokenizer's
 # tokenizer.json, its configuration, and the vocabularies a slow tokenizer
@@ -528,6 +528,18 @@ def _identify(model: str, *, what: str = "gliner model") -> ModelIdentity | None
         return identify(model)
     except SidecarError as exc:
         raise _config_error(f"[detection.ner] {what}: {exc}") from exc
+
+
+def catalog_entry(model: str, backend: str) -> CatalogEntry | None:
+    """The model catalog's entry for ``model``, a ``backend`` model value (a
+    Hub id, or a folder its sidecar file names); None when the catalog has
+    none for that backend. A folder whose sidecar file cannot be read is a
+    configuration error."""
+    from llm_redact.detection.model_catalog import lookup
+
+    identity = _identify(model, what=f"{backend} model")
+    entry = lookup(identity.model_id) if identity is not None else None
+    return entry if entry is not None and backend in entry.backends else None
 
 
 def _backbone_revision(model: str, backbone: str) -> str | None:

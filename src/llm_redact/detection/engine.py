@@ -404,6 +404,8 @@ def build_detectors(
                 check_model_policy(
                     model_policy, config.ner, backend_name, allow_download=single.allow_download
                 )
+            if backend_name in HUB_BACKENDS:
+                check_min_versions(single, backend_name)
             # Imported only when enabled: the NER dependencies stay
             # optional and startup fails fast per backend if missing.
             if backend_name == "gliner":
@@ -436,6 +438,23 @@ def build_detectors(
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
         _mark_unmatched(config.ner.entities, built)
     return detectors
+
+
+def check_min_versions(ner: NerConfig, backend: str) -> None:
+    """Refuse to build ``backend`` when a library is installed older than the
+    model catalog says its model needs (``CatalogEntry.min_versions``, read
+    from distribution metadata): the load would fail on a model type the
+    library does not know, or misread the checkpoint. The ConfigError names
+    the model, the library and both versions — the text doctor's ``models``
+    FAIL row shows."""
+    from llm_redact.config import ConfigError
+    from llm_redact.detection.model_files import catalog_entry
+    from llm_redact.detection.model_sources import version_problems
+
+    model = ner.model or DEFAULT_MODELS[backend]
+    problems = version_problems(catalog_entry(model, backend), backend, model)
+    if problems:
+        raise ConfigError("[detection.ner] " + "; ".join(problems))
 
 
 # How much of a policy's refusal a ConfigError carries (it is shown and logged).

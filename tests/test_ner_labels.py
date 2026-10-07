@@ -315,6 +315,23 @@ def test_gliner_type_request_wins_a_shared_prompt(fold_raw: bool) -> None:
     assert policy.classify("phone number") == "PHONE"
 
 
+def test_a_model_prompt_replaces_the_generic_one(fold_raw: bool) -> None:
+    # The model catalog's prompts (a model's trained label text) are sent
+    # for type requests instead of gliner_prompt; a raw request equal to
+    # one is not sent a second time, and the type request wins.
+    policy = LabelPolicy(
+        ("PERSON", "ADDRESS", "name"),
+        backend="gliner",
+        prompts={"PERSON": "name", "PASSPORT": "passport no"},
+    )
+    assert policy.prompts == ("name", "street address")
+    assert policy.classify_gliner("name") == "PERSON"
+    assert dict(policy.prompt_overrides) == {"PERSON": "name", "PASSPORT": "passport no"}
+    # Pairs work as well as a mapping; without prompts nothing changes.
+    assert LabelPolicy(("PERSON",), prompts=[("PERSON", "name")]).prompts == ("name",)
+    assert LabelPolicy(("PERSON",)).prompts == ("person",)
+
+
 def test_gliner_label_equal_to_a_prompt_is_the_requesting_type(fold_raw: bool) -> None:
     policy = LabelPolicy(("PERSON", "USERNAME", "ORG"), backend="gliner")
     assert policy.prompts == ("person", "username", "ORG")

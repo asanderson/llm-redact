@@ -60,6 +60,272 @@ snapshot; the conclusions, not the version numbers, are the deliverable).
    accuracy, or runtime-class bars without adding coverage the first two
    don't.
 
+## PII models measured by the llm-redact bench
+
+Dated decision record (2026-10-07) of the open PII models measured with the
+NER bench ([ner-bench.md](ner-bench.md)) and the catalog status each was
+given ([detection.md](detection.md#the-model-catalog)). Every number comes
+from one shared machine: an `Intel(R) Xeon(R) Processor @ 2.80GHz` with 4
+cores (other work ran beside some of the accuracy runs, never beside a
+latency run), torch 2.13.0 (CPU build), transformers 5.10.1, gliner 0.2.28,
+models loaded offline at their catalog pins, `score_threshold` 0.5 unless a
+row says otherwise. Accuracy numbers are deterministic for a model and
+revision; latency is this machine's.
+
+**The admission bar ("vetted").** An OSI-approved
+weights license and no known restricted training-data lineage (undisclosed
+training data is stated as a fact, not disqualifying); on the synthetic
+corpus PERSON recall ≥ 0.85 and a character-leak rate ≤ 0.15; at most one
+false positive per 50 KB on the agent-traffic negatives; p50 ≤ 100 ms for a
+500-character string. A model that misses a bar stays "caution", with its
+numbers in its catalog reason. How each is measured here:
+
+- each model runs with its recommended entities that the synthetic corpus
+  labels (`PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME`,
+  `ACCOUNT_NUMBER`; fewer when the model recommends fewer), so the
+  character-leak rate covers what the model is asked for plus the corpus's
+  `EMAIL` and `PHONE` values, which the rules find. A model also
+  recommended for `PASSPORT` and `DRIVER_LICENSE`, which the corpus does
+  not label, is not asked for them, and its catalog reason says so: its
+  false-positive count is for the narrower request;
+- false positives are the NER detections the rules alone do not make in the
+  four agent-traffic files of `bench/fp_corpus`
+  (`synthetic_agent_tool_results.json`, `synthetic_git_log.txt`,
+  `synthetic_ci_log.txt`, `synthetic_python_module.py`; 19,808 bytes),
+  scaled to 50 KB (51,200 bytes). "Whole corpus" is every file of
+  `bench/fp_corpus` per 100 KB, real names included (a novel, an RFC's
+  authors), so it is not a false-positive rate;
+- latency is the whole pipeline's p50 per 500-character string
+  (`--latency`).
+
+The two default models, measured the same way for comparison (their
+recorded baselines request `PERSON` only):
+
+| Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
+|---|---|---|---|---|---|---|---|
+| `urchade/gliner_small-v2.1`, `PERSON` (`gliner-default`) | 1.000 (1.000) | 0.639 | 0.324 | 0.015 | 52 | 448 | 189 ms |
+| `urchade/gliner_small-v2.1`, five types | 0.791 (0.791) | 0.916 | 0.049 | 0.050 | 34 | 457 | — |
+| `dslim/bert-base-NER`, `PERSON` (`hf-default`) | 0.974 (0.951) | 0.913 | 0.398 | 0.003 | 0 | 210 | 176 ms |
+
+### Knowledgator GLiNER-PII (`gliner`)
+
+`knowledgator/gliner-pii-{edge,small,base,large}-v1.0` (Apache-2.0,
+Knowledgator with Wordcab, created 2025-09-24; the card does not name the
+training data). Self-contained checkpoints with int8 ONNX exports. Measured
+with the prompts the card lists ("name", "location address", "dob",
+"username", "account number"); before this measurement llm-redact sent the
+generic prompts ("person", …), with which `-edge` (int8) found 0.27 of the
+names instead of 0.77.
+
+| Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
+|---|---|---|---|---|---|---|---|
+| `-edge`, PyTorch (`gliner-knowledgator-edge`) | 0.992 (0.992) | 0.961 | 0.082 | 0.100 | 109 | 138 | 93 ms |
+| `-edge`, int8 ONNX (`gliner-knowledgator-edge-onnx`) | 0.771 (0.757) | 0.934 | 0.270 | 0.050 | 16 | 10 | 97 ms |
+| `-base`, PyTorch (`gliner-knowledgator-base`) | 0.966 (0.966) | 0.921 | 0.021 | 0.055 | 8 | 76 | 234 ms |
+| `-base`, int8 ONNX (`gliner-knowledgator-base-onnx`) | 0.964 (0.964) | 0.915 | 0.029 | 0.028 | 13 | 93 | 182 ms |
+| `-edge`, PyTorch, `PERSON` only | 1.000 (1.000) | 0.862 | 0.368 | 0.006 | 0 | 166 | — |
+| `-base`, PyTorch, `PERSON` only | 1.000 (1.000) | 0.734 | 0.330 | 0.007 | 8 | 141 | — |
+| `-edge`, int8 ONNX, threshold 0.3 | 0.968 (0.929) | 0.868 | 0.118 | 0.141 | 114 | 200 | — |
+| `-base`, int8 ONNX, threshold 0.3 | 0.998 (0.998) | 0.854 | 0.003 | 0.114 | 57 | 303 | — |
+
+On published data (2,000-row slices in file order: OpenPII 1.5M `validation`,
+whose first 2,000 rows hold eight languages — Chinese, Japanese,
+Vietnamese, Tagalog, Indonesian, Malay, Korean and 236 English rows —
+and, with `--language en`, its first 2,000 English rows; Nemotron-PII
+`test`, US-locale English documents, 142 rows skipped for spans that
+disagree with their text):
+
+| Configuration | OpenPII PERSON recall / precision | OpenPII character leak | Nemotron PERSON recall / precision | Nemotron character leak |
+|---|---|---|---|---|
+| `urchade/gliner_small-v2.1`, `PERSON` (`gliner-default`) | 0.708 / 0.788 | 0.617 | 0.874 / 0.538 | 0.317 |
+| `-edge`, PyTorch | 0.485 / 0.848 | 0.362 | 0.706 / 0.890 | 0.140 |
+| `-edge`, int8 ONNX | 0.243 / 0.765 | 0.618 | 0.358 / 0.834 | 0.365 |
+| `-base`, PyTorch | 0.551 / 0.946 | 0.459 | 0.682 / 0.943 | 0.192 |
+| `-base`, int8 ONNX | 0.321 / 0.957 | 0.520 | 0.669 / 0.961 | 0.207 |
+
+The int8 exports lose more on published data than on the synthetic corpus
+(`-base` int8: OpenPII PERSON recall 0.32 against 0.55 for PyTorch). On
+these slices the default `urchade/gliner_small-v2.1` (asked for `PERSON`
+only, so its leak counts every other type) finds more names than
+Knowledgator's models (Nemotron 0.874 against 0.706 for `-edge`), at about
+half their precision (0.538 against 0.890).
+
+**Verdict: caution** for `-edge` and `-base`: both clear the license,
+recall and leak bars, and `-edge` the latency bar, but neither clears one
+false positive per 50 KB of agent traffic with its recommended entities
+(most are `USERNAME` detections of identifiers and handles; `-base` is also
+above 100 ms). `-small` and `-large` were not measured. The bench configs
+`bench/configs/gliner-knowledgator-{edge,edge-onnx,base,base-onnx}.toml`
+are gated in CI. On these numbers `-base` (int8 ONNX for speed) leaks less
+and draws fewer agent-traffic false positives than the default
+`urchade/gliner_small-v2.1` asked for the same five types, at the same
+latency class; the `gliner` default model is unchanged here. Asked for
+`PERSON` only, `-edge` (PyTorch) would clear every bar if the leak bar were read for the requested types
+(its `PERSON` leak is 0.000; the all-type leak counts the corpus's other
+types, never requested); the bar is read here over every type the corpus
+labels.
+
+### OpenMed-PII Small 44M and ettin-68m-nemotron-pii (`hf`)
+
+`OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` (Apache-2.0;
+microsoft/deberta-v3-small, MIT, fine-tuned on nvidia/Nemotron-PII, CC BY
+4.0; 54 entity types; BIO tags, first sub-token labelled; its card's
+sequence length of 384 tokens is the catalog window) and
+`kalyan-ks/ettin-68m-nemotron-pii` (MIT; jhu-clsp/ettin-encoder-68m, MIT,
+fine-tuned on the same dataset; 55 entity types). Both fold every
+recommended type from their labels; their sensitive-attribute labels
+(gender, race or ethnicity, religious belief, political view, sexuality)
+are never folded.
+Measured after a fix found here: the `hf` backend now leaves out the blank a
+SentencePiece or byte-level BPE token's offsets take in before its word
+(OpenMed's " Jane" + " Doe" were two placeholders that swallowed the
+spaces; exact `PERSON` recall rose from 0.00 to 0.67).
+
+| Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
+|---|---|---|---|---|---|---|---|
+| OpenMed, five types (`hf-openmed-pii-small`) | 1.000 (0.674) | 0.950 | 0.051 | 0.005 | 18 | 205 | 175 ms |
+| OpenMed, `PERSON` only | 1.000 (0.674) | 0.950 | 0.385 | 0.002 | 0 | 198 | — |
+| ettin, five types (`hf-ettin-68m-nemotron-pii`) | 0.990 (0.030) | 0.968 | 0.158 | 0.003 | 21 | 106 | 277 ms |
+| ettin, `PERSON` only | 0.990 (0.030) | 0.968 | 0.421 | 0.002 | 0 | 96 | — |
+
+On published data (the slices of the Knowledgator section; Nemotron-PII is
+the training distribution of both models, so its numbers favour them):
+
+| Configuration | OpenPII PERSON recall / precision (leak) | OpenPII English PERSON recall / precision (leak) | Nemotron PERSON recall / precision (leak) |
+|---|---|---|---|
+| `dslim/bert-base-NER`, `PERSON` (`hf-default`) | 0.527 / 0.757 (0.389) | 0.911 / 0.994 (0.097) | 0.888 / 0.965 (0.092) |
+| OpenMed, `PERSON` only | 0.829 / 0.793 (0.227) | 0.989 / 0.995 (0.030) | — |
+| OpenMed, five types | 0.829 / 0.793 (0.166) | 0.989 / 0.995 (0.028) | 0.995 / 0.996 (0.006) |
+| ettin, `PERSON` only | 0.581 / 0.922 (0.452) | 0.951 / 0.997 (0.141) | — |
+| ettin, five types | 0.580 / 0.922 (0.428) | 0.951 / 0.997 (0.138) | 0.987 / 0.988 (0.032) |
+
+(Leak in brackets is the `PERSON` characters left uncovered; the
+five-type rows cover some names under another type.)
+
+**ettin's fragments.** The model labels every sub-word piece `B-…`, and the
+`hf` backend's transformers aggregation for a tokenizer without
+continuing-word markers (`simple`) turns each piece into its own value:
+"Zbigniew Brzezinski" becomes six `PERSON` values, and an account number
+whose pieces the model labels `customer_id` or `medical_record_number`
+loses those digits upstream (synthetic `ACCOUNT_NUMBER` recall 0.24, 76% of
+its characters leaked; `PERSON` 8% leaked). The `hf` backend does not yet
+decode such a tokenizer's pieces word by word (it does for WordPiece
+tokenizers and for BIOES/BILOU taggers); until it does, this model's
+numbers leak in part.
+
+**Verdict: caution** for both. OpenMed clears the license, recall and leak
+bars but not one false positive per 50 KB of agent traffic with its five
+types (all seven are `USERNAME` detections, six of them in the tool-result
+JSON) nor 100 ms per 500 characters (175 ms, the same as
+`dslim/bert-base-NER`'s 176 ms on this machine); ettin misses the leak and
+latency bars too. Bench configs
+`bench/configs/hf-openmed-pii-small.toml` and
+`bench/configs/hf-ettin-68m-nemotron-pii.toml` are gated in CI.
+
+**The `hf` default.** Compared as the default
+configuration runs (`entities = ["PERSON"]`), OpenMed-PII Small 44M finds
+more names than `dslim/bert-base-NER` everywhere it was measured outside its
+own training distribution — synthetic corpus 1.000 against 0.974 (leaking
+0.0005 of the name characters against 0.037), OpenPII English 0.989 against
+0.911, OpenPII's first 2,000 rows 0.829 against 0.527 — at equal
+false positives (none in the agent-traffic files for either; 198 against
+210 detections per 100 KB of the whole negatives corpus) and equal latency
+(175 against 176 ms). Its exact-span `PERSON` recall is lower (0.674 against
+0.951: its spans are often a word wider or narrower than the annotation,
+which still covers the name). The `hf` default model is unchanged; a
+change would be a 2.0.0 decision, not a 1.12.0 one: in 1.x a configured
+`entities = ["PER"]` would match nothing from OpenMed, which never emits
+`PER`. Its weights are 566 MB (`dslim/bert-base-NER`: 433 MB), and
+redistributing it carries the Nemotron-PII attribution.
+
+### OpenAI Privacy Filter (`hf`)
+
+`openai/privacy-filter` (Apache-2.0; created 2026-04-17; 1.5B parameters,
+50M active per token — a sparse mixture of experts — with banded attention;
+the card does not name the training data). It loads on the locked
+transformers 5.10.1 without remote code (transformers knows the model type
+from 5.6.0; the catalog records that minimum and every build checks it).
+Only `model.safetensors` (2.8 GB), `config.json`, `tokenizer.json`,
+`tokenizer_config.json` and `viterbi_calibration.json` are fetched, never
+the `original/` copy or the ONNX exports. Eight span labels, BIOES-tagged;
+`private_person`, `private_address`, `account_number` fold into `PERSON`,
+`ADDRESS` and `ACCOUNT_NUMBER`, the types it is recommended for; its
+`secret` label is left to the anchored secret rules (its card lists
+over-redaction of hashes, placeholders and sample credentials among its
+failure modes), and `private_date` and `private_url` are not folded.
+
+| Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
+|---|---|---|---|---|---|---|---|
+| Viterbi decoding (`bench/configs/manual/hf-openai-privacy-filter.toml`) | 0.994 (0.994) | 0.768 | 0.120 | 0.046 | 23 | 27 | 1,108 ms |
+| greedy decoding (the calibration left out) | 0.994 (0.994) | 0.717 | 0.120 | 0.047 | 57 | — | — |
+
+Latency per string: 261 ms at 50 characters, 2.1 s at 2,000, 19.5 s at
+10,000; the 1,000-string many-small body took 57 s. The `hf` backend loads
+the weights in their stored precision (bfloat16); a float32 load measured
+about 30% faster on this CPU (738 against 1,025 ms per 500 characters for
+the model alone), which the backend does not do today. Its
+`ACCOUNT_NUMBER` precision is 0.46: it calls many numeric identifiers
+account numbers (23 in the national-id log of the negatives corpus). On
+OpenPII's first 2,000 English rows: `PERSON` recall 0.898, precision 0.933
+(`PERSON` leak 0.082; character leak 0.145 over the types asked for and
+the rest), with two structured regressions (a wider span over a value a
+rule finds); the other published slices were not run (each would take
+hours on this CPU).
+
+**Verdict: caution.** It clears the license, recall and leak bars (the leak
+counts the corpus's `DATE_OF_BIRTH` and `USERNAME` values, which it is not
+asked for) but neither the false-positive bar nor the latency bar: about a
+second per 500-character string on this CPU, five times the other models.
+Its configuration is measured by hand (`bench/configs/manual/`), not in CI.
+The constrained Viterbi decoder with the repository's calibration is what
+the `hf` backend uses for it; greedy decoding finds the same names with more
+than twice the false positives.
+
+### Fastino GLiNER2-PII (`gliner2`)
+
+`fastino/gliner2-privacy-filter-PII-multi` (Apache-2.0; created
+2026-05-10; GLiNER2, 205M parameters, on `microsoft/mdeberta-v3-base`;
+fine-tuned on 4,910 synthetic texts its card says GPT-5.4 generated;
+English, French, Spanish, German, Italian, Portuguese, Dutch; 42 labels).
+Self-contained (`config.json`, `encoder_config/config.json`, tokenizer,
+`model.safetensors`, 1.2 GB). The card's label spellings for the contextual
+types — `person`, `street_address`, `date_of_birth`, `passport_number`,
+`drivers_license_number`, `username`, `account_number` — are its catalog
+prompts. Its card reports a precision of 0.35–0.37 on SPY and suggests
+raising the threshold for names; measured at three thresholds (the
+threshold does not change the model's work, so one latency run covers
+them):
+
+| Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
+|---|---|---|---|---|---|---|---|
+| five types, threshold 0.9 (`gliner2-fastino`) | 0.998 (0.998) | 0.955 | 0.009 | 0.022 | 26 | 360 | 453 ms |
+| five types, threshold 0.7 | 0.998 (0.998) | 0.882 | 0.004 | 0.051 | 72 | 445 | — |
+| five types, threshold 0.5 | 1.000 (1.000) | 0.825 | 0.003 | 0.091 | 96 | 503 | 453 ms |
+| `PERSON` only, threshold 0.5 | 1.000 (1.000) | 0.459 | 0.320 | 0.049 | 80 | 503 | — |
+
+On published data (the slices of the Knowledgator section):
+
+| Configuration | OpenPII PERSON recall / precision (leak) | OpenPII English PERSON recall / precision (leak) | Nemotron PERSON recall / precision (leak) |
+|---|---|---|---|
+| five types, threshold 0.9 | 0.614 / 0.997 (0.298) | 0.786 / 0.997 (0.197) | 0.759 / 0.853 (0.186) |
+| `PERSON` only, threshold 0.5 | — | 0.977 / 0.884 (0.025) | — |
+
+(Leak in brackets is the `PERSON` characters left uncovered.) The 0.9
+threshold that holds its synthetic-corpus recall costs it a fifth of
+OpenPII's English names (0.786 against 0.977 at 0.5), where the default
+`hf` and `gliner` models find 0.911 and 0.922: the threshold trades recall
+on real text for false positives on agent traffic.
+
+**Verdict: caution.** It clears the license and lineage bar (its training
+data is synthetic text the card says GPT-5.4 generated: stated as a fact),
+recall and leak bars (at 0.5 its leak, 0.003, ties the lowest measured
+here), but neither the
+false-positive bar nor the latency bar (453 ms per 500 characters; its
+1,000-string body takes 206 s). `bench/configs/gliner2-fastino.toml`
+(threshold 0.9) is gated in CI. The catalog has no per-model default
+threshold: `[detection.ner] score_threshold` is one value for every
+confidence backend, so the 0.9 is the configuration's, not the model's.
+
 ## LLM-based extractors (LangExtract and its class) — rejected as detectors
 
 LangExtract (google/langextract) and similar prompted-extraction tools

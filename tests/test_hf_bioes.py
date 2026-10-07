@@ -22,16 +22,16 @@ import random
 import re
 import sys
 import types
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from llm_redact.config import ConfigError
-from llm_redact.detection import model_catalog
+from llm_redact.detection import hf_ner, model_catalog
 from llm_redact.detection.engine import NerConfig
-from llm_redact.detection.hf_ner import TaggerPipe, build_hf_detector, torch_scorer
+from llm_redact.detection.hf_ner import HfDetector, TaggerPipe, build_hf_detector, torch_scorer
 from llm_redact.detection.model_catalog import SIDECAR_NAME, TAGGING_SCHEMES, CatalogEntry
 from llm_redact.detection.tagging import (
     BIAS_KEYS,
@@ -39,6 +39,7 @@ from llm_redact.detection.tagging import (
     BIO,
     BIOES,
     ZERO_BIASES,
+    Decoder,
     TaggingError,
     TagSet,
     argmax_path,
@@ -751,6 +752,36 @@ def test_a_catalogued_calibration_selects_viterbi(monkeypatch: pytest.MonkeyPatc
     assert detector.stats.scanned_whole == 1
 
 
+@pytest.mark.parametrize(
+    ("stay", "found"),
+    [
+        (0.0, []),  # "Kim" is a little more likely O than a name
+        (-1.0, ["Kim"]),  # a dearer background tips it into a span
+    ],
+)
+def test_the_calibration_file_sets_the_decoders_biases(
+    monkeypatch: pytest.MonkeyPatch, stay: float, found: list[str]
+) -> None:
+    # The biases come from the file the catalog lists, not defaults: the
+    # same model and text decode differently when only the file changes
+    # (openai/privacy-filter's file sets every bias to 0.0, so its real
+    # model cannot show this).
+    install_torch(monkeypatch)
+    hub = FakeHub()
+    assert hub.default is not None
+    hub.repos["org/bioes-ner"] = {
+        **hub.default,
+        "viterbi_calibration.json": json.dumps(_calibration(transition_bias_background_stay=stay)),
+    }
+    install_transformers(monkeypatch, _tagger_pipe({"Kim": {"O": 1.0, "S-person": 0.8}}), hub)
+    entry = _entry("org/bioes-ner", tagging="bioes", viterbi_calibration="viterbi_calibration.json")
+    monkeypatch.setattr(model_catalog, "lookup", lambda model_id: entry)
+    # A name less likely than O scores under the default threshold.
+    config = NerConfig(enabled=True, backend="hf", model="org/bioes-ner", score_threshold=0.1)
+    detector = build_hf_detector(config)
+    assert [d.value for d in detector.detect("hi Kim")] == found
+
+
 def test_a_long_text_is_read_in_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     install_torch(monkeypatch)
     pipe = _tagger_pipe(NAME)
@@ -978,3 +1009,97 @@ def test_a_real_tokenizer_and_model_decode_whole_spans(
     # The long text was read in windows of the real tokenizer.
     assert detector.stats.scanned_windowed == 1
     assert detector.stats.windows == 3
+
+
+# openai/privacy-filter (Apache-2.0) at the catalog pin checked on 2026-10-07,
+# pulled by the CI ner-models job (tests/real_model_configs/hf-openai-
+# privacy-filter.toml): 2.8 GB of weights and about a second per
+# 500-character string on a 4-core CPU, so only short strings here.
+PRIVACY = "openai/privacy-filter"
+PRIVACY_REVISION = "7ffa9a043d54d1be65afb281eddf0ffbe629385b"
+PRIVACY_FILES = [
+    "config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "viterbi_calibration.json",
+]
+PRIVACY_CONFIG = Path(__file__).parent / "real_model_configs" / "hf-openai-privacy-filter.toml"
+PRIVACY_SENTENCE = "Wire it to account 00123456789 for Maria Gonzalez, 42 Elm Street, Springfield."
+
+
+@pytest.mark.real_model
+def test_real_privacy_filter_finds_whole_spans_with_its_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    from llm_redact.config import load_config
+    from llm_redact.detection.engine import build_detectors, ner_backends
+    from llm_redact.detection.model_sources import version_problems
+
+    entry = model_catalog.lookup(PRIVACY)
+    if problems := version_problems(entry, "hf", PRIVACY):
+        pytest.skip(problems[0])  # an older transformers than the model needs
+    offline_hub(monkeypatch)
+    snapshot = Path(cached_snapshot(PRIVACY, PRIVACY_REVISION, PRIVACY_FILES))
+    # Every decoder the build makes, with the biases it was handed.
+    decoders: list[tuple[Mapping[str, float] | None, Decoder]] = []
+
+    def recorded_decoder_for(tagset: TagSet, biases: Mapping[str, float] | None) -> Decoder:
+        decoders.append((biases, decoder_for(tagset, biases)))
+        return decoders[-1][1]
+
+    monkeypatch.setattr(hf_ner, "decoder_for", recorded_decoder_for)
+    # The CI config, through the proxy's own build (downloads off): the
+    # catalog pin, the BIOES tagger and the calibration file it lists.
+    detection = load_config(PRIVACY_CONFIG).detection
+    (detector,) = ner_backends(build_detectors(detection))
+    assert isinstance(detector, HfDetector)
+    assert detector.model_name == PRIVACY
+    pipe = detector._pipe
+    assert isinstance(pipe, TaggerPipe)
+    labels = pipe.model.config.id2label
+    assert [labels[index] for index in range(len(labels))] == PRIVACY_LABELS
+    # The pipe decodes with the six biases of the file's default operating
+    # point, read here on their own. At this pin they are all 0.0, so what
+    # the calibration selects is the decoder's span constraint, not a bias
+    # (docs/ner-landscape.md says so; a pin with other biases fails here).
+    shipped = json.loads((snapshot / "viterbi_calibration.json").read_text(encoding="utf-8"))
+    biases = shipped["operating_points"]["default"]["biases"]
+    ((handed, decoder),) = decoders
+    assert pipe._decode is decoder
+    assert handed == biases
+    assert handed == dict(ZERO_BIASES)
+    # The constrained Viterbi decoder on the model's own tag set: a name
+    # whose middle token is a little more likely O than I is one span, where
+    # the greedy reading cuts it in two (the sentence below reads the same
+    # either way, so it cannot show this).
+    rows = _rows(
+        PRIVACY_LABELS,
+        [{"B-private_person": 4.0}, {"O": 2.0, "I-private_person": 1.9}, {"E-private_person": 4.0}],
+    )
+    tagset = TagSet.from_labels(labels)
+    assert spans_of(argmax_path(rows), tagset) == [
+        (0, 0, "private_person"),
+        (2, 2, "private_person"),
+    ]
+    assert pipe._decode(rows) == viterbi_path(rows, tagset, handed)
+    assert spans_of(pipe._decode(rows), tagset) == [(0, 2, "private_person")]
+    expected = [
+        ("ACCOUNT_NUMBER", "00123456789"),
+        ("PERSON", "Maria Gonzalez"),
+        ("ADDRESS", "42 Elm Street, Springfield"),
+    ]
+    # The same sentence as plain text and inside a JSON string: each value
+    # at its own offsets, no quote or blank taken in.
+    for text in (PRIVACY_SENTENCE, json.dumps({"note": PRIVACY_SENTENCE})):
+        found = sorted(detector.detect(text), key=lambda d: d.start)
+        assert [(d.detector_type, d.value) for d in found] == expected
+        assert [(d.start, d.end) for d in found] == [
+            (text.index(value), text.index(value) + len(value)) for _type, value in expected
+        ]
+    # An empty text is no model call on no token ids (which fails), and a
+    # blank one no span (span edges lose their blanks).
+    assert detector.detect("") == []
+    assert detector.detect("   \n\t ") == []

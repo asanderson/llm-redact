@@ -561,7 +561,8 @@ rules. Measured on the same corpora: `PERSON` recall 0.99, character leak
 0.12, 23 agent-traffic false positives per 50 KB, and about a second per
 500-character string on a 4-core CPU (1.1 s; 19.5 s for 10,000 characters),
 so it stays "caution" and its bench configuration is measured by hand
-(`bench/configs/manual/`, [ner-bench.md](ner-bench.md)). Those latencies were
+(`bench/configs/manual/`, [ner-bench.md](ner-bench.md)); CI pulls it only
+for a smoke test on a few short strings. Those latencies were
 measured with its weights in bfloat16, as the repository stores them; the
 `hf` backend now loads every model in float32, which measured about 30%
 faster on that CPU for the model alone, and which takes twice the memory of

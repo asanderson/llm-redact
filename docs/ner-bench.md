@@ -242,7 +242,11 @@ pushes to `main` and the weekly CI schedule):
 3. runs `pytest -m real_model` with
    `LLM_REDACT_TEST_REAL_MODELS_REQUIRED=1`, which turns a real-model test
    that would skip (a model not pulled, an extra missing) into a failure: a
-   green job means every one of them ran;
+   green job means every one of them ran. The `openai/privacy-filter` smoke
+   test runs in a second `pytest` process of its own (in float32 the model
+   alone takes about 6 GB of the runner's 16 GB). Then it removes
+   `openai/privacy-filter` from the Hugging Face cache (below), whatever the
+   tests did;
 4. for every `bench/configs/*.toml`, runs the bench three times with
    `--check`: the synthetic corpus against `bench/ner_thresholds.toml`, the
    negatives corpus (`--fp-corpus bench/fp_corpus`) against
@@ -275,9 +279,9 @@ them to the run's summary.
 | `bench/configs/gliner-knowledgator-edge.toml`, `-edge-onnx.toml` | `knowledgator/gliner-pii-edge-v1.0` at its catalog pin, PyTorch weights and the int8 ONNX export, asked for `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and `ACCOUNT_NUMBER` | `[gliner-knowledgator-edge.synthetic]`, `[gliner-knowledgator-edge]`, and the same for `-edge-onnx` |
 | `bench/configs/gliner-knowledgator-base.toml`, `-base-onnx.toml` | `knowledgator/gliner-pii-base-v1.0`, the same way | `[gliner-knowledgator-base.synthetic]`, `[gliner-knowledgator-base]`, and the same for `-base-onnx` |
 | `bench/configs/hf-openmed-pii-small.toml`, `hf-ettin-68m-nemotron-pii.toml` | `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` and `kalyan-ks/ettin-68m-nemotron-pii` at their catalog pins, asked for the same five types | `[hf-openmed-pii-small.synthetic]`, `[hf-openmed-pii-small]`, and the same for `hf-ettin-68m-nemotron-pii` |
-| `bench/configs/gliner2-fastino.toml` | `fastino/gliner2-privacy-filter-PII-multi` at its catalog pin (the `gliner2` backend), asked for the same five types with `score_threshold = 0.9` | `[gliner2-fastino.synthetic]`, `[gliner2-fastino]` |
+| `bench/configs/gliner2-fastino.toml` | `fastino/gliner2-privacy-filter-PII-multi` at its catalog pin (the `gliner2` backend), asked for the same five types at its catalog default `score_threshold` 0.9 (the file sets none) | `[gliner2-fastino.synthetic]`, `[gliner2-fastino]` |
 | `bench/configs/manual/hf-openai-privacy-filter.toml` | not run by CI: `openai/privacy-filter` at its catalog pin, Viterbi-decoded, asked for `PERSON`, `ADDRESS` and `ACCOUNT_NUMBER`; measured by hand (below) | `[hf-openai-privacy-filter.synthetic]`, `[hf-openai-privacy-filter]`, checked by hand |
-| `tests/real_model_configs/*.toml` | not scored: the other models the `real_model` tests load (the `gliner2` default, a Knowledgator ONNX checkpoint), pulled by `ner-models` | — |
+| `tests/real_model_configs/*.toml` | not scored: the other models the `real_model` tests load (the `gliner2` default, a Knowledgator ONNX checkpoint, `openai/privacy-filter` for a smoke test), pulled by `ner-models` | — |
 
 A configuration added to `bench/configs/` is pulled, tested and gated by
 `ner-models` with no workflow change, and fails it until its baselines are
@@ -306,6 +310,23 @@ uv run --no-sync llm-redact models pull --config bench/configs/manual/hf-openai-
 uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/manual/hf-openai-privacy-filter.toml --check
 uv run --no-sync python -m llm_redact.bench.ner --config bench/configs/manual/hf-openai-privacy-filter.toml --fp-corpus bench/fp_corpus --check
 ```
+
+`ner-models` still loads the model, for a smoke test only:
+`tests/real_model_configs/hf-openai-privacy-filter.toml` asks for what the
+manual configuration asks for, the job pulls it with the others, and
+`tests/test_hf_bioes.py` builds it offline through the proxy's own build
+(the catalog pin, the BIOES tagger and the `viterbi_calibration.json` it
+lists), checks that the decoder got that file's biases and keeps a span
+whole where the greedy reading would cut it, and reads four short strings:
+a name, an address and an account number in a sentence, the same sentence
+inside a JSON string, an empty and a blank string. Its 2.8 GB are pulled again on every run instead of being
+saved with the model cache: GitHub keeps 10 GB of caches per repository
+and evicts the least recently used beyond that, and this entry, saved anew
+whenever the catalog or a configuration changes, would push the other
+jobs' caches out. The job removes it right after the `real_model` tests,
+so the bench runs have the disk space and the saved cache never holds it,
+and frees disk before anything else by removing preinstalled toolchains it
+does not use (`df -h /` in the log shows what is left).
 
 To reproduce the job locally (it creates a CPython 3.13 venv; Linux,
 x86_64 or aarch64, where the PyTorch CPU index has a `+cpu` wheel; the

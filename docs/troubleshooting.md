@@ -198,6 +198,17 @@ files. Install the backend's extra (`uv sync --extra hf`, or
 CPU-only host take torch from the PyTorch CPU index first
 ([dependencies.md](dependencies.md)).
 
+## "[detection.ner] backend = \"hf\" needs transformers >= 4.56 (its pipeline's dtype), but transformers VERSION is installed"
+
+From `serve` / `serve --check`, and from `doctor` for an enabled `hf`
+backend: the `hf` backend loads every model in float32 through the
+transformers pipeline's `dtype` setting, which transformers has taken
+since 4.56; an older one refuses the setting and no model could load. The
+`hf` extra asks for 4.56 or newer, but an environment that already held an
+older transformers keeps it until the extra is installed again: run
+`uv sync --extra hf --upgrade-package transformers` (or
+`pip install -U 'llm-redact-proxy[hf]'`).
+
 ## "config reload failed; keeping current config" / "changes require restart"
 
 Log lines from a `kill -HUP`. The first means the new file failed to parse
@@ -397,6 +408,31 @@ hold names (pasted documents, large tool results), raise `max_chars`; if the
 skipped strings are logs or files you do not need NER on, the line is the
 expected cost of the cap.
 
+## "[detection.ner] score_threshold must be a number greater than 0 and at most 1 (leave it out to run each model at its default threshold)"
+
+`serve --check` / `serve` / `doctor` / SIGHUP (and the llm-redact-pro config
+editor's save) refuse a `score_threshold` of 0 or below, above 1, `nan` or
+`inf`, or one that is not a number. Every confidence backend compares a score
+between 0 and 1 with it: at 0 NER redacts every candidate span, and above 1
+(or at `nan`) it redacts nothing, silently. Write a value such as `0.5`, or
+delete the key: each backend then runs at its model's default threshold (the
+model catalog's, else 0.5). Since 1.12.0 an unset threshold is no longer
+served as 0.5; the config editor of an llm-redact-pro older than 0.17.0 shows
+it as an empty field and saves 0, which this check refuses: upgrade
+llm-redact-pro, or edit the file. A file such an editor saved earlier with
+`score_threshold = 0` (an emptied field) fails here too: delete the key.
+
+## doctor: "BACKEND: [detection.ner] score_threshold X overrides the model catalog's default Y for MODEL; delete the key to run at the default …" (WARN)
+
+The configuration sets `score_threshold`, so every confidence backend runs at
+it, while the model catalog records a different default for this model
+(`fastino/gliner2-privacy-filter-PII-multi`: 0.9). Files that `config show` or
+the config editor wrote before 1.12.0 carry `score_threshold = 0.5` whether
+or not anyone chose it; at 0.5 that model makes about four times the
+agent-traffic false positives. Delete the key to run each model at its
+default, or keep it if you chose it (a lower value trades false positives
+for recall on real text; docs/detection.md).
+
 ## "[detection.ner.labels] LABEL: the type must match [A-Z][A-Z0-9_]* and be at most 20 characters, or be "" to drop the label"
 
 A `[detection.ner.labels]` value is not a placeholder type. Write the type in
@@ -482,10 +518,13 @@ folder: the Hugging Face cache's `models--ORG--MODEL/snapshots/<revision>`).
 
 ## "[detection.ner] hf model '…': its labels mix BIOES (E-, S-) and BILOU (L-, U-) tags" / "… its id2label does not name every logit index 0 to n-1" / "… its id2label keys are not logit indices"
 
-From `serve` / `serve --check`: the `hf` model's labels (`config.json`
-`id2label`) tag spans with `E-`/`S-` (BIOES) or `L-`/`U-` (BILOU), which
-llm-redact decodes itself (docs/detection.md "BIOES and BILOU taggers"), but
-they cannot be read as one scheme: some labels use BIOES tags and others
+From `serve` / `serve --check`: llm-redact decodes the `hf` model's labels
+(`config.json` `id2label`) itself — those of a model that tags spans with
+`E-`/`S-` (BIOES) or `L-`/`U-` (BILOU) (docs/detection.md "BIOES and BILOU
+taggers"), and those of a `B-`/`I-` (BIO) model whose tokenizer does not
+mark word pieces, a SentencePiece or byte-level BPE one (DeBERTa-v3, XLM-R,
+RoBERTa, ModernBERT; docs/detection.md "BIO taggers without word-piece
+marks") — but they cannot be read: some labels use BIOES tags and others
 BILOU ones, or the labels do not name each of the model's outputs by its
 position. The checkpoint's configuration is inconsistent; pick another model
 or fix its `config.json` in a local copy and point `[detection.ner.models] hf`

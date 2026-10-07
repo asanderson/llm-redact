@@ -161,7 +161,11 @@ its pins, its measurements and its documentation in the same change.
    A model too slow for a runner goes to `bench/configs/manual/` instead
    (measured by hand; its comment and baseline note say how).
    A real-model test of another model needs that model in a config under
-   `tests/real_model_configs/`, or the job fails the skipped test.
+   `tests/real_model_configs/`, or the job fails the skipped test; a slow
+   model can still get a smoke test on a few short strings there, as
+   `openai/privacy-filter` does, and a large one is removed from the model
+   cache after the tests, as the job does for that model
+   ([ner-bench.md](ner-bench.md), "CI").
 6. **Admission.** "vetted" needs an OSI-approved weights license, no
    known restricted lineage (undisclosed training data alone does not rule
    a model out; the catalog states it), and on the bench: PERSON recall

@@ -134,6 +134,7 @@ def test_stride_is_set_once_at_construction(monkeypatch: pytest.MonkeyPatch) -> 
         "tokenizer": folder,
         "aggregation_strategy": "simple",
         "trust_remote_code": False,
+        "dtype": "float32",
         "model_kwargs": {"use_safetensors": True},
     }
     assert strided == {
@@ -145,6 +146,68 @@ def test_stride_is_set_once_at_construction(monkeypatch: pytest.MonkeyPatch) -> 
     # Calls keep their one-argument signature: the stride is not per call.
     assert [d.value for d in detector.detect("hi Jane Doe")] == ["Jane Doe"]
     assert pipe.calls == ["hi Jane Doe"]
+
+
+def test_every_model_loads_in_float32(monkeypatch: pytest.MonkeyPatch) -> None:
+    # transformers 5.10.1's pipeline() takes `dtype` (`torch_dtype` is its
+    # deprecated alias) and defaults to "auto", which keeps the precision the
+    # checkpoint stores: a bfloat16 model (openai/privacy-filter) then runs
+    # about 30% slower on a CPU. The one load serves the strided pipeline and
+    # a BIOES/BILOU tagger alike, so the model is never loaded twice.
+    pipe = FakeHfPipe([("Jane Doe", "PER", 0.9)])
+    install_transformers(monkeypatch, pipe)
+    build_hf_detector(NerConfig(enabled=True, backend="hf"))
+    loaded, strided = pipe.built_with
+    assert loaded["dtype"] == "float32"
+    assert strided["model"] is pipe.model and "dtype" not in strided
+
+
+@pytest.mark.parametrize("installed", ["4.40.0", "4.55.4", "4.55.99.dev0"])
+def test_a_transformers_without_pipeline_dtype_is_refused_by_name(
+    monkeypatch: pytest.MonkeyPatch, installed: str
+) -> None:
+    # transformers before 4.56 has no `dtype` in pipeline(): it hands the
+    # keyword to the token-classification pipeline, which refuses it, and
+    # the load failed with a bare TypeError. The hf extra now asks for 4.56;
+    # an environment that kept an older one is refused naming the minimum,
+    # before any model file is touched.
+    import importlib.metadata
+
+    real_version = importlib.metadata.version
+
+    def version(name: str) -> str:
+        return installed if name == "transformers" else real_version(name)
+
+    pipe = FakeHfPipe([("Jane Doe", "PER", 0.9)])
+    install_transformers(monkeypatch, pipe)
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    with pytest.raises(ConfigError) as refused:
+        build_hf_detector(NerConfig(enabled=True, backend="hf"))
+    assert str(refused.value) == (
+        '[detection.ner] backend = "hf" needs transformers >= 4.56 (its pipeline\'s dtype),'
+        f" but transformers {installed} is installed; upgrade it:"
+        " uv sync --extra hf --upgrade-package transformers"
+    )
+    assert pipe.built_with == []
+
+
+@pytest.mark.parametrize("installed", ["4.56.0", "4.56", "5.10.1", "10.0.0rc1", None])
+def test_a_transformers_with_pipeline_dtype_loads(
+    monkeypatch: pytest.MonkeyPatch, installed: str | None
+) -> None:
+    # None: no distribution metadata (a source tree), nothing to compare.
+    import importlib.metadata
+
+    def version(name: str) -> str:
+        if installed is None:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return installed
+
+    pipe = FakeHfPipe([("Jane Doe", "PER", 0.9)])
+    install_transformers(monkeypatch, pipe)
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    build_hf_detector(NerConfig(enabled=True, backend="hf"))
+    assert pipe.built_with[0]["dtype"] == "float32"
 
 
 # --- whole words --------------------------------------------------------------
@@ -400,3 +463,39 @@ def test_real_model_sentencepiece_spans_leave_the_blanks_out(
         ("ADDRESS", "12 Oak Street"),
     ]
     assert all(not d.value[0].isspace() and not d.value[-1].isspace() for d in found)
+
+
+@pytest.mark.real_model
+def test_real_model_a_bfloat16_checkpoint_runs_in_float32(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    # A checkpoint saved in bfloat16 (openai/privacy-filter is) loads in
+    # float32 all the same: transformers' default keeps the stored
+    # precision, which runs slower on a CPU. A bfloat16 copy of the default
+    # model, read from a local folder, stands in for one.
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    safetensors_torch = pytest.importorskip("safetensors.torch")
+    import json
+    import shutil
+    from pathlib import Path
+
+    offline_hub(monkeypatch)
+    source = Path(cached_snapshot(DSLIM, DSLIM_REVISION, DSLIM_FILES))
+    for name in DSLIM_FILES:
+        if name != "model.safetensors":
+            shutil.copyfile(source / name, tmp_path / name)
+    weights = safetensors_torch.load_file(str(source / "model.safetensors"))
+    safetensors_torch.save_file(
+        {k: v.to(torch.bfloat16) if v.is_floating_point() else v for k, v in weights.items()},
+        str(tmp_path / "model.safetensors"),
+    )
+    config = json.loads((tmp_path / "config.json").read_text())
+    config["torch_dtype"] = config["dtype"] = "bfloat16"
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    detector = build_hf_detector(NerConfig(enabled=True, backend="hf", model=str(tmp_path)))
+    model = detector._pipe.model  # type: ignore[attr-defined]
+    assert {p.dtype for p in model.parameters()} == {torch.float32}
+    assert [d.value for d in detector.detect("Yesterday Angela Merkel met the press.")] == [
+        "Angela Merkel"
+    ]

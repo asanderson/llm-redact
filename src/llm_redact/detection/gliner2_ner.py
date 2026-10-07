@@ -315,7 +315,7 @@ def build_gliner2_detector(config: "NerConfig") -> Gliner2Detector:
         model,
         frozenset(config.entities),
         config.max_chars,
-        config.score_threshold,
+        config.score_threshold_for("gliner2")[0],
         policy=LabelPolicy(
             config.entities,
             backend="gliner2",

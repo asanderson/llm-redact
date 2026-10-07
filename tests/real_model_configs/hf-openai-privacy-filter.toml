@@ -1,0 +1,12 @@
+# Pulled by the CI ner-models job (`llm-redact models pull --config`) for a
+# real_model smoke test, not scored by the NER bench (its bench
+# configuration, bench/configs/manual/hf-openai-privacy-filter.toml, is
+# measured by hand): openai/privacy-filter at its catalog pin (2.8 GB of
+# weights and its viterbi_calibration.json; transformers 5.6.0 or newer),
+# asked for the three types the catalog recommends it for
+# (tests/test_hf_bioes.py). The job drops it from the model cache it saves.
+[detection.ner]
+enabled = true
+backend = "hf"
+model = "openai/privacy-filter"
+entities = ["PERSON", "ADDRESS", "ACCOUNT_NUMBER"]

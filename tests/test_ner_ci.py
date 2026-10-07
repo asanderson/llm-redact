@@ -71,7 +71,9 @@ def _bench_config_problems(paths: list[Path]) -> list[str]:
 
 def test_the_bench_scores_the_two_default_models() -> None:
     assert _bench_config_problems(BENCH_CONFIGS) == []
-    assert {"gliner-pii-edge-onnx", "gliner2-default"} <= {p.stem for p in TEST_CONFIGS}
+    assert {"gliner-pii-edge-onnx", "gliner2-default", "hf-openai-privacy-filter"} <= {
+        p.stem for p in TEST_CONFIGS
+    }
 
 
 def test_a_bench_config_for_another_model_may_name_it(tmp_path: Path) -> None:
@@ -112,11 +114,16 @@ def test_each_config_loads_pinned_models_with_downloads_off(path: Path) -> None:
 def test_ci_pulls_every_model_the_real_model_tests_load() -> None:
     import test_gliner
     import test_gliner2
+    import test_hf_bioes
+    import test_hf_text_words
     import test_hf_windows
 
     needed = {
         (test_hf_windows.DSLIM, test_hf_windows.DSLIM_REVISION),
+        (test_hf_bioes.DSLIM, test_hf_bioes.DSLIM_REVISION),
+        (test_hf_bioes.PRIVACY, test_hf_bioes.PRIVACY_REVISION),
         (test_hf_windows.OPENMED, test_hf_windows.OPENMED_REVISION),
+        (test_hf_text_words.ETTIN, test_hf_text_words.ETTIN_REVISION),
         (test_gliner.GLINER_SMALL, test_gliner.GLINER_SMALL_REVISION),
         (test_gliner.DEBERTA_SMALL, test_gliner.DEBERTA_SMALL_REVISION),
         (test_gliner.EDGE, test_gliner.EDGE_REVISION),
@@ -161,6 +168,86 @@ def test_a_manual_config_has_recorded_baselines_and_says_why(path: Path) -> None
     assert "per_100kb_max" in ceilings[path.stem]
     # Its comment says why CI does not run it.
     assert "by hand" in path.read_text()
+
+
+def test_a_manual_model_gets_a_smoke_test_in_ci_but_no_bench() -> None:
+    # openai/privacy-filter is too slow for the bench on a runner, but the
+    # ner-models job pulls it for one real_model smoke test: a config of
+    # tests/real_model_configs/ (pulled, never scored) asking for what the
+    # manual bench config asks for, and the test reads that config.
+    import test_hf_bioes
+
+    manual = load_config(ROOT / "bench/configs/manual/hf-openai-privacy-filter.toml")
+    smoke = load_config(test_hf_bioes.PRIVACY_CONFIG)
+    assert test_hf_bioes.PRIVACY_CONFIG.resolve() in TEST_CONFIGS
+    assert smoke.detection.ner == manual.detection.ner
+    (source,) = hub_sources(smoke.detection.ner)
+    assert (source.model_id, source.revision) == (
+        test_hf_bioes.PRIVACY,
+        test_hf_bioes.PRIVACY_REVISION,
+    )
+
+
+def _step_index(steps: list[dict[str, Any]], *, run: str = "", name: str = "") -> int:
+    (index,) = [
+        i
+        for i, step in enumerate(steps)
+        if (run and step.get("run", "").strip() == run) or (name and step.get("name") == name)
+    ]
+    return index
+
+
+def test_the_ner_models_job_never_saves_openai_privacy_filter() -> None:
+    # 2.8 GB pulled on every run instead of saved with the model cache (the
+    # actions cache keeps 10 GB per repository, least recently used out):
+    # removed right after the real_model tests, whatever their outcome, so
+    # the bench has the disk space and the cache saved at the end of the
+    # job never holds it.
+    steps = _workflow("ci.yml")["jobs"]["ner-models"]["steps"]
+    tests = _step_index(
+        steps, run='uv run --no-sync pytest -m real_model -v --deselect "$PRIVACY_FILTER_TEST"'
+    )
+    smoke = _step_index(steps, name="openai/privacy-filter smoke test")
+    drop = _step_index(steps, name="drop openai/privacy-filter from the model cache")
+    bench = _step_index(steps, name="NER bench gates")
+    assert tests < smoke < drop < bench
+    assert steps[drop]["if"] == "always()"
+    assert "rm -rf ~/.cache/huggingface/hub/models--openai--privacy-filter\n" in steps[drop]["run"]
+    (models_cache,) = [
+        s for s in steps if s.get("with", {}).get("path") == "~/.cache/huggingface/hub"
+    ]
+    assert "actions/cache@" in models_cache["uses"]  # saved at the end of the job
+
+
+def test_the_privacy_filter_smoke_test_runs_in_a_process_of_its_own() -> None:
+    # In float32 the model alone takes about 6 GB: the first real_model run
+    # leaves it out, and a second process runs exactly that one test.
+    import test_hf_bioes
+
+    steps = _workflow("ci.yml")["jobs"]["ner-models"]["steps"]
+    tests = steps[
+        _step_index(
+            steps, run='uv run --no-sync pytest -m real_model -v --deselect "$PRIVACY_FILTER_TEST"'
+        )
+    ]
+    smoke = steps[_step_index(steps, name="openai/privacy-filter smoke test")]
+    node = "tests/test_hf_bioes.py::" + (
+        test_hf_bioes.test_real_privacy_filter_finds_whole_spans_with_its_calibration.__name__
+    )
+    assert tests["env"]["PRIVACY_FILTER_TEST"] == smoke["env"]["PRIVACY_FILTER_TEST"] == node
+    assert smoke["run"] == 'uv run --no-sync pytest -m real_model -v "$PRIVACY_FILTER_TEST"'
+
+
+def test_the_ner_models_job_frees_disk_first() -> None:
+    # The CPU-torch environment, the restored model cache and the 2.8 GB
+    # openai/privacy-filter come close to a hosted runner's free disk: the
+    # preinstalled toolchains the job never uses go first.
+    job = _workflow("ci.yml")["jobs"]["ner-models"]
+    first = job["steps"][0]
+    assert first["name"] == "free disk space"
+    assert "sudo rm -rf /usr/share/dotnet /usr/local/lib/android" in first["run"]
+    assert first["run"].count("df -h /") == 2
+    assert job["timeout-minutes"] == 180
 
 
 def test_manual_configs_stay_out_of_the_ci_jobs() -> None:

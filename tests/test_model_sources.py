@@ -166,7 +166,8 @@ def test_the_build_records_each_hub_backends_source(monkeypatch: pytest.MonkeyPa
     # spaCy pipelines are not Hub snapshots: nothing to say.
     assert {key: block["spacy"][key] for key in UNKNOWN_SOURCE_FIELDS} == UNKNOWN_SOURCE_FIELDS
     assert list(block["hf"]) == [
-        "model", "source", "model_id", "revision", "pinned", "catalog", "license", "counters",
+        "model", "source", "model_id", "revision", "pinned", "catalog", "license",
+        "score_threshold", "score_threshold_source", "counters",
     ]  # fmt: skip
 
 

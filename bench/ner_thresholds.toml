@@ -110,23 +110,39 @@ over_redaction_max = 0.06
 recorded = "2026-10-07"
 note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, onnx/model_quint8.onnx; measured PERSON recall 0.964 (exact 0.964), precision 0.915, leak 0.0366; ADDRESS recall 0.994 (exact 0.994), precision 1.000, leak 0.0058; DATE_OF_BIRTH recall 0.982 (exact 0.982), precision 0.727, leak 0.0180; USERNAME recall 0.788 (exact 0.750), precision 0.612, leak 0.1806; ACCOUNT_NUMBER recall 1.000 (exact 1.000), precision 0.599, leak 0.0000; leak 0.0288, over-redaction 0.0279, structured regressions 0"
 
+# hf-openmed-pii-small and hf-ettin-68m-nemotron-pii were re-measured on
+# 2026-10-07 (same CPU and libraries; other jobs ran on the machine) after the
+# hf backend started loading in float32 and decoding a BIO tagger without
+# word-piece marks word by word, and again after the decoder's review fixes
+# (spans grow over the characters the model tags with them; unspaced scripts
+# read by character; long words read in parts): the same numbers but one
+# more OpenMed USERNAME detection. Floors and ceilings follow the rule above;
+# four sit below the token-level decoder's baselines. OpenMed USERNAME recall
+# 0.87 to 0.84 and its leak ceiling 0.12 to 0.13: five usernames whose first
+# piece the model leaves untagged or unsure are missed, one more is found (5
+# more characters uncovered). ettin DATE_OF_BIRTH and USERNAME recall 0.35 to
+# 0.32 and 0.85 to 0.80: overlap recall counts a value found by any piece, and
+# the token-level decoder found ettin's six lost usernames by 1 to 6 of their
+# 8 to 13 characters and its three lost dates of birth by 1 or 2 of theirs,
+# while the characters of those types left uncovered fell (USERNAME 241 to
+# 166 of 1,340, DATE_OF_BIRTH 1,169 to 1,153 of 1,443).
 [hf-openmed-pii-small.synthetic]
-recall = { PERSON = 0.95, ADDRESS = 0.95, DATE_OF_BIRTH = 0.45, USERNAME = 0.87, ACCOUNT_NUMBER = 0.92 }
-exact_recall = { PERSON = 0.62, ADDRESS = 0.89, DATE_OF_BIRTH = 0.39, USERNAME = 0.76, ACCOUNT_NUMBER = 0.89 }
-leak_max = 0.11
-type_leak_max = { PERSON = 0.06, ADDRESS = 0.06, DATE_OF_BIRTH = 0.57, USERNAME = 0.12, ACCOUNT_NUMBER = 0.09 }
+recall = { PERSON = 0.95, ADDRESS = 0.95, DATE_OF_BIRTH = 0.45, USERNAME = 0.84, ACCOUNT_NUMBER = 0.94 }
+exact_recall = { PERSON = 0.95, ADDRESS = 0.90, DATE_OF_BIRTH = 0.41, USERNAME = 0.84, ACCOUNT_NUMBER = 0.94 }
+leak_max = 0.10
+type_leak_max = { PERSON = 0.05, ADDRESS = 0.06, DATE_OF_BIRTH = 0.57, USERNAME = 0.13, ACCOUNT_NUMBER = 0.06 }
 over_redaction_max = 0.01
 recorded = "2026-10-07"
-note = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at a2360d3f42526fc660ac3b2b2301e1c2d94eba61; measured PERSON recall 1.000 (exact 0.674), precision 0.950, leak 0.0005; ADDRESS recall 1.000 (exact 0.949), precision 0.924, leak 0.0075; DATE_OF_BIRTH recall 0.509 (exact 0.447), precision 1.000, leak 0.5184; USERNAME recall 0.924 (exact 0.818), precision 0.763, leak 0.0687; ACCOUNT_NUMBER recall 0.974 (exact 0.948), precision 1.000, leak 0.0355; leak 0.0506, over-redaction 0.0048, structured regressions 0"
+note = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at a2360d3f42526fc660ac3b2b2301e1c2d94eba61, float32, word-by-word decoding (first piece); measured PERSON recall 1.000 (exact 1.000), precision 0.937, leak 0.0000; ADDRESS recall 1.000 (exact 0.956), precision 0.981, leak 0.0071; DATE_OF_BIRTH recall 0.509 (exact 0.465), precision 1.000, leak 0.5114; USERNAME recall 0.894 (exact 0.894), precision 0.747, leak 0.0724; ACCOUNT_NUMBER recall 0.991 (exact 0.991), precision 1.000, leak 0.0069; leak 0.0483, over-redaction 0.0058, structured regressions 0"
 
 [hf-ettin-68m-nemotron-pii.synthetic]
-recall = { PERSON = 0.93, ADDRESS = 0.95, DATE_OF_BIRTH = 0.35, USERNAME = 0.85, ACCOUNT_NUMBER = 0.19 }
-exact_recall = { PERSON = 0.00, ADDRESS = 0.24, DATE_OF_BIRTH = 0.00, USERNAME = 0.00, ACCOUNT_NUMBER = 0.00 }
-leak_max = 0.21
-type_leak_max = { PERSON = 0.13, ADDRESS = 0.07, DATE_OF_BIRTH = 0.87, USERNAME = 0.23, ACCOUNT_NUMBER = 0.81 }
+recall = { PERSON = 0.93, ADDRESS = 0.95, DATE_OF_BIRTH = 0.32, USERNAME = 0.80, ACCOUNT_NUMBER = 0.19 }
+exact_recall = { PERSON = 0.81, ADDRESS = 0.90, DATE_OF_BIRTH = 0.10, USERNAME = 0.79, ACCOUNT_NUMBER = 0.19 }
+leak_max = 0.20
+type_leak_max = { PERSON = 0.11, ADDRESS = 0.07, DATE_OF_BIRTH = 0.85, USERNAME = 0.18, ACCOUNT_NUMBER = 0.80 }
 over_redaction_max = 0.01
 recorded = "2026-10-07"
-note = "kalyan-ks/ettin-68m-nemotron-pii at 500262a2aaf913825ef750ef255c3fe437cd8e64; measured PERSON recall 0.990 (exact 0.030), precision 0.968, leak 0.0770; ADDRESS recall 1.000 (exact 0.297), precision 0.930, leak 0.0163; DATE_OF_BIRTH recall 0.404 (exact 0.000), precision 1.000, leak 0.8101; USERNAME recall 0.902 (exact 0.000), precision 0.848, leak 0.1799; ACCOUNT_NUMBER recall 0.243 (exact 0.000), precision 1.000, leak 0.7595; leak 0.1577, over-redaction 0.0034, structured regressions 0"
+note = "kalyan-ks/ettin-68m-nemotron-pii at 500262a2aaf913825ef750ef255c3fe437cd8e64, float32 (stored bfloat16), word-by-word decoding (most confidently tagged piece: catalog piece_labels = every); measured PERSON recall 0.984 (exact 0.866), precision 0.938, leak 0.0543; ADDRESS recall 1.000 (exact 0.956), precision 0.913, leak 0.0122; DATE_OF_BIRTH recall 0.377 (exact 0.158), precision 1.000, leak 0.7990; USERNAME recall 0.856 (exact 0.848), precision 0.753, leak 0.1239; ACCOUNT_NUMBER recall 0.243 (exact 0.243), precision 1.000, leak 0.7439; leak 0.1430, over-redaction 0.0054, structured regressions 0"
 
 [hf-openai-privacy-filter.synthetic]
 recall = { PERSON = 0.94, ADDRESS = 0.88, ACCOUNT_NUMBER = 0.95 }

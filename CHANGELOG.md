@@ -12,6 +12,16 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- Two PII models for the `hf` backend in the model catalog, both trained on NVIDIA
+  Nemotron-PII (CC BY 4.0) and measured by the NER bench: `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`
+  (Apache-2.0, a 384-token window) and `kalyan-ks/ettin-68m-nemotron-pii` (MIT, ModernBERT:
+  transformers 4.48 or newer), pinned to their `main` commits of 2026-10-07, status "caution"
+  with their numbers (agent-traffic false positives above the admission bar; ettin's sub-word
+  fragments leak part of numbers). Bench configs `bench/configs/hf-openmed-pii-small.toml` and
+  `hf-ettin-68m-nemotron-pii.toml` with recorded baselines, gated by the `ner-models` CI job,
+  and a `real_model` test of OpenMed's spans. docs/detection.md gains "PII models for the
+  `hf` backend"; docs/ner-landscape.md records the numbers. The `hf` default model is
+  unchanged.
 - Knowledgator's GLiNER-PII models measured by the NER bench (docs/ner-landscape.md, "PII
   models measured by the llm-redact bench"): `bench/configs/gliner-knowledgator-edge.toml`,
   `-edge-onnx.toml`, `-base.toml` and `-base-onnx.toml` (the PyTorch weights and the int8 ONNX
@@ -376,6 +386,10 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The `hf` NER backend's spans took in the blank before a word when the model's tokenizer is a
+  SentencePiece or byte-level BPE one (DeBERTa-v3, ModernBERT, RoBERTa): the placeholder
+  swallowed the space before the value, and a name reported in parts (" Jane", " Doe") stayed
+  two placeholders. Span edges now leave blanks out, so the parts join into one value.
 - The prompts the model catalog records for a GLiNER model (the label text the model was
   trained on) never reached the model: every GLiNER and GLiNER2 model was asked for the generic
   prompts ("person", "street address", …). A type request now sends the catalogued model's own

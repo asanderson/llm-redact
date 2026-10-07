@@ -1,0 +1,15 @@
+# NER bench configuration "hf-openmed-pii-small" (docs/ner-bench.md): the hf
+# backend with OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at its catalog
+# pin and its catalog window of 384 tokens (the card's maximum sequence
+# length), asked for the five contextual types the synthetic corpus labels
+# (the model's first_name/last_name, street_address, date_of_birth, user_name
+# and account_number labels fold into them). Scored in CI by the ner-models
+# job against bench/ner_thresholds.toml [hf-openmed-pii-small.*] and
+# bench/ner_ceilings.toml [hf-openmed-pii-small]; the numbers and the catalog
+# status they give are in docs/ner-landscape.md. Downloads stay off: the job
+# pulls the model first (`llm-redact models pull --config` on this file).
+[detection.ner]
+enabled = true
+backend = "hf"
+model = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]

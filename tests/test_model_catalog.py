@@ -230,7 +230,7 @@ def test_section_4_6_statuses() -> None:
     }
     # Configurable, below a D11 bar or not yet measured: the Knowledgator
     # sizes and the gliner2 backend's default model.
-    assert caution == {*_KNOWLEDGATOR, "fastino/gliner2-base-v1"}
+    assert caution == {*_KNOWLEDGATOR, "fastino/gliner2-base-v1", *_NEMOTRON_HF}
     restricted = {e.model_id for e in CATALOG if e.status == "restricted"}
     assert {
         "iiiorg/piiranha-v1-detect-personal-information",
@@ -300,6 +300,35 @@ def test_knowledgator_gliner_pii_is_a_configurable_option(model_id: str) -> None
     assert {"onnx/model.onnx", "onnx/model_quint8.onnx"} <= set(entry.onnx_files)
     assert entry.lineage == ("undisclosed-training-data",)
     modernbert = entry.backbone.startswith("jhu-clsp/ettin-encoder-")
+    assert (("transformers", "4.48.0") in entry.min_versions) == modernbert
+
+
+_NEMOTRON_HF = (
+    "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1",
+    "kalyan-ks/ettin-68m-nemotron-pii",
+)
+
+
+@pytest.mark.parametrize("model_id", _NEMOTRON_HF)
+def test_the_nemotron_trained_hf_models_carry_their_attribution(model_id: str) -> None:
+    entry = lookup(model_id)
+    assert entry is not None
+    assert entry.backends == ("hf",) and entry.tagging == "bio"
+    assert entry.status == "caution"
+    assert f"llm-redact bench {MEASURED}" in entry.reason
+    assert entry.lineage == ("nemotron-cc-by",)
+    assert entry.attribution.endswith("trained on NVIDIA Nemotron-PII, CC BY 4.0")
+    assert entry.recommended_entities == (
+        "PERSON",
+        "ADDRESS",
+        "DATE_OF_BIRTH",
+        "USERNAME",
+        "ACCOUNT_NUMBER",
+    )
+    assert entry.revision is not None and entry.backbone_revision is None
+    # OpenMed's card: 384 tokens; ettin's tokenizer configuration: 1,024.
+    assert entry.window == {"OpenMed": 384, "kalyan-ks": 1024}[model_id.split("/")[0]]
+    modernbert = entry.backbone == "jhu-clsp/ettin-encoder-68m"
     assert (("transformers", "4.48.0") in entry.min_versions) == modernbert
 
 

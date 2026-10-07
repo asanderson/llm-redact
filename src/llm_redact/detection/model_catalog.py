@@ -401,6 +401,60 @@ CATALOG: tuple[CatalogEntry, ...] = (
         lineage=("undisclosed-training-data",),
         recommended_entities=("PERSON",),
     ),
+    # --- caution: PII models the bench measured below a D11 bar (their
+    # numbers in the reason; docs/ner-landscape.md) ------------------------
+    CatalogEntry(
+        # main since 2026-01-13. BIO tags, first sub-token labelled only;
+        # 54 entity types, 5 of them sensitive attributes (D10: not folded).
+        model_id="OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1",
+        backends=("hf",),
+        license="Apache-2.0",
+        status="caution",
+        reason=(
+            "Apache-2.0; microsoft/deberta-v3-small (MIT) fine-tuned on nvidia/Nemotron-PII"
+            " (CC BY 4.0); 54 entity types; "
+            + measured(recall=1.00, leak=0.05, false_positives=18, p50_ms=175)
+        ),
+        checked="2026-10-07",
+        revision="a2360d3f42526fc660ac3b2b2301e1c2d94eba61",
+        backbone="microsoft/deberta-v3-small",
+        attribution=(
+            "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 (Apache-2.0); trained on NVIDIA"
+            " Nemotron-PII, CC BY 4.0"
+        ),
+        lineage=("nemotron-cc-by",),
+        recommended_entities=("PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"),
+        tagging="bio",
+        # The card's "Max Sequence Length: 384 tokens" (the model takes 512
+        # positions).
+        window=384,
+    ),
+    CatalogEntry(
+        # main since 2026-05-22. BIO tags; 55 entity types, 5 of them
+        # sensitive attributes (D10: not folded).
+        model_id="kalyan-ks/ettin-68m-nemotron-pii",
+        backends=("hf",),
+        license="MIT",
+        status="caution",
+        reason=(
+            "MIT; jhu-clsp/ettin-encoder-68m (MIT) fine-tuned on nvidia/Nemotron-PII"
+            " (CC BY 4.0); 55 entity types; every sub-word piece tagged B-, read as separate"
+            " values; " + measured(recall=0.99, leak=0.16, false_positives=21, p50_ms=277)
+        ),
+        checked="2026-10-07",
+        revision="500262a2aaf913825ef750ef255c3fe437cd8e64",
+        backbone="jhu-clsp/ettin-encoder-68m",
+        attribution=(
+            "kalyan-ks/ettin-68m-nemotron-pii (MIT); trained on NVIDIA Nemotron-PII, CC BY 4.0"
+        ),
+        lineage=("nemotron-cc-by",),
+        recommended_entities=("PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"),
+        tagging="bio",
+        # tokenizer_config.json's max_length (the tokenizer reports 8192,
+        # the encoder takes 7999 positions).
+        window=1024,
+        min_versions=_MODERNBERT,
+    ),
     # --- restricted: never suggested; a warning names the reason ----------
     CatalogEntry(
         model_id="iiiorg/piiranha-v1-detect-personal-information",

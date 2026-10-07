@@ -111,6 +111,7 @@ def test_ci_pulls_every_model_the_real_model_tests_load() -> None:
 
     needed = {
         (test_hf_windows.DSLIM, test_hf_windows.DSLIM_REVISION),
+        (test_hf_windows.OPENMED, test_hf_windows.OPENMED_REVISION),
         (test_gliner.GLINER_SMALL, test_gliner.GLINER_SMALL_REVISION),
         (test_gliner.DEBERTA_SMALL, test_gliner.DEBERTA_SMALL_REVISION),
         (test_gliner.EDGE, test_gliner.EDGE_REVISION),

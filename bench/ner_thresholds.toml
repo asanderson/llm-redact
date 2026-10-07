@@ -109,3 +109,21 @@ type_leak_max = { PERSON = 0.09, ADDRESS = 0.06, DATE_OF_BIRTH = 0.07, USERNAME 
 over_redaction_max = 0.06
 recorded = "2026-10-07"
 note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, onnx/model_quint8.onnx; measured PERSON recall 0.964 (exact 0.964), precision 0.915, leak 0.0366; ADDRESS recall 0.994 (exact 0.994), precision 1.000, leak 0.0058; DATE_OF_BIRTH recall 0.982 (exact 0.982), precision 0.727, leak 0.0180; USERNAME recall 0.788 (exact 0.750), precision 0.612, leak 0.1806; ACCOUNT_NUMBER recall 1.000 (exact 1.000), precision 0.599, leak 0.0000; leak 0.0288, over-redaction 0.0279, structured regressions 0"
+
+[hf-openmed-pii-small.synthetic]
+recall = { PERSON = 0.95, ADDRESS = 0.95, DATE_OF_BIRTH = 0.45, USERNAME = 0.87, ACCOUNT_NUMBER = 0.92 }
+exact_recall = { PERSON = 0.62, ADDRESS = 0.89, DATE_OF_BIRTH = 0.39, USERNAME = 0.76, ACCOUNT_NUMBER = 0.89 }
+leak_max = 0.11
+type_leak_max = { PERSON = 0.06, ADDRESS = 0.06, DATE_OF_BIRTH = 0.57, USERNAME = 0.12, ACCOUNT_NUMBER = 0.09 }
+over_redaction_max = 0.01
+recorded = "2026-10-07"
+note = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at a2360d3f42526fc660ac3b2b2301e1c2d94eba61; measured PERSON recall 1.000 (exact 0.674), precision 0.950, leak 0.0005; ADDRESS recall 1.000 (exact 0.949), precision 0.924, leak 0.0075; DATE_OF_BIRTH recall 0.509 (exact 0.447), precision 1.000, leak 0.5184; USERNAME recall 0.924 (exact 0.818), precision 0.763, leak 0.0687; ACCOUNT_NUMBER recall 0.974 (exact 0.948), precision 1.000, leak 0.0355; leak 0.0506, over-redaction 0.0048, structured regressions 0"
+
+[hf-ettin-68m-nemotron-pii.synthetic]
+recall = { PERSON = 0.93, ADDRESS = 0.95, DATE_OF_BIRTH = 0.35, USERNAME = 0.85, ACCOUNT_NUMBER = 0.19 }
+exact_recall = { PERSON = 0.00, ADDRESS = 0.24, DATE_OF_BIRTH = 0.00, USERNAME = 0.00, ACCOUNT_NUMBER = 0.00 }
+leak_max = 0.21
+type_leak_max = { PERSON = 0.13, ADDRESS = 0.07, DATE_OF_BIRTH = 0.87, USERNAME = 0.23, ACCOUNT_NUMBER = 0.81 }
+over_redaction_max = 0.01
+recorded = "2026-10-07"
+note = "kalyan-ks/ettin-68m-nemotron-pii at 500262a2aaf913825ef750ef255c3fe437cd8e64; measured PERSON recall 0.990 (exact 0.030), precision 0.968, leak 0.0770; ADDRESS recall 1.000 (exact 0.297), precision 0.930, leak 0.0163; DATE_OF_BIRTH recall 0.404 (exact 0.000), precision 1.000, leak 0.8101; USERNAME recall 0.902 (exact 0.000), precision 0.848, leak 0.1799; ACCOUNT_NUMBER recall 0.243 (exact 0.000), precision 1.000, leak 0.7595; leak 0.1577, over-redaction 0.0034, structured regressions 0"

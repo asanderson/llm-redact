@@ -340,7 +340,10 @@ that keep them below the "vetted" bars (see "Choosing a GLiNER model" below),
 `gliner2` backend's default, `fastino/gliner2-base-v1`, not yet measured.
 Each ships its tokenizer and encoder configuration, so no base model is
 fetched; the Knowledgator `-edge` and `-small` need transformers 4.48 or
-newer:
+newer. Also caution, with their bench numbers: the `hf` PII models trained
+on NVIDIA Nemotron-PII (CC BY 4.0), OpenMed-PII Small 44M and
+ettin-68m-nemotron-pii ("PII models for the `hf` backend" below; the
+ModernBERT ettin model needs transformers 4.48 or newer too):
 
 <!-- model-catalog:caution -->
 | Model | Backend | License | Pinned revision | Base model (pinned revision) |
@@ -350,6 +353,8 @@ newer:
 | `knowledgator/gliner-pii-base-v1.0` | gliner | Apache-2.0 | `61726e0ad791` | `microsoft/deberta-v3-small` (—) |
 | `knowledgator/gliner-pii-large-v1.0` | gliner | Apache-2.0 | `f847f54fbc97` | `microsoft/deberta-v3-large` (—) |
 | `fastino/gliner2-base-v1` | gliner2 | Apache-2.0 | `f9634218e535` | `microsoft/deberta-v3-base` (—) |
+| `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` | hf | Apache-2.0 | `a2360d3f4252` | `microsoft/deberta-v3-small` (—) |
+| `kalyan-ks/ettin-68m-nemotron-pii` | hf | MIT | `500262a2aaf9` | `jhu-clsp/ettin-encoder-68m` (—) |
 <!-- /model-catalog -->
 
 Restricted (a startup WARNING names the facts; no pin):
@@ -442,6 +447,51 @@ None of them meets every bar of the catalog's "vetted" status (agent-traffic
 false positives above one per 50 KB; `-base` above 100 ms too), so they stay
 "caution" with these numbers in their catalog reasons; the default model is
 unchanged. `-small` and `-large` are not measured yet.
+
+### PII models for the `hf` backend
+
+The `hf` backend's default, `dslim/bert-base-NER`, is a general NER model
+(people, organizations, places). Two PII models trained on NVIDIA's
+Nemotron-PII (CC BY 4.0, which asks for attribution: "Trained on NVIDIA
+Nemotron-PII, CC BY 4.0") are catalogued: `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`
+(Apache-2.0, DeBERTa-v3-small, read in windows of 384 tokens, its card's
+sequence length) and `kalyan-ks/ettin-68m-nemotron-pii` (MIT, a ModernBERT
+encoder: transformers 4.48 or newer). Both label 54–55 kinds of data; their
+`first_name`/`last_name`, `street_address`, `date_of_birth`, `user_name` and
+`account_number` labels fold into `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`,
+`USERNAME` and `ACCOUNT_NUMBER`, and their sensitive-attribute labels
+(gender, race or ethnicity, religious belief, political view, sexuality)
+are never folded:
+
+```toml
+[detection.ner]
+enabled = true
+backend = "hf"
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
+
+[detection.ner.models]
+hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+```
+
+Measured by the NER bench (2026-10-07, the same machine and rules as the
+GLiNER table above):
+
+| Model, entities | PERSON recall (exact) | Character leak | Over-redaction | Agent-traffic false positives per 50 KB | p50, 500 characters |
+|---|---|---|---|---|---|
+| `dslim/bert-base-NER` (the default), `PERSON` | 0.97 (0.95) | 0.40 | 0.003 | 0 | 176 ms |
+| OpenMed-PII Small 44M, `PERSON` | 1.00 (0.67) | 0.39 | 0.002 | 0 | — |
+| OpenMed-PII Small 44M, five types | 1.00 (0.67) | 0.05 | 0.005 | 18 | 175 ms |
+| ettin-68m-nemotron-pii, five types | 0.99 (0.03) | 0.16 | 0.003 | 21 | 277 ms |
+
+`kalyan-ks/ettin-68m-nemotron-pii` tags every sub-word piece of a value as
+the start of a value, so the `hf` backend reports names and numbers as
+fragments ("Z", "b", "ign", …): each fragment becomes its own placeholder,
+and pieces the model labels with another type are sent as they are (a
+quarter of the synthetic corpus's account numbers is found; three quarters
+of their digits leak). It stays "caution" with these numbers. The
+`PERSON`-only rows request what the default configuration requests, so
+their character leak counts every other labelled value as leaked; the
+default model is unchanged (a change would be a 2.0.0 decision).
 
 ### Model-load policies (plugins)
 

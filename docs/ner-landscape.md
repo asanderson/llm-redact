@@ -134,13 +134,18 @@ disagree with their text):
 
 | Configuration | OpenPII PERSON recall / precision | OpenPII character leak | Nemotron PERSON recall / precision | Nemotron character leak |
 |---|---|---|---|---|
+| `urchade/gliner_small-v2.1`, `PERSON` (`gliner-default`) | 0.708 / 0.788 | 0.617 | 0.874 / 0.538 | 0.317 |
 | `-edge`, PyTorch | 0.485 / 0.848 | 0.362 | 0.706 / 0.890 | 0.140 |
 | `-edge`, int8 ONNX | 0.243 / 0.765 | 0.618 | 0.358 / 0.834 | 0.365 |
 | `-base`, PyTorch | 0.551 / 0.946 | 0.459 | 0.682 / 0.943 | 0.192 |
 | `-base`, int8 ONNX | 0.321 / 0.957 | 0.520 | 0.669 / 0.961 | 0.207 |
 
 The int8 exports lose more on published data than on the synthetic corpus
-(`-base` int8: OpenPII PERSON recall 0.32 against 0.55 for PyTorch).
+(`-base` int8: OpenPII PERSON recall 0.32 against 0.55 for PyTorch). On
+these slices the default `urchade/gliner_small-v2.1` (asked for `PERSON`
+only, so its leak counts every other type) finds more names than
+Knowledgator's models (Nemotron 0.874 against 0.706 for `-edge`), at about
+half their precision (0.538 against 0.890).
 
 **Verdict: caution** for `-edge` and `-base`: both clear the license,
 recall and leak bars, and `-edge` the latency bar, but neither clears one
@@ -157,6 +162,79 @@ would clear every bar if the leak bar were read for the requested types
 (its `PERSON` leak is 0.000; the all-type leak counts the corpus's other
 types, never requested) — that reading is the open D11 measurement-scope
 question.
+
+### OpenMed-PII Small 44M and ettin-68m-nemotron-pii (`hf`)
+
+`OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` (Apache-2.0;
+microsoft/deberta-v3-small, MIT, fine-tuned on nvidia/Nemotron-PII, CC BY
+4.0; 54 entity types; BIO tags, first sub-token labelled; its card's
+sequence length of 384 tokens is the catalog window) and
+`kalyan-ks/ettin-68m-nemotron-pii` (MIT; jhu-clsp/ettin-encoder-68m, MIT,
+fine-tuned on the same dataset; 55 entity types). Both fold every
+recommended type from their labels; their D10 labels (gender, race or
+ethnicity, religious belief, political view, sexuality) are never folded.
+Measured after a fix found here: the `hf` backend now leaves out the blank a
+SentencePiece or byte-level BPE token's offsets take in before its word
+(OpenMed's " Jane" + " Doe" were two placeholders that swallowed the
+spaces; exact `PERSON` recall rose from 0.00 to 0.67).
+
+| Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
+|---|---|---|---|---|---|---|---|
+| OpenMed, five types (`hf-openmed-pii-small`) | 1.000 (0.674) | 0.950 | 0.051 | 0.005 | 18 | 205 | 175 ms |
+| OpenMed, `PERSON` only | 1.000 (0.674) | 0.950 | 0.385 | 0.002 | 0 | 198 | — |
+| ettin, five types (`hf-ettin-68m-nemotron-pii`) | 0.990 (0.030) | 0.968 | 0.158 | 0.003 | 21 | 106 | 277 ms |
+| ettin, `PERSON` only | 0.990 (0.030) | 0.968 | 0.421 | 0.002 | 0 | 96 | — |
+
+On published data (the slices of the Knowledgator section; Nemotron-PII is
+the training distribution of both models, so its numbers favour them):
+
+| Configuration | OpenPII PERSON recall / precision (leak) | OpenPII English PERSON recall / precision (leak) | Nemotron PERSON recall / precision (leak) |
+|---|---|---|---|
+| `dslim/bert-base-NER`, `PERSON` (`hf-default`) | 0.527 / 0.757 (0.389) | 0.911 / 0.994 (0.097) | 0.888 / 0.965 (0.092) |
+| OpenMed, `PERSON` only | 0.829 / 0.793 (0.227) | 0.989 / 0.995 (0.030) | — |
+| OpenMed, five types | 0.829 / 0.793 (0.166) | 0.989 / 0.995 (0.028) | 0.995 / 0.996 (0.006) |
+| ettin, `PERSON` only | 0.581 / 0.922 (0.452) | 0.951 / 0.997 (0.141) | — |
+| ettin, five types | 0.580 / 0.922 (0.428) | 0.951 / 0.997 (0.138) | 0.987 / 0.988 (0.032) |
+
+(Leak in brackets is the `PERSON` characters left uncovered; the
+five-type rows cover some names under another type.)
+
+**ettin's fragments.** The model labels every sub-word piece `B-…`, and the
+`hf` backend's transformers aggregation for a tokenizer without
+continuing-word markers (`simple`) turns each piece into its own value:
+"Zbigniew Brzezinski" becomes six `PERSON` values, and an account number
+whose pieces the model labels `customer_id` or `medical_record_number`
+loses those digits upstream (synthetic `ACCOUNT_NUMBER` recall 0.24, 76% of
+its characters leaked; `PERSON` 8% leaked). The `hf` backend does not yet
+decode such a tokenizer's pieces word by word (it does for WordPiece
+tokenizers and for BIOES/BILOU taggers); until it does, this model's
+numbers leak in part.
+
+**Verdict: caution** for both. OpenMed clears the license, recall and leak
+bars but not one false positive per 50 KB of agent traffic with its five
+types (all seven are `USERNAME` detections, six of them in the tool-result
+JSON) nor 100 ms per 500 characters (175 ms, the same as
+`dslim/bert-base-NER`'s 176 ms on this machine); ettin misses the leak and
+latency bars too. Bench configs
+`bench/configs/hf-openmed-pii-small.toml` and
+`bench/configs/hf-ettin-68m-nemotron-pii.toml` are gated in CI.
+
+**The `hf` default (owner decision D6, open).** Compared as the default
+configuration runs (`entities = ["PERSON"]`), OpenMed-PII Small 44M finds
+more names than `dslim/bert-base-NER` everywhere it was measured outside its
+own training distribution — synthetic corpus 1.000 against 0.974 (leaking
+0.0005 of the name characters against 0.037), OpenPII English 0.989 against
+0.911, OpenPII's first 2,000 rows 0.829 against 0.527 — at equal
+false positives (none in the agent-traffic files for either; 198 against
+210 detections per 100 KB of the whole negatives corpus) and equal latency
+(175 against 176 ms). Its exact-span `PERSON` recall is lower (0.674 against
+0.951: its spans are often a word wider or narrower than the annotation,
+which still covers the name). D6's condition (better `PERSON` recall at equal
+or lower false positives) holds on these numbers; switching the default is
+the owner's decision and would ship in 2.0.0 (T46), not 1.12.0: in 1.x a
+configured `entities = ["PER"]` would match nothing from OpenMed, which
+never emits `PER`. Its weights are 566 MB (`dslim/bert-base-NER`: 433 MB),
+and redistributing it carries the Nemotron-PII attribution.
 
 ## LLM-based extractors (LangExtract and its class) — rejected as detectors
 

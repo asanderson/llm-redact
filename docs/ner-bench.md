@@ -270,6 +270,7 @@ artifact and written to the run's summary.
 | `bench/configs/gliner-default.toml` | the `gliner` backend's default model (`urchade/gliner_small-v2.1`, assembled with its pinned base model) at its catalog pin, default entities | `[gliner-default.synthetic]`, `[gliner-default]` |
 | `bench/configs/gliner-knowledgator-edge.toml`, `-edge-onnx.toml` | `knowledgator/gliner-pii-edge-v1.0` at its catalog pin, PyTorch weights and the int8 ONNX export, asked for `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and `ACCOUNT_NUMBER` | `[gliner-knowledgator-edge.synthetic]`, `[gliner-knowledgator-edge]`, and the same for `-edge-onnx` |
 | `bench/configs/gliner-knowledgator-base.toml`, `-base-onnx.toml` | `knowledgator/gliner-pii-base-v1.0`, the same way | `[gliner-knowledgator-base.synthetic]`, `[gliner-knowledgator-base]`, and the same for `-base-onnx` |
+| `bench/configs/hf-openmed-pii-small.toml`, `hf-ettin-68m-nemotron-pii.toml` | `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` and `kalyan-ks/ettin-68m-nemotron-pii` at their catalog pins, asked for the same five types | `[hf-openmed-pii-small.synthetic]`, `[hf-openmed-pii-small]`, and the same for `hf-ettin-68m-nemotron-pii` |
 | `tests/real_model_configs/*.toml` | not scored: the other models the `real_model` tests load (the `gliner2` default, a Knowledgator ONNX checkpoint), pulled by `ner-models` | — |
 
 A configuration added to `bench/configs/` is pulled, tested and gated by

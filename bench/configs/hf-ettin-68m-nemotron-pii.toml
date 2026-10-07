@@ -1,0 +1,16 @@
+# NER bench configuration "hf-ettin-68m-nemotron-pii" (docs/ner-bench.md): the
+# hf backend with kalyan-ks/ettin-68m-nemotron-pii at its catalog pin and its
+# catalog window of 1,024 tokens (its tokenizer configuration's max_length),
+# asked for the five contextual types the synthetic corpus labels (the model's
+# first_name/last_name, street_address, date_of_birth, user_name and
+# account_number labels fold into them). Scored in CI by the ner-models job
+# against bench/ner_thresholds.toml [hf-ettin-68m-nemotron-pii.*] and
+# bench/ner_ceilings.toml [hf-ettin-68m-nemotron-pii]; the numbers and the
+# catalog status they give are in docs/ner-landscape.md. Downloads stay off:
+# the job pulls the model first (`llm-redact models pull --config` on this
+# file).
+[detection.ner]
+enabled = true
+backend = "hf"
+model = "kalyan-ks/ettin-68m-nemotron-pii"
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]

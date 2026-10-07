@@ -164,6 +164,16 @@ class HfDetector:
                 self.stats.offsets_dropped += 1
                 continue
             start, end = int(start), int(end)
+            # A SentencePiece or byte-level BPE token's offsets take in the
+            # blank before its word (" Jane"): the span is the value, never
+            # the blank around it, so the two parts of a name stay adjacent
+            # parts (one placeholder) and the text keeps its spaces.
+            while start < end and text[start].isspace():
+                start += 1
+            while end > start and text[end - 1].isspace():
+                end -= 1
+            if start == end:
+                continue
             yield Detection(
                 start=start,
                 end=end,

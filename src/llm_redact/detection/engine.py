@@ -92,6 +92,11 @@ class CustomRule:
     anchors: tuple[str, ...] = ()
 
 
+# The confidence threshold of a backend whose model has no catalog default
+# and whose configuration sets none (NerConfig.score_threshold_for).
+DEFAULT_SCORE_THRESHOLD = 0.5
+
+
 @dataclass(frozen=True)
 class NerConfig:
     # Default off: requires an extra (`ner` for spacy, `gliner` for gliner,
@@ -108,8 +113,10 @@ class NerConfig:
     max_chars: int = 20000
     # Only meaningful for backends that emit confidences (gliner, gliner2,
     # presidio, hf); config loading rejects it when no such backend is active
-    # (spacy and stanza emit none).
-    score_threshold: float = 0.5
+    # (spacy and stanza emit none). None = not set: each confidence backend
+    # then uses its model's catalog default, else DEFAULT_SCORE_THRESHOLD
+    # (score_threshold_for). A set value applies to every backend.
+    score_threshold: float | None = None
     # NER language (presidio wires it through the analyzer, stanza selects the
     # language model; for spacy it is implied by the model) and an optional
     # model-name override: the spaCy pipeline for spacy/presidio (default
@@ -167,6 +174,25 @@ class NerConfig:
             if name == backend:
                 return revision
         return None
+
+    def score_threshold_for(self, backend: str) -> tuple[float, str]:
+        """The confidence threshold ``backend`` runs at, and where it comes
+        from: the configured ``score_threshold`` ("config"), else the model
+        catalog's default for the model the backend loads ("catalog": its
+        configured model, else the backend's default; a local folder by its
+        sidecar's model id — model_files.catalog_entry, the builders'
+        lookup), else :data:`DEFAULT_SCORE_THRESHOLD` ("default"). A folder
+        whose sidecar file cannot be read is a ConfigError, as its build
+        is."""
+        if self.score_threshold is not None:
+            return self.score_threshold, "config"
+        if backend in HUB_BACKENDS:
+            from llm_redact.detection.model_files import catalog_entry
+
+            entry = catalog_entry(self.model_for(backend) or DEFAULT_MODELS[backend], backend)
+            if entry is not None and entry.score_threshold is not None:
+                return entry.score_threshold, "catalog"
+        return DEFAULT_SCORE_THRESHOLD, "default"
 
     def revision_for(self, backend: str) -> str | None:
         """The commit ``backend``'s model is pinned to: its
@@ -388,6 +414,8 @@ def build_detectors(
         suppressed = frozenset(
             rule.detector_type for rule in BUILTIN_RULES if rule.detector_type not in enabled_types
         )
+        from llm_redact.config import CONFIDENCE_BACKENDS
+
         built: list[Detector] = []
         for backend_name in config.ner.active_backends():
             # Each backend builder still sees a single-backend view with
@@ -406,6 +434,17 @@ def build_detectors(
                 )
             if backend_name in HUB_BACKENDS:
                 check_min_versions(single, backend_name)
+            # A confidence backend's effective score threshold (the user's,
+            # else its model's catalog default, else 0.5), resolved once
+            # here into the view the builder reads, so /status reports
+            # exactly the number the backend runs at.
+            threshold = (
+                config.ner.score_threshold_for(backend_name)
+                if backend_name in CONFIDENCE_BACKENDS
+                else None
+            )
+            if threshold is not None:
+                single = replace(single, score_threshold=threshold[0])
             # Imported only when enabled: the NER dependencies stay
             # optional and startup fails fast per backend if missing.
             if backend_name == "gliner":
@@ -434,6 +473,8 @@ def build_detectors(
                 inner = build_ner_detector(single)
             if backend_name in HUB_BACKENDS:
                 _mark_source(inner, config.ner, backend_name)
+            if threshold is not None and _label_policy(inner) is not None:
+                inner.threshold_choice = threshold  # type: ignore[attr-defined]
             built.append(inner)
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
         _mark_unmatched(config.ner.entities, built)
@@ -505,7 +546,9 @@ def _single_backend_view(ner: NerConfig, backend: str, *, startup: bool = False)
     ``revisions`` entry (none when unpinned), so ``revision_for(backend)``
     answers the same on the view as on the full config, and
     ``allow_download`` only for the startup build (downloads happen at
-    startup or never)."""
+    startup or never). ``score_threshold_for(backend)`` answers the same
+    on the view too (same model); build_detectors stores its answer in the
+    view's ``score_threshold``."""
     revision = ner.revision_for(backend)
     return replace(
         ner,
@@ -576,6 +619,18 @@ def _source_fields(detector: Detector) -> dict[str, Any]:
     return dict(UNKNOWN_SOURCE_FIELDS) if source is None else source.status_fields()
 
 
+def _threshold_fields(detector: Detector) -> dict[str, Any]:
+    """The ``/status`` threshold fields of an NER backend: the confidence
+    threshold it was built with and its source (config, catalog or
+    default), both null for a backend without confidences (spaCy, Stanza)
+    or one a plugin built."""
+    threshold = getattr(detector, "threshold_choice", None)
+    if not (isinstance(threshold, tuple) and len(threshold) == 2):
+        return {"score_threshold": None, "score_threshold_source": None}
+    value, source = threshold
+    return {"score_threshold": value, "score_threshold_source": source}
+
+
 def ner_backends(detectors: Sequence[Detector]) -> list[Detector]:
     """The NER backends among ``detectors`` (unwrapped from their type
     filter), in build order."""
@@ -612,7 +667,8 @@ def ner_status(ner: NerConfig, detectors: Sequence[Detector]) -> dict[str, Any]:
     """The ``/status`` block ``detection.ner``: whether NER is on, the
     string limit, each running backend's model — for a Hugging Face Hub
     backend also where it comes from, its revision and its model-catalog
-    status and license (model_sources.py; null for the others) — and
+    status and license (model_sources.py; null for the others), for a
+    confidence backend the score threshold it runs at and its source — and
     coverage counters, and the configured entities no backend can ever
     emit. Metadata and counts only. The counters belong to the built
     detectors: a reload that rebuilds them starts from zero."""
@@ -623,6 +679,7 @@ def ner_status(ner: NerConfig, detectors: Sequence[Detector]) -> dict[str, Any]:
             name: {
                 "model": getattr(backend, "model_name", None),
                 **_source_fields(backend),
+                **_threshold_fields(backend),
                 "counters": stats.as_dict(),
             }
             for name, backend, stats in ner_backend_stats(detectors)

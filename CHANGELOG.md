@@ -12,6 +12,17 @@ and tags `vX.Y.Z`.
 ## [Unreleased]
 
 ### Added
+- Per-model default `score_threshold`: `[detection.ner] score_threshold` is optional, and a
+  confidence backend (`gliner`, `gliner2`, `presidio`, `hf`) whose configuration sets none runs
+  at the model catalog's default for the model it loads (`CatalogEntry.score_threshold`; a local
+  folder by its sidecar's model id), else 0.5 as before. Only
+  `fastino/gliner2-privacy-filter-PII-multi` has one, 0.9, the threshold the NER bench measured it
+  at (at 0.5 it makes about four times the agent-traffic false positives);
+  `bench/configs/gliner2-fastino.toml` now relies on it. A set value always wins and applies to
+  every backend, 0.5 included. `/status` reports each backend's `score_threshold` and
+  `score_threshold_source` (`config`, `catalog` or `default`) under `detection.ner.backends`,
+  `llm-redact doctor` names a catalog default under `models`, and `config show` writes the key
+  only when it is set.
 - `fastino/gliner2-privacy-filter-PII-multi` (Apache-2.0; GLiNER2 on mdeberta-v3-base; seven
   European languages) in the model catalog for the `gliner2` backend, pinned to its `main`
   commit of 2026-10-07, with the label spellings it was trained on as its prompts

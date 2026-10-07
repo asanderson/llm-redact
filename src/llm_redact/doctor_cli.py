@@ -744,7 +744,26 @@ def _check_models(report: _Report, config: Config) -> None:
         cache = False
     for source in sources:
         _check_model_pin(report, source)
+        _check_model_threshold(report, ner, source)
         _check_model_files(report, ner, source, cache=cache)
+
+
+def _check_model_threshold(report: _Report, ner: Any, source: Any) -> None:
+    """A row naming the confidence threshold a Hub backend runs at when it
+    comes from the model catalog (``NerConfig.score_threshold_for``): the
+    configuration does not show it. Silent for a configured or the
+    historical default threshold, and for a folder whose sidecar cannot be
+    read (its pin row FAILs already)."""
+    if source.sidecar_problem is not None:
+        return
+    value, origin = ner.score_threshold_for(source.backend)
+    if origin == "catalog":
+        report.line(
+            "PASS",
+            "models",
+            f"{source.backend}: score_threshold {value} is the model catalog's default for"
+            f" {source.model_id} ([detection.ner] score_threshold overrides it)",
+        )
 
 
 def _catalog_note(source: Any) -> str:

@@ -527,7 +527,7 @@ def build_hf_detector(config: "NerConfig") -> HfDetector:
         pipe,
         frozenset(config.entities),
         config.max_chars,
-        config.score_threshold,
+        config.score_threshold_for("hf")[0],
         policy=LabelPolicy(config.entities, backend="hf", overrides=config.labels),
         windows_of=window_counter(tokenizer, stride),
     )

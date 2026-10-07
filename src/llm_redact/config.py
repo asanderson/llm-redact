@@ -2585,7 +2585,11 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         backends=backends,
         entities=_str_list(ner_raw, "entities", default_ner.entities, "[detection.ner]"),
         max_chars=int(ner_raw.get("max_chars", default_ner.max_chars)),
-        score_threshold=float(ner_raw.get("score_threshold", default_ner.score_threshold)),
+        # Absent = not set (None): each confidence backend then runs at its
+        # model's catalog default, else 0.5 (NerConfig.score_threshold_for).
+        score_threshold=(
+            float(ner_raw["score_threshold"]) if "score_threshold" in ner_raw else None
+        ),
         language=str(ner_raw.get("language", default_ner.language)),
         model=str(ner_raw["model"]) if "model" in ner_raw else None,
         models=models,

@@ -204,16 +204,38 @@ def test_the_ner_models_job_never_saves_openai_privacy_filter() -> None:
     # the bench has the disk space and the cache saved at the end of the
     # job never holds it.
     steps = _workflow("ci.yml")["jobs"]["ner-models"]["steps"]
-    tests = _step_index(steps, run="uv run --no-sync pytest -m real_model -v")
+    tests = _step_index(
+        steps, run='uv run --no-sync pytest -m real_model -v --deselect "$PRIVACY_FILTER_TEST"'
+    )
+    smoke = _step_index(steps, name="openai/privacy-filter smoke test")
     drop = _step_index(steps, name="drop openai/privacy-filter from the model cache")
     bench = _step_index(steps, name="NER bench gates")
-    assert tests < drop < bench
+    assert tests < smoke < drop < bench
     assert steps[drop]["if"] == "always()"
     assert "rm -rf ~/.cache/huggingface/hub/models--openai--privacy-filter\n" in steps[drop]["run"]
     (models_cache,) = [
         s for s in steps if s.get("with", {}).get("path") == "~/.cache/huggingface/hub"
     ]
     assert "actions/cache@" in models_cache["uses"]  # saved at the end of the job
+
+
+def test_the_privacy_filter_smoke_test_runs_in_a_process_of_its_own() -> None:
+    # In float32 the model alone takes about 6 GB: the first real_model run
+    # leaves it out, and a second process runs exactly that one test.
+    import test_hf_bioes
+
+    steps = _workflow("ci.yml")["jobs"]["ner-models"]["steps"]
+    tests = steps[
+        _step_index(
+            steps, run='uv run --no-sync pytest -m real_model -v --deselect "$PRIVACY_FILTER_TEST"'
+        )
+    ]
+    smoke = steps[_step_index(steps, name="openai/privacy-filter smoke test")]
+    node = "tests/test_hf_bioes.py::" + (
+        test_hf_bioes.test_real_privacy_filter_finds_whole_spans_with_its_calibration.__name__
+    )
+    assert tests["env"]["PRIVACY_FILTER_TEST"] == smoke["env"]["PRIVACY_FILTER_TEST"] == node
+    assert smoke["run"] == 'uv run --no-sync pytest -m real_model -v "$PRIVACY_FILTER_TEST"'
 
 
 def test_the_ner_models_job_frees_disk_first() -> None:

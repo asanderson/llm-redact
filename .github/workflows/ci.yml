@@ -400,9 +400,19 @@ jobs:
           for config in bench/configs/*.toml tests/real_model_configs/*.toml; do
             uv run --no-sync llm-redact models pull --config "$config"
           done
-      - run: uv run --no-sync pytest -m real_model -v
+      # openai/privacy-filter's smoke test runs in a process of its own: in
+      # float32 the model alone takes about 6 GB (8.6 GB peak for the hf
+      # real_model tests on a development host), on a 16 GB runner whose
+      # first process also holds the GLiNER models.
+      - run: uv run --no-sync pytest -m real_model -v --deselect "$PRIVACY_FILTER_TEST"
+        env:
+          PRIVACY_FILTER_TEST: tests/test_hf_bioes.py::test_real_privacy_filter_finds_whole_spans_with_its_calibration
+      - name: openai/privacy-filter smoke test
+        run: uv run --no-sync pytest -m real_model -v "$PRIVACY_FILTER_TEST"
+        env:
+          PRIVACY_FILTER_TEST: tests/test_hf_bioes.py::test_real_privacy_filter_finds_whole_spans_with_its_calibration
       # openai/privacy-filter (tests/real_model_configs/hf-openai-privacy-
-      # filter.toml) serves only its real_model smoke test above, and is
+      # filter.toml) serves only its smoke test above, and is
       # pulled again on every run instead of being saved with the model
       # cache: actions/cache keeps 10 GB per repository and evicts the least
       # recently used entry beyond it, and 2.8 GB more in this entry (which

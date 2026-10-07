@@ -242,7 +242,9 @@ pushes to `main` and the weekly CI schedule):
 3. runs `pytest -m real_model` with
    `LLM_REDACT_TEST_REAL_MODELS_REQUIRED=1`, which turns a real-model test
    that would skip (a model not pulled, an extra missing) into a failure: a
-   green job means every one of them ran. Then it removes
+   green job means every one of them ran. The `openai/privacy-filter` smoke
+   test runs in a second `pytest` process of its own (in float32 the model
+   alone takes about 6 GB of the runner's 16 GB). Then it removes
    `openai/privacy-filter` from the Hugging Face cache (below), whatever the
    tests did;
 4. for every `bench/configs/*.toml`, runs the bench three times with

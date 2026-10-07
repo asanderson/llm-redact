@@ -213,6 +213,11 @@ downloaded unless `allow_download = true`, and then only at startup.
 - `llm-redact doctor` — the `models` area says the same, with warnings for
   downloads, pickle weights, unpinned and restricted models.
 
+Which models exist, what each finds (names; with a PII model also
+addresses, dates of birth, usernames and account numbers, best effort) and
+how long strings are read: `docs/detection.md` and `docs/ner-landscape.md`.
+Carrying models into a network with no internet route: `docs/air-gapped.md`.
+
 ## Honesty surfaces
 
 Anything that reduces coverage is surfaced, never silent. Configured

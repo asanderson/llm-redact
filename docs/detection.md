@@ -1,8 +1,8 @@
 # What gets detected
 
 The complete detection surface: the built-in rule families, deny
-strings, per-rule modes, allowlists, and the optional person-name NER
-backends. The full, current rule list with per-rule comments is in
+strings, per-rule modes, allowlists, and the optional NER backends and
+models. The full, current rule list with per-rule comments is in
 [`config.example.toml`](../config.example.toml); how each rule is
 scored and gated is in [assurance.md](assurance.md) and the benchmark
 section of the [README](../README.md#benchmark-and-live-validation).
@@ -99,8 +99,14 @@ a three-way selector per rule.
 
 ## Person-name detection (optional NER)
 
-Regex catches structured values (emails, keys) but misses most person names.
-Optional NER backends close that gap (`[detection.ner]`):
+Regex catches structured values (emails, keys) but misses most person names,
+and has no reliable grammar for street addresses, dates of birth, usernames,
+account numbers or passport and driver's-licence numbers. Optional NER
+backends close that gap (`[detection.ner]`): names by default (`entities =
+["PERSON"]`) and, with a PII-trained model and the types listed in
+`entities`, the contextual types too — best effort, measured per model
+([ner-landscape.md](ner-landscape.md#verdicts-at-a-glance)), not a guarantee
+([threat-model.md](threat-model.md#contextual-values-rules-and-models)):
 
 ```bash
 # spaCy (default backend, ~tens of MB, ~1-5 ms/string):
@@ -116,7 +122,14 @@ uv sync --extra gliner2
 # context scoring over the same spaCy model; supports score_threshold):
 uv sync --extra presidio
 uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+# or any Hugging Face token-classification model, PII models included
+# (pulls torch; supports score_threshold), or Stanza (60+ languages):
+uv sync --extra hf        # or: --extra stanza
 ```
+
+Models for the `gliner`, `gliner2` and `hf` backends come from the Hugging Face
+Hub and are fetched once, explicitly: `llm-redact models pull` (the startup
+downloads nothing unless `allow_download = true`; "Model sources" below).
 
 Presidio entity types that overlap the built-in regex rules
 (`EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_SSN`, `IBAN_CODE`, `CREDIT_CARD`)
@@ -544,8 +557,11 @@ carry labels that are not folded into `ACCOUNT_NUMBER` (`customer_id`,
 `unique_id`, …), so a quarter of the synthetic corpus's account numbers is
 found and three quarters of their digits leak. Both stay "caution" with
 these numbers. The `PERSON`-only rows request what the default configuration requests, so
-their character leak counts every other labelled value as leaked; the
-default model is unchanged (a change would be a 2.0.0 decision).
+their character leak counts every other labelled value as leaked. The bench
+supports OpenMed-PII Small 44M as a better default for this backend than
+`dslim/bert-base-NER`; the default is unchanged in 1.x, and the switch is
+planned together with raw-entity folding in the next major release (2.0.0;
+[ner-landscape.md](ner-landscape.md#what-the-measurements-decided)).
 
 `openai/privacy-filter` (Apache-2.0; a 1.5B-parameter mixture of experts,
 50M parameters active, 2.8 GB of weights) labels `private_person`,
@@ -1001,10 +1017,10 @@ existing `detection.ner_enabled`):
 | Counter | Counts |
 |---|---|
 | `scanned_whole` | strings the model read in one call |
-| `scanned_windowed` | strings the model read in overlapping windows (`hf`, `gliner`) |
+| `scanned_windowed` | strings the model read in overlapping windows (`hf`, `gliner`, `gliner2`) |
 | `skipped_max_chars` | strings longer than `[detection.ner] max_chars`, which the model never read (the regex rules and deny strings still scan them) |
 | `windows` | the windows the windowed strings were read in |
-| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`) |
+| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`, `gliner2`) |
 | `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |
 | `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
 | `inline_calls` | strings the backend ran on the event loop itself, holding up every other request for that string's inference, instead of ahead of the redaction on the NER worker thread |

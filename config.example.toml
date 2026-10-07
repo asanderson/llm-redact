@@ -410,7 +410,10 @@ allowlist_patterns = ['^10\.', '^192\.168\.']
 # exempt_servers = ["my-internal-server"]
 
 [detection.ner]
-# Person-name detection (regex misses most names).
+# Optional NER (off by default): person names (regex misses most names) and,
+# with a PII-trained model, addresses, dates of birth, usernames and account
+# numbers — best effort, measured per model, never a guarantee
+# (docs/detection.md, docs/ner-landscape.md).
 # backend = "spacy" (default): uv sync --extra ner, then install the model:
 #   uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 #   (~1-5 ms per scanned string on CPU)
@@ -424,6 +427,16 @@ allowlist_patterns = ['^10\.', '^192\.168\.']
 #   spaCy model; supports score_threshold). Entity types that overlap the
 #   built-in rules (EMAIL_ADDRESS, PHONE_NUMBER, US_SSN, IBAN_CODE,
 #   CREDIT_CARD) fold into the built-in placeholder names.
+# backend = "stanza": uv sync --extra stanza (60+ languages, no scores).
+# backend = "hf": uv sync --extra hf (torch + transformers); any Hugging Face
+#   token-classification model, PII models included; supports score_threshold.
+#   A PII model for addresses, dates of birth, usernames and account numbers
+#   (fetch it once with `llm-redact models pull`; docs/detection.md "PII
+#   models for the hf backend"):
+#     backend = "hf"
+#     entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
+#     [detection.ner.models]
+#     hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
 enabled = false
 backend = "spacy"
 # Run several backends at once, each toggled individually (wins over

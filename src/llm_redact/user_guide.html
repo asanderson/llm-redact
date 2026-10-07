@@ -83,6 +83,7 @@
 <li><code>llm-redact models verify</code> — exit 1 unless every model is complete at its revision; <code>--dir DIR</code> checks a folder of portable models against its manifest (offline, no config).</li>
 <li><code>llm-redact doctor</code> — the <code>models</code> area says the same, with warnings for downloads, pickle weights, unpinned and restricted models.</li>
 </ul>
+<p>Which models exist, what each finds (names; with a PII model also addresses, dates of birth, usernames and account numbers, best effort) and how long strings are read: <code>docs/detection.md</code> and <code>docs/ner-landscape.md</code>. Carrying models into a network with no internet route: <code>docs/air-gapped.md</code>.</p>
 <h2>Honesty surfaces</h2>
 <p>Anything that reduces coverage is surfaced, never silent. Configured opt-outs — warn-mode rules (matches are observed and FORWARDED), per-provider detection off, MCP server exemptions, language-scoped-out national-ID rules, the remote-plaintext vault hatch — appear in <code>/__llm-redact/status</code>, <code>llm-redact status</code>'s posture block, <code>doctor</code>, and (with llm-redact-pro) the dashboard. Runtime state — audit-backup upload failures, routing upstreams in cooldown or over budget — appears in <code>/__llm-redact/status</code>, <code>llm-redact status</code>, and the dashboard; <code>doctor</code> checks the routing config and its credentials, never the running proxy's cooldown or budget state.</p>
 <h2>Going deeper</h2>

@@ -60,7 +60,7 @@ padding differs), pinned to the published Keccak test vectors.
 | `gliner2` | `gliner2`, `torch`, `transformers`, `peft`, `safetensors`, `numpy` | Fastino's GLiNER2 zero-shot extraction with character spans; lists gliner2's model dependencies itself (its own `local` extra caps transformers below 5). Its hosted-API client is never used. |
 | `presidio` | `presidio-analyzer` | Microsoft's FOSS PII analyzer layered over spaCy (recognizers + context scoring). |
 | `stanza` | `stanza`, `torch` | Stanford Stanza NER, 60+ languages — the multilingual complement to spaCy. |
-| `hf` | `transformers`, `torch` | Any Hugging Face token-classification checkpoint as a detector; emits confidences. |
+| `hf` | `transformers`, `torch` | Any Hugging Face token-classification checkpoint as a detector, PII models included; emits confidences. `transformers>=4.56` (the float32 `dtype` the backend loads every model with), `torch>=2.6`. |
 | `crypto` | `cryptography` | At-rest Fernet encryption for the vault (`[vault] encryption = "fernet"`). |
 | `vault-postgres` | `psycopg[binary]` | PostgreSQL driver for the Pro RDBMS vault backend. |
 | `vault-mysql` | `PyMySQL` | Pure-Python MySQL/MariaDB driver for the Pro RDBMS vault backend. |

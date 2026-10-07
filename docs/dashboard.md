@@ -32,9 +32,11 @@ headers.
   so poll `/recent` as the authoritative fallback). Both are
   Host-gated against DNS rebinding.
 - **Status**: `llm-redact status` (or `GET /__llm-redact/status`) reports the
-  live totals as JSON — including the `routing` block (per-upstream
-  health, spend against budget, re-issues) when the llm-redact-pro routing
-  layer is enabled (`{"enabled": false}` otherwise).
+  live totals as JSON — including the `detection.ner` block while NER is on
+  (each backend's model, revision, catalog status and coverage counters:
+  [detection.md](detection.md#ner-coverage-counters)) and the `routing` block
+  (per-upstream health, spend against budget, re-issues) when the
+  llm-redact-pro routing layer is enabled (`{"enabled": false}` otherwise).
 - **Routing**: with the llm-redact-pro routing layer enabled,
   `llm-redact status` prints per-upstream lines — name, protocol,
   credential mode (never the key), state (`healthy` / `cooldown` /
@@ -67,9 +69,11 @@ headers.
 - **Coverage posture, surfaced loudly**: `llm-redact status` and
   `llm-redact doctor` both report every configured opt-out that lets
   traffic through unredacted — warn-mode types, providers with detection
-  off, MCP exempt servers, language-scoped-out national-id rules — and
-  say so plainly when nothing is opted out. Protection is never quietly
-  reduced.
+  off, MCP exempt servers, language-scoped-out national-id rules — and say so
+  plainly when nothing is opted out. `llm-redact status` adds the NER coverage
+  gaps it sees at runtime (strings no model read because they were longer than
+  `max_chars`, configured entities no backend can emit). Protection is never
+  quietly reduced.
 - **Agent plugins**: the status, recent-request, preview and
   config-editing workflows are available as slash commands inside
   Claude Code, Codex, OpenCode, and Cursor —

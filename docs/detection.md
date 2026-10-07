@@ -234,13 +234,13 @@ hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
   backends' models are not Hub snapshots and take none). A branch or tag name such as
   `main` is a config error, because it moves. A backend with no entry uses
   the pin llm-redact's model catalog records for the model it loads, when
-  there is one: the default models `urchade/gliner_small-v2.1` and
-  `dslim/bert-base-NER`, `urchade/gliner_medium-v2.1`,
-  `urchade/gliner_multi-v2.1`, `urchade/gliner_multi_pii-v1` and the four
-  `knowledgator/gliner-pii-*-v1.0` sizes are pinned to the commit their
-  `main` branch pointed at on 2026-10-05, and the `gliner2` default
-  `fastino/gliner2-base-v1` to its `main` commit of 2026-10-06. An entry for a backend that is not
-  active is kept and ignored, like a `[detection.ner.models]` entry.
+  there is one: every model in the vetted and caution tables below, the
+  defaults (`urchade/gliner_small-v2.1`, `dslim/bert-base-NER`,
+  `fastino/gliner2-base-v1`) included, is pinned to the commit its `main`
+  branch pointed at when its entry was checked (2026-10-05 to 2026-10-07; the
+  date is in `llm-redact models list --json`, under `facts`). An entry for a
+  backend that is not active is kept and ignored, like a
+  `[detection.ner.models]` entry.
 - `allow_download` (default `false`) decides whether the proxy's startup
   (`serve`, `serve --check`) may fetch a model's pinned files from the Hub
   into the Hugging Face cache. With `false` every model loads from the

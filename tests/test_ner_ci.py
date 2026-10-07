@@ -244,6 +244,19 @@ def test_the_environment_script_checks_every_hash() -> None:
     assert commands[0] == "set -euo pipefail"
 
 
+def test_the_docs_scope_local_reproduction_to_what_the_script_runs_on() -> None:
+    # The script runs the venv's POSIX interpreter (`$venv/bin/python`; a
+    # Windows venv has Scripts/python.exe) and pipes through python3, so
+    # docs/ner-bench.md must not promise a local run on Windows.
+    assert '"$venv/bin/python"' in ENV_SCRIPT.read_text()
+    text = (ROOT / "docs" / "ner-bench.md").read_text()
+    start = text.index("To reproduce the job locally")
+    paragraph = " ".join(text[start : text.index("```", start)].split())
+    assert "CPython 3.13 venv; Linux, x86_64 or aarch64" in paragraph
+    assert "does not run on Windows" in paragraph
+    assert "Linux or Windows" not in paragraph
+
+
 @pytest.mark.parametrize("name", ["ci.yml", "ner-eval.yml"])
 def test_actions_are_pinned_and_checkouts_keep_no_credentials(name: str) -> None:
     for job in _workflow(name)["jobs"].values():

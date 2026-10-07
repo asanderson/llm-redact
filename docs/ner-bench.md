@@ -281,9 +281,10 @@ type-agnostic leak rate. A ceiling on that rate alone would let `PERSON`
 leakage grow about fivefold before failing, so each entry also carries a
 `type_leak_max` for every entity its configuration requests.
 
-To reproduce the job locally (it creates a CPython 3.13 venv; Linux or
-Windows, x86_64 or aarch64, where the PyTorch CPU index has a `+cpu`
-wheel), install as it does; the script replaces `.venv`, so run it in a
+To reproduce the job locally (it creates a CPython 3.13 venv; Linux,
+x86_64 or aarch64, where the PyTorch CPU index has a `+cpu` wheel; the
+script runs the venv's `bin/python`, so it does not run on Windows, which
+is unsupported), install as it does; the script replaces `.venv`, so run it in a
 checkout you do not develop in, and the models go to the Hugging Face
 cache. When `uv.lock` moves torch to another version, the script refuses
 to run until `CPU_WHEELS` in `scripts/cpu_torch.py` records that

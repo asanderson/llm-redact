@@ -154,8 +154,12 @@ its pins, its measurements and its documentation in the same change.
    revisions and measured values in the notes; tolerances as in
    [ner-bench.md](ner-bench.md#recording-a-baseline)).
    `tests/test_ner_ci.py` requires an entry for every bench configuration.
-5. **CI**: nothing to edit for a bench configuration — the `ner-models`
-   job and the weekly `ner-eval` workflow run every `bench/configs/*.toml`.
+5. **CI**: the `ner-models` job runs every `bench/configs/*.toml` with no
+   edit; add the configuration's name to the matrix of the weekly
+   `ner-eval` workflow (`.github/workflows/ner-eval.yml`, one job per
+   configuration; `tests/test_ner_ci.py` fails until it is listed).
+   A model too slow for a runner goes to `bench/configs/manual/` instead
+   (measured by hand; its comment and baseline note say how).
    A real-model test of another model needs that model in a config under
    `tests/real_model_configs/`, or the job fails the skipped test.
 6. **Admission.** "vetted" needs an OSI-approved weights license, no

@@ -237,7 +237,7 @@ def build_gliner_detector(config: "NerConfig") -> GlinerDetector:
             '[detection.ner] backend = "gliner" but the gliner extra is not installed;'
             " install it: uv sync --extra gliner"
         ) from exc
-    from llm_redact.detection.model_files import gliner_model_dir
+    from llm_redact.detection.model_files import catalog_entry, gliner_model_dir
 
     model_name = config.model or _MODEL_NAME
     # A self-contained local folder at the pinned revision (model_files.py):
@@ -259,6 +259,7 @@ def build_gliner_detector(config: "NerConfig") -> GlinerDetector:
         allow_download=config.allow_download,
         onnx_file=onnx_file,
     )
+    entry = catalog_entry(model_name, "gliner")
     try:
         model = GLiNER.from_pretrained(str(folder), **load)
     except Exception as exc:  # model load can fail many ways; name only what is known
@@ -270,7 +271,13 @@ def build_gliner_detector(config: "NerConfig") -> GlinerDetector:
         frozenset(config.entities),
         config.max_chars,
         config.score_threshold,
-        policy=LabelPolicy(config.entities, backend="gliner", overrides=config.labels),
+        policy=LabelPolicy(
+            config.entities,
+            backend="gliner",
+            overrides=config.labels,
+            # The prompts the model was trained on, where the catalog knows them.
+            prompts=entry.prompts if entry is not None else (),
+        ),
     )
     detector.model_name = model_name
     return detector

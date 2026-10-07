@@ -11,6 +11,8 @@ Messages and fields name backends, model ids, revisions and catalog facts,
 never anything a model read.
 """
 
+import importlib.metadata
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -211,3 +213,34 @@ def model_load(ner: "NerConfig", backend: str, *, allow_download: bool = False) 
         lineage=entry.lineage if entry is not None else (),
         attribution=(entry.attribution or None) if entry is not None else None,
     )
+
+
+def version_problems(entry: CatalogEntry | None, backend: str, model: str) -> list[str]:
+    """One message per library installed older than the model catalog says
+    ``model`` needs (``entry.min_versions``; distribution metadata only:
+    nothing is imported). A library that is not installed is not reported
+    here: the backend's own import names its extra."""
+    problems = []
+    for distribution, minimum in entry.min_versions if entry is not None else ():
+        try:
+            installed = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        if version_tuple(installed) < version_tuple(minimum):
+            problems.append(
+                f"{backend}: {model} needs {distribution} >= {minimum} (model"
+                f" catalog), but {distribution} {installed} is installed; upgrade it:"
+                f" uv sync --extra {backend} --upgrade-package {distribution}"
+            )
+    return problems
+
+
+def version_tuple(version: str) -> tuple[int, ...]:
+    """The leading numeric release segments of a version string."""
+    numbers = []
+    for part in version.split("+", 1)[0].split(".")[:3]:
+        match = re.match(r"\d+", part)
+        if match is None:
+            break
+        numbers.append(int(match[0]))
+    return tuple(numbers)

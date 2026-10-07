@@ -361,3 +361,42 @@ def test_real_model_finds_a_name_after_3000_words(monkeypatch: pytest.MonkeyPatc
     assert all(text[d.start : d.end] == d.value for d in found)
     assert detector.stats.scanned_windowed == 1
     assert detector.stats.windows == 8  # 3,010 tokens in windows of 512, 128 shared
+
+
+# OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 (Apache-2.0; DeBERTa-v3
+# SentencePiece tokenizer, first_name/last_name BIO labels) at the catalog pin
+# checked on 2026-10-07.
+OPENMED = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+OPENMED_REVISION = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"
+OPENMED_FILES = [
+    "config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "spm.model",
+]
+
+
+@pytest.mark.real_model
+def test_real_model_sentencepiece_spans_leave_the_blanks_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A SentencePiece token's offsets take in the blank before its word:
+    # " Jane" + " Doe" came back as two PERSON spans that swallowed the
+    # spaces; trimmed, the parts are adjacent and merge into one value.
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    offline_hub(monkeypatch)
+    cached_snapshot(OPENMED, OPENMED_REVISION, OPENMED_FILES)
+    detector = build_hf_detector(
+        NerConfig(enabled=True, backend="hf", model=OPENMED, entities=("PERSON", "ADDRESS"))
+    )
+    text = "Ask Jane Doe about 12 Oak Street today."
+    found = detector.detect(text)
+    assert [(d.detector_type, d.value) for d in found] == [
+        ("PERSON", "Jane Doe"),
+        ("ADDRESS", "12 Oak Street"),
+    ]
+    assert all(not d.value[0].isspace() and not d.value[-1].isspace() for d in found)

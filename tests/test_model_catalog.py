@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_redact.config import ConfigError, parse_config
+from llm_redact.config import ConfigError, load_config, parse_config
 from llm_redact.detection import gliner2_ner, gliner_ner, hf_ner, model_catalog
 from llm_redact.detection.engine import DetectionConfig, NerConfig, build_detectors
 from llm_redact.detection.labels import (
@@ -16,6 +16,7 @@ from llm_redact.detection.labels import (
     DEFAULT_FOLDS,
     SENSITIVE_LABELS,
     TYPE_NAMES,
+    ZERO_SHOT_BACKENDS,
     LabelPolicy,
     normalize_label,
 )
@@ -26,6 +27,7 @@ from llm_redact.detection.model_catalog import (
     HUB_BACKENDS,
     LINEAGE_TAGS,
     MAX_SIDECAR_BYTES,
+    MEASURED,
     MODEL_ID_RE,
     REVISION_RE,
     SIDECAR_NAME,
@@ -37,6 +39,7 @@ from llm_redact.detection.model_catalog import (
     SidecarError,
     identify,
     lookup,
+    measured,
     pinned_revision,
     read_sidecar,
     sidecar_text,
@@ -162,7 +165,8 @@ def test_entry_shape(entry: CatalogEntry) -> None:
         assert not onnx_file.startswith("/")
         assert ".." not in onnx_file.split("/")
     if entry.prompts:
-        assert entry.backends == ("gliner",)
+        # Zero-shot models only: they are prompted with label text.
+        assert set(entry.backends) <= ZERO_SHOT_BACKENDS
     assert entry.window is None or entry.window > 0
     for distribution, version in entry.min_versions:
         assert re.fullmatch(r"[a-z0-9-]+", distribution)
@@ -226,9 +230,15 @@ def test_section_4_6_statuses() -> None:
         "urchade/gliner_multi-v2.1",
         "urchade/gliner_multi_pii-v1",
     }
-    # Not yet measured by the bench: the Knowledgator sizes and the gliner2
-    # backend's default model.
-    assert caution == {*_KNOWLEDGATOR, "fastino/gliner2-base-v1"}
+    # Configurable, below a D11 bar or not yet measured: the Knowledgator
+    # sizes and the gliner2 backend's default model.
+    assert caution == {
+        *_KNOWLEDGATOR,
+        "fastino/gliner2-base-v1",
+        *_NEMOTRON_HF,
+        "openai/privacy-filter",
+        "fastino/gliner2-privacy-filter-PII-multi",
+    }
     restricted = {e.model_id for e in CATALOG if e.status == "restricted"}
     assert {
         "iiiorg/piiranha-v1-detect-personal-information",
@@ -282,7 +292,15 @@ def test_knowledgator_gliner_pii_is_a_configurable_option(model_id: str) -> None
     entry = lookup(model_id)
     assert entry is not None
     assert entry.status == "caution"
-    assert UNMEASURED in entry.reason
+    # -edge and -base carry their bench numbers (D11: caution, with the
+    # numbers shown); -small and -large are not yet measured.
+    if model_id.split("-")[-2] in ("edge", "base"):
+        assert (
+            f"llm-redact bench {MEASURED}, PASSPORT and DRIVER_LICENSE not requested:"
+            " synthetic-corpus PERSON recall"
+        ) in entry.reason
+    else:
+        assert UNMEASURED in entry.reason
     assert entry.revision is not None
     # Self-contained checkpoints: no backbone snapshot to pin.
     assert entry.backbone is not None
@@ -294,6 +312,71 @@ def test_knowledgator_gliner_pii_is_a_configurable_option(model_id: str) -> None
     assert entry.lineage == ("undisclosed-training-data",)
     modernbert = entry.backbone.startswith("jhu-clsp/ettin-encoder-")
     assert (("transformers", "4.48.0") in entry.min_versions) == modernbert
+
+
+_NEMOTRON_HF = (
+    "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1",
+    "kalyan-ks/ettin-68m-nemotron-pii",
+)
+
+
+@pytest.mark.parametrize("model_id", _NEMOTRON_HF)
+def test_the_nemotron_trained_hf_models_carry_their_attribution(model_id: str) -> None:
+    entry = lookup(model_id)
+    assert entry is not None
+    assert entry.backends == ("hf",) and entry.tagging == "bio"
+    assert entry.status == "caution"
+    assert f"llm-redact bench {MEASURED}" in entry.reason
+    assert entry.lineage == ("nemotron-cc-by",)
+    assert entry.attribution.endswith("trained on NVIDIA Nemotron-PII, CC BY 4.0")
+    assert entry.recommended_entities == (
+        "PERSON",
+        "ADDRESS",
+        "DATE_OF_BIRTH",
+        "USERNAME",
+        "ACCOUNT_NUMBER",
+    )
+    assert entry.revision is not None and entry.backbone_revision is None
+    # OpenMed's card: 384 tokens; ettin's tokenizer configuration: 1,024.
+    assert entry.window == {"OpenMed": 384, "kalyan-ks": 1024}[model_id.split("/")[0]]
+    modernbert = entry.backbone == "jhu-clsp/ettin-encoder-68m"
+    assert (("transformers", "4.48.0") in entry.min_versions) == modernbert
+
+
+def test_the_openai_privacy_filter_entry() -> None:
+    entry = lookup("openai/privacy-filter")
+    assert entry is not None
+    assert (entry.backends, entry.license, entry.status) == (("hf",), "Apache-2.0", "caution")
+    assert f"llm-redact bench {MEASURED}" in entry.reason
+    # BIOES spans decoded with the repository's Viterbi calibration, which a
+    # pull fetches and a check requires.
+    assert entry.tagging == "bioes"
+    assert entry.extra_files("hf") == ("viterbi_calibration.json",)
+    # transformers learned the model type in 5.6.0; the build checks it.
+    assert entry.min_versions == (("transformers", "5.6.0"),)
+    assert entry.window == 128000
+    # Its `secret` label is left to the anchored secret rules.
+    assert entry.recommended_entities == ("PERSON", "ADDRESS", "ACCOUNT_NUMBER")
+    assert entry.lineage == ("undisclosed-training-data",)
+
+
+def test_the_fastino_gliner2_pii_entry() -> None:
+    entry = lookup("fastino/gliner2-privacy-filter-PII-multi")
+    assert entry is not None
+    assert (entry.backends, entry.license, entry.status) == (("gliner2",), "Apache-2.0", "caution")
+    assert f"llm-redact bench {MEASURED}" in entry.reason
+    assert entry.revision is not None and entry.backbone_revision is None
+    assert entry.recommended_entities == CANONICAL_NER_TYPES
+    # The card's label spellings, one per contextual type.
+    assert dict(entry.prompts) == {
+        "PERSON": "person",
+        "ADDRESS": "street_address",
+        "DATE_OF_BIRTH": "date_of_birth",
+        "PASSPORT": "passport_number",
+        "DRIVER_LICENSE": "drivers_license_number",
+        "USERNAME": "username",
+        "ACCOUNT_NUMBER": "account_number",
+    }
 
 
 def test_prompt_for() -> None:
@@ -592,3 +675,47 @@ def test_an_unpinned_backend_view_carries_no_revision(monkeypatch: pytest.Monkey
     assert seen["hf"].model == "org/private-model"
     assert seen["hf"].revisions == ()
     assert seen["hf"].revision_for("hf") is None
+
+
+def test_a_measured_reason_quotes_the_bench() -> None:
+    assert measured(recall=0.991, leak=0.0821, false_positives=108.6, p50_ms=92.7) == (
+        "llm-redact bench 2026-10-07: synthetic-corpus PERSON recall 0.99, character leak"
+        " 0.08; 109 false positives per 50 KB of agent-traffic negatives; p50 93 ms per 500"
+        " characters"
+    )
+    # A narrower request than the recommended entities is named.
+    assert measured(1, 0, 0, 1, unrequested=("PASSPORT",)).startswith(
+        "llm-redact bench 2026-10-07, PASSPORT not requested: synthetic"
+    )
+    assert measured(1, 0, 0, 1, unrequested=("PASSPORT", "DRIVER_LICENSE")).startswith(
+        "llm-redact bench 2026-10-07, PASSPORT and DRIVER_LICENSE not requested: synthetic"
+    )
+    assert measured(1, 0, 0, 1, unrequested=("A", "B", "C")).startswith(
+        "llm-redact bench 2026-10-07, A, B and C not requested: synthetic"
+    )
+
+
+_BENCH = Path(__file__).resolve().parent.parent / "bench" / "configs"
+_MEASURED_ENTRIES = [e for e in CATALOG if f"llm-redact bench {MEASURED}" in e.reason]
+
+
+@pytest.mark.parametrize("entry", _MEASURED_ENTRIES, ids=lambda e: e.model_id)
+def test_a_measured_reason_names_what_its_bench_config_left_unrequested(
+    entry: CatalogEntry,
+) -> None:
+    # The numbers a reason quotes are its bench configuration's; when that
+    # configuration requests fewer types than the model is recommended for,
+    # the reason says so (the false-positive count of a narrower request
+    # may be lower than the recommended one's).
+    configs = [
+        load_config(path).detection.ner
+        for path in sorted(_BENCH.glob("*.toml")) + sorted(_BENCH.glob("manual/*.toml"))
+    ]
+    measured_by = [ner for ner in configs if ner.model == entry.model_id]
+    assert measured_by, entry.model_id
+    for ner in measured_by:
+        unrequested = [t for t in entry.recommended_entities if t not in ner.entities]
+        assert len(unrequested) <= 2
+        scope = f", {' and '.join(unrequested)} not requested" if unrequested else ""
+        assert f"llm-redact bench {MEASURED}{scope}: " in entry.reason
+    assert len(_MEASURED_ENTRIES) == 6

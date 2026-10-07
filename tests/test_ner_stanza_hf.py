@@ -155,6 +155,23 @@ def test_hf_out_of_range_offsets_are_skipped(start: int, end: int) -> None:
     assert [(d.start, d.end, d.value) for d in det.detect(text)] == [(3, 7, "Jane")]
 
 
+def test_hf_spans_lose_the_blanks_a_token_takes_in() -> None:
+    # A SentencePiece (DeBERTa-v3) or byte-level BPE token's offsets take in
+    # the blank before its word: OpenMed's first_name/last_name came back as
+    # " Jane" and " Doe", which swallowed the spaces around the placeholders
+    # and kept the parts apart (two PERSON tokens for one name).
+    text = "Ask Jane Doe today"
+    pipe = _ScriptedHfPipe(
+        [
+            {"entity_group": "first_name", "score": 0.9, "start": 3, "end": 8},
+            {"entity_group": "last_name", "score": 0.9, "start": 8, "end": 13},
+            {"entity_group": "last_name", "score": 0.9, "start": 12, "end": 13},  # a blank only
+        ]
+    )
+    det = HfDetector(pipe, frozenset({"PERSON"}), 1000, 0.5)
+    assert [(d.start, d.end, d.value) for d in det.detect(text)] == [(4, 12, "Jane Doe")]
+
+
 def test_hf_span_ending_exactly_at_the_text_end_is_kept() -> None:
     text = "Jane"
     pipe = _ScriptedHfPipe([{"entity_group": "PER", "score": 0.9, "start": 0, "end": 4}])

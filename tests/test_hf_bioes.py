@@ -526,6 +526,26 @@ def test_the_pipe_reports_spans_like_the_pipeline() -> None:
     assert all(0.5 < e["score"] <= 1.0 for e in found)
 
 
+@pytest.mark.parametrize("text", ["", "   \n\t"])
+def test_a_text_without_tokens_never_reaches_the_model(text: str) -> None:
+    # openai/privacy-filter's tokenizer adds no special tokens: an empty
+    # string is one window of no token ids, and a model call on it raised
+    # (torch made the empty id list a float tensor), failing the request.
+    class NoSpecials(TagTokenizer):
+        def __call__(self, text: str, **kwargs: Any) -> TagEncoding:  # type: ignore[override]
+            out = super().__call__(text, **kwargs)
+            for key in ("input_ids", "offset_mapping", "special_tokens_mask"):
+                out[key] = [row[1:-1] for row in out[key]]
+            return out
+
+    def scorer(ids: list[int]) -> list[list[float]]:
+        raise AssertionError("scored a window without tokens")
+
+    tags = _tags(BIOES_PERSON)
+    pipe = TaggerPipe(None, NoSpecials(512), 128, tags, decoder_for(tags, None), scorer)
+    assert pipe(text) == []
+
+
 def test_without_a_calibration_the_pipe_reads_greedily() -> None:
     text = "Ask Jane Q. Doe today"
     found = _pipe(NAME)(text)
@@ -633,7 +653,9 @@ def test_the_torch_scorer_returns_log_probabilities(monkeypatch: pytest.MonkeyPa
     assert len(rows) == 2
     assert max(range(5), key=lambda j: rows[1][j]) == 4
     assert sum(math.exp(x) for x in rows[0]) == pytest.approx(1.0)
-    assert torch.made == [{"data": [[TagTokenizer.CLS, 0]], "device": "cpu"}]
+    # Integer token ids, whatever the list holds (an empty list made a
+    # float tensor the embedding refused).
+    assert torch.made == [{"data": [[TagTokenizer.CLS, 0]], "dtype": "torch.long", "device": "cpu"}]
 
 
 # --- building ----------------------------------------------------------------------
@@ -827,6 +849,40 @@ def test_the_privacy_filter_labels_fold_into_placeholder_types(
     assert detector.emittable_types == frozenset({"PERSON", "ADDRESS"})
     found = detector.detect("Jane lives on Elm")
     assert [(d.detector_type, d.value) for d in found] == [("PERSON", "Jane"), ("ADDRESS", "Elm")]
+
+
+def test_a_library_older_than_the_catalog_says_refuses_the_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # openai/privacy-filter's model type exists from transformers 5.6.0
+    # (the hf extra allows older releases): the build says so, naming the
+    # versions, instead of failing inside the load.
+    from llm_redact.detection import model_sources
+    from llm_redact.detection.engine import DetectionConfig, build_detectors
+
+    install_torch(monkeypatch)
+    install_transformers(monkeypatch, _tagger_pipe(NAME))
+    installed = {"transformers": "5.5.4"}
+    monkeypatch.setattr(model_sources.importlib.metadata, "version", installed.__getitem__)
+    ner = NerConfig(enabled=True, backend="hf", model="openai/privacy-filter")
+    with pytest.raises(ConfigError) as caught:
+        build_detectors(DetectionConfig(enabled=(), ner=ner))
+    assert str(caught.value) == (
+        "[detection.ner] hf: openai/privacy-filter needs transformers >= 5.6.0 (model"
+        " catalog), but transformers 5.5.4 is installed; upgrade it: uv sync --extra hf"
+        " --upgrade-package transformers"
+    )
+    # The version it names, or a later one, builds.
+    hub = FakeHub()
+    assert hub.default is not None
+    hub.repos["openai/privacy-filter"] = {
+        **hub.default,
+        "viterbi_calibration.json": json.dumps(_calibration()),
+    }
+    install_transformers(monkeypatch, _tagger_pipe(NAME), hub)
+    for version in ("5.6.0", "5.10.1"):
+        installed["transformers"] = version
+        assert build_detectors(DetectionConfig(enabled=(), ner=ner))
 
 
 def test_every_tag_combination_of_two_tokens_reads_without_error() -> None:

@@ -1,0 +1,18 @@
+# NER bench configuration "hf-openai-privacy-filter" (docs/ner-bench.md),
+# measured by hand: CI does not run bench/configs/manual/ (the model takes
+# about a second per 500-character string on a 4-core CPU, its latency run
+# alone twenty minutes). The hf backend with openai/privacy-filter at its
+# catalog pin (model.safetensors, 2.8 GB; transformers 5.6.0 or newer), its
+# BIOES spans decoded with the constrained Viterbi decoder and the
+# repository's viterbi_calibration.json, asked for the three types the catalog
+# recommends it for (its secret label is left to the anchored secret rules).
+# Checked by hand against bench/ner_thresholds.toml [hf-openai-privacy-
+# filter.*] and bench/ner_ceilings.toml [hf-openai-privacy-filter]; the
+# numbers and the catalog status they give are in docs/ner-landscape.md.
+# Downloads stay off: pull the model first (`llm-redact models pull --config`
+# on this file).
+[detection.ner]
+enabled = true
+backend = "hf"
+model = "openai/privacy-filter"
+entities = ["PERSON", "ADDRESS", "ACCOUNT_NUMBER"]

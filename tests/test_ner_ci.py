@@ -20,6 +20,9 @@ from llm_redact.detection.model_sources import hub_sources
 ROOT = Path(__file__).resolve().parent.parent
 BENCH_CONFIGS = sorted((ROOT / "bench" / "configs").glob("*.toml"))
 TEST_CONFIGS = sorted((ROOT / "tests" / "real_model_configs").glob("*.toml"))
+# Measured by hand, never by CI: a model too slow for a CI runner
+# (docs/ner-bench.md, "Configurations measured by hand").
+MANUAL_CONFIGS = sorted((ROOT / "bench" / "configs" / "manual").glob("*.toml"))
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 
@@ -92,7 +95,9 @@ def test_a_bench_config_for_another_model_may_name_it(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize("path", BENCH_CONFIGS + TEST_CONFIGS, ids=lambda p: p.stem)
+@pytest.mark.parametrize(
+    "path", BENCH_CONFIGS + TEST_CONFIGS + MANUAL_CONFIGS, ids=lambda p: p.stem
+)
 def test_each_config_loads_pinned_models_with_downloads_off(path: Path) -> None:
     ner = load_config(path).detection.ner
     assert ner.enabled
@@ -111,10 +116,12 @@ def test_ci_pulls_every_model_the_real_model_tests_load() -> None:
 
     needed = {
         (test_hf_windows.DSLIM, test_hf_windows.DSLIM_REVISION),
+        (test_hf_windows.OPENMED, test_hf_windows.OPENMED_REVISION),
         (test_gliner.GLINER_SMALL, test_gliner.GLINER_SMALL_REVISION),
         (test_gliner.DEBERTA_SMALL, test_gliner.DEBERTA_SMALL_REVISION),
         (test_gliner.EDGE, test_gliner.EDGE_REVISION),
         (test_gliner2.BASE, test_gliner2.BASE_PIN),
+        (test_gliner2.PII, test_gliner2.PII_PIN),
     }
     assert needed <= _pulled()
 
@@ -139,6 +146,32 @@ def test_each_bench_config_has_recorded_baselines(path: Path) -> None:
     requested = load_config(path).detection.ner.entities
     assert set(requested) <= set(thresholds[name]["synthetic"]["type_leak_max"])
     assert "per_100kb_max" in ceilings[name]
+
+
+@pytest.mark.parametrize("path", MANUAL_CONFIGS, ids=lambda p: p.stem)
+def test_a_manual_config_has_recorded_baselines_and_says_why(path: Path) -> None:
+    thresholds = tomllib.loads((ROOT / "bench" / "ner_thresholds.toml").read_text())
+    entry = thresholds[path.stem]["synthetic"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry["recorded"])
+    for source in hub_sources(load_config(path).detection.ner):
+        assert source.model_id in entry["note"] and str(source.revision) in entry["note"]
+    requested = load_config(path).detection.ner.entities
+    assert set(requested) <= set(entry["type_leak_max"])
+    ceilings = tomllib.loads((ROOT / "bench" / "ner_ceilings.toml").read_text())
+    assert "per_100kb_max" in ceilings[path.stem]
+    # Its comment says why CI does not run it.
+    assert "by hand" in path.read_text()
+
+
+def test_manual_configs_stay_out_of_the_ci_jobs() -> None:
+    assert MANUAL_CONFIGS
+    assert not {p.name for p in MANUAL_CONFIGS} & {p.name for p in BENCH_CONFIGS}
+    job = _workflow("ci.yml")["jobs"]["ner-models"]
+    runs = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "bench/configs/*.toml" in runs  # not recursive: manual/ is left out
+    assert "manual" not in runs and "**" not in runs
+    # The weekly eval lists its configurations (below): none of them manual.
+    assert not set(_eval_matrix()) & {p.stem for p in MANUAL_CONFIGS}
 
 
 # --- the workflows -------------------------------------------------------------
@@ -174,15 +207,55 @@ def test_the_docs_name_when_the_ner_models_job_runs() -> None:
     )
 
 
+def _eval_matrix() -> list[str]:
+    configs: list[str] = _workflow("ner-eval.yml")["jobs"]["ner-eval"]["strategy"]["matrix"][
+        "config"
+    ]
+    return configs
+
+
 def test_the_weekly_eval_reports_both_datasets() -> None:
     workflow = _workflow("ner-eval.yml")
     triggers = workflow[True]  # YAML 1.1 reads the key "on" as true
     assert set(triggers) == {"schedule", "workflow_dispatch"}
     assert workflow["permissions"] == {"contents": "read"}
-    runs = "\n".join(step.get("run", "") for step in workflow["jobs"]["ner-eval"]["steps"])
+    job = workflow["jobs"]["ner-eval"]
+    runs = "\n".join(step.get("run", "") for step in job["steps"])
     assert "for dataset in openpii nemotron" in runs
     assert "--limit 2000" in runs
     assert "--check" not in runs  # report only until baselines are recorded
+    # One job per configuration, pulling and evaluating only its own.
+    assert job["env"]["CONFIG"] == "bench/configs/${{ matrix.config }}.toml"
+    assert 'models pull --config "$CONFIG"' in runs
+    assert '--config "$CONFIG" --dataset "$dataset"' in runs
+    assert "bench/configs/*.toml" not in runs
+    assert job["strategy"]["fail-fast"] is False
+    upload = [s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-artifact@")]
+    assert [s["with"]["name"] for s in upload] == ["ner-eval-${{ matrix.config }}"]
+
+
+def test_the_weekly_eval_runs_every_bench_config_in_its_own_job() -> None:
+    # A serial loop over every configuration ran past the job's timeout
+    # once the bench grew past two; each job holds one configuration (two
+    # dataset slices), within a GitHub-hosted job's 360-minute cap.
+    matrix = _eval_matrix()
+    assert len(set(matrix)) == len(matrix)
+    assert set(matrix) == {p.stem for p in BENCH_CONFIGS}
+    assert 0 < _workflow("ner-eval.yml")["jobs"]["ner-eval"]["timeout-minutes"] <= 360
+
+
+def test_the_weekly_eval_never_saves_the_shared_model_cache() -> None:
+    # A job pulls only its own model; saving under the key ner-models
+    # restores would hand that job one model and never save the full set.
+    steps = _workflow("ner-eval.yml")["jobs"]["ner-eval"]["steps"]
+    hub = [s for s in steps if s.get("with", {}).get("path") == "~/.cache/huggingface/hub"]
+    assert [s["uses"].split("@")[0] for s in hub] == ["actions/cache/restore"]
+    (models_cache,) = [
+        s
+        for s in _workflow("ci.yml")["jobs"]["ner-models"]["steps"]
+        if s.get("with", {}).get("path") == "~/.cache/huggingface/hub"
+    ]
+    assert hub[0]["with"]["key"] == models_cache["with"]["key"]
 
 
 def test_the_weekly_eval_installs_the_same_environment() -> None:

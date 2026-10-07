@@ -770,7 +770,8 @@ token windows, word by word:
   Tibetan, Yi) is a word of its own, with the combining marks after it;
   punctuation at either end of a word is left out ("Paris." is "Paris"),
   punctuation inside it stays ("1985-03-12", "j.doe" and "dev_jo42" are one
-  word each);
+  word each). The words decide which piece labels what; what a value covers
+  can grow past them (below);
 - a word is labelled by its first piece, the piece a model trained the
   Hugging Face way labels (its later pieces were never trained and may say
   anything); a piece of blanks only right before the word — SentencePiece's
@@ -785,12 +786,21 @@ token windows, word by word:
   overlap) is read in parts, each from its own first piece in the window
   that holds it, so every piece of a text is read;
 - labels are read greedily, `B` opening a span and `I` continuing it; a span
-  covers whole words (or the parts a long word is read in) and never takes
-  in a quote, a bracket, a colon, a semicolon, an equals sign or a newline:
-  between two of its words there is only nothing (a script written without
-  spaces), one or two blanks, a comma and a space ("March 3, 1985") or a
-  slash ("03/12/1985"), else it is cut there; neighbouring spans of one
-  label separated by nothing or a slash are one value;
+  is cut where anything but one or two blanks, a comma and a space or a
+  slash separates two of its words — a quote, a bracket, a colon, a
+  semicolon, an equals sign, a newline. A span continues across a comma and
+  a space or a slash only where the model continues it ("March 3, 1985",
+  "03/12/1985"; also two numbers of a list, "4417123456, 5512345678", when
+  the model tags the second as the first one's continuation);
+- a span then grows over the characters beside it that no word holds and
+  that a piece the model tags with the span's entity covers: the symbols at
+  a password's edges ("$ecret!"), a colon or an equals sign inside one
+  ("p@ss:w0rd=x9"), the colons of a MAC address — every character the model
+  tags as part of a value is redacted with it. It never grows over a blank,
+  a quote or a bracket: a quote inside a value (a password holding `"`)
+  goes upstream as sent, between the two parts of the value, each its own
+  placeholder. Neighbouring spans of one label then separated by nothing or
+  a slash are one value;
 - a span's score is the mean probability of the words the model tagged as
   one span (`score_threshold` applies), also for each part a cut leaves.
 

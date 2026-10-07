@@ -12,10 +12,12 @@ written without spaces alone, trimmed of punctuation), each labelled by its
 first piece (a lone blank piece right before it included) — or, for a model
 the catalog says labels every piece, by its most confidently tagged piece. A
 word no window reads whole is decoded in parts, each in the window that holds
-its first piece. A span never takes in a quote, a bracket, a colon or a
-newline; it continues across a comma and a space or a slash only where the
-model continues the entity. WordPiece models keep the transformers pipeline,
-unchanged.
+its first piece. A span is cut where anything but one or two blanks, a comma
+and a space or a slash separates two of its words, then grows over the
+characters beside it that no word holds and a piece the model tags with the
+span's entity covers — a symbol at a password's edge, the colon inside one —
+but never over a blank, a quote or a bracket. WordPiece models keep the
+transformers pipeline, unchanged.
 
 The fakes cut text into pieces the way the two tokenizer families do (a
 piece's offsets take in the blank before its word); nothing here needs torch,
@@ -24,7 +26,6 @@ transformers or a network.
 
 from __future__ import annotations
 
-import itertools
 import math
 import re
 import types
@@ -495,7 +496,7 @@ def test_the_most_confident_tagged_piece_decides_a_word_of_an_every_piece_model(
 
 @pytest.mark.parametrize("style", ["bpe", "spm"])
 def test_punctuation_inside_a_word_is_part_of_it(style: str) -> None:
-    text = "login dev_jo42 or j.doe, born 1985-03-12"
+    text = "login dev_jo42 or j.doe and born 1985-03-12"
     detector = _detector(style, _every_piece({"dev_jo42": "user_name", "j.doe": "user_name"}))
     assert _found(detector, text) == [("USERNAME", "dev_jo42"), ("USERNAME", "j.doe")]
 
@@ -522,22 +523,168 @@ def test_a_span_never_takes_in_json_punctuation_or_quotes(style: str) -> None:
     ]
 
 
+_SEPARATORS = [",", " ,", ",  ", "\n", ". ", " - ", '" "', "   ", ": ", "; ", " = ", " | ", "\\"]
+
+
 @pytest.mark.parametrize("style", ["bpe", "spm"])
-@pytest.mark.parametrize(
-    "separator", [",", " ,", ",  ", "\n", ". ", " - ", '" "', "   ", ": ", "; ", " = ", " | ", "\\"]
-)
+@pytest.mark.parametrize("separator", _SEPARATORS)
 def test_a_span_is_cut_where_anything_else_than_its_gaps_separates_words(
     style: str, separator: str
 ) -> None:
     text = f"Doe{separator}Jane said"
 
     def label(text: str, start: int, end: int, _opens: bool) -> str:
-        piece = text[start:end].strip().lstrip('",;:=|-.\\ ')
-        return {"Do": "B-last_name", "Ja": "I-last_name"}.get(piece[:2], "O")
+        piece = text[start:end].strip()
+        return {"D": "B-last_name", "J": "I-last_name"}.get(piece, "O")
 
-    # The model continues the span across the separator; the decoder cuts
-    # it there, so the separator is never part of a value.
-    assert _found(_detector(style, label), text) == [("PERSON", "Doe"), ("PERSON", "Jane")]
+    # The model continues the span across the separator but does not tag
+    # the separator (one character a piece: none shares a piece with a
+    # name); the decoder cuts the span there, so the separator is never
+    # part of a value.
+    found = _found(_detector(style, label, size=1), text)
+    assert found == [("PERSON", "Doe"), ("PERSON", "Jane")]
+
+
+@pytest.mark.parametrize("style", ["bpe", "spm"])
+@pytest.mark.parametrize(
+    ("separator", "values"),
+    [
+        (",", ["4417,5512"]),
+        ("\\", ["4417\\5512"]),
+        (";", ["4417;5512"]),
+        ("=", ["4417=5512"]),
+        ("|", ["4417|5512"]),
+        ("-", ["4417-5512"]),  # inside one word
+        # Never over a blank: what the model tags beside a blank stays with
+        # its own side.
+        (" ,", ["4417", ",5512"]),
+        (",  ", ["4417,", "5512"]),
+        (". ", ["4417.", "5512"]),
+        (": ", ["4417:", "5512"]),
+        (" - ", ["4417", "5512"]),
+        ("   ", ["4417", "5512"]),
+        ("\n", ["4417", "5512"]),
+        # Never over a quote or a bracket of any script.
+        ('" "', ["4417", "5512"]),
+        ('"', ["4417", "5512"]),
+        ("(", ["4417", "5512"]),
+        ("]", ["4417", "5512"]),
+        ("\u00bb", ["4417", "5512"]),
+        ("\u300c", ["4417", "5512"]),
+    ],
+)
+def test_a_separator_the_model_tags_is_part_of_the_value_unless_a_blank_quote_or_bracket(
+    style: str, separator: str, values: list[str]
+) -> None:
+    # The model tags every piece from "4417" to "5512", the separator's too:
+    # the separator is part of the value (a colon inside a password), so
+    # the parts on either side of it grow over it and join — but a span
+    # never takes in a blank, a quote or a bracket. (An account number:
+    # parts of a name or an address with one or two blanks between them
+    # are joined anyway, labels.merge_adjacent_parts.)
+    text = f"acct 4417{separator}5512 said"
+
+    def label(text: str, start: int, end: int, _opens: bool) -> str:
+        if end <= text.index("4417") or start >= text.index(" said"):
+            return "O"
+        return "B-account_number" if start <= text.index("4417") else "I-account_number"
+
+    for size in (1, 3):
+        found = _found(_detector(style, label, size=size), text)
+        assert found == [("ACCOUNT_NUMBER", value) for value in values]
+
+
+@pytest.mark.parametrize("style", ["bpe", "spm"])
+@pytest.mark.parametrize("every_piece", [False, True])
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("my password is $ecret! ok", "$ecret!"),
+        ("password -> !Tr0ub4dor&3# now", "!Tr0ub4dor&3#"),
+        ("pw p@ss:w0rd=x9 ok", "p@ss:w0rd=x9"),
+        ("my password is Summer2024! now", "Summer2024!"),
+        ("token=sk_live:ab|cd\\ef next", "sk_live:ab|cd\\ef"),
+        ("pin #4417# then", "#4417#"),
+        ("key ~^*%+@ end", "~^*%+@"),
+        ('pass "hunter2!" quoted', "hunter2!"),
+        ("pass (s3cr3t) bracketed", "s3cr3t"),
+    ],
+)
+def test_every_character_of_a_value_the_model_tags_is_redacted(
+    style: str, every_piece: bool, text: str, secret: str
+) -> None:
+    # A password's symbols at its edges or inside it are part of it: the
+    # words only choose the piece that labels the value; every character
+    # beside it that a piece the model tags covers is redacted with it
+    # (before, "$ecret!" sent "$" and "!" upstream and "p@ss:w0rd=x9"
+    # became three values with ":" and "=" between them). Quotes and
+    # brackets around a value stay outside it.
+    labels = ["O", "B-password", "I-password"]
+    tokenizer = PieceTokenizer(style)
+
+    def label(text: str, start: int, end: int, _opens: bool) -> str:
+        at = text.index(secret)
+        return "B-password" if start < at + len(secret) and at < end else "O"
+
+    model = PieceModel(tokenizer, label, labels)
+    tags = TagSet.from_labels(model.config.id2label)
+    pipe = TaggerPipe(
+        model,
+        tokenizer,
+        128,
+        tags,
+        decoder_for(tags, None),
+        model.rows,
+        by_text_word=True,
+        every_piece=every_piece,
+    )
+    detector = HfDetector(
+        pipe, frozenset({"SECRET"}), 1_000_000, 0.5, policy=LabelPolicy(("SECRET",), backend="hf")
+    )
+    if secret == "~^*%+@":
+        # Symbols only: no word, nothing a value could start at.
+        assert _found(detector, text) == []
+        return
+    assert _found(detector, text) == [("SECRET", secret)]
+
+
+@pytest.mark.parametrize("style", ["bpe", "spm"])
+def test_a_mac_address_is_one_value_with_its_colons(style: str) -> None:
+    labels = ["O", "B-mac_address", "I-mac_address"]
+    text = "device 00:1A:2B:3C:4D:5E is up"
+    tokenizer = PieceTokenizer(style)
+    value = "00:1A:2B:3C:4D:5E"
+
+    def label(text: str, start: int, end: int, _opens: bool) -> str:
+        at = text.index(value)
+        return "B-mac_address" if start < at + len(value) and at < end else "O"
+
+    model = PieceModel(tokenizer, label, labels)
+    tags = TagSet.from_labels(model.config.id2label)
+    pipe = TaggerPipe(
+        model, tokenizer, 128, tags, decoder_for(tags, None), model.rows, by_text_word=True
+    )
+    entities = ("MAC_ADDRESS",)
+    detector = HfDetector(
+        pipe, frozenset(entities), 1_000_000, 0.5, policy=LabelPolicy(entities, backend="hf")
+    )
+    assert _found(detector, text) == [("MAC_ADDRESS", value)]
+
+
+@pytest.mark.parametrize("style", ["bpe", "spm"])
+def test_punctuation_the_model_does_not_tag_stays_outside_a_value(style: str) -> None:
+    # "Paris." and "(Doe)": the period and the brackets are not tagged, so
+    # they are not part of the values.
+    text = "Met Jane Doe. Then (Doe) left; Doe!"
+
+    def label(text: str, start: int, end: int, _opens: bool) -> str:
+        piece = text[start:end].strip()
+        if piece in ("Jan", "Jane", "e", "J", "a", "n"):
+            return "B-first_name" if piece.startswith("J") else "I-first_name"
+        return "B-last_name" if piece.startswith("Do") or piece == "D" else "O"
+
+    found = _found(_detector(style, label, size=1), text)
+    assert found == [("PERSON", "Jane Doe"), ("PERSON", "Doe"), ("PERSON", "Doe")]
 
 
 @pytest.mark.parametrize("style", ["bpe", "spm"])
@@ -560,9 +707,12 @@ def test_spans_of_one_label_join_across_a_slash(style: str) -> None:
     detector = _detector(style, _every_piece({"03/12/1985": "account_number"}))
     assert _found(detector, text) == [("ACCOUNT_NUMBER", "03/12/1985")]
     # Across a comma and a space, B- after B- stays two values (the model
-    # says the second one starts anew).
+    # says the second one starts anew; one character a piece, so the comma
+    # shares no piece the model tags).
     text = "accounts 1234, 5678"
-    detector = _detector(style, _every_piece({"1234": "account_number", "5678": "account_number"}))
+    detector = _detector(
+        style, _every_piece({"1234": "account_number", "5678": "account_number"}), size=1
+    )
     assert _found(detector, text) == [("ACCOUNT_NUMBER", "1234"), ("ACCOUNT_NUMBER", "5678")]
 
 
@@ -785,7 +935,8 @@ def test_a_name_past_the_first_window_keeps_its_absolute_offsets(style: str) -> 
 
 # --- every span, any text (hypothesis) ----------------------------------------------------
 
-_ALPHABET = "abcXYZ019 \t\n\u00a0\"'{}[]:,.-_@#=/王李éสั\u300c"
+_ALPHABET = "abcXYZ019 \t\n\u00a0\"'{}[]:,.-_@#=/!$王李éสั\u300c"
+_STOPS = set("\"'`()[]{}<>")
 
 
 @settings(max_examples=300, deadline=None)
@@ -796,7 +947,7 @@ _ALPHABET = "abcXYZ019 \t\n\u00a0\"'{}[]:,.-_@#=/王李éสั\u300c"
     window=st.sampled_from([6, 9, 512]),
     every_piece=st.booleans(),
 )
-def test_spans_cover_whole_words_and_nothing_else(
+def test_spans_cover_whole_words_and_tagged_characters_only(
     text: str, picks: list[str], style: str, window: int, every_piece: bool
 ) -> None:
     def label(_text: str, start: int, _end: int, _opens: bool) -> str:
@@ -816,30 +967,60 @@ def test_spans_cover_whole_words_and_nothing_else(
         every_piece=every_piece,
     )
     words = text_words(text)
+    in_word = {i for start, end in words for i in range(start, end)}
+    word_starts = {start for start, _end in words}
+    word_ends = {end for _start, end in words}
     spans = tokenizer.pieces(text)
-    starts = {start for start, _end in words} | {start for start, _end in spans}
-    ends = {end for _start, end in words} | {end for _start, end in spans}
+    piece_starts = {start for start, _end in spans}
+    piece_ends = {end for _start, end in spans}
+    # The entity each character's piece tags it with (None: background).
+    tagged: dict[int, str | None] = {}
+    for start, end in spans:
+        name = label(text, start, end, True)
+        for i in range(start, end):
+            tagged[i] = None if name == "O" else name[2:]
+
+    def grows(i: int, entity: str) -> bool:
+        char = text[i]
+        stop = char.isspace() or char in _STOPS
+        stop = stop or unicodedata.category(char) in ("Ps", "Pe", "Pi", "Pf")
+        return not stop and i not in in_word and tagged.get(i) == entity
+
     entities = pipe(text)
+    covered = {i for e in entities for i in range(e["start"], e["end"])}
     for entity in entities:
-        start, end = entity["start"], entity["end"]
+        start, end, name = entity["start"], entity["end"], entity["entity_group"]
         assert 0 <= start < end <= len(text)
-        # A span starts and ends on word boundaries (or the piece a word no
-        # window reads whole is read in parts at) …
-        assert start in starts and end in ends
-        # … and between its words only nothing, one or two blanks, a comma
-        # and a space, or a slash: never a quote, a bracket, a colon, an
-        # equals sign or a newline.
-        inside = [w for w in words if start <= w[0] and w[1] <= end]
-        for (_a, left_end), (right_start, _b) in itertools.pairwise(inside):
-            assert text[left_end:right_start] in ("", " ", "  ", "\t", "\u00a0", ", ", "/") or (
-                len(text[left_end:right_start]) <= 2
-                and set(text[left_end:right_start]) <= {" ", "\t", "\u00a0"}
-            )
+        # A span starts at a word, at a piece inside one (a word no window
+        # reads whole is read in parts) or at a character it grew over …
+        assert start in word_starts or start in piece_starts or grows(start, name)
+        assert end in word_ends or end in piece_ends or grows(end - 1, name)
+        # … holds no quote, bracket or newline, and between its words only
+        # one or two blanks, a comma and a space, a slash, or characters
+        # the model tags with its entity.
+        for i in range(start, end):
+            char = text[i]
+            assert char not in _STOPS and char != "\n" and unicodedata.category(char) != "Ps"
+            if i in in_word or grows(i, name):
+                continue
+            # The run of such characters around it: a gap the model
+            # continues the span across, or one two spans joined over.
+            left, right = i, i
+            while left > start and not (left - 1 in in_word or grows(left - 1, name)):
+                left -= 1
+            while right < end - 1 and not (right + 1 in in_word or grows(right + 1, name)):
+                right += 1
+            gap = text[left : right + 1]
+            assert gap in (", ", "/") or (len(gap) <= 2 and set(gap) <= {" ", "\t", "\u00a0"})
+        # It grew as far as it could: a character beside it no span holds
+        # is one it may not take in.
+        for i in (start - 1, end):
+            if 0 <= i < len(text) and i not in covered:
+                assert not grows(i, name)
     # Every word whose first piece scores an entity label is covered: whole
     # when one window reads the text, else from its start (a word longer
     # than the windows' overlap is read in parts, each by its own first
     # piece).
-    covered = {i for e in entities for i in range(e["start"], e["end"])}
     first_pieces: dict[tuple[int, int], int] = {}
     for index, (start, end) in enumerate(spans):
         for word in words:
@@ -1006,3 +1187,23 @@ def test_real_model_every_piece_b_tagger_gives_whole_names(monkeypatch: pytest.M
         ("こんにちはマイケルです", ["マイケル"]),
     ]:
         assert _found(detector, text) == [("PERSON", name) for name in names]
+
+
+@pytest.mark.real_model
+def test_real_model_a_value_keeps_the_delimiters_the_model_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ettin tags every piece of a MAC address, its colons included: one
+    # value. Cut at the colons, it was six values with five colons sent
+    # upstream between them.
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    from real_models import cached_snapshot, offline_hub
+
+    offline_hub(monkeypatch)
+    cached_snapshot(ETTIN, ETTIN_REVISION, ETTIN_FILES)
+    detector = build_hf_detector(
+        NerConfig(enabled=True, backend="hf", model=ETTIN, entities=("MAC_ADDRESS",))
+    )
+    text = "device 00:1A:2B:3C:4D:5E is up"
+    assert _found(detector, text) == [("MAC_ADDRESS", "00:1A:2B:3C:4D:5E")]

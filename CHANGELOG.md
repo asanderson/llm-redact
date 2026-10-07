@@ -372,7 +372,13 @@ and tags `vX.Y.Z`.
   piece right before it, SentencePiece's "▁", counts as that piece), or — for a model the
   model catalog lists as trained on every piece (`piece_labels = "every"`) — by its most
   confidently tagged piece; a word no window reads to its end is read in parts, so every
-  piece of a text is read. A span never takes in a quote, a bracket, a colon or a newline.
+  piece of a text is read. A span is cut where anything but one or two blanks, a comma and a
+  space or a slash separates its words (a comma and a space only where the model continues
+  the entity across it: "March 3, 1985", but also two numbers of a list), then grows over
+  the characters beside it that a piece the model tags with the span's entity covers — a
+  password's edge symbols and inner colons, a MAC address's colons — so every character the
+  model tags as part of a value is redacted with it; it never takes in a blank, a quote or
+  a bracket (a quote inside a value goes upstream between the two parts' placeholders).
   WordPiece models (`dslim/bert-base-NER`, the default) keep the pipeline, unchanged
   (a differential test over the recall and false-positive corpora, and identical bench
   numbers).

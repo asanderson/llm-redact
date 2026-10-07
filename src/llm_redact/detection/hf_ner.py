@@ -23,8 +23,11 @@ itself (:class:`TaggerPipe`) over the text's own words (:func:`text_words`:
 cut at blanks, quotes, brackets and value delimiters, each character of a
 script written without spaces alone), each labelled by its first piece (by
 its most confidently tagged piece for a model the catalog says labels every
-piece), and a span never takes in a quote, a bracket, a colon or a newline
-(:func:`_cut_spans`).
+piece); a span is cut at a quote, a bracket, a colon or a newline between
+its words (:func:`_cut_spans`), then grows over the characters beside it
+that the model tags with its entity but never over a blank, a quote or a
+bracket (:func:`_grown`): the words choose which piece labels a value,
+never which of its tagged characters go upstream.
 
 Long strings are read whole, in overlapping token windows: without `stride`
 the pipeline truncates at the tokenizer's maximum length and never reads the
@@ -330,9 +333,13 @@ def _word_units(encoded: Any, windows: Sequence[Window]) -> list[Units]:
 # "1985-03-12", "j.doe" and "dev_jo42" are one word each, as the model was
 # trained to label them (cutting them there left their later parts to
 # pieces no model labels). A slash ends a word too, so each part of a path
-# is read on its own.
+# is read on its own. The words only decide which piece labels what: the
+# characters a span covers grow past them (_grown).
 _DELIMITERS = frozenset("\"'`()[]{}<>,;:=|/\\")
 _BRACKETS_AND_QUOTES = frozenset({"Ps", "Pe", "Pi", "Pf"})
+# The ASCII quotes and brackets: with a blank and the Unicode quotes and
+# brackets, what a span never grows over (_grown).
+_ASCII_QUOTES_AND_BRACKETS = frozenset("\"'`()[]{}<>")
 # Scripts written without spaces between words (Unicode blocks, first and
 # last code point, sorted): each character — with the combining marks that
 # follow it — is a word of its own, so a name inside a sentence is labelled
@@ -564,7 +571,8 @@ def _word_row(
 # written without spaces), one or two blanks (labels.is_part_gap), or a
 # comma and a space ("March 3, 1985") or a slash ("03/12/1985") where the
 # model tags the second unit as the span's continuation. Anything else — a
-# quote, a bracket, a colon, a newline — cuts the span (_cut_spans).
+# quote, a bracket, a colon, a newline — cuts the span (_cut_spans); a
+# character the model tags as part of the value is taken back in (_grown).
 _SPAN_GAPS = frozenset({", ", "/"})
 # What may separate two spans of the same label that become one value: a
 # model that labels every word B- ("03" "12" "1985" of "03/12/1985").
@@ -620,11 +628,72 @@ def _cut_spans(
     return cut
 
 
-def _joined(cut: Sequence[_Span], text: str) -> list[_Span]:
-    """The spans of one window, neighbouring spans of the same label
-    joined over :data:`_JOINED_GAPS`."""
+def _tag_chars(
+    tagged: dict[int, set[str]], rows: Sequence[Sequence[float]], window: Window, tagset: TagSet
+) -> None:
+    """Record in ``tagged`` (a character position: the entities it is
+    tagged with) every character of each piece of ``window`` whose best
+    label tags an entity."""
+    _ids, offsets, special = window
+    for row, (start, end) in enumerate(offsets):
+        if special[row] or end <= start:
+            continue
+        label = argmax_path([rows[row]])[0]
+        if tagset.tags[label] in (None, "O"):
+            continue
+        for position in range(start, end):
+            tagged.setdefault(position, set()).add(tagset.entities[label])
+
+
+def _grows(
+    text: str,
+    position: int,
+    label: str,
+    words: Sequence[tuple[int, int]],
+    starts: Sequence[int],
+    tagged: Mapping[int, set[str]],
+) -> bool:
+    """Whether a span labelled ``label`` takes in the character at
+    ``position`` beside it: a character no word holds (a word is decoded by
+    its own label), neither a blank nor a quote or a bracket of any script,
+    inside a piece the model tags with the span's entity."""
+    char = text[position]
+    if (
+        char.isspace()
+        or char in _ASCII_QUOTES_AND_BRACKETS
+        or unicodedata.category(char) in _BRACKETS_AND_QUOTES
+    ):
+        return False
+    word = bisect.bisect_right(starts, position) - 1
+    if word >= 0 and words[word][1] > position:
+        return False
+    return label in tagged.get(position, ())
+
+
+def _grown(
+    cut: Sequence[_Span],
+    text: str,
+    words: Sequence[tuple[int, int]],
+    starts: Sequence[int],
+    tagged: Mapping[int, set[str]],
+) -> list[_Span]:
+    """The spans of one window grown over the characters beside them that
+    :func:`_grows` lets them take in — a symbol at a word's edge
+    ("$ecret!"), a delimiter inside a value ("p@ss:w0rd") — each character
+    to the first span that reaches it; then neighbouring spans of the same
+    label joined over :data:`_JOINED_GAPS`. The words only decide which
+    piece labels what: a character the model tags as part of a value is
+    redacted with it, never sent upstream as part of it."""
     joined: list[_Span] = []
+    taken = 0  # where the span before ends
     for span in cut:
+        while span.start > taken and _grows(
+            text, span.start - 1, span.label, words, starts, tagged
+        ):
+            span.start -= 1
+        while span.end < len(text) and _grows(text, span.end, span.label, words, starts, tagged):
+            span.end += 1
+        taken = span.end
         if (
             joined
             and joined[-1].label == span.label
@@ -669,8 +738,9 @@ class TaggerPipe:
     piece as the pipeline's word-level aggregation reads a BIO model; with
     ``by_text_word`` the words of the text itself (:func:`text_words`), each
     scored by :func:`_word_row` (``every_piece``: the model labels every
-    piece of a word), a span cut by :func:`_cut_spans` and joined by
-    :func:`_joined`, and the parts of a word no window reads whole joined by
+    piece of a word), a span cut by :func:`_cut_spans`, grown over the
+    characters beside it the model tags with its entity and joined by
+    :func:`_grown`, and the parts of a word no window reads whole joined by
     :func:`_joined_across`; otherwise the window's tokens. Each span is
     reported like a pipeline entity — its entity label (the tag dropped),
     the mean probability of the labels of the units the model tagged as one
@@ -739,13 +809,21 @@ class TaggerPipe:
 
     def _text_word_entities(self, text: str, windows: Sequence[Window]) -> list[dict[str, Any]]:
         words = text_words(text)
+        if not words:
+            return []  # nothing a span could start at: no model call
+        starts = [start for start, _end in words]
+        # Every character a piece the model tags covers, in any window: a
+        # span grows over them (_grown) once every window is read.
+        tagged: dict[int, set[str]] = {}
         cut: list[list[_Span]] = []
-        for (ids, _offsets, _special), kept in zip(
-            windows, _text_word_units(text, words, windows), strict=True
-        ):
-            if not kept:
-                continue  # no word in this window (see __call__)
+        for window, kept in zip(windows, _text_word_units(text, words, windows), strict=True):
+            ids, offsets, special = window
+            if all(special[row] or end <= start for row, (start, end) in enumerate(offsets)):
+                continue  # no token covers a character (see __call__)
             rows = self._scorer(list(ids))
+            _tag_chars(tagged, rows, window, self._tagset)
+            if not kept:
+                continue  # no word decoded here: its pieces only tag characters
             scores = [
                 _word_row(rows, pieces, self._tagset, self._every_piece)
                 for pieces, _start, _end in kept
@@ -761,7 +839,7 @@ class TaggerPipe:
                     last + 1 - first
                 )
             cut.append(_cut_spans(spans, kept, confidence, text))
-        found = [span for spans in cut for span in _joined(spans, text)]
+        found = [span for spans in cut for span in _grown(spans, text, words, starts, tagged)]
         return [
             {
                 "entity_group": span.label,

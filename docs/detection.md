@@ -451,7 +451,7 @@ has the full record):
 
 | Model (weights) | PERSON recall | Character leak | Over-redaction | Agent-traffic false positives per 50 KB | p50, 500 characters |
 |---|---|---|---|---|---|
-| `urchade/gliner_small-v2.1` (the default) | 0.79 | 0.05 | 0.050 | 34 | 189 ms |
+| `urchade/gliner_small-v2.1` (the default) | 0.79 | 0.05 | 0.050 | 34 | — (189 ms asked for `PERSON` only) |
 | `knowledgator/gliner-pii-edge-v1.0` (PyTorch) | 0.99 | 0.08 | 0.100 | 109 | 93 ms |
 | `knowledgator/gliner-pii-edge-v1.0` (int8 ONNX) | 0.77 | 0.27 | 0.050 | 16 | 97 ms |
 | `knowledgator/gliner-pii-base-v1.0` (PyTorch) | 0.97 | 0.02 | 0.055 | 8 | 234 ms |

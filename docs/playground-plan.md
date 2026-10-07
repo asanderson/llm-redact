@@ -3,8 +3,8 @@
 > **Status: proposal, 2026-10-07.** Nothing described here is built or
 > deployed. This is the plan for the owner to approve, change or reject; the
 > decisions it needs are listed in [section 16](#16-owner-decisions). Code
-> references are to the 1.11.0 tree (`a622b42`). Platform facts were checked
-> on 2026-10-06 and 2026-10-07; their sources are listed at the end.
+> references are to `main` at `130516f` (version 1.11.0). Platform facts were
+> checked on 2026-10-06 and 2026-10-07; their sources are listed at the end.
 
 ## 1. Summary
 
@@ -73,16 +73,16 @@ Non-goals:
 ## 3. What was verified while planning
 
 These checks ran on 2026-10-07 against the 1.11.0 wheel built from this
-tree; [appendix C](#appendix-c-reproducing-the-checks) shows how to repeat
+tree at `130516f`; [appendix C](#appendix-c-reproducing-the-checks) shows how to repeat
 them. In M1 their scripts become the seed of the playground's test suite
 ([section 14](#14-testing-and-gates)).
 
 | Check | Result |
 | --- | --- |
-| Library-level round trip under Pyodide 314.0.7 (CPython 3.14.2) in Node 22: redact a request, have a simulated provider echo it in 7-character chunks, rehydrate. Run for Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, Gemini, Bedrock Converse stream (binary eventstream) and Ollama (NDJSON). | All six restore every value. Mangled tokens restore with fuzzy matching on and pass through verbatim with it off. Switching off `credit_card` leaves the card in clear. A second vault does not restore the first vault's «EMAIL_001». Import 416 ms, run 449 ms. The chain loads 37 `llm_redact` modules and no third-party package. |
-| The full proxy under Pyodide: `create_app(config, upstream_transport=…)` with an in-process simulated provider, driven by a 30-line ASGI client. | Status 200 with 13 streamed chunks. The provider received placeholders plus the injected system note; the client received the original values. `ProxyState.apply_config` switched `credit_card` off live, and `/__llm-redact/status` counted the detections. Import 1.7 s, `create_app` about 40 ms, first request about 80 ms. |
+| Library-level round trip under Pyodide 314.0.7 (CPython 3.14.2) in Node 22: redact a request, have a simulated provider echo it in 7-character chunks, rehydrate. Run for Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, Gemini, Bedrock Converse stream (binary eventstream) and Ollama (NDJSON). | All six restore every value. Mangled tokens restore with fuzzy matching on and pass through verbatim with it off. Switching off `credit_card` leaves the card in clear. A second vault does not restore the first vault's «EMAIL_001». Import about 0.4 s, run about 0.45 s. The chain loads 37 `llm_redact` modules and no third-party package. |
+| The full proxy under Pyodide: `create_app(config, upstream_transport=…)` with an in-process simulated provider, driven by a 30-line ASGI client. | Status 200 with 13 streamed chunks. The provider received placeholders plus the injected system note; the client received the original values. `ProxyState.apply_config` switched `credit_card` off live, and `/__llm-redact/status` counted the detections. Import about 1.8 s, `create_app` about 35 ms, first request about 80 ms. |
 | Headless Chromium, page CSP `script-src 'self' 'wasm-unsafe-eval'` delivered by a `<meta>` tag, Pyodide inside a module Web Worker. | Pyodide booted and ran without `'unsafe-eval'`. A worker bootstrapped from a `blob:` URL inherits the page's CSP: its cross-origin `fetch` was blocked and reported. A worker loaded from its own URL, on a host that sends no CSP header, ran with no CSP, and its cross-origin `fetch` was not blocked. Boot 3.1 s, first redaction 263 ms, on localhost. |
-| Download size of a cold visit, gzip. | Pyodide: 3.54 MB WebAssembly, 2.50 MB standard library, 0.29 MB JavaScript and lock file. The llm-redact wheel: 0.76 MB. The proxy's locked runtime closure for Python 3.14, without uvicorn and click, which the in-tab proxy never imports (httpx, httpcore, h11, anyio, idna, certifi, starlette): 0.59 MB. Total about 7.7 MB. |
+| Download size of a cold visit, gzip. | Pyodide: 3.54 MB WebAssembly, 2.50 MB standard library, 0.29 MB JavaScript and lock file. The llm-redact wheel: 0.80 MB. The proxy's locked runtime closure for Python 3.14, without uvicorn and click, which the in-tab proxy never imports (httpx, httpcore, h11, anyio, idna, certifi, starlette): 0.59 MB. Total about 7.7 MB. |
 | Python version in the browser. | Pyodide 314.0.7 ships CPython 3.14.2, a version the core's CI already tests (3.11 to 3.14). |
 | Pyodide's package index (357 packages). | No spaCy, torch, transformers, GLiNER, Presidio, Stanza or onnxruntime. Person-name detection cannot run in a browser. |
 | Rule inventory. | 87 built-in rules over 84 placeholder types. |
@@ -276,7 +276,7 @@ playground fails CI here instead of on the live site.
 
 Every built-in rule is in exactly one category, and no placeholder type
 spans two categories, so a mode chosen per category can never put two modes
-on one type, which `build_modes` (engine.py:539) refuses. The playground's
+on one type, which `build_modes` (engine.py:587) refuses. The playground's
 catalogue test enforces both properties against `BUILTIN_RULES`, so a new
 rule fails CI until it is placed.
 
@@ -299,7 +299,7 @@ How settings become configuration:
 
 - **On and off.** The category switch and the per-rule checkboxes become
   `[detection] enabled`: the checked rules in `BUILTIN_RULES` order, never
-  in screen order, because detector order breaks ties (engine.py:301).
+  in screen order, because detector order breaks ties (engine.py:312).
 - **Modes.** Chosen per category, with a per-type override in an advanced
   view, and written to `[detection.modes]` for every rule of the type.
 - **Languages.** A preset that checks or unchecks Government IDs, not the
@@ -865,7 +865,7 @@ leaks, but the type is surprising, and the playground will show it.
 
 ## Appendix C: reproducing the checks
 
-From a checkout at 1.11.0, with Node 22, in an empty scratch directory:
+From a checkout at `130516f` (1.11.0), with Node 22, in an empty scratch directory:
 
 1. `uv build --wheel` in the checkout.
 2. Download the runtime closure's wheels at the versions in `uv.lock`,

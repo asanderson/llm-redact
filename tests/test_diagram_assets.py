@@ -56,3 +56,38 @@ def test_animated_svg_and_gif(source: Path) -> None:
 def test_static_diagrams_have_no_animated_render(source: Path) -> None:
     assert not source.with_suffix(".svg").exists()
     assert not source.with_suffix(".gif").exists()
+
+
+_EDGE = re.compile(r"^\s*(\w+)\s.*(?:-->|==>|\.->)\s*(\w+)\s*$")
+
+
+def _edges(source: Path) -> dict[str, set[str]]:
+    graph: dict[str, set[str]] = {}
+    for line in source.read_text(encoding="utf-8").splitlines():
+        if (match := _EDGE.match(line)) is not None:
+            graph.setdefault(match[1], set()).add(match[2])
+    return graph
+
+
+def _reaches(graph: dict[str, set[str]], start: str, goal: str) -> bool:
+    seen, todo = {start}, [start]
+    while todo:
+        for nxt in graph.get(todo.pop(), set()) - seen:
+            if nxt == goal:
+                return True
+            seen.add(nxt)
+            todo.append(nxt)
+    return False
+
+
+def test_the_model_load_policy_is_asked_before_assembly() -> None:
+    # engine.build_detectors asks check_model_policy (model_sources.model_load:
+    # the cached files and an `assembled` flag) BEFORE the builder's loader
+    # (model_files.gliner_model_dir -> assemble_folder) assembles a GLiNER
+    # base model: assembly sits on the load side of the policy.
+    graph = _edges(DIAGRAMS / "model-supply-chain.mmd")
+    assert _reaches(graph, "cache", "policy")
+    assert _reaches(graph, "policy", "assemble")
+    assert _reaches(graph, "assemble", "load")
+    assert not _reaches(graph, "assemble", "policy")
+    assert "assemble" not in graph["cache"]

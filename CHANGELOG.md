@@ -11,6 +11,28 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-10-08
+
+Optional NER models for the values rules cannot reach: names, addresses, dates of birth,
+usernames, account numbers. Each model is catalogued with a pinned revision, its license and
+its measured numbers; it is loaded from a local folder or the local cache (never downloaded
+unless you allow it, never with code from the model's repository) and runs off the event
+loop. New: the `gliner2` backend, BIOES/BILOU and ONNX model support, `llm-redact models
+list|verify|pull`, per-model default thresholds, NER coverage counters on `/status` and
+`/metrics`, a Free `-ner` container image, a model-load policy seam for plugin packages, and
+the NER bench with CI jobs that run real models. docs/ner-landscape.md records what the
+measurements decided. The matching llm-redact-pro release is 0.17.0.
+
+**Upgrading:** a configuration without NER models behaves as before. With the `gliner`,
+`gliner2` or `hf` backend: run `llm-redact models pull` once (the startup no longer
+downloads a model unless `[detection.ner] allow_download = true`); expect the `hf` backend
+to hold its model in float32 (up to twice its stored size in memory) and to need
+transformers 4.56 or newer; and delete a `score_threshold = 0` line (it is now refused;
+leave the key out for the model's default). An `entities` entry that names a model's own
+label (`PER`) keeps working in 1.12 with a startup warning and folds into `PERSON` in 2.0.0
+(see Deprecated). Upgrade llm-redact-pro to 0.17.0 together with this release if you use its
+configuration editor.
+
 ### Added
 - docs/ner-landscape.md consolidates the decision record for the PII-specific open models the
   NER bench measured: a verdict table with one row per measured configuration (and a row for each
@@ -426,8 +448,8 @@ and tags `vX.Y.Z`.
   `nan` NER silently found nothing. Upgrade note: a file with `score_threshold = 0` (which the
   config editor wrote for an emptied field) now fails `serve --check`; delete the key. The 1.12.0
   config editor needs llm-redact-pro 0.17.0: an older one shows the now-unset threshold as an
-  empty field and saves 0, which this check refuses instead of writing it, so release
-  llm-redact-pro 0.17.0 before (or with) this core.
+  empty field and saves 0, which this check refuses instead of writing it, so upgrade
+  llm-redact-pro to 0.17.0 together with this core.
 - The `hf` backend decodes a BIO model whose tokenizer does not mark word pieces
   (SentencePiece, byte-level BPE: DeBERTa-v3, XLM-R, RoBERTa, ModernBERT) itself, word by
   word, instead of the transformers pipeline's token-level aggregation, which made every

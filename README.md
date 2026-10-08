@@ -468,12 +468,14 @@ the package (see [docs/editions.md](docs/editions.md)).
   strings are gated per string: only the rules that could match one run
   on it — the same body cost ~2 s when every rule ran on every string).
 - NER models are measured by a separate, statistical bench:
-  `uv run python -m llm_redact.bench.ner --config my-ner.toml --check`
-  scores the whole detection pipeline on a generated corpus (or a published
-  dataset) against recorded recall floors and leak ceilings, and counts the
-  false positives a model adds to the negatives corpus — see
-  [docs/ner-bench.md](docs/ner-bench.md). The deterministic gate above never
-  changes for it.
+  `uv run python -m llm_redact.bench.ner --config my-ner.toml` scores the
+  whole detection pipeline on a generated corpus (or a published dataset),
+  and `--fp-corpus bench/fp_corpus` is its own run that counts the false
+  positives a model adds to the negatives corpus; `--check` compares a run
+  with recorded recall floors and leak ceilings, so it needs a baseline
+  recorded for your config first — see
+  [docs/ner-bench.md](docs/ner-bench.md#recording-a-baseline). The
+  deterministic gate above never changes for it.
 - `uv run python scripts/live_smoke.py` runs opt-in smoke tests against the
   real provider APIs (needs API keys, spends credits, never runs in default
   test or CI runs) — including an event-shape drift detector for the
@@ -525,8 +527,9 @@ the curl output shows the originals restored in the stream.
   Presidio, Stanza, and any Hugging Face token-classification model);
   strings longer than a model's window are read in overlapping windows, and
   every string a model did not read is counted in `/status` and `/metrics`.
-  Models load at a pinned commit (the catalog's or yours), from local files,
-  without code from their repositories, and nothing is downloaded unless
+  Models load at a pinned commit for a catalogued model or when you pin
+  one (otherwise the newest cached revision, flagged by `doctor`), from local
+  files, without code from their repositories, and nothing is downloaded unless
   you allow it at startup (`llm-redact models pull` fetches them yourself;
   an air-gapped install carries checksummed folders —
   [docs/air-gapped.md](docs/air-gapped.md)); detection runs on a worker

@@ -267,7 +267,7 @@ coverage once the operator enables a model and asks for the types
 What that claim rests on, and what it does not:
 
 - **Measured, per model.** The NER bench ([ner-bench.md](ner-bench.md))
-  scores each catalogued model on a generated corpus shaped like
+  scores each model it measures on a generated corpus shaped like
   coding-agent traffic (seeded, regenerated at every run, never committed)
   and, report only, on 2,000-row slices of two published datasets (OpenPII
   1.5M, Nemotron-PII). On the generated corpus the models measured found
@@ -283,9 +283,10 @@ What that claim rests on, and what it does not:
   values, and a PII model draws false positives on identifiers (usernames
   above all). The recorded floors catch a model's measured behavior
   regressing; they promise nothing about your traffic.
-- **Passport and driver's-licence numbers** are requested from the models
-  that list them, but the generated corpus labels neither and no recorded
-  baseline covers them.
+- **Passport and driver's-licence numbers** can be requested (add
+  `PASSPORT` / `DRIVER_LICENSE` to `entities`) from the models whose catalog
+  entries list them, but no shipped configuration or bench run does and the
+  generated corpus labels neither, so no recorded baseline covers them.
 - **Only what is asked for.** A type missing from `entities` is never
   redacted by a model, and with no model enabled (the default) no address,
   date of birth or username is: they reach the provider as typed.

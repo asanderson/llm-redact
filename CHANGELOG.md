@@ -13,8 +13,8 @@ and tags `vX.Y.Z`.
 
 ### Added
 - docs/ner-landscape.md consolidates the decision record for the PII-specific open models the
-  NER bench measured: a verdict table with one row per measured configuration (license and
-  training data, catalog status, `PERSON` recall, character leak, agent-traffic false positives
+  NER bench measured: a verdict table with one row per measured configuration (and a row for each
+  catalogued model not measured; license and training data, catalog status, `PERSON` recall, character leak, agent-traffic false positives
   per 50 KB, p50 per 500 characters, and what each is good for), a per-type table of recall and
   leak for addresses, dates of birth, usernames and account numbers, the bar items for weight
   provenance (pinned, safetensors or ONNX, no repository code, offline) and long-text coverage

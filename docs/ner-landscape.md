@@ -11,9 +11,9 @@
 > beside spaCy/GLiNER/Presidio and run concurrently. The survey below is kept
 > as the rationale of record. The lineup has grown since: a GLiNER2 backend
 > (`gliner2` extra), ONNX weights for GLiNER, and a model catalog of
-> PII-specific open models, each measured by the llm-redact bench and given a
-> verdict in "PII models measured by the llm-redact bench" below — the current
-> decision record.
+> PII-specific open models, in which each model the llm-redact bench measured
+> is given a verdict in "PII models measured by the llm-redact bench" below —
+> the current decision record.
 
 Research survey (2026-07) for expanding beyond the three shipped NER
 backends (spaCy, GLiNER, Presidio). Method: evaluation against the
@@ -47,11 +47,15 @@ snapshot; the conclusions, not the version numbers, are the deliverable).
    surfaced in `/status`, `/metrics` and the posture output
    ([detection.md](detection.md#how-ner-runs)).
 
-The Hub backends (`hf`, `gliner`, `gliner2`) meet items 5 and 6 for every
-model they run, catalogued or not: explicit file names, no repository code,
-safetensors unless the operator opts in, and local files with downloads off;
-windows and counters. A pin comes from the catalog or the operator, and a
-model with neither loads at the newest cached revision with a `doctor` WARN.
+The Hub backends (`hf`, `gliner`, `gliner2`) meet the loading half of item 5
+and item 6 for every model they run, catalogued or not: explicit file names,
+no repository code, local files with downloads off, windows and counters.
+Weights differ by backend: `hf` takes safetensors and refuses a pickle unless
+`allow_pickle_weights = true`; `gliner` and `gliner2` take safetensors or ONNX
+and otherwise fall back to a `pytorch_model.bin` read only through torch's
+`weights_only` loader (torch 2.6 or later). A pin comes from the catalog or
+the operator, and a model with neither loads at the newest cached revision
+with a `doctor` WARN.
 spaCy, Presidio and Stanza read each string whole. Items 1 to 4 and the
 measured bars below are what a catalog status records.
 
@@ -123,7 +127,8 @@ numbers in its catalog reason. How each is measured here:
 
 ### Verdicts at a glance
 
-Every model the bench measured, one row per configuration, with the license
+Every measured model, one row per configuration (a catalogued model the
+bench did not measure has a row that says so), with the license
 and training data its catalog entry states and the status it was given
 (`llm-redact models list` prints status and license; the catalog tables are
 in [detection.md](detection.md#the-model-catalog)). Recall is `PERSON`
@@ -135,7 +140,7 @@ text the bench did not see.
 
 | Model (backend), as measured | License; training data | Status | PERSON recall (exact); character leak | Agent-traffic FP per 50 KB; p50, 500 chars | Good for |
 |---|---|---|---|---|---|
-| `urchade/gliner_small-v2.1` (`gliner`, the default), asked for `PERSON` | Apache-2.0; `urchade/pile-mistral-v0.1` (Apache-2.0) | vetted | 1.000 (1.000); 0.324 | 52; 189 ms | More names on published data than the Knowledgator models (OpenPII 0.708, Nemotron 0.874, against 0.485 and 0.706 for `-edge`), at about half their precision. Its leak counts the types it was not asked for |
+| `urchade/gliner_small-v2.1` (`gliner`, the default), asked for `PERSON` | Apache-2.0; `urchade/pile-mistral-v0.1` (Apache-2.0) | vetted | 1.000 (1.000); 0.324 | 47; 189 ms | More names on published data than the Knowledgator models (OpenPII 0.708, Nemotron 0.874, against 0.485 and 0.706 for `-edge`), at lower precision (Nemotron-PII 0.538 against 0.890 for `-edge`, OpenPII 0.788 against 0.848). Its leak counts the types it was not asked for |
 | `dslim/bert-base-NER` (`hf`, the default), asked for `PERSON` | MIT; CoNLL-2003 (Reuters news) | vetted | 0.974 (0.951); 0.398 | 0; 176 ms | English person names with no detection in the agent-traffic files; `PERSON` only (it also tags organizations and places). Its leak counts the types it was not asked for |
 | `knowledgator/gliner-pii-edge-v1.0`, PyTorch, five types | Apache-2.0; the card does not name them | caution | 0.992 (0.992); 0.082 | 109; 93 ms | Names and addresses (ADDRESS 0.994) at the lowest latency here; `USERNAME` draws most of its false positives |
 | same, int8 ONNX | same | caution | 0.771 (0.757); 0.270 | 16; 97 ms | Fewer false positives than the PyTorch weights (16 against 109); finds almost no dates of birth (0.053) and few usernames (0.273) |
@@ -145,7 +150,7 @@ text the bench did not see.
 | `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` (`hf`), five types | Apache-2.0; `microsoft/deberta-v3-small` (MIT) fine-tuned on `nvidia/Nemotron-PII` (CC BY 4.0) | caution | 1.000 (1.000); 0.048 | 18; 136 ms | Names, addresses, account numbers and usernames (ADDRESS 1.000, ACCOUNT_NUMBER 0.991, USERNAME 0.894); dates of birth are its weak type (0.509). The better `hf` default candidate, below |
 | `kalyan-ks/ettin-68m-nemotron-pii` (`hf`), five types | MIT; `jhu-clsp/ettin-encoder-68m` (MIT) fine-tuned on `nvidia/Nemotron-PII` (CC BY 4.0) | caution | 0.984 (0.866); 0.143 | 16; 127 ms | Names and addresses; it finds few dates of birth (0.377) and account numbers (0.243: most carry labels that are not folded into that type) |
 | `openai/privacy-filter` (`hf`), `PERSON`, `ADDRESS`, `ACCOUNT_NUMBER` | Apache-2.0; the card does not name them | caution | 0.994 (0.994); 0.120 | 23; 1,108 ms | Names, addresses (0.930) and account numbers (1.000) from a 1.5B-parameter mixture of experts, at about a second per string |
-| `fastino/gliner2-privacy-filter-PII-multi` (`gliner2`), five types, threshold 0.9 | Apache-2.0; 4,910 synthetic texts the card says GPT-5.4 generated | caution | 0.998 (0.998); 0.009 | 26; 453 ms | All five types with the lowest leak measured, in seven languages; recall on real text is lower at its 0.9 default (OpenPII English 0.786) |
+| `fastino/gliner2-privacy-filter-PII-multi` (`gliner2`), five types, threshold 0.9 | Apache-2.0; 4,910 synthetic texts the card says GPT-5.4 generated | caution | 0.998 (0.998); 0.009 | 26; 453 ms | All five types with the lowest leak measured (its card lists seven languages; every bench run is English or mixed, and OpenPII's first 2,000 rows give 0.614); recall on real text is lower at its 0.9 default (OpenPII English 0.786) |
 | `fastino/gliner2-base-v1` (`gliner2`, the default) | Apache-2.0; multi-domain datasets (its card) | caution | not measured | — | — |
 | `urchade/gliner_multi_pii-v1`, `-medium-v2.1`, `-multi-v2.1` (`gliner`) | Apache-2.0; `urchade/pile-mistral-v0.1` and `urchade/synthetic-pii-ner-mistral-v1` (both Apache-2.0) | vetted | not measured | — | Catalogued and pinned without a bench measurement of their own |
 
@@ -175,18 +180,19 @@ Recall without precision flatters a type that draws many false positives:
 `USERNAME` precision on the same runs is 0.13 for Knowledgator `-edge` (0.12
 int8), 0.59 for `-base` (0.61 int8), 0.75 for OpenMed and ettin and 0.52 for
 Fastino, and username detections are most of the agent-traffic false
-positives of the Knowledgator and OpenMed runs below. `PASSPORT` and
-`DRIVER_LICENSE` are requested from the models that list them (the catalog's
-prompts and labels), but no bench configuration asks for them and the
-synthetic corpus labels neither, so no recorded baseline covers them
-(OpenPII labels both; the weekly evaluation is report-only).
+positives of the Knowledgator `-edge` (PyTorch), OpenMed, ettin and Fastino
+runs below. `PASSPORT` and
+`DRIVER_LICENSE` can be requested (add them to `entities`) from the models
+whose catalog entries list them, but no shipped configuration or bench run
+does and the synthetic corpus labels neither, so no recorded baseline covers
+them (OpenPII labels both; the weekly evaluation is report-only).
 
 The two default models, measured the same way for comparison (their
 recorded baselines request `PERSON` only):
 
 | Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
 |---|---|---|---|---|---|---|---|
-| `urchade/gliner_small-v2.1`, `PERSON` (`gliner-default`) | 1.000 (1.000) | 0.639 | 0.324 | 0.015 | 52 | 448 | 189 ms |
+| `urchade/gliner_small-v2.1`, `PERSON` (`gliner-default`) | 1.000 (1.000) | 0.639 | 0.324 | 0.015 | 47 | 448 | 189 ms |
 | `urchade/gliner_small-v2.1`, five types | 0.791 (0.791) | 0.916 | 0.049 | 0.050 | 34 | 457 | — |
 | `dslim/bert-base-NER`, `PERSON` (`hf-default`) | 0.974 (0.951) | 0.913 | 0.398 | 0.003 | 0 | 210 | 176 ms |
 
@@ -231,7 +237,8 @@ The int8 exports lose more on published data than on the synthetic corpus
 these slices the default `urchade/gliner_small-v2.1` (asked for `PERSON`
 only, so its leak counts every other type) finds more names than
 Knowledgator's models (Nemotron 0.874 against 0.706 for `-edge`), at about
-half their precision (0.538 against 0.890).
+lower precision on Nemotron-PII (0.538 against 0.890; OpenPII 0.788 against
+0.848).
 
 **Verdict: caution** for `-edge` and `-base`: both clear the license,
 recall and leak bars, and `-edge` the latency bar, but neither clears one
@@ -473,9 +480,13 @@ baselines stay the 0.9 measurement above.
 
 ### What the measurements decided
 
-- **No PII model reached "vetted".** Each of them misses at least one
-  admission bar (false positives on agent traffic, latency, or both), so
-  each is "caution" with its numbers in its catalog reason. The leak bar is
+- **No model admitted by the bar reached "vetted".** Each PII model the
+  bench measured misses at least one admission bar (false positives on
+  agent traffic, latency, or both), so each is "caution" with its numbers in
+  its catalog reason. The two defaults and the `urchade` models are "vetted"
+  as the models users already run, from before the bar existed: the bar
+  would not admit them today (the `gliner` default draws 47 false positives
+  per 50 KB, the `hf` default has a p50 of 176 ms). The leak bar is
   read over every type the synthetic corpus labels, so a configuration that
   asks for `PERSON` only (the default) shows a large character leak that is
   the unrequested types, not its names.
@@ -485,8 +496,9 @@ baselines stay the 0.9 measurement above.
   release (2.0.0), and will be listed in its migration notes.
 - **The `gliner` default stays `urchade/gliner_small-v2.1`.** On published
   data it finds more names than the Knowledgator models (Nemotron-PII 0.874
-  against 0.706 for `-edge`, OpenPII 0.708 against 0.485), at about half
-  their precision, while `-base` leaks less and draws fewer agent-traffic
+  against 0.706 for `-edge`, OpenPII 0.708 against 0.485), at lower precision
+  (Nemotron-PII 0.538 against 0.890 for `-edge`, OpenPII 0.788 against
+  0.848), while `-base` leaks less and draws fewer agent-traffic
   false positives on the synthetic corpus than the default asked for the same
   five types (int8: leak 0.029 against 0.049, 13 against 34 false positives
   per 50 KB). The Knowledgator models stay a configurable catalog option,
@@ -577,9 +589,10 @@ failures follow even where a user would accept that trade:
    (scanning less, silently) and failing closed (your agent is down).
 2. **Per-request cost and quota** on a path that scans every string of
    every body.
-3. **Posture honesty**: `docs/privacy.md` states that nothing is
-   transmitted anywhere except the redacted provider traffic; a SaaS
-   detector would falsify it.
+3. **Posture honesty**: `docs/privacy.md` lists what leaves the machine
+   (the redacted provider traffic, the optional audit sinks and, if you
+   allow them, startup model downloads); a SaaS detector would add the raw
+   text to that list.
 
 This is a data-locality objection, not a commercial one — the same
 vendors' engines become acceptable the moment they run on your own
@@ -614,9 +627,10 @@ document: demand-driven, not built speculatively.
 
 ## Running NER on non-English text
 
-The backends pick their model from `[detection.ner] language` (spaCy,
-Presidio, Stanza) and the per-backend `[detection.ner.models]` overrides
-(every backend). Three ways to cover another language, cheapest first:
+Stanza picks its model from `[detection.ner] language`; spaCy and Presidio
+take theirs from `[detection.ner] model` (`language` is Presidio's analyzer
+language); every backend honours the per-backend `[detection.ner.models]`
+overrides. Three ways to cover another language, cheapest first:
 
 ```toml
 # 1. A language-specific spaCy pipeline (tens of MB, ~1-10 ms). Install the
@@ -637,7 +651,9 @@ language = "fr"               # python -c "import stanza; stanza.download('fr')"
 entities = ["PERSON"]
 
 # 3. Any multilingual Hugging Face NER checkpoint (pulls transformers+torch),
-#    with score_threshold since it emits confidences.
+#    with score_threshold since it emits confidences. Fetch it first with
+#    `llm-redact models pull` and pin the printed commit in
+#    [detection.ner.revisions] (downloads are off by default).
 [detection.ner]
 enabled = true
 backend = "hf"

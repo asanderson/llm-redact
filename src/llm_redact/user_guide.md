@@ -229,7 +229,10 @@ and (with llm-redact-pro) the dashboard. Runtime state — audit-backup
 upload failures, routing upstreams in cooldown or over budget — appears
 in `/__llm-redact/status`, `llm-redact status`, and the dashboard;
 `doctor` checks the routing config and its credentials, never the
-running proxy's cooldown or budget state.
+running proxy's cooldown or budget state. NER coverage gaps appear the
+same way: strings a model never read because they are longer than
+`max_chars`, and requested entities no loaded backend can emit, are
+counted in `llm-redact status`'s posture block.
 
 ## Going deeper
 

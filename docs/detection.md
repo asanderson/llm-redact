@@ -361,7 +361,9 @@ for its catalog status (a policy plugin may).
   leak of at most 0.15 on the synthetic corpus, at most one false positive
   per 50 KB of agent-traffic negatives, and a p50 of at most 100 ms per
   500-character string ([CONTRIBUTING.md](CONTRIBUTING.md#adding-an-ner-model-or-backend),
-  step 6).
+  step 6). The two backend defaults and the `urchade` models are vetted as
+  the models users already run, from before the bar existed; none of the
+  models the bar has been applied to reached vetted.
 - **caution**: configurable and pinned, with the reason shown — for example,
   not yet measured by the llm-redact bench, or measured below a bar (the
   reason then quotes the numbers).
@@ -704,7 +706,7 @@ llm-redact models verify --dir DIR  # check a folder written by `models pull --t
 
 ## How NER runs
 
-![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model (an hf BIOES/BILOU tagger's spans decoded by llm-redact), the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)
+![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model (an hf BIOES/BILOU tagger's, or a BIO tagger without word pieces', spans decoded by llm-redact), the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)
 
 *Static diagram. [Mermaid source](diagrams/ner-pipeline.mmd).*
 

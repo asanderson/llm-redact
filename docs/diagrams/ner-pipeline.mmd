@@ -13,7 +13,8 @@ flowchart TB
     fits -- no --> windows["overlapping windows (scanned_windowed, windows)<br/>hf: the pipeline's token stride, a quarter shared;<br/>window = the model's token limit<br/>gliner: GLiNER words (JSON punctuation counts),<br/>within max_len beside the prompts and within<br/>the encoder's subwords, a fifth shared;<br/>gliner2: its own words, the same way;<br/>a lone over-long word: windows_truncated"]
     whole --> model["model: entities with a label,<br/>a score and character offsets"]
     windows --> model
-    model -. "hf BIOES/BILOU tagger<br/>(E-/S- or L-/U- labels)" .-> decode["llm-redact decodes the per-token<br/>label scores (tagging.py): constrained<br/>Viterbi with the calibration file the<br/>model catalog lists, else greedy;<br/>WordPiece: whole words"]
+    model -. "hf BIOES/BILOU tagger<br/>(E-/S- or L-/U- labels)" .-> decode["llm-redact decodes the per-token<br/>label scores (tagging.py): constrained<br/>Viterbi with the calibration file the<br/>model catalog lists, else greedy;<br/>a BIO tagger without word pieces: greedy,<br/>word by word over the text's own words;<br/>WordPiece: whole words"]
+    model -. "hf BIO tagger whose tokenizer marks<br/>no word pieces (SentencePiece,<br/>byte-level BPE)" .-> decode
     decode --> policy
     model --> policy["label policy (labels.py)<br/>normalize the label (B-PER → PER);<br/>a GLiNER type prompt → its type;<br/>a raw request without an override keeps its<br/>label until 2.0.0 (presidio: its five legacy folds);<br/>else the [detection.ner.labels] override,<br/>else the default fold (PER → PERSON)"]
     policy --> requested{"a requested<br/>type?"}

@@ -13,7 +13,12 @@ pip install llm-redact-proxy          # or: uv tool install llm-redact-proxy
 
 Runtime dependencies are exactly httpx, starlette, and uvicorn. Optional
 extras (`[crypto]` vault encryption, `[realtime]` WebSocket APIs, NER
-backends) can come later — nothing here needs them.
+backends) can come later — nothing here needs them. NER (person names, and
+with a PII model addresses and dates of birth) is opt-in: install a backend's
+extra and, for the `hf`, `gliner` and `gliner2` backends, fetch the model once
+with `llm-redact models pull` (the proxy downloads nothing on its own) — see
+[detection.md](detection.md#person-name-detection-optional-ner), and
+[air-gapped.md](air-gapped.md) for a host with no internet route.
 
 ## 2. Initialize
 

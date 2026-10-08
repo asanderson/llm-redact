@@ -175,8 +175,9 @@ its pins, its measurements and its documentation in the same change.
    the reference CPU (name the CPU). Otherwise "caution", with the numbers
    shown. A backend's default model changes only by a maintainer's
    decision.
-7. **Docs**: the "Vetted models" table in `docs/detection.md` (pinned by
-   test), `docs/ner-landscape.md` (the dated verdict and its numbers), a
+7. **Docs**: the model-catalog tables (vetted, caution, restricted) in
+   `docs/detection.md` (pinned to the catalog by
+   `tests/test_model_sources.py`), `docs/ner-landscape.md` (the dated verdict and its numbers), a
    `docs/troubleshooting.md` entry for every new warning or error text,
    `config.example.toml` for any new key, and a CHANGELOG entry.
 8. **Extras**: a new library goes behind an extra in `pyproject.toml`

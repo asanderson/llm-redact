@@ -1,13 +1,13 @@
-"""The student-model recipe (plan T43): a SKELETON that plans a run and trains nothing.
+"""The student-model recipe: a SKELETON that plans a run and trains nothing.
 
     uv run python scripts/pii_corpus/train_student.py plan --name acme-pii-student \\
         --base microsoft/deberta-v3-small --sources nemotron,privy,kiji --out ~/student-run
 
 ``plan`` checks every requested data source against the data manifest
 (training_sources.toml): a source not listed, or one marked evaluation-only,
-is refused; OpenPII 1.5M is refused until an owner commit records
-AI4Privacy's written confirmation in the data manifest (plan D9:
-``confirmation = "REF"`` under ``[sources.openpii]``), and then only with
+is refused; OpenPII 1.5M is refused until a maintainer commit records
+AI4Privacy's written confirmation in the data manifest
+(``confirmation = "REF"`` under ``[sources.openpii]``), and then only with
 ``--openpii-confirmation REF`` repeating it (REF goes into the manifest and
 the model card); the private agent corpus must be a VERIFIED training share
 disjoint from the frozen ``agent-eval`` set, which ``--agent-eval FROZEN``
@@ -24,7 +24,7 @@ restricted), then writes, into a directory outside every git work tree:
   the bench results left to fill in after the evaluation.
 
 ``train`` is a deliberate stub: training is the step TRAINING.md describes
-and an owner decision; this skeleton never downloads data or trains.
+and a maintainer decision; this skeleton never downloads data or trains.
 """
 
 import argparse
@@ -258,14 +258,14 @@ def plan_sources(
 
 def _confirmed(name: str, entry: Mapping[str, Any], given: str | None) -> None:
     """Refuse a needs-confirmation source unless the data manifest RECORDS
-    the confirmation (an owner commit: ``confirmation = "REF"`` under its
+    the confirmation (a maintainer commit: ``confirmation = "REF"`` under its
     table) and ``--openpii-confirmation`` repeats it. A flag alone unlocks
     nothing: the model card would state a confirmation nobody recorded."""
     recorded = entry.get("confirmation")
     if name != OPENPII or not isinstance(recorded, str) or not recorded.strip():
         raise CorpusError(
             f"source {name!r} is refused for training until {entry.get('gate')} is recorded"
-            f' in the data manifest (an owner commit adds confirmation = "REF" under'
+            f' in the data manifest (a maintainer commit adds confirmation = "REF" under'
             f" [sources.{name}] in training_sources.toml; TRAINING.md)"
         )
     if (given or "").strip() != recorded.strip():
@@ -363,7 +363,7 @@ def _parser() -> argparse.ArgumentParser:
     planned.add_argument(
         "--openpii-confirmation",
         metavar="REF",
-        help="repeats the confirmation of AI4Privacy (plan D9) recorded in"
+        help="repeats the confirmation of AI4Privacy recorded in"
         " training_sources.toml; openpii is refused until it is recorded there",
     )
     planned.add_argument("--out", type=Path, required=True, help="the run directory")

@@ -53,8 +53,10 @@ Report back:
   is disabled, report that in one line
 - EVERY line of the posture block verbatim (warn-mode rules, providers
   with detection disabled, MCP-exempt servers, language-inactive rules,
-  compaction forks, audit-sink drops, upstreams in cooldown or budget
-  exhausted, unpriced models, routing warnings). These are deliberate
+  NER gaps — strings no model read because they were longer than
+  max_chars, entities no backend can emit —, compaction forks, audit-sink
+  drops, upstreams in cooldown or budget exhausted, unpriced models,
+  routing warnings). These are deliberate
   protection opt-outs and degraded lanes the user must see; if the block
   is absent, say the posture is clean.
 

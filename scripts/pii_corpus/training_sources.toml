@@ -1,4 +1,4 @@
-# Data manifest of the student-model recipe (plan T43; TRAINING.md).
+# Data manifest of the student-model recipe (TRAINING.md).
 #
 # Every dataset the recipe may name, with its license, attribution, pinned
 # revision and lineage as read on its card (checked 2026-10-05), and
@@ -11,7 +11,7 @@
 #   training = "refused"             evaluation only (real data, or a license
 #                                    that keeps it out of a shipped model)
 # train_student.py refuses every source not listed here. Lineage lines are
-# neutral facts (plan D14), not legal conclusions.
+# neutral facts, not legal conclusions.
 
 checked = "2026-10-05"
 
@@ -83,8 +83,8 @@ attribution = "OpenPII 1.5M by Ai4Privacy / Ai Suisse SA"
 card = "https://huggingface.co/datasets/ai4privacy/pii-masking-openpii-1.5m"
 lineage = "synthetic; the card does not say how it was generated; its predecessor releases were generated with Llama models"
 training = "needs-confirmation"
-gate = "D9: AI4Privacy's written confirmation that OpenPII 1.5M may train a redistributed model"
-# Not recorded: openpii stays refused. Only an owner commit, once the
+gate = "AI4Privacy's written confirmation that OpenPII 1.5M may train a redistributed model"
+# Not recorded: openpii stays refused. Only a maintainer commit, once the
 # confirmation is in hand, adds the line below (REF = its date and archive
 # location); train_student.py plan then needs --openpii-confirmation REF.
 # confirmation = "REF"

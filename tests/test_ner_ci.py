@@ -155,6 +155,29 @@ def test_each_bench_config_has_recorded_baselines(path: Path) -> None:
     assert "per_100kb_max" in ceilings[name]
 
 
+def test_only_the_int8_edge_onnx_config_carries_the_cross_cpu_tolerance() -> None:
+    # Its integer kernels differ by CPU instruction set: an AVX2-only and an AVX-512
+    # GitHub runner gave 31 and 28 false-positive detections and 13 EMAIL characters
+    # lost on one of them, for one commit, where every float32 config and the int8
+    # base model gave identical counts and passed their exact ceilings. A per-file
+    # ceiling and a zero structured-regression budget would fail on whichever
+    # runner the job lands on (docs/ner-bench.md, "False positives on agent
+    # traffic"); every other config keeps both, so a real regression still shows.
+    thresholds = tomllib.loads((ROOT / "bench" / "ner_thresholds.toml").read_text())
+    ceilings = tomllib.loads((ROOT / "bench" / "ner_ceilings.toml").read_text())
+    tolerant = "gliner-knowledgator-edge-onnx"
+    assert ceilings[tolerant]["per_file"] is False
+    assert "per_100kb_max" in ceilings[tolerant]
+    assert [k for k, v in ceilings[tolerant].items() if isinstance(v, dict)] == []
+    assert thresholds[tolerant]["synthetic"]["structured_regressions_max"] == 1
+    # The tolerance belongs to a quantized ONNX model, never a float32 one.
+    assert load_config(ROOT / "bench" / "configs" / f"{tolerant}.toml").detection.ner.onnx
+    for path in BENCH_CONFIGS + MANUAL_CONFIGS:
+        if path.stem != tolerant:
+            assert "per_file" not in ceilings[path.stem], path.stem
+            assert "structured_regressions_max" not in thresholds[path.stem]["synthetic"], path.stem
+
+
 @pytest.mark.parametrize("path", MANUAL_CONFIGS, ids=lambda p: p.stem)
 def test_a_manual_config_has_recorded_baselines_and_says_why(path: Path) -> None:
     thresholds = tomllib.loads((ROOT / "bench" / "ner_thresholds.toml").read_text())

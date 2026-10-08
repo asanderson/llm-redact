@@ -13,6 +13,11 @@
 #   recorded = "YYYY-MM-DD"        when the baseline was measured
 #   note = "..."                   models and revisions it was measured with
 #   per_100kb_max = 2.0            NER hits per 100 KB of the whole corpus
+#   per_file = false               gate only per_100kb_max (default true; needs
+#                                  per_100kb_max): for an int8-quantized ONNX model
+#                                  whose per-file counts were measured to differ
+#                                  between CPU types (its kernels differ by
+#                                  instruction set)
 #
 #   [<config name>."<corpus file>"]
 #   PERSON = 3                     maximum count per type in that file
@@ -176,42 +181,9 @@ USERNAME = 5
 
 [gliner-knowledgator-edge-onnx]
 recorded = "2026-10-07"
-note = "knowledgator/gliner-pii-edge-v1.0 at 9b7f39b0a2da971a5beea78d35f1539d4009c891, onnx/model_quint8.onnx; measured 28 NER detections in 269437 bytes, 10.39 per 100 KB"
-per_100kb_max = 11.0
-
-[gliner-knowledgator-edge-onnx."README.md"]
-PERSON = 2
-
-[gliner-knowledgator-edge-onnx."gutenberg_prose.txt"]
-USERNAME = 4
-
-[gliner-knowledgator-edge-onnx."rfc_excerpt.txt"]
-ADDRESS = 2
-
-[gliner-knowledgator-edge-onnx."sqlite_excerpt.c"]
-ACCOUNT_NUMBER = 9
-PERSON = 2
-USERNAME = 2
-
-[gliner-knowledgator-edge-onnx."synthetic_agent_tool_results.json"]
-ACCOUNT_NUMBER = 2
-USERNAME = 2
-
-[gliner-knowledgator-edge-onnx."synthetic_bigint.log"]
-ACCOUNT_NUMBER = 4
-
-[gliner-knowledgator-edge-onnx."synthetic_ci_log.txt"]
-ACCOUNT_NUMBER = 2
-USERNAME = 4
-
-[gliner-knowledgator-edge-onnx."synthetic_code.py"]
-ACCOUNT_NUMBER = 3
-
-[gliner-knowledgator-edge-onnx."synthetic_k8s.yaml"]
-ADDRESS = 2
-
-[gliner-knowledgator-edge-onnx."synthetic_terraform.tf"]
-USERNAME = 2
+note = "knowledgator/gliner-pii-edge-v1.0 at 9b7f39b0a2da971a5beea78d35f1539d4009c891, onnx/model_quint8.onnx (int8); measured 28 NER detections in 269437 bytes, 10.39 per 100 KB on an AVX-512 CPU and 31, 11.51 per 100 KB on an AVX2-only one (GitHub runners, 2026-10-07); the rate alone is gated, with 13% over the higher figure"
+per_100kb_max = 13.0
+per_file = false
 
 [gliner-knowledgator-base]
 recorded = "2026-10-07"
@@ -253,7 +225,7 @@ PERSON = 4
 
 [gliner-knowledgator-base-onnx]
 recorded = "2026-10-07"
-note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, onnx/model_quint8.onnx; measured 250 NER detections in 269437 bytes, 92.79 per 100 KB"
+note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, onnx/model_quint8.onnx; measured 250 NER detections in 269437 bytes, 92.79 per 100 KB on one CPU and 253, 93.90 per 100 KB on another (GitHub runners, 2026-10-07); both pass these ceilings"
 per_100kb_max = 98.0
 
 [gliner-knowledgator-base-onnx."README.md"]

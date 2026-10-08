@@ -15,7 +15,10 @@
 #   leak_max = 0.15                       character-leak rate ceiling (all gold)
 #   type_leak_max = { TYPE = ceiling }    character-leak rate ceilings per type
 #   over_redaction_max = 0.01             over-redaction rate ceiling
-#   structured_regressions_max = 0        regex-type spans NER may cost (default 0)
+#   structured_regressions_max = 0        regex-type spans NER may cost (default 0;
+#                                         1 for the int8 edge ONNX model: on an
+#                                         AVX2-only CI runner it lost 13 characters
+#                                         of one EMAIL that an AVX-512 runner kept)
 #   recorded = "YYYY-MM-DD"               when the baseline was measured
 #   note = "..."                          models and revisions it was measured with
 #
@@ -89,8 +92,9 @@ exact_recall = { PERSON = 0.70, ADDRESS = 0.56, DATE_OF_BIRTH = 0.00, USERNAME =
 leak_max = 0.33
 type_leak_max = { PERSON = 0.28, ADDRESS = 0.39, DATE_OF_BIRTH = 1.00, USERNAME = 0.76, ACCOUNT_NUMBER = 0.15 }
 over_redaction_max = 0.11
+structured_regressions_max = 1
 recorded = "2026-10-07"
-note = "knowledgator/gliner-pii-edge-v1.0 at 9b7f39b0a2da971a5beea78d35f1539d4009c891, onnx/model_quint8.onnx; measured PERSON recall 0.771 (exact 0.757), precision 0.934, leak 0.2239; ADDRESS recall 0.646 (exact 0.614), precision 0.729, leak 0.3340; DATE_OF_BIRTH recall 0.053 (exact 0.053), precision 1.000, leak 0.9584; USERNAME recall 0.273 (exact 0.242), precision 0.120, leak 0.7045; ACCOUNT_NUMBER recall 0.896 (exact 0.896), precision 0.972, leak 0.0960; leak 0.2703, over-redaction 0.0504, structured regressions 0"
+note = "knowledgator/gliner-pii-edge-v1.0 at 9b7f39b0a2da971a5beea78d35f1539d4009c891, onnx/model_quint8.onnx; measured PERSON recall 0.771 (exact 0.757), precision 0.934, leak 0.2239; ADDRESS recall 0.646 (exact 0.614), precision 0.729, leak 0.3340; DATE_OF_BIRTH recall 0.053 (exact 0.053), precision 1.000, leak 0.9584; USERNAME recall 0.273 (exact 0.242), precision 0.120, leak 0.7045; ACCOUNT_NUMBER recall 0.896 (exact 0.896), precision 0.972, leak 0.0960; leak 0.2703, over-redaction 0.0504, structured regressions 0; a second CPU (an AVX2-only GitHub runner) measured PERSON recall 0.783, ADDRESS 0.633, USERNAME 0.280, leak 0.2690 and one EMAIL span differing (structured regressions 1)"
 
 [gliner-knowledgator-base.synthetic]
 recall = { PERSON = 0.91, ADDRESS = 0.95, DATE_OF_BIRTH = 0.94, USERNAME = 0.82, ACCOUNT_NUMBER = 0.95 }
@@ -102,13 +106,13 @@ recorded = "2026-10-07"
 note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, PyTorch weights; measured PERSON recall 0.966 (exact 0.966), precision 0.921, leak 0.0339; ADDRESS recall 1.000 (exact 1.000), precision 1.000, leak 0.0000; DATE_OF_BIRTH recall 0.991 (exact 0.991), precision 0.706, leak 0.0097; USERNAME recall 0.879 (exact 0.856), precision 0.586, leak 0.1060; ACCOUNT_NUMBER recall 1.000 (exact 1.000), precision 0.414, leak 0.0000; leak 0.0207, over-redaction 0.0545, structured regressions 0"
 
 [gliner-knowledgator-base-onnx.synthetic]
-recall = { PERSON = 0.91, ADDRESS = 0.94, DATE_OF_BIRTH = 0.93, USERNAME = 0.73, ACCOUNT_NUMBER = 0.95 }
-exact_recall = { PERSON = 0.91, ADDRESS = 0.94, DATE_OF_BIRTH = 0.93, USERNAME = 0.70, ACCOUNT_NUMBER = 0.95 }
+recall = { PERSON = 0.91, ADDRESS = 0.94, DATE_OF_BIRTH = 0.93, USERNAME = 0.70, ACCOUNT_NUMBER = 0.95 }
+exact_recall = { PERSON = 0.91, ADDRESS = 0.94, DATE_OF_BIRTH = 0.93, USERNAME = 0.66, ACCOUNT_NUMBER = 0.95 }
 leak_max = 0.08
 type_leak_max = { PERSON = 0.09, ADDRESS = 0.06, DATE_OF_BIRTH = 0.07, USERNAME = 0.24, ACCOUNT_NUMBER = 0.05 }
 over_redaction_max = 0.06
 recorded = "2026-10-07"
-note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, onnx/model_quint8.onnx; measured PERSON recall 0.964 (exact 0.964), precision 0.915, leak 0.0366; ADDRESS recall 0.994 (exact 0.994), precision 1.000, leak 0.0058; DATE_OF_BIRTH recall 0.982 (exact 0.982), precision 0.727, leak 0.0180; USERNAME recall 0.788 (exact 0.750), precision 0.612, leak 0.1806; ACCOUNT_NUMBER recall 1.000 (exact 1.000), precision 0.599, leak 0.0000; leak 0.0288, over-redaction 0.0279, structured regressions 0"
+note = "knowledgator/gliner-pii-base-v1.0 at 61726e0ad791dcab3e29339bbec3ad42ded65641, onnx/model_quint8.onnx; measured PERSON recall 0.964 (exact 0.964), precision 0.915, leak 0.0366; ADDRESS recall 0.994 (exact 0.994), precision 1.000, leak 0.0058; DATE_OF_BIRTH recall 0.982 (exact 0.982), precision 0.727, leak 0.0180; USERNAME recall 0.788 (exact 0.750), precision 0.612, leak 0.1806; ACCOUNT_NUMBER recall 1.000 (exact 1.000), precision 0.599, leak 0.0000; leak 0.0288, over-redaction 0.0279, structured regressions 0; a second CPU (an AVX2-only GitHub runner) measured PERSON recall 0.962, USERNAME recall 0.758 (exact 0.720), leak 0.0300 and over-redaction 0.0268, structured regressions 0; the USERNAME floors are the lower of the two runs minus 0.05"
 
 # hf-openmed-pii-small and hf-ettin-68m-nemotron-pii were re-measured on
 # 2026-10-07 (same CPU and libraries; other jobs ran on the machine) after the

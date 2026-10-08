@@ -1,6 +1,6 @@
 """Where generated and verified rows may be written, and how.
 
-The corpus is private (plan D7): every file this tooling writes that holds
+The corpus is private: every file this tooling writes that holds
 text goes OUTSIDE every git work tree (the rule ``--dump-errors`` of the NER
 bench follows), into a mode-0700 directory as a mode-0600 file, never
 through a symlink. The default directory is

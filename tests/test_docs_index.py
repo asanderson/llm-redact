@@ -40,6 +40,8 @@ def test_public_docs_cite_no_private_planning_ids() -> None:
             root / "CHANGELOG.md",
             root / "config.example.toml",
             root / "src" / "llm_redact" / "user_guide.md",
+            *sorted((root / "scripts" / "pii_corpus").glob("*.md")),
+            root / "scripts" / "pii_corpus" / "training_sources.toml",
         ]
         if (ids := _planning_ids(path.read_text()))
     }

@@ -1,4 +1,4 @@
-"""Verify generated rows by hand and freeze the agent-traffic evaluation set (plan T42).
+"""Verify generated rows by hand and freeze the agent-traffic evaluation set.
 
     uv run python scripts/pii_corpus/review.py review GENERATED.jsonl --reviewer NAME [--share K/N]
     uv run python scripts/pii_corpus/review.py freeze VERIFIED.jsonl [MORE ...] --out FROZEN.jsonl
@@ -27,7 +27,7 @@ dataset checks before scoring
 (``python -m llm_redact.bench.ner --dataset agent-eval --path FROZEN.jsonl``).
 
 Every file is written outside every git work tree, mode 0600: the set is
-private (plan D7). The labeling rules are in GUIDELINES.md.
+private. The labeling rules are in GUIDELINES.md.
 """
 
 import argparse

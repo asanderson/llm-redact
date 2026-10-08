@@ -1,4 +1,4 @@
-"""The out-of-band corpus tooling in scripts/pii_corpus (plan T40-T43), run
+"""The out-of-band corpus tooling in scripts/pii_corpus, run
 against a fake Ollama server (tests/fake_ollama.py; no network)."""
 
 import argparse
@@ -1309,7 +1309,7 @@ def test_the_data_manifest_lists_every_source_with_its_facts() -> None:
         "agent-corpus",
     }
     assert sources["openpii"]["training"] == "needs-confirmation"
-    assert sources["openpii"]["gate"].startswith("D9")
+    assert sources["openpii"]["gate"].startswith("AI4Privacy")
     assert {n for n, e in sources.items() if e["training"] == "refused"} == {
         "pupa",
         "mapa",
@@ -1368,7 +1368,7 @@ def test_plan_writes_a_data_manifest_and_a_model_card(
     card = (run / "MODEL_CARD.md").read_text()
     assert "# acme-student" in card and "{{" not in card
     assert "| privy | beki/privy | dc137a6a976f6b5bb8768e9bb51ec58df930ccd1 | MIT |" in card
-    assert "OpenPII 1.5M written confirmation (plan D9): not used." in card
+    assert "OpenPII 1.5M written confirmation: not used." in card
     assert "- beki/privy by Benjamin Kilimnik (MIT)" in card
     if os.name == "posix":
         assert run.stat().st_mode & 0o777 == 0o700
@@ -1389,10 +1389,10 @@ def test_openpii_is_refused_without_the_d9_confirmation(
     for extra in ([], ["--openpii-confirmation", "x"]):
         assert train_student.main([*argv, *extra]) == 2
         err = capsys.readouterr().err
-        assert "source 'openpii' is refused for training until D9" in err
-        assert 'an owner commit adds confirmation = "REF" under [sources.openpii]' in err
+        assert "source 'openpii' is refused for training until AI4Privacy" in err
+        assert 'a maintainer commit adds confirmation = "REF" under [sources.openpii]' in err
         assert not (tmp_path / "run").exists()
-    # Once an owner commit records it, the flag must repeat it exactly.
+    # Once a maintainer commit records it, the flag must repeat it exactly.
     reference = "AI4Privacy letter of 2026-11-02, archived as DOC-17"
     recorded = tmp_path / "training_sources.toml"
     shipped = train_student.SOURCES_FILE.read_text(encoding="utf-8")
@@ -1412,7 +1412,7 @@ def test_openpii_is_refused_without_the_d9_confirmation(
     assert manifest["sources"][1]["confirmation"] == reference
     card = (tmp_path / "run" / "MODEL_CARD.md").read_text()
     assert (
-        f"OpenPII 1.5M written confirmation (plan D9): {reference} (recorded in"
+        f"OpenPII 1.5M written confirmation: {reference} (recorded in"
         " training_sources.toml)." in card
     )
 

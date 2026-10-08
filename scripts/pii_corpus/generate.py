@@ -1,4 +1,4 @@
-"""Generate agent-traffic PII samples with a local Apache-2.0 LLM (plan T40).
+"""Generate agent-traffic PII samples with a local Apache-2.0 LLM.
 
     uv run python scripts/pii_corpus/generate.py --model gemma4:e4b --count 500 --seed 7
 

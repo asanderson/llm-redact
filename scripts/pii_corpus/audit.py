@@ -1,4 +1,4 @@
-"""Audit the false-positive corpus with the local teacher (plan T41; report only).
+"""Audit the false-positive corpus with the local teacher (report only).
 
     uv run python scripts/pii_corpus/audit.py --model gemma4:e4b [--config my-ner.toml]
 

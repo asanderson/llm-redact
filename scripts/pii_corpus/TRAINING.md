@@ -3,10 +3,10 @@
 How to fine-tune a small personal-data detector — a GLiNER checkpoint or a
 DeBERTa-v3 token classifier — on license-clean data, so it can run inside the
 proxy through the core `gliner` or `hf` NER backend. This is a recipe and a
-skeleton (plan T43): `train_student.py plan` checks the data and writes the
+skeleton: `train_student.py plan` checks the data and writes the
 run's data manifest and model card; **no step here downloads data or trains a
 model**, and the `train` command deliberately refuses. Running the training
-is an owner decision.
+is a maintainer decision.
 
 ## 1. Plan the run
 
@@ -30,9 +30,9 @@ uv run python scripts/pii_corpus/train_student.py plan --name acme-pii-student \
 - **OpenPII 1.5M** until the confirmation is recorded. Its card text says
   CC BY 4.0 while its metadata says `license: other`, and it does not say
   how the data was generated (its predecessors were generated with Llama
-  models). Plan decision D9: it may be used for evaluation now and for
+  models). It may be used for evaluation now and for
   training only after AI4Privacy confirms in writing. The confirmation is
-  recorded by an owner commit that adds `confirmation = "REF"` (for example
+  recorded by a maintainer commit that adds `confirmation = "REF"` (for example
   the confirmation's date and archive location) under `[sources.openpii]`
   in `training_sources.toml`, where review sees it; until then openpii is
   refused whatever is passed. Once recorded, `--openpii-confirmation REF`
@@ -65,7 +65,7 @@ no text — and `MODEL_CARD.md`, filled from
 [`MODEL_CARD_TEMPLATE.md`](MODEL_CARD_TEMPLATE.md): `plan` fills every
 `{{field}}` from the manifest, and the parts marked `TO FILL` (the student's
 license, hardware, time, evaluation, known limits) are completed after
-training. Keep every statement a verifiable fact (plan D14): licenses,
+training. Keep every statement a verifiable fact: licenses,
 revisions, datasets, measured numbers.
 
 ## 2. Data
@@ -78,7 +78,7 @@ revisions, datasets, measured numbers.
 | `privy` | MIT | PII inside JSON, SQL, HTML and XML payloads | `train` (the bench scores `test`) |
 | `kiji` | Apache-2.0 | six languages, 26 types | `train` |
 | `agent-corpus` | private | coding-agent artifacts, verified by hand | a verified training share, never the frozen set |
-| `openpii` | see D9 | 1.5M rows, 30 languages | `train`, only with the confirmation |
+| `openpii` | needs confirmation | 1.5M rows, 30 languages | `train`, only with the confirmation |
 
 Preparation, in order:
 
@@ -91,7 +91,7 @@ Preparation, in order:
    `labels.normalize_label` and the default folds
    (`llm_redact.detection.labels`). Labels that fold to no type become
    outside (`O`); sensitive attributes (race, religion, politics, sexuality,
-   gender; plan D10) are always outside.
+   gender) are always outside.
 3. Drop rows whose span text differs from the text at its offsets (as the
    bench skips them) and rows whose text equals, after whitespace
    normalisation, any row of an evaluation split (dedupe by SHA-256).
@@ -143,14 +143,14 @@ Fill the model card's evaluation tables from the reports.
 
 - [ ] Data manifest and model card complete; every attribution line present
       (CC BY 4.0 sources require it).
-- [ ] No OpenPII rows unless the D9 confirmation reference is recorded.
+- [ ] No OpenPII rows unless AI4Privacy's confirmation reference is recorded.
 - [ ] No evaluation split, no frozen `agent-eval` row and no real-data
       dataset in the training data.
 - [ ] Weights in safetensors (and ONNX), uploaded to the Hub; the release
       commit recorded as a 40-character revision.
 - [ ] A catalog entry in `src/llm_redact/detection/model_catalog.py`
       (license, lineage, revision pin, recommended entities, window) with
-      the admission decision under plan D11 (vetted or caution, numbers
+      the admission decision under the catalog's bar (vetted or caution, numbers
       shown), and the docs table updated.
 - [ ] Bench thresholds recorded for the new configuration
       (`bench/ner_thresholds.toml`, `bench/ner_ceilings.toml`).

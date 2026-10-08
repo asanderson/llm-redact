@@ -29,7 +29,7 @@ from llm_redact.bench.ner_metrics import DUMP_CONTEXT_CHARS, Pipeline
 
 CHUNK_CHARS = 2000
 # Section keys that are not file names.
-_SECTION_KEYS = frozenset({"recorded", "note", "per_100kb_max"})
+_SECTION_KEYS = frozenset({"recorded", "note", "per_100kb_max", "per_file"})
 
 
 @dataclass
@@ -106,18 +106,26 @@ def ceiling_failures(
 ) -> list[str]:
     """One line per crossed ceiling (file, type, counts, line numbers). A
     config without a section fails with how to record a baseline; a ceiling
-    for a file the corpus lacks is a failure too (a stale entry)."""
+    for a file the corpus lacks is a failure too (a stale entry). A section
+    with ``per_file = false`` (which needs ``per_100kb_max``) gates only that
+    rate: an int8-quantized model's kernels differ by CPU instruction set, so
+    its detections can move by a few from machine to machine."""
     section = ceilings.get(config_name)
     if not isinstance(section, dict):
         return [
             f"no NER ceilings for [{config_name}] in {path}; record a baseline from this"
             " run's report (docs/ner-bench.md, 'Recording a baseline')"
         ]
+    per_file = section.get("per_file", True)
+    if not isinstance(per_file, bool):
+        raise ValueError(f"[{config_name}] per_file must be true or false")
+    if not per_file and "per_100kb_max" not in section:
+        raise ValueError(f"[{config_name}] per_file = false gates nothing without per_100kb_max")
     failures: list[str] = []
     names = {f.name for f in files}
     for key in sorted(set(section) - _SECTION_KEYS - names):
         failures.append(f"{path} [{config_name}] names {key}, which is not in the corpus")
-    for result in files:
+    for result in files if per_file else ():
         allowed = section.get(result.name, {})
         if not isinstance(allowed, dict):
             raise ValueError(f"[{config_name}] {result.name} must be a table of type = maximum")

@@ -597,6 +597,30 @@ def test_ceiling_gate(tmp_path: Path) -> None:
             ner_fp.ceiling_failures({"cfg": bad}, "cfg", files, path)
 
 
+def test_per_file_false_gates_only_the_rate(tmp_path: Path) -> None:
+    files = ner_fp.scan(_corpus(tmp_path / "corpus"), _pipeline({"Jenkins": "PERSON"}))
+    path = Path("c.toml")
+    # A quantized model's per-file counts move between CPUs: none is compared,
+    # whatever the file tables hold ...
+    rate = {"per_file": False, "per_100kb_max": 100000}
+    assert ner_fp.ceiling_failures({"cfg": rate}, "cfg", files, path) == []
+    assert ner_fp.ceiling_failures({"cfg": {**rate, "build.log": 3}}, "cfg", files, path) == []
+    # ... the rate is still gated, and a stale file name is still a failure.
+    section = {"per_file": False, "per_100kb_max": 0.5, "gone.txt": {}}
+    assert ner_fp.ceiling_failures({"cfg": section}, "cfg", files, path) == [
+        "c.toml [cfg] names gone.txt, which is not in the corpus",
+        f"NER hits per 100 KB {ner_fp.per_100kb(files):.2f} is above per_100kb_max 0.50",
+    ]
+    # true is the default: the same counts fail per file.
+    assert ner_fp.ceiling_failures({"cfg": {"per_file": True}}, "cfg", files, path) == [
+        "build.log: PERSON found 2, ceiling 0 (lines 1, 3)"
+    ]
+    with pytest.raises(ValueError, match="per_file = false gates nothing without per_100kb_max"):
+        ner_fp.ceiling_failures({"cfg": {"per_file": False}}, "cfg", files, path)
+    with pytest.raises(ValueError, match="per_file must be true or false"):
+        ner_fp.ceiling_failures({"cfg": {"per_file": "no"}}, "cfg", files, path)
+
+
 def test_cli_fp_corpus_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

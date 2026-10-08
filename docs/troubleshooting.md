@@ -1025,7 +1025,11 @@ its recorded ceiling allows (a file or type with no ceiling allows none):
 read the lines named, decide whether the hits are legitimate (raise the
 ceiling, with the reason in the commit) or a regression (fix the
 configuration). The second message names a ceiling for a file that no
-longer exists: remove the stale entry.
+longer exists: remove the stale entry. A configuration whose model is
+int8-quantized and whose counts differ between CPU types can set
+`per_file = false` in its section to gate the rate per 100 KB alone
+(`per_file = false gates nothing without per_100kb_max` means the rate is
+missing; docs/ner-bench.md says when this is warranted).
 
 ## NER bench: "downloading a dataset needs huggingface_hub; install the bench-data extra: uv sync --extra bench-data" / "reading a parquet dataset needs pyarrow; …"
 

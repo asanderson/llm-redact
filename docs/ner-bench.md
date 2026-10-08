@@ -127,7 +127,7 @@ and `@LANGUAGE` with `--language` (quote such keys:
 | `leak_max` | character-leak rate ceiling, over all gold characters |
 | `type_leak_max = { TYPE = ceiling }` | character-leak rate ceilings per type |
 | `over_redaction_max` | over-redaction rate ceiling |
-| `structured_regressions_max` | regex-type spans NER may cost (default 0) |
+| `structured_regressions_max` | regex-type spans NER may cost (default 0; 1 for the int8 edge ONNX model, below) |
 | `recorded`, `note` | when and with which models and revisions the baseline was measured |
 
 A run with no entry fails `--check`, and so does a floor or a
@@ -186,6 +186,20 @@ is right, and their ceilings say so. A baseline's count ceilings are the
 measured counts plus 5%, rounded up and at least one more than measured, so
 the same model on another CPU does not fail on one borderline span;
 `per_100kb_max` likewise.
+
+One configuration is the exception: `gliner-knowledgator-edge-onnx`, an int8-quantized
+ONNX model. Its integer kernels differ by CPU instruction set, and two GitHub-hosted runners
+produced different counts on the same commit (an AVX-512 CPU: 28 detections on the negatives
+corpus, 10.39 per 100 KB, and a developer machine matched it; an AVX2-only CPU: 31, 11.51 per
+100 KB, with detections in files whose ceiling was zero), where every float32 configuration
+produced identical counts. Its section sets `per_file = false`, which gates `per_100kb_max` alone
+(it needs that key) at 13% over the higher rate, and its synthetic entry allows
+`structured_regressions_max = 1`: on the AVX2-only runner an NER span displaced one EMAIL
+match and 13 of that corpus's 3,994 EMAIL characters went unredacted, so that entry tolerates
+a partial leak of one structured value on such CPUs. The int8 base model
+(`gliner-knowledgator-base-onnx`) differed by three detections of 250 and passed its exact
+ceilings on both runners, so it keeps them; a configuration that fails on a third CPU type
+is handled the same way, from its measured spread.
 
 ## Latency: `--latency`
 

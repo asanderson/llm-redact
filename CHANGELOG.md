@@ -483,6 +483,15 @@ and tags `vX.Y.Z`.
   one for good with `[detection.ner.labels] PER = "PER"`.
 
 ### Fixed
+- The NER bench's CI gates for `gliner-knowledgator-edge-onnx` (an int8-quantized ONNX model) failed
+  on some GitHub-hosted runners and passed on others for the same commit: integer kernels differ
+  by CPU instruction set, so an AVX2-only runner found 31 false-positive detections where an
+  AVX-512 one found 28, and lost 13 characters of one EMAIL the other kept. Its false-positive
+  ceilings now gate the rate per 100 KB alone (`per_file = false` in `bench/ner_ceilings.toml`, a
+  new optional key that needs `per_100kb_max`), at 13% over the higher rate, and its synthetic
+  entry allows one structured regression; every float32 configuration, whose counts were identical
+  on both runners, and the int8 base model, which passed its exact ceilings on both, keep theirs.
+  The int8 base model's USERNAME recall floors are re-derived from the lower of the two runs.
 - The `hf` backend's BIOES/BILOU decoding failed on an empty or blank string when the model's
   tokenizer adds no special tokens (`openai/privacy-filter`): a window of no token ids reached
   the model, which refused it, so the request failed. Such a window is no longer scored, and

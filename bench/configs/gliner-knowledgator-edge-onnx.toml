@@ -9,6 +9,9 @@
 # catalog status they give are in docs/ner-landscape.md. Downloads stay off:
 # the job pulls the model first (`llm-redact models pull --config` on this
 # file).
+# Its int8 kernels differ by CPU instruction set, so its false-positive
+# ceilings gate the rate alone (per_file = false in bench/ner_ceilings.toml) and
+# its synthetic entry allows one structured regression (docs/ner-bench.md).
 [detection.ner]
 enabled = true
 backend = "gliner"

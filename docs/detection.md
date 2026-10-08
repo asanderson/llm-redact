@@ -1,8 +1,8 @@
 # What gets detected
 
 The complete detection surface: the built-in rule families, deny
-strings, per-rule modes, allowlists, and the optional person-name NER
-backends. The full, current rule list with per-rule comments is in
+strings, per-rule modes, allowlists, and the optional NER backends and
+models. The full, current rule list with per-rule comments is in
 [`config.example.toml`](../config.example.toml); how each rule is
 scored and gated is in [assurance.md](assurance.md) and the benchmark
 section of the [README](../README.md#benchmark-and-live-validation).
@@ -99,8 +99,14 @@ a three-way selector per rule.
 
 ## Person-name detection (optional NER)
 
-Regex catches structured values (emails, keys) but misses most person names.
-Optional NER backends close that gap (`[detection.ner]`):
+Regex catches structured values (emails, keys) but misses most person names,
+and has no reliable grammar for street addresses, dates of birth, usernames,
+account numbers or passport and driver's-licence numbers. Optional NER
+backends close that gap (`[detection.ner]`): names by default (`entities =
+["PERSON"]`) and, with a PII-trained model and the types listed in
+`entities`, the contextual types too — best effort, measured per model
+([ner-landscape.md](ner-landscape.md#verdicts-at-a-glance)), not a guarantee
+([threat-model.md](threat-model.md#contextual-values-rules-and-models)):
 
 ```bash
 # spaCy (default backend, ~tens of MB, ~1-5 ms/string):
@@ -116,7 +122,14 @@ uv sync --extra gliner2
 # context scoring over the same spaCy model; supports score_threshold):
 uv sync --extra presidio
 uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+# or any Hugging Face token-classification model, PII models included
+# (pulls torch; supports score_threshold), or Stanza (60+ languages):
+uv sync --extra hf        # or: --extra stanza
 ```
+
+Models for the `gliner`, `gliner2` and `hf` backends come from the Hugging Face
+Hub and are fetched once, explicitly: `llm-redact models pull` (the startup
+downloads nothing unless `allow_download = true`; "Model sources" below).
 
 Presidio entity types that overlap the built-in regex rules
 (`EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_SSN`, `IBAN_CODE`, `CREDIT_CARD`)
@@ -221,13 +234,13 @@ hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
   backends' models are not Hub snapshots and take none). A branch or tag name such as
   `main` is a config error, because it moves. A backend with no entry uses
   the pin llm-redact's model catalog records for the model it loads, when
-  there is one: the default models `urchade/gliner_small-v2.1` and
-  `dslim/bert-base-NER`, `urchade/gliner_medium-v2.1`,
-  `urchade/gliner_multi-v2.1`, `urchade/gliner_multi_pii-v1` and the four
-  `knowledgator/gliner-pii-*-v1.0` sizes are pinned to the commit their
-  `main` branch pointed at on 2026-10-05, and the `gliner2` default
-  `fastino/gliner2-base-v1` to its `main` commit of 2026-10-06. An entry for a backend that is not
-  active is kept and ignored, like a `[detection.ner.models]` entry.
+  there is one: every model in the vetted and caution tables below, the
+  defaults (`urchade/gliner_small-v2.1`, `dslim/bert-base-NER`,
+  `fastino/gliner2-base-v1`) included, is pinned to the commit its `main`
+  branch pointed at when its entry was checked (2026-10-05 to 2026-10-07; the
+  date is in `llm-redact models list --json`, under `facts`). An entry for a
+  backend that is not active is kept and ignored, like a
+  `[detection.ner.models]` entry.
 - `allow_download` (default `false`) decides whether the proxy's startup
   (`serve`, `serve --check`) may fetch a model's pinned files from the Hub
   into the Hugging Face cache. With `false` every model loads from the
@@ -348,7 +361,9 @@ for its catalog status (a policy plugin may).
   leak of at most 0.15 on the synthetic corpus, at most one false positive
   per 50 KB of agent-traffic negatives, and a p50 of at most 100 ms per
   500-character string ([CONTRIBUTING.md](CONTRIBUTING.md#adding-an-ner-model-or-backend),
-  step 6).
+  step 6). The two backend defaults and the `urchade` models are vetted as
+  the models users already run, from before the bar existed; none of the
+  models the bar has been applied to reached vetted.
 - **caution**: configurable and pinned, with the reason shown — for example,
   not yet measured by the llm-redact bench, or measured below a bar (the
   reason then quotes the numbers).
@@ -544,8 +559,11 @@ carry labels that are not folded into `ACCOUNT_NUMBER` (`customer_id`,
 `unique_id`, …), so a quarter of the synthetic corpus's account numbers is
 found and three quarters of their digits leak. Both stay "caution" with
 these numbers. The `PERSON`-only rows request what the default configuration requests, so
-their character leak counts every other labelled value as leaked; the
-default model is unchanged (a change would be a 2.0.0 decision).
+their character leak counts every other labelled value as leaked. The bench
+supports OpenMed-PII Small 44M as a better default for this backend than
+`dslim/bert-base-NER`; the default is unchanged in 1.x, and the switch is
+planned together with raw-entity folding in the next major release (2.0.0;
+[ner-landscape.md](ner-landscape.md#what-the-measurements-decided)).
 
 `openai/privacy-filter` (Apache-2.0; a 1.5B-parameter mixture of experts,
 50M parameters active, 2.8 GB of weights) labels `private_person`,
@@ -688,7 +706,7 @@ llm-redact models verify --dir DIR  # check a folder written by `models pull --t
 
 ## How NER runs
 
-![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model (an hf BIOES/BILOU tagger's spans decoded by llm-redact), the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)
+![Flowchart of one string through one NER backend: the max_chars gate, one call or overlapping windows, the model (an hf BIOES/BILOU tagger's, or a BIO tagger without word pieces', spans decoded by llm-redact), the label policy, the placeholder-type guard, threshold and offset checks, duplicate removal, part merging, rule toggles, the allowlist, overlap resolution with the regex rules and deny strings, and the mode that sends the winner to the vault](diagrams/ner-pipeline.png)
 
 *Static diagram. [Mermaid source](diagrams/ner-pipeline.mmd).*
 
@@ -1001,10 +1019,10 @@ existing `detection.ner_enabled`):
 | Counter | Counts |
 |---|---|
 | `scanned_whole` | strings the model read in one call |
-| `scanned_windowed` | strings the model read in overlapping windows (`hf`, `gliner`) |
+| `scanned_windowed` | strings the model read in overlapping windows (`hf`, `gliner`, `gliner2`) |
 | `skipped_max_chars` | strings longer than `[detection.ner] max_chars`, which the model never read (the regex rules and deny strings still scan them) |
 | `windows` | the windows the windowed strings were read in |
-| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`) |
+| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`, `gliner2`) |
 | `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |
 | `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
 | `inline_calls` | strings the backend ran on the event loop itself, holding up every other request for that string's inference, instead of ahead of the redaction on the NER worker thread |
@@ -1014,7 +1032,7 @@ Each string a backend is handed counts once, under `scanned_whole`,
 `scanned_windowed` or `skipped_max_chars`; with several backends each one
 counts the strings it was handed. `unmatched_entities` lists the configured
 entities no active backend can ever emit (the startup warning above), and
-`model` the model each backend loaded. For the `gliner` and `hf` backends,
+`model` the model each backend loaded. For the `gliner`, `gliner2` and `hf` backends,
 `source` says whether it came from the Hugging Face Hub (`hub`) or a local
 folder (`local`), `model_id` names the Hub model (a folder's: the one its
 `llm-redact-model.json` names, else `null`), `revision` the commit it loads

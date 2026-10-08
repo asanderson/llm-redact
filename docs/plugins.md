@@ -13,6 +13,11 @@ All four plugins carry the SAME eleven commands, defined once in
 `src/llm_redact/plugin_assets.py` and rendered into each tool's command
 format.
 
+These are plugins for the agent tool. A separately installed Python package
+(llm-redact-pro) extends the proxy itself through registry seams instead; the
+one that decides which NER models may load, the model-load policy, is
+described in [detection.md](detection.md#model-load-policies-plugins).
+
 ## Install
 
 ### Claude Code

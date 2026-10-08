@@ -1,7 +1,7 @@
 """The teacher: a local LLM served by Ollama, and the policy for which ones
 may be asked.
 
-POLICY (plan D8/T40; README.md "Licensing"):
+POLICY (README.md "Licensing"):
 
 * only models whose weights are published under Apache-2.0, by exact
   Ollama library name and size tag (:data:`ALLOWED`); a name or tag that can
@@ -83,7 +83,7 @@ DENIED: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"llama"), _LLAMA),
     (
         re.compile(r"qwen"),
-        "Qwen family: refused by name (lineage and procurement policy, plan T40)",
+        "Qwen family: refused by name (lineage and procurement policy)",
     ),
     (re.compile(r"deepseek"), "DeepSeek family: refused by name (lineage and procurement policy)"),
     (re.compile(r"(?<![a-z])(code|shield|embedding)?gemma(?:[123]n?)?(?![0-9])"), _GEMMA),

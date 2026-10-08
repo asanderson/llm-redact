@@ -27,7 +27,7 @@ rules, never instead of them. Planned {{date}}.
 |---|---|---|---|---|
 {{training_data_rows}}
 
-OpenPII 1.5M written confirmation (plan D9): {{openpii_confirmation}}.
+OpenPII 1.5M written confirmation: {{openpii_confirmation}}.
 
 Never trained on: the NER bench's evaluation splits (Nemotron-PII `test`,
 privy `test`, OpenPII `validation`), the frozen agent-traffic evaluation set,
@@ -68,7 +68,7 @@ exported checkpoint at its pinned revision.
 |---|---|
 | | |
 
-Admission (plan D11): vetted only with an OSI-approved license, clean lineage,
+Admission: vetted only with an OSI-approved license, clean lineage,
 PERSON recall ≥ 0.85 and leak rate ≤ 0.15 on the synthetic corpus, ≤ 1 false
 positive per 50 KB of agent-traffic negatives and p50 ≤ 100 ms for 500
 characters on the reference CPU; otherwise caution, with these numbers shown.

@@ -213,6 +213,11 @@ downloaded unless `allow_download = true`, and then only at startup.
 - `llm-redact doctor` — the `models` area says the same, with warnings for
   downloads, pickle weights, unpinned and restricted models.
 
+Which models exist, what each finds (names; with a PII model also
+addresses, dates of birth, usernames and account numbers, best effort) and
+how long strings are read: `docs/detection.md` and `docs/ner-landscape.md`.
+Carrying models into a network with no internet route: `docs/air-gapped.md`.
+
 ## Honesty surfaces
 
 Anything that reduces coverage is surfaced, never silent. Configured
@@ -224,7 +229,10 @@ and (with llm-redact-pro) the dashboard. Runtime state — audit-backup
 upload failures, routing upstreams in cooldown or over budget — appears
 in `/__llm-redact/status`, `llm-redact status`, and the dashboard;
 `doctor` checks the routing config and its credentials, never the
-running proxy's cooldown or budget state.
+running proxy's cooldown or budget state. NER coverage gaps appear the
+same way: strings a model never read because they are longer than
+`max_chars`, and requested entities no loaded backend can emit, are
+counted in `llm-redact status`'s posture block.
 
 ## Going deeper
 

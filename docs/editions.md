@@ -21,7 +21,7 @@ proprietary **`llm-redact-pro`** package.
 | | FOSS core (this repo) | + llm-redact-pro (Pro) | Team | Unlimited / Managed |
 | --- | --- | --- | --- | --- |
 | Named users (email-verified seats) and client authentication: user keys, client certificates, OIDC/SSO (people and workloads), access-proxy identity, Basic/LDAP, brokered provider keys, remote dashboard sign-in, SCIM provisioning | implicit single local user (no authentication code in this repository) | 1 | 25 | unlimited |
-| The entire redaction/rehydration path: every rule, mode, NER backend, deny/allow lists, the realtime relay | ✓ | ✓ | ✓ | ✓ |
+| The entire redaction/rehydration path: every rule, mode, deny/allow lists, the realtime relay, and every NER backend (spaCy, GLiNER, GLiNER2, Presidio, Stanza, Hugging Face) with the model catalog and `llm-redact models` (list, verify, pull) | ✓ | ✓ | ✓ | ✓ |
 | ALL provider adapters — Anthropic/OpenAI/Gemini/Ollama/Cohere/custom **and** AWS Bedrock / Azure OpenAI / GCP Vertex | ✓ | ✓ | ✓ | ✓ |
 | In-memory + persistent unencrypted SQLite vault, JSON logs, JSON `/status` + Prometheus `/metrics` + `/recent`/`/events` feeds, `llm-redact status`/`preview`/`doctor`, agent plugins | ✓ | ✓ | ✓ | ✓ |
 | Browser dashboard: live status view, config editor, redaction-preview card (`/__llm-redact/`) | | ✓ | ✓ | ✓ |

@@ -187,10 +187,10 @@ message names the exact offender; fix it and re-run `serve --check`.
 
 ## "backend \"NAME\" needs torch, which is not installed" / "needs torch >= 2.6 (CVE-2025-32434), but torch VERSION is installed"
 
-From `doctor`, for an enabled `gliner`, `stanza` or `hf` NER backend: these
-backends run on torch, and their library can be present without it
-(transformers imports fine without torch and fails only when a model
-loads), so serve could not build the backend. torch older than 2.6 is
+From `doctor`, for an enabled `gliner`, `gliner2`, `stanza` or `hf` NER
+backend: these backends run on torch, and their library can be present
+without it (transformers imports fine without torch and fails only when a
+model loads), so serve could not build the backend. torch older than 2.6 is
 refused because CVE-2025-32434 lets a crafted checkpoint run code through
 `torch.load(weights_only=True)`, which GLiNER uses for `pytorch_model.bin`
 files. Install the backend's extra (`uv sync --extra hf`, or
@@ -393,6 +393,23 @@ Nothing breaks: the entity simply never redacts anything. Fix the entry or
 pick a model that covers it. While it stands, `llm-redact status` repeats it
 as the posture line `NER entities no backend can emit: … (never detected)`,
 and `/status` lists it in `detection.ner.unmatched_entities`.
+
+## "unknown placeholder type(s) […] in [detection.allowlist_by_type]; known types are […]"
+
+From `serve` / `serve --check` / `doctor` (the detector build): a key of
+`[detection.allowlist_by_type]` names a type nothing emits, so its allowed
+values could never apply. A key is a placeholder type: a built-in rule's
+(`EMAIL`, `AWS_KEY`, …, enabled or not), a custom rule's or deny string's, a
+type the configured `[detection.ner] entities` are emitted as (`PERSON`,
+`ADDRESS`, … — the message lists them with the others), or an entry of
+`entities` as written. A typo, a custom-rule or deny type the file does not
+define, or an NER type `entities` does not request (an `ADDRESS` key without
+`ADDRESS` in `entities`) ends here. Fix the key, or request the type. A key
+written as a raw model label that only NER emits (`"job title"`, `PER`) is
+read as the type NER emits for it, and the startup log says so once at INFO
+level — `[detection.allowlist_by_type] keys read as the types NER emits:
+'job title' -> JOB_TITLE` — which needs no action; write the type
+(`JOB_TITLE`) to silence it.
 
 ## "NER skipped … string(s) longer than max_chars (…) — regex rules still applied"
 
@@ -727,9 +744,9 @@ ships its tokenizer and an `encoder_config`), or a folder written by
 
 ## `llm-redact doctor` under `models`: "allow_download = true: …" / "allow_pickle_weights = true: …" / "… has no pin: the newest cached revision of its default branch loads; …" / "… is not (completely) in the local Hugging Face cache; the proxy's startup will fetch it (allow_download = true)" / "… takes its tokenizer and encoder configuration from its base model …, whose revision the model catalog does not pin: the newest cached revision loads"
 
-The `models` area of `doctor` lists, for the `gliner` and `hf` backends, where
-each model comes from. Its WARN rows are settings worth a second look, not
-errors:
+The `models` area of `doctor` lists, for the `gliner`, `gliner2` and `hf`
+backends, where each model comes from. Its WARN rows are settings worth a
+second look, not errors:
 
 - `allow_download = true`: the proxy's startup may fetch a missing model from
   huggingface.co (the model id, revision and file names; never request
@@ -759,12 +776,13 @@ above): the startup would stop on it.
 ## `llm-redact doctor` under `models`: "…: the local Hugging Face cache was not checked: huggingface_hub is not installed (the … extra installs it)" / `llm-redact models list|verify`: "…: huggingface_hub is not installed (the hf, gliner and gliner2 extras install it)"
 
 doctor, `models list` and `models verify` look models up in the local
-Hugging Face cache through `huggingface_hub`, which the `hf` and `gliner`
-extras install. Without it, a Hub model's files are reported `unchecked`,
-and `verify` exits 1 (it cannot tell that the model is complete). Install
-the backend's extra (`uv sync --extra hf` / `--extra gliner`); the `ner`
-area's FAIL row in doctor says the same. A model configured as a local
-folder is checked without it (the Hub base model of a GLiNER folder is not).
+Hugging Face cache through `huggingface_hub`, which the `hf`, `gliner` and
+`gliner2` extras install. Without it, a Hub model's files are reported
+`unchecked`, and `verify` exits 1 (it cannot tell that the model is
+complete). Install the backend's extra (`uv sync --extra hf`,
+`--extra gliner` or `--extra gliner2`); the `ner` area's FAIL row in doctor
+says the same. A model configured as a local folder is checked without it
+(the Hub base model of a GLiNER folder is not).
 
 ## `llm-redact models`: "llm-redact models: cannot read PATH (…)"
 
@@ -804,8 +822,9 @@ the cause and pull again.
 
 ## `llm-redact models pull`: "FAIL  pulling needs huggingface_hub, which the hf, gliner and gliner2 extras install; …" / "--as needs --to" / "--as needs an absolute path: where DIR is mounted for the proxy (for example /models)"
 
-Install the backend's extra on the machine that pulls (`uv sync --extra hf`
-or `--extra gliner`; both bring `huggingface_hub`). `--as PATH` only says
+Install the backend's extra on the machine that pulls (`uv sync --extra hf`,
+`--extra gliner` or `--extra gliner2`; each brings `huggingface_hub`).
+`--as PATH` only says
 where the folders written by `--to DIR` will be mounted; give both, and give
 `--as` as an absolute path (`/models`, or `C:\models` on Windows). A relative
 path would be read against the proxy's working directory, and one such as
@@ -838,11 +857,11 @@ MiB (a manifest lists tens of files; this is not one `pull --to` wrote), not
 a UTF-8 JSON object of kind `llm-redact-models`, a newer schema (upgrade
 llm-redact), a `models` value that is not a list, two entries naming the same
 model folder, or an entry that is not well formed (`models[I]` that is not
-an object, a backend other than `gliner` or `hf`, a folder name that is not a
-single plain name, a file path that is absolute or contains `..`, a path
-listed twice, a size or SHA-256 of the wrong shape). Point `--dir` at the
-folder `models pull --to` wrote (the one holding `llm-redact-models.json`),
-or pull again.
+an object, a backend other than `gliner`, `gliner2` or `hf`, a folder name
+that is not a single plain name, a file path that is absolute or contains
+`..`, a path listed twice, a size or SHA-256 of the wrong shape). Point
+`--dir` at the folder `models pull --to` wrote (the one holding
+`llm-redact-models.json`), or pull again.
 
 ## `[detection.ner] BACKEND model 'ID' has model catalog status "restricted": …`
 
@@ -971,6 +990,24 @@ dataset; a run with nothing recorded fails rather than passing unmeasured.
 Record a baseline as [ner-bench.md](ner-bench.md#recording-a-baseline)
 describes, or drop `--check` to only print the report.
 
+## NER bench: "TYPE recall X is below the floor Y" / "TYPE type_leak_max: X is above the ceiling Y" / "leak_max: X is above the ceiling Y" / "over_redaction_max: …" / "structured regressions: N gold spans the rules alone find exactly are lost with NER on (allowed M)"
+
+`--check` measured this configuration on this dataset below a recorded floor
+or above a recorded ceiling of `bench/ner_thresholds.toml`
+(`TYPE exact_recall` is the same gate on exact spans). Something changed what
+the model finds: its revision or precision, the decoding, a window, the label
+policy or the entities the configuration asks for. Read the report (types,
+counts and rates, never text) and run with `--dump-errors` (to a file outside
+the repository) to see the misses; then either fix the regression, or — when
+the new numbers are the correct ones, after a model or decoder change you
+reviewed — record the baseline again as
+[ner-bench.md](ner-bench.md#recording-a-baseline) describes, in the same
+change and with the reason. Never lower a floor only to get green. The last
+form means a model span replaced the exact match of a regex rule (a wider
+span won overlap resolution): `--dump-errors` lists them as `regression`
+records; narrow the entities, fix the label map, or accept a documented
+number with `structured_regressions_max`.
+
 ## NER bench: "recall floor for TYPE cannot be checked: the run holds no gold spans of TYPE"
 
 The thresholds entry sets a floor for a type the scored samples never
@@ -1003,6 +1040,20 @@ never remove `--require-hashes` to get past it.
 `--dump-errors` writes dataset text, so it refuses a path inside a git
 repository, where the file could be committed. Write it under `/tmp` or your
 home directory, and delete it when done.
+
+## NER bench: "cannot write --dump-errors file: refusing to write the dump through a symlink"
+
+`--dump-errors PATH` truncates and rewrites PATH, so it will not follow a
+symbolic link (the link's target could be a file you did not mean to
+overwrite). Name the real file, or remove the link, and run again; the run
+itself finished, only the dump was refused.
+
+## NER bench: "--fp-corpus DIR is not a directory"
+
+`--fp-corpus` takes the directory of negatives to scan, normally
+`bench/fp_corpus` in a checkout of the repository (it is not part of the
+installed wheel). Run it from a checkout or pass the path of a directory
+that exists.
 
 ## NER bench: "dataset 'NAME' holds real data; --dump-errors would write its text to disk: add --allow-real-data-dump to confirm"
 
@@ -1135,3 +1186,31 @@ The full pipeline's median per-string time crossed the ceiling recorded in
 `[CONFIG.latency]` of the thresholds file. Latency depends on the CPU the
 report names: compare like with like before treating it as a regression,
 and raise the ceiling (with the CPU in its `note`) when the machine changed.
+
+## NER bench: "[CONFIG.DATASET] in bench/ner_thresholds.toml: unknown key(s) […]" / "… must be a table of type = floor" / "… must be a number" / "[CONFIG] FILE must be a table of type = maximum" / "unknown latency key(s) […]" / "PATH not found"
+
+A gate file (`bench/ner_thresholds.toml`, `bench/ner_ceilings.toml`, or the
+file named by `--thresholds` / `--ceilings`) is not what the bench reads. The
+bench refuses to guess: a misspelled key would silently gate nothing. The
+message names the section and the key; the keys, their shapes and an example
+are in [ner-bench.md](ner-bench.md#the-gate-benchner_thresholdstoml) (recall
+and leak gates, latency ceilings) and
+[ner-bench.md](ner-bench.md#false-positives-on-agent-traffic---fp-corpus)
+(ceilings per file and type). `PATH not found` / `PATH: <TOML error>` is the
+file itself missing or not valid TOML. Other shapes it refuses read
+`type_leak_max must be a table of type = ceiling`, and in the ceilings file
+`[CONFIG] FILE TYPE must be an integer` and
+`[CONFIG] per_100kb_max must be a number`, and in the latency table
+`p50_ms must be a table of length = milliseconds` (`p95_ms` likewise).
+
+## NER bench: "--config PATH is required (a config with [detection.ner] enabled)"
+
+Every run but `--list-datasets` scores a configuration: pass `--config` with
+the llm-redact config to measure (for example a file of `bench/configs/`).
+
+## NER bench: "unknown dataset 'NAME'; known datasets: …" / "dataset 'NAME' has no split 'SPLIT'; its splits: …"
+
+`--dataset` takes `NAME` or `NAME:SPLIT` from the list the message prints
+(`--list-datasets` shows each with its splits, license and attribution). The
+names are lower case (`openpii`, `nemotron`, `privy`, `pupa`, `mapa`,
+`creddata`, `agent-eval`, `synthetic`, `rules`).

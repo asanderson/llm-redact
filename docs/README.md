@@ -55,7 +55,7 @@ reference and enforcement internals ship with it.
 | --- | --- |
 | [SECURITY.md](SECURITY.md) | The security policy: how to report a vulnerability (GitHub private reporting) and what counts as one. |
 | [privacy.md](privacy.md) | The privacy policy: no telemetry or phone-home; what stays on your machine (vault, metadata-only audit) and what leaves it (redacted provider traffic, opt-outs you configure). |
-| [threat-model.md](threat-model.md) | What the proxy defends against, what it deliberately does not, and why loopback is the default. |
+| [threat-model.md](threat-model.md) | What the proxy defends against, what it deliberately does not, and why loopback is the default — including what a PII model does and does not add for contextual values, long-text coverage and the model supply chain. |
 | [security-dataflows.md](security-dataflows.md) | The request-path trust boundaries with each policy decision/enforcement point mapped to code. |
 | [security-testing.md](security-testing.md) | The red-team boundary suite, canary leak harness, and differential fuzzing. |
 | [security-review.md](security-review.md) | The adversarial security review record and the fixes it produced. |
@@ -71,7 +71,7 @@ reference and enforcement internals ship with it.
 | [dependencies.md](dependencies.md) | What ships and why: the three runtime deps, every extra, and the vendored-code policy (pinned to pyproject by test). |
 | [SBOM.md](SBOM.md) | The software bill of materials: every package by install path — runtime closure, extras, dev toolchain — and how to verify the per-release CycloneDX artifact (pinned to pyproject by test). |
 | [versioning.md](versioning.md) | SemVer policy: what counts as breaking, deprecation windows, release verification. |
-| [ner-landscape.md](ner-landscape.md) | The FOSS NER landscape survey behind the optional backends. |
+| [ner-landscape.md](ner-landscape.md) | The decision record behind the optional NER backends: the survey and the bar a backend must clear, the verdict on every PII-specific open model the bench measured (license, training data, status, recall, leak, false positives, latency), the `hf` and `gliner` default decisions, and why LLM-based extractors and SaaS PII APIs are rejected as detectors. |
 | [compaction-relink.md](compaction-relink.md) | The rejected design record for relinking history-compaction session forks — read before re-attempting — and the token floor that keeps a fork (or any request carrying tokens its session never issued) from giving one token two meanings, with its exact residual. |
 | [playground-plan.md](playground-plan.md) | The proposal (not yet built) for public online playgrounds: the real proxy running in the visitor's browser under Pyodide for llm-redact, a private short-lived sandbox per visitor for llm-redact-pro, rule-category toggles, isolation and privacy, hosting, CI and the owner decisions it needs. |
 

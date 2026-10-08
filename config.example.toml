@@ -410,7 +410,10 @@ allowlist_patterns = ['^10\.', '^192\.168\.']
 # exempt_servers = ["my-internal-server"]
 
 [detection.ner]
-# Person-name detection (regex misses most names).
+# Optional NER (off by default): person names (regex misses most names) and,
+# with a PII-trained model, addresses, dates of birth, usernames and account
+# numbers — best effort, measured per model, never a guarantee
+# (docs/detection.md, docs/ner-landscape.md).
 # backend = "spacy" (default): uv sync --extra ner, then install the model:
 #   uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 #   (~1-5 ms per scanned string on CPU)
@@ -424,6 +427,16 @@ allowlist_patterns = ['^10\.', '^192\.168\.']
 #   spaCy model; supports score_threshold). Entity types that overlap the
 #   built-in rules (EMAIL_ADDRESS, PHONE_NUMBER, US_SSN, IBAN_CODE,
 #   CREDIT_CARD) fold into the built-in placeholder names.
+# backend = "stanza": uv sync --extra stanza (60+ languages, no scores).
+# backend = "hf": uv sync --extra hf (torch + transformers); any Hugging Face
+#   token-classification model, PII models included; supports score_threshold.
+#   A PII model for addresses, dates of birth, usernames and account numbers
+#   (fetch it once with `llm-redact models pull`; docs/detection.md "PII
+#   models for the hf backend"):
+#     backend = "hf"
+#     entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
+#   and name the model in the `[detection.ner.models]` table below:
+#     hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
 enabled = false
 backend = "spacy"
 # Run several backends at once, each toggled individually (wins over
@@ -435,6 +448,7 @@ backend = "spacy"
 # spacy = "en_core_web_md"
 # gliner = "urchade/gliner_medium-v2.1"
 # gliner2 = "fastino/gliner2-base-v1"
+# hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
 # Model labels become placeholder types through one label policy for every
 # backend (docs/detection.md "Placeholder types from NER models"): synonyms
 # fold into one type (PER, FIRST_NAME, SURNAME -> PERSON; EMAIL_ADDRESS ->
@@ -465,9 +479,12 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 #                            # 0.5; a set value applies to every backend.
 # Model sources of the Hugging Face Hub backends (gliner, gliner2, hf); see
 # docs/detection.md "Model sources". Each loads its model from the local
-# cache at the pinned revision (hf: safetensors only unless
-# allow_pickle_weights; gliner: with its pinned base model's tokenizer, in a
-# self-contained folder; gliner2: a self-contained checkpoint).
+# cache at the pinned revision (the catalog's, or yours; otherwise the newest
+# cached one, flagged by `doctor`). hf: safetensors only unless
+# allow_pickle_weights; gliner and gliner2: safetensors or ONNX, else a
+# pytorch_model.bin read through torch's weights_only loader; gliner: with its
+# pinned base model's tokenizer, in a self-contained folder; gliner2: a
+# self-contained checkpoint).
 # allow_download = false        # default: whether the startup may fetch pinned model
 #                               # files from the Hub (false: local cache or folder
 #                               # only; `llm-redact models pull` fills the cache).

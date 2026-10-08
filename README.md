@@ -113,12 +113,16 @@ that cannot cover:
   placeholder ("the CFO's personal address «EMAIL_004»"). Only omission
   fixes that.
 - **Values with no reliable shape.** Bare-digit phone numbers and SSNs,
-  street addresses, and passport/driver's-license numbers are
-  deliberately never matched (no grammar separates them from ordinary
-  numbers), and a secret format no rule knows will not fire. You can
-  extend coverage with `[[detection.custom_rules]]`, deny strings, and
-  the NER extras — and `llm-redact preview` shows exactly what fires on
-  a given text before you rely on it.
+  street addresses, dates of birth, usernames and passport/driver's-license
+  numbers are deliberately never matched by a rule (no grammar separates
+  them from ordinary words and numbers), and a secret format no rule knows
+  will not fire. You can extend coverage with
+  `[[detection.custom_rules]]`, deny strings, and the NER extras — a PII
+  model finds addresses, dates of birth, usernames and account numbers on a
+  best-effort basis, measured per model but never guaranteed
+  ([threat model](docs/threat-model.md#contextual-values-rules-and-models)) —
+  and `llm-redact preview` shows exactly what fires on a given text before
+  you rely on it.
 - **Media.** Base64 images, PDFs, and audio are never decoded and
   scanned; on realtime voice connections, only the text modality is
   redacted — what a user *says* reaches the provider as-is. File uploads
@@ -463,6 +467,15 @@ the package (see [docs/editions.md](docs/editions.md)).
   rehydration, and ~100 ms for a body of 20,000 short strings (short
   strings are gated per string: only the rules that could match one run
   on it — the same body cost ~2 s when every rule ran on every string).
+- NER models are measured by a separate, statistical bench:
+  `uv run python -m llm_redact.bench.ner --config my-ner.toml` scores the
+  whole detection pipeline on a generated corpus (or a published dataset),
+  and `--fp-corpus bench/fp_corpus` is its own run that counts the false
+  positives a model adds to the negatives corpus; `--check` compares a run
+  with recorded recall floors and leak ceilings, so it needs a baseline
+  recorded for your config first — see
+  [docs/ner-bench.md](docs/ner-bench.md#recording-a-baseline). The
+  deterministic gate above never changes for it.
 - `uv run python scripts/live_smoke.py` runs opt-in smoke tests against the
   real provider APIs (needs API keys, spends credits, never runs in default
   test or CI runs) — including an event-shape drift detector for the
@@ -507,22 +520,38 @@ the curl output shows the originals restored in the stream.
   (GitHub, GitLab, Anthropic, OpenAI, Slack, Databricks, and more).
 - PEM and PGP/GPG private-key blocks, plus a keyword-context + entropy
   rule for generic secrets (`password = "..."` etc.).
+- Optional **NER models** (off by default) for what no rule can match:
+  person names, and with a PII-trained model street addresses, dates of
+  birth, usernames and account numbers — best effort, measured per model by
+  the NER bench, never a guarantee. Six backends (spaCy, GLiNER, GLiNER2,
+  Presidio, Stanza, and any Hugging Face token-classification model);
+  strings longer than a model's window are read in overlapping windows, and
+  every string a model did not read is counted in `/status` and `/metrics`.
+  Models load at a pinned commit for a catalogued model or when you pin
+  one (otherwise the newest cached revision, flagged by `doctor`), from local
+  files, without code from their repositories, and nothing is downloaded unless
+  you allow it at startup (`llm-redact models pull` fetches them yourself;
+  an air-gapped install carries checksummed folders —
+  [docs/air-gapped.md](docs/air-gapped.md)); detection runs on a worker
+  thread, off the proxy's event loop.
 
 The complete annotated reference is
 [docs/detection.md](docs/detection.md) — the full rule list, **deny
 strings** (values that must always be redacted, highest precedence,
 never subject to modes), **per-rule modes** (`redact`/`warn`/`block`),
 custom rules with checksum validators, global and per-type allowlists,
-and the optional **person-name NER backends** (spaCy, GLiNER, GLiNER2,
-Presidio, Stanza, Hugging Face). The current rule list also ships in
-[`config.example.toml`](config.example.toml).
+and the optional **NER backends** (spaCy, GLiNER, GLiNER2, Presidio,
+Stanza, Hugging Face) with their model catalog. The current rule list also
+ships in [`config.example.toml`](config.example.toml).
 
-The NER backends are backed by a research survey,
+The NER backends are backed by a research survey and decision record,
 [docs/ner-landscape.md](docs/ner-landscape.md) — the engines evaluated
-and the bar each had to clear, why LLM-based extractors and SaaS PII
+and the bar each had to clear, the PII-specific open models the bench
+measured with a verdict for each, why LLM-based extractors and SaaS PII
 APIs are rejected as a class (the raw pre-redaction text must never
 leave your machine), and the commercial self-hosted engines that would
-qualify if demand materializes.
+qualify if demand materializes. [docs/ner-bench.md](docs/ner-bench.md)
+explains how models are measured.
 
 ## Security
 

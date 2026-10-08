@@ -1,9 +1,9 @@
 # Assurance: proving the suites have teeth
 
-Phase 18 ([security-testing.md](security-testing.md)) proved the guarantees
-are *correct*. Phase 19 ([resilience.md](resilience.md)) proved they *hold
-under fault*. Both rest on a premise that green checkmarks alone cannot
-establish: **that the suites would actually FAIL if a guard were silently
+The security-testing record ([security-testing.md](security-testing.md))
+proved the guarantees are *correct*; the resilience record
+([resilience.md](resilience.md)) proved they *hold under fault*. Both rest
+on a premise that green checkmarks alone cannot establish: **that the suites would actually FAIL if a guard were silently
 weakened or a checksum table corrupted.** This document is the record of
 measuring that premise — mutation testing over the load-bearing core, one
 falsifiable statement of "never a wrong value", differential fuzzing up
@@ -237,15 +237,32 @@ Neither gate replaces the other: the deterministic gate stays unchanged and
 runs without any model; the statistical one needs a model and states what it
 measured.
 
-Both run in CI. The `ner-models` job pulls the default `hf` and `gliner`
-models at their catalog pins and, on every pull request, gates each
-configuration in `bench/configs/` against its recorded floors and
-ceilings — the synthetic corpus and the false-positive ceilings of
-`bench/ner_ceilings.toml` — after running the `real_model` tests, where a
-test that would skip for a missing model or extra fails the job instead. A
-weekly `ner-eval` workflow scores the same configurations on slices of two
-published datasets, report only until their baselines are recorded
-([ner-bench.md](ner-bench.md#ci)).
+Both run in CI. The `ner-models` job pulls every model that the
+configurations in `bench/configs/` and the `real_model` tests name, at their
+catalog pins, and, on every pull request, gates each configuration in
+`bench/configs/` against its recorded floors and ceilings — the synthetic
+corpus and the false-positive ceilings of `bench/ner_ceilings.toml` — after
+running the `real_model` tests, where a test that would skip for a missing
+model or extra fails the job instead. A model too slow for a runner
+(`bench/configs/manual/`) is checked against the same kind of baselines by
+hand, and CI only smoke-tests it. A weekly `ner-eval` workflow scores the
+same configurations on slices of two published datasets, report only until
+their baselines are recorded ([ner-bench.md](ner-bench.md#ci)).
+
+What the statistical gates do not promise is as important as what they do:
+a floor is a regression gate on a generated corpus and a negatives corpus, so
+it says a model still behaves as it was measured, not that it finds a given
+value in your traffic ([threat-model.md](threat-model.md#contextual-values-rules-and-models)).
+
+**Latency is measured, not promised.** `python -m llm_redact.bench
+--latency --check` gates only four deliberately generous p50 smoke ceilings
+(a 100 KB JSON body, 100 KB of dense prose, a body of 20,000 short strings,
+and the proxy's own overhead on a 100 KB body: 150, 100, 800 and 150 ms,
+about ten times the healthy numbers), enough to catch accidental quadratic
+behavior and nothing finer; every other figure it prints is report only. The
+NER bench's `--latency` run is report only too until a configuration records
+`[<config>.latency]` ceilings, and none does: a model's time per string
+depends on the CPU the report names ([ner-bench.md](ner-bench.md#latency---latency)).
 
 ## Reproducible builds
 

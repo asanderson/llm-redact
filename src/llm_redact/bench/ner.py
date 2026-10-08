@@ -478,7 +478,12 @@ def _run(args: argparse.Namespace) -> int:
         key = dataset_key(spec, split, args.language)
         passed = f"[{_toml_key(config_name)}.{_toml_key(key)}]"
     if errors is not None:
-        write_dump(args.dump_errors, errors)
+        try:
+            write_dump(args.dump_errors, errors)
+        except OSError as exc:
+            raise BenchError(
+                f"cannot write --dump-errors file: {exc.strerror or type(exc).__name__}"
+            ) from exc
         print(f"{len(errors)} error records written to {args.dump_errors} (mode 0600)")
     if failures is None:
         return 0

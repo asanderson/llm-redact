@@ -7,19 +7,19 @@ human verifies every row, and the frozen set is scored by the NER bench
 (`python -m llm_redact.bench.ner --dataset agent-eval --path FILE`,
 [docs/ner-bench.md](../../docs/ner-bench.md)).
 
-The data stays private (plan decision D7): generated, verified and frozen
+The data stays private: generated, verified and frozen
 files are written outside every git work tree (each script refuses a path
 inside one), as mode-0600 files, by default under
 `${XDG_DATA_HOME:-~/.local/share}/llm-redact/pii-corpus/`. Nothing these
 scripts print or log contains a generated or audited text value: they print
 counts, ids, offsets, types and model names.
 
-| Script | Plan task | What it does |
+| Script | What it does |
 |---|---|---|
-| `generate.py` | T40 | Asks the teacher for tagged artifacts, grounds every span, writes unverified JSONL rows and a run manifest. |
-| `review.py` | T42 | Shows each generated row to a human for accept, edit or reject (`review`), then writes the frozen evaluation set with its manifest (`freeze`). Rules: [GUIDELINES.md](GUIDELINES.md). |
-| `train_student.py` | T43 | The student-model recipe skeleton: `plan` checks the training sources against [training_sources.toml](training_sources.toml) (OpenPII refused until an owner commit records the D9 confirmation there; an agent-corpus share must be disjoint from the frozen evaluation set) and writes the data manifest and a model card from [MODEL_CARD_TEMPLATE.md](MODEL_CARD_TEMPLATE.md); it trains nothing. Recipe: [TRAINING.md](TRAINING.md). |
-| `audit.py` | T41 | Has the teacher read `bench/fp_corpus` beside the detectors and lists candidate misses and false positives (file, offsets, type, reason). Report only. |
+| `generate.py` | Asks the teacher for tagged artifacts, grounds every span, writes unverified JSONL rows and a run manifest. |
+| `review.py` | Shows each generated row to a human for accept, edit or reject (`review`), then writes the frozen evaluation set with its manifest (`freeze`). Rules: [GUIDELINES.md](GUIDELINES.md). |
+| `train_student.py` | The student-model recipe skeleton: `plan` checks the training sources against [training_sources.toml](training_sources.toml) (OpenPII refused until an maintainer commit records AI4Privacy's confirmation there; an agent-corpus share must be disjoint from the frozen evaluation set) and writes the data manifest and a model card from [MODEL_CARD_TEMPLATE.md](MODEL_CARD_TEMPLATE.md); it trains nothing. Recipe: [TRAINING.md](TRAINING.md). |
+| `audit.py` | Has the teacher read `bench/fp_corpus` beside the detectors and lists candidate misses and false positives (file, offsets, type, reason). Report only. |
 
 ## Requirements
 
@@ -156,7 +156,7 @@ file's SHA-256, row and hard-negative counts, spans by type, and rows by
 prompt, teacher, teacher digest, seed, reviewer and decision — no text. An
 existing frozen set is replaced only with `--force`. The NER bench reads it
 with `--dataset agent-eval --path FROZEN.jsonl` and refuses a file that no
-longer matches its manifest. Keep the frozen set private (plan D7): outside
+longer matches its manifest. Keep the frozen set private: outside
 every git work tree, never in an issue, a chat or a model prompt.
 
 ## Auditing the false-positive corpus (`audit.py`)
@@ -198,7 +198,7 @@ changed automatically.
 The teacher's output becomes evaluation data and, later, possibly training
 data for a student model shipped to users. A model whose terms reach its
 output would pass duties to that student, so only models whose weights are
-published under **Apache-2.0** may teach (plan T40). `teacher.py` enforces it
+published under **Apache-2.0** may teach. `teacher.py` enforces it
 three ways:
 
 1. **Allowlist by exact name and size tag** (checked 2026-10-05 against each

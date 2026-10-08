@@ -495,6 +495,24 @@ def test_cli_input_errors_exit_2(
     assert message in capsys.readouterr().err
 
 
+def test_cli_refuses_a_dump_through_a_symlink_with_an_error_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_transformers(monkeypatch, FakeHfPipe(findings=[("config", "PER", 0.99)]))
+    target = tmp_path / "target.jsonl"
+    target.write_text("old")
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(target)
+    argv = ["--config", str(_config(tmp_path)), "--dataset", "rules", "--limit", "0"]
+    assert bench_ner.main([*argv, "--dump-errors", str(link)]) == 2
+    err = capsys.readouterr().err
+    assert (
+        "error: cannot write --dump-errors file: refusing to write the dump through a symlink"
+        in err
+    )
+    assert target.read_text() == "old"
+
+
 def test_cli_build_errors_exit_2(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

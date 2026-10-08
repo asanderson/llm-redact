@@ -1041,6 +1041,20 @@ never remove `--require-hashes` to get past it.
 repository, where the file could be committed. Write it under `/tmp` or your
 home directory, and delete it when done.
 
+## NER bench: "cannot write --dump-errors file: refusing to write the dump through a symlink"
+
+`--dump-errors PATH` truncates and rewrites PATH, so it will not follow a
+symbolic link (the link's target could be a file you did not mean to
+overwrite). Name the real file, or remove the link, and run again; the run
+itself finished, only the dump was refused.
+
+## NER bench: "--fp-corpus DIR is not a directory"
+
+`--fp-corpus` takes the directory of negatives to scan, normally
+`bench/fp_corpus` in a checkout of the repository (it is not part of the
+installed wheel). Run it from a checkout or pass the path of a directory
+that exists.
+
 ## NER bench: "dataset 'NAME' holds real data; --dump-errors would write its text to disk: add --allow-real-data-dump to confirm"
 
 The dataset holds real text (real prompts, code or documents). Its errors

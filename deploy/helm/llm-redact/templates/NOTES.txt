@@ -43,9 +43,12 @@ Mode: STANDALONE — a shared in-cluster proxy (Deployment + Service{{ if .Value
   "{{ .Values.image.tag | default .Chart.AppVersion }}" is the STOCK Free image, which ships without
   the RDBMS drivers and crypto extras — the proxy will REFUSE to start (missing
   driver / off-box-DSN-without-fernet), and a server RDBMS vault is an
-  llm-redact-pro subsystem anyway. Use the paid distribution's image (paired
-  with a license):
-    image.repository=<the llm-redact-pro image>  image.tag={{ .Chart.AppVersion }}-pro
+  llm-redact-pro subsystem anyway. Use the llm-redact-pro image (paired with a
+  license; it adds the crypto extra and the postgresql and mysql drivers),
+  tagged with the llm-redact-pro version, not this chart's appVersion. It is
+  in a private registry, so the pod needs an image pull secret:
+    image.repository=ghcr.io/asanderson/llm-redact-pro  image.tag=<llm-redact-pro version>
+    imagePullSecrets[0].name=<your ghcr.io pull secret>
   See docs/editions.md and the llm-redact-pro repo's docs/vault-rdbms.md.
 {{- end }}
 {{- else -}}

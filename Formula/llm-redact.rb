@@ -4,8 +4,8 @@
 #
 # NOTE: url/sha256 below point at the llm-redact-proxy sdist on PyPI and are
 # refreshed by scripts/update_formula.py as part of the release runbook
-# (RELEASING.md). Until the first PyPI release lands they hold placeholders
-# and the formula does not install.
+# (docs/RELEASING.md), once PyPI lists the new version; until then the formula
+# keeps installing the previous release.
 class LlmRedact < Formula
   include Language::Python::Virtualenv
 

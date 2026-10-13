@@ -97,13 +97,21 @@ internet access:
 
 ```bash
 docker pull ghcr.io/asanderson/llm-redact:<version>-ner        # connected side
+docker buildx imagetools inspect ghcr.io/asanderson/llm-redact:<version>-ner | grep -m1 '^Digest:'   # the <digest>
 cosign verify ghcr.io/asanderson/llm-redact@<digest> \
-  --certificate-identity-regexp 'https://github.com/asanderson/llm-redact/.*' \
+  --certificate-identity-regexp '^https://github\.com/asanderson/llm-redact/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 docker save ghcr.io/asanderson/llm-redact:<version>-ner | gzip > llm-redact-ner.tar.gz
 # carry the file in, then on the other side:
 docker load < llm-redact-ner.tar.gz
 ```
+
+The `<digest>` is the top-level `Digest:` line `imagetools inspect` prints,
+the image's multi-platform index: only that digest is signed, not the
+per-platform images listed under it. The signature is a Sigstore bundle
+attached to the index (no `.sig` tag), so it takes a cosign release that
+verifies Sigstore bundle signatures: cosign 3 verifies it as shown; cosign
+2.6 needs `--new-bundle-format` added.
 
 ### Health probes
 

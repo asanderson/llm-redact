@@ -9,9 +9,10 @@ WORKDIR /app
 # --extra extract (pypdf, imported only by the isolated extraction worker):
 # [extraction] with its default formats reads PDFs, and without it an enabled
 # [extraction] refuses to start (docs/extraction.md).
-# EXTRAS is overridable so release.yml can build the `-rdbms` image variant
-# (adds vault-postgres/vault-mysql/crypto for the Helm standalone shared-vault
-# path — a server DSN without those extras refuses startup).
+# EXTRAS is overridable for a derived image (--build-arg EXTRAS=...). This
+# repository's release builds only the stock image and its -ner variant;
+# llm-redact-pro builds its own image variants (with the server-vault drivers
+# and crypto) from its own Dockerfile.
 ARG EXTRAS="--extra perf --extra realtime --extra extract"
 # The -ner variant (release.yml, tag suffix -ner; docs/deployment.md) adds
 # the NER extras (NER_EXTRAS="--extra hf --extra gliner") with a CPU-only

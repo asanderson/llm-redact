@@ -18,11 +18,13 @@ mode: sidecar
 image:
   repository: ghcr.io/asanderson/llm-redact
   # Defaults to the chart's appVersion when empty. The stock Free image ships
-  # the perf+realtime extras ONLY — a server RDBMS vault (postgresql/mysql) and
-  # vault encryption are llm-redact-pro subsystems whose image (`<version>-pro`,
-  # adding the vault-postgres, vault-mysql, and crypto extras) ships from the
-  # paid llm-redact-pro distribution (NOTES.txt warns when the values ask for
-  # an RDBMS backend on the stock FOSS image). See docs/editions.md.
+  # the perf, realtime and extract extras ONLY — a server RDBMS vault
+  # (postgresql/mysql) and vault encryption are llm-redact-pro subsystems. They
+  # run on the llm-redact-pro image (repository ghcr.io/asanderson/llm-redact-pro,
+  # tag = the llm-redact-pro version, not this chart's appVersion), which adds
+  # the vault-postgres, vault-mysql and crypto extras; it is in a private
+  # registry, so set imagePullSecrets below (NOTES.txt warns when the values
+  # ask for an RDBMS backend on the stock FOSS image). See docs/editions.md.
   tag: ""
   # "" = the stock image; "ner" = its -ner variant (tag <version>-ner): the
   # hf and gliner NER extras on a CPU-only torch. NER is Free; the variant
@@ -70,8 +72,8 @@ vault:
   # restart wipes the vault and token numbers get reissued.
   backend: memory
   # "none" | "fernet". Encrypted vaults need the llm-redact-pro package, a key
-  # Secret, and the -rdbms image variant (the crypto extra is not in the stock
-  # image).
+  # Secret, and the llm-redact-pro image (see image above; the crypto extra is
+  # not in the stock image).
   encryption: none
   # Secret holding key `vault-key` for at-rest encryption (optional).
   # Create it: kubectl create secret generic llm-redact-vault \

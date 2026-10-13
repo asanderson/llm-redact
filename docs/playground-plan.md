@@ -855,13 +855,15 @@ leaks, but the type is surprising, and the playground will show it.
 
 ## Appendix B: housekeeping found while planning
 
-- CLAUDE.md lists `scripts/issue_license.py gen-key|sign`, but that script
-  is not in this repository; licence signing lives in llm-redact-pro.
-- CLAUDE.md's ops bullet says release.yml builds and signs an `-rdbms`
-  image variant; release.yml notes, near line 171, that the variant moved to
-  the llm-redact-pro release.
-- docs/RELEASING.md says the image is not signed yet; release.yml signs it
-  with cosign by digest.
+All three were fixed in the 1.12.0 release documentation:
+
+- CLAUDE.md listed `scripts/issue_license.py gen-key|sign`, a script that
+  is not in this repository (licence signing lives in llm-redact-pro); the
+  line was removed.
+- CLAUDE.md's ops bullet said release.yml builds and signs an `-rdbms`
+  image variant; it now says the variant moved to the llm-redact-pro release.
+- docs/RELEASING.md said the image is not signed yet; it now describes the
+  cosign signature release.yml makes over every image digest.
 
 ## Appendix C: reproducing the checks
 

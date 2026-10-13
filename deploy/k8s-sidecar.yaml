@@ -7,7 +7,8 @@
 #
 # This is a template: replace `your-agentic-tool` and its image, pick the
 # vault backend you need, and set any provider [providers.*] overrides via a
-# mounted config (a ConfigMap) if you use non-default upstreams.
+# mounted config (a ConfigMap) if you use non-default upstreams. The proxy
+# image tag below moves with each release (docs/RELEASING.md).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,7 +37,7 @@ spec:
       containers:
         # --- the redaction proxy sidecar ---
         - name: llm-redact
-          image: ghcr.io/asanderson/llm-redact:3.3.0
+          image: ghcr.io/asanderson/llm-redact:1.12.0
           args: ["serve"]
           env:
             # Loopback bind: containers in a pod share the network namespace,

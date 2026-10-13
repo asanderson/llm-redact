@@ -116,12 +116,12 @@ jobs:
   publish-pypi:
     runs-on: ubuntu-latest
     needs: build
-    # PyPI publishing is HELD while the repository is private: publishing
-    # the sdist/wheel would make the source public regardless of repo
-    # visibility, so visibility is the deliberate switch. The job
-    # self-skips instead of failing red on every release run; making the
-    # repo public arms it, and it then still needs the one-time PyPI
-    # trusted-publisher setup — see docs/RELEASING.md.
+    # Runs on every tag while the repository is public. Publishing the
+    # sdist/wheel makes the source public whatever the repository's
+    # visibility, so the job skips itself (the if: below) while the
+    # repository is private, instead of failing red on every release run.
+    # It relies on the one-time PyPI trusted-publisher setup — see
+    # docs/RELEASING.md.
     if: ${{ !github.event.repository.private }}
     environment: pypi
     permissions:
@@ -188,8 +188,8 @@ jobs:
             suffix=${{ matrix.suffix }},onlatest=true
           # metadata-action labels the image with the repository's GitHub-detected
           # license (pro: NOASSERTION, core: AGPL-3.0), overriding the Dockerfile
-          # LABEL; pin it to pyproject's `license` (tests/test_license_metadata.py /
-          # test_deploy_assets.py check it).
+          # LABEL; pin it to pyproject's `license` (tests/test_deploy_assets.py
+          # checks it).
           labels: |
             org.opencontainers.image.licenses=AGPL-3.0-only
       - id: build
@@ -210,9 +210,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
       # Keyless cosign signature over the pushed manifest DIGEST (not a tag —
-      # tags move, digests do not). Consumers verify with
+      # tags move, digests do not). The certificate's identity is this workflow
+      # at the release tag, and consumers pin exactly that, anchored: cosign
+      # matches the regexp anywhere in the identity, and a looser pin such as
+      # 'https://github.com/<owner>/<repo>/.*' also accepts any other workflow
+      # or ref of the repository. Verify with
       # `cosign verify ghcr.io/<repo>@<digest>
-      #   --certificate-identity-regexp 'https://github.com/<owner>/<repo>/.*'
+      #   --certificate-identity-regexp '^https://github\.com/asanderson/llm-redact/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
       #   --certificate-oidc-issuer https://token.actions.githubusercontent.com`.
       # Complements the BuildKit SBOM attestation above: SBOM says WHAT is in
       # the image, the signature says WHO built it and that it is unmodified.

@@ -154,6 +154,16 @@ def test_k8s_sidecar_is_hardened_and_probes_real_endpoints() -> None:
     assert "/__llm-redact/readyz" in redact["readinessProbe"]["exec"]["command"][-1]
 
 
+def test_k8s_sidecar_pins_the_image_of_this_release() -> None:
+    # The manifest names the exact image it deploys, and the release-prep
+    # commit moves that tag with __version__ (docs/RELEASING.md). It once named
+    # a tag that was never published, so a pod applied from it could not pull.
+    doc = next(yaml.safe_load_all((DEPLOY / "k8s-sidecar.yaml").read_text()))
+    spec = doc["spec"]["template"]["spec"]
+    redact = next(c for c in spec["containers"] if c["name"] == "llm-redact")
+    assert redact["image"] == f"ghcr.io/asanderson/llm-redact:{__version__}"
+
+
 # --- Helm chart (deploy/helm/llm-redact) ------------------------------------
 #
 # The needle + appVersion tests are stdlib-only and always run. The rendering

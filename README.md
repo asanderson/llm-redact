@@ -186,7 +186,7 @@ bare name belongs to an unrelated project); the CLI it installs is
 ```bash
 uvx --from llm-redact-proxy llm-redact serve   # zero-install run
 pip install llm-redact-proxy                   # or a normal install
-# Homebrew (after the first PyPI release is published):
+# Homebrew:
 brew tap asanderson/llm-redact https://github.com/asanderson/llm-redact
 brew install asanderson/llm-redact/llm-redact
 ```

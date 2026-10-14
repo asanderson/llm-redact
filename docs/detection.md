@@ -108,6 +108,53 @@ Known residuals:
 - A sentence's final `.` after a PlanetScale token or a generic secret is
   redacted with it (it may be the value's own last character).
 
+### A card next to another digit group
+
+The `credit_card` rule reads 13 to 19 digits, separated by single spaces
+or hyphens, and checks them with the Luhn algorithm. Up to 1.12.1 a card
+written next to another digit group (a quantity or a year before it, a
+CVV or an expiry month after it) was read together with that group, failed
+the check, and went upstream as sent: `Order 12 4111 1111 1111 1111`,
+`4111 1111 1111 1111 123`. Since 1.13.0, when the check fails, the rule
+looks for a card inside what it read: a stretch from the start of a group
+to the end of one, 13 to 19 digits, written in a card's own grouping
+(solid; groups of four, the last of one to four digits; or 4-6-5 and 4-6-4
+as American Express and Diners Club print them; one separator throughout)
+that passes the check. Of several, it takes the one of most digits (of
+equal length, the one starting last). The stretch may run on past what the
+rule read first when that stopped at its 19th digit
+(`2024 4111 1111 1111 1111`). It must end where the run of groups ends, or
+before one more group when the card and that group are at most 19 digits
+together (`4111 1111 1111 1111 12/27`): no other rule's value can then
+start inside the card and run on past it. What the rule found before is
+found exactly as before, and no card it finds inside a run overlaps
+another of its detections.
+
+On 5,000 synthetic negatives (runs of 13 to 40 random digits in groups of
+one to four, separated by one space or one hyphen) the rule finds a card
+in 13.78% of them, against 13.58% before (Luhn passes one random number
+in ten); looking only for a card after a leading group it would be 13.70%,
+and without the grouping requirement 60.40% (37.76% after a leading group
+only).
+
+Known residuals:
+
+- A card in a longer run is not read when two or more groups follow it
+  (`4111 1111 1111 1111 12 34`, a card right before a SIN or an NHS
+  number) or one that brings the two past 19 digits
+  (`Order 12 4111 1111 1111 1111 5678`): an Aadhaar number's three groups
+  could start inside the card and run on past it.
+- Nor when the run of groups is followed by one of `-`, `.`, `:`, `@`,
+  `%` or `+` and more text, as a paper IBAN is not
+  (`12 4111 1111 1111 1111@example.com`: an email address takes in the
+  last group), nor when the card is written in another grouping or with
+  two separators.
+- The Luhn check passes one random number in ten, so a stretch of a long
+  run of digit groups that is no card can be redacted as one.
+- A card read inside a run wins an overlap like any longer match: under
+  `[detection.modes]` the digits it takes in follow the `credit_card`
+  rule's mode.
+
 ## Deny strings: values that must always be redacted
 
 Name the strings you never want to leave the machine — project codenames,

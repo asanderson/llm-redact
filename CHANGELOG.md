@@ -11,6 +11,19 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Security
+- **A card number written next to another digit group went upstream unredacted.**
+  `Order 12 4111 1111 1111 1111`, `4111 1111 1111 1111 123` (a CVV after it) and
+  `exp: 4111 1111 1111 1111 12/27` were forwarded as sent: the `credit_card` rule read the card
+  together with the other group, the Luhn check failed, and nothing was redacted. When the check
+  fails, the rule now looks inside what it read for a card in a card's own grouping (solid,
+  groups of four, or 4-6-5 / 4-6-4) that passes the check, and redacts that. Not read yet: a card
+  followed by two or more digit groups, or by one that brings the two past 19 digits, and one
+  whose run of digit groups is followed by `-`, `.`, `:`, `@`, `%` or `+` and more text
+  (docs/detection.md lists the residuals). With the default modes nothing 1.12.1 redacted is
+  forwarded now. On random runs of digit groups the rule's false positives barely move (13.58% to
+  13.78% of 5,000 runs).
+
 ### Changed
 - The latency smoke check (`python -m llm_redact.bench --latency --check`) allows the proxy's
   own overhead on a 100 KB body up to 300 ms (was 150 ms). It is a tripwire for gross

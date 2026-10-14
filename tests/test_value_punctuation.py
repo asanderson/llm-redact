@@ -13,6 +13,7 @@ countries. A value glued into a longer token is still not one. That nothing
 """
 
 import json
+import re
 import time
 from collections.abc import Callable
 
@@ -204,8 +205,14 @@ def test_the_paper_format_is_read_only_at_the_registry_length() -> None:
         for size in range(15, 35):
             value = with_check_digits(country, ("XYZW" + "1234567890" * 3)[: size - 4])
             paper = " ".join(value[i : i + 4] for i in range(0, len(value), 4))
-            expected = "IBAN «IBAN_001» ok" if size == length else f"IBAN {paper} ok"
-            assert redacted(f"IBAN {paper} ok") == expected
+            output = redacted(f"IBAN {paper} ok")
+            if size == length:
+                assert output == "IBAN «IBAN_001» ok"
+            else:
+                # Not an IBAN. Its digit groups may hold a Luhn-valid card
+                # since 1.13.0 (test_credit_card_groups.py), nothing else.
+                assert set(re.findall(r"«([A-Z_]+)_\d+»", output)) <= {"CREDIT_CARD"}
+                assert re.sub(r"«CREDIT_CARD_\d+»", "", output).startswith(f"IBAN {paper[:9]}")
 
 
 # --- cost ---------------------------------------------------------------------

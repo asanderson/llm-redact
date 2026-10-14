@@ -16,7 +16,9 @@ format.
 These are plugins for the agent tool. A separately installed Python package
 (llm-redact-pro) extends the proxy itself through registry seams instead; the
 one that decides which NER models may load, the model-load policy, is
-described in [detection.md](detection.md#model-load-policies-plugins).
+described in [detection.md](detection.md#model-load-policies-plugins), and
+the one that reads what the redaction scanned, scan sinks, in
+[Scan sinks](#scan-sinks-a-registry-seam) below.
 
 ## Install
 
@@ -269,6 +271,68 @@ OpenCode gets the same guard-in-body protection as Codex.
 The command bodies never widen what leaves the machine: status, recent,
 sessions, and audit are metadata-only surfaces by design, and preview
 returns your own text already masked.
+
+## Scan sinks (a registry seam)
+
+> **A scan sink receives UNREDACTED text.** It is handed the strings a
+> request's redaction scanned exactly as the client sent them — the API
+> keys, emails, names and ID numbers the proxy exists to keep from the
+> provider. Install a plugin that registers one only when you trust it
+> with that text as you trust the proxy itself: what it keeps is outside
+> the vault's protections, and storing, encrypting, retaining and purging
+> it is the plugin's job. The Free core registers no sink.
+
+This is not an agent plugin: it is a seam of the proxy process, for a
+Python package like llm-redact-pro (whose opt-in training capture it was
+added for). `Registry.build_scan_sinks(config, tier)` returns the sinks,
+once at startup (restart-only); the contract is `plugin_api.ScanSink`:
+
+- `wants(context) -> bool` is asked synchronously, on the event loop,
+  before each request's (or realtime client frame's) redaction — a flag,
+  a sample, a clock; never I/O. Only `True` captures it.
+- `capture(context, strings)` is called for a request a sink wanted, once
+  its redaction succeeded and the request is handed to its upstream (a
+  realtime frame: right before it is sent). `strings` holds each DISTINCT
+  string the redaction scanned, once, in the order first scanned
+  (`ScannedString.text`), with every detection found in it
+  (`ScannedDetection`: type, start, end, and the detector — `kind` `rule`,
+  `custom`, `deny`, `ner` or `other`, `source` the rule's or NER backend's
+  name), after the allowlists and before overlap resolution and modes.
+  `context` (`ScanContext`) carries the surface (`http` or `websocket`),
+  provider, adapter, method, path, vault session, the access gate's
+  subject and whether a credential the proxy holds is spent — never a
+  value. Never a placeholder or vault data.
+- `close()` once at shutdown, after the queue drained.
+
+What is captured: JSON body strings, verbatim and label fields, an
+upload's form fields, file names, text and JSONL file parts, text an
+upload inspector extracted from a binary part, a convert-mode document's
+text, realtime client frames. What is not: a request refused at any point
+(a block, an access gate's check, the `[audit] required` START row, an
+upstream authorizer, a routing budget), and anything the core forwards
+unredacted (`[providers.NAME] detection = false`, pass-through routes, an
+exempt MCP server's blocks, a binary part sent unscanned) or adds itself
+(the system note).
+
+`capture` runs on ONE worker thread, never on the event loop and never two
+calls at once (not always the same thread: the worker exits after 5 s
+idle and a new one starts with the next capture), in the order requests
+were handed upstream. The queue in front of it holds at most 256 captures
+and 16 Mi characters: a capture that does not fit is dropped and counted,
+never waited for, so a slow sink loses captures rather than slowing any
+request. A sink's exception is contained, counted
+(`llm_redact_bookkeeping_errors_total{stage="scan_sink"}`) and logged by
+its type only, once per outage. At shutdown the queue drains for at most
+5 s beside the vault's map-write drain (the shutdown budget is unchanged;
+[resilience.md](resilience.md#shutdown-order)), what is left is dropped
+and counted, and each sink is closed once — never while one of its
+captures still runs.
+
+`/status` `scan_capture` reports `sinks`, `queued`, `delivered_total` (one
+for each sink a capture reached), `dropped_total` and `faults_total`, and
+`llm-redact status` prints a posture line while any sink is registered. The threat model's
+[Scan sinks](threat-model.md#scan-sinks-a-plugin-reading-what-the-redaction-scanned)
+section states what the core does and does not guarantee.
 
 ## For contributors
 

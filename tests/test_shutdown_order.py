@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -494,3 +495,45 @@ async def test_a_failing_router_or_gate_close_never_skips_the_flush_or_the_close
     assert "closing the router failed (RuntimeError)" in caplog.text
     assert "closing the access gate failed (RuntimeError)" in caplog.text
     assert "SECRET" not in caplog.text
+
+
+class ScanSinkSpy:
+    """A plugin's scan sink (plugin_api.ScanSink) slow enough that captures
+    are still queued when the shutdown starts."""
+
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def wants(self, context: object) -> bool:
+        return True
+
+    def capture(self, context: object, strings: object) -> None:
+        time.sleep(0.05)
+        self.events.append("scan.capture")
+
+    def close(self) -> None:
+        self.events.append("scan.close")
+
+
+async def test_scan_sinks_drain_and_close_before_the_audit_flush_and_the_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Step 3 of the documented order: once the requests have finished, the
+    # scan sinks get every capture still queued and are closed — beside the
+    # vault's map-write drain, before the audit sinks' final flush and the
+    # databases close.
+    events: list[str] = []
+    _register(monkeypatch, events)
+    scan = ScanSinkSpy(events)
+    registry_mod.get_registry().build_scan_sinks = lambda config, tier: (scan,)  # type: ignore[method-assign]
+    app = _app(events, httpx.MockTransport(_answer))
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://proxy.test") as client:
+            for _ in range(3):
+                assert (await client.post("/v1/messages", json=_BODY)).status_code == 200
+    assert events[:4] == ["scan.capture"] * 3 + ["scan.close"]
+    assert sorted(events[4:6]) == ["azure.aclose", "s3.aclose"]
+    assert events[6:] == ["audit.close", "vault.close"]
+    assert app.state.proxy.scan_capture.status()["dropped_total"] == 0

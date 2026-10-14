@@ -467,6 +467,36 @@ the value's two parts ([detection.md](detection.md#how-ner-runs)).
   allowlists; it sits behind the same Host/Origin checks, as do
   `/sessions` and `/events`).
 
+### Scan sinks (a plugin reading what the redaction scanned)
+
+A plugin may register scan sinks (`plugin_api.ScanSink`,
+`Registry.build_scan_sinks`; the seam exists for llm-redact-pro's opt-in
+capture of training text). The Free core registers none, and without a sink nothing is recorded
+or queued. A sink receives the strings a request's redaction scanned
+**exactly as the client sent them — unredacted** — with each detection's
+type, span and the rule or NER backend that found it: the values the proxy
+exists to keep from the provider, handed to code running in the proxy's
+process. What a sink keeps is outside the vault's protections (and outside
+`[vault] encryption`): it is the sink's to protect, and installing one is
+the operator's trust decision, like an upload inspector that sends files to
+an extraction service. What the core guarantees:
+
+- read-only: a sink sees copies of facts and can change nothing a request,
+  its redaction or its answer does; it runs on one worker thread off the
+  event loop, behind a bounded queue (a full queue drops and counts — a
+  slow sink costs captures, never a request's time), and its faults are
+  contained and logged by exception type only;
+- only what the redaction scanned, only once it succeeded and the request
+  is handed to its upstream: a refused request or frame is never captured,
+  and nothing the core forwards unredacted (`detection = false`, a
+  pass-through route, an exempt MCP server's blocks, a binary part sent
+  unscanned) reaches a sink through this seam;
+- no vault data: never a placeholder the proxy issued, never a mapping
+  (a string the client itself sent holding a placeholder holds it);
+- surfaced: `/status` `scan_capture` (the number of sinks and the queue's
+  delivered/dropped/fault counts) and a `llm-redact status` posture line
+  while any sink is registered.
+
 ### Logging posture
 
 - Log lines carry path, status, and detection counts. Never values,
@@ -641,6 +671,7 @@ row, is [resilience.md](resilience.md).
 | Contextual personal values no rule can match (addresses, passport and driver's-licence numbers, dates of birth, usernames, account numbers, most names) | Outside the rules by design. With a PII model enabled and the types requested, redacted on a best-effort basis: measured per model on a generated corpus and published slices ([ner-landscape.md](ner-landscape.md#verdicts-at-a-glance)), never guaranteed on your traffic; a model misses values and draws false positives; passport and driver's-licence numbers have no recorded baseline; the default configuration asks for names only, and `llm-redact preview` shows what fires on a text |
 | Text beyond what an NER model reads | Longer strings are read in overlapping windows (`hf`, `gliner`, `gliner2`); a string over `max_chars` (default 20,000 characters) is read by no model, the rules still scan it, and every skip is counted (`/status`, `/metrics`, a `llm-redact status` posture line, the `LlmRedactNerSkippingLongStrings` alert). Residual: names in such a string reach the provider; a word longer than the encoder reads is read in part (`windows_truncated`); an `hf` model decoded word by word never takes a quote or bracket into a value, so one inside a value goes upstream between the placeholders of its two parts |
 | NER model supply chain: weights or a tokenizer from a model repository that changed or was replaced | Models load at a full commit id (the user's pin or the model catalog's; an unpinned model is a `doctor` WARN), with explicit file names, never running repository code (`auto_map` refused, `trust_remote_code` never set) and, for `hf`, safetensors only unless `allow_pickle_weights` (a `doctor` WARN); a GLiNER ONNX export (`[detection.ner.onnx]`) fetches and reads only the one named file; GLiNER base models are pinned and assembled locally; downloads are off by default and startup-only, and with them off the Hugging Face libraries' own offline switches are set before they are imported, so no model load opens a connection (a CI job proves a start inside a network namespace with no route). Models carried into an enclave travel as portable folders checked against a SHA-256 manifest (`llm-redact models verify --dir`); the manifest travels with the folders, so its hash needs a separate channel. The model catalog states neutral facts (license, training data, a pin, measured numbers) and the core refuses nothing for them: a restricted model logs a startup WARNING, and a plugin's model-load policy (llm-redact-pro's `[models]`) may refuse. Residual: a pinned commit is trusted as published (no signature exists to check), a model the catalog does not know loads unpinned unless the operator pins it, GLiNER still loads a `pytorch_model.bin` through torch's `weights_only` loader (torch >= 2.6), a base model the catalog does not pin loads at its newest cached revision (a startup WARNING and a `doctor` WARN name it), and a model, though loaded as data and never as code, reads every scanned string inside the proxy's process |
+| A registered scan sink (a plugin's, none in the Free core) keeps the unredacted text it is handed | By design of the seam: the operator installs the plugin and enables its capture. The core hands a sink only what a successful redaction scanned, off the event loop, read-only, and says so (`/status` `scan_capture`, a `llm-redact status` posture line); everything after that — storage, retention, encryption, purge — is the plugin's to get right |
 | LLM mangles a placeholder beyond fuzzy repair | Pass-through verbatim (never a wrong value); bracket swaps deliberately unrestored |
 | History compaction rewrites the session anchor | Fails safe: fresh session, no cross-session restore — verified by the dogfood compaction probe. The fork never issues a token its summary carries: the summary is the fork's anchor, so every request of it carries the summary's tokens and the token floor numbers new values past them |
 | A request carries tokens its session did not issue (a pasted answer, a foreign proxy's token) | The token floor keeps the request (and a realtime connection) that carries them from issuing those names. Residual, documented in [compaction-relink.md](compaction-relink.md): a number the session had already issued before the foreign token arrived, another request sharing the session that does not carry the token, and provider-side history (a `previous_response_id` chain, a realtime model's own output) no request of the session carries — the last is what llm-redact-pro's sealed sessions cover |

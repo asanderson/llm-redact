@@ -905,6 +905,46 @@ def _runner(det: Detector, heavy: _Heavy | None) -> Callable[[PreparedText], Ite
     return lambda prepared: det.detect(prepared.text)
 
 
+class DetectorSource(NamedTuple):
+    """Which detector found a detection (``DetectorPlan.detect_sourced``).
+
+    ``kind``: ``rule`` (a built-in regex rule), ``custom`` (a
+    ``[[detection.custom_rules]]`` rule), ``deny`` (a deny string), ``ner``
+    (a model-backed NER backend) or ``other`` (any other detector, a
+    plugin's). ``name``: the rule's name, the NER backend's (``hf``,
+    ``gliner``, …), ``deny_strings``, else the detector's own name. Names
+    only — never a value."""
+
+    kind: str
+    name: str
+
+
+# The built-in rules by identity: a custom rule is a RegexRule of its own,
+# even one spelled exactly like a built-in.
+_BUILTIN_RULE_IDS = frozenset(id(rule) for rule in BUILTIN_RULES)
+
+
+def detector_source(det: Detector, *, heavy: bool) -> DetectorSource:
+    """``det`` as ``DetectorSource`` names it (``heavy``: it runs a model —
+    an NER backend, or a type filter around one, named after the backend)."""
+    if isinstance(det, RegexDetector):
+        return DetectorSource("rule" if id(det.rule) in _BUILTIN_RULE_IDS else "custom", det.name)
+    if isinstance(det, DenyDetector):
+        return DetectorSource("deny", det.name)
+    inner = det.inner if isinstance(det, TypeFilteredDetector) else det
+    name = getattr(inner, "name", None)
+    return DetectorSource(
+        "ner" if heavy else "other", name if isinstance(name, str) else type(inner).__name__
+    )
+
+
+def _detection_order(d: Detection) -> tuple[int, int, int]:
+    """The order detections are handed to overlap resolution in: by start,
+    longest first, then by priority (a stable sort keeps list order for the
+    rest)."""
+    return (d.start, -(d.end - d.start), d.priority)
+
+
 def _gate_group(required: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
     """The CNF group a rule is gated on: any one group is a necessary
     condition; the one whose shortest literal is longest skips most."""
@@ -1053,6 +1093,41 @@ class DetectorPlan:
                 found[index] = list(self.detectors[index].detect(text))
         return found
 
+    @functools.cached_property
+    def sources(self) -> tuple[DetectorSource, ...]:
+        """Each detector's ``DetectorSource``, in list order (named once,
+        when a redactor recording what it scans first asks)."""
+        return tuple(
+            detector_source(det, heavy=index in self._heavy)
+            for index, det in enumerate(self.detectors)
+        )
+
+    def detect_sourced(
+        self,
+        text: str,
+        allowlist: Allowlist,
+        precomputed: Mapping[int, Sequence[Detection]] | None = None,
+    ) -> list[tuple[Detection, DetectorSource]]:
+        """``detect``'s detections, each with the detector that found it
+        (``sources``): the same detections in the same order. Every
+        candidate detector runs once, through the same per-detector code
+        (``_run``, one index at a time); each one's results come sorted, and
+        the stable sort of their concatenation in list order by the same
+        key is ``detect``'s order — ties keep list order, then each
+        detector's own (tests/test_scan_sinks.py runs both over the recall
+        and fp corpora). Asked only by a redactor that records what it
+        scans (``Redactor.with_recorder``): ``detect`` stays as it is."""
+        prepared = PreparedText(text)
+        order = self._every if len(text) > self.gated_max_chars else self.candidates(prepared)
+        sources = self.sources
+        found = [
+            (d, sources[index])
+            for index in order
+            for d in self._run((index,), prepared, allowlist, precomputed)
+        ]
+        found.sort(key=lambda pair: _detection_order(pair[0]))
+        return found
+
     def count_prefetch_miss(self) -> None:
         """One text a request's redaction found no precomputed results for
         (``Redactor.with_precomputed``): counted on every heavy detector
@@ -1085,7 +1160,7 @@ class DetectorPlan:
             detections.extend(
                 d for d in found if d.tier == 0 or not allows(d.detector_type, d.value)
             )
-        detections.sort(key=lambda d: (d.start, -(d.end - d.start), d.priority))
+        detections.sort(key=_detection_order)
         return detections
 
 

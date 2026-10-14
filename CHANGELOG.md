@@ -11,6 +11,26 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+- **A read-only capture seam for plugins: scan sinks.** A plugin (llm-redact-pro's opt-in capture
+  of training text is what it is for) may register sinks through `Registry.build_scan_sinks`;
+  each is handed, off the event loop, the strings a request's redaction scanned — JSON body
+  strings, upload form fields, file names and text or JSONL file parts, text an upload inspector
+  extracted, realtime client frames — with every detection's type, span and the rule or NER
+  backend that found it. Only once the redaction succeeded and the request is handed to its
+  upstream: a refused request is never captured, and nothing the proxy forwards unredacted is.
+  The contract is `plugin_api.ScanSink` (`wants`, `capture`, `close`) with the frozen
+  `ScanContext`, `ScannedString` and `ScannedDetection`. **A sink receives unredacted text** — the
+  values the proxy keeps from the provider; what it keeps is outside the vault's protections
+  (docs/plugins.md, docs/threat-model.md). Sinks run on one worker thread behind a bounded queue
+  (256 captures, 16 Mi characters): a full queue drops and counts, a slow sink never delays a
+  request, and a sink's fault is counted (`llm_redact_bookkeeping_errors_total{stage="scan_sink"}`)
+  and logged by exception type only. The queue drains (at most 5 s, beside the vault's map-write
+  drain, so the shutdown budget is unchanged) before the sinks close at shutdown. `/status` gains a
+  `scan_capture` block (sinks, queued, delivered, dropped, faults) and `llm-redact status` a
+  posture line while any sink is registered. The Free core registers no sink, and then nothing is
+  recorded or queued: the request path is unchanged.
+
 ## [1.12.1] - 2026-10-14
 
 Closes detection gaps 1.12.0 left: a Belgian national number, a Swiss AHV number or an IPv6

@@ -11,7 +11,7 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
-## [1.12.0] - 2026-10-08
+## [1.12.0] - 2026-10-13
 
 Optional NER models for the values rules cannot reach: names, addresses, dates of birth,
 usernames, account numbers. The model catalog lists each model it knows with its license and,

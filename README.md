@@ -3,14 +3,14 @@
 [![CI](https://github.com/asanderson/llm-redact/actions/workflows/ci.yml/badge.svg)](https://github.com/asanderson/llm-redact/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/llm-redact-proxy)](https://pypi.org/project/llm-redact-proxy/)
 [![Container](https://img.shields.io/badge/ghcr.io-asanderson%2Fllm--redact-blue?logo=docker&logoColor=white)](https://github.com/asanderson/llm-redact/pkgs/container/llm-redact)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
-[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://github.com/asanderson/llm-redact/blob/main/pyproject.toml)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](https://github.com/asanderson/llm-redact/blob/main/LICENSE)
 
 Large Language Model (LLM) information redactor that prevents private information from being sent to LLMs from agentic tools by substituting placeholders for private information on outgoing requests and then replaces the placeholders on the incoming responses seamlessly for the agentic tool users.
 
-![System data flow: agentic tool (with the llm-redact plugin slash commands inside it), proxy, local vault and local NER model files on your machine; only placeholder tokens reach the LLM provider, and the Hugging Face Hub is reached only by an opt-in startup download of pinned model weights. Dashed boxes mark as Pro the browser dashboard, the access gate and the offline model bundles with their AI-BOM and model policy (Team and above) on your machine, and the audit log with its object-store sinks, plus the flows into each](docs/diagrams/architecture.png)
+![System data flow: agentic tool (with the llm-redact plugin slash commands inside it), proxy, local vault and local NER model files on your machine; only placeholder tokens reach the LLM provider, and the Hugging Face Hub is reached only by an opt-in startup download of pinned model weights. Dashed boxes mark as Pro the browser dashboard, the access gate and the offline model bundles with their AI-BOM and model policy (Team and above) on your machine, and the audit log with its object-store sinks, plus the flows into each](https://raw.githubusercontent.com/asanderson/llm-redact/main/docs/diagrams/architecture.png)
 
-*Animated version: [SVG](docs/diagrams/architecture.svg) · [GIF](docs/diagrams/architecture.gif) — the request and response flow moves.*
+*Animated version: [SVG](https://github.com/asanderson/llm-redact/blob/main/docs/diagrams/architecture.svg) · [GIF](https://github.com/asanderson/llm-redact/blob/main/docs/diagrams/architecture.gif) — the request and response flow moves.*
 
 Only placeholder tokens cross the trust boundary; the vault mapping never
 leaves your machine. The dashed boxes mark what is **Pro** — supplied by
@@ -23,28 +23,28 @@ model-load policy (Team and above), and the audit subsystem (the audit
 log, its object-store sinks, and the audit-row flow into them). Vault at-rest encryption, the server
 RDBMS vault backends, and upstream routing are Pro too but not drawn;
 everything else pictured is part of this repository's **FOSS core**
-(matrix in [docs/editions.md](docs/editions.md)). The full
+(matrix in [docs/editions.md](https://github.com/asanderson/llm-redact/blob/main/docs/editions.md)). The full
 documentation set — quickstart, deployment, security, engineering
-record — is indexed in [docs/](docs/README.md).
+record — is indexed in [docs/](https://github.com/asanderson/llm-redact/blob/main/docs/README.md).
 
 ## Contents
 
 - [Why redact?](#why-redact)
 - [What it does](#what-it-does)
 - [What it does not protect](#what-it-does-not-protect)
-- [Plugins](#plugins) — detail: [command reference and screenshots](docs/plugins.md)
+- [Plugins](#plugins) — detail: [command reference and screenshots](https://github.com/asanderson/llm-redact/blob/main/docs/plugins.md)
 - [Install](#install)
-- [Quickstart](#quickstart) — detail: [five-minute walkthrough](docs/quickstart.md), [provider setup and coverage](docs/providers.md)
-- [How it works](#how-it-works) — detail: [round trip, worked example, persistence, sessions](docs/how-it-works.md)
-- [Editions and licensing](#editions-and-licensing) — detail: [tiers, keys, and the open-core boundary](docs/editions.md)
+- [Quickstart](#quickstart) — detail: [five-minute walkthrough](https://github.com/asanderson/llm-redact/blob/main/docs/quickstart.md), [provider setup and coverage](https://github.com/asanderson/llm-redact/blob/main/docs/providers.md)
+- [How it works](#how-it-works) — detail: [round trip, worked example, persistence, sessions](https://github.com/asanderson/llm-redact/blob/main/docs/how-it-works.md)
+- [Editions and licensing](#editions-and-licensing) — detail: [tiers, keys, and the open-core boundary](https://github.com/asanderson/llm-redact/blob/main/docs/editions.md)
 - [Containers (docker or podman)](#containers-docker-or-podman)
-- [Status, metrics, and audit log](#status-metrics-and-audit-log) — detail: [the local ops surface](docs/dashboard.md)
-- [Operations](#operations) — detail: [the deployment guide](docs/deployment.md)
-- [What gets detected](#what-gets-detected) — detail: [the detection reference](docs/detection.md)
+- [Status, metrics, and audit log](#status-metrics-and-audit-log) — detail: [the local ops surface](https://github.com/asanderson/llm-redact/blob/main/docs/dashboard.md)
+- [Operations](#operations) — detail: [the deployment guide](https://github.com/asanderson/llm-redact/blob/main/docs/deployment.md)
+- [What gets detected](#what-gets-detected) — detail: [the detection reference](https://github.com/asanderson/llm-redact/blob/main/docs/detection.md)
 - [Benchmark and live validation](#benchmark-and-live-validation)
 - [Trying it without touching a real API](#trying-it-without-touching-a-real-api)
 - [Security](#security)
-- [Tech stack](#tech-stack) — detail: [software bill of materials](docs/SBOM.md), [what ships and why](docs/dependencies.md)
+- [Tech stack](#tech-stack) — detail: [software bill of materials](https://github.com/asanderson/llm-redact/blob/main/docs/SBOM.md), [what ships and why](https://github.com/asanderson/llm-redact/blob/main/docs/dependencies.md)
 - [Stability](#stability)
 - [Development](#development)
 
@@ -120,7 +120,7 @@ that cannot cover:
   `[[detection.custom_rules]]`, deny strings, and the NER extras — a PII
   model finds addresses, dates of birth, usernames and account numbers on a
   best-effort basis, measured per model but never guaranteed
-  ([threat model](docs/threat-model.md#contextual-values-rules-and-models)) —
+  ([threat model](https://github.com/asanderson/llm-redact/blob/main/docs/threat-model.md#contextual-values-rules-and-models)) —
   and `llm-redact preview` shows exactly what fires on a given text before
   you rely on it.
 - **Media.** Base64 images, PDFs, and audio are never decoded and
@@ -129,7 +129,7 @@ that cannot cover:
   are read by content: text files are redacted, but a binary file (a PDF,
   an image, an archive) sent with your own key is forwarded unscanned by
   default — counted in `/status`; `[detection] binary_uploads = "refuse"`
-  refuses it instead. `[extraction]` ([docs/extraction.md](docs/extraction.md))
+  refuses it instead. `[extraction]` ([docs/extraction.md](https://github.com/asanderson/llm-redact/blob/main/docs/extraction.md))
   reads PDFs, Office documents and — through Tika, docling, unstructured or
   a cloud OCR service — scans as text first: a value found refuses the
   upload (or, opt-in, sends its redacted text instead of the file), a
@@ -138,14 +138,14 @@ that cannot cover:
   the matched value; `[providers.NAME] detection = false`, MCP server
   exemptions, and language scoping likewise forward what they exempt, and
   so does an approved refusal override
-  ([docs/overrides.md](docs/overrides.md); off by default, opt in with
+  ([docs/overrides.md](https://github.com/asanderson/llm-redact/blob/main/docs/overrides.md); off by default, opt in with
   `[overrides] enabled = true`) for the value, body or file it lets through.
   Every such opt-out is surfaced in `/status`, `llm-redact status`, and
   `doctor` — never silent.
 
 The precise boundary — assets, trust assumptions, and the full
 out-of-scope table — is written down in
-[docs/threat-model.md](docs/threat-model.md).
+[docs/threat-model.md](https://github.com/asanderson/llm-redact/blob/main/docs/threat-model.md).
 
 ## Plugins
 
@@ -174,7 +174,7 @@ command and asks your approval before anything is installed — and
 `lookup` is deliberately not a command: an agent that read a secret
 value would send it upstream. The full command reference, per-tool
 install paths, and terminal screenshots are in
-[docs/plugins.md](docs/plugins.md).
+[docs/plugins.md](https://github.com/asanderson/llm-redact/blob/main/docs/plugins.md).
 
 ## Install
 
@@ -206,7 +206,7 @@ docker run -d --name llm-redact \
 Config mounts, persistence, and health probes are covered in
 [Containers (docker or podman)](#containers-docker-or-podman) below.
 
-Undecided? [`scripts/install.sh`](scripts/install.sh) is an interactive
+Undecided? [`scripts/install.sh`](https://github.com/asanderson/llm-redact/blob/main/scripts/install.sh) is an interactive
 installer: it detects what is available on your machine (uv, pipx, pip,
 Homebrew, docker, podman), asks which install you prefer, prints each
 command before running it, and does nothing else. Download it and read
@@ -227,7 +227,7 @@ Then:
   status, preview, and config-edit workflows as **agent slash commands**
   (Claude Code can instead add this repo as a plugin marketplace:
   `/plugin marketplace add asanderson/llm-redact`); see
-  [docs/plugins.md](docs/plugins.md).
+  [docs/plugins.md](https://github.com/asanderson/llm-redact/blob/main/docs/plugins.md).
 - `llm-redact completions bash|zsh|fish` — shell completions.
 
 ## Quickstart
@@ -243,36 +243,36 @@ and point tools at it via their base-URL variables (`ANTHROPIC_BASE_URL`,
 `GOOGLE_GEMINI_BASE_URL`, `OLLAMA_HOST`). From there:
 
 - **Five-minute walkthrough** — install, init, run, verify, preflight:
-  [docs/quickstart.md](docs/quickstart.md).
+  [docs/quickstart.md](https://github.com/asanderson/llm-redact/blob/main/docs/quickstart.md).
 - **Providers** — the point-a-tool matrix (Anthropic, OpenAI, Azure
   OpenAI, Gemini, Vertex, Bedrock, Cohere, Ollama, custom
   OpenAI-compatible upstreams), per-provider setup, batch APIs, and the
-  realtime WebSocket relay: [docs/providers.md](docs/providers.md);
+  realtime WebSocket relay: [docs/providers.md](https://github.com/asanderson/llm-redact/blob/main/docs/providers.md);
   endpoint-by-endpoint coverage:
-  [docs/api-coverage.md](docs/api-coverage.md). Several upstreams per
+  [docs/api-coverage.md](https://github.com/asanderson/llm-redact/blob/main/docs/api-coverage.md). Several upstreams per
   protocol, with fallback chains and monthly budgets, are the
-  llm-redact-pro routing layer (see [docs/editions.md](docs/editions.md)).
+  llm-redact-pro routing layer (see [docs/editions.md](https://github.com/asanderson/llm-redact/blob/main/docs/editions.md)).
 - **Agent plugins** — drive the proxy without leaving Claude Code,
   Codex, OpenCode, or Cursor: `/llm-redact:status`,
   `/llm-redact:recent`, `/llm-redact:preview`, and a guarded
   `/llm-redact:config-edit`, installed via `llm-redact plugin install`
   (or the Claude Code plugin marketplace); see
-  [docs/plugins.md](docs/plugins.md).
+  [docs/plugins.md](https://github.com/asanderson/llm-redact/blob/main/docs/plugins.md).
 - **Preflight and diagnosis** — `llm-redact doctor` (read-only
   PASS/WARN/FAIL report incl. a detector-build dry-run; `--json` for
   machines) and `llm-redact serve --check` (the deploy/reload gate);
-  error-by-error fixes: [docs/troubleshooting.md](docs/troubleshooting.md).
+  error-by-error fixes: [docs/troubleshooting.md](https://github.com/asanderson/llm-redact/blob/main/docs/troubleshooting.md).
 - **User guide** — the CLI, the plugin commands, and (with
   llm-redact-pro) the dashboard and config editor, written for the
   person *using* the proxy: served at
   `/__llm-redact/guide` (also `llm-redact guide`, or packaged as
-  [src/llm_redact/user_guide.md](src/llm_redact/user_guide.md)). Full
-  doc index: [docs/README.md](docs/README.md).
+  [src/llm_redact/user_guide.md](https://github.com/asanderson/llm-redact/blob/main/src/llm_redact/user_guide.md)). Full
+  doc index: [docs/README.md](https://github.com/asanderson/llm-redact/blob/main/docs/README.md).
 
 API keys pass through untouched (and are never logged); each request is
 logged as a one-line metadata summary, e.g.
 `POST /v1/messages -> 200 redacted: EMAIL×1`. Configuration is optional —
-[`config.example.toml`](config.example.toml) documents every setting;
+[`config.example.toml`](https://github.com/asanderson/llm-redact/blob/main/config.example.toml) documents every setting;
 `LLM_REDACT_HOST`/`_PORT`/`_CONFIG` override it, and precedence is
 CLI flag > env var > config file.
 
@@ -281,7 +281,7 @@ CLI flag > env var > config file.
 Outbound requests are scanned and each detected value is replaced with
 a vault-issued token; responses — streaming included, even when a token
 is split across chunk boundaries — are restored byte-for-byte.
-[docs/how-it-works.md](docs/how-it-works.md) covers the mechanism end
+[docs/how-it-works.md](https://github.com/asanderson/llm-redact/blob/main/docs/how-it-works.md) covers the mechanism end
 to end:
 
 - the request round trip, with the non-streaming and streaming sequence
@@ -297,19 +297,19 @@ to end:
 
 Every step is observable from inside your agent: the slash-command
 plugins (`/llm-redact:status`, `/llm-redact:recent`,
-`/llm-redact:preview` — [docs/plugins.md](docs/plugins.md)) show live
+`/llm-redact:preview` — [docs/plugins.md](https://github.com/asanderson/llm-redact/blob/main/docs/plugins.md)) show live
 detections and restores without leaving the tool.
 
 ## Editions and licensing
 
 This repository is **free and open-source software** under the
-[GNU AGPL-3.0](LICENSE): use it for anything, inspect every line, modify
+[GNU AGPL-3.0](https://github.com/asanderson/llm-redact/blob/main/LICENSE): use it for anything, inspect every line, modify
 it, and redistribute it. The one obligation is share-alike — if you
 distribute a modified version, **or run one as a network service for
 others**, you must offer them your modified source under the same
 license. Unmodified self-hosted use (the normal case: your tools talking
 to your own proxy) carries no obligations at all. Contributions are
-accepted under a [contributor license agreement](docs/CLA.md).
+accepted under a [contributor license agreement](https://github.com/asanderson/llm-redact/blob/main/docs/CLA.md).
 
 **Nothing in this repository is gated**: no license keys, no tiers, no
 seat caps — every detection rule, redaction mode, NER backend, provider
@@ -327,7 +327,7 @@ above, a deployment kit for one shared mutual-TLS team server and offline
 NER model bundles with an AI bill of materials and a model-load policy.
 Configuring one of those without the package fails closed naming it —
 never a silent downgrade. The matrix and
-licensing model are in [docs/editions.md](docs/editions.md).
+licensing model are in [docs/editions.md](https://github.com/asanderson/llm-redact/blob/main/docs/editions.md).
 
 ## Containers (docker or podman)
 
@@ -356,7 +356,7 @@ The `-ner` image (`ghcr.io/asanderson/llm-redact:latest-ner`, or
 `<version>-ner`) adds the `hf` and `gliner` NER extras on a CPU-only torch.
 NER models are never downloaded by default: fetch them with `llm-redact
 models pull`, or carry them into a network with no internet route as
-portable, checksummed folders — [docs/air-gapped.md](docs/air-gapped.md)
+portable, checksummed folders — [docs/air-gapped.md](https://github.com/asanderson/llm-redact/blob/main/docs/air-gapped.md)
 walks through it, image and Helm chart (`image.variant: ner`,
 `models.volume`) included.
 
@@ -381,7 +381,7 @@ every reply is hardened with a strict CSP and framing/sniffing headers.
 - **Agent slash commands** — the same workflows inside Claude Code,
   Codex, OpenCode, and Cursor
   (`/plugin marketplace add asanderson/llm-redact`, or
-  `llm-redact plugin install`; see [docs/plugins.md](docs/plugins.md)).
+  `llm-redact plugin install`; see [docs/plugins.md](https://github.com/asanderson/llm-redact/blob/main/docs/plugins.md)).
 - **Coverage posture, surfaced loudly** — every configured opt-out that
   lets traffic through unredacted is reported by `/status`,
   `llm-redact status`, and `doctor`; never silently.
@@ -390,11 +390,11 @@ every reply is hardened with a strict CSP and framing/sniffing headers.
   never values).
 
 The full tour of every endpoint is
-[docs/dashboard.md](docs/dashboard.md).
+[docs/dashboard.md](https://github.com/asanderson/llm-redact/blob/main/docs/dashboard.md).
 
 ## Operations
 
-[docs/deployment.md](docs/deployment.md) is the end-to-end deployment
+[docs/deployment.md](https://github.com/asanderson/llm-redact/blob/main/docs/deployment.md) is the end-to-end deployment
 guide — bind policy, containers and health probes, vault lifecycle
 (backup/verify/TTL), service management, log rotation, and
 observability wiring, all keyed to the mutual-TLS bind policy. The
@@ -411,14 +411,14 @@ essentials:
   active. An open realtime connection whose provider settings, upstream
   identity or detection policy the reload changed is closed with code
   1012, so the client reconnects under the new config
-  ([details](docs/deployment.md#reloads-and-open-realtime-connections)).
+  ([details](https://github.com/asanderson/llm-redact/blob/main/docs/deployment.md#reloads-and-open-realtime-connections)).
 - **Agent plugins**: the ops workflows ship as slash commands —
   `/llm-redact:status`, `/llm-redact:recent`, `/llm-redact:doctor`, and
   a guarded `/llm-redact:config-edit` that mirrors the reload flow
   (effective-config read → TOML edit → `serve --check` gate → SIGHUP →
   posture read-back). Install with
   `llm-redact plugin install claude|codex|opencode|cursor`; see
-  [docs/plugins.md](docs/plugins.md).
+  [docs/plugins.md](https://github.com/asanderson/llm-redact/blob/main/docs/plugins.md).
 - **Logs**: one metadata-only line per request to stderr — run under
   systemd (journald owns retention) or cap the container log driver.
   `[log] format = "json"` switches to one JSON object per line for log
@@ -441,7 +441,7 @@ essentials:
   (coming soon).
 - **FIPS 140-3 posture**: all cryptographic uses are FIPS-approved
   algorithm selections — `llm-redact fips-check`,
-  [docs/fips.md](docs/fips.md).
+  [docs/fips.md](https://github.com/asanderson/llm-redact/blob/main/docs/fips.md).
 - **Event loop**: `pip install 'llm-redact-proxy[perf]'` adds uvloop;
   uvicorn picks it up automatically — no configuration.
 
@@ -450,7 +450,7 @@ are a Pro feature of llm-redact-pro; the core parses and validates
 `[upstreams]`/`[routing]`/`[prices]`, carries every surface
 (`routes`/`spend`, doctor/status lines, the `/status` block, two
 metrics), and refuses to start with `[routing] enabled = true` without
-the package (see [docs/editions.md](docs/editions.md)).
+the package (see [docs/editions.md](https://github.com/asanderson/llm-redact/blob/main/docs/editions.md)).
 
 ## Benchmark and live validation
 
@@ -474,7 +474,7 @@ the package (see [docs/editions.md](docs/editions.md)).
   positives a model adds to the negatives corpus; `--check` compares a run
   with recorded recall floors and leak ceilings, so it needs a baseline
   recorded for your config first — see
-  [docs/ner-bench.md](docs/ner-bench.md#recording-a-baseline). The
+  [docs/ner-bench.md](https://github.com/asanderson/llm-redact/blob/main/docs/ner-bench.md#recording-a-baseline). The
   deterministic gate above never changes for it.
 - `uv run python scripts/live_smoke.py` runs opt-in smoke tests against the
   real provider APIs (needs API keys, spends credits, never runs in default
@@ -532,35 +532,35 @@ the curl output shows the originals restored in the stream.
   files, without code from their repositories, and nothing is downloaded unless
   you allow it at startup (`llm-redact models pull` fetches them yourself;
   an air-gapped install carries checksummed folders —
-  [docs/air-gapped.md](docs/air-gapped.md)); detection runs on a worker
+  [docs/air-gapped.md](https://github.com/asanderson/llm-redact/blob/main/docs/air-gapped.md)); detection runs on a worker
   thread, off the proxy's event loop.
 
 The complete annotated reference is
-[docs/detection.md](docs/detection.md) — the full rule list, **deny
+[docs/detection.md](https://github.com/asanderson/llm-redact/blob/main/docs/detection.md) — the full rule list, **deny
 strings** (values that must always be redacted, highest precedence,
 never subject to modes), **per-rule modes** (`redact`/`warn`/`block`),
 custom rules with checksum validators, global and per-type allowlists,
 and the optional **NER backends** (spaCy, GLiNER, GLiNER2, Presidio,
 Stanza, Hugging Face) with their model catalog. The current rule list also
-ships in [`config.example.toml`](config.example.toml).
+ships in [`config.example.toml`](https://github.com/asanderson/llm-redact/blob/main/config.example.toml).
 
 The NER backends are backed by a research survey and decision record,
-[docs/ner-landscape.md](docs/ner-landscape.md) — the engines evaluated
+[docs/ner-landscape.md](https://github.com/asanderson/llm-redact/blob/main/docs/ner-landscape.md) — the engines evaluated
 and the bar each had to clear, the PII-specific open models the bench
 measured with a verdict for each, why LLM-based extractors and SaaS PII
 APIs are rejected as a class (the raw pre-redaction text must never
 leave your machine), and the commercial self-hosted engines that would
-qualify if demand materializes. [docs/ner-bench.md](docs/ner-bench.md)
+qualify if demand materializes. [docs/ner-bench.md](https://github.com/asanderson/llm-redact/blob/main/docs/ner-bench.md)
 explains how models are measured.
 
 ## Security
 
 - **Threat model**: what the proxy defends against — and deliberately
   does not — is written down in
-  [docs/threat-model.md](docs/threat-model.md); the request-path gates,
+  [docs/threat-model.md](https://github.com/asanderson/llm-redact/blob/main/docs/threat-model.md); the request-path gates,
   with each policy decision and enforcement point mapped to code, are
   diagrammed in
-  [docs/security-dataflows.md](docs/security-dataflows.md).
+  [docs/security-dataflows.md](https://github.com/asanderson/llm-redact/blob/main/docs/security-dataflows.md).
 - **Hardened local endpoints**: every reserved ops endpoint carries a
   strict `Content-Security-Policy` plus
   `X-Frame-Options`/`nosniff`/`Referrer-Policy` headers, on top of the
@@ -569,18 +569,18 @@ explains how models are measured.
   from another origin or site, or through DNS rebinding, is refused
   before any upstream contact — HTTP and WebSocket alike — so no page can
   spend a credential the proxy holds or read the vault back through
-  rehydration ([threat model](docs/threat-model.md#requests-from-web-pages-the-operators-browser)).
+  rehydration ([threat model](https://github.com/asanderson/llm-redact/blob/main/docs/threat-model.md#requests-from-web-pages-the-operators-browser)).
   A browser app you trust with those values is an explicit opt-in:
-  `allowed_origins` ([deployment.md](docs/deployment.md#browser-apps-on-other-origins-allowed_origins)).
+  `allowed_origins` ([deployment.md](https://github.com/asanderson/llm-redact/blob/main/docs/deployment.md#browser-apps-on-other-origins-allowed_origins)).
 - **Reporting**: use GitHub private vulnerability reporting — see
-  [docs/SECURITY.md](docs/SECURITY.md).
+  [docs/SECURITY.md](https://github.com/asanderson/llm-redact/blob/main/docs/SECURITY.md).
 - **Supply chain**: release artifacts carry Sigstore provenance
   (`gh attestation verify <file> --repo asanderson/llm-redact`) and are
   byte-reproducible from source.
 - **Measured, not just tested**: mutation testing over the load-bearing
   core gates CI on a kill-or-justify contract, and "never a wrong
   value" is one falsifiable stateful property — method and results in
-  [docs/assurance.md](docs/assurance.md).
+  [docs/assurance.md](https://github.com/asanderson/llm-redact/blob/main/docs/assurance.md).
 
 ## Tech stack
 
@@ -609,9 +609,9 @@ cloud SDK ever enters the tree.
 
 The full inventory — every extra, the runtime closure, the dev
 toolchain, and how to verify the machine-readable CycloneDX SBOM
-attached to each release — is [docs/SBOM.md](docs/SBOM.md) (pinned to
+attached to each release — is [docs/SBOM.md](https://github.com/asanderson/llm-redact/blob/main/docs/SBOM.md) (pinned to
 `pyproject.toml` by test); the why-chosen record per package is
-[docs/dependencies.md](docs/dependencies.md).
+[docs/dependencies.md](https://github.com/asanderson/llm-redact/blob/main/docs/dependencies.md).
 
 ## Stability
 
@@ -621,12 +621,12 @@ the first public release and the public history starts there. As of
 API, proxying behavior contracts, and the three-runtime-dependency
 ceiling are stable surfaces under semantic versioning — the policy,
 including what MINOR releases may add and how deprecations work, is
-[docs/versioning.md](docs/versioning.md).
+[docs/versioning.md](https://github.com/asanderson/llm-redact/blob/main/docs/versioning.md).
 
 ## Development
 
 Contribution mechanics — the gates, the testing conventions, and how to
-add a detection rule — are in [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
+add a detection rule — are in [docs/CONTRIBUTING.md](https://github.com/asanderson/llm-redact/blob/main/docs/CONTRIBUTING.md).
 
 ```bash
 uv run pytest                                  # tests

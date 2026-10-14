@@ -40,6 +40,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             -r /tmp/requirements.txt; \
     fi
 COPY src ./src
+# LICENSE: hatchling puts it in the project wheel's dist-info (licenses/LICENSE),
+# so it must be in /app before the project is built (after the dependency
+# layer above, which it would otherwise invalidate).
+COPY LICENSE ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ -z "${NER_EXTRAS}" ]; then \
         uv sync --frozen --no-dev --no-editable ${EXTRAS}; \
@@ -56,6 +60,10 @@ LABEL org.opencontainers.image.title="llm-redact" \
 RUN useradd --uid 10001 --create-home app && mkdir -p /data && chown 10001:10001 /data
 COPY --from=builder --chown=10001:10001 /app/.venv /app/.venv
 COPY --chown=10001:10001 scripts/fake_upstream.py /app/scripts/fake_upstream.py
+# The AGPL-3.0 text travels with the program, also where a reader looks
+# for it outside Python's metadata (scripts/image_license_check.py checks
+# both copies; container_smoke.sh and ci.yml's container-ner job run it).
+COPY LICENSE /usr/share/doc/llm-redact/LICENSE
 # 0.0.0.0 binds only inside the container's network namespace; the host
 # boundary is the publish spec. Document -p 127.0.0.1:8787:8787 — a bare
 # -p 8787:8787 exposes the proxy (and its rehydrated secrets) to the LAN.

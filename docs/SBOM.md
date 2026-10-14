@@ -89,7 +89,8 @@ digests it records for the locked version.
 tests), `mutmut` (mutation assurance), `coverage` (complexity-coverage
 gate), plus `cryptography`, `websockets` and `pypdf` so the crypto,
 realtime and document-extraction paths are always exercised by the suite,
-and `pyyaml` for the k8s manifest and Helm chart render tests.
+`pyyaml` for the k8s manifest and Helm chart render tests, and `packaging`
+for the tests that read the declared dependency floors.
 
 ## Verifying a release
 

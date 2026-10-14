@@ -13,7 +13,7 @@ pyproject.toml in both directions, so it cannot go stale silently.
 |---|---|
 | `httpx` | The upstream HTTP client: async, streaming request/response bodies (the proxy re-frames streams byte-level), HTTP/2 capable, and its `AsyncBaseTransport` seam is what lets the whole integration suite run in-process against fake upstreams. |
 | `starlette` | The ASGI app layer: routing, WebSocket support, streaming responses — without FastAPI's validation machinery, which the proxy must NOT have (unknown JSON fields are forwarded verbatim, never validated or reshaped; that rule is why pydantic is banned from the request path). |
-| `uvicorn` | The ASGI server: production-grade, SIGHUP-friendly, and its `loop="auto"` / websocket protocol auto-selection is what lets the `perf` and `realtime` extras light up capabilities without any serve-code changes. |
+| `uvicorn` | The ASGI server: production-grade, SIGHUP-friendly, and its `loop="auto"` / websocket protocol auto-selection is what lets the `perf` and `realtime` extras light up capabilities without any serve-code changes. Floor 0.50.1: 0.50.0 hands the app a client's `Sec-WebSocket-Protocol` header as one subprotocol, so for a realtime client offering two or more the relay's upstream dial fails with the client's own key, and under `auth = "identity"` the client is answered with none of them (which a browser refuses). |
 
 Everything else in the request path is stdlib (`tomllib`, `argparse`,
 `dataclasses`, `sqlite3`, `hashlib`/`hmac`, `zlib` for eventstream CRCs) —
@@ -38,7 +38,7 @@ checked by the weekly gating pip-audit job.
 | `perf` | `uvloop` | Drop-in event-loop speedup; uvicorn's `loop="auto"` picks it up with zero configuration. |
 | `realtime` | `websockets` | One package serves BOTH sides of the realtime relay: uvicorn's server-side WebSocket protocol (auto-enabled when importable) and the upstream wss client. Floor 15.0: the relay overrides the asyncio client's redirect hook (added in 13.1) and forwards the client's `User-Agent`, which clients before 15.0 send a second time. |
 | `otel` | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` | Metadata-only telemetry export over OTLP/HTTP, the vendor-neutral standard; scoped SDK providers, never process globals. |
-| `extract` | `pypdf` | PDF text layers for [document extraction](extraction.md) (`[extraction]`): pure Python, BSD-3-Clause, imported only in the isolated, resource-limited extraction worker process — never on the request path. The OOXML/ODF, markup and RTF readers are stdlib. |
+| `extract` | `pypdf` | PDF text layers for [document extraction](extraction.md) (`[extraction]`): pure Python, BSD-3-Clause, imported only in the isolated, resource-limited extraction worker process — never on the request path. The OOXML/ODF, markup and RTF readers are stdlib. Floor 6.5: older releases fail on a PDF that draws an inline run-length-encoded image whose data holds a `0x80` byte before its end-of-data marker (they take the first `0x80` for that marker). |
 | `bench-data` | `huggingface_hub`, `pyarrow` | The [NER bench](ner-bench.md)'s published datasets only (`python -m llm_redact.bench.ner --dataset openpii`, …): `huggingface_hub` downloads a dataset file at a pinned revision, `pyarrow` reads the parquet ones a batch at a time. Never imported by the proxy. Floor `pyarrow>=14.0.1`: 14.0.1 fixed CVE-2023-47248 (code execution when reading an untrusted IPC/Parquet file), and a downloaded dataset is exactly such a file. |
 
 **torch (the `gliner`, `gliner2`, `stanza` and `hf` extras).** Each of the
@@ -80,11 +80,13 @@ and rewrite `uv.lock`, and a `pip install` from PyPI ignores it anyway.
 ## Development group
 
 The dev group (`uv sync`) additionally carries the test/lint toolchain
-(pytest, pytest-asyncio, ruff, mypy, hypothesis, mutmut) plus
-`cryptography`, `websockets` and `pypdf` so the whole suite exercises the
-crypto, realtime, document-extraction and mutation-assurance paths without
-extra flags. Dev
-dependencies never ship in the wheel.
+(pytest, pytest-asyncio, ruff, mypy, hypothesis, mutmut, and coverage for
+the complexity-coverage gate) plus `cryptography`, `websockets` and `pypdf`
+so the whole suite exercises the crypto, realtime, document-extraction and
+mutation-assurance paths without extra flags, `pyyaml` for the k8s
+manifest and Helm chart render tests, and `packaging` for the tests that
+read the declared dependency floors. Dev dependencies never ship in the
+wheel.
 
 ## Reproducible builds
 

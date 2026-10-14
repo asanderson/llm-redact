@@ -7,6 +7,7 @@ the histogram `_bucket`/`_sum`/`_count` suffixes), so renaming a metric without
 updating the dashboard fails CI.
 """
 
+import importlib.util
 import inspect
 import json
 import math
@@ -803,6 +804,104 @@ def test_the_image_license_label_is_the_declared_license() -> None:
     release = (root / ".github" / "workflows" / "release.yml").read_text()
     pinned = re.findall(r"org\.opencontainers\.image\.licenses=(\S+)", release)
     assert pinned == [declared]
+
+
+# --- the license text in the images ---------------------------------------------
+# The images once shipped no copy of the AGPL text: no step put it at a doc
+# path, and the builder never saw LICENSE, so the wheel built there lacked
+# licenses/LICENSE.
+
+ROOT = DEPLOY.parent
+
+
+def test_the_dockerfile_copies_the_license_into_both_stages() -> None:
+    # The builder copies it after the dependency-install RUN (which it would
+    # otherwise re-run whenever the text changes) and before the RUN that
+    # builds the project's wheel; the runtime stage puts it at the doc path.
+    lines = (ROOT / "Dockerfile").read_text().splitlines()
+
+    def where(text: str) -> list[int]:
+        return [i for i, line in enumerate(lines) if text in line]
+
+    copies = [i for i in where("LICENSE") if lines[i].startswith("COPY")]
+    assert [lines[i] for i in copies] == [
+        "COPY LICENSE ./",
+        "COPY LICENSE /usr/share/doc/llm-redact/LICENSE",
+    ]
+    [dependencies] = where("uv sync --frozen --no-dev --no-install-project")
+    [project] = where("uv sync --frozen --no-dev --no-editable")
+    [runtime] = where("FROM python:3.13-slim-bookworm AS runtime")
+    # The doc copy belongs to the runtime stage itself (release.yml builds
+    # that target), not to a later stage built FROM it.
+    runtime_end = next(
+        (i for i in range(runtime + 1, len(lines)) if lines[i].startswith("FROM ")), len(lines)
+    )
+    assert dependencies < copies[0] < project < runtime < copies[1] < runtime_end
+
+
+SMOKE_LICENSE_CHECK = (
+    '"$ENGINE" exec -i smoke-proxy python - < "$(dirname "$0")/image_license_check.py" \\\n'
+    '  || { echo "FAIL: the AGPL-3.0 license text is missing from the image"; exit 1; }\n'
+)
+NER_LICENSE_CHECK = (
+    "docker run --rm --network none --entrypoint python \\\n"
+    '  -v "$PWD/scripts/image_license_check.py:/smoke/image_license_check.py:ro" \\\n'
+    "  llm-redact:ner-ci /smoke/image_license_check.py\n"
+)
+
+
+def test_both_images_run_the_license_check() -> None:
+    # The stock image in the container smoke test, whose handler fails it
+    # when the check fails; the -ner image in a container-ner step, which no
+    # continue-on-error lets pass when the check fails.
+    smoke = (ROOT / "scripts" / "container_smoke.sh").read_text()
+    assert f"\n{SMOKE_LICENSE_CHECK}" in smoke
+    job = _workflow("ci.yml")["jobs"]["container-ner"]
+    [step] = [step for step in job["steps"] if step.get("run") == NER_LICENSE_CHECK]
+    assert "continue-on-error" not in step
+    assert "continue-on-error" not in job
+
+
+def _license_check():
+    path = ROOT / "scripts" / "image_license_check.py"
+    spec = importlib.util.spec_from_file_location("image_license_check", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_image_license_check_names_what_is_wrong() -> None:
+    check = _license_check()
+    # The path is pinned once; the messages render it as the host does (the
+    # suite also runs on Windows, where it is written with backslashes).
+    assert check.DOC.as_posix() == "/usr/share/doc/llm-redact/LICENSE"
+    doc = check.DOC
+    agpl = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    assert check.problems(agpl, agpl) == []
+    assert check.problems(None, agpl) == [f"{doc} is missing"]
+    assert check.problems("MIT License", agpl) == [f"{doc} does not hold the AGPL-3.0 text"]
+    metadata = "the llm-redact-proxy distribution"
+    assert check.problems(agpl, None) == [f"{metadata} carries no licenses/LICENSE"]
+    assert check.problems(agpl, "MIT License") == [
+        f"{metadata}'s licenses/LICENSE does not hold the AGPL-3.0 text"
+    ]
+    assert check.problems(agpl, agpl + "\n") == [f"{metadata}'s licenses/LICENSE is not {doc}"]
+
+
+def test_the_image_license_check_fails_without_the_distribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    check = _license_check()
+    (tmp_path / "LICENSE").write_bytes((ROOT / "LICENSE").read_bytes())
+    monkeypatch.setattr(check, "DOC", tmp_path / "LICENSE")
+
+    def not_installed(name: str) -> None:
+        raise check.PackageNotFoundError(name)
+
+    monkeypatch.setattr(check, "distribution", not_installed)
+    assert check.main() == 1
+    assert capsys.readouterr().err == "FAIL: the llm-redact-proxy distribution is not installed\n"
 
 
 # --- the -ner image variant and the air-gap CI jobs (static: CI builds them) -----

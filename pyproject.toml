@@ -14,12 +14,24 @@ requires-python = ">=3.11"
 # Floors track the tested majors: CI runs `uv sync --frozen` against the lock,
 # so these lower bounds are what a NON-frozen `pip install` may resolve. They
 # are raised past the starlette 0.x->1.x boundary (lock: 1.3.1) so a fresh
-# install cannot pull an untested pre-1.0 ASGI surface.
+# install cannot pull an untested pre-1.0 ASGI surface. uvicorn 0.50.0 hands
+# the app a client's Sec-WebSocket-Protocol header as ONE subprotocol: for a
+# realtime client offering two or more, the relay's upstream dial fails with
+# the client's own key, and under identity auth the client is answered with
+# none of them. 0.50.1 is the first release after 0.50.0 that the suite
+# passes on (tests/test_packaging_metadata.py).
 dependencies = [
     "httpx>=0.28",
     "starlette>=1.0",
-    "uvicorn>=0.50",
+    "uvicorn>=0.50.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/asanderson/llm-redact"
+Documentation = "https://github.com/asanderson/llm-redact/tree/main/docs"
+Source = "https://github.com/asanderson/llm-redact"
+Issues = "https://github.com/asanderson/llm-redact/issues"
+Changelog = "https://github.com/asanderson/llm-redact/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 ner = ["spacy>=3.7,<4"]
@@ -92,8 +104,10 @@ realtime = ["websockets>=15.0"]
 # (BSD-3-Clause), in the isolated extraction worker process only — never on
 # the request path. Without it an enabled [extraction] whose formats include
 # "pdf" refuses to start with this install hint; the OOXML/ODF, markup and
-# RTF readers are stdlib.
-extract = ["pypdf>=5"]
+# RTF readers are stdlib. Below pypdf 6.5 the worker errors on a PDF that
+# draws an inline run-length image holding a 0x80 byte before its end-of-data
+# marker (tests/test_packaging_metadata.py).
+extract = ["pypdf>=6.5"]
 # The NER bench's published datasets (python -m llm_redact.bench.ner
 # --dataset openpii|nemotron|...; docs/ner-bench.md): huggingface_hub fetches
 # them at a pinned revision, pyarrow reads the parquet ones. Bench only —
@@ -138,7 +152,8 @@ dev = [
     "mutmut>=3.6",
     # The extract extra, always present in dev so the extraction worker's
     # PDF reader is exercised (the no-extra refusal is pinned separately).
-    "pypdf>=5",
+    # Same floor as the extra.
+    "pypdf>=6.5",
     # The complexity-coverage gate (scripts/complexity_gate.py): every
     # branching function must be executed by the suite.
     "coverage>=7.6",
@@ -147,6 +162,10 @@ dev = [
     # CI helm job's Python — whose module is `yaml_ft`, so the render tests
     # once skipped there unseen.
     "pyyaml>=6",
+    # tests/test_packaging_metadata.py reads the declared requirements with
+    # it. Declared directly rather than left to pytest's own requirements
+    # (whose floor this is).
+    "packaging>=22",
 ]
 
 [tool.hatch.version]
@@ -272,9 +291,9 @@ only_mutate = [
 ]
 # mutmut runs pytest from a mutants/ copy; the suite reads repo data by path
 # (docs/api-coverage.md, deploy/*, bench/fp_corpus/*, CLAUDE.md, the checked-in agent
-# plugin under plugins/ + .claude-plugin/, config.example.toml, README.md),
+# plugin under plugins/ + .claude-plugin/, config.example.toml, README.md, LICENSE),
 # so those must be copied alongside the tests/ and pyproject.toml mutmut
 # copies by default — a path missing here fails the BASELINE run and every
 # mutant reports "not checked".
-also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", ".github", "config.example.toml", "README.md", "CHANGELOG.md", "CLAUDE.md", "Dockerfile", "uv.lock"]
+also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", ".github", "config.example.toml", "README.md", "CHANGELOG.md", "CLAUDE.md", "Dockerfile", "LICENSE", "uv.lock"]
 pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]

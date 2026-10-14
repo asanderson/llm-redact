@@ -27,6 +27,12 @@ from llm_redact.detection.model_manifest import (
 from llm_redact.models_cli import run_models
 from ner_fakes import DEFAULT_REPO, FakeHub, install_hub
 
+# The hf backend's default model (OpenMed-PII Small 44M since 1.13.0), at its
+# catalog pin, and the folder `models pull --to` writes it to.
+HF_DEFAULT = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+HF_DEFAULT_PIN = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"
+HF_FOLDER = "hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1"
+# The default before 1.13.0, named where a test names a model.
 DSLIM = "dslim/bert-base-NER"
 DSLIM_PIN = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
 GLINER_SMALL = "urchade/gliner_small-v2.1"
@@ -69,7 +75,7 @@ def test_list_shows_each_hub_model(
 ) -> None:
     hub = install_hub(
         monkeypatch,
-        FakeHub(repos={GLINER_SMALL: URCHADE_REPO, DEBERTA: DEBERTA_REPO}, uncached={DSLIM}),
+        FakeHub(repos={GLINER_SMALL: URCHADE_REPO, DEBERTA: DEBERTA_REPO}, uncached={HF_DEFAULT}),
     )
     config = _config(tmp_path, 'backends = ["gliner", "hf", "spacy"]')
     code, out = _run(capsys, "list", "--config", str(config))
@@ -83,9 +89,9 @@ def test_list_shows_each_hub_model(
         f"{DEBERTA}@{DEBERTA_PIN[:12]}",
     ]  # fmt: skip
     assert lines[2].split() == [
-        "hf", DSLIM, DSLIM_PIN[:12], "vetted", "MIT", "missing", "-",
+        "hf", HF_DEFAULT, HF_DEFAULT_PIN[:12], "caution", "Apache-2.0", "missing", "-",
     ]  # fmt: skip
-    assert lines[3].startswith(f"hf: [detection.ner] hf model '{DSLIM}' at revision")
+    assert lines[3].startswith(f"hf: [detection.ner] hf model '{HF_DEFAULT}' at revision")
     assert lines[4] == (
         "spacy: en_core_web_sm is not a Hugging Face model; install it with:"
         " uv run python -m spacy download en_core_web_sm"
@@ -105,13 +111,13 @@ def test_list_json(
     [state] = payload["models"]
     assert state == {
         "backend": "hf",
-        "model": DSLIM,
+        "model": HF_DEFAULT,
         "source": "hub",
-        "model_id": DSLIM,
-        "revision": DSLIM_PIN,
+        "model_id": HF_DEFAULT,
+        "revision": HF_DEFAULT_PIN,
         "pinned_by": "catalog",
-        "catalog": "vetted",
-        "license": "MIT",
+        "catalog": "caution",
+        "license": "Apache-2.0",
         "facts": state["facts"],
         "min_versions": [],
         "backbone": None,
@@ -120,7 +126,10 @@ def test_list_json(
         "file_count": 5,
         "problem": None,
     }
-    assert state["facts"].startswith(f"{DSLIM}: MIT;") and "checked 2026-10-05" in state["facts"]
+    assert (
+        state["facts"].startswith(f"{HF_DEFAULT}: Apache-2.0; the hf backend's default model;")
+        and "checked 2026-10-07" in state["facts"]
+    )
     assert payload["other_models"] == [
         {
             "backend": "stanza",
@@ -259,7 +268,8 @@ def test_verify_passes_when_every_model_is_complete(
     assert out.splitlines() == [
         f"OK    gliner: {GLINER_SMALL} at {GLINER_PIN}: 5 files complete in the local Hugging"
         " Face cache",
-        f"OK    hf: {DSLIM} at {DSLIM_PIN}: 5 files complete in the local Hugging Face cache",
+        f"OK    hf: {HF_DEFAULT} at {HF_DEFAULT_PIN}: 5 files complete in the local Hugging"
+        " Face cache",
     ]
     _offline(hub)
 
@@ -268,13 +278,13 @@ def test_verify_passes_when_every_model_is_complete(
     ("hub", "fail"),
     [
         # Not cached at its revision.
-        (FakeHub(uncached={DSLIM}), "is not (completely) in the local Hugging Face cache"),
+        (FakeHub(uncached={HF_DEFAULT}), "is not (completely) in the local Hugging Face cache"),
         # Cached, but the snapshot an interrupted download left lacks its
         # tokenizer: snapshot_download(local_files_only=True) returns it anyway.
         (
             FakeHub(
                 repos={
-                    DSLIM: {
+                    HF_DEFAULT: {
                         k: v for k, v in DEFAULT_REPO.items() if "tok" not in k and k != "vocab.txt"
                     }
                 }
@@ -534,13 +544,13 @@ def test_pull_fetches_each_model_at_its_pin_with_the_loader_patterns(
         (GLINER_SMALL, GLINER_PIN, list(GLINER_PATTERNS)),
         (GLINER_SMALL, GLINER_PIN, [*GLINER_PATTERNS, "pytorch_model.bin"]),
         (DEBERTA, DEBERTA_PIN, list(BACKBONE_PATTERNS)),
-        (DSLIM, DSLIM_PIN, list(HF_PATTERNS)),
+        (HF_DEFAULT, HF_DEFAULT_PIN, list(HF_PATTERNS)),
     ]
     assert not any(c["local_files_only"] for c in hub.calls)  # pull downloads
     assert out.splitlines() == [
         f"OK    gliner: {GLINER_SMALL} at {GLINER_PIN}: 5 files; base model {DEBERTA} at"
         f" {DEBERTA_PIN}",
-        f"OK    hf: {DSLIM} at {DSLIM_PIN}: 5 files",
+        f"OK    hf: {HF_DEFAULT} at {HF_DEFAULT_PIN}: 5 files",
     ]
     # With the cache filled, the proxy's own offline check passes.
     code, _ = _run(capsys, "verify", "--config", str(config))
@@ -662,12 +672,14 @@ def test_pull_to_writes_portable_folders_a_manifest_and_the_snippet(
     install_hub(monkeypatch, _pull_hub())
     out_dir = tmp_path / "carry"
     config = _config(
-        tmp_path, 'backends = ["gliner", "hf"]', f'[detection.ner.revisions]\nhf = "{DSLIM_PIN}"\n'
+        tmp_path,
+        'backends = ["gliner", "hf"]',
+        f'[detection.ner.revisions]\nhf = "{HF_DEFAULT_PIN}"\n',
     )
     code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
     assert code == 0
     gliner_dir = out_dir / "gliner-urchade--gliner_small-v2.1"
-    hf_dir = out_dir / "hf-dslim--bert-base-NER"
+    hf_dir = out_dir / HF_FOLDER
     assert sorted(p.name for p in out_dir.iterdir()) == sorted(
         [gliner_dir.name, hf_dir.name, MANIFEST_NAME]
     )
@@ -735,7 +747,7 @@ def test_pull_to_as_prints_the_mounted_paths(
         capsys, "pull", "--config", str(config), "--to", str(tmp_path / "out"), "--as", "/models/"
     )
     assert code == 0
-    assert 'hf = "/models/hf-dslim--bert-base-NER"' in out.splitlines()
+    assert f'hf = "/models/{HF_FOLDER}"' in out.splitlines()
     assert (
         out.splitlines()[-1]
         == "check the folder where it is used with: llm-redact models verify --dir /models/"
@@ -818,7 +830,7 @@ def test_a_pulled_folder_loads_with_every_network_call_failing(
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "no-assembly"))
     pipe = FakeHfPipe([])
     install_transformers(monkeypatch, pipe, offline)
-    hf_folder = str(out_dir / "hf-dslim--bert-base-NER")
+    hf_folder = str(out_dir / HF_FOLDER)
     build_hf_detector(NerConfig(enabled=True, backend="hf", model=hf_folder))
     assert pipe.built_with[0]["model"] == hf_folder
     model = FakeGliner([])
@@ -870,7 +882,7 @@ def test_pull_failures(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # One model is not on the hub: nothing is written to --to.
-    install_hub(monkeypatch, FakeHub(repos={DSLIM: DEFAULT_REPO}, default=None))
+    install_hub(monkeypatch, FakeHub(repos={HF_DEFAULT: DEFAULT_REPO}, default=None))
     out_dir = tmp_path / "carry"
     config = _config(tmp_path, 'backends = ["gliner", "hf"]')
     code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
@@ -895,17 +907,17 @@ def test_pull_to_never_replaces_a_folder_it_did_not_write(
     out_dir = tmp_path / "carry"
     config = _config(tmp_path, 'backend = "hf"')
     assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
-    marker = out_dir / "hf-dslim--bert-base-NER" / "config.json"
+    marker = out_dir / HF_FOLDER / "config.json"
     marker.write_text("changed")
     # A folder it wrote (it holds the sidecar) is replaced whole.
     assert _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))[0] == 0
     assert marker.read_text() != "changed"
     assert not any(p.name.endswith(".partial") for p in out_dir.iterdir())
-    (out_dir / "hf-dslim--bert-base-NER" / SIDECAR_NAME).unlink()
+    (out_dir / HF_FOLDER / SIDECAR_NAME).unlink()
     code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
     assert code == 1
     assert out.splitlines()[-1] == (
-        f"FAIL  {out_dir / 'hf-dslim--bert-base-NER'} exists and is not a folder `llm-redact"
+        f"FAIL  {out_dir / HF_FOLDER} exists and is not a folder `llm-redact"
         " models pull --to` wrote; remove it or choose another --to"
     )
 
@@ -965,10 +977,10 @@ def test_pull_to_that_fails_while_replacing_leaves_no_manifest(
     code, out = _run(capsys, "pull", "--config", str(config), "--to", str(out_dir))
     assert code == 1
     assert out.splitlines()[-1] == f"FAIL  cannot write the model folders to {out_dir} (OSError)"
-    assert replaced == ["hf-dslim--bert-base-NER"]
+    assert replaced == [HF_FOLDER]
     assert sorted(p.name for p in out_dir.iterdir()) == [
         "gliner-urchade--gliner_small-v2.1",
-        "hf-dslim--bert-base-NER",
+        HF_FOLDER,
     ]  # no manifest, and nothing left aside
     code, out = _run(capsys, "verify", "--dir", str(out_dir))
     assert code == 1 and f"no {MANIFEST_NAME} in" in out

@@ -29,6 +29,8 @@ from llm_redact.proxy import create_app
 from ner_fakes import FakeGliner, FakeHfPipe, FakeHub, install_gliner, install_transformers
 
 HF = NerConfig(enabled=True, backend="hf")
+# The hf backend's default model since 1.13.0.
+HF_DEFAULT = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
 
 
 def _detection(**ner: object) -> DetectionConfig:
@@ -125,7 +127,7 @@ def test_a_reload_with_a_cached_model_loads_it_from_the_cache(
     state.apply_config(replace(config, detection=_detection(model="org/new-ner")))
     assert state.config.detection.ner.model == "org/new-ner"
     assert [(c["repo_id"], c["local_files_only"]) for c in hub.calls] == [
-        ("dslim/bert-base-NER", True),
+        (HF_DEFAULT, True),
         ("org/new-ner", True),
     ]
 
@@ -205,10 +207,12 @@ def test_serve_check_with_an_empty_cache_fails_offline_with_the_pull_hint(
     assert report["seen"] == {"transformers": "1", "huggingface_hub": "1"}
     assert report["calls"] == [
         {
-            "repo_id": "dslim/bert-base-NER",
-            "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",
+            "repo_id": HF_DEFAULT,
+            "revision": "a2360d3f42526fc660ac3b2b2301e1c2d94eba61",
             "local_files_only": True,
         }
     ]
-    assert "serve --check: FAIL: [detection.ner] hf model 'dslim/bert-base-NER'" in done.stderr
+    # The hf default since 1.13.0: a user who never named a model fetches it
+    # once (the upgrade note in CHANGELOG.md).
+    assert f"serve --check: FAIL: [detection.ner] hf model '{HF_DEFAULT}'" in done.stderr
     assert "run `llm-redact models pull`" in done.stderr

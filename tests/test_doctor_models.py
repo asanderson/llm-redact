@@ -14,10 +14,19 @@ from typing import Any
 
 import pytest
 
-from llm_redact.detection.model_catalog import SIDECAR_NAME
+from llm_redact.detection.model_catalog import DEFAULT_MODELS, SIDECAR_NAME, lookup
 from llm_redact.doctor_cli import run_doctor
 from ner_fakes import DEFAULT_REPO, FakeHub, install_hub
 
+# The hf backend's default model (OpenMed-PII Small 44M since 1.13.0) and
+# what the model catalog says of it: a "caution" model, so its rows carry
+# the catalog's reason.
+HF_DEFAULT = DEFAULT_MODELS["hf"]
+_HF_ENTRY = lookup(HF_DEFAULT)
+assert _HF_ENTRY is not None and _HF_ENTRY.revision is not None
+HF_DEFAULT_PIN = _HF_ENTRY.revision
+HF_NOTE = f"(model catalog: caution, Apache-2.0): {_HF_ENTRY.describe()}"
+# The default before 1.13.0, named by local folders' sidecars below.
 DSLIM = "dslim/bert-base-NER"
 DSLIM_PIN = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
 GLINER_SMALL = "urchade/gliner_small-v2.1"
@@ -81,15 +90,15 @@ def test_a_cached_default_model_passes(
             "downloads off (allow_download = false): models load from the local Hugging"
             " Face cache or local folders only",
         ),
+        ("PASS", f"hf: {HF_DEFAULT} pinned at {HF_DEFAULT_PIN} by the model catalog {HF_NOTE}"),
         (
             "PASS",
-            f"hf: {DSLIM} pinned at {DSLIM_PIN} by the model catalog (model catalog: vetted, MIT)",
+            f"hf: {HF_DEFAULT}: every file the loader reads is in the local Hugging Face cache",
         ),
-        ("PASS", f"hf: {DSLIM}: every file the loader reads is in the local Hugging Face cache"),
     ]
     # A local-cache lookup at the pin, never a download.
     assert {(c["repo_id"], c["revision"], c["local_files_only"]) for c in hub.calls} == {
-        (DSLIM, DSLIM_PIN, True)
+        (HF_DEFAULT, HF_DEFAULT_PIN, True)
     }
 
 
@@ -165,7 +174,7 @@ def test_a_configured_pin_is_named(
     )
     assert (
         "PASS",
-        f"hf: {DSLIM} pinned at {SHA} by [detection.ner.revisions] (model catalog: vetted, MIT)",
+        f"hf: {HF_DEFAULT} pinned at {SHA} by [detection.ner.revisions] {HF_NOTE}",
     ) in rows
     assert {c["revision"] for c in hub.calls} == {SHA}
 
@@ -173,26 +182,27 @@ def test_a_configured_pin_is_named(
 def test_a_model_missing_from_the_cache_fails_while_downloads_are_off(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_hub(monkeypatch, FakeHub(uncached={DSLIM}))
+    install_hub(monkeypatch, FakeHub(uncached={HF_DEFAULT}))
     code, rows = _rows(tmp_path, capsys, 'backend = "hf"')
     assert code == 1
     assert _levels(rows, "FAIL") == [
-        f"[detection.ner] hf model '{DSLIM}' at revision {DSLIM_PIN} is not (completely) in"
-        " the local Hugging Face cache, and downloads are off (an older revision in the"
-        " cache does not count); run `llm-redact models pull`, or set [detection.ner]"
-        " allow_download = true to fetch it at startup (a reload never downloads)"
+        f"[detection.ner] hf model '{HF_DEFAULT}' at revision {HF_DEFAULT_PIN} is not"
+        " (completely) in the local Hugging Face cache, and downloads are off (an older"
+        " revision in the cache does not count); run `llm-redact models pull`, or set"
+        " [detection.ner] allow_download = true to fetch it at startup (a reload never"
+        " downloads)"
     ]
 
 
 def test_a_model_missing_from_the_cache_warns_when_startup_may_fetch_it(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    hub = install_hub(monkeypatch, FakeHub(uncached={DSLIM}))
+    hub = install_hub(monkeypatch, FakeHub(uncached={HF_DEFAULT}))
     _, rows = _rows(tmp_path, capsys, 'backend = "hf"\nallow_download = true')
     assert _levels(rows, "FAIL") == []
     assert (
         "WARN",
-        f"hf: hf model {DSLIM} is not (completely) in the local Hugging Face cache; the"
+        f"hf: hf model {HF_DEFAULT} is not (completely) in the local Hugging Face cache; the"
         " proxy's startup will fetch it (allow_download = true)",
     ) in rows
     assert all(c["local_files_only"] for c in hub.calls)  # doctor itself never downloads
@@ -204,7 +214,7 @@ def test_an_incomplete_snapshot_fails_naming_what_is_missing(
     # A cached snapshot without its tokenizer (an interrupted download).
     repo = {name: text for name, text in DEFAULT_REPO.items() if "tok" not in name}
     repo.pop("vocab.txt")
-    install_hub(monkeypatch, FakeHub(repos={DSLIM: repo}))
+    install_hub(monkeypatch, FakeHub(repos={HF_DEFAULT: repo}))
     code, rows = _rows(tmp_path, capsys, 'backend = "hf"')
     assert code == 1
     (fail,) = _levels(rows, "FAIL")
@@ -372,7 +382,7 @@ def test_without_huggingface_hub_the_cache_is_not_checked(
     assert _levels(rows, "WARN") == [
         f"gliner: {GLINER_SMALL}: the local Hugging Face cache was not checked:"
         " huggingface_hub is not installed (the gliner extra installs it)",
-        f"hf: {DSLIM}: the local Hugging Face cache was not checked: huggingface_hub is not"
+        f"hf: {HF_DEFAULT}: the local Hugging Face cache was not checked: huggingface_hub is not"
         " installed (the hf extra installs it)",
     ]
 
@@ -380,7 +390,7 @@ def test_without_huggingface_hub_the_cache_is_not_checked(
 def test_human_output_groups_the_rows_under_models(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_hub(monkeypatch, FakeHub(uncached={DSLIM}))
+    install_hub(monkeypatch, FakeHub(uncached={HF_DEFAULT}))
     config = tmp_path / "config.toml"
     config.write_text('port = 1\n[detection.ner]\nenabled = true\nbackend = "hf"\n')
     assert run_doctor(argparse.Namespace(config=config)) == 1

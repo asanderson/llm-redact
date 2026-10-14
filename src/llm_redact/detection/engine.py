@@ -13,7 +13,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.labels import LabelPolicy, raw_entity_deprecations
-from llm_redact.detection.model_catalog import DEFAULT_MODELS, HUB_BACKENDS, pinned_revision
+from llm_redact.detection.model_catalog import (
+    DEFAULT_MODELS,
+    HUB_BACKENDS,
+    PREVIOUS_HF_DEFAULT,
+    PREVIOUS_HF_DEFAULT_LABELS,
+    lookup,
+    pinned_revision,
+)
 from llm_redact.detection.regex_rules import BUILTIN_RULES, PreparedText, RegexDetector, RegexRule
 from llm_redact.detection.stats import NerStats
 
@@ -122,7 +129,8 @@ class NerConfig:
     # model-name override: the spaCy pipeline for spacy/presidio (default
     # en_core_web_sm), the HF model id for gliner (default
     # urchade/gliner_small-v2.1), gliner2 (default fastino/gliner2-base-v1)
-    # and hf (default dslim/bert-base-NER).
+    # and hf (default OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 since
+    # 1.13.0, dslim/bert-base-NER before: default_change_losses).
     language: str = "en"
     model: str | None = None
     # Per-backend model overrides ([detection.ner.models], stored sorted
@@ -418,6 +426,11 @@ def build_detectors(
 
         built: list[Detector] = []
         for backend_name in config.ner.active_backends():
+            if backend_name == "hf":
+                # Before any file is resolved or fetched: the hf default's
+                # change must not narrow what is redacted (from the model
+                # catalog's facts here; from the loaded model below).
+                check_default_change(config.ner)
             # Each backend builder still sees a single-backend view with
             # its own resolved model and effective revision (the user's
             # pin, else the catalog's) — the builders stay untouched.
@@ -467,6 +480,7 @@ def build_detectors(
                 from llm_redact.detection.hf_ner import build_hf_detector
 
                 inner = build_hf_detector(single)
+                check_default_change(config.ner, inner)
             else:
                 from llm_redact.detection.ner import build_ner_detector
 
@@ -479,6 +493,80 @@ def build_detectors(
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
         _mark_unmatched(config.ner.entities, built)
     return detectors
+
+
+def default_change_losses(ner: NerConfig, detector: Detector | None = None) -> tuple[str, ...]:
+    """The configured entities the hf backend loses to the change of its
+    default model in 1.13.0 (owner decision D6: from
+    :data:`~llm_redact.detection.model_catalog.PREVIOUS_HF_DEFAULT` to
+    ``DEFAULT_MODELS["hf"]``): each entity the previous default's labels
+    (``PREVIOUS_HF_DEFAULT_LABELS``) would have been emitted as and the
+    new default cannot emit. Only while the hf backend loads its default
+    without the configuration naming a model for it (no
+    ``[detection.ner.models] hf``, no legacy single ``model`` key); empty
+    otherwise. Decided as the never-match check decides
+    (:func:`_mark_unmatched`): by the backend's label policy (labels.py)
+    and the placeholder types its model emits — those of the built
+    ``detector``'s loaded model, or, without one (before the load; doctor,
+    which loads nothing), the labels the model catalog records for the
+    default at its pin (``CatalogEntry.model_labels``; nothing is decided
+    for another revision). Config names only, never detected text."""
+    if "hf" not in ner.active_backends() or ner.model_for("hf") is not None:
+        return ()
+    if detector is None:
+        # The policy the hf builder builds (build_hf_detector).
+        planned = LabelPolicy(ner.entities, backend="hf", overrides=ner.labels)
+        policy: LabelPolicy | None = planned
+        emittable = _catalog_types(ner, planned)
+    else:
+        policy = _label_policy(detector)
+        emittable = getattr(detector, "emittable_types", None)
+    if policy is None or emittable is None:
+        return ()
+    previous = {policy.classify(label) for label in PREVIOUS_HF_DEFAULT_LABELS}
+    return tuple(
+        entity
+        for entity in dict.fromkeys(ner.entities)
+        if (type_name := policy.classify(entity)) is not None
+        and type_name in previous
+        and type_name not in emittable
+    )
+
+
+def _catalog_types(ner: NerConfig, policy: LabelPolicy) -> frozenset[str] | None:
+    """The placeholder types the hf default model emits under ``policy``,
+    from the labels the model catalog records for it; None when it records
+    none, or ``ner`` pins the backend to another revision than the
+    catalog's (whose labels the catalog does not know)."""
+    entry = lookup(DEFAULT_MODELS["hf"])
+    if entry is None or not entry.model_labels or ner.revision_for("hf") != entry.revision:
+        return None
+    types = (policy.classify(label) for label in entry.model_labels)
+    return frozenset(t for t in types if t is not None)
+
+
+def default_change_message(losses: Sequence[str]) -> str:
+    """Why a configuration losing ``losses`` to the hf default's change is
+    refused, and both ways out (entity names only)."""
+    names = ", ".join(f'"{entity}"' for entity in losses)
+    return (
+        f"[detection.ner] entities: the hf backend's default model changed in 1.13.0 from"
+        f" {PREVIOUS_HF_DEFAULT} to {DEFAULT_MODELS['hf']}, which cannot emit {names}"
+        " (refused rather than redact less): set [detection.ner.models]"
+        f' hf = "{PREVIOUS_HF_DEFAULT}" to keep the previous default, or change'
+        ' [detection.ner] entities to types the new default emits (for example "PERSON")'
+    )
+
+
+def check_default_change(ner: NerConfig, detector: Detector | None = None) -> None:
+    """Refuse an hf backend that would redact less after its default
+    model's change (:func:`default_change_losses`): a ConfigError naming
+    the entities and both fixes."""
+    losses = default_change_losses(ner, detector)
+    if losses:
+        from llm_redact.config import ConfigError
+
+        raise ConfigError(default_change_message(losses))
 
 
 def check_min_versions(ner: NerConfig, backend: str) -> None:

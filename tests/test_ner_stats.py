@@ -46,6 +46,9 @@ from ner_fakes import (
     install_transformers,
 )
 
+# The hf backend's default model since 1.13.0, at its catalog pin.
+HF_DEFAULT = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+HF_DEFAULT_PIN = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"
 UPSTREAM = "https://api.openai.test"
 NER_FAMILIES = (
     "llm_redact_ner_strings_total",
@@ -257,13 +260,13 @@ def test_status_block_names_each_backend(monkeypatch: pytest.MonkeyPatch) -> Non
         "max_chars": 20000,
         "backends": {
             "hf": {
-                "model": "dslim/bert-base-NER",
+                "model": HF_DEFAULT,
                 "source": "hub",
-                "model_id": "dslim/bert-base-NER",
-                "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",
+                "model_id": HF_DEFAULT,
+                "revision": HF_DEFAULT_PIN,
                 "pinned": True,
-                "catalog": "vetted",
-                "license": "MIT",
+                "catalog": "caution",
+                "license": "Apache-2.0",
                 "score_threshold": 0.5,
                 "score_threshold_source": "default",
                 "counters": zero,
@@ -361,11 +364,11 @@ async def test_status_counts_requests_previews_and_resets_on_rebuild(
         sent = [message["content"] for message in json.loads(seen[0])["messages"]]
         assert sent == ["hi «PERSON_001»", LONG]
         hf = after["detection"]["ner"]["backends"]["hf"]
-        assert hf["model"] == "dslim/bert-base-NER"
+        assert hf["model"] == HF_DEFAULT
         assert (hf["revision"], hf["catalog"], hf["license"], hf["pinned"]) == (
-            "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",
-            "vetted",
-            "MIT",
+            HF_DEFAULT_PIN,
+            "caution",
+            "Apache-2.0",
             True,
         )
         assert hf["counters"]["scanned_whole"] == 1

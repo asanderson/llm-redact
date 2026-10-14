@@ -35,6 +35,9 @@ from ner_fakes import FakeHfPipe, FakeHub, FakeTokenizer, install_hub, install_t
 
 DSLIM = "dslim/bert-base-NER"
 DSLIM_PIN = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
+# The hf backend's default model since 1.13.0, at its catalog pin.
+HF_DEFAULT = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+HF_DEFAULT_PIN = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"
 OTHER = "0123456789abcdef0123456789abcdef01234567"
 
 # An hf repository with every kind of file a Hub model repo can hold.
@@ -101,8 +104,8 @@ def test_the_default_model_loads_at_its_catalog_pin_from_the_cache(
     pipe, _ = _build(monkeypatch, hub)
     assert hub.calls == [
         {
-            "repo_id": DSLIM,
-            "revision": DSLIM_PIN,
+            "repo_id": HF_DEFAULT,
+            "revision": HF_DEFAULT_PIN,
             "allow_patterns": list(HF_PATTERNS),
             "local_files_only": True,  # allow_download defaults to false (D2)
         }
@@ -139,14 +142,15 @@ def test_an_uncatalogued_model_without_a_revision_is_looked_up_unpinned(
 
 
 def test_a_model_missing_from_the_cache_names_models_pull(monkeypatch: pytest.MonkeyPatch) -> None:
-    hub = FakeHub(uncached={DSLIM})
+    hub = FakeHub(uncached={HF_DEFAULT})
     with pytest.raises(ConfigError) as caught:
         _build(monkeypatch, hub)
     assert str(caught.value) == (
-        f"[detection.ner] hf model '{DSLIM}' at revision {DSLIM_PIN} is not (completely) in"
-        " the local Hugging Face cache, and downloads are off (an older revision in the"
-        " cache does not count); run `llm-redact models pull`, or set [detection.ner]"
-        " allow_download = true to fetch it at startup (a reload never downloads)"
+        f"[detection.ner] hf model '{HF_DEFAULT}' at revision {HF_DEFAULT_PIN} is not"
+        " (completely) in the local Hugging Face cache, and downloads are off (an older"
+        " revision in the cache does not count); run `llm-redact models pull`, or set"
+        " [detection.ner] allow_download = true to fetch it at startup (a reload never"
+        " downloads)"
     )
 
 
@@ -319,7 +323,7 @@ def test_a_configuration_naming_model_code_is_refused(
     with pytest.raises(ConfigError) as caught:
         build_hf_detector(NerConfig(enabled=True, backend="hf"))
     assert str(caught.value) == (
-        f"[detection.ner] hf model '{DSLIM}' needs code from its repository ({name} names"
+        f"[detection.ner] hf model '{HF_DEFAULT}' needs code from its repository ({name} names"
         " auto_map); llm-redact never runs model code"
     )
     assert pipe.built_with == []

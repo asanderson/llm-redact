@@ -34,6 +34,7 @@ import pytest
 
 from llm_redact.config import ConfigError
 from llm_redact.detection.engine import DetectionConfig, NerConfig, build_detectors
+from llm_redact.detection.model_catalog import DEFAULT_MODELS
 from llm_redact.detection.model_files import names_a_path, resolve_model
 from ner_fakes import (
     DEFAULT_REPO,
@@ -159,7 +160,7 @@ def test_every_backend_starts_and_detects_without_a_connection(
 def test_the_guard_sees_a_startup_download(monkeypatch: pytest.MonkeyPatch, guard: Guard) -> None:
     # The fakes reach the network where the libraries would: an allowed
     # startup download of a model the cache lacks.
-    hub = NetworkedHub(uncached={"dslim/bert-base-NER"})
+    hub = NetworkedHub(uncached={DEFAULT_MODELS["hf"]})
     install_transformers(monkeypatch, FakeHfPipe([]), hub)
     config = DetectionConfig(ner=NerConfig(enabled=True, backend="hf", allow_download=True))
     with pytest.raises(ConfigError, match="could not be fetched from the Hugging Face Hub"):
@@ -245,7 +246,7 @@ def test_a_local_folder_loads_without_the_hub_or_a_connection(
 @pytest.mark.parametrize(
     "value",
     [
-        "/models/hf-dslim--bert-base-NER",
+        "/models/hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1",
         "./models/hf-x",
         "~/models/hf-x",
         "models/hf/x",
@@ -291,8 +292,7 @@ def test_the_airgap_configs_load_what_pull_prints() -> None:
         pulled = tomllib.loads((here / pull_name).read_text(encoding="utf-8"))
         served = tomllib.loads((here / serve_name).read_text(encoding="utf-8"))
         ner = pulled["detection"]["ner"]
-        defaults = {"hf": "dslim/bert-base-NER", "gliner": "urchade/gliner_small-v2.1"}
-        models = {b: ner.get("models", {}).get(b, defaults[b]) for b in ner["backends"]}
+        models = {b: ner.get("models", {}).get(b, DEFAULT_MODELS[b]) for b in ner["backends"]}
         expected = {b: f"/models/{folder_name(b, m)}" for b, m in models.items()}
         assert served["detection"]["ner"]["models"] == expected
         assert served["detection"]["ner"]["backends"] == ner["backends"]

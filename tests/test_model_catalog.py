@@ -29,6 +29,8 @@ from llm_redact.detection.model_catalog import (
     MAX_SIDECAR_BYTES,
     MEASURED,
     MODEL_ID_RE,
+    PREVIOUS_HF_DEFAULT,
+    PREVIOUS_HF_DEFAULT_LABELS,
     REVISION_RE,
     SIDECAR_NAME,
     STATUSES,
@@ -265,10 +267,43 @@ def test_default_models_are_the_backends_defaults() -> None:
         entry = lookup(model_id)
         assert entry is not None
         assert entry.backends == (backend,)
-        # Pinned whatever its status; gliner2's default is not yet measured.
-        assert entry.status == ("caution" if backend == "gliner2" else "vetted")
+        # Pinned whatever its status: gliner2's default is not yet measured,
+        # and hf's misses D11 bars with the five types its bench
+        # configuration requests (docs/ner-landscape.md, "The hf default").
+        assert entry.status == ("vetted" if backend == "gliner" else "caution")
         assert entry.revision is not None
-        assert f"the {backend} backend's default model" in entry.reason
+        assert f"the {backend} backend's default model;" in entry.reason
+    # Only the defaults say so.
+    others = [e for e in CATALOG if e.model_id not in DEFAULT_MODELS.values()]
+    assert not [e.model_id for e in others if "backend's default model;" in e.reason]
+
+
+def test_the_previous_hf_default_stays_catalogued_with_its_pin() -> None:
+    # Configurations that name it keep loading it (owner decision D6).
+    entry = lookup(PREVIOUS_HF_DEFAULT)
+    assert entry is not None and entry.status == "vetted"
+    assert entry.revision == _DSLIM_PIN
+    assert "the hf backend's default model before 1.13.0;" in entry.reason
+    assert DEFAULT_MODELS["hf"] != PREVIOUS_HF_DEFAULT
+    # Its config.json id2label: CoNLL-2003's four types, B-/I- tagged.
+    assert PREVIOUS_HF_DEFAULT_LABELS[0] == "O"
+    assert sorted({label[2:] for label in PREVIOUS_HF_DEFAULT_LABELS[1:]}) == [
+        "LOC",
+        "MISC",
+        "ORG",
+        "PER",
+    ]
+    assert all(label[:2] in ("B-", "I-") for label in PREVIOUS_HF_DEFAULT_LABELS[1:])
+
+
+def test_model_labels_are_recorded_for_the_hf_default_only() -> None:
+    # What doctor reads to know what the default emits without loading it.
+    default = lookup(DEFAULT_MODELS["hf"])
+    assert default is not None and len(default.model_labels) == 54
+    assert len(set(default.model_labels)) == 54
+    assert all(label == label.lower() and label != "o" for label in default.model_labels)
+    assert {"first_name", "last_name", "street_address", "user_name"} <= set(default.model_labels)
+    assert [e.model_id for e in CATALOG if e.model_labels] == [DEFAULT_MODELS["hf"]]
 
 
 @pytest.mark.parametrize(
@@ -574,6 +609,7 @@ def test_unknown_ner_keys_stay_errors() -> None:
 
 _SMALL_PIN = "4e091416cf7c3481db542c2a3d26156916f3a47f"
 _DSLIM_PIN = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
+_OPENMED_PIN = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"
 
 
 @pytest.mark.parametrize(
@@ -581,7 +617,9 @@ _DSLIM_PIN = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
     [
         # The backends' default models load at their catalog pins.
         (NerConfig(backend="gliner"), "gliner", _SMALL_PIN),
-        (NerConfig(backend="hf"), "hf", _DSLIM_PIN),
+        (NerConfig(backend="hf"), "hf", _OPENMED_PIN),
+        # The previous hf default, named, at its own pin.
+        (NerConfig(backend="hf", model="dslim/bert-base-NER"), "hf", _DSLIM_PIN),
         # The user's pin wins over the catalog's.
         (NerConfig(backend="hf", revisions=(("hf", _SHA),)), "hf", _SHA),
         # A configured catalogued model (per-backend table or legacy key,
@@ -605,7 +643,7 @@ _DSLIM_PIN = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
         (NerConfig(backend="hf", model="/models/ner"), "hf", None),
         # The legacy single `model` applies only with one backend active:
         # with two, each backend loads its default (and its default's pin).
-        (NerConfig(backends=("gliner", "hf"), model="org/other"), "hf", _DSLIM_PIN),
+        (NerConfig(backends=("gliner", "hf"), model="org/other"), "hf", _OPENMED_PIN),
         # Backends whose models are not Hub snapshots never have one.
         (NerConfig(backend="spacy"), "spacy", None),
         (NerConfig(backend="stanza", revisions=(("hf", _SHA),)), "stanza", None),

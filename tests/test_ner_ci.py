@@ -71,9 +71,12 @@ def _bench_config_problems(paths: list[Path]) -> list[str]:
 
 def test_the_bench_scores_the_two_default_models() -> None:
     assert _bench_config_problems(BENCH_CONFIGS) == []
-    assert {"gliner-pii-edge-onnx", "gliner2-default", "hf-openai-privacy-filter"} <= {
-        p.stem for p in TEST_CONFIGS
-    }
+    assert {
+        "gliner-pii-edge-onnx",
+        "gliner2-default",
+        "hf-dslim-bert-base-ner",
+        "hf-openai-privacy-filter",
+    } <= {p.stem for p in TEST_CONFIGS}
 
 
 def test_a_bench_config_for_another_model_may_name_it(tmp_path: Path) -> None:

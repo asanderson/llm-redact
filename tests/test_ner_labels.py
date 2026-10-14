@@ -41,6 +41,12 @@ from ner_fakes import (
     install_transformers,
 )
 
+# The hf backend's default model before 1.13.0, which labels names PER: the
+# tests of a PER-emitting model name it (since 1.13.0 a configuration
+# loading the new default implicitly is refused when it asks for PER:
+# tests/test_hf_default_change.py).
+DSLIM = "dslim/bert-base-NER"
+
 # --- normalization ------------------------------------------------------------
 
 
@@ -239,9 +245,8 @@ def test_default_hf_config_detects_person(monkeypatch: pytest.MonkeyPatch, fold_
 
 def test_hf_raw_entity_per(monkeypatch: pytest.MonkeyPatch, fold_raw: bool) -> None:
     install_transformers(monkeypatch, FakeHfPipe([("Jane Doe", "PER", 0.99)]))
-    (detector,) = build_detectors(
-        DetectionConfig(enabled=(), ner=NerConfig(enabled=True, backend="hf", entities=("PER",)))
-    )
+    ner = NerConfig(enabled=True, backend="hf", model=DSLIM, entities=("PER",))
+    (detector,) = build_detectors(DetectionConfig(enabled=(), ner=ner))
     assert [d.detector_type for d in detector.detect("ask Jane Doe")] == [
         "PERSON" if fold_raw else "PER"
     ]
@@ -550,7 +555,9 @@ def test_override_keeps_per_in_both_modes(monkeypatch: pytest.MonkeyPatch, fold_
     # The opt-out from the 2.0.0 fold: PER = "PER" keeps entities = ["PER"]
     # requesting and emitting PER.
     install_transformers(monkeypatch, FakeHfPipe([("Jane Doe", "PER", 0.9)]))
-    ner = NerConfig(enabled=True, backend="hf", entities=("PER",), labels=(("PER", "PER"),))
+    ner = NerConfig(
+        enabled=True, backend="hf", model=DSLIM, entities=("PER",), labels=(("PER", "PER"),)
+    )
     (detector,) = build_detectors(DetectionConfig(enabled=(), ner=ner))
     assert [d.detector_type for d in detector.detect("hi Jane Doe")] == ["PER"]
     policy = LabelPolicy(("PER",), overrides={"PER": "PER"})
@@ -623,7 +630,7 @@ def test_allowlist_written_for_per_keeps_matching(
     config = DetectionConfig(
         enabled=(),
         allowlist_by_type=(("PER", ("Jane Doe",)),),
-        ner=NerConfig(enabled=True, backend="hf", entities=("PER",)),
+        ner=NerConfig(enabled=True, backend="hf", model=DSLIM, entities=("PER",)),
     )
     allow = build_allowlist(config)
     found = detect_all(build_detectors(config), "Jane Doe and Bob", allow)
@@ -768,7 +775,7 @@ def test_startup_and_rebuild_log_the_deprecation(
     from llm_redact.proxy import create_app
 
     install_transformers(monkeypatch, FakeHfPipe([("Jane Doe", "PER", 0.9)]))
-    ner = NerConfig(enabled=True, backend="hf", entities=("PER",))
+    ner = NerConfig(enabled=True, backend="hf", model=DSLIM, entities=("PER",))
     config = Config(detection=DetectionConfig(ner=ner))
     with caplog.at_level(logging.WARNING, logger="llm_redact"):
         app = create_app(config)
@@ -948,6 +955,8 @@ DSLIM_ID2LABEL = {
 
 
 def _built(monkeypatch: pytest.MonkeyPatch, **ner: object) -> tuple[DetectionConfig, list[object]]:
+    # The hf backend loads dslim/bert-base-NER, named.
+    ner.setdefault("models", (("hf", DSLIM),))
     install_transformers(monkeypatch, FakeHfPipe([], id2label=DSLIM_ID2LABEL))
     install_spacy(monkeypatch, FakeSpacy([], labels=("PERSON", "ORG", "GPE", "DATE")))
     install_stanza(monkeypatch, FakeSpacy([]))
@@ -964,7 +973,7 @@ def _never(monkeypatch: pytest.MonkeyPatch, **ner: object) -> list[str]:
     return [w for w in ner_warnings(config, detectors) if "can never match" in w]  # type: ignore[arg-type]
 
 
-def test_default_hf_config_matches(monkeypatch: pytest.MonkeyPatch, fold_raw: bool) -> None:
+def test_dslim_matches_its_labels(monkeypatch: pytest.MonkeyPatch, fold_raw: bool) -> None:
     assert _never(monkeypatch, backend="hf") == []
     assert _never(monkeypatch, backend="hf", entities=("PERSON", "ORG", "LOC", "MISC")) == []
     # While raw entities keep their type, a raw PER claims the model's PER
@@ -1073,7 +1082,7 @@ def test_startup_logs_the_never_match_warning(
     from llm_redact.proxy import create_app
 
     install_transformers(monkeypatch, FakeHfPipe([], id2label=DSLIM_ID2LABEL))
-    ner = NerConfig(enabled=True, backend="hf", entities=("PERSON", "PERSONS"))
+    ner = NerConfig(enabled=True, backend="hf", model=DSLIM, entities=("PERSON", "PERSONS"))
     with caplog.at_level(logging.WARNING, logger="llm_redact"):
         create_app(Config(detection=DetectionConfig(ner=ner)))
     assert [r.getMessage() for r in caplog.records if "can never match" in r.getMessage()] == [

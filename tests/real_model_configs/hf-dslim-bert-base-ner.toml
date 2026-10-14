@@ -1,0 +1,10 @@
+# Pulled by the CI ner-models job (`llm-redact models pull --config`) for the
+# real_model tests, not scored by the NER bench: dslim/bert-base-NER, the hf
+# backend's default model before 1.13.0, at its catalog pin. Its WordPiece
+# tokenizer is what tests/test_hf_windows.py and tests/test_hf_bioes.py read,
+# and tests/test_hf_default_change.py checks its config.json id2label against
+# model_catalog.PREVIOUS_HF_DEFAULT_LABELS.
+[detection.ner]
+enabled = true
+backend = "hf"
+model = "dslim/bert-base-NER"

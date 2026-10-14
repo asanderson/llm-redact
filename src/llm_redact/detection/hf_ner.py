@@ -81,7 +81,10 @@ if TYPE_CHECKING:
     from llm_redact.detection.engine import NerConfig
     from llm_redact.detection.model_catalog import CatalogEntry
 
-_MODEL_NAME = "dslim/bert-base-NER"
+# The default model (model_catalog.DEFAULT_MODELS["hf"], test-pinned equal):
+# OpenMed-PII Small 44M since 1.13.0, dslim/bert-base-NER before
+# (model_catalog.PREVIOUS_HF_DEFAULT; engine.default_change_losses).
+_MODEL_NAME = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
 # A tokenizer that does not know its model's limit reports a huge sentinel
 # (transformers' VERY_LARGE_INTEGER); below this it is a real limit.
 _SENTINEL_MAX_LENGTH = 1_000_000

@@ -711,11 +711,22 @@ def _check_licensed_features(report: _Report, config: Config) -> None:
 def _check_ner_labels(report: _Report, config: Config) -> None:
     """The NER label policy's config-only warnings (doctor never loads a
     model): configured raw entities whose placeholder type changes in
-    2.0.0 — the same lines serve logs at startup."""
-    from llm_redact.detection.engine import ner_warnings
+    2.0.0 — the same lines serve logs at startup — and the entities the hf
+    backend's default model no longer emits since its change in 1.13.0,
+    from the labels the model catalog records (the startup refuses such a
+    configuration)."""
+    from llm_redact.detection.engine import (
+        default_change_losses,
+        default_change_message,
+        ner_warnings,
+    )
 
     for warning in ner_warnings(config.detection):
         report.line("WARN", "ner", warning)
+    ner = config.detection.ner
+    losses = default_change_losses(ner) if ner.enabled else ()
+    if losses:
+        report.line("WARN", "ner", default_change_message(losses))
 
 
 def _check_models(report: _Report, config: Config) -> None:

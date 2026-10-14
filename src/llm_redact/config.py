@@ -2709,9 +2709,10 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
     models = tuple(sorted((str(k), str(v)) for k, v in models_raw.items()))
     active = backends if backends is not None else (backend_name,)
     enabled = _bool_key(ner_raw, "enabled", False, "[detection.ner]")
-    if active == ("llm",) and "model" in ner_raw:
+    if enabled and active == ("llm",) and "model" in ner_raw:
         # The single `model` key applies to a lone backend, but this one's
-        # model lives in its own table: a silently inert key misleads.
+        # model lives in its own table: a silently inert key misleads (kept
+        # while NER is off, as an editor switching backends may keep it).
         raise ConfigError(
             "[detection.ner] model does not apply to the llm backend; set [detection.ner.llm] model"
         )

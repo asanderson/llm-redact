@@ -16,7 +16,7 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | File | What it is |
 |---|---|
 | `deploy/prometheus-scrape.yml` | A `scrape_configs` job to merge into your `prometheus.yml`. |
-| `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage, NER skipping strings longer than `max_chars`). |
+| `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage, NER skipping strings longer than `max_chars`, the `llm` NER backend's model server failing). |
 | `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, windows and truncated windows, entities dropped). |
 
 ## Metrics reference

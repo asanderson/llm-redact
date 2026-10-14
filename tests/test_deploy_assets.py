@@ -91,6 +91,8 @@ def test_ner_coverage_gap_has_panels_and_an_alert() -> None:
         "llm_redact_ner_windows_truncated_total",
         "llm_redact_ner_labels_dropped_total",
         "llm_redact_ner_offsets_dropped_total",
+        "llm_redact_ner_ungrounded_total",
+        "llm_redact_ner_errors_total",
     ):
         assert family in dashboard, family
     rules = yaml.safe_load((DEPLOY / "prometheus-alerts.yml").read_text())["groups"][0]["rules"]
@@ -99,6 +101,12 @@ def test_ner_coverage_gap_has_panels_and_an_alert() -> None:
     assert rule["labels"]["severity"] == "warning"
     assert rule["annotations"]["summary"]
     assert "max_chars" in rule["annotations"]["description"]
+    # The llm backend's model server failing: refused or forwarded without
+    # its findings, either way worth a look.
+    server = {r["alert"]: r for r in rules}["LlmRedactNerServerFailing"]
+    assert "llm_redact_ner_errors_total" in server["expr"]
+    assert server["labels"]["severity"] == "warning"
+    assert "on_error" in server["annotations"]["description"]
 
 
 def test_prometheus_scrape_targets_reserved_path() -> None:

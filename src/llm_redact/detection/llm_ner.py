@@ -64,7 +64,7 @@ from llm_redact.detection.labels import LabelPolicy, merge_adjacent_parts
 from llm_redact.detection.ner import NER_PRIORITY
 from llm_redact.detection.stats import NerStats
 from llm_redact.detection.windows import drop_exact_duplicates, gliner_words, word_windows
-from llm_redact.jsonwalk import loads_bounded
+from llm_redact.jsonwalk import json_bytes, loads_bounded
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import LlmNerConfig, NerConfig
@@ -187,12 +187,17 @@ class _Client:
         """One request's JSON answer; ``_Failed`` naming the failure kind."""
         if timeout <= 0:
             raise _Failed("timeout")
+        headers = {"accept": "application/json"}
+        if body is not None:
+            headers["content-type"] = "application/json"
         try:
             with self._http.stream(
                 method,
                 self.base + path,
-                json=body,
-                headers={"accept": "application/json"},
+                # json_bytes: a lone surrogate the request carried (a JSON
+                # "\ud800" escape) is re-escaped, never an encoding error.
+                content=json_bytes(body) if body is not None else None,
+                headers=headers,
                 timeout=timeout,
             ) as response:
                 if response.status_code != 200:
@@ -205,7 +210,9 @@ class _Client:
                         raise _Failed("answer too large")
         except httpx.TimeoutException:
             raise _Failed("timeout") from None
-        except httpx.HTTPError as exc:
+        except _Failed:
+            raise
+        except Exception as exc:  # noqa: BLE001 — any transport fault is a failed call
             raise _Failed(type(exc).__name__) from None
         try:
             return loads_bounded(bytes(data))

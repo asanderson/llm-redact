@@ -5749,7 +5749,9 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     # with the redaction): a reload meanwhile hands the request new
     # detectors, whose plan the table was not computed for — every string
     # then runs inline (counted), never a stale result. A detector's
-    # exception propagates as an inline one does (nothing is forwarded).
+    # exception propagates as an inline one does (nothing is forwarded); a
+    # required detector that could not read a string (DetectorUnavailable:
+    # the llm backend's server failing) is the recorded 503 either way.
     prefetched: tuple[DetectorPlan, PrecomputedTable] | None = None
     if adapter is not None and isinstance(parsed, dict) and not detection_off:
         try:

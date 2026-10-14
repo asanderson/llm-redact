@@ -525,16 +525,22 @@ def test_additive_detections_only_ever_add_redacted_characters(
         if d.tier == ADDITIVE_TIER and d not in added:
             assert d.value.strip() == d.value
     # Every non-blank character an additive winner of their own sweep held
-    # is redacted.
+    # is redacted, and one overlapping no other winner is kept as it is.
     covered = {i for d in resolved for i in range(d.start, d.end)}
     for d in _sweep(_ordered(added)):
         for i in range(d.start, d.end):
             assert i in covered or text[i].isspace()
+        if all(w.end <= d.start or d.end <= w.start for w in without):
+            assert d in resolved
 
 
 def test_an_additive_detection_overlapping_nothing_is_kept_as_it_is() -> None:
     lone = Detection(0, 4, "PERSON", " ab ", tier=ADDITIVE_TIER)
     assert _resolve_overlaps([lone]) == [lone]
+    # Touching a winner at either end is no overlap.
+    left, right = Detection(0, 2, "K", "xy"), Detection(6, 8, "K", "zw")
+    touching = Detection(2, 6, "PERSON", " ab ", tier=ADDITIVE_TIER)
+    assert _resolve_overlaps([left, touching, right]) == [left, touching, right]
     cut = _resolve_overlaps(
         [Detection(0, 9, "PERSON", "ab xy cd ", tier=ADDITIVE_TIER), Detection(3, 5, "K", "xy")]
     )
@@ -622,7 +628,7 @@ def test_a_bad_llm_table_is_refused(table: str, message: str) -> None:
             "reports no model digest",
         ),
         (
-            '[detection.ner]\nbackend = "llm"\nmodel = "m"\n',
+            '[detection.ner]\nenabled = true\nbackend = "llm"\nmodel = "m"\n',
             "model does not apply to the llm backend",
         ),
         ('[detection.ner.models]\nllm = "m"\n', r"\[detection.ner.llm\] model"),
@@ -641,7 +647,9 @@ def test_llm_settings_that_cannot_work_are_refused(body: str, message: str) -> N
 
 def test_an_inactive_or_disabled_llm_table_needs_no_model() -> None:
     # The pro editor keeps the table from the file across a backend switch.
-    config = _toml('[detection.ner]\nenabled = false\nbackend = "llm"\n\n[detection.ner.llm]\n')
+    config = _toml(
+        '[detection.ner]\nenabled = false\nbackend = "llm"\nmodel = "x"\n\n[detection.ner.llm]\n'
+    )
     assert config.detection.ner.llm == LlmNerConfig()
     _toml('[detection.ner]\nenabled = true\n\n[detection.ner.llm]\non_error = "skip"\n')
 
@@ -934,3 +942,15 @@ def test_llm_redact_models_names_the_servers_model() -> None:
     )
     ((entry,),) = [other_models(openai)]
     assert entry["model"] == "m" and "OpenAI-compatible" in entry["install"]
+
+
+def test_a_lone_surrogate_in_the_text_is_sent_escaped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A JSON body may carry "\ud800": the request to the server re-escapes
+    # it instead of failing to encode (which would read as a server fault).
+    server = FakeModelServer([(NAME, "person")])
+    _redactor, detector = _build(monkeypatch, server)
+    text = f"hi {NAME} \ud800"
+    assert [d.value for d in detector.detect(text)] == [NAME]
+    (chat,) = [r for r in server.requests if r.url.path == "/api/chat"]
+    assert b"\\ud800" in chat.content
+    assert server.asked == [text]

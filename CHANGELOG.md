@@ -42,7 +42,9 @@ and tags `vX.Y.Z`.
     resends with every request is not asked again. `llm-redact preview` exits 1 and names the
     failure when the server cannot read the text.
 - **Two NER counters**: `ungrounded` and `errors` in `/status` `detection.ner` and as
-  `llm_redact_ner_ungrounded_total` / `llm_redact_ner_errors_total`.
+  `llm_redact_ner_ungrounded_total` / `llm_redact_ner_errors_total`, both on the shipped Grafana
+  dashboard's NER panel, and a `LlmRedactNerServerFailing` alert in
+  `deploy/prometheus-alerts.yml` while the model server fails.
 
 ## [1.12.1] - 2026-10-14
 

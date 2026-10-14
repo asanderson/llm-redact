@@ -437,6 +437,10 @@ allowlist_patterns = ['^10\.', '^192\.168\.']
 #     entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
 #   and name the model in the `[detection.ner.models]` table below:
 #     hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+# backend = "llm": no extra; a generative model on a model server you run
+#   (Ollama, or an OpenAI-compatible server: vLLM, llama.cpp, LM Studio),
+#   configured in `[detection.ner.llm]` below. The server receives every
+#   scanned string UNREDACTED; its answers only ever ADD redactions.
 enabled = false
 backend = "spacy"
 # Run several backends at once, each toggled individually (wins over
@@ -500,6 +504,21 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # weights: a .onnx file inside the model; only that file is fetched.
 # [detection.ner.onnx]
 # gliner = "onnx/model_quint8.onnx"
+# The llm backend's model server (docs/detection.md "A model server you run").
+# It receives every string the backend scans UNREDACTED: loopback only,
+# unless allow_remote = true AND the url is https. The startup checks that
+# the server serves the model (on Ollama at the pinned digest, the 64-hex
+# one /api/tags reports); llm-redact never pulls a model.
+# [detection.ner.llm]
+# url = "http://127.0.0.1:11434"   # default: Ollama on loopback
+# api = "ollama"                   # or "openai" (an OpenAI-compatible server)
+# model = "qwen2.5:3b-instruct"    # `ollama pull` it first
+# digest = "<64 hex characters from /api/tags>"   # required with api = "ollama"
+# timeout_ms = 30000               # per string, every window of it
+# on_error = "block"               # a server failure refuses the request (503);
+#                                  # "skip" forwards it without this backend's
+#                                  # findings (a coverage opt-out, counted)
+# allow_remote = false
 
 [audit]
 # Opt-in local log of proxy activity: detector types and counts, paths,

@@ -1,11 +1,11 @@
 """Outbound half: replace detected values with vault-issued placeholders."""
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple, Protocol
 
-from llm_redact.detection.base import Detection, Detector
+from llm_redact.detection.base import ADDITIVE_TIER, Detection, Detector
 from llm_redact.detection.engine import Allowlist, DetectorPlan, PrecomputedTable, plan_for
 from llm_redact.jsonwalk import transform_strings
 from llm_redact.vault import PlaceholderSpaceExhausted, Vault
@@ -104,6 +104,69 @@ def _sweep(detections: Sequence[Detection]) -> list[Detection]:
 
 
 def _resolve_overlaps(detections: Sequence[Detection]) -> list[Detection]:
+    """The detections redaction acts on: tier-0 (user deny) detections win
+    every overlap (``_resolve_tiers``), and additive ones (tier 2,
+    ``ADDITIVE_TIER``: the llm NER backend's) never displace anything.
+
+    The others are resolved exactly as without the additive detections;
+    those are swept among themselves and each winner keeps only the parts
+    of its span that no other winner holds (``_outside``). So an additive
+    detection can only ADD redacted characters: a model the scanned text
+    instructs can return a span starting just before a secret, but that
+    span never takes the secret's place. With no additive detection present
+    the behavior is ``_resolve_tiers``, byte for byte.
+    """
+    if all(d.tier != ADDITIVE_TIER for d in detections):
+        return _resolve_tiers(detections)
+    fixed = _resolve_tiers([d for d in detections if d.tier != ADDITIVE_TIER])
+    additive = sorted(
+        (d for d in detections if d.tier == ADDITIVE_TIER),
+        key=lambda d: (d.start, -(d.end - d.start), d.priority),
+    )
+    return sorted(fixed + _outside(fixed, _sweep(additive)), key=lambda d: d.start)
+
+
+def _outside(fixed: Sequence[Detection], spans: Sequence[Detection]) -> list[Detection]:
+    """The parts of ``spans`` no ``fixed`` detection covers. Both are
+    disjoint and start-sorted; a span overlapping none is kept as it is,
+    one overlapping some is cut into the pieces between them, each a
+    detection of its own (same type, priority and tier) trimmed of the
+    whitespace at its edges (a piece of only whitespace is dropped). Each
+    span finds the winners it overlaps by binary search, so the cost is
+    linear in the spans, the winners and the pieces."""
+    ends = [f.end for f in fixed]
+    starts = [f.start for f in fixed]
+    pieces: list[Detection] = []
+    for d in spans:
+        # fixed[first:last] are the winners overlapping d: those ending
+        # after it starts and starting before it ends.
+        first = bisect_right(ends, d.start)
+        last = bisect_left(starts, d.end)
+        if first >= last:
+            pieces.append(d)
+            continue
+        cursor = d.start
+        for winner in fixed[first:last]:
+            pieces.extend(_piece(d, cursor, winner.start))
+            cursor = winner.end
+        pieces.extend(_piece(d, cursor, d.end))
+    return pieces
+
+
+def _piece(d: Detection, start: int, end: int) -> list[Detection]:
+    """``d``'s span between ``start`` and ``end`` (clamped to it) as a
+    detection of its own, its edge whitespace trimmed; none when nothing
+    but whitespace is left."""
+    start, end = max(start, d.start), min(end, d.end)
+    raw = d.value[start - d.start : end - d.start] if start < end else ""
+    kept = raw.strip()
+    if not kept:
+        return []
+    begin = start + len(raw) - len(raw.lstrip())
+    return [Detection(begin, begin + len(kept), d.detector_type, kept, d.priority, d.tier)]
+
+
+def _resolve_tiers(detections: Sequence[Detection]) -> list[Detection]:
     """Two-phase sweep: tier-0 (user deny) detections win every overlap.
 
     A sort-key tweak cannot express "deny always wins": the sweep is

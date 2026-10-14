@@ -184,13 +184,17 @@ def model_load(ner: "NerConfig", backend: str, *, allow_download: bool = False) 
     resolves them (:func:`local_files`, downloading only with
     ``allow_download``) plus the configuration's and the model catalog's
     facts; for spaCy, Presidio and Stanza the configured model (a Stanza
-    model is its language). Loads nothing. Raises ConfigError
-    (``ModelNotCached`` for a model the cache lacks) as the loader would."""
+    model is its language), for the llm backend the model its server runs.
+    Loads nothing. Raises ConfigError (``ModelNotCached`` for a model the
+    cache lacks) as the loader would."""
     from llm_redact.plugin_api import ModelLoad
 
     if backend not in HUB_BACKENDS:
         if backend == "stanza":
             return ModelLoad(backend=backend, model=ner.language or "en")
+        if backend == "llm":
+            # The model a model server runs ([detection.ner.llm]): its name.
+            return ModelLoad(backend=backend, model=ner.llm.model or "")
         model = ner.model_for(backend) or _OTHER_DEFAULTS.get(backend, "")
         return ModelLoad(backend=backend, model=model)
     source = model_source(ner, backend)

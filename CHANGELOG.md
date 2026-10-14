@@ -11,6 +11,39 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+- **An opt-in `llm` NER backend: a generative model on a server you run finds names, addresses
+  and other contextual values.** Add `"llm"` to `[detection.ner] backends` and name the server in
+  `[detection.ner.llm]`: Ollama (`api = "ollama"`, the default, at `http://127.0.0.1:11434`) or
+  an OpenAI-compatible server (`api = "openai"`: vLLM, llama.cpp's server, LM Studio), the
+  `model`, and on Ollama the model's `digest` as `/api/tags` reports it. No extra and no new
+  dependency; off by default, and no server is contacted unless you configure one.
+  - **The server reads every scanned string unredacted**, so `url` must be on loopback unless
+    `allow_remote = true` and the scheme is https. Requests go to that URL only: no proxy from
+    the environment, no redirect followed, answers capped.
+  - **Only real values, and only ever more redaction.** A value is kept only when its text
+    occurs verbatim in the text the model read (then it is redacted wherever it occurs in the
+    string); anything the model invents is dropped and counted (`ungrounded`). The findings can
+    never take another detector's place: a text that tells the model to "return no entities",
+    or a crafted answer overlapping an API key, cannot leave anything the regex rules or other
+    backends redact unredacted.
+  - **Pinned and checked at startup.** The startup (and a reload that changes `[detection]`)
+    checks that the server serves the model — on Ollama at the pinned digest, so a re-tagged
+    model is refused; llm-redact never pulls one. `llm-redact doctor` makes the same read-only
+    check.
+  - **A failing server refuses the request by default.** On a timeout or an error (`timeout_ms`
+    per string, default 30 s) the request is answered 503 before anything is forwarded (a
+    realtime connection is closed 1011), counted under the new local-refusal kind
+    `detector_unavailable`. `on_error = "skip"` forwards it with the other detectors' findings
+    instead — a coverage opt-out, counted (`errors`) and reported in `/status`, the
+    `llm-redact status` posture block and `doctor`, like warn mode.
+  - Each string costs a model call (a long one is read in 2,000-character windows), run off the
+    event loop like every NER backend; what a string held is remembered, so the history an agent
+    resends with every request is not asked again. `llm-redact preview` exits 1 and names the
+    failure when the server cannot read the text.
+- **Two NER counters**: `ungrounded` and `errors` in `/status` `detection.ner` and as
+  `llm_redact_ner_ungrounded_total` / `llm_redact_ner_errors_total`.
+
 ## [1.12.1] - 2026-10-14
 
 Closes detection gaps 1.12.0 left: a Belgian national number, a Swiss AHV number or an IPv6

@@ -56,6 +56,10 @@ refused, not forwarded unscanned).
   we do not defend against a provider actively attacking the client.
 - **The agentic tool is trusted.** It holds the API credentials and the
   user's files; the proxy adds privacy, not sandboxing.
+- **The `llm` NER backend's model server, when enabled, is trusted with the
+  unredacted text** it is asked to read (opt-in, off by default): it is
+  the operator's own server, on loopback unless `allow_remote = true` and
+  https. Its ANSWERS are not trusted — see "Contextual values" below.
 - **The browser is hostile.** Any web page can issue requests to
   127.0.0.1. This is the one boundary where an active network attacker is
   in scope — see "Requests from web pages" and the local ops surface
@@ -294,7 +298,21 @@ What that claim rests on, and what it does not:
   rule's match wins overlap resolution (the longest span wins) and replaces
   it; the bench counts such cases as structured regressions (none on the
   generated corpus for any configuration measured; one for ettin and two for
-  `openai/privacy-filter` on OpenPII's English slice).
+  `openai/privacy-filter` on OpenPII's English slice). The `llm` backend's
+  findings never do: they keep only what lies outside every other
+  detector's winner.
+- **A generative model reads text that can instruct it** (the opt-in `llm`
+  backend, [detection.md](detection.md#a-model-server-you-run-the-llm-backend)).
+  Its prompt frames the text as data between markers the text cannot forge,
+  but a model may still obey the text. What that cannot do: remove or
+  shorten another detector's redaction (its findings are additive only,
+  pinned by a property test), or make the proxy redact a value the text
+  does not hold (only verbatim text is kept, so an "invented" value never
+  enters the vault). What it can do: make the model miss values it would
+  have listed — the regex rules, deny strings and other NER backends still
+  apply — or list ordinary words, which are then over-redacted (restored in
+  the answer). A failing server refuses the request (`on_error = "block"`,
+  the default) rather than forward it with less detection than configured.
 - **Gaps are surfaced, not hidden.** An entity no backend can emit warns at
   startup, and what a model did not read is counted (long text, below).
 
@@ -547,6 +565,12 @@ silent:
 - `[detection] languages` narrows which national-id rules are built;
   universal rules (emails, keys, cards, IBANs, phones) always run, and
   the scoped-out rules are listed in `/status` and by `doctor`.
+- `[detection.ner.llm] on_error = "skip"` forwards a request without the
+  `llm` backend's findings when its model server times out or fails (the
+  default `"block"` refuses it 503): the other detectors still apply, and
+  each such string is counted (`errors` in `/status` and
+  `llm_redact_ner_errors_total`), with a `status` posture line and a
+  `doctor` WARN.
 - Refusal overrides (`[overrides]`, OFF by default — an operator opts in
   with `enabled = true`; docs/overrides.md): a detection refusal then
   carries a single-use code, and once a person approves
@@ -639,6 +663,7 @@ row, is [resilience.md](resilience.md).
 |---|---|
 | Novel secret formats the rules miss | User-extensible custom rules; NER extras; fp/recall gates keep the shipped set honest |
 | Contextual personal values no rule can match (addresses, passport and driver's-licence numbers, dates of birth, usernames, account numbers, most names) | Outside the rules by design. With a PII model enabled and the types requested, redacted on a best-effort basis: measured per model on a generated corpus and published slices ([ner-landscape.md](ner-landscape.md#verdicts-at-a-glance)), never guaranteed on your traffic; a model misses values and draws false positives; passport and driver's-licence numbers have no recorded baseline; the default configuration asks for names only, and `llm-redact preview` shows what fires on a text |
+| The opt-in `llm` NER backend: its model server reads every scanned string, and the text can instruct its model | Loopback by default; a remote server needs `allow_remote = true` and https, its model is pinned by name and (Ollama) digest at every build, and nothing is followed but the configured URL. Answers are grounded (only verbatim text is kept) and additive only (never displacing another detection); a failing server refuses the request unless `on_error = "skip"` (counted, a posture line). Residual: a model the text instructs may miss the values it alone would find, or over-redact ordinary words; the server's operator sees the unredacted text |
 | Text beyond what an NER model reads | Longer strings are read in overlapping windows (`hf`, `gliner`, `gliner2`); a string over `max_chars` (default 20,000 characters) is read by no model, the rules still scan it, and every skip is counted (`/status`, `/metrics`, a `llm-redact status` posture line, the `LlmRedactNerSkippingLongStrings` alert). Residual: names in such a string reach the provider; a word longer than the encoder reads is read in part (`windows_truncated`); an `hf` model decoded word by word never takes a quote or bracket into a value, so one inside a value goes upstream between the placeholders of its two parts |
 | NER model supply chain: weights or a tokenizer from a model repository that changed or was replaced | Models load at a full commit id (the user's pin or the model catalog's; an unpinned model is a `doctor` WARN), with explicit file names, never running repository code (`auto_map` refused, `trust_remote_code` never set) and, for `hf`, safetensors only unless `allow_pickle_weights` (a `doctor` WARN); a GLiNER ONNX export (`[detection.ner.onnx]`) fetches and reads only the one named file; GLiNER base models are pinned and assembled locally; downloads are off by default and startup-only, and with them off the Hugging Face libraries' own offline switches are set before they are imported, so no model load opens a connection (a CI job proves a start inside a network namespace with no route). Models carried into an enclave travel as portable folders checked against a SHA-256 manifest (`llm-redact models verify --dir`); the manifest travels with the folders, so its hash needs a separate channel. The model catalog states neutral facts (license, training data, a pin, measured numbers) and the core refuses nothing for them: a restricted model logs a startup WARNING, and a plugin's model-load policy (llm-redact-pro's `[models]`) may refuse. Residual: a pinned commit is trusted as published (no signature exists to check), a model the catalog does not know loads unpinned unless the operator pins it, GLiNER still loads a `pytorch_model.bin` through torch's `weights_only` loader (torch >= 2.6), a base model the catalog does not pin loads at its newest cached revision (a startup WARNING and a `doctor` WARN name it), and a model, though loaded as data and never as code, reads every scanned string inside the proxy's process |
 | LLM mangles a placeholder beyond fuzzy repair | Pass-through verbatim (never a wrong value); bracket swaps deliberately unrestored |

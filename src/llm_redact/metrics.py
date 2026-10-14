@@ -37,6 +37,7 @@ LocalRefusal = Literal[
     "budget",
     "credential_protocol",
     "delivery_fault",
+    "detector_unavailable",
     "disabled_provider",
     "identity_path",
     "identity_route",
@@ -113,6 +114,8 @@ CORE_METRIC_FAMILIES = frozenset(
         "llm_redact_ner_windows_truncated_total",
         "llm_redact_ner_labels_dropped_total",
         "llm_redact_ner_offsets_dropped_total",
+        "llm_redact_ner_ungrounded_total",
+        "llm_redact_ner_errors_total",
         "llm_redact_ner_inline_calls_total",
         "llm_redact_ner_prefetch_misses_total",
         "llm_redact_routed_requests_total",
@@ -522,6 +525,20 @@ def _ner_lines(backends: list[tuple[str, "NerStats"]]) -> list[str]:
             "offsets_dropped",
             "NER model entities of a requested type never redacted because the scanned"
             " string does not contain their span, by backend.",
+        ),
+        (
+            "llm_redact_ner_ungrounded_total",
+            "ungrounded",
+            "Entities a model server returned (the llm backend) whose text does not occur in"
+            " the text it read, or is too short to tell from the words around it: never"
+            " redacted, by backend.",
+        ),
+        (
+            "llm_redact_ner_errors_total",
+            "errors",
+            "Strings a model server failed on (the llm backend: a timeout, an error, an"
+            ' unreadable answer): with on_error = "block" each refused its request, with'
+            ' "skip" each went on without the backend\'s findings, by backend.',
         ),
         (
             "llm_redact_ner_inline_calls_total",

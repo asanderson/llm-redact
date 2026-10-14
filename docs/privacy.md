@@ -48,6 +48,12 @@ running it.
   starts the proxy with its NER models inside a network namespace with no
   route, failing on any connection attempt made through Python's `socket`
   module ([air-gapped.md](air-gapped.md)).
+- **The text you scan with a model server, only if you configure one.** The
+  optional `llm` NER backend (`[detection.ner.llm]`, off by default) sends
+  every string it scans, unredacted, to the model server you name — Ollama
+  on this machine by default; a server elsewhere only with `allow_remote =
+  true` over https. That server and its operator see that text; nothing is
+  sent unless you configure the backend.
 
 ## The agent plugin commands
 

@@ -42,14 +42,17 @@ from ner_fakes import (
     FakeGliner2,
     FakeHfPipe,
     FakeHub,
+    FakeModelServer,
     FakeSpacy,
     FakeTldExtract,
     install_gliner,
     install_gliner2,
+    install_llm,
     install_presidio,
     install_spacy,
     install_stanza,
     install_transformers,
+    llm_ner_config,
 )
 
 
@@ -109,6 +112,10 @@ def _install(monkeypatch: pytest.MonkeyPatch, backend: str, hub: FakeHub) -> Any
         model2 = FakeGliner2([("Jane Roe", "person", 0.9)])
         install_gliner2(monkeypatch, model2, hub)
         return model2
+    if backend == "llm":
+        # The model server the operator configured (loopback by default),
+        # answering in process: the backend's only connections go there.
+        return install_llm(monkeypatch, FakeModelServer([("Jane Roe", "person")]))
     if backend == "presidio":
         analyzer = FakeAnalyzer(
             [("Jane Roe", "PERSON", 0.9), ("jane.roe@example.com", "EMAIL_ADDRESS", 0.9)],
@@ -128,16 +135,21 @@ def _reach(host: str) -> None:
     socket.create_connection((host, 443), timeout=5)
 
 
-@pytest.mark.parametrize("backend", ["hf", "gliner", "gliner2", "spacy", "presidio", "stanza"])
+@pytest.mark.parametrize(
+    "backend", ["hf", "gliner", "gliner2", "spacy", "presidio", "stanza", "llm"]
+)
 def test_every_backend_starts_and_detects_without_a_connection(
     monkeypatch: pytest.MonkeyPatch, guard: Guard, backend: str
 ) -> None:
     hub = NetworkedHub()
     model = _install(monkeypatch, backend, hub)
     entities = ("PERSON", "EMAIL") if backend == "presidio" else ("PERSON",)
-    config = DetectionConfig(
-        enabled=(), ner=NerConfig(enabled=True, backend=backend, entities=entities)
+    ner = (
+        llm_ner_config()
+        if backend == "llm"
+        else NerConfig(enabled=True, backend=backend, entities=entities)
     )
+    config = DetectionConfig(enabled=(), ner=ner)
     (detector,) = build_detectors(config, startup=True)  # serve / serve --check
     found = {d.value for d in detector.detect(TEXT)}
     assert "Jane Roe" in found
@@ -154,6 +166,14 @@ def test_every_backend_starts_and_detects_without_a_connection(
     if backend == "presidio":
         # Presidio's email check asked tldextract (offline) about the address.
         assert FakeTldExtract.asked == ["jane.roe@example.com"]
+    if backend == "llm":
+        # Its model list at startup, one chat for the text: both to the
+        # configured server and nowhere else.
+        assert [(r.url.host, r.url.port, r.url.path) for r in model.requests] == [
+            ("127.0.0.1", 11434, "/api/tags"),
+            ("127.0.0.1", 11434, "/api/chat"),
+        ]
+        assert hub.calls == []
 
 
 def test_the_guard_sees_a_startup_download(monkeypatch: pytest.MonkeyPatch, guard: Guard) -> None:
@@ -165,6 +185,15 @@ def test_the_guard_sees_a_startup_download(monkeypatch: pytest.MonkeyPatch, guar
     with pytest.raises(ConfigError, match="could not be fetched from the Hugging Face Hub"):
         build_detectors(config, startup=True)
     assert guard.attempts == ["create_connection ('huggingface.co', 443)"]
+
+
+def test_the_guard_sees_the_llm_backends_own_connection(guard: Guard) -> None:
+    # Unfaked, the llm backend's startup check dials its configured server
+    # (loopback by default) — and only that one: in an enclave the server
+    # sits inside it, and an unreachable one stops the start.
+    with pytest.raises(ConfigError, match="model list could not be read"):
+        build_detectors(DetectionConfig(enabled=(), ner=llm_ner_config()), startup=True)
+    assert guard.attempts == ["create_connection ('127.0.0.1', 11434)"]
 
 
 def test_the_guard_sees_tldextracts_own_suffix_list_fetch(

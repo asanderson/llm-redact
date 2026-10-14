@@ -34,6 +34,7 @@ KIND_STATUSES: dict[str, frozenset[int | None]] = {
     "budget": frozenset({402}),
     "credential_protocol": frozenset({403}),
     "delivery_fault": frozenset({502, 500}),
+    "detector_unavailable": frozenset({503}),
     "disabled_provider": frozenset({502}),
     "identity_path": frozenset({None}),
     "identity_route": frozenset({403}),

@@ -91,7 +91,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 from llm_redact.audit import AuditWriteError
 from llm_redact.authorization import content_facts
 from llm_redact.connections import ACCESS_CLOSE_CODE
-from llm_redact.detection.base import Detection
+from llm_redact.detection.base import Detection, DetectorUnavailable
 from llm_redact.detection.engine import DetectorPlan
 from llm_redact.jsonwalk import (
     MAX_JSON_DEPTH,
@@ -2093,6 +2093,19 @@ async def _relay(
                 refusal = "override_fault" if raced.fault else "override_raced"
                 await close_on_policy(
                     OVERRIDE_FAULT_REASON if raced.fault else OVERRIDE_RACED_REASON
+                )
+                return
+            except DetectorUnavailable as unavailable:
+                # A detector the configuration requires could not read this
+                # frame (the llm NER backend's server failed, on_error =
+                # "block"): never sent, and the session cannot continue
+                # without it — closed 1011 (internal error), recorded as the
+                # HTTP path's 503; backend and failure kind only.
+                logger.warning("WS %s -> closed 1011 (%s); frame not sent", path, unavailable)
+                status, refusal = 503, "detector_unavailable"
+                await close_on_policy(
+                    f"llm-redact: the {unavailable.backend} detector could not read this frame",
+                    code=1011,
                 )
                 return
             except state.vault_faults as fault:

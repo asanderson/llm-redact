@@ -213,6 +213,15 @@ downloaded unless `allow_download = true`, and then only at startup.
 - `llm-redact doctor` — the `models` area says the same, with warnings for
   downloads, pickle weights, unpinned and restricted models.
 
+The `llm` backend instead asks a generative model on a server you run
+(Ollama, or an OpenAI-compatible server), set in `[detection.ner.llm]`. That
+server reads every scanned string unredacted, so it stays on loopback unless
+`allow_remote = true` over https; the startup checks it serves the pinned
+model, and `doctor` checks the same. Its findings only ever add redactions.
+When the server fails a request is refused (503) unless `on_error = "skip"`,
+which forwards it without those findings — a coverage opt-out shown in
+`llm-redact status`.
+
 Which models exist, what each finds (names; with a PII model also
 addresses, dates of birth, usernames and account numbers, best effort) and
 how long strings are read: `docs/detection.md` and `docs/ner-landscape.md`.

@@ -39,6 +39,8 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | `llm_redact_ner_windows_truncated_total` | counter | `backend` | Windows (a string read whole counts as one) holding a single word longer than the model's encoder reads (a very long identifier), which the model may read only in part. |
 | `llm_redact_ner_labels_dropped_total` | counter | `backend` | Model entities never emitted because their type cannot be a placeholder type (it starts with a digit, or is longer than 28 characters). |
 | `llm_redact_ner_offsets_dropped_total` | counter | `backend` | Model entities of a requested type never redacted because the scanned string does not contain their span (or they came without one). |
+| `llm_redact_ner_ungrounded_total` | counter | `backend` | Entities the `llm` backend's model server returned whose text does not occur in the text it read (invented or mangled), is shorter than two characters or holds a placeholder's guillemet: never redacted. |
+| `llm_redact_ner_errors_total` | counter | `backend` | Strings the `llm` backend's model server failed on (a timeout, an error status, a connection fault, an answer that is not the requested JSON). With `on_error = "block"` each refused its request (`detector_unavailable`); with `"skip"` each was **forwarded without the backend's findings** — a coverage gap, also a `llm-redact status` posture line. |
 | `llm_redact_ner_inline_calls_total` | counter | `backend` | Strings an NER backend ran on the event loop itself — every other request waited for that string's inference — instead of ahead of the redaction on the NER worker thread. |
 | `llm_redact_ner_prefetch_misses_total` | counter | `backend` | Strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced) and ran inline instead; each is also counted in `llm_redact_ner_inline_calls_total`. |
 | `llm_redact_overrides_used_total` | counter | `kind` | Requests (and realtime frames) that passed a refusal on an approved refusal override (docs/overrides.md), by `once`/`always` — **the overridden value, body or file part was forwarded upstream as sent**, like a warn-mode value. Also `/status` `overrides`. |
@@ -100,6 +102,7 @@ status, a frame refused on an open relay closes it.
 | `placeholder_limit` | 400 | No placeholder number left for a new value. |
 | `override_raced` / `override_fault` | 400 | A one-time refusal override another request used first, or the override store could not record the use. |
 | `vault_fault` | 503 | The vault could not issue the request's placeholders or open its session. |
+| `detector_unavailable` | 503 | A detector the configuration requires could not read the request (the `llm` NER backend's model server timed out or failed, with `on_error = "block"`); realtime: the frame is refused and the connection closed 1011. |
 | `audit_unavailable` | 503 | `[audit] required`: the write-ahead START row could not be committed. |
 | `upstream_auth` | 502 | The proxy's own cloud identity produced no credential. |
 | `upstream_fault` | 502 | No upstream answer at all: a transport fault (connect, timeout, a drop before the answer was delivered), every routed hop failed, or a realtime dial failed. |

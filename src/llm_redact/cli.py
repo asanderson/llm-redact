@@ -601,6 +601,7 @@ def run_preview(args: argparse.Namespace) -> int:
     import sys
 
     from llm_redact.config import load_config
+    from llm_redact.detection.base import DetectorUnavailable
     from llm_redact.detection.engine import build_allowlist, build_detectors, build_modes
     from llm_redact.licensing import resolve_license
     from llm_redact.redactor import BlockedRequest, Redactor
@@ -625,25 +626,29 @@ def run_preview(args: argparse.Namespace) -> int:
     )
     blocked: str | None = None
     redacted: str | None = None
+    unavailable: DetectorUnavailable | None = None
     try:
         redacted = redactor.redact_text(text)
     except BlockedRequest as exc:
         blocked = exc.detector_type
+    except DetectorUnavailable as exc:
+        unavailable = exc
 
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "redacted": redacted,
-                    "detections": dict(redactor.counts),
-                    "warnings": dict(redactor.warn_counts),
-                    "blocked": blocked,
-                },
-                indent=2,
-            )
-        )
-        return 0
+        answer: dict[str, object] = {
+            "redacted": redacted,
+            "detections": dict(redactor.counts),
+            "warnings": dict(redactor.warn_counts),
+            "blocked": blocked,
+        }
+        if unavailable is not None:
+            answer["unavailable"] = {"backend": unavailable.backend, "reason": unavailable.reason}
+        print(json.dumps(answer, indent=2))
+        return 0 if unavailable is None else 1
 
+    if unavailable is not None:
+        print(f"UNAVAILABLE: {unavailable}; a real request would be refused (503)")
+        return 1
     if blocked is not None:
         print(f"BLOCKED: a {blocked} value matched a block-mode rule (a real request would 400)")
         return 0
@@ -987,7 +992,9 @@ def _print_posture(payload: dict[str, Any]) -> None:
 def _ner_posture(ner: object) -> list[str]:
     """NER coverage gaps from the /status ``detection.ner`` block (absent on
     an older proxy): strings the models never read because they were
-    longer than max_chars, and configured entities no backend can emit."""
+    longer than max_chars, configured entities no backend can emit, and a
+    model-server backend that lets requests go on without it when its
+    server fails (``on_error = "skip"``)."""
     if not isinstance(ner, dict):
         return []
     lines: list[str] = []
@@ -1005,6 +1012,15 @@ def _ner_posture(ner: object) -> list[str]:
     unmatched = ner.get("unmatched_entities") or []
     if unmatched:
         lines.append(f"NER entities no backend can emit: {', '.join(unmatched)} (never detected)")
+    for name, entry in backends.items():
+        if isinstance(entry, dict) and entry.get("on_error") == "skip":
+            # A coverage opt-out like warn mode: reported whether or not the
+            # model server has failed yet.
+            failed = (entry.get("counters") or {}).get("errors") or 0
+            lines.append(
+                f'NER {name} on_error = "skip": {failed} string(s) forwarded without its'
+                " findings after its model server failed (the other detectors still applied)"
+            )
     return lines
 
 

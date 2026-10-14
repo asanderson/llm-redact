@@ -283,6 +283,18 @@ def test_nothing_1_12_0_redacted_is_forwarded(seed: int) -> None:
     assert count > 20_000 and gained > 1_000
 
 
+def _as_written(func: types.FunctionType) -> tuple[types.FunctionType, str]:
+    """``func`` and its source as written. In mutmut's mutants/ copy a
+    function of a module it mutates (validators.py) is a trampoline wrapping
+    the function as written (``__wrapped__``) under one added decorator
+    line; both are read through, so the digest is the same there, where no
+    mutant can change a source anyway."""
+    func = inspect.unwrap(func)
+    lines = inspect.getsource(func).splitlines(keepends=True)
+    added = "@_mutmut_mutated("
+    return func, "".join(line for line in lines if not line.lstrip().startswith(added))
+
+
 def _source(func: types.FunctionType) -> list[str]:
     """The source of ``func`` and of every function it names (of its module,
     or imported in its body), and the value of every other name of theirs
@@ -290,8 +302,8 @@ def _source(func: types.FunctionType) -> list[str]:
     found: set[str] = set()
     todo = [func]
     while todo:
-        func = todo.pop()
-        found.add(inspect.getsource(func))
+        func, source = _as_written(todo.pop())
+        found.add(source)
         codes = [func.__code__]
         while codes:
             code = codes.pop()
@@ -304,7 +316,7 @@ def _source(func: types.FunctionType) -> list[str]:
             names = [scope[name] for scope in scopes for name in code.co_names if name in scope]
             for value in names:
                 if inspect.isfunction(value):
-                    if inspect.getsource(value) not in found:
+                    if _as_written(value)[1] not in found:
                         todo.append(value)
                 elif not inspect.ismodule(value):
                     found.add(repr(sorted(value) if isinstance(value, frozenset) else value))

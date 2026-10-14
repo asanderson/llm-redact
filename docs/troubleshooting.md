@@ -362,7 +362,9 @@ until you upgrade to 2.0.0. Settle it now in one of two ways:
   switch to that type now (new placeholders such as «PERSON_001»; metrics and
   alerts keyed on the old type move with them);
 - or keep today's type for good with the override the message names
-  (`[detection.ner.labels] PER = "PER"`).
+  (`[detection.ner.labels] PER = "PER"`). On the `hf` backend this needs a
+  model that emits `PER`: the default since 1.13.0 emits none, so name
+  `dslim/bert-base-NER` in `[detection.ner.models] hf` too (the next entry).
 
 Either way the warning goes away. See docs/detection.md "Placeholder types
 from NER models".

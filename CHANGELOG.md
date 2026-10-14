@@ -11,6 +11,12 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+- The latency smoke check (`python -m llm_redact.bench --latency --check`) allows the proxy's
+  own overhead on a 100 KB body up to 300 ms (was 150 ms). It is a tripwire for gross
+  regressions such as quadratic behavior, measured at about 44 ms; a loaded shared CI runner
+  once landed at 150.3 ms on an unchanged hot path. docs/assurance.md lists the ceilings.
+
 ## [1.12.1] - 2026-10-14
 
 Closes detection gaps 1.12.0 left: a Belgian national number, a Swiss AHV number or an IPv6

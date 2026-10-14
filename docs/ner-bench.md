@@ -171,7 +171,7 @@ directory, whose every file is scanned):
 ```toml
 [hf-default]
 recorded = "2026-10-05"
-note = "dslim/bert-base-NER at <revision>"
+note = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at <revision>"
 per_100kb_max = 2.0              # NER hits per 100 KB of the whole corpus
 
 [hf-default."rfc_excerpt.txt"]
@@ -288,14 +288,14 @@ them to the run's summary.
 
 | Configuration | What it scores | Gated by |
 |---|---|---|
-| `bench/configs/hf-default.toml` | the `hf` backend's default model (`dslim/bert-base-NER`) at its catalog pin, default entities (`PERSON`) | `[hf-default.synthetic]`, `[hf-default]` |
+| `bench/configs/hf-default.toml` | the `hf` backend's default model (`OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` since 1.13.0, `dslim/bert-base-NER` before) at its catalog pin, default entities (`PERSON`) | `[hf-default.synthetic]`, `[hf-default]` |
 | `bench/configs/gliner-default.toml` | the `gliner` backend's default model (`urchade/gliner_small-v2.1`, assembled with its pinned base model) at its catalog pin, default entities | `[gliner-default.synthetic]`, `[gliner-default]` |
 | `bench/configs/gliner-knowledgator-edge.toml`, `-edge-onnx.toml` | `knowledgator/gliner-pii-edge-v1.0` at its catalog pin, PyTorch weights and the int8 ONNX export, asked for `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and `ACCOUNT_NUMBER` | `[gliner-knowledgator-edge.synthetic]`, `[gliner-knowledgator-edge]`, and the same for `-edge-onnx` |
 | `bench/configs/gliner-knowledgator-base.toml`, `-base-onnx.toml` | `knowledgator/gliner-pii-base-v1.0`, the same way | `[gliner-knowledgator-base.synthetic]`, `[gliner-knowledgator-base]`, and the same for `-base-onnx` |
 | `bench/configs/hf-openmed-pii-small.toml`, `hf-ettin-68m-nemotron-pii.toml` | `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` and `kalyan-ks/ettin-68m-nemotron-pii` at their catalog pins, asked for the same five types | `[hf-openmed-pii-small.synthetic]`, `[hf-openmed-pii-small]`, and the same for `hf-ettin-68m-nemotron-pii` |
 | `bench/configs/gliner2-fastino.toml` | `fastino/gliner2-privacy-filter-PII-multi` at its catalog pin (the `gliner2` backend), asked for the same five types at its catalog default `score_threshold` 0.9 (the file sets none) | `[gliner2-fastino.synthetic]`, `[gliner2-fastino]` |
 | `bench/configs/manual/hf-openai-privacy-filter.toml` | not run by CI: `openai/privacy-filter` at its catalog pin, Viterbi-decoded, asked for `PERSON`, `ADDRESS` and `ACCOUNT_NUMBER`; measured by hand (below) | `[hf-openai-privacy-filter.synthetic]`, `[hf-openai-privacy-filter]`, checked by hand |
-| `tests/real_model_configs/*.toml` | not scored: the other models the `real_model` tests load (the `gliner2` default, a Knowledgator ONNX checkpoint, `openai/privacy-filter` for a smoke test), pulled by `ner-models` | — |
+| `tests/real_model_configs/*.toml` | not scored: the other models the `real_model` tests load (the `gliner2` default, a Knowledgator ONNX checkpoint, `dslim/bert-base-NER`, `openai/privacy-filter` for a smoke test), pulled by `ner-models` | — |
 
 A configuration added to `bench/configs/` is pulled, tested and gated by
 `ner-models` with no workflow change, and fails it until its baselines are

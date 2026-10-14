@@ -367,6 +367,30 @@ until you upgrade to 2.0.0. Settle it now in one of two ways:
 Either way the warning goes away. See docs/detection.md "Placeholder types
 from NER models".
 
+## `[detection.ner] entities: the hf backend's default model changed in 1.13.0 from dslim/bert-base-NER to OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1, which cannot emit "…" (refused rather than redact less): …`
+
+The startup (and `serve --check`, a reload, the config editor's check) refused
+the configuration; a reload keeps the running one. `[detection.ner]` runs the
+`hf` backend without naming a model for it, so it loads the default model,
+which is `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` since 1.13.0. The
+quoted entities are ones the previous default, `dslim/bert-base-NER`, emitted
+(its CoNLL-2003 labels `PER`, `ORG`, `LOC` and `MISC`, which keep their own
+type while raw entities do not fold, until 2.0.0) and the new default cannot,
+so starting would redact less than before. Settle it in one of two ways:
+
+- keep the previous default: name it in `[detection.ner.models]`
+  (`hf = "dslim/bert-base-NER"`; with `hf` the only backend,
+  `[detection.ner] model = "dslim/bert-base-NER"` works too). It loads at its
+  catalog pin, from the cache it already used;
+- or ask for types the new default emits: `entities = ["PERSON"]` (the
+  default) instead of `["PER"]`. Placeholders then read «PERSON_001» instead
+  of «PER_001», and metrics or alerts keyed on `PER` move with them. The new
+  default has no label for organizations or places (`ORG`, `LOC`, `MISC`);
+  keep the previous default for those.
+
+`llm-redact doctor` shows the same line as a WARN under `ner` without
+loading a model. docs/detection.md, "The `hf` default's change in 1.13.0".
+
 ## `[detection.ner] entities: "…" can never match: no active backend emits it (…)`
 
 A WARNING logged at startup (also by `serve --check`) and after a reload that
@@ -589,6 +613,10 @@ urchade model); the folder itself is never fetched.
 A reload (SIGHUP, the dashboard editor) never downloads, whatever
 `allow_download` says: after a reload naming a new model, the running
 configuration is kept — fetch the model, then reload again, or restart.
+After an upgrade to 1.13.0 a configuration that names no `hf` model meets
+this for `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, the `hf` backend's
+new default: run `llm-redact models pull` once (566 MB), or name the previous
+default, `dslim/bert-base-NER`, in `[detection.ner.models] hf` to keep it.
 "(completely)": the cache holds the revision but not every file the loader
 needs, such as after an interrupted download; the message then ends with
 `; missing: …`, naming the kinds of files absent (`config.json`, `weights`,

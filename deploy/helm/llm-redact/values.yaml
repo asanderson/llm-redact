@@ -47,7 +47,7 @@ image:
 #     enabled = true
 #     backends = ["hf", "gliner"]
 #     [detection.ner.models]
-#     hf = "/models/hf-dslim--bert-base-NER"
+#     hf = "/models/hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1"
 #     gliner = "/models/gliner-urchade--gliner_small-v2.1"
 # Check the volume first: `llm-redact models verify --dir /models` (exec into
 # the pod, or run it where the volume is prepared). Absent (`helm upgrade

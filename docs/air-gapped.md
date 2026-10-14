@@ -123,7 +123,7 @@ enabled = true
 backends = ["hf", "gliner"]
 
 [detection.ner.models]
-hf = "/models/hf-dslim--bert-base-NER"
+hf = "/models/hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1"
 gliner = "/models/gliner-urchade--gliner_small-v2.1"
 ```
 
@@ -164,7 +164,7 @@ extraConfig: |
   enabled = true
   backends = ["hf", "gliner"]
   [detection.ner.models]
-  hf = "/models/hf-dslim--bert-base-NER"
+  hf = "/models/hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1"
   gliner = "/models/gliner-urchade--gliner_small-v2.1"
 ```
 

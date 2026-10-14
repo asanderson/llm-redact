@@ -207,7 +207,9 @@ spacy/presidio (default `en_core_web_sm`), a Hugging Face model id for
 GLiNER (default `urchade/gliner_small-v2.1`) or GLiNER2 (default
 `fastino/gliner2-base-v1`) or, for the `hf` backend, a
 Hugging Face `token-classification` model id (default
-`dslim/bert-base-NER`); Stanza ignores it. `score_threshold` (a number
+`OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` since 1.13.0,
+`dslim/bert-base-NER` before; see "The `hf` default's change in 1.13.0"
+below); Stanza ignores it. `score_threshold` (a number
 greater than 0 and at most 1) drops entities below that confidence on the backends that report one — gliner, gliner2,
 presidio and hf; spaCy and Stanza report none, so the key is a config error
 when only they are active. Left unset, each of those backends runs at its
@@ -246,7 +248,8 @@ at 453 ms per 500-character string — "caution", with the numbers in [ner-lands
 runs at it without a `score_threshold` of its own (one set wins). The default
 trades recall on real text for fewer false positives on agent traffic: on the
 published OpenPII data it finds 0.786 of the English names at 0.9 (the
-default `hf` and `gliner` models find 0.911 and 0.922; see
+default `hf` model finds 0.989, measured asked for `PERSON` before
+word-by-word decoding; see
 [ner-landscape.md](ner-landscape.md#fastino-gliner2-pii-gliner2)), so a
 deployment that prefers recall sets `score_threshold` lower:
 
@@ -291,8 +294,9 @@ hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
   `main` is a config error, because it moves. A backend with no entry uses
   the pin llm-redact's model catalog records for the model it loads, when
   there is one: every model in the vetted and caution tables below, the
-  defaults (`urchade/gliner_small-v2.1`, `dslim/bert-base-NER`,
-  `fastino/gliner2-base-v1`) included, is pinned to the commit its `main`
+  defaults (`urchade/gliner_small-v2.1`,
+  `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, `fastino/gliner2-base-v1`)
+  included, is pinned to the commit its `main`
   branch pointed at when its entry was checked (2026-10-05 to 2026-10-07; the
   date is in `llm-redact models list --json`, under `facts`). An entry for a
   backend that is not active is kept and ignored, like a
@@ -446,10 +450,13 @@ by the model its `llm-redact-model.json` names.
 | `urchade/gliner_multi_pii-v1` | gliner | Apache-2.0 | `1fcf13e85f4e` | `microsoft/mdeberta-v3-base` (`a0484667b223`) |
 <!-- /model-catalog -->
 
-The defaults are `urchade/gliner_small-v2.1` (`gliner`) and
-`dslim/bert-base-NER` (`hf`); the `gliner2` default, `fastino/gliner2-base-v1`,
-is listed under caution below. A base model is pinned where the GLiNER
-checkpoint ships no tokenizer or encoder configuration of its own.
+The `gliner` default, `urchade/gliner_small-v2.1`, is vetted; the `hf`
+default since 1.13.0, `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, and
+the `gliner2` default, `fastino/gliner2-base-v1`, are listed under caution
+below. `dslim/bert-base-NER`, the `hf` default before 1.13.0, stays vetted and
+pinned: a configuration that names it keeps loading it. A base model is
+pinned where the GLiNER checkpoint ships no tokenizer or encoder
+configuration of its own.
 
 Configurable, status caution (their cards do not name the training data):
 Knowledgator's GLiNER-PII models — `-edge` and `-base` with the bench numbers
@@ -573,39 +580,42 @@ unchanged. `-small` and `-large` are not measured yet.
 
 ### PII models for the `hf` backend
 
-The `hf` backend's default, `dslim/bert-base-NER`, is a general NER model
-(people, organizations, places). Two PII models trained on NVIDIA's
-Nemotron-PII (CC BY 4.0, which asks for attribution: "Trained on NVIDIA
-Nemotron-PII, CC BY 4.0") are catalogued: `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`
-(Apache-2.0, DeBERTa-v3-small, read in windows of 384 tokens, its card's
-sequence length) and `kalyan-ks/ettin-68m-nemotron-pii` (MIT, a ModernBERT
-encoder: transformers 4.48 or newer). Both label 54–55 kinds of data; their
-`first_name`/`last_name`, `street_address`, `date_of_birth`, `user_name` and
-`account_number` labels fold into `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`,
-`USERNAME` and `ACCOUNT_NUMBER`, and their sensitive-attribute labels
-(gender, race or ethnicity, religious belief, political view, sexuality)
-are never folded:
+The `hf` backend's default since 1.13.0 is
+`OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` (Apache-2.0,
+DeBERTa-v3-small, 566 MB of weights, read in windows of 384 tokens, its
+card's sequence length), a PII model trained on NVIDIA's Nemotron-PII (CC BY
+4.0, which asks for attribution: "Trained on NVIDIA Nemotron-PII, CC BY
+4.0"). Before 1.13.0 it was `dslim/bert-base-NER` (MIT, 433 MB), a general
+NER model (people, organizations, places), which stays catalogued and pinned:
+name it to keep it. `kalyan-ks/ettin-68m-nemotron-pii` (MIT, a ModernBERT
+encoder: transformers 4.48 or newer) is trained on the same data. Both PII
+models label 54–55 kinds of data; their `first_name`/`last_name`,
+`street_address`, `date_of_birth`, `user_name` and `account_number` labels
+fold into `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and
+`ACCOUNT_NUMBER`, and their sensitive-attribute labels (gender, race or
+ethnicity, religious belief, political view, sexuality) are never folded. The
+default configuration asks for `PERSON`; to have the default model find the
+other contextual types too:
 
 ```toml
 [detection.ner]
 enabled = true
 backend = "hf"
 entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
-
-[detection.ner.models]
-hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
 ```
 
 Measured by the NER bench (2026-10-07, the same machine and rules as the
 GLiNER table above; the two PII models re-measured that day with
 word-by-word decoding, while other jobs ran on the machine, so their
-latencies are indicative only):
+latencies are indicative only; the default's accuracy re-measured with the
+same results on 2026-10-14 as the `hf-default` bench configuration, its
+latency taken side by side with `dslim/bert-base-NER` on 2026-10-07):
 
 | Model, entities | PERSON recall (exact) | Character leak | Over-redaction | Agent-traffic false positives per 50 KB | p50, 500 characters |
 |---|---|---|---|---|---|
-| `dslim/bert-base-NER` (the default), `PERSON` | 0.97 (0.95) | 0.40 | 0.003 | 0 | 176 ms |
-| OpenMed-PII Small 44M, `PERSON` | 1.00 (1.00) | 0.39 | 0.002 | 0 | — |
+| OpenMed-PII Small 44M (the default), `PERSON` | 1.00 (1.00) | 0.39 | 0.002 | 0 | 175 ms |
 | OpenMed-PII Small 44M, five types | 1.00 (1.00) | 0.05 | 0.006 | 18 | 136 ms |
+| `dslim/bert-base-NER` (the default before 1.13.0), `PERSON` | 0.97 (0.95) | 0.40 | 0.003 | 0 | 176 ms |
 | ettin-68m-nemotron-pii, five types | 0.98 (0.87) | 0.14 | 0.005 | 16 | 127 ms |
 
 `kalyan-ks/ettin-68m-nemotron-pii` tags every sub-word piece of a value as
@@ -613,13 +623,47 @@ the start of a value; read word by word ("BIO taggers without word-piece
 marks" above), its names are whole values, but most of its account numbers
 carry labels that are not folded into `ACCOUNT_NUMBER` (`customer_id`,
 `unique_id`, …), so a quarter of the synthetic corpus's account numbers is
-found and three quarters of their digits leak. Both stay "caution" with
-these numbers. The `PERSON`-only rows request what the default configuration requests, so
-their character leak counts every other labelled value as leaked. The bench
-supports OpenMed-PII Small 44M as a better default for this backend than
-`dslim/bert-base-NER`; the default is unchanged in 1.x, and the switch is
-planned together with raw-entity folding in the next major release (2.0.0;
-[ner-landscape.md](ner-landscape.md#what-the-measurements-decided)).
+found and three quarters of their digits leak. Both PII models are catalogued
+"caution" with their five-type numbers (agent-traffic false positives above
+one per 50 KB, latency above 100 ms). The `PERSON`-only rows request what the
+default configuration requests, so their character leak counts every other
+labelled value as leaked; asked for `PERSON` only, OpenMed-PII Small 44M finds
+more names than `dslim/bert-base-NER` with no agent-traffic false positive
+for either ([ner-landscape.md](ner-landscape.md#the-hf-default)).
+
+#### The `hf` default's change in 1.13.0
+
+A configuration that names no model for the `hf` backend (no
+`[detection.ner.models] hf`, and no `[detection.ner] model` with `hf` the only
+backend) loads the new default after the upgrade. Two things can stop its
+startup:
+
+- **The model is not in the cache.** Downloads are off by default, so the
+  startup (and `serve --check`) stops with "hf model
+  'OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1' at revision a2360d3f42526fc660ac3b2b2301e1c2d94eba61 is
+  not (completely) in the local Hugging Face cache … run `llm-redact models
+  pull`". Run `llm-redact models pull` once (566 MB), or write the model's
+  folder for an air-gapped host with `models pull --to` ([air-gapped.md](air-gapped.md)).
+- **An entity only the previous default served.** While raw entities keep
+  their own type (until 2.0.0), the previous default's CoNLL-2003 labels
+  served a raw `PER`, `ORG`, `LOC` or `MISC` in `entities`; the new default
+  emits none of them. Rather than redact less, every detector build — the
+  startup, `serve --check`, a reload (which keeps the running configuration)
+  and the config editor's check — refuses such a configuration, naming the
+  entities (never a value) and both ways out: keep the previous default with
+
+  ```toml
+  [detection.ner.models]
+  hf = "dslim/bert-base-NER"
+  ```
+
+  or change `entities` to types the new default emits (`PERSON` instead of
+  `PER`; `["PERSON"]`, the default, keeps the `PERSON` placeholder type).
+  The decision uses the backend's own label policy (above), so a
+  `[detection.ner.labels]` override counts: `PER = "PERSON"` makes `PER` a
+  `PERSON` request, which passes. `llm-redact doctor` shows the same line as a
+  WARN without loading a model (from the labels the model catalog records for
+  the new default).
 
 `openai/privacy-filter` (Apache-2.0; a 1.5B-parameter mixture of experts,
 50M parameters active, 2.8 GB of weights) labels `private_person`,
@@ -709,7 +753,8 @@ llm-redact models verify --dir DIR  # check a folder written by `models pull --t
   Downloads need network access to huggingface.co (and `HF_TOKEN` for a gated
   model); exit 1 when a model cannot be fetched.
 - `pull --to DIR` also writes one self-contained folder per model into `DIR`
-  (`hf-dslim--bert-base-NER`, `gliner-urchade--gliner_small-v2.1`,
+  (`hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1`,
+  `gliner-urchade--gliner_small-v2.1`,
   `gliner2-fastino--gliner2-base-v1`): its files copied, a GLiNER model's
   base-model tokenizer and configuration included (the folder loads with no
   base model and no assembly; a GLiNER2 checkpoint is self-contained, its
@@ -801,12 +846,14 @@ alone, ignores the rest of a longer string. The `hf`, `gliner` and `gliner2`
 backends read a longer string in overlapping windows, so a name anywhere in it
 is found at its exact offsets:
 
-- `hf`: a window is the model's limit (the smaller of its tokenizer's
-  `model_max_length` and its config's `max_position_embeddings`, 512 when
-  neither says; 512 tokens for `dslim/bert-base-NER`), and consecutive windows
-  share a quarter of it. Windowing needs a fast tokenizer — the only kind that
-  reports character offsets — so an `hf` model without one is refused at
-  startup. A model whose tokenizer marks word pieces (WordPiece, as BERT and
+- `hf`: a window is the model's limit (the window the model catalog records
+  for it — 384 tokens for the default,
+  `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, its card's sequence
+  length — else the smaller of its tokenizer's `model_max_length` and its
+  config's `max_position_embeddings`, 512 when neither says; 512 tokens for
+  `dslim/bert-base-NER`), and consecutive windows share a quarter of it.
+  Windowing needs a fast tokenizer — the only kind that reports character
+  offsets — so an `hf` model without one is refused at startup. A model whose tokenizer marks word pieces (WordPiece, as BERT and
   `dslim/bert-base-NER` use) labels each word by its first piece, so a name
   is reported as whole words, never cut inside one ("Angela Merk"). Other
   tokenizers (SentencePiece, byte-level BPE) do not tell the pipeline where
@@ -1058,10 +1105,10 @@ existing `detection.ner_enabled`):
   "max_chars": 20000,
   "backends": {
     "hf": {
-      "model": "dslim/bert-base-NER",
-      "source": "hub", "model_id": "dslim/bert-base-NER",
-      "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc", "pinned": true,
-      "catalog": "vetted", "license": "MIT",
+      "model": "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1",
+      "source": "hub", "model_id": "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1",
+      "revision": "a2360d3f42526fc660ac3b2b2301e1c2d94eba61", "pinned": true,
+      "catalog": "caution", "license": "Apache-2.0",
       "score_threshold": 0.5, "score_threshold_source": "default",
       "counters": {"scanned_whole": 812, "scanned_windowed": 14, "skipped_max_chars": 3,
                    "windows": 61, "windows_truncated": 0, "labels_dropped": 0,

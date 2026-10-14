@@ -11,6 +11,55 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+**Upgrading:** the `hf` backend has a new default model. A configuration that names no model
+for it (no `[detection.ner.models] hf`, and no `[detection.ner] model` with `hf` the only backend)
+loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-base-NER`:
+- Fetch it once with `llm-redact models pull` (566 MB of weights; `dslim/bert-base-NER` has
+  433 MB). Downloads are off by default, so until then the startup and `serve --check` stop with
+  "hf model 'OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1' at revision … is not (completely) in
+  the local Hugging Face cache … run `llm-redact models pull`". For an air-gapped host, write its
+  folder with `llm-redact models pull --to` (docs/air-gapped.md).
+- To keep the previous default instead, set `[detection.ner.models] hf = "dslim/bert-base-NER"`:
+  it stays in the model catalog at its pin and loads from the cache it already used.
+- `entities = ["PERSON"]` (the default) keeps the `PERSON` placeholder type: the new model's
+  `first_name` and `last_name` labels fold into it.
+- An entity only the previous default emitted — a raw `PER`, `ORG`, `LOC` or `MISC`, which keeps
+  its own type until 2.0.0 — is refused at startup, by `serve --check` and on a reload (which
+  keeps the running configuration), with a message naming the entities: pin
+  `dslim/bert-base-NER` as above, or write `PERSON` instead of `PER` (the new model has no label
+  for organizations or places). `llm-redact doctor` shows the same as a WARN.
+- The new model is trained on NVIDIA Nemotron-PII (CC BY 4.0): if you redistribute its weights
+  (a model folder, an image you build with them), credit "Trained on NVIDIA Nemotron-PII,
+  CC BY 4.0".
+
+### Changed
+- **The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`**
+  (Apache-2.0; `microsoft/deberta-v3-small` fine-tuned on NVIDIA Nemotron-PII), replacing
+  `dslim/bert-base-NER` (see Upgrading). Asked for `PERSON`, the default entities, it finds more
+  names on every measured set outside its own training data: the synthetic corpus 1.000 against
+  0.974 (exact spans 1.000 against 0.951), OpenPII's first 2,000 English rows 0.989 against 0.911,
+  OpenPII's first 2,000 rows (eight languages) 0.829 against 0.527, with no false positive on the
+  agent-traffic negatives for either and the same latency class (175 against 176 ms per
+  500-character string measured side by side). Its model catalog status stays "caution" (its
+  five-type measurement misses the false-positive and latency bars); docs/ner-landscape.md, "The
+  `hf` default", records the decision, what holds for the default entities and the caveats. The
+  `hf-default` NER bench baselines are re-recorded for it, and the CI `ner-models` job also
+  pulls `dslim/bert-base-NER`, which the `real_model` tests still read by name.
+
+### Added
+- A configuration that loads the `hf` default without naming it and asks for an entity the
+  previous default emitted but the new one cannot is refused at every detector build (startup,
+  `serve --check`, a reload, the config editor's check) instead of redacting less, decided by the
+  backend's own label policy (a `[detection.ner.labels]` override counts) and named in a
+  message that lists the entities and both fixes; `llm-redact doctor` WARNs about it under `ner`
+  from the labels the model catalog records for the new default, without loading a model.
+
+### Fixed
+- docs/detection.md and docs/ner-landscape.md said the default `gliner` model finds 0.922 of
+  OpenPII's English names, a figure no recorded bench result backs (none of the `gliner`
+  default's recorded runs covers that slice); it is gone, and the `hf` figure beside it is now
+  the new default's.
+
 ## [1.12.1] - 2026-10-14
 
 Closes detection gaps 1.12.0 left: a Belgian national number, a Swiss AHV number or an IPv6

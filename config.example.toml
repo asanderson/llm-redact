@@ -429,14 +429,19 @@ allowlist_patterns = ['^10\.', '^192\.168\.']
 #   CREDIT_CARD) fold into the built-in placeholder names.
 # backend = "stanza": uv sync --extra stanza (60+ languages, no scores).
 # backend = "hf": uv sync --extra hf (torch + transformers); any Hugging Face
-#   token-classification model, PII models included; supports score_threshold.
-#   A PII model for addresses, dates of birth, usernames and account numbers
-#   (fetch it once with `llm-redact models pull`; docs/detection.md "PII
-#   models for the hf backend"):
+#   token-classification model; supports score_threshold. Its default model
+#   (since 1.13.0) is the PII model OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1
+#   (566 MB; trained on NVIDIA Nemotron-PII, CC BY 4.0): fetch it once with
+#   `llm-redact models pull`. It also finds addresses, dates of birth,
+#   usernames and account numbers when asked (docs/detection.md "PII models
+#   for the hf backend"):
 #     backend = "hf"
 #     entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
-#   and name the model in the `[detection.ner.models]` table below:
-#     hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+#   The default before 1.13.0, dslim/bert-base-NER (people, organizations,
+#   places), loads when named in the `[detection.ner.models]` table below:
+#     hf = "dslim/bert-base-NER"
+#   A configuration that names no hf model and asks for an entity only that
+#   model emitted (a raw PER, ORG, LOC or MISC) is refused at startup.
 enabled = false
 backend = "spacy"
 # Run several backends at once, each toggled individually (wins over
@@ -448,7 +453,7 @@ backend = "spacy"
 # spacy = "en_core_web_md"
 # gliner = "urchade/gliner_medium-v2.1"
 # gliner2 = "fastino/gliner2-base-v1"
-# hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+# hf = "dslim/bert-base-NER"
 # Model labels become placeholder types through one label policy for every
 # backend (docs/detection.md "Placeholder types from NER models"): synonyms
 # fold into one type (PER, FIRST_NAME, SURNAME -> PERSON; EMAIL_ADDRESS ->
@@ -495,7 +500,7 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # names are refused: they move). Without an entry, a model llm-redact's
 # catalog knows uses the catalog's pin (the default models included).
 # [detection.ner.revisions]
-# hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
+# hf = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"
 # Load the gliner model's ONNX export (onnxruntime, in the gliner extra) instead of its torch
 # weights: a .onnx file inside the model; only that file is fetched.
 # [detection.ner.onnx]

@@ -89,7 +89,8 @@ measured bars below are what a catalog status records.
 
 ## PII models measured by the llm-redact bench
 
-Dated decision record (2026-10-07) of the open PII models measured with the
+Dated decision record (2026-10-07; the `hf` default's change decided
+2026-10-14, "The `hf` default" below) of the open PII models measured with the
 NER bench ([ner-bench.md](ner-bench.md)) and the catalog status each was
 given ([detection.md](detection.md#the-model-catalog)). Every number comes
 from one shared machine: an `Intel(R) Xeon(R) Processor @ 2.80GHz` with 4
@@ -141,13 +142,14 @@ text the bench did not see.
 | Model (backend), as measured | License; training data | Status | PERSON recall (exact); character leak | Agent-traffic FP per 50 KB; p50, 500 chars | Good for |
 |---|---|---|---|---|---|
 | `urchade/gliner_small-v2.1` (`gliner`, the default), asked for `PERSON` | Apache-2.0; `urchade/pile-mistral-v0.1` (Apache-2.0) | vetted | 1.000 (1.000); 0.324 | 47; 189 ms | More names on published data than the Knowledgator models (OpenPII 0.708, Nemotron 0.874, against 0.485 and 0.706 for `-edge`), at lower precision (Nemotron-PII 0.538 against 0.890 for `-edge`, OpenPII 0.788 against 0.848). Its leak counts the types it was not asked for |
-| `dslim/bert-base-NER` (`hf`, the default), asked for `PERSON` | MIT; CoNLL-2003 (Reuters news) | vetted | 0.974 (0.951); 0.398 | 0; 176 ms | English person names with no detection in the agent-traffic files; `PERSON` only (it also tags organizations and places). Its leak counts the types it was not asked for |
+| `dslim/bert-base-NER` (`hf`, the default before 1.13.0), asked for `PERSON` | MIT; CoNLL-2003 (Reuters news) | vetted | 0.974 (0.951); 0.398 | 0; 176 ms | English person names with no detection in the agent-traffic files; `PERSON` only (it also tags organizations and places). Its leak counts the types it was not asked for |
 | `knowledgator/gliner-pii-edge-v1.0`, PyTorch, five types | Apache-2.0; the card does not name them | caution | 0.992 (0.992); 0.082 | 109; 93 ms | Names and addresses (ADDRESS 0.994) at the lowest latency here; `USERNAME` draws most of its false positives |
 | same, int8 ONNX | same | caution | 0.771 (0.757); 0.270 | 16; 97 ms | Fewer false positives than the PyTorch weights (16 against 109); finds almost no dates of birth (0.053) and few usernames (0.273) |
 | `knowledgator/gliner-pii-base-v1.0`, PyTorch, five types | same | caution | 0.966 (0.966); 0.021 | 8; 234 ms | The lowest leak and the fewest agent-traffic false positives of the Knowledgator runs, at 234 ms |
 | same, int8 ONNX | same | caution | 0.964 (0.964); 0.029 | 13; 182 ms | The same coverage on the synthetic corpus at 182 ms; loses recall on published data (OpenPII 0.321) |
 | `knowledgator/gliner-pii-small-v1.0`, `-large-v1.0` | same | caution | not measured | — | — |
-| `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` (`hf`), five types | Apache-2.0; `microsoft/deberta-v3-small` (MIT) fine-tuned on `nvidia/Nemotron-PII` (CC BY 4.0) | caution | 1.000 (1.000); 0.048 | 18; 136 ms | Names, addresses, account numbers and usernames (ADDRESS 1.000, ACCOUNT_NUMBER 0.991, USERNAME 0.894); dates of birth are its weak type (0.509). The better `hf` default candidate, below |
+| `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` (`hf`, the default since 1.13.0), asked for `PERSON` | Apache-2.0; `microsoft/deberta-v3-small` (MIT) fine-tuned on `nvidia/Nemotron-PII` (CC BY 4.0) | caution | 1.000 (1.000); 0.385 | 0; 175 ms | More names than `dslim/bert-base-NER` on every set measured outside its training data, with no detection in the agent-traffic files ("The `hf` default", below). Its leak counts the types it was not asked for |
+| same, five types | same | caution | 1.000 (1.000); 0.048 | 18; 136 ms | Names, addresses, account numbers and usernames (ADDRESS 1.000, ACCOUNT_NUMBER 0.991, USERNAME 0.894); dates of birth are its weak type (0.509) |
 | `kalyan-ks/ettin-68m-nemotron-pii` (`hf`), five types | MIT; `jhu-clsp/ettin-encoder-68m` (MIT) fine-tuned on `nvidia/Nemotron-PII` (CC BY 4.0) | caution | 0.984 (0.866); 0.143 | 16; 127 ms | Names and addresses; it finds few dates of birth (0.377) and account numbers (0.243: most carry labels that are not folded into that type) |
 | `openai/privacy-filter` (`hf`), `PERSON`, `ADDRESS`, `ACCOUNT_NUMBER` | Apache-2.0; the card does not name them | caution | 0.994 (0.994); 0.120 | 23; 1,108 ms | Names, addresses (0.930) and account numbers (1.000) from a 1.5B-parameter mixture of experts, at about a second per string |
 | `fastino/gliner2-privacy-filter-PII-multi` (`gliner2`), five types, threshold 0.9 | Apache-2.0; 4,910 synthetic texts the card says GPT-5.4 generated | caution | 0.998 (0.998); 0.009 | 26; 453 ms | All five types with the lowest leak measured (its card lists seven languages; every bench run is English or mixed, and OpenPII's first 2,000 rows give 0.614); recall on real text is lower at its 0.9 default (OpenPII English 0.786) |
@@ -187,14 +189,15 @@ whose catalog entries list them, but no shipped configuration or bench run
 does and the synthetic corpus labels neither, so no recorded baseline covers
 them (OpenPII labels both; the weekly evaluation is report-only).
 
-The two default models, measured the same way for comparison (their
-recorded baselines request `PERSON` only):
+The default models, measured the same way for comparison (their recorded
+baselines request `PERSON` only; the `hf` default before and since 1.13.0):
 
 | Configuration | PERSON recall (exact) | Precision | Character leak | Over-redaction | Agent-traffic FP per 50 KB | Whole corpus per 100 KB | p50, 500 chars |
 |---|---|---|---|---|---|---|---|
 | `urchade/gliner_small-v2.1`, `PERSON` (`gliner-default`) | 1.000 (1.000) | 0.639 | 0.324 | 0.015 | 47 | 448 | 189 ms |
 | `urchade/gliner_small-v2.1`, five types | 0.791 (0.791) | 0.916 | 0.049 | 0.050 | 34 | 457 | — |
-| `dslim/bert-base-NER`, `PERSON` (`hf-default`) | 0.974 (0.951) | 0.913 | 0.398 | 0.003 | 0 | 210 | 176 ms |
+| `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, `PERSON` (`hf-default` since 1.13.0; measured 2026-10-14, p50 side by side on 2026-10-07) | 1.000 (1.000) | 0.937 | 0.385 | 0.002 | 0 | 186 | 175 ms |
+| `dslim/bert-base-NER`, `PERSON` (`hf-default` before 1.13.0) | 0.974 (0.951) | 0.913 | 0.398 | 0.003 | 0 | 210 | 176 ms |
 
 ### Knowledgator GLiNER-PII (`gliner`)
 
@@ -328,7 +331,7 @@ the training distribution of both models, so its numbers favour them):
 
 | Configuration | OpenPII PERSON recall / precision (leak) | OpenPII English PERSON recall / precision (leak) | Nemotron PERSON recall / precision (leak) |
 |---|---|---|---|
-| `dslim/bert-base-NER`, `PERSON` (`hf-default`) | 0.527 / 0.757 (0.389) | 0.911 / 0.994 (0.097) | 0.888 / 0.965 (0.092) |
+| `dslim/bert-base-NER`, `PERSON` (`hf-default` before 1.13.0) | 0.527 / 0.757 (0.389) | 0.911 / 0.994 (0.097) | 0.888 / 0.965 (0.092) |
 | OpenMed, `PERSON` only | 0.829 / 0.793 (0.227) ¹ | 0.989 / 0.995 (0.030) ¹ | — |
 | OpenMed, five types | 0.829 / 0.793 (0.166) ¹ | 0.980 / 0.994 (0.017) | 0.995 / 0.996 (0.006) ¹ |
 | ettin, `PERSON` only | 0.581 / 0.922 (0.452) ¹ | 0.951 / 0.997 (0.141) ¹ | — |
@@ -358,28 +361,79 @@ and leak bars too (`PERSON` recall 0.98, leak 0.143) but not the
 false-positive bar (16 per 50 KB) nor latency (127 ms). Bench configs
 `bench/configs/hf-openmed-pii-small.toml` and
 `bench/configs/hf-ettin-68m-nemotron-pii.toml` are gated in CI.
+OpenMed asked for `PERSON` only is the `hf` default since 1.13.0 ("The `hf`
+default", below).
 
-**The `hf` default.** Compared as the default
-configuration runs (`entities = ["PERSON"]`), OpenMed-PII Small 44M finds
-more names than `dslim/bert-base-NER` everywhere it was measured outside its
-own training distribution — synthetic corpus 1.000 against 0.974 (leaking
-none of the name characters against 0.037), OpenPII English 0.989 against
-0.911, OpenPII's first 2,000 rows 0.829 against 0.527 (both measured before
-word-by-word decoding) — at equal false positives (none in the
-agent-traffic files for either; 186 against 210 detections per 100 KB of
-the whole negatives corpus) and similar latency (175 against 176 ms when
-measured side by side; 136 ms in the busier re-measurement). Read word by
-word, its exact-span `PERSON` recall is 1.000 (0.951 for
-`dslim/bert-base-NER`; 0.674 before, when its spans were often a word wider
-or narrower than the annotation). The bench therefore supports OpenMed-PII
-Small 44M as a better default for the `hf` backend than
-`dslim/bert-base-NER` (better `PERSON` recall at equal false positives and
-equal latency). The default is **unchanged in 1.x**, and the switch is
-planned together with raw-entity folding in the next major release (2.0.0):
-until raw entities fold, a configured `entities = ["PER"]` would match
-nothing from OpenMed, which never emits `PER`. The weights are 566 MB
-(`dslim/bert-base-NER`: 433 MB), and redistributing them carries the
-Nemotron-PII attribution.
+### The `hf` default
+
+Decided 2026-10-14: from 1.13.0 the `hf` backend's default model is
+OpenMed-PII Small 44M instead of `dslim/bert-base-NER`. It had been planned
+for the next major release (2.0.0), together with raw-entity folding, and
+was brought forward with a guard for the one configuration it would have
+weakened (below).
+
+**The evidence**, as the default configuration runs (`entities =
+["PERSON"]`), recorded when the switch was proposed (2026-10-07):
+
+| | OpenMed-PII Small 44M | `dslim/bert-base-NER` |
+|---|---|---|
+| `PERSON` recall, synthetic corpus | 1.000 | 0.974 |
+| `PERSON` recall, OpenPII's first 2,000 English rows | 0.989 ¹ | 0.911 |
+| `PERSON` recall, OpenPII's first 2,000 rows (eight languages) | 0.829 ¹ | 0.527 |
+| False positives per 50 KB of agent traffic | 0 | 0 |
+| Detections per 100 KB of the whole negatives corpus | 186 | 210 |
+| p50, 500 characters (side by side, 2026-10-07) | 175 ms | 176 ms |
+| Exact-span `PERSON` recall, synthetic corpus | 1.000 (0.674 when proposed) | 0.951 |
+| Weights | 566 MB | 433 MB |
+
+(¹ Measured before word-by-word decoding, not re-run; re-run on OpenPII
+English after it, the five-type configuration's `PERSON` recall was 0.980.)
+Nemotron-PII is OpenMed's training data, so its slice is left out of the
+comparison. The caveats when it was proposed were the exact-span recall
+(0.674 against 0.951: its spans were often a word wider or narrower than the
+annotation), the larger weights and the Nemotron-PII attribution its weights
+carry (CC BY 4.0: "Trained on NVIDIA Nemotron-PII, CC BY 4.0"). Word-by-word
+decoding (1.12.0) settled the first: its exact-span recall is 1.000 now. The
+2026-10-14 re-measurement of the `hf-default` configuration gave the same
+accuracy (`PERSON` recall 1.000, exact 1.000, precision 0.937, character
+leak 0.385 with `PERSON` 0.000, over-redaction 0.002, no agent-traffic
+false positive, 501 detections or 186 per 100 KB of the whole negatives
+corpus). Its latency run that day shared the 4 cores with other jobs (a load
+average of 7 to 10; p50 146 ms and p95 247 ms per 500 characters, its
+1,000-string body about 168 s), so it is no comparison: the side-by-side
+figures above stand.
+
+**Why a "caution" model is the default.** The catalog's caution line for
+OpenMed quotes its five-type measurement (18 agent-traffic false positives
+per 50 KB, all `USERNAME` detections; p50 136 ms). Asked for `PERSON` only,
+what the default configuration asks for, it clears the license and lineage
+bar (Apache-2.0; its training data, Nemotron-PII, asks for attribution only),
+the recall bar (1.000 against 0.85) and the false-positive bar (none), and the
+leak bar when it is read for the requested type (`PERSON` leak 0.000). It
+does not clear the latency bar (175 ms against 100 ms per 500 characters) or
+the leak bar as this record reads it, over every type the synthetic corpus
+labels (0.385, which counts the addresses, dates of birth, usernames and
+account numbers it was not asked for). `dslim/bert-base-NER` misses the same
+two (176 ms; 0.398) and finds fewer names, so the change loses nothing the
+previous default had on any measured bar. The catalog status stays
+"caution" because a status describes a model with its recommended entities,
+not one configuration of it.
+
+**The transition.** Until raw entities fold (2.0.0), a raw entity keeps its
+own label as its type: `entities = ["PER"]` (or `ORG`, `LOC`, `MISC`) asked
+`dslim/bert-base-NER` for its CoNLL-2003 label, which OpenMed never emits. A
+minor release must not silently redact less, so a configuration that loads
+the `hf` default without naming a model and asks for such an entity is
+refused at every detector build, with the entities and both ways out named:
+keep the previous default with `[detection.ner.models] hf =
+"dslim/bert-base-NER"` (still catalogued and pinned), or ask for `PERSON`.
+"Would have been emitted" is decided by the backend's own label policy over
+`dslim/bert-base-NER`'s `id2label`, and "cannot be emitted" by the loaded
+model's `id2label` (before the load, and in `llm-redact doctor`, by the labels
+the model catalog records for the new default at its pin), as the startup's
+never-match warning decides. `entities = ["PERSON"]`, the default, is
+unaffected. Default-model users fetch the new model once (`llm-redact models
+pull`; downloads are off by default).
 
 ### OpenAI Privacy Filter (`hf`)
 
@@ -462,9 +516,11 @@ On published data (the slices of the Knowledgator section):
 
 (Leak in brackets is the `PERSON` characters left uncovered.) The 0.9
 threshold that holds its synthetic-corpus recall costs it a fifth of
-OpenPII's English names (0.786 against 0.977 at 0.5), where the default
-`hf` and `gliner` models find 0.911 and 0.922: the threshold trades recall
-on real text for false positives on agent traffic.
+OpenPII's English names (0.786 against 0.977 at 0.5), where the `hf`
+default finds 0.989 (OpenMed-PII Small 44M asked for `PERSON`, measured
+before word-by-word decoding; `dslim/bert-base-NER`, the default before
+1.13.0, 0.911): the threshold trades recall on real text for false positives
+on agent traffic.
 
 **Verdict: caution.** It clears the license and lineage bar (its training
 data is synthetic text the card says GPT-5.4 generated: stated as a fact),
@@ -483,17 +539,19 @@ baselines stay the 0.9 measurement above.
 - **No model admitted by the bar reached "vetted".** Each PII model the
   bench measured misses at least one admission bar (false positives on
   agent traffic, latency, or both), so each is "caution" with its numbers in
-  its catalog reason. The two defaults and the `urchade` models are "vetted"
-  as the models users already run, from before the bar existed: the bar
-  would not admit them today (the `gliner` default draws 47 false positives
-  per 50 KB, the `hf` default has a p50 of 176 ms). The leak bar is
-  read over every type the synthetic corpus labels, so a configuration that
-  asks for `PERSON` only (the default) shows a large character leak that is
-  the unrequested types, not its names.
-- **The `hf` default stays `dslim/bert-base-NER` in 1.x.** OpenMed-PII Small
-  44M finds more names at equal false positives and similar latency (above);
-  the switch is planned together with raw-entity folding in the next major
-  release (2.0.0), and will be listed in its migration notes.
+  its catalog reason. The `gliner` default, `dslim/bert-base-NER` and the
+  `urchade` models are "vetted" as the models users already ran, from before
+  the bar existed: the bar would not admit them today (the `gliner` default
+  draws 47 false positives per 50 KB, `dslim/bert-base-NER` has a p50 of
+  176 ms). The leak bar is read over every type the synthetic corpus labels,
+  so a configuration that asks for `PERSON` only (the default) shows a large
+  character leak that is the unrequested types, not its names.
+- **The `hf` default is OpenMed-PII Small 44M from 1.13.0** (decided
+  2026-10-14; "The `hf` default", above). It finds more names than
+  `dslim/bert-base-NER` at equal false positives and similar latency; a
+  configuration that loads the default without naming it and asks for an
+  entity only `dslim/bert-base-NER` emitted is refused until it names that
+  model or asks for `PERSON`. Its catalog status stays "caution".
 - **The `gliner` default stays `urchade/gliner_small-v2.1`.** On published
   data it finds more names than the Knowledgator models (Nemotron-PII 0.874
   against 0.706 for `-edge`, OpenPII 0.708 against 0.485), at lower precision

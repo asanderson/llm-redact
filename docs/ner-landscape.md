@@ -398,10 +398,10 @@ decoding (1.12.0) settled the first: its exact-span recall is 1.000 now. The
 accuracy (`PERSON` recall 1.000, exact 1.000, precision 0.937, character
 leak 0.385 with `PERSON` 0.000, over-redaction 0.002, no agent-traffic
 false positive, 501 detections or 186 per 100 KB of the whole negatives
-corpus). Its latency run that day shared the 4 cores with other jobs (a load
-average of 7 to 10; p50 146 ms and p95 247 ms per 500 characters, its
-1,000-string body about 168 s), so it is no comparison: the side-by-side
-figures above stand.
+corpus). Its two latency runs that day shared the 4 cores with other jobs
+(load averages of 5 to 10; a p50 of 146 and 123 ms per 500 characters, with
+p95s up to 780 ms), so they are no comparison: the side-by-side figures above
+stand.
 
 **Why a "caution" model is the default.** The catalog's caution line for
 OpenMed quotes its five-type measurement (18 agent-traffic false positives

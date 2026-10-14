@@ -37,7 +37,7 @@ spec:
       containers:
         # --- the redaction proxy sidecar ---
         - name: llm-redact
-          image: ghcr.io/asanderson/llm-redact:1.12.0
+          image: ghcr.io/asanderson/llm-redact:1.12.1
           args: ["serve"]
           env:
             # Loopback bind: containers in a pod share the network namespace,

@@ -11,6 +11,17 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-10-14
+
+Closes detection gaps 1.12.0 left: a Belgian national number, a Swiss AHV number or an IPv6
+address at the end of a sentence, an IPv6 address before a colon, an IBAN in the spaced paper
+format, and a long PlanetScale token before a sentence's dot all went upstream unredacted; with
+the default modes nothing 1.12.0 redacted is forwarded now. Also raises the uvicorn and pypdf
+floors past releases that break realtime connections and document extraction, fixes the PyPI
+page's links and ships the license text in the container images. Upgrading needs no
+configuration change. The matching llm-redact-pro release is 0.17.1 (llm-redact-pro 0.17.0 runs
+on this release too).
+
 ### Security
 - **A Belgian national number, a Swiss AHV number or an IPv6 address at the end of a sentence
   went upstream unredacted.** `NN 93.05.18-223.61.`, `AHV 756.9217.0769.85. Done` and

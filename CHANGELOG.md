@@ -11,6 +11,62 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Security
+- **A Belgian national number, a Swiss AHV number or an IPv6 address at the end of a sentence
+  went upstream unredacted.** `NN 93.05.18-223.61.`, `AHV 756.9217.0769.85. Done` and
+  `Ship to 2001:db8::1.` were forwarded as sent: the `belgian_nn`, `swiss_ahv` and `ipv6` rules
+  refused a value followed by `.`. A run of dots after such a value now ends it when whitespace,
+  a closing quote or bracket (German and French quotes included), `*`, `<`, a backslash (a JSON
+  escape, as in a tool call's arguments) or the end of the text follows; a value glued into a
+  longer token (`756.9217.0769.85.3`, `2001:db8::1..x`) is still not matched.
+- **An IPv6 address followed by a colon went upstream unredacted.** `2001:db8::1: unreachable`
+  (or ping6's `64 bytes from 2001:db8:42::1: icmp_seq=1`) is now redacted, the colon left out.
+- **An IBAN written in the ISO 13616 paper format went upstream unredacted.**
+  `GB82 WEST 1234 5698 7654 32` is now read for the 89 countries of the SWIFT IBAN registry, each
+  at its registry length, with a space, a no-break space or a narrow no-break space between the
+  groups; the solid form is read exactly as before. Not read yet: a spaced IBAN followed by a
+  space and a digit, by a one-letter word A-D, or directly by `-`, `.`, `:`, `@`, `%` or `+` and
+  more text (docs/detection.md lists the residuals).
+- **A PlanetScale token whose body and the dots after it ran past 64 characters went upstream
+  unredacted.** A token with a 64-character body before a sentence's `.` was refused whole; it is
+  now redacted with the dots, as a shorter one already was.
+
+### Changed
+- A spaced IBAN now takes in the values other rules found inside it (a card number, an Aadhaar
+  number, a National Insurance number), so under `[detection.modes]` they follow the `iban`
+  rule's mode: `iban = "warn"` forwards them, and with `credit_card = "block"` such a request is
+  redacted as an IBAN instead of refused. With the default modes nothing 1.12.0 redacted is
+  forwarded; a test pins that against frozen copies of the 1.12.0 rules.
+- Upper-case hex printed in groups of four can now be redacted as an IBAN: about one random
+  `gpg --fingerprint` line in 9,300, and one `xxd -u` line in 7,500, holds a checksum-valid run of
+  a registry country's length.
+- The bench corpus puts every rule's values in twenty-one punctuation contexts and half its IBANs
+  in the paper format; the fp corpus's `synthetic_netdebug.log` now counts three IPv6 addresses
+  (was two: the one before a colon is found now).
+
+### Fixed
+- **A non-frozen `pip install` could pick a uvicorn or pypdf release that breaks realtime
+  connections or document extraction**; the declared floors now exclude them (the lock, the
+  container images and the Homebrew formula were not affected):
+  - `uvicorn>=0.50.1` (was `>=0.50`): with 0.50.0 a realtime client offering two or more
+    subprotocols (OpenAI Realtime's browser form) failed. With the client's own key the relay's
+    upstream dial raised and the proxy closed the connection (1011); under `auth = "identity"`
+    the client was answered with none of its subprotocols, which a browser refuses, or the
+    upstream was offered none.
+  - `pypdf>=6.5` in the `extract` extra (was `>=5`): below 6.5 the extraction worker produced no
+    reading of a PDF drawing an inline run-length-encoded image that holds a `0x80` byte before
+    its end-of-data marker. With `[extraction]` on and no extraction service, a value in the
+    PDF's text layer was forwarded unscanned (with the client's own key and the default
+    `binary_uploads = "forward"`); a cloud OCR service read the file but could never clear it.
+- **The PyPI project page's links were dead.** README.md, the page's description, linked the
+  repository's files and the architecture diagram by relative paths, which PyPI does not
+  resolve; they are now absolute URLs into `main`, and `[project.urls]` adds the repository,
+  documentation, issue tracker and changelog links. A test fails on a relative link, and on a
+  link into `main` that names no file or folder of the tree.
+- **The container images shipped without the AGPL-3.0 license text.** It is now at
+  `/usr/share/doc/llm-redact/LICENSE` and in the installed distribution's metadata
+  (`licenses/LICENSE`); CI checks both copies in the stock and the `-ner` image.
+
 ## [1.12.0] - 2026-10-13
 
 Optional NER models for the values rules cannot reach: names, addresses, dates of birth,

@@ -9,6 +9,7 @@ never fire. Generated fresh from a seed at every run.
 import base64
 import json
 import random
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -85,23 +86,55 @@ def _ssn(rng: random.Random) -> str:
     return f"{area:03d}-{rng.randrange(1, 100):02d}-{rng.randrange(1, 10000):04d}"
 
 
-# Country -> (IBAN length, BBAN starts with 4 letters). Kept in sync with the
-# rule's length table for these five; the checksum below is computed, so
-# every generated IBAN is genuinely valid.
-_IBAN_COUNTRIES = {"DE": (22, False), "GB": (22, True), "FR": (27, False), "NL": (18, True)}
+# Country -> (IBAN length, BBAN starts with 4 letters), transcribed from the
+# registry independently of the rule's length table; the checksum below is
+# computed, so every generated IBAN is genuinely valid. BE and PL end on a
+# full group of four in the paper format, MT is the longest here.
+_IBAN_COUNTRIES = {
+    "BE": (16, False),
+    "DE": (22, False),
+    "FR": (27, False),
+    "GB": (22, True),
+    "MT": (31, True),
+    "NL": (18, True),
+    "PL": (28, False),
+}
+# The ISO 13616 paper format's separator, and the no-break spaces the rule
+# also reads as one.
+_IBAN_PAPER_SEPARATORS = (" ", " ", " ", "\u00a0", "\u202f")
 
 
-def _iban(rng: random.Random) -> str:
-    country = rng.choice(sorted(_IBAN_COUNTRIES))
+def _iban_solid(rng: random.Random, country: str | None = None) -> str:
+    """A valid IBAN in the solid electronic form."""
+    country = country or rng.choice(sorted(_IBAN_COUNTRIES))
     length, alpha_prefix = _IBAN_COUNTRIES[country]
     bban_len = length - 4
     if alpha_prefix:
         bban = _pick(rng, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", 4) + _pick(rng, "0123456789", bban_len - 4)
     else:
         bban = _pick(rng, "0123456789", bban_len)
+    return _with_check_digits(country, bban)
+
+
+def _with_check_digits(country: str, bban: str) -> str:
+    """``country`` + the mod-97 check digits that make it valid + ``bban``."""
     numeric = "".join(str(int(ch, 36)) for ch in bban + country + "00")
     check = 98 - int(numeric) % 97
     return f"{country}{check:02d}{bban}"
+
+
+def _paper(iban: str, separator: str = " ") -> str:
+    """``iban`` in the paper format: groups of four, the last one shorter
+    or not."""
+    return separator.join(iban[i : i + 4] for i in range(0, len(iban), 4))
+
+
+def _iban(rng: random.Random) -> str:
+    """A valid IBAN, half in the solid form, half in the paper format."""
+    solid = _iban_solid(rng)
+    if rng.random() < 0.5:
+        return solid
+    return _paper(solid, rng.choice(_IBAN_PAPER_SEPARATORS))
 
 
 def _canadian_sin(rng: random.Random) -> str:
@@ -286,17 +319,35 @@ _HETU_ALPHABET = "0123456789" + "".join(c for c in "ABCDEFGHIJKLMNOPQRSTUVWXY" i
 _HETU_SIGNS = "+-YXWVUABCDEF"
 
 
+def _reads_as_personnummer(value: str) -> bool:
+    """Whether a DDMMYY±NNNC value is also a valid Swedish personnummer
+    (YYMMDD±NNNC: month 1-12, day 1-31 or 61-91, Luhn over the ten digits),
+    which the swedish_personnummer rule, earlier in the list, would claim."""
+    digits = [int(c) for c in value if c.isdigit()]
+    if len(digits) != 10 or value[6] not in "+-":
+        return False
+    month, day = digits[2] * 10 + digits[3], digits[4] * 10 + digits[5]
+    if not (1 <= month <= 12 and (1 <= day <= 31 or 61 <= day <= 91)):
+        return False
+    total = sum(sum(divmod(d * (2 - i % 2), 10)) for i, d in enumerate(digits))
+    return total % 10 == 0
+
+
 def _finnish_hetu(rng: random.Random) -> str:
     """Henkilötunnus: DDMMYY + century sign + 3-digit individual number + a
-    mod-31 check character over the nine digits."""
-    day = rng.randrange(1, 29)
-    month = rng.randrange(1, 13)
-    year = rng.randrange(100)
-    ddmmyy = f"{day:02d}{month:02d}{year:02d}"
-    sign = rng.choice(_HETU_SIGNS)
-    zzz = f"{rng.randrange(1000):03d}"
-    check = _HETU_ALPHABET[int(ddmmyy + zzz) % 31]
-    return f"{ddmmyy}{sign}{zzz}{check}"
+    mod-31 check character over the nine digits. A value that also reads as
+    a Swedish personnummer is drawn again (the TFN/SIN stance)."""
+    while True:
+        day = rng.randrange(1, 29)
+        month = rng.randrange(1, 13)
+        year = rng.randrange(100)
+        ddmmyy = f"{day:02d}{month:02d}{year:02d}"
+        sign = rng.choice(_HETU_SIGNS)
+        zzz = f"{rng.randrange(1000):03d}"
+        check = _HETU_ALPHABET[int(ddmmyy + zzz) % 31]
+        value = f"{ddmmyy}{sign}{zzz}{check}"
+        if not _reads_as_personnummer(value):
+            return value
 
 
 def _nhs_number(rng: random.Random) -> str:
@@ -604,20 +655,26 @@ def _german_steuer_id(rng: random.Random) -> str:
     return f"{joined[:2]} {joined[2:5]} {joined[5:8]} {joined[8:]}"
 
 
-def _corrupt_iban(rng: random.Random) -> str:
-    """A valid-shaped IBAN whose checksum is off by one digit — must not fire."""
-    valid = _iban(rng)
+def _corrupt_iban(rng: random.Random, country: str | None = None) -> str:
+    """A valid-shaped solid IBAN whose checksum is off by one digit — must
+    not fire."""
+    valid = _iban_solid(rng, country)
     last = str((int(valid[-1]) + 1) % 10)
     return valid[:-1] + last
 
 
 def _ipv6(rng: random.Random) -> str:
     # Shapes that pass all validator gates: hex letters guaranteed by the
-    # 2001:db8 documentation prefix, never eight two-char groups.
-    if rng.random() < 0.5:
+    # 2001:db8 documentation prefix, never eight two-char groups. One in
+    # five ends in "::", which the punctuation contexts follow with "." or
+    # ":" (it must still be found whole).
+    roll = rng.random()
+    if roll < 0.4:
         tail = ":".join(f"{rng.randrange(16**4):x}" for _ in range(6))
         return f"2001:db8:{tail}"
-    return f"2001:db8::{rng.randrange(16**4):x}:{rng.randrange(1, 16**4):x}"
+    if roll < 0.8:
+        return f"2001:db8::{rng.randrange(16**4):x}:{rng.randrange(1, 16**4):x}"
+    return f"2001:db8:{rng.randrange(1, 16**4):x}::"
 
 
 # Armor labels the private_key rule must catch. PGP carries a ` BLOCK` suffix
@@ -833,7 +890,9 @@ VALUE_GENERATORS: dict[str, tuple[str, Callable[[random.Random], str]]] = {
             "pscale_"
             + r.choice(["tkn", "oauth", "pw"])
             + "_"
-            + _pick(r, _ALNUM + "._-", 38)
+            # 40 or the most, 64 characters: the punctuation contexts put
+            # dots after the longest too.
+            + _pick(r, _ALNUM + "._-", r.choice((38, 62)))
             + _pick(r, _ALNUM, 2)
         ),
     ),
@@ -872,6 +931,8 @@ def _url_credentials(rng: random.Random) -> tuple[str, str]:
 
 def _aws_secret(rng: random.Random) -> tuple[str, str]:
     value = _pick(rng, _B64, 40)
+    if rng.random() < 0.5:  # bare: the punctuation contexts touch the value
+        return value, f"aws_secret_access_key = {value}"
     return value, f'aws_secret_access_key = "{value}"'
 
 
@@ -882,11 +943,15 @@ def _gcp_key_id(rng: random.Random) -> tuple[str, str]:
 
 def _azure_key(rng: random.Random) -> tuple[str, str]:
     value = base64.b64encode(rng.randbytes(48)).decode()
+    if rng.random() < 0.5:  # the key last: the punctuation contexts touch it
+        return value, f"DefaultEndpointsProtocol=https;AccountKey={value}"
     return value, f"DefaultEndpointsProtocol=https;AccountKey={value};EndpointSuffix=example"
 
 
 def _generic_secret(rng: random.Random) -> tuple[str, str]:
     value = _pick(rng, _ALNUM, 28)
+    if rng.random() < 0.5:  # bare: the punctuation contexts touch the value
+        return value, f"password = {value}"
     return value, f'password = "{value}"'
 
 
@@ -906,6 +971,38 @@ _CONTEXTS: tuple[str, ...] = (
     '{{"field": "{v}", "note": "from config"}}',
     'contact = "{v}"  # loaded at startup',
     "The value {v} appeared in the log output.",
+)
+
+# Every rule's values (the contextual rules' whole text) are also put in each
+# of these, once: a value that ends a sentence or a clause, or sits in
+# brackets or quotes, must be found exactly as in plain prose. A
+# sentence-final "." once hid four rules' values (planetscale_token's when
+# its body is 64 characters); the recall gate holds all rules to it now. No
+# word here is a secret keyword.
+PUNCTUATION_CONTEXTS: tuple[str, ...] = (
+    "It is {v}.",
+    "It is {v}. Next line.",
+    "It is {v}...",
+    "First {v}, then the rest.",
+    "First {v}; then the rest.",
+    "Reached {v}: no reply.",
+    "Found {v}! Done.",
+    "Is it {v}? Yes.",
+    "(see {v}) for details",
+    "[see {v}] for details",
+    "see ({v} for details",
+    "see [{v} for details",
+    "({v})",
+    "[{v}]",
+    'quoted "{v}" here',
+    "quoted '{v}' here",
+    '"{v}."',
+    "„{v}.“",
+    "It is **{v}.**",
+    # In a tool call's arguments, redacted as JSON source: an escaped line
+    # break follows the sentence's ".".
+    '{"content": "It is {v}.\\nNext line."}',
+    "It ends with {v}",
 )
 
 
@@ -936,9 +1033,87 @@ def _decoys(rng: random.Random) -> list[str]:
         f"9{rng.randrange(10)}{rng.randrange(10)}-12-3456 on file",
         "123-00-4567 on file",
         "123-45-0000 on file",
-        # Valid-shaped IBAN with a corrupted checksum digit.
+        # Valid-shaped IBAN with a corrupted checksum digit, solid and in the
+        # paper format (NL: its 10-digit account number forms no other
+        # rule's digit grouping, a card's 13+ or a 4-4-4 id).
         f"ref {_corrupt_iban(rng)} rejected",
+        f"ref {_paper(_corrupt_iban(rng, 'NL'))} rejected",
+        # A value glued into a longer dotted or colon token is not the value:
+        # a "." or ":" ends one only before a non-word character.
+        f"build {_swiss_ahv(rng)}.{rng.randrange(10)} done",
+        f"id {_belgian_nn(rng)}.{rng.randrange(10)} done",
+        f"addr {_ipv6(rng)}:x done",
+        f"addr {_ipv6(rng)}.{rng.randrange(10)} done",
+        "ratio 1:2:3. done",  # letterless, three groups: vetoed
+        "slice x[::2]. done",
+        "at 08:00:01: done",
     ]
+
+
+# What a value takes in of the characters right after it, as its rule's
+# regex reads them: a generic secret's value runs on over every character
+# of its alphabet ("." included, as many as follow; the rule is
+# case-insensitive, so "ſ", "K" and "ı" are of its alphabet too), and a
+# PlanetScale token over the token alphabet: up to 64 characters before a
+# character that is not a word character, or with only dots past the 64th
+# when whitespace, a closing quote or bracket, "*", "<", a backslash or the
+# end of the text follows them (the rules' _CLOSE) and no other token starts
+# in the run. Every other rule's value ends where its generated value does.
+_SECRET_VALUE = re.compile(r"[A-Za-z0-9/+=_\-\.]*", re.IGNORECASE)
+_PLANETSCALE_PREFIX = re.compile(r"pscale_(?:tkn|oauth|pw)_")
+_PLANETSCALE_RUN = re.compile(r"[A-Za-z0-9=._-]*")
+_PLANETSCALE_NESTED = re.compile(r"[=.-]pscale_(?:tkn|oauth|pw)_")
+_WORD = re.compile(r"\w")
+_CLOSING = re.compile(r"""[\s"'`)\]}>»”’“‘«‹›*<\\]|\Z""")
+
+
+def taken_after(detector_type: str, value: str, after: str) -> int:
+    """How many of the characters that open ``after`` a ``value`` of
+    ``detector_type`` right before them takes in. ValueError when the
+    value's rule finds no value there at all (a PlanetScale token whose
+    run goes on)."""
+    if detector_type == "SECRET":
+        return _SECRET_VALUE.match(after).end()  # type: ignore[union-attr]
+    if detector_type == "PLANETSCALE_TOKEN":
+        prefix = _PLANETSCALE_PREFIX.match(value).end()  # type: ignore[union-attr]
+        body = len(value) - prefix
+        run = _PLANETSCALE_RUN.match(after).end()  # type: ignore[union-attr]
+        if body + run <= 64 and not _WORD.match(after, run):
+            return run
+        if (
+            body + run > 64
+            and not after[64 - body : run].strip(".")
+            and _CLOSING.match(after, run)
+            and not _PLANETSCALE_NESTED.search(value[prefix:] + after[:run])
+        ):
+            return run
+        raise ValueError("the token's run goes on")
+    return 0
+
+
+def _embedded(context: str, value: str, text: str, detector_type: str) -> Sample:
+    """``text`` (holding ``value``) put in ``context``, labeled at ``value``
+    (with what it takes in of the characters after it, when it ends
+    ``text``)."""
+    before, after = context.split("{v}")
+    start = len(before) + text.find(value)
+    end = start + len(value)
+    if text.endswith(value):
+        end += taken_after(detector_type, value, after)
+    return Sample(before + text + after, (LabeledSpan(start, end, detector_type),))
+
+
+def punctuation_samples(rng: random.Random) -> list[Sample]:
+    """One value of every rule in each punctuation context."""
+    samples: list[Sample] = []
+    for context in PUNCTUATION_CONTEXTS:
+        for detector_type, gen in VALUE_GENERATORS.values():
+            value = gen(rng)
+            samples.append(_embedded(context, value, value, detector_type))
+        for detector_type, gen_ctx in CONTEXTUAL_GENERATORS.values():
+            value, text = gen_ctx(rng)
+            samples.append(_embedded(context, value, text, detector_type))
+    return samples
 
 
 def generate(seed: int = 42, samples_per_rule: int = 25) -> list[Sample]:
@@ -963,6 +1138,8 @@ def generate(seed: int = 42, samples_per_rule: int = 25) -> list[Sample]:
     for _ in range(samples_per_rule):
         for decoy in _decoys(rng):
             corpus.append(Sample(decoy, ()))
+
+    corpus.extend(punctuation_samples(rng))
 
     rng.shuffle(corpus)
     return corpus

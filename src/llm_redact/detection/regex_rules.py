@@ -13,7 +13,7 @@ import ipaddress
 import math
 import re
 import unicodedata
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 from llm_redact.detection.base import Detection
@@ -58,6 +58,10 @@ class RegexRule:
     # such rules run regardless of [detection] languages. A tagged rule is
     # NOT BUILT when the configured language list shares no entry with it.
     languages: tuple[str, ...] | None = None
+    # Where the scan goes on after the validator vetoes a match (None: at
+    # its end, as finditer); a match that can start inside a vetoed one is
+    # then read. For a rule without anchors whose matches are never empty.
+    resume: Callable[[re.Match[str]], int] | None = None
 
 
 # `\d` in a str pattern is any Unicode decimal digit (category Nd), not just
@@ -626,6 +630,22 @@ def _ssn_ok(match: re.Match[str]) -> bool:
     return group != "00" and serial != "0000"
 
 
+# What may follow a value's run of dots (1.12.1): whitespace, a closing
+# quote or bracket (also of German and French typography: „…“ ‚…‘ »…« ›…‹),
+# the "*" ending Markdown emphasis, the "<" of an HTML tag, a backslash (a
+# JSON string's escaped line break or quote: a tool call's arguments are
+# redacted as JSON source, "…85.\n…"), or the end of the text. A value a
+# rule ends only before a non-word character may also end before such a run
+# (a sentence's ".", an ellipsis): "756.9217.0769.85." is the number, while
+# a "." glued to more ("756.9217.0769.85.3", "2001:db8::1..x") still ends no
+# value, so a new match never starts before, and overlaps, a value another
+# rule finds there.
+_CLOSE = r"""(?=[\s"'`)\]}>»”’“‘«‹›*<\\]|\Z)"""
+# The end of belgian_nn and swiss_ahv: as in 1.12.0 (no word character, "."
+# or "-" after the value), or a run of dots then _CLOSE.
+_END_OR_DOTS = rf"(?:(?![\w.-])|(?=\.++{_CLOSE}))"
+
+
 # Official IBAN lengths for common countries; other country codes fall back
 # to the checksum alone (the grammar already bounds 15-34 chars).
 # fmt: off
@@ -637,16 +657,86 @@ _IBAN_LENGTHS = {
 # fmt: on
 
 
+# The IBAN length of every country in the SWIFT IBAN registry (ISO 13616),
+# for the paper format: python-stdnum 2.2 (stdnum/iban.dat, from registry
+# v101) and schwifty 2026.7.3 agree on all 89. schwifty also lists 38 codes
+# outside the registry (GG, IM, JE and the French overseas departments
+# among them, though their banks issue GB and FR IBANs): their paper format
+# is not read, their solid form is (on the checksum alone).
+# fmt: off
+_IBAN_PAPER_LENGTHS = {
+    "AD": 24, "AE": 23, "AL": 28, "AT": 20, "AZ": 28, "BA": 20, "BE": 16,
+    "BG": 22, "BH": 22, "BI": 27, "BR": 29, "BY": 28, "CH": 21, "CR": 22,
+    "CY": 28, "CZ": 24, "DE": 22, "DJ": 27, "DK": 18, "DO": 28, "EE": 20,
+    "EG": 29, "ES": 24, "FI": 18, "FK": 18, "FO": 18, "FR": 27, "GB": 22,
+    "GE": 22, "GI": 23, "GL": 18, "GR": 27, "GT": 28, "HN": 28, "HR": 21,
+    "HU": 28, "IE": 22, "IL": 23, "IQ": 23, "IS": 26, "IT": 27, "JO": 30,
+    "KW": 30, "KZ": 20, "LB": 28, "LC": 32, "LI": 21, "LT": 20, "LU": 20,
+    "LV": 21, "LY": 25, "MC": 27, "MD": 24, "ME": 22, "MK": 19, "MN": 20,
+    "MR": 27, "MT": 31, "MU": 30, "NI": 28, "NL": 18, "NO": 15, "OM": 23,
+    "PK": 24, "PL": 28, "PS": 29, "PT": 25, "QA": 29, "RO": 24, "RS": 22,
+    "RU": 33, "SA": 24, "SC": 31, "SD": 18, "SE": 24, "SI": 19, "SK": 24,
+    "SM": 27, "SO": 23, "ST": 25, "SV": 28, "TL": 23, "TN": 24, "TR": 26,
+    "UA": 29, "VA": 22, "VG": 24, "XK": 20, "YE": 30,
+}
+# fmt: on
+
+# The paper format separates its groups by one space; a no-break space or a
+# narrow one (documents keep an IBAN on one line with them) reads as one.
+_IBAN_SEPARATORS = " \u00a0\u202f"
+
+
+def _iban_pattern() -> "re.Pattern[str]":
+    """The solid electronic form exactly as in 1.12.0, or the paper format
+    of a registry country: after the code and check digits, the groups of
+    four its registry length makes, the last of one to four. One
+    alternative per length, its countries named in a lookbehind, so the
+    regex knows where the IBAN ends; the code is read once, before them.
+
+    A paper IBAN may be followed by what may follow an IPv6 address (a run
+    of dots or one ":", then _CLOSE), else not by anything another rule
+    could run on with from inside it: one of ``-.:@%+`` (an id, an IPv6 or
+    email address), a separator then a digit (a card number, a spaced id)
+    or a separator then a one-letter word from A to D (a NINO's last
+    letter)."""
+    separator = f"[{_IBAN_SEPARATORS}]"
+    by_length: dict[int, list[str]] = {}
+    for code, length in sorted(_IBAN_PAPER_LENGTHS.items()):
+        by_length.setdefault(length, []).append(code)
+    paper = []
+    for length, codes in sorted(by_length.items()):
+        full, rest = divmod(length - 4, 4)
+        groups = f"(?:{separator}[A-Z0-9]{{4}}){{{full}}}"
+        if rest:
+            groups += f"{separator}[A-Z0-9]{{{rest}}}"
+        paper.append(f"(?<=(?:{'|'.join(codes)})\\d\\d){groups}")
+    end = rf"(?=(?:\.++|:){_CLOSE}|(?![-.:@%+]|{separator}(?:\d|[A-D]\b)))"
+    solid = r"[A-Z0-9]{11,30}\b"
+    return re.compile(rf"\b[A-Z]{{2}}\d{{2}}(?:{solid}|(?:{'|'.join(paper)})\b{end})")
+
+
 def _iban_ok(match: re.Match[str]) -> bool:
     value = match.group(0)
-    expected = _IBAN_LENGTHS.get(value[:2])
-    if expected is not None and len(value) != expected:
-        return False
+    if value[4] in _IBAN_SEPARATORS:
+        # The paper format, at its registry length (the pattern holds it).
+        value = value.replace(" ", "").replace("\u00a0", "").replace("\u202f", "")
+    else:
+        expected = _IBAN_LENGTHS.get(value[:2])
+        if expected is not None and len(value) != expected:
+            return False
     # ISO 13616 mod-97: move the first four chars to the end, map letters to
     # 10..35, and the whole number must be ≡ 1 (mod 97). This eliminates
     # random uppercase-alphanumeric identifiers 96 times out of 97.
     rearranged = value[4:] + value[:4]
     return int("".join(str(int(ch, 36)) for ch in rearranged)) % 97 == 1
+
+
+def _iban_resume(match: re.Match[str]) -> int:
+    """Where the scan goes on after a vetoed candidate: at its second group
+    in the paper format, where an IBAN can start ("IS12 GB82 WEST 1234 5698
+    7654 32": an Icelandic-length candidate holding a GB IBAN); at its end
+    in the solid form, as finditer."""
+    return match.start() + 5 if match.group(0)[4] in _IBAN_SEPARATORS else match.end()
 
 
 def shannon_entropy(s: str) -> float:
@@ -707,10 +797,15 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
     RegexRule(
         # Loose colon-hex candidate; the validator does the real work (see
         # _valid_ipv6). The repetition bound keeps long hex-pair dumps from
-        # ever forming a candidate.
+        # ever forming a candidate. It may end before a run of dots or one
+        # ":" (_CLOSE), but never takes a trailing ":" in: the lookbehinds
+        # refuse an end on "hex:" or ":::" ("2001:db8::" before a ":").
         name="ipv6",
         detector_type="IPV6",
-        pattern=re.compile(r"(?<![\w:.])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,8}(?![\w:.])"),
+        pattern=re.compile(
+            r"(?<![\w:.])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,8}(?<![0-9A-Fa-f]:)(?<!:::)"
+            rf"(?:(?![\w:.])|(?=(?:\.++|:){_CLOSE}))"
+        ),
         validator=_valid_ipv6,
         required=((":",),),
     ),
@@ -767,10 +862,13 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         required=(_DIGIT_DASH,),
     ),
     RegexRule(
+        # The solid electronic form, or the ISO 13616 paper format of a
+        # registry country (_iban_pattern); the span is the text as written.
         name="iban",
         detector_type="IBAN",
-        pattern=re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b"),
+        pattern=_iban_pattern(),
         validator=_iban_ok,
+        resume=_iban_resume,
     ),
     RegexRule(
         # Ethereum (and every EVM chain): 0x + 40 hex. A mixed-case address
@@ -918,7 +1016,7 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         # prefix is both the grammar anchor and the prefilter literal.
         name="swiss_ahv",
         detector_type="CH_AHV",
-        pattern=re.compile(r"(?<![\w.-])756\.\d{4}\.\d{4}\.\d{2}(?![\w.-])"),
+        pattern=re.compile(r"(?<![\w.-])756\.\d{4}\.\d{4}\.\d{2}" + _END_OR_DOTS),
         validator=_ahv_ok,
         languages=("de", "fr", "it"),
         required=(("756.",),),
@@ -941,7 +1039,7 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         # is in the validator. 93.05.18-223.61 pins it.
         name="belgian_nn",
         detector_type="BE_NN",
-        pattern=re.compile(r"(?<![\w.-])\d{2}\.\d{2}\.\d{2}-\d{3}\.\d{2}(?![\w.-])"),
+        pattern=re.compile(r"(?<![\w.-])\d{2}\.\d{2}\.\d{2}-\d{3}\.\d{2}" + _END_OR_DOTS),
         validator=_belgian_nn_ok,
         languages=("nl", "fr", "de"),
         required=(_DIGIT_DOT,),
@@ -1438,9 +1536,20 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         anchors=("sbp_", "sb_secret_"),
     ),
     RegexRule(
+        # The body's alphabet holds ".", so a token takes the dots after it
+        # in: as in 1.12.0 up to 64 characters, and since 1.12.1 also when
+        # they run past the 64th and _CLOSE follows them (a 64-character
+        # body before a sentence's "."). Not then when another token starts
+        # in the first 64: that one is read on its own (the outer match can
+        # lose an overlap to a value it starts inside, and take it along).
         name="planetscale_token",
         detector_type="PLANETSCALE_TOKEN",
-        pattern=re.compile(r"\bpscale_(?:tkn|oauth|pw)_[A-Za-z0-9=._-]{30,64}(?![\w=.-])"),
+        pattern=re.compile(
+            r"\bpscale_(?:tkn|oauth|pw)_(?:[A-Za-z0-9=._-]{30,64}(?![\w=.-])"
+            r"|(?![A-Za-z0-9=._-]{0,63}[=.-]pscale_(?:tkn|oauth|pw)_)[A-Za-z0-9=._-]{64}\.++"
+            + _CLOSE
+            + ")"
+        ),
         priority=10,
         required=(("pscale_tkn_", "pscale_oauth_", "pscale_pw_"),),
         anchors=("pscale_tkn_", "pscale_oauth_", "pscale_pw_"),
@@ -1691,12 +1800,31 @@ class RegexDetector:
                 last_end = match.end()
 
     def detect(self, text: str) -> Iterable[Detection]:
+        if self._rule.resume is not None:
+            return self._detections_from(self._resumed(text, self._rule.resume), validated=True)
         return self._detections_from(self._rule.pattern.finditer(text))
 
-    def _detections_from(self, matches: Iterable["re.Match[str]"]) -> Iterable[Detection]:
+    def _resumed(
+        self, text: str, resume: Callable[["re.Match[str]"], int]
+    ) -> Iterator["re.Match[str]"]:
+        """The matches the validator accepts, found as finditer finds them,
+        except that after a vetoed one the search goes on at ``resume``."""
+        search, validator = self._rule.pattern.search, self._validator
+        pos = 0
+        while (match := search(text, pos)) is not None:
+            if validator is None or validator(match):
+                yield match
+                pos = match.end()
+            else:
+                pos = resume(match)
+
+    def _detections_from(
+        self, matches: Iterable["re.Match[str]"], validated: bool = False
+    ) -> Iterable[Detection]:
         rule = self._rule
+        validator = None if validated else self._validator
         for match in matches:
-            if self._validator is not None and not self._validator(match):
+            if validator is not None and not validator(match):
                 continue
             if rule.group and match.group("value") is not None:
                 start, end = match.span("value")

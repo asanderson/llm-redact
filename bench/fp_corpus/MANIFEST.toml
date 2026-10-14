@@ -83,9 +83,10 @@ IPV6 = 1
 # serial, and hh:mm:ss timestamps are all colon-hex shapes the ipv6
 # validator's gates must keep rejecting, and ://host:port/path URLs
 # without an @-password never fire url_credentials. 127.0.0.1 is
-# default-allowlisted and uncounted.
+# default-allowlisted and uncounted. Since 1.12.1 also the IPv6 address
+# ping6 prints before a colon ("from 2001:db8:42::1: icmp_seq=1"), genuine.
 IPV4 = 17
-IPV6 = 2
+IPV6 = 3
 
 [files."synthetic_bigint.log"]
 # 18-19-digit machine integers: snowflake ids, nanosecond timestamps, Kafka

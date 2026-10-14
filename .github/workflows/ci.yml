@@ -700,11 +700,11 @@ jobs:
   container-ner:
     # The -ner image (stock image + the hf and gliner extras on a CPU-only
     # torch) as release.yml builds it, linux/amd64 only here: the closure is
-    # CPU-only, doctor sees both NER backends, and — with no network, a
-    # read-only root filesystem and models the image itself pulled with
-    # `models pull --to`, mounted read-only at /models — `serve --check`
-    # loads them under tests/airgap/no_network.py. NER_EXTRAS must equal
-    # release.yml's (tests/test_deploy_assets.py).
+    # CPU-only, the license text ships, doctor sees both NER backends, and —
+    # with no network, a read-only root filesystem and models the image
+    # itself pulled with `models pull --to`, mounted read-only at /models —
+    # `serve --check` loads them under tests/airgap/no_network.py. NER_EXTRAS
+    # must equal release.yml's (tests/test_deploy_assets.py).
     name: container (-ner image, no network)
     runs-on: ubuntu-latest
     needs: test
@@ -723,6 +723,12 @@ jobs:
           docker run --rm --network none --entrypoint python \
             -v "$PWD/scripts/cpu_torch.py:/smoke/cpu_torch.py:ro" \
             llm-redact:ner-ci /smoke/cpu_torch.py check
+      - name: the license text ships (inside the image, no network)
+        # The stock image's copies are checked by scripts/container_smoke.sh.
+        run: |
+          docker run --rm --network none --entrypoint python \
+            -v "$PWD/scripts/image_license_check.py:/smoke/image_license_check.py:ro" \
+            llm-redact:ner-ci /smoke/image_license_check.py
       - name: doctor sees the hf and gliner backends (inside the image, no network)
         run: |
           set -euo pipefail

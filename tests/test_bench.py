@@ -1,6 +1,18 @@
+import random
 from pathlib import Path
 
-from llm_redact.bench.corpus import LabeledSpan, Sample, generate
+import pytest
+
+from llm_redact.bench.corpus import (
+    CONTEXTUAL_GENERATORS,
+    PUNCTUATION_CONTEXTS,
+    VALUE_GENERATORS,
+    LabeledSpan,
+    Sample,
+    generate,
+    punctuation_samples,
+    taken_after,
+)
 from llm_redact.bench.fp_scan import fp_failures, scan_fp_corpus, to_markdown_table
 from llm_redact.bench.metrics import evaluate, to_json_dict, to_markdown
 
@@ -17,6 +29,57 @@ def test_corpus_spans_are_correct() -> None:
     for sample in generate(seed=1, samples_per_rule=2):
         for span in sample.spans:
             assert 0 <= span.start < span.end <= len(sample.text)
+
+
+def test_every_rule_is_put_in_every_punctuation_context() -> None:
+    # The recall gate holds every rule to a value ending a sentence, before a
+    # colon, in brackets or quotes: one value of each rule per context.
+    rules = len(VALUE_GENERATORS) + len(CONTEXTUAL_GENERATORS)
+    samples = punctuation_samples(random.Random(3))
+    assert len(samples) == rules * len(PUNCTUATION_CONTEXTS)
+    for index, sample in enumerate(samples):
+        before, after = PUNCTUATION_CONTEXTS[index // rules].split("{v}")
+        assert sample.text.startswith(before) and sample.text.endswith(after)
+    corpus = {sample.text for sample in generate(seed=3, samples_per_rule=1)}
+    for context in PUNCTUATION_CONTEXTS:
+        before, after = context.split("{v}")
+        found = [t for t in corpus if t.startswith(before) and t.endswith(after)]
+        assert len(found) >= rules, context
+
+
+def test_the_corpus_reads_what_a_value_takes_in_as_its_rule_does() -> None:
+    # The corpus's model of the characters right after a value that its rule
+    # takes in (taken_after), pinned to the production rules: a generic
+    # secret's value takes every character of its alphabet, a PlanetScale
+    # token the dots after it; every other value none.
+    from llm_redact.detection.regex_rules import BUILTIN_RULES, RegexDetector
+
+    rules = {rule.name: RegexDetector(rule) for rule in BUILTIN_RULES}
+    secret = "Xk29QmPl40Vt85ZwQqR7"
+    afters = (
+        ".", "...", '."', ".)", ". \nnext", "... and more", ", then", ".-x", ".x", "", " .",
+        "\u017f ok", "\u212a ok", "...\u00e9 ok", ".**", ".\u201c", "..<br>",
+    )  # fmt: skip
+    for after in afters:
+        (found,) = rules["generic_secret"].detect(f"password = {secret}{after}")
+        assert found.end - found.start - len(secret) == taken_after("SECRET", secret, after)
+    # Long runs of dots, alone or before a character that is no word's,
+    # and of the token alphabet holding another token's start.
+    runs = (
+        "." * 40 + " ok", "." * 40 + "x", "." * 40 + "/",
+        ".pscale_tkn_" + "b" * 30 + "....", "-pscale_pw_" + "c" * 40 + ".",
+    )  # fmt: skip
+    for after in afters + runs:
+        for body in (30, 40, 60, 63, 64):
+            token = "pscale_tkn_" + ("a1B2c3D4e5" * 7)[:body]
+            first = [d for d in rules["planetscale_token"].detect(f"see {token}{after}")]
+            if first and first[0].start == 4:
+                taken = first[0].end - 4 - len(token)
+                assert taken == taken_after("PLANETSCALE_TOKEN", token, after), (body, after)
+            else:
+                with pytest.raises(ValueError):
+                    taken_after("PLANETSCALE_TOKEN", token, after)
+    assert taken_after("IPV6", "2001:db8::1", "...") == 0
 
 
 def test_metrics_math() -> None:

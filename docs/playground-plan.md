@@ -829,7 +829,7 @@ Each comes with the recommended default.
 ## Appendix A: detection gaps found while preparing samples
 
 Building the sample set surfaced detection gaps that the bench's recall
-gate does not see, because its corpus never puts a value at the end of a
+gate did not see, because its corpus never put a value at the end of a
 sentence. A scan of all 82 value-generated rules in eight punctuation
 contexts (plain, sentence end, comma, parentheses, semicolon, colon after,
 quoted, end of text) found:
@@ -841,12 +841,15 @@ quoted, end of text) found:
 | `ipv6` | the value ends a sentence, or a colon follows it | `Ship to 2001:db8::1. Done` missed; `Ship to 2001:db8::1 now` found |
 | `iban` | it is written in the spaced paper format | `GB82 WEST 1234 5698 7654 32` missed; `GB82WEST12345698765432` found |
 
-The first three come from a negative lookahead that rejects a following
-`.` (and `:` for IPv6). Each is a leak in ordinary prose and deserves its
-own change: a narrower lookahead, such as a period not followed by a
-digit, sentence-final contexts in `bench/corpus.py`, and a run of the
-fp-corpus gate. The spaced IBAN form needs a grammar decision first. None
-of the playground work depends on them.
+The first three came from a negative lookahead that rejected a following
+`.` (and `:` for IPv6). All four were leaks in ordinary prose, as was a
+fifth found while fixing them (`planetscale_token` refused a token whose
+body and the dots after it passed 64 characters), and all five were fixed
+in 1.12.1: a value may also be followed by a run of dots (an IPv6 address
+also by one `:`) when whitespace, a closing quote or bracket, `*`, `<`, a
+backslash or the end of the text follows, and the `iban` rule reads the
+paper format of the SWIFT registry's countries. The bench corpus now puts
+every rule's values in twenty-one punctuation contexts.
 
 Also observed: in `postgres://app:hunter2@db.corp.example:5432/app` the
 email rule claims `hunter2@db.corp.example`, which is longer than the URL

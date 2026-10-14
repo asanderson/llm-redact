@@ -48,6 +48,12 @@ curl -sf http://127.0.0.1:18787/__llm-redact/readyz | grep -q '"realtime": *true
 "$ENGINE" exec smoke-proxy python -c "import uvloop" \
   || { echo "FAIL: uvloop (perf extra) not in image"; exit 1; }
 
+echo "--- the license text"
+# The AGPL-3.0 text ships in the image: where a reader looks for it, and in
+# the installed distribution's metadata (the wheel built in the image).
+"$ENGINE" exec -i smoke-proxy python - < "$(dirname "$0")/image_license_check.py" \
+  || { echo "FAIL: the AGPL-3.0 license text is missing from the image"; exit 1; }
+
 echo "--- status endpoint"
 curl -sf http://127.0.0.1:18787/__llm-redact/status | head -c 200
 echo

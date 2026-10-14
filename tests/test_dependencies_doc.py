@@ -30,6 +30,31 @@ def test_every_declared_package_is_documented() -> None:
             )
 
 
+def _section(text: str, heading: str) -> str:
+    start = text.index(f"\n## {heading}\n")
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end != -1 else len(text)]
+
+
+def test_every_dev_group_package_is_named() -> None:
+    # The dev group is described in prose on this page and in docs/SBOM.md;
+    # both must name every package it carries.
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    dev = {_base_name(r) for r in pyproject["dependency-groups"]["dev"] if isinstance(r, str)}
+    sections = {
+        "docs/dependencies.md": _section(DOC.read_text(), "Development group"),
+        "docs/SBOM.md": _section(
+            (ROOT / "docs" / "SBOM.md").read_text(),
+            "Development toolchain (dev group; never ships in the wheel)",
+        ),
+    }
+    unnamed = {
+        page: sorted(p for p in dev if not re.search(rf"(?<![\w-]){re.escape(p)}(?![\w-])", text))
+        for page, text in sections.items()
+    }
+    assert unnamed == {page: [] for page in sections}
+
+
 def test_documented_extras_all_exist() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     declared = set(pyproject["project"]["optional-dependencies"])

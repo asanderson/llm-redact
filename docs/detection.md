@@ -32,7 +32,8 @@ mod-11), Irish PPS numbers (mod-23 check letter), and Mexican CURPs
 national-id rule matches its
 grouped or signed display form and is checksum-validated, so bare digit
 runs never fire. IBANs
-(mod-97 checksum), cryptocurrency wallet addresses (Ethereum with the
+(mod-97 checksum; the solid electronic form, and the ISO 13616 paper format
+of the SWIFT registry's countries), cryptocurrency wallet addresses (Ethereum with the
 EIP-55 checksum, Bitcoin base58check, and bech32/taproot), URL-embedded
 passwords
 (`postgres://user:pass@host` — only the password is redacted), AWS
@@ -51,6 +52,61 @@ regexes, or scoped to a single placeholder type
 Custom rules (`[[detection.custom_rules]]`) can also name a built-in
 validator (`luhn`, `mod97`, `verhoeff`, `jwt`, `entropy`) so a loose
 pattern only fires on checksum-valid matches.
+
+### Values next to punctuation
+
+A value may end a sentence. `belgian_nn` and `swiss_ahv` find a number
+followed by a run of dots, and `ipv6` an address followed by a run of dots
+or one `:`, when one of these follows that run: whitespace, a closing quote
+or bracket (`` " ' ` ) ] } > » ” ’ `` and the German and French `“ ‘ « ‹ ›`),
+the `*` of Markdown emphasis, the `<` of an HTML tag, a backslash (a JSON
+string's escape: a tool call's arguments are redacted as JSON source, where
+a line break after the `.` is written `\n`), or the end of the text
+(`AHV 756.9217.0769.85.`, `2001:db8::1: unreachable`, `(2001:db8::.)`,
+`**AHV 756.9217.0769.85.**`); the punctuation stays outside the redacted
+span. A value glued into a longer token is not one: `756.9217.0769.85.3`,
+`93.05.18-223.61..x` and `2001:db8::1:x` are not matched.
+`planetscale_token` takes the dots after a token into it, as it did while
+the token's body and the dots were at most 64 characters, now also when
+they run past that and one of the same characters follows them (not when
+another PlanetScale token starts in the first 64: that one is read on its
+own).
+
+The `iban` rule reads the solid form as before (the length checked for 19
+common countries, any other country code on the checksum alone) and the
+paper format of the 89 countries of the SWIFT IBAN registry, each at its
+registry length: groups of four after the check digits, the last of one to
+four, separated by one space, no-break space or narrow no-break space
+(`GB82 WEST 1234 5698 7654 32`). The checksum runs on the compacted value;
+the redacted span is the text as written. IBANs of countries outside the
+registry are read in the solid form only (Guernsey, Jersey, the Isle of
+Man and the French overseas departments use GB and FR IBANs, which are
+read in both forms).
+
+Known residuals:
+
+- A paper-format IBAN is not read when one of `-`, `.`, `:`, `@`, `%` or
+  `+`, a separator and a digit, or a separator and a one-letter word `A`
+  to `D` (the last letter of a National Insurance number) follows it
+  (another rule's value could run on from inside it), except a run of dots
+  or one `:` followed by one of the characters above: in
+  `GB82 WEST 1234 5698 7654 32-x` the IBAN goes upstream as sent.
+- Upper-case hex printed in groups of four holds runs shaped like a
+  registry country's paper IBAN: one random `gpg --fingerprint` line in
+  about 9,300, and one random `xxd -u` line in about 7,500, has a run that
+  passes the checksum and is redacted as an IBAN (twenty million random
+  lines of each).
+- A newly read value wins an overlap like any longer match, so under
+  `[detection.modes]` what it takes in follows its own rule's mode: the
+  digits of a spaced IBAN that also form a card number follow the `iban`
+  rule's (in warn mode they are forwarded, and a `credit_card` rule in
+  block mode no longer refuses the request), and a generic secret inside a
+  PlanetScale token's run follows `planetscale_token`'s.
+- An allowlist entry is an exact value: one in the solid form does not
+  cover the same IBAN in the paper format. List both, or use
+  `allowlist_patterns`.
+- A sentence's final `.` after a PlanetScale token or a generic secret is
+  redacted with it (it may be the value's own last character).
 
 ## Deny strings: values that must always be redacted
 

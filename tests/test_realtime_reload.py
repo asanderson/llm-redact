@@ -13,9 +13,10 @@ frame it reads after the swap. A reload that changes nothing a relay depends
 on leaves it open.
 
 Real sockets end to end (uvicorn on port 0 in a thread, a fake ``websockets``
-upstream in the test's loop — the test_realtime_relay harness). The reload
-runs ON the server's event loop, as SIGHUP (``loop.add_signal_handler``) and
-the config editor (an HTTP handler) run it in production.
+upstream in the test's loop — the test_realtime_relay harness). The apply
+runs ON the server's event loop, as SIGHUP's reload (``loop.add_signal_handler``:
+its file read and build off the loop, its apply on it) and the config editor
+(an HTTP handler) run it in production.
 
 A client still WRITING frames while the proxy closes may see a reset instead
 of the close frame: uvicorn closes the socket right after writing its close
@@ -168,6 +169,12 @@ class Proxy:
 
     async def apply(self, fresh: Config) -> Any:
         return await self.on_loop(lambda: self.state.apply_config(fresh))
+
+    async def await_on_loop(self, coroutine: Callable[[], Any]) -> Any:
+        """Await ``coroutine()`` on the server's event loop."""
+        assert self._capture.loop is not None
+        running = asyncio.run_coroutine_threadsafe(coroutine(), self._capture.loop)
+        return await asyncio.wrap_future(running)
 
 
 @contextlib.contextmanager
@@ -400,7 +407,8 @@ async def test_tightened_redaction_closes_the_live_relay(
 # --- the SIGHUP path ------------------------------------------------------------------
 
 
-async def test_a_sighup_reload_closes_the_relay(tmp_path: Path) -> None:
+@pytest.mark.parametrize("off_loop", [True, False])
+async def test_a_sighup_reload_closes_the_relay(tmp_path: Path, off_loop: bool) -> None:
     async with Upstream() as fake:
         path = tmp_path / "config.toml"
         section = f'[providers.openai]\nupstream_base_url = "{fake.url()}"\n'
@@ -410,7 +418,13 @@ async def test_a_sighup_reload_closes_the_relay(tmp_path: Path) -> None:
                 await client.send(_frame("openai", f"first {EMAIL}"))
                 await client.recv()
                 path.write_text(section)
-                await proxy.on_loop(proxy.state.reload)  # what the SIGHUP handler runs
+                if off_loop:
+                    # What the SIGHUP handler runs: the file read and built
+                    # off the loop, applied on it.
+                    await proxy.on_loop(proxy.state.reloads.request)
+                    await proxy.await_on_loop(proxy.state.reloads.wait)
+                else:
+                    await proxy.on_loop(proxy.state.reload)  # the synchronous form
                 assert proxy.state.config.providers["openai"].detection is True
                 closed = await _closed(client)
             await _upstream_closed(fake)

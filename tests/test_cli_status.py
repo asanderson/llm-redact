@@ -78,6 +78,43 @@ def test_posture_surfaces_every_runtime_opt_out(capsys: pytest.CaptureFixture[st
     assert "providers disabled (fail closed): bedrock" in out
 
 
+def test_posture_says_a_reload_is_running_or_failed(capsys: pytest.CaptureFixture[str]) -> None:
+    from llm_redact.cli import _print_posture
+
+    def posture(config_reload: object) -> str:
+        _print_posture({"config_reload": config_reload, "detection": {}, "audit": {}})
+        return capsys.readouterr().out
+
+    # Still building off the event loop: what status prints is the
+    # configuration BEFORE it — said first, above the posture it qualifies.
+    out = posture({"running": True, "running_seconds": 3.4, "last": None})
+    assert out.splitlines()[:2] == [
+        "posture:",
+        "  ⚠ config reload in progress for 3s: this status (the posture below included) is the"
+        " configuration BEFORE it — run `llm-redact status` again once it ends",
+    ]
+    assert "in progress:" in posture({"running": True, "running_seconds": None, "last": None})
+    # The last reload failed: the file the proxy read is not what runs.
+    out = posture(
+        {"running": False, "last": {"outcome": "failed", "at": "2026-10-15T09:00:00+00:00"}}
+    )
+    assert (
+        "the last config reload FAILED at 2026-10-15T09:00:00+00:00: the proxy kept its previous"
+        " configuration, not the file it read" in out
+    )
+    # Applied, a failure a later apply superseded (the config editor's save:
+    # the file is what runs), idle, or an older proxy without the block:
+    # nothing to say.
+    superseded = {"outcome": "failed", "at": "x", "superseded": True}
+    for quiet in (
+        {"running": False, "last": {"outcome": "applied", "at": "x"}},
+        {"running": False, "last": superseded},
+        None,
+        "junk",
+    ):
+        assert "all traffic redacted" in posture(quiet)
+
+
 def test_posture_surfaces_licensed_features_not_registered(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

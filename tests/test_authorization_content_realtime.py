@@ -70,6 +70,37 @@ async def test_each_frame_is_asked_with_its_own_counts(
     assert len(fake.texts()) == 3 and EMAIL not in fake.texts()[0]
 
 
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+async def test_a_warn_mode_value_an_added_string_cuts_into_is_reported_when_partly_sent(
+    monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    # The connection's overlay adds a deny string; a warn-mode value it
+    # takes part of is a warning of that frame, once; one it takes whole
+    # is none.
+    from test_authorization_content import OverlaidGate
+    from test_realtime_reload import _serve
+
+    gate = OverlaidGate(("acme", "jane.roe@corp.example"))
+    _install(monkeypatch, gate)
+    rules = {"modes": {"email": "warn"}}
+    async with Upstream() as fake:
+        with _serve(_config(provider, fake.url(), rules)) as proxy:
+            async with websockets.connect(f"ws://{proxy.host}{PATHS[provider]}") as client:
+                await client.send(_frame(provider, "mail bob.private@acme-corp.example"))
+                await client.recv()
+                await client.send(_frame(provider, "mail jane.roe@corp.example"))
+                await client.recv()
+            warnings = dict(proxy.state.warn_counts)
+    assert [content for _request, content in gate.asked] == [
+        ContentFacts(scanned=True, detected=(("DENY", 1),), warned=(("EMAIL", 1),)),
+        ContentFacts(scanned=True, detected=(("DENY", 1),)),
+    ]
+    first, second = fake.texts()
+    assert "bob.private@«DENY_001»-corp.example" in first
+    assert "jane.roe" not in second and "«DENY_002»" in second
+    assert warnings == {"EMAIL": 1}
+
+
 def _serve_config(provider: str, fake: Upstream, **provider_settings: Any) -> Any:
     from test_realtime_reload import _serve
 

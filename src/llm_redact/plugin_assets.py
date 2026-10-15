@@ -163,16 +163,28 @@ llm-redact-pro dashboard's config editor:
    host/port/vault/audit/log/tls/otel/users/email are RESTART-ONLY —
    warn the user and stop if the change touches them; so are the llm
    backend's [detection.ner.llm] url, allow_remote and api_key_env, and
-   a reload never starts the llm backend (adding it takes a restart).
+   a reload never starts the llm backend on a proxy started without it,
+   and starts it again only at the values the proxy started with (any
+   other start takes a restart).
 3. Validate BEFORE applying: `llm-redact serve --check` must exit 0.
    If it fails, fix the file or revert it — never leave the config
    failing --check, because a SIGHUP would silently keep the old config
    and serve would refuse to start.
-4. Hot-apply: find the proxy (`pgrep -f "llm-redact serve"`) and send
-   `kill -HUP <pid>`. Confirm with `llm-redact status` and read the
-   posture block back to the user — if the change weakened protection
-   (warn mode, detection off, exemptions), say so explicitly. If no
-   proxy is running, say the change takes effect on the next start.
+4. Hot-apply: find the proxy (`pgrep -f "llm-redact serve"`), note
+   `config_reload.requested_total` in `llm-redact status --json`, and
+   send `kill -HUP <pid>`. The proxy builds the new configuration off
+   its event loop (seconds when NER models load), and until it applies,
+   status still describes the configuration BEFORE the change: run
+   `llm-redact status --json` again until `config_reload.requested_total`
+   is above the noted value and `config_reload.running` is false (a
+   proxy whose status has no `config_reload` reloads before it answers).
+   If `config_reload.last.outcome` is "failed", the proxy kept its old
+   configuration: say so — never report the change as applied — and
+   point at the proxy's log line "config reload failed; keeping current
+   config", which names the cause. Otherwise run `llm-redact status` and
+   read the posture block back to the user — if the change weakened
+   protection (warn mode, detection off, exemptions), say so explicitly.
+   If no proxy is running, say the change takes effect on the next start.
 
 Never write secret values into the conversation. Deny strings are the
 one exception BY DESIGN (they live in the config file); add them

@@ -616,12 +616,14 @@ class DashboardHost(Protocol):
     (``config.RESTART_ONLY_PATHS`` through ``config.restart_only_name``,
     e.g. ``detection.ner.llm.url``) — a label to show, not always a
     ``Config`` attribute. A ``fresh`` those keys refuse (one that would
-    start the llm backend, or one the kept values make invalid) raises
-    ``ConfigError`` with the running configuration kept, and
-    ``validate_config`` refuses it alike. ``preview`` runs the LIVE detection
-    pipeline over caller text on a throwaway vault (no upstream, vault,
-    metrics or audit write) and returns ``{redacted, detections, warnings,
-    blocked}`` — ``blocked`` is ``{"type": T}`` or None, never a value.
+    start the llm backend — a reload starts it again only on a process
+    started running it, at the values it started with —, or one the kept
+    values make invalid) raises ``ConfigError`` with the running
+    configuration kept, and ``validate_config`` refuses it alike.
+    ``preview`` runs the LIVE detection pipeline over caller text on a
+    throwaway vault (no upstream, vault, metrics or audit write) and
+    returns ``{redacted, detections, warnings, blocked}`` — ``blocked`` is
+    ``{"type": T}`` or None, never a value.
 
     OPTIONAL members (cores before 1.13 lack them: read with ``getattr``),
     for running the preview and the editor's check off the event loop:
@@ -857,7 +859,9 @@ class DetectionOverlay:
       redacted as one placeholder (neither leaves in part); a value the
       policy blocks still refuses the request; only a value the policy
       forwards as sent (warn mode, an approved refusal override) yields to
-      it — the deny string's span is redacted, the rest sent as before.
+      it — the deny string's span is redacted, the rest sent as before (a
+      warn-mode value still counted as a warning when part of it is sent,
+      not when the redacted spans cover it whole).
 
     The core refuses the request (403) rather than drop anything it cannot
     apply, since an intended tightening would be lost: an unknown rule
@@ -894,7 +898,12 @@ class ContentFacts:
       redaction replaced with placeholders in THIS request (never another
       request's, whatever runs concurrently), sorted by type.
     - ``warned``: likewise for the warn-mode values the request forwards as
-      sent (observed, not redacted).
+      sent (observed, not redacted) — in part included where a value it is
+      joined with or an added deny string (``DetectionOverlay``) takes part
+      of it (one the redacted values cover whole does not count), but not
+      one that loses an ordinary overlap to a configured deny string or to
+      a value redacted in its place, although the rest of it is sent
+      (docs/detection.md "Per-rule modes").
     - ``unscanned_parts``: the binary upload file parts this request
       forwards unscanned (``[detection] binary_uploads = "forward"``, or an
       approved ``binary_upload`` override).
@@ -1433,7 +1442,8 @@ class ModelPolicy(Protocol):
     exception, an empty string or any other answer refuses too (the core
     then names the exception TYPE only): nothing fails open. The message is
     shown and logged: name models, backends, licenses and files, never
-    file content."""
+    file content. A reload's build and the editor's dry run run off the
+    event loop, so ``check`` may be called on a worker thread."""
 
     def check(self, load: ModelLoad) -> str | None: ...
 
@@ -1620,6 +1630,8 @@ class ConfigSection(Protocol):
     for ``config show`` and the config editor's rewrite, so the section
     round-trips. Plugin sections are restart-only: a reload that changes
     one keeps the running value and reports ``name`` as restart-required.
+    A SIGHUP reload reads and parses the file off the event loop, so
+    ``parse`` may be called on a worker thread.
     """
 
     name: str

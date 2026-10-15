@@ -57,3 +57,46 @@ def test_docs_enumerate_exactly_the_restart_only_paths(doc: str) -> None:
     assert all(names == expected for names in found), (
         f"{doc} restart-only keys {found} != code {sorted(expected)}"
     )
+
+
+# Every shipped text that tells an operator what a reload does with the llm
+# backend states the start rule pin_restart_only_paths applies: a reload
+# never starts it on a proxy started without it (not even a table the
+# startup file held dormant), and starts it again only at the values the
+# proxy started with. The packaged user guide (served at
+# /__llm-redact/guide; its HTML is pinned to it by test_user_guide.py) and
+# the example config are read as they ship.
+_START_RULE_DOCS = [
+    "README.md",
+    "docs/deployment.md",
+    "docs/troubleshooting.md",
+    "docs/detection.md",
+    "docs/threat-model.md",
+    "docs/security-dataflows.md",
+    "src/llm_redact/user_guide.md",
+    "config.example.toml",
+    "plugins/llm-redact/commands/config-edit.md",
+]
+_NEVER_STARTS = "never starts the backend on a proxy started without it"
+_STARTS_AGAIN = "starts it again only at the values the proxy started with"
+# "never starts the backend" with no qualifier: the rule before a reload
+# could re-activate it.
+_UNQUALIFIED = re.compile(
+    r"never starts? (?:the |that )?(?:llm )?backend(?! on a proxy started without it)"
+)
+
+
+def _prose(text: str) -> str:
+    """``text`` as one line of words: comment markers at line starts and
+    backticks dropped, whitespace runs folded to one space."""
+    lines = (line.strip().lstrip("#").strip() for line in text.splitlines())
+    return " ".join(" ".join(lines).replace("`", "").split())
+
+
+@pytest.mark.parametrize("doc", _START_RULE_DOCS)
+def test_docs_state_when_a_reload_starts_the_llm_backend(doc: str) -> None:
+    prose = _prose((ROOT / doc).read_text())
+    rule = prose.replace("that backend", "the backend").replace("the llm backend", "the backend")
+    assert _NEVER_STARTS in rule, f"{doc}: does not say {_NEVER_STARTS!r}"
+    assert _STARTS_AGAIN in rule, f"{doc}: does not say {_STARTS_AGAIN!r}"
+    assert not _UNQUALIFIED.search(prose), f"{doc}: {_UNQUALIFIED.search(prose)}"

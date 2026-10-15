@@ -68,6 +68,13 @@ table miss) waits for at most the string the worker is on, never the whole
 batch. A model fault refuses the request (nothing is forwarded), exactly as
 it did when the models ran inline.
 
+Loading the models is kept off the event loop too. A configuration reload
+that changes `[detection]` — a SIGHUP, or a save in the llm-redact-pro
+config editor — reads the file and loads every model it names on a worker
+thread while requests keep being served, then swaps the new detectors in
+one step on the event loop; requests already running finish with the
+detectors they started with.
+
 A plugin may register scan sinks (none in the Free core; docs/plugins.md
 "Scan sinks"): a sink that wants a request is handed, after its redaction
 succeeded and right before the request leaves for its upstream, each

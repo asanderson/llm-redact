@@ -197,7 +197,9 @@ run of overlapping values:
   it, and counted as a warning also when a redacted value overlaps it, as
   long as part of it lies outside the redacted values: that part goes
   upstream. One lying wholly inside them (a warn-mode rule's `9217` in
-  `AHV 756.9217.0769.85. Done`) sends nothing and is not counted. Of
+  `AHV 756.9217.0769.85. Done`) sends nothing and is not counted — decided
+  once everything is redacted, so one whose rest an access gate's added
+  deny string or an `llm` backend finding redacts is not counted either. Of
   warn-mode values overlapping one another, the one the overlap sweep
   keeps is counted, as everywhere — so one value two detectors find (a
   custom rule and an NER model reading the same address) counts once.
@@ -263,7 +265,20 @@ Warn-mode hits show up in `/status` (`warnings_total`), Prometheus
 (`llm_redact_warnings_total`), and `llm-redact status`, so you can measure a
 rule's noise on your real traffic before trusting it with redaction. Be
 aware warn is *observation only* — the matched value (and anything a longer
-warn-mode match overlaps) is sent to the provider. Block-mode rejections
+warn-mode match overlaps) is sent to the provider. A warn-mode value part
+of which is redacted after all — by a value it is joined with
+([above](#values-joined-with-the-ones-they-overlap)), or by a deny string
+an access gate adds for its requester (an llm-redact-pro role's detection
+overlay, which only tightens this policy) — is counted the same way: once,
+when part of it is still sent, and not at all when what is redacted in the
+end (the value it is joined with, an added deny string, an `llm` backend
+finding) covers it whole. A warn-mode value that loses an ordinary overlap
+— to a configured deny string, or to a value redacted in its place that
+the overlap sweep prefers (one starting earlier, or longer) — is NOT
+counted, although the part of it the winner does not cover is still sent:
+with `deny = ["acme"]` and `email = "warn"`, `bob.private@acme-corp.example`
+goes upstream as `bob.private@«DENY_001»-corp.example` and no warning is
+counted. Block-mode rejections
 return a provider-shaped 400 whose message names the rule type, which
 agentic tools surface directly. `llm-redact preview` shows which mode a
 given text would trigger; the llm-redact-pro dashboard's config editor has
@@ -438,15 +453,32 @@ keys, applies the rest of `[detection]` (the model, `timeout_ms`, the
 entities, ...), and names each kept key in its "require restart" warning
 (`detection.ner.llm.url`, `detection.ner.llm.allow_remote`,
 `detection.ner.llm.api_key_env`; the editor's answer lists the same names).
-A reload never STARTS the backend either: one that would run it while the
-running configuration does not — `"llm"` added to `backends`, NER switched
-on with it, its table added — is refused (`a reload cannot start the llm
-backend`) and the running configuration kept, even when the file named the
-same server at startup; and so is a reload the kept values make invalid (a
-changed `api` whose paths the running `url` already ends with). Restart the
-proxy to apply either. The startup and `serve --check` read the file as
-written. A running proxy therefore never begins to send scanned text, or a
-credential, to a destination it was not started with.
+The running values are the ones the proxy started with: no reload moves
+them. A reload never starts the backend on a proxy started without it,
+and starts it again only at the values the proxy started with. One that
+would run it while the running configuration does not — `"llm"` added to
+`backends`, NER switched on with it, its table added — is refused on a
+proxy whose startup did not run the backend, whatever the file names: a
+`[detection.ner.llm]` table the startup file held with NER off, or the
+defaults (`a reload cannot start the llm backend: the proxy was not
+started running it`). On a proxy started running it, a reload that
+stopped it (NER switched off, or `"llm"` removed from `backends`, with
+or without its table) can be
+followed by one that re-activates it, applied when the file names the
+`url`, `allow_remote` and `api_key_env` the proxy started with; the build
+then reads the key's variable and checks the server and its model exactly
+as at startup (any failure keeps the running configuration), and an open
+realtime connection is closed 1012 to reconnect under the new detection
+policy, as for any `[detection]` change. A re-activation with any of the
+three changed is refused (`a reload cannot start the llm backend anywhere
+but where the proxy was started to send it`, naming the changed keys) and
+the running configuration kept: kept, the running values would start it
+at a destination the file does not name. So is a reload the kept values
+make invalid (a changed `api` whose paths the running `url` already ends
+with). Each refusal names keys, never a value. Restart the proxy to apply
+any of them. The startup and `serve --check` read the file as written. A
+running proxy therefore never begins to send scanned text, or a
+credential, to a destination it did not send to from its start.
 
 **A server that requires a key** (vLLM started with `--api-key`, a hosted
 https endpoint, Ollama behind an authenticating reverse proxy or Ollama's
@@ -471,7 +503,8 @@ starts with `LLM_REDACT_` is refused: those hold llm-redact's own settings
 and keys, which must never reach a model server.
 
 **Pinned model.** Before the backend is built (at startup, `serve --check`,
-and on a reload that changes `[detection]`) the server must list `model`
+and on a reload that changes `[detection]` — which builds on a worker
+thread, so the wait holds no request) the server must list `model`
 (answering within 10 seconds, or `timeout_ms` when that is shorter); on
 Ollama its `/api/tags` digest must equal `digest` (required there; the
 64-character form `/api/tags` reports, with or without `sha256:` — `ollama

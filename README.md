@@ -160,7 +160,7 @@ Cursor, so the proxy can be driven without leaving the tool:
   redact, warn on, or block, entirely locally;
 - `/llm-redact:config-show` and a guarded `/llm-redact:config-edit`
   (effective-config read → TOML edit → `serve --check` gate → SIGHUP
-  reload → posture read-back);
+  reload → wait for it to apply → posture read-back);
 - `/llm-redact:routes` and `/llm-redact:spend` (pro routing layer) —
   which rule and upstream a request would take (no upstream contacted),
   and per-upstream spend against the monthly budgets;
@@ -403,13 +403,16 @@ essentials:
 - **Config reload without a restart**: edit the config file, then send
   SIGHUP — `kill -HUP $(pgrep -f 'llm-redact serve')`, or for containers
   `docker kill --signal=HUP llm-redact`. Detection settings and upstream
-  URLs apply immediately; vault, audit, host, port, allowed_hosts,
+  URLs apply as soon as the reload has built them — off the event loop,
+  seconds when NER models load; `/__llm-redact/status` `config_reload`
+  says when it applied or failed — vault, audit, host, port, allowed_hosts,
   allowed_origins, log, TLS, OTel, users, email, extraction, and overrides changes are kept as-is
   with a "require restart"
   warning, and so are sections a plugin adds (llm-redact-pro's `[auth]`) and,
   inside `[detection]`, the `llm` backend's `[detection.ner.llm]` `url`,
   `allow_remote` and `api_key_env` (where it sends scanned text, and its key) —
-  a reload that would start that backend is refused.
+  a reload never starts that backend on a proxy started without it, and starts
+  it again only at the values the proxy started with.
   A broken config file is logged and ignored — the running config stays
   active. An open realtime connection whose provider settings, upstream
   identity or detection policy the reload changed is closed with code
@@ -419,7 +422,7 @@ essentials:
   `/llm-redact:status`, `/llm-redact:recent`, `/llm-redact:doctor`, and
   a guarded `/llm-redact:config-edit` that mirrors the reload flow
   (effective-config read → TOML edit → `serve --check` gate → SIGHUP →
-  posture read-back). Install with
+  wait for the reload → posture read-back). Install with
   `llm-redact plugin install claude|codex|opencode|cursor`; see
   [docs/plugins.md](https://github.com/asanderson/llm-redact/blob/main/docs/plugins.md).
 - **Logs**: one metadata-only line per request to stderr — run under

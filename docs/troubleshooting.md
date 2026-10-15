@@ -219,8 +219,53 @@ allowed_hosts, allowed_origins, vault, audit, log, tls, otel, users, email,
 extraction, and overrides changes are kept as they were and named in the
 "require restart" line — and so are the `llm` backend's `[detection.ner.llm]`
 `url`, `allow_remote` and `api_key_env`, named by their dotted path
-(`detection.ner.llm.url`; see "a reload cannot start the llm backend"
-below).
+(`detection.ner.llm.url`); a reload never starts that backend on a proxy
+started without it, and starts it again only at the values the proxy
+started with (see "a reload cannot start the llm backend" below).
+
+The reload reads the file and builds what changed (every NER model of a
+changed `[detection]`) off the event loop, so the proxy keeps answering
+while it runs, and then swaps it in; the "config reloaded" INFO line says
+it applied. Until then `/status` describes the configuration before it:
+its `config_reload` block (`running`, `requested_total`, `applied_total`,
+`failed_total`, `last`) says whether the reload is still building and
+how the last one ended, and `llm-redact status` prints a posture line
+while one runs and while the last one has failed (until a configuration
+applied since — a config editor save — supersedes it). A second `kill -HUP`
+while one runs is not lost: one more reload runs right after it and
+reads the file again.
+
+## "config reload still running after 120 s; the configuration before it stays live and SIGHUPs meanwhile wait for it"
+
+A WARNING, once per reload: a `kill -HUP` reload is still building two
+minutes after it began — far longer than NER models take to load. The
+proxy keeps serving the configuration it had (`/healthz` stays green), and
+every later SIGHUP waits for this reload to end (`/status`
+`config_reload.running` stays true, `running_seconds` grows). Look for
+what the build waits on: a model folder on a network volume that stopped
+answering, an `llm` backend server that accepted the connection and never
+answered the model list (that check gives up after 10 s), or a plugin's
+model-load policy or config section that never returns. A restart
+applies the file afresh.
+
+## "config reload failed unexpectedly (TYPE)"
+
+A reload failed in a way no configuration error explains — a bug, or a
+plugin raising something unexpected while the new configuration was read
+or built. Only the exception type is logged (its message could quote the
+file). Nothing was swapped: the running configuration stays live and the
+proxy keeps serving; the next `kill -HUP` reloads as usual. Check the file
+with `serve --check`, and report the type if it repeats.
+
+## "config reload: the configuration changed during 3 builds off the event loop; building on it"
+
+A WARNING from a `kill -HUP`: while the reload built the new configuration
+off the event loop, a config editor save (llm-redact-pro) applied another
+one — three times in a row. A build made from the file as it was before a
+save is never applied (that would undo the save), so the reload started
+over each time; now it reads the file and builds on the event loop, holding
+requests for that build (seconds when NER models load). Nothing to fix:
+avoid saving in the editor and signalling at the same moment.
 
 ## "the vault at {path} is encrypted; set [vault] encryption = \"fernet\" …"
 
@@ -1112,16 +1157,33 @@ The `llm` backend's `url`, `allow_remote` and `api_key_env` — where it
 sends every scanned string unredacted, and which variable's value it sends
 there as its key — take a restart, although the rest of `[detection]`
 reloads hot. A reload (SIGHUP, the llm-redact-pro config editor) that changed
-them keeps their running values, applies the rest and names each kept key
-(`detection.ner.llm.url`, `detection.ner.llm.allow_remote`,
-`detection.ner.llm.api_key_env`) in its "require restart" warning. A reload
-that would START the backend — `"llm"` added to `[detection.ner] backends`,
-NER switched on with it, its table added; also one a previous reload
-stopped — is refused (`config reload failed; keeping current config: …`,
-the editor's 400), and so is one the kept `url` makes invalid (`url is the
-server's base URL, without /v1 … — the running url is kept on a reload`: a
-changed `api`). Restart the proxy (`serve --check` first) to apply the file
-as written.
+them keeps their running values — the ones the proxy started with —, applies
+the rest and names each kept key (`detection.ner.llm.url`,
+`detection.ner.llm.allow_remote`, `detection.ner.llm.api_key_env`) in its
+"require restart" warning. A reload never starts the backend on a proxy
+started without it, and starts it again only at the values the proxy
+started with:
+
+- `config reload failed; keeping current config: [detection.ner] a reload
+  cannot start the llm backend: the proxy was not started running it (…)`
+  (the editor's 400): the reload would start the backend — `"llm"` added to
+  `[detection.ner] backends`, NER switched on with it, its table added — on
+  a proxy whose startup did not run it, even at the `url` and key variable
+  of a `[detection.ner.llm]` table the startup file held with NER off.
+  Restart the proxy (`serve --check` first) to start it.
+- `… a reload cannot start the llm backend anywhere but where the proxy was
+  started to send it: detection.ner.llm.url changed (…)`: the proxy was
+  started running the backend, a reload stopped it, and this one would start
+  it again with the named keys changed. Set them back and reload again to
+  start it where it ran, or restart the proxy to start it at the new ones.
+
+So is a reload the kept `url` makes invalid (`url is the server's base URL,
+without /v1 … — the running url is kept on a reload`: a changed `api`);
+restart the proxy to apply the file as written. Each message names keys,
+never a value. A re-activation the reload allows builds as the startup
+does: an unset key variable (above), a server that does not answer or no
+longer serves the pinned model refuses it with the running configuration
+kept.
 
 ## "[detection.ner.llm] api_key_env must name an environment variable …" / "… must not name an LLM_REDACT_ variable …"
 

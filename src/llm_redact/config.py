@@ -226,9 +226,11 @@ RESTART_ONLY_KEYS = (
 # there as a bearer token — whoever can change [detection] (a file edit
 # and SIGHUP, the pro editor) must not be able to point either somewhere
 # the proxy was not started with. apply_config keeps their running values
-# and reports each by its dotted name (restart_only_name), and refuses a
-# reload that would START the llm backend (pin_restart_only_paths); the
-# pro editor reads this list for its read-only fields. README.md,
+# (the startup ones: every apply keeps them) and reports each by its dotted
+# name (restart_only_name), and refuses a reload that would START the llm
+# backend unless the proxy was started running it and the reload names
+# those values (pin_restart_only_paths); the pro editor reads this list
+# for its read-only fields. README.md,
 # docs/deployment.md and docs/troubleshooting.md enumerate them
 # (test_restart_only_docs.py).
 RESTART_ONLY_PATHS: tuple[tuple[str, ...], ...] = (
@@ -1861,23 +1863,48 @@ def _with_path_value(config: Any, path: tuple[str, ...], value: object) -> Any:
     return dataclasses.replace(config, **{head: inner})
 
 
-def _llm_running(ner: NerConfig) -> bool:
+def llm_backend_runs(ner: NerConfig) -> bool:
+    """Whether ``ner`` runs the llm backend: NER enabled with "llm" among
+    its active backends (the one test pin_restart_only_paths and the
+    proxy's startup record share)."""
     return ner.enabled and "llm" in ner.active_backends()
 
 
-def pin_restart_only_paths(fresh: Config, running: Config) -> tuple[Config, list[str]]:
+def pin_restart_only_paths(
+    fresh: Config, running: Config, *, llm_at_startup: bool = False
+) -> tuple[Config, list[str]]:
     """``fresh`` with every RESTART_ONLY_PATHS value set to ``running``'s,
     and the dotted names of those that differed (never a value) — what a
-    hot reload applies (apply_config, and validate_config agreeing).
+    hot reload applies (apply_config, and prepare_config/validate_config
+    agreeing: each calls this first, against the same running config and
+    the same ``llm_at_startup``).
 
-    ConfigError, naming the restart-only keys, when that is no
-    configuration to apply hot: one that would START the llm backend —
-    enabled with "llm" among its backends while the running configuration
-    does not run it (added to the backends, NER switched on, its section
-    added) — since a running proxy never begins to send scanned text, or a
-    credential, to a model server it was not started with, even the one its
-    file named; or one the kept values make invalid (the running url with
-    a changed ``api``)."""
+    ``running``'s values ARE the ones the process started with: the
+    running configuration is written only at startup and by apply_config,
+    which writes this function's answer — the running values again — so
+    no apply can move them (tests/test_llm_restart_only.py runs the
+    sequence). Whether the backend RAN at startup is the one fact the
+    running configuration does not keep (a reload may stop it), so the
+    caller passes it: ``llm_at_startup``, recorded once when the process
+    built its startup detectors (``ProxyState``) and never written again.
+    It defaults to False, the strict answer.
+
+    A reload may START the llm backend — enabled with "llm" among its
+    backends while the running configuration does not run it (added to the
+    backends, NER switched on, its section added) — only to RE-ACTIVATE it
+    where the process was started to send it: when the process started
+    with the backend running (``llm_at_startup``; a reload stopped it
+    since) and ``fresh`` names the running value of every restart-only
+    key. The build then reads the key's variable and checks that server as
+    at startup. ConfigError, naming the keys (never a value), when that is
+    no configuration to apply hot: a start on a process started without
+    the backend running — even at the url its file named (a dormant
+    table) or the default one: a running proxy never begins to send
+    scanned text, or a credential, to a model server it did not send to
+    from its start —; a start with any of the keys changed (kept, the
+    start would go to a destination the file does not name; taken, to one
+    the process was not started with); or one the kept values make
+    invalid (the running url with a changed ``api``)."""
     pinned = fresh
     changed: list[str] = []
     for path in RESTART_ONLY_PATHS:
@@ -1886,11 +1913,20 @@ def pin_restart_only_paths(fresh: Config, running: Config) -> tuple[Config, list
             changed.append(restart_only_name(path))
             pinned = _with_path_value(pinned, path, kept)
     names = ", ".join(restart_only_name(path) for path in RESTART_ONLY_PATHS)
-    if _llm_running(pinned.detection.ner) and not _llm_running(running.detection.ner):
+    starts = llm_backend_runs(pinned.detection.ner) and not llm_backend_runs(running.detection.ner)
+    if starts and not llm_at_startup:
         raise ConfigError(
-            "[detection.ner] a reload cannot start the llm backend (the running configuration"
-            f" does not run it): where it sends the scanned text and its key ({names}) are"
-            " restart-only; restart the proxy to start it"
+            "[detection.ner] a reload cannot start the llm backend: the proxy was not started"
+            f" running it ({names} are restart-only, and a reload starts the backend again only"
+            " on a proxy started with it, at the values it started with); restart the proxy to"
+            " start it"
+        )
+    if starts and changed:
+        raise ConfigError(
+            "[detection.ner] a reload cannot start the llm backend anywhere but where the proxy"
+            f" was started to send it: {', '.join(changed)} changed ({names} are restart-only,"
+            " and a reload starts the backend again only at the values the proxy started with);"
+            " restart the proxy to start it at the new ones"
         )
     llm = pinned.detection.ner.llm
     problem = llm_url_problem(llm.url, allow_remote=llm.allow_remote) or _llm_url_api_problem(

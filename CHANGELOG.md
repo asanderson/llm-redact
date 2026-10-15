@@ -91,12 +91,20 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   request. Values overlapping a card read inside a run of digit groups are treated alike. A
   warn-mode value among them is forwarded only where no redacted value covers it, and counted as
   a warning, once, even where a redacted value overlaps it, as long as part of it lies outside the
-  redacted values (that part goes upstream; one wholly inside them is not counted). Where the
-  proxy cannot rewrite the text (a verbatim field, an upload's extracted text), a span joining
-  two or more such values is put to refusal overrides value by value: the refusal's code names
-  every value, one approval of it lets the span through as sent (an access gate's content facts
-  count each value once), and a span holding a deny string refuses with no code, as a deny
-  string does. docs/detection.md describes how such values are joined.
+  redacted values (that part goes upstream; one wholly inside them is not counted). A warn-mode
+  value an access gate's added deny string redacts part of (a detection overlay: llm-redact-pro
+  roles) is now counted the same way — in `llm_redact_warnings_total`, the request's row and
+  `authorize_content`'s `warned`, once, when part of it is still sent — where it was not
+  counted at all. For both, whether part of the value is still sent is decided once everything is
+  redacted: one whose rest an added deny string or an `llm` backend finding redacts is not
+  counted. A warn-mode value that loses an ordinary overlap — to a configured deny string, or to
+  a value redacted in its place — is still sent in part and not counted, as before
+  (docs/detection.md, "Per-rule modes", now says so). Where the proxy cannot rewrite the text (a
+  verbatim field, an upload's extracted text), a span joining two or more such values is put to
+  refusal overrides value by value: the refusal's code names every value, one approval of it
+  lets the span through as sent (an access gate's content facts count each value once), and a
+  span holding a deny string refuses with no code, as a deny string does. docs/detection.md
+  describes how such values are joined.
 - The latency smoke check (`python -m llm_redact.bench --latency --check`) allows the proxy's
   own overhead on a 100 KB body up to 300 ms (was 150 ms). It is a tripwire for gross
   regressions such as quadratic behavior, measured at about 44 ms; a loaded shared CI runner
@@ -155,14 +163,19 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     the environment, no redirect followed, answers capped. `url`, `allow_remote` and
     `api_key_env` take a restart although `[detection]` reloads hot: a reload (SIGHUP, the
     llm-redact-pro config editor) keeps their running values, applies the rest of
-    `[detection]` and names them in its "require restart" warning (`detection.ner.llm.url`, …);
-    a reload that would start the backend (`"llm"` added to the backends, NER switched on with
-    it) is refused with the running configuration kept. Whoever can change `[detection]` can
-    therefore never make a running proxy send scanned text, or a key, somewhere it was not
-    started with. `config.RESTART_ONLY_PATHS` lists the three for the editor, and
-    `apply_config`'s restart-required list (the plugin API's `DashboardHost` contract) now
-    holds their dotted names beside the section names: an entry is a name to show, not always
-    a `Config` attribute.
+    `[detection]` and names them in its "require restart" warning (`detection.ner.llm.url`, …).
+    Those running values are the ones the proxy started with (no reload moves them). A reload
+    never starts the backend (`"llm"` added to the backends, NER switched on with it) on a
+    proxy started without it, not even a `[detection.ner.llm]` table the startup file held
+    with NER off; on one started running it, a reload may start it again after a reload
+    stopped it, only at those values — the build reading the key and checking the server as
+    at startup. Any other start is refused with the running configuration kept, naming keys,
+    never a value. Whoever can change `[detection]` can therefore never make a running proxy
+    send scanned text, or a key, somewhere it did not send to from its start.
+    `config.RESTART_ONLY_PATHS` lists the three for the editor, and `apply_config`'s
+    restart-required list (the plugin API's `DashboardHost` contract) now holds their dotted
+    names beside the section names: an entry is a name to show, not always a `Config`
+    attribute.
   - **Only real values, and only ever more redaction.** A value is kept only when its text
     occurs verbatim in the text the model read (then it is redacted wherever it occurs in the
     string, never inside a placeholder an earlier turn left there); anything the model invents
@@ -206,19 +219,46 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     event loop like every NER backend; what a string held is remembered, so the history an agent
     resends with every request is not asked again. `llm-redact preview` exits 1 and names the
     failure when the server cannot read the text.
-- **A dashboard's preview and config check can run off the event loop safely, and a save loads
-  each NER model once.** The proxy's detectors, allowlists and modes are now one immutable
-  snapshot that a reload or a save swaps in a single step, and the redaction preview reads it
-  once: a preview a reload overlaps describes the configuration live when it began, never the
-  old detectors with the new modes. Three optional members of `plugin_api.DashboardHost`, read
-  with `getattr` (an older core lacks them), let a dashboard plugin use this:
-  `preview_snapshot` (True), `prepare_config(candidate)` — the config check, raising the same
-  errors as `validate_config`, keeping the NER models it loaded for a changed `[detection]` in an
-  opaque `plugin_api.PreparedConfig` and safe on a worker thread — and the `prepared` keyword of
-  `apply_config`, which adopts those models instead of loading them again on the event loop
-  when they were prepared for the `[detection]` the apply runs (restart-only parts kept) and no
-  reload changed it since (otherwise the apply builds as before). `validate_config` is `prepare_config` followed by `close()`; a
-  SIGHUP reload is unchanged (docs/plugins.md, "The dashboard host").
+- **A dashboard's preview and config check can run off the event loop safely, a save loads each
+  NER model once, and a SIGHUP reload builds off the event loop.** The proxy's detectors,
+  allowlists and modes are now one immutable snapshot that a reload or a save swaps in a single
+  step, and the redaction preview reads it once: a preview a reload overlaps describes the
+  configuration live when it began, never the old detectors with the new modes. Three optional
+  members of `plugin_api.DashboardHost`, read with `getattr` (an older core lacks them), let a
+  dashboard plugin use this: `preview_snapshot` (True), `prepare_config(candidate)` — the config
+  check, raising the same errors as `validate_config`, keeping the NER models it loaded for a
+  changed `[detection]` in an opaque `plugin_api.PreparedConfig` and safe on a worker thread — and
+  the `prepared` keyword of `apply_config`, which adopts those models instead of loading them
+  again on the event loop when they were prepared for the `[detection]` the apply runs
+  (restart-only parts kept) and no reload changed it since (otherwise the apply builds as before).
+  `validate_config` is `prepare_config` followed by `close()`.
+  A SIGHUP reload now does the same: it reads and parses the file and builds a changed
+  `[detection]` (every NER model loaded, the `llm` backend's model-list check) on a worker
+  thread while the proxy keeps answering, then applies that build on the event loop — with no
+  check added (the editor's dry-run probes stay the editor's) and its outcomes and log lines
+  unchanged (a build that fails still logs the "changes require restart" lines first, as the
+  synchronous reload logs them). SIGHUPs arriving while a reload runs start exactly one more
+  after it, which reads the file again; a config editor save landing during the build makes
+  the reload drop its build and start over from the file the save wrote, never undoing the
+  save (after three such overlaps it builds on the event loop, with a WARNING); a reload still
+  building at shutdown has ended before the shutdown awaits anything else and applies nothing,
+  the build its worker finishes later dropped. A reload failing unexpectedly is logged by
+  exception type only ("config reload failed unexpectedly"), never fatal. Because the swap
+  now follows the signal by the build's length (seconds when NER models load), `/status` says
+  where reloads stand — a `config_reload` block: `running`, `running_seconds`,
+  `requested_total`, `applied_total`, `failed_total` and the `last` outcome (`applied` or
+  `failed`, and whether a configuration applied since — a config editor save — has
+  `superseded` a failed one) — `llm-redact status` prints a posture line while one runs
+  ("config reload in progress": the status is the configuration before it) and while the
+  last one has failed and nothing applied since, and the `/llm-redact:config-edit` agent
+  command now notes `requested_total`, sends the
+  signal and waits for that reload to end before it reads the posture back (it once could
+  report the posture from before a change as the change's, and calls a failed reload failed).
+  A reload still running after 120 seconds is logged once ("config reload still running") — a
+  build that hangs would otherwise be invisible, every later SIGHUP waiting behind it. Since
+  the reload reads and builds on a worker thread, a plugin's `ConfigSection.parse` and
+  model-load policy `check` may be called there (docs/plugins.md, "The dashboard host";
+  docs/resilience.md, "Configuration reloads (SIGHUP)"; docs/deployment.md).
 - **Four NER counters**: `ungrounded`, `errors`, `breaker_opens` and `breaker_short_circuits` in
   `/status` `detection.ner` and as `llm_redact_ner_ungrounded_total`,
   `llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total` and
@@ -227,6 +267,16 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   model server fails.
 
 ### Fixed
+- A SIGHUP during the proxy's shutdown — a terminal closing, a reload racing a stop — could end
+  the process in the middle of the audit sinks' final flush (up to 45 seconds), before the audit
+  database and the vault closed: the shutdown removed the SIGHUP handler first, which restores
+  the default action. The handler now stays registered until the shutdown's last step, and a
+  signal meanwhile does nothing.
+- A configuration reload whose displaced router (llm-redact-pro routing turned off) failed to
+  close was reported as failed — the config editor answered 500, a SIGHUP logged a traceback —
+  although the new configuration was already live. The fault is now logged by exception type
+  ("closing the router failed") and the reload reports success, like every other close after
+  the swap.
 - docs/detection.md and docs/ner-landscape.md said the default `gliner` model finds 0.922 of
   OpenPII's English names, a figure no recorded bench result backs (none of the `gliner`
   default's recorded runs covers that slice); it is gone, and the `hf` figure beside it is now

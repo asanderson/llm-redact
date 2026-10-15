@@ -123,6 +123,27 @@ required = true` inverts that deliberately; its fault behavior:
 | Crash or kill between START and END | The next startup adopts every orphaned START as a synthetic chained `interrupted` row — a served request can lose its details, never its existence. Idempotent. | pro `test_audit_required_pro.py` |
 | Off-machine sink upload fails / credentials or encryption key missing | Batches spool from the audit DB and the per-sink high-water mark does NOT advance — retained and retried (byte-identical), never dropped; `max_rows` pruning never deletes unshipped rows. The START and AMEND rows the sinks also ship travel through a bounded in-memory buffer instead: a crash, a kill or a failed final upload can lose them, and past 10,000 queued rows they drop oldest-first, counted in `rows_dropped`. | pro `test_audit_required_pro.py` |
 
+## Configuration reloads (SIGHUP)
+
+A reload applies the config file without a restart. What it changes is
+built first — for a changed `[detection]` every NER model it names is
+loaded, which takes seconds (the `llm` backend's model-list check waits up
+to 10 s) — and swapped in afterwards in one step, so requests already
+running keep the objects they started with. SIGHUP reads and parses the
+file and makes that build on a worker thread, while the proxy keeps
+answering; only the swap runs on the event loop. (The llm-redact-pro config
+editor's save builds off the loop the same way.)
+
+| Fault / situation | Behavior | Pinned by |
+| --- | --- | --- |
+| The file cannot be read or parsed, or the build fails (an unknown rule name, a bad custom regex, a missing NER extra, a model not in the local cache, a reload that would start the `llm` backend on a proxy started without it or at other values than it started with) | Nothing is swapped: the running configuration stays live, and the ERROR line `config reload failed; keeping current config: …` names the cause ([troubleshooting.md](troubleshooting.md#config-reload-failed-keeping-current-config--changes-require-restart)). The next SIGHUP tries again. | `test_reload.py`, `test_reload_off_loop.py` |
+| A reload fails in a way no configuration error explains (a bug, a plugin raising something unexpected) | Never fatal: logged as `config reload failed unexpectedly (TYPE)` — the exception type only, never its message — and the next SIGHUP reloads as usual. | `test_reload_off_loop.py` |
+| More SIGHUPs arrive while a reload runs | Never two reloads at once: however many arrive, exactly one more reload runs after the current one, and it reads the file again — the file as it was at the last signal is what ends up applied. | `test_reload_off_loop.py` |
+| A config editor save (llm-redact-pro) lands while a reload builds | The save wins: the reload's build was made from the file as it was before the save (and checked against the configuration the save replaced), so it is dropped — never applied, which would undo the save — and the reload starts over, reading the file the save wrote. After three builds overlapped this way the reload reads and builds on the event loop instead (a WARNING says so), holding requests for that build as every reload once did. A save whose check a reload overlaps is refused as before (409). | `test_reload_off_loop.py` |
+| A reload's build never ends (a stalled model volume, a plugin that never answers) | The running configuration stays live and requests are served; every later SIGHUP waits behind it (coalesced into one more reload). It is visible: `/status` `config_reload` keeps `running` true with a growing `running_seconds`, `llm-redact status` prints "config reload in progress", and a WARNING (`config reload still running after 120 s`) is logged once. A restart applies the file afresh. | `test_reload_off_loop.py` |
+| Someone reads the configuration back right after the signal (the `config-edit` agent command, an operator) | Until the reload applies, `/status` answers from the configuration before it — the swap follows the signal by the build's length. Its `config_reload` block says whether a reload runs and how the last one ended (`requested_total` moved past what was read before the signal and `running` false: the signal's reload has ended), so a reader waits instead of reporting the old posture as the new one; a failed one says the file is not what runs — until a configuration applied since (a config editor save) supersedes it (`last.superseded`). | `test_reload_off_loop.py`, `test_cli_status.py`, `test_plugins.py` |
+| The proxy shuts down while a reload builds | The reload is cancelled first thing in the shutdown (below) and applies nothing; the build its worker thread finishes later is dropped, its NER models freed. | `test_reload_off_loop.py`, `test_shutdown_order.py` |
+
 ## Shutdown order
 
 A clean stop (SIGTERM / Ctrl-C) drains in this order:
@@ -138,8 +159,18 @@ A clean stop (SIGTERM / Ctrl-C) drains in this order:
    ended by the proxy as shutdown starts (`serving.ProxyServer`; before,
    an open dashboard held the drain until the supervisor killed the
    process). This wait has no limit of its own: a streamed answer still
-   running holds it until it ends. The connection re-check backstop then
-   stops.
+   running holds it until it ends. A configuration reload (SIGHUP) still
+   building off the event loop is then cancelled, before anything else in
+   the shutdown: none is begun or applied from here on, and a build its
+   worker thread finishes later is dropped, never applied (process exit
+   waits for that thread: as long as the build takes, its NER model loads —
+   the `llm` backend's model-list check gives up after 10 s). The SIGHUP
+   handler itself stays registered until the very end of the shutdown (a
+   signal meanwhile reaches the closed reload scheduler and does nothing):
+   removing it restores the default action, under which a SIGHUP — a
+   terminal closing, a reload racing a stop — would end the process in the
+   middle of the sinks' final flush or the database closes. The connection
+   re-check backstop then stops.
 3. **Background work stops.** The sinks' periodic flush loops, the
    session-TTL prune and the license refresh are cancelled (a loop that
    had already died is logged by exception type and never cuts the
@@ -216,7 +247,9 @@ no Service and renders none.
 
 The order is pinned by `test_shutdown_order.py` (order, the END row of a
 request in flight at shutdown reaching the sink, an open events stream, a
-hanging sink, a failing flush); the budget by `test_deploy_assets.py`,
+hanging sink, a failing flush, a reload still building — ended before the
+first step that awaits —, the SIGHUP handler kept until the end); the
+budget by `test_deploy_assets.py`,
 which recomputes it from the constants in `proxy.py` and `vault_writer.py`
 and fails when the chart's default or its NOTES threshold falls behind.
 

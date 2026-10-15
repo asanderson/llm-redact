@@ -60,6 +60,7 @@ from test_no_loss_since_1_12_0 import (
     card_run,
     luhn_card,
 )
+from warn_oracle import dropped_warnings
 
 CARD = "4111 1111 1111 1111"
 # A paper IBAN whose digits after the bank code are a Luhn-valid card number.
@@ -671,7 +672,7 @@ def test_joining_never_redacts_or_refuses_less_than_a_sweep_without_some(
     redactor = Redactor([], InMemoryVault(), Allowlist(), modes=modes)
     before = _redacts(_resolve_overlaps(fewer), modes)
     try:
-        winners = redactor._resolved("x" * 60, detections)
+        winners = redactor._resolved("x" * 60, detections, [])
     except BlockedRequest:
         return
     assert all(a.end <= b.start for a, b in zip(winners, winners[1:], strict=False))
@@ -691,30 +692,22 @@ def test_joining_never_redacts_or_refuses_less_than_a_sweep_without_some(
 def test_a_dropped_warn_mode_value_is_counted_only_when_part_of_it_goes_upstream(
     spans: list[tuple[int, int, str, bool, int]], modes: dict[str, str]
 ) -> None:
-    # What the join counts as warnings (the winners it returns are counted
-    # by redact_text and scan): only warn-mode values it did not keep with a
-    # character no winner redacts, each span once however many detections
-    # read it — and nothing without a joining value (the sweep's own).
+    # What the redaction counts as warnings besides its winners: exactly the
+    # warn-mode values a joined run drops with a character no winner
+    # redacts, each span once however many detections read it — and
+    # nothing without a joining value (the sweep's own).
     detections = _sorted(spans)
     redactor = Redactor([], InMemoryVault(), Allowlist(), modes=modes)
-    warned: Counter[str] = Counter()
     try:
-        winners = redactor._resolved("x" * 60, detections, warned)
+        winners = redactor._settled("x" * 60, detections, None)
     except BlockedRequest:
         return
     if not any(d.joins for d in detections):
-        assert warned == Counter()
+        assert redactor.warn_counts == Counter()
     redacted = _redacts(winners, modes)
     if redacted is None:
-        return
-    forwarded = {
-        (d.start, d.end, d.detector_type)
-        for d in detections
-        if modes.get(d.detector_type) == "warn"
-        and d not in winners
-        and not set(range(d.start, d.end)) <= redacted
-    }
-    assert warned <= Counter(kind for _start, _end, kind in forwarded)
+        return  # a block-mode winner: redact_text refuses the text
+    assert redactor.warn_counts == dropped_warnings(detections, winners, modes, redacted)
 
 
 class _Additive:
@@ -732,6 +725,35 @@ class _Additive:
             return []
         end = at + len(self.surface)
         return [Detection(at, end, "PERSON", self.surface, 120, ADDITIVE_TIER)]
+
+
+class _Given:
+    """A stand-in detector finding exactly ``found`` in any text."""
+
+    name = "given"
+
+    def __init__(self, *found: Detection) -> None:
+        self.found = found
+
+    def detect(self, text: str) -> list[Detection]:
+        return list(self.found)
+
+
+def test_a_dropped_warn_value_an_llm_finding_covers_the_rest_of_is_no_warning() -> None:
+    # A warn-mode value a joining one overlaps: its part outside the joining
+    # value is sent — a warning — unless an llm finding (ADDITIVE_TIER, cut
+    # around the winners) redacts that part, so nothing of it is sent.
+    text = "x" * 30
+    warn = Detection(5, 15, "A", text[5:15])
+    joining = Detection(10, 20, "B", text[10:20], joins=True)
+    person = Detection(0, 10, "PERSON", text[:10], 120, ADDITIVE_TIER)
+    modes = {"A": "warn"}
+    sent = Redactor([_Given(warn, joining)], InMemoryVault(), Allowlist(), modes=modes)
+    assert sent.redact_text(text) == "x" * 10 + "«B_001»" + "x" * 10
+    assert sent.warn_counts == Counter({"A": 1})
+    covered = Redactor([_Given(warn, joining, person)], InMemoryVault(), Allowlist(), modes=modes)
+    assert covered.redact_text(text) == "«PERSON_001»«B_001»" + "x" * 10
+    assert covered.warn_counts == Counter()
 
 
 def test_a_recorder_sees_the_same_joined_redaction() -> None:
@@ -810,19 +832,25 @@ def test_an_additive_detection_never_joins(
     both = sorted(base + extra, key=lambda d: (d.start, -(d.end - d.start), d.priority))
     redactor = Redactor([], InMemoryVault(), Allowlist(), modes=modes)
     try:
-        without = redactor._resolved(text, base)
+        without = redactor._resolved(text, base, [])
     except BlockedRequest as refused:
         with pytest.raises(BlockedRequest) as again:
-            redactor._resolved(text, both)
+            redactor._resolved(text, both, [])
         assert again.value.detector_type == refused.detector_type
         return
-    winners = redactor._resolved(text, both)
+    winners = redactor._resolved(text, both, [])
     assert [d for d in winners if d.tier != ADDITIVE_TIER] == without
     assert all(a.end <= b.start for a, b in zip(winners, winners[1:], strict=False))
     covered = {i for d in winners for i in range(d.start, d.end)}
     ordered = sorted(extra, key=lambda d: (d.start, -(d.end - d.start), d.priority))
     for d in _sweep(ordered):
         assert set(range(d.start, d.end)) <= covered
+    # A warn-mode value a joined run drops is a warning only when part of it
+    # is still sent: one an llm finding redacts the rest of is not.
+    assert redactor._settled(text, both, None) == winners
+    redacted = _redacts(winners, modes)
+    if redacted is not None:
+        assert redactor.warn_counts == dropped_warnings(both, winners, modes, redacted)
 
 
 # --- the differential --------------------------------------------------------------

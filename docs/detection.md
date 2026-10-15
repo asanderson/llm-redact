@@ -297,8 +297,8 @@ asked to read. `url` must therefore be on loopback; a server off loopback is
 refused unless `allow_remote = true` and the scheme is `https`. Requests go
 exactly to `url`: no proxy or netrc from the environment, no redirect
 followed, answers asked for uncompressed (a compressed one is a failure)
-and read no further than 1 MiB or the string's `timeout_ms`. The backend
-sends no credential of its own, and `url` may not carry one.
+and read no further than 1 MiB. The backend sends no credential of its own,
+and `url` may not carry one.
 
 **Pinned model.** Before the backend is built (at startup, `serve --check`,
 and on a reload that changes `[detection]`) the server must list `model`
@@ -311,7 +311,10 @@ is refused with `api = "openai"`. llm-redact never pulls a model: `ollama
 pull` it first, then read its digest with `curl -s
 http://127.0.0.1:11434/api/tags`. A failed check stops the startup (a reload
 keeps the running configuration), and `llm-redact doctor` makes the same
-read-only check (it sends no text; `doctor --offline` skips it).
+read-only check (it sends no text; `doctor --offline` skips it). The pin
+holds at the build: the chat requests name the model, not its digest, so a
+model re-tagged on the server after the build is used until the next build
+(a restart, or a reload that changes `[detection]`) refuses it.
 
 **Per string** the backend sends one chat request: a fixed system prompt
 that names the requested types (as the `gliner` prompts do: "person",
@@ -322,15 +325,27 @@ schema for the answer (Ollama's `format`, the OpenAI `response_format`), a
 list of `{text, type}` objects. A string longer than 2,000 characters is read
 in overlapping windows of whole words (a single word longer than that in
 overlapping pieces of 2,000 characters, counted `windows_truncated`, so no
-request outgrows the context the server is asked for), all within one
-`timeout_ms`; one longer than `max_chars` is skipped, as on every backend. What a string held
-is remembered by its SHA-256 (the last 4,096 strings, in process memory, gone
-with a reload), so the conversation history an agent resends with every
-request costs one call per new string. Each new string still costs a model
-call — hundreds of milliseconds to seconds — which runs off the event loop
-through the NER prefetch ("How NER runs"). Ollama unloads a model idle for
-five minutes (`OLLAMA_KEEP_ALIVE`); the first string after that waits for the
-load within `timeout_ms`.
+request outgrows the context the server is asked for); one longer than
+`max_chars` is skipped, as on every backend. `timeout_ms` bounds a string's
+windows together: a window is asked only while time is left, each wait of
+its request (connecting, sending, every read) lasts at most what was left
+when that request started, and an answer still arriving once the time is up
+is cut — so a server that goes silent mid-answer can hold a string for up to
+about twice `timeout_ms` before it fails. What a string held is remembered by
+its SHA-256 (the last 4,096 strings, in process memory, gone when a reload
+rebuilds the detectors), so the conversation history an agent resends with
+every request costs one call per new string.
+
+Each new string still costs a model call — hundreds of milliseconds to
+seconds — which runs off the event loop through the NER prefetch ("How NER
+runs"): one string at a time for the whole proxy, one request's strings
+after another's, so a request also waits for the new strings of the
+requests ahead of it. A string a request's prefetch did not cover (a reload
+during the request, or a body its collecting pass could not walk, such as
+one over `max_body_strings`) is asked inline, holding every other request
+for that call (`inline_calls`). Ollama unloads a model idle for five minutes
+(`OLLAMA_KEEP_ALIVE`); the first string after that waits for the load within
+`timeout_ms`.
 
 **Grounded.** A value is kept only when its text occurs verbatim in the text
 the model read (edge blanks trimmed, at least two characters, no placeholder
@@ -359,7 +374,11 @@ forwards it with the other detectors' findings instead: counted (`errors`),
 logged once per outage, and reported as a coverage opt-out — a `/status`
 field (`detection.ner.backends.llm.on_error`), a `llm-redact status` posture
 line and a `doctor` WARN, like warn mode. `llm-redact preview` exits 1 and
-names the failure.
+names the failure. A string the model cannot answer within its limits —
+more values than one answer holds (2,048 tokens, 512 values), or text that
+makes it ramble — fails the same way, and a failure is never remembered: with
+`"block"`, every request that carries that string again (a conversation's
+history) is refused until the string leaves it.
 
 Like every NER backend it is best effort, measured per model, never a
 guarantee ([threat-model.md](threat-model.md#contextual-values-rules-and-models)).

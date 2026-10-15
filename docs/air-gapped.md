@@ -3,7 +3,8 @@
 How to run llm-redact, NER models included, inside an enclave that has no
 route to the internet. Everything the proxy needs is prepared on a connected
 machine and carried in; inside, nothing is downloaded and nothing but your
-LLM provider is ever contacted.
+LLM provider is ever contacted (and, when you enable the opt-in `llm` NER
+backend, the model server you name for it, on loopback by default).
 
 With `[detection.ner] allow_download` unset (it defaults to `false`) the
 proxy opens no connection to load a model: the Hub backends (`hf`, `gliner`,

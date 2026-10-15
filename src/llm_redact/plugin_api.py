@@ -599,7 +599,15 @@ class DashboardHost(Protocol):
     credentials, the router's own checks) — it raises ``ValueError`` /
     ``TypeError`` / ``re.error`` / ``ImportError`` and changes nothing.
     ``apply_config`` is the SIGHUP hot-apply path and returns the
-    restart-required section names. ``preview`` runs the LIVE detection
+    restart-required NAMES, never a value: top-level section names
+    (``config.RESTART_ONLY_KEYS``, then plugin sections) and, for a
+    restart-only key inside a hot section, its dotted path
+    (``config.RESTART_ONLY_PATHS`` through ``config.restart_only_name``,
+    e.g. ``detection.ner.llm.url``) — a label to show, not always a
+    ``Config`` attribute. A ``fresh`` those keys refuse (one that would
+    start the llm backend, or one the kept values make invalid) raises
+    ``ConfigError`` with the running configuration kept, and
+    ``validate_config`` refuses it alike. ``preview`` runs the LIVE detection
     pipeline over caller text on a throwaway vault (no upstream, vault,
     metrics or audit write) and returns ``{redacted, detections, warnings,
     blocked}`` — ``blocked`` is ``{"type": T}`` or None, never a value.

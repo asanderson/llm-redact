@@ -28,6 +28,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from llm_redact import plugin_api
 from llm_redact.config import (
     RESTART_ONLY_KEYS,
     RESTART_ONLY_PATHS,
@@ -163,6 +164,27 @@ def test_only_the_changed_paths_are_reported(monkeypatch: pytest.MonkeyPatch) ->
     # Beside a restart-only section, in the order apply_config reports them.
     fresh = dataclasses.replace(_with(state.config, url="http://localhost:11434"), port=9999)
     assert state.apply_config(fresh) == ["port", "detection.ner.llm.url"]
+
+
+def test_the_dashboard_host_contract_names_the_dotted_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``plugin_api.DashboardHost`` is the plugin contract for apply_config:
+    it must say that an entry is a section name OR a dotted path (a plugin
+    reading each as a ``Config`` attribute would misreport the new ones),
+    and every name apply_config returns is one of the two."""
+    doc = " ".join((plugin_api.DashboardHost.__doc__ or "").split())
+    for term in ("RESTART_ONLY_KEYS", "RESTART_ONLY_PATHS", "restart_only_name", NAMES[0]):
+        assert term in doc, term
+    install_llm(monkeypatch, FakeModelServer())
+    state = ProxyState(Config(detection=DetectionConfig(ner=llm_ner_config())), None)
+    fresh = _with(
+        state.config, url="http://localhost:11434", allow_remote=True, api_key_env=OTHER_VAR
+    )
+    reported = state.apply_config(dataclasses.replace(fresh, host="127.0.0.2", port=9999))
+    assert reported == ["host", "port", *NAMES]
+    assert all(name in RESTART_ONLY_KEYS or name in NAMES for name in reported)
+    assert [name for name in reported if not hasattr(Config, name)] == NAMES
 
 
 def test_a_reload_that_removes_the_backend_keeps_its_destination(

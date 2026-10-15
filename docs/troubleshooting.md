@@ -393,6 +393,24 @@ so starting would redact less than before. Settle it in one of two ways:
 `llm-redact doctor` shows the same line as a WARN under `ner` without
 loading a model. docs/detection.md, "The `hf` default's change in 1.13.0".
 
+## `[detection.ner.revisions] hf pins the commit the model catalog records for dslim/bert-base-NER, the hf backend's default model before 1.13.0, but no hf model is named, …`
+
+The startup (and `serve --check`, a reload, the config editor's check) refused
+the configuration before looking up any file; a reload keeps the running one.
+`[detection.ner.revisions] hf` holds the commit the model catalog records for
+`dslim/bert-base-NER` (docs/detection.md showed it as the example pin before
+1.13.0), but no model is named for the `hf` backend, so it would load the new
+default, `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, at a commit of
+another repository. Settle it in one of two ways:
+
+- keep the previous default at that pin: add `hf = "dslim/bert-base-NER"` to
+  `[detection.ner.models]`;
+- or load the new default: remove the `hf` entry of
+  `[detection.ner.revisions]` (it then loads at its own catalog pin), and
+  fetch it once with `llm-redact models pull`.
+
+`llm-redact doctor` shows the same line under `ner`.
+
 ## `[detection.ner] entities: "…" can never match: no active backend emits it (…)`
 
 A WARNING logged at startup (also by `serve --check`) and after a reload that

@@ -28,6 +28,11 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   keeps the running configuration), with a message naming the entities: pin
   `dslim/bert-base-NER` as above, or write `PERSON` instead of `PER` (the new model has no label
   for organizations or places). `llm-redact doctor` shows the same as a WARN.
+- A `[detection.ner.revisions] hf` pin of `dslim/bert-base-NER`'s commit
+  (`d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc`, the example pin docs/detection.md showed) with
+  no `hf` model named would now pin the new default to a commit of another repository: it is
+  refused the same way, before any file is looked up. Name `dslim/bert-base-NER` in
+  `[detection.ner.models] hf` to keep it at that pin, or remove the pin.
 - The new model is trained on NVIDIA Nemotron-PII (CC BY 4.0): if you redistribute its weights
   (a model folder, an image you build with them), credit "Trained on NVIDIA Nemotron-PII,
   CC BY 4.0".
@@ -52,7 +57,9 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   `serve --check`, a reload, the config editor's check) instead of redacting less, decided by the
   backend's own label policy (a `[detection.ner.labels]` override counts) and named in a
   message that lists the entities and both fixes; `llm-redact doctor` WARNs about it under `ner`
-  from the labels the model catalog records for the new default, without loading a model.
+  from the labels the model catalog records for the new default, without loading a model. A
+  `[detection.ner.revisions] hf` pin of the previous default's commit with no `hf` model named
+  is refused alike, with its two fixes.
 
 ### Fixed
 - docs/detection.md and docs/ner-landscape.md said the default `gliner` model finds 0.922 of

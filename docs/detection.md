@@ -285,7 +285,7 @@ allow_download = false        # the default
 allow_pickle_weights = false  # the default; hf only
 
 [detection.ner.revisions]
-hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
+hf = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"   # a full commit id
 ```
 
 - `revisions` pins a backend's model to one commit: a full 40-character
@@ -635,7 +635,7 @@ for either ([ner-landscape.md](ner-landscape.md#the-hf-default)).
 
 A configuration that names no model for the `hf` backend (no
 `[detection.ner.models] hf`, and no `[detection.ner] model` with `hf` the only
-backend) loads the new default after the upgrade. Two things can stop its
+backend) loads the new default after the upgrade. Three things can stop its
 startup:
 
 - **The model is not in the cache.** Downloads are off by default, so the
@@ -664,6 +664,14 @@ startup:
   `PERSON` request, which passes. `llm-redact doctor` shows the same line as a
   WARN without loading a model (from the labels the model catalog records for
   the new default).
+- **A revision pin written for the previous default.** `[detection.ner.revisions]
+  hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"` (the commit the model catalog
+  records for `dslim/bert-base-NER`; these docs showed it before 1.13.0) with no
+  `hf` model named would pin the new default to a commit of another repository.
+  Every detector build refuses it before any file is looked up, naming both ways
+  out: name `dslim/bert-base-NER` in `[detection.ner.models] hf` to keep it at
+  that pin, or remove the `hf` entry of `[detection.ner.revisions]` to load the
+  new default at its own catalog pin. `llm-redact doctor` shows the same line.
 
 `openai/privacy-filter` (Apache-2.0; a 1.5B-parameter mixture of experts,
 50M parameters active, 2.8 GB of weights) labels `private_person`,

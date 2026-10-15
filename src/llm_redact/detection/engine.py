@@ -558,15 +558,52 @@ def default_change_message(losses: Sequence[str]) -> str:
     )
 
 
-def check_default_change(ner: NerConfig, detector: Detector | None = None) -> None:
-    """Refuse an hf backend that would redact less after its default
-    model's change (:func:`default_change_losses`): a ConfigError naming
-    the entities and both fixes."""
+def pins_previous_default(ner: NerConfig) -> bool:
+    """Whether the hf backend loads its default without the configuration
+    naming a model for it while ``[detection.ner.revisions] hf`` pins the
+    commit the model catalog records for the previous default
+    (:data:`~llm_redact.detection.model_catalog.PREVIOUS_HF_DEFAULT`): a pin
+    written for that model (the docs before 1.13.0 showed it), which would
+    now pin the new default to a commit of another repository."""
+    if "hf" not in ner.active_backends() or ner.model_for("hf") is not None:
+        return False
+    previous = lookup(PREVIOUS_HF_DEFAULT)
+    return previous is not None and ner.configured_revision("hf") == previous.revision
+
+
+def previous_default_pin_message() -> str:
+    """Why a configuration :func:`pins_previous_default` is refused, and both
+    ways out (the pin itself is never echoed)."""
+    return (
+        "[detection.ner.revisions] hf pins the commit the model catalog records for"
+        f" {PREVIOUS_HF_DEFAULT}, the hf backend's default model before 1.13.0, but no hf"
+        f" model is named, so the new default, {DEFAULT_MODELS['hf']}, would load at a"
+        " commit of another repository: set [detection.ner.models]"
+        f' hf = "{PREVIOUS_HF_DEFAULT}" to keep the previous default at that pin, or remove'
+        " the hf entry of [detection.ner.revisions] to load the new default at its catalog pin"
+    )
+
+
+def default_change_problem(ner: NerConfig, detector: Detector | None = None) -> str | None:
+    """Why the hf default's change in 1.13.0 refuses ``ner``, or None: a
+    revision pin written for the previous default (decided from the
+    configuration alone, so only without a ``detector``), else the entities
+    :func:`default_change_losses` finds."""
+    if detector is None and pins_previous_default(ner):
+        return previous_default_pin_message()
     losses = default_change_losses(ner, detector)
-    if losses:
+    return default_change_message(losses) if losses else None
+
+
+def check_default_change(ner: NerConfig, detector: Detector | None = None) -> None:
+    """Refuse an hf backend that would redact less, or load the wrong
+    commit, after its default model's change (:func:`default_change_problem`):
+    a ConfigError naming the entities (or the pin) and both fixes."""
+    problem = default_change_problem(ner, detector)
+    if problem is not None:
         from llm_redact.config import ConfigError
 
-        raise ConfigError(default_change_message(losses))
+        raise ConfigError(problem)
 
 
 def check_min_versions(ner: NerConfig, backend: str) -> None:

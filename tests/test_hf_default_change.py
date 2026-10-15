@@ -30,6 +30,9 @@ from llm_redact.detection.engine import (
     build_detectors,
     default_change_losses,
     default_change_message,
+    default_change_problem,
+    pins_previous_default,
+    previous_default_pin_message,
 )
 from llm_redact.detection.model_catalog import (
     DEFAULT_MODELS,
@@ -46,6 +49,9 @@ HF_DEFAULT = DEFAULT_MODELS["hf"]
 _ENTRY = lookup(HF_DEFAULT)
 assert _ENTRY is not None and _ENTRY.revision is not None
 HF_DEFAULT_PIN = _ENTRY.revision
+_PREVIOUS_ENTRY = lookup(PREVIOUS_HF_DEFAULT)
+assert _PREVIOUS_ENTRY is not None and _PREVIOUS_ENTRY.revision is not None
+DSLIM_PIN = _PREVIOUS_ENTRY.revision
 OTHER_REVISION = "0123456789abcdef0123456789abcdef01234567"
 
 
@@ -150,6 +156,73 @@ def test_the_catalog_decides_only_at_its_pin() -> None:
 
 def test_the_message_names_entities_and_both_fixes_never_values() -> None:
     assert default_change_message(("PER", "ORG")) == _message("PER", "ORG")
+
+
+# --- a revision pin written for the previous default -------------------------------
+
+PIN_MESSAGE = (
+    "[detection.ner.revisions] hf pins the commit the model catalog records for"
+    " dslim/bert-base-NER, the hf backend's default model before 1.13.0, but no hf model is"
+    f" named, so the new default, {HF_DEFAULT}, would load at a commit of another"
+    ' repository: set [detection.ner.models] hf = "dslim/bert-base-NER" to keep the previous'
+    " default at that pin, or remove the hf entry of [detection.ner.revisions] to load the"
+    " new default at its catalog pin"
+)
+
+
+class _Built:
+    """A loaded hf backend as default_change_problem sees one."""
+
+    name = "hf"
+    label_policy = labels.LabelPolicy(("PERSON",), backend="hf")
+    emittable_types = frozenset({"PERSON"})
+
+    def detect(self, text: str) -> list[Any]:
+        return []
+
+
+def test_a_pin_of_the_previous_default_without_its_name_is_refused() -> None:
+    # The docs before 1.13.0 showed this pin with no model named: it now
+    # pins the new default to a commit of another repository.
+    pinned = (("hf", DSLIM_PIN),)
+    assert pins_previous_default(_ner(revisions=pinned))
+    assert default_change_problem(_ner(revisions=pinned)) == PIN_MESSAGE
+    assert previous_default_pin_message() == PIN_MESSAGE
+    assert DSLIM_PIN not in PIN_MESSAGE  # a pin is never echoed
+    # Named, it keeps the previous default at that pin.
+    for named in (
+        _ner(revisions=pinned, models=(("hf", PREVIOUS_HF_DEFAULT),)),
+        _ner(revisions=pinned, model=PREVIOUS_HF_DEFAULT),
+    ):
+        assert not pins_previous_default(named) and default_change_problem(named) is None
+    # The new default's own pin, another commit, or no hf backend: nothing
+    # to say.
+    for other in (
+        _ner(revisions=(("hf", HF_DEFAULT_PIN),)),
+        _ner(revisions=(("hf", OTHER_REVISION),)),
+        NerConfig(enabled=True, backend="gliner", revisions=pinned),
+    ):
+        assert not pins_previous_default(other) and default_change_problem(other) is None
+    # Decided from the configuration alone: a loaded detector never decides it.
+    assert default_change_problem(_ner(revisions=pinned), _Built()) is None  # type: ignore[arg-type]
+
+
+def test_a_pin_of_the_previous_default_is_refused_before_any_file_is_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hub = FakeHub()
+    pipe = _pipe()
+    install_transformers(monkeypatch, pipe, hub)
+    ner = _ner(revisions=(("hf", DSLIM_PIN),))
+    with pytest.raises(ConfigError) as refused:
+        build_detectors(DetectionConfig(enabled=(), ner=ner))
+    assert str(refused.value) == PIN_MESSAGE
+    assert hub.calls == [] and pipe.built_with == []
+    # Naming the model loads it at that pin.
+    install_transformers(monkeypatch, FakeHfPipe([], id2label=DSLIM_ID2LABEL), hub)
+    named = dataclasses.replace(ner, models=(("hf", PREVIOUS_HF_DEFAULT),))
+    assert build_detectors(DetectionConfig(enabled=(), ner=named))
+    assert [(c["repo_id"], c["revision"]) for c in hub.calls] == [(PREVIOUS_HF_DEFAULT, DSLIM_PIN)]
 
 
 # --- every build refuses -----------------------------------------------------------
@@ -294,13 +367,17 @@ def test_doctor_warns_without_loading_a_model(
     monkeypatch.setitem(sys.modules, "transformers", None)  # never imported
     rows = _doctor(tmp_path, capsys, 'enabled = true\nbackend = "hf"\nentities = ["PER", "ORG"]')
     assert ("WARN", "ner", _message("PER", "ORG")) in rows
+    pin = f'[detection.ner.revisions]\nhf = "{DSLIM_PIN}"'
+    rows = _doctor(tmp_path, capsys, f'enabled = true\nbackend = "hf"\n{pin}')
+    assert ("WARN", "ner", PIN_MESSAGE) in rows
     for ner in (
         'enabled = true\nbackend = "hf"',
         'enabled = true\nbackend = "hf"\nentities = ["PER"]\nmodel = "dslim/bert-base-NER"',
+        f'enabled = true\nbackend = "hf"\nmodel = "dslim/bert-base-NER"\n{pin}',
         'enabled = false\nbackend = "hf"\nentities = ["PER"]',
     ):
         rows = _doctor(tmp_path, capsys, ner)
-        assert not [r for r in rows if "default model changed" in r[2]], ner
+        assert not [r for r in rows if r[1] == "ner" and "1.13.0" in r[2]], ner
 
 
 # --- the facts against the real snapshots (deselected by default) ------------------

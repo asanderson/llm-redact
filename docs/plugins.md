@@ -348,7 +348,8 @@ posture line while any sink is registered. While a sink is registered,
 `llm_redact_scan_captures_dropped_total{reason}` and
 `llm_redact_scan_capture_queue_depth`
 ([observability.md](observability.md#metrics-reference); the
-`LlmRedactScanCapturesDropped` alert warns when the queue keeps dropping). The threat model's
+`LlmRedactScanCapturesDropped` alert warns when the queue keeps dropping, and the shipped
+Grafana dashboard's Scan sinks row charts all three). The threat model's
 [Scan sinks](threat-model.md#scan-sinks-a-plugin-reading-what-the-redaction-scanned)
 section states what the core does and does not guarantee.
 

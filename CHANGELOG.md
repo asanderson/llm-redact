@@ -140,6 +140,10 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   lines are there, as for the audit sinks' counters. A new alert in
   `deploy/prometheus-alerts.yml`, `LlmRedactScanCapturesDropped` (warning), fires when captures
   keep being dropped for 30 minutes: the requests are unaffected, the plugin misses their text.
+  `deploy/grafana-dashboard.json` gains a **Scan sinks** row charting the three: captures
+  delivered, captures dropped by reason — the reasons the alert reads in orange, `shutdown` (a
+  process's last drain) in grey — and the queue depth; it shows *No data* while no sink is
+  registered, as in the Free core.
 - **An opt-in `llm` NER backend: a generative model on a server you run finds names, addresses
   and other contextual values.** Add `"llm"` to `[detection.ner] backends` and name the server in
   `[detection.ner.llm]`: Ollama (`api = "ollama"`, the default, at `http://127.0.0.1:11434`) or

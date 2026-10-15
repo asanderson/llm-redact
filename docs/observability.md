@@ -18,7 +18,7 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 |---|---|
 | `deploy/prometheus-scrape.yml` | A `scrape_configs` job to merge into your `prometheus.yml`. |
 | `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage, NER skipping strings longer than `max_chars`, the `llm` NER backend's model server failing, a plugin's scan sinks dropping captures). |
-| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, windows and truncated windows, entities dropped). |
+| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, windows and truncated windows, entities dropped; a plugin's scan sinks: captures delivered, captures dropped by reason, queue depth). |
 
 ## Metrics reference
 
@@ -69,7 +69,12 @@ The three `llm_redact_scan_capture*` families render their samples only
 while a plugin registers a scan sink — then every drop reason, zeros
 included — as the audit sinks' and NER counters render theirs only for a
 running sink or backend; their `# HELP`/`# TYPE` lines are always there, so
-a dashboard or an alert reading them finds the family either way.
+a dashboard or an alert reading them finds the family either way. The
+shipped dashboard's **Scan sinks** row therefore shows *No data* in the Free
+core (which registers no sink); with a sink, its drops panel colors the
+reasons `LlmRedactScanCapturesDropped` warns on (`captures`, `characters`,
+`items`) orange and `shutdown` — a process's last drain, never a trend —
+grey.
 
 The `llm_redact_ner_*` counters belong to the built NER detectors: they
 restart from zero when a configuration reload rebuilds the detectors (any

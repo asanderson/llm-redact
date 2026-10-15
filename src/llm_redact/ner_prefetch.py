@@ -20,12 +20,16 @@ other request on the proxy. So only DETECTION moves:
    table — only where the models ran.
 
 A collecting pass that fails in any way (a body over its string budget, a
-field it cannot decode, anything else) disables the prefetch for that
-request and never changes its outcome: the real pass meets the same body
-and refuses it on its own terms.
+field it cannot decode, anything else) never changes the request's outcome:
+the real pass meets the same body and refuses it on its own terms. The
+strings collected before the failure are still detected ahead of it — the
+real pass scans those first, and running them inline instead held the event
+loop for every one of them (a body over ``max_body_strings`` made up to that
+many model calls there before its 413).
 """
 
 import asyncio
+import contextlib
 import threading
 import weakref
 from collections import Counter
@@ -90,16 +94,17 @@ class CollectingRedactor(Redactor):
         return self
 
 
-def collect(run: Callable[[CollectingRedactor], object], *, limit: int) -> list[str] | None:
+def collect(run: Callable[[CollectingRedactor], object], *, limit: int) -> list[str]:
     """The strings ``run`` — one redaction pass, given a collector in its
-    redactor's place — hands to detection, in order (duplicates kept), or
-    None when it raises anything at all: prefetching is then off for the
-    request, whose real pass refuses the body (or not) on its own."""
+    redactor's place — hands to detection, in order (duplicates kept): up
+    to where it raised, when it raises anything at all. The request's real
+    pass then refuses the body (or not) on its own, after scanning those
+    strings first; a string it scans that the collector never reached is
+    detected inline (counted, ``prefetch_misses``)."""
     collector = CollectingRedactor(limit)
-    try:
+    # Contained by design: the real pass decides.
+    with contextlib.suppress(Exception):
         run(collector)
-    except Exception:  # noqa: BLE001 — contained by design: the real pass decides
-        return None
     return collector.strings
 
 
@@ -111,13 +116,13 @@ def collect_request_strings(
     *,
     limit: int,
     mcp_exempt: frozenset[str] = frozenset(),
-) -> list[str] | None:
+) -> list[str]:
     """The strings the redaction of this JSON request body will scan
     (``providers.base.prepare_route_request``, the proxy's entry point: the
-    adapter's walk with its verbatim and label fields), or None when the
-    collecting pass fails (``collect``). ``body`` is never changed; the
-    system note is left out (it is added after the redaction, and never
-    scanned)."""
+    adapter's walk with its verbatim and label fields), up to where the
+    collecting pass failed if it did (``collect``). ``body`` is never
+    changed; the system note is left out (it is added after the redaction,
+    and never scanned)."""
     return collect(
         lambda collector: prepare_route_request(
             adapter,

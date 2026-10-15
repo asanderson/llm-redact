@@ -1331,9 +1331,10 @@ class ModelLoad:
     found on disk — never anything a model read.
 
     ``backend`` is the NER backend (``gliner``, ``gliner2``, ``hf``,
-    ``spacy``, ``presidio`` or ``stanza``); ``model`` the configured value
-    (a Hugging Face model id, a local folder, a spaCy pipeline name or a
-    Stanza language). For the Hugging Face Hub backends (``gliner``,
+    ``spacy``, ``presidio``, ``stanza`` or ``llm``); ``model`` the configured
+    value (a Hugging Face model id, a local folder, a spaCy pipeline name, a
+    Stanza language or the model a model server runs, ``[detection.ner.llm]
+    model``). For the Hugging Face Hub backends (``gliner``,
     ``gliner2``, ``hf``) the files are already RESOLVED (cached or
     downloaded at the pinned revision, checked complete) and nothing is
     loaded yet: ``model_id`` is the Hub id (a folder's from its

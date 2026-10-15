@@ -103,6 +103,39 @@ class CustomRule:
 # and whose configuration sets none (NerConfig.score_threshold_for).
 DEFAULT_SCORE_THRESHOLD = 0.5
 
+# [detection.ner.llm]: the APIs the llm backend speaks, what it does when
+# its server fails on a string, and the server it asks by default (Ollama on
+# loopback).
+LLM_APIS = ("ollama", "openai")
+LLM_ON_ERROR = ("block", "skip")
+DEFAULT_LLM_URL = "http://127.0.0.1:11434"
+
+
+@dataclass(frozen=True)
+class LlmNerConfig:
+    """``[detection.ner.llm]``: the model server the ``llm`` backend asks
+    (detection/llm_ner.py). The server receives the scanned text
+    UNREDACTED, so ``url`` must be loopback unless ``allow_remote`` is set
+    and the scheme is https (config.py checks it)."""
+
+    url: str = DEFAULT_LLM_URL
+    # "ollama" (its native /api/chat) or "openai" (an OpenAI-compatible
+    # /v1/chat/completions: vLLM, llama.cpp's server, LM Studio).
+    api: str = "ollama"
+    # The model the server runs; required when the backend is active.
+    model: str | None = None
+    # Ollama only, and required there: the digest /api/tags reports for
+    # the model, as 64 lowercase hex characters (a "sha256:" prefix is
+    # dropped). The build refuses a model re-tagged to another digest.
+    digest: str | None = None
+    # One string's time (every window of it) before it counts as a failure.
+    timeout_ms: int = 30000
+    # A failure: "block" refuses the request (503, nothing forwarded);
+    # "skip" forwards it with the other detectors' findings (counted, and
+    # reported as a coverage opt-out).
+    on_error: str = "block"
+    allow_remote: bool = False
+
 
 @dataclass(frozen=True)
 class NerConfig:
@@ -110,7 +143,7 @@ class NerConfig:
     # `presidio` for presidio) and adds per-string latency the regex hot
     # path doesn't have.
     enabled: bool = False
-    backend: str = "spacy"  # or "gliner" / "gliner2" / "presidio" / "stanza" / "hf"
+    backend: str = "spacy"  # or "gliner" / "gliner2" / "presidio" / "stanza" / "hf" / "llm"
     # Multi-backend form: when set it wins over `backend` (which stays the
     # one-element legacy spelling); every listed backend runs concurrently
     # behind the same Detector protocol, and same-span same-type hits
@@ -161,6 +194,8 @@ class NerConfig:
     onnx: tuple[tuple[str, str], ...] = ()
     allow_download: bool = False
     allow_pickle_weights: bool = False
+    # [detection.ner.llm]: the llm backend's model server.
+    llm: LlmNerConfig = field(default_factory=LlmNerConfig)
 
     def active_backends(self) -> tuple[str, ...]:
         return self.backends if self.backends is not None else (self.backend,)
@@ -481,6 +516,10 @@ def build_detectors(
 
                 inner = build_hf_detector(single)
                 check_default_change(config.ner, inner)
+            elif backend_name == "llm":
+                from llm_redact.detection.llm_ner import build_llm_detector
+
+                inner = build_llm_detector(single)
             else:
                 from llm_redact.detection.ner import build_ner_detector
 
@@ -744,6 +783,20 @@ def _source_fields(detector: Detector) -> dict[str, Any]:
     return dict(UNKNOWN_SOURCE_FIELDS) if source is None else source.status_fields()
 
 
+def _server_fields(detector: Detector) -> dict[str, Any]:
+    """The ``/status`` fields of a backend that asks a model server (the llm
+    backend): the server's origin, its API and what a failure does
+    (``on_error = "skip"`` is a coverage opt-out). Empty for the others."""
+    on_error = getattr(detector, "on_error", None)
+    if not isinstance(on_error, str):
+        return {}
+    return {
+        "server": getattr(detector, "server", None),
+        "api": getattr(detector, "api", None),
+        "on_error": on_error,
+    }
+
+
 def _threshold_fields(detector: Detector) -> dict[str, Any]:
     """The ``/status`` threshold fields of an NER backend: the confidence
     threshold it was built with and its source (config, catalog or
@@ -805,6 +858,7 @@ def ner_status(ner: NerConfig, detectors: Sequence[Detector]) -> dict[str, Any]:
                 "model": getattr(backend, "model_name", None),
                 **_source_fields(backend),
                 **_threshold_fields(backend),
+                **_server_fields(backend),
                 "counters": stats.as_dict(),
             }
             for name, backend, stats in ner_backend_stats(detectors)

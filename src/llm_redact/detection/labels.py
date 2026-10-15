@@ -196,8 +196,9 @@ SENSITIVE_LABELS = frozenset(
 )
 
 # The zero-shot backends: prompted with label TEXT, they return the prompts
-# as labels (gliner_prompt, LabelPolicy.prompts and classify_gliner).
-ZERO_SHOT_BACKENDS = frozenset({"gliner", "gliner2"})
+# as labels (gliner_prompt, LabelPolicy.prompts and classify_gliner) — the
+# llm backend's model server names them as the types it may answer with.
+ZERO_SHOT_BACKENDS = frozenset({"gliner", "gliner2", "llm"})
 
 # GLiNER is zero-shot: it is prompted with label TEXT. A type request sends
 # a natural-language prompt (a model reads "street address" better than

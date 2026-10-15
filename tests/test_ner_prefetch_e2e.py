@@ -88,9 +88,13 @@ async def _send(client: httpx.AsyncClient, shape: Shape) -> httpx.Response:
     )
 
 
+async def _no_prefetch(*args: Any, **kwargs: Any) -> None:
+    return None
+
+
 def _prefetch_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The collecting pass "fails": the request redacts inline, as before.
-    monkeypatch.setattr(proxy_module, "collect_request_strings", lambda *a, **k: None)
+    # No prefetch at all: the request redacts inline, as before.
+    monkeypatch.setattr(proxy_module, "_prefetch_json", _no_prefetch)
 
 
 async def _upstream_bytes(

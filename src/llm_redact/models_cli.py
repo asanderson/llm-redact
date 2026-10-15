@@ -136,8 +136,9 @@ def _hub_installed() -> bool:
     return True
 
 
-# spaCy, Presidio and Stanza models are packages or library downloads,
-# never Hugging Face snapshots: how to install each backend's model.
+# spaCy, Presidio and Stanza models are packages or library downloads, and
+# the llm backend's runs on its model server — never Hugging Face snapshots:
+# how to install each backend's model.
 def other_models(config: Config) -> list[dict[str, str]]:
     """The models of the active backends that are not Hub snapshots, each
     with the command that installs it."""
@@ -152,6 +153,14 @@ def other_models(config: Config) -> list[dict[str, str]]:
             language = ner.language or "en"
             model = f"stanza {language}"
             install = f"uv run python -c \"import stanza; stanza.download('{language}')\""
+        elif backend == "llm":
+            # A model its model server runs: llm-redact never fetches it.
+            model = ner.llm.model or "(no model set)"
+            install = (
+                f"ollama pull {model} (then pin its /api/tags digest)"
+                if ner.llm.api == "ollama"
+                else "your OpenAI-compatible server's own model loading"
+            )
         else:  # spacy, presidio: a spaCy pipeline package
             model = ner.model_for(backend) or "en_core_web_sm"
             install = f"uv run python -m spacy download {model}"

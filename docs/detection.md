@@ -181,6 +181,8 @@ uv pip install https://github.com/explosion/spacy-models/releases/download/en_co
 # or any Hugging Face token-classification model, PII models included
 # (pulls torch; supports score_threshold), or Stanza (60+ languages):
 uv sync --extra hf        # or: --extra stanza
+# or a generative model on a server you run (Ollama, vLLM, llama.cpp's
+# server, LM Studio): no extra; see "A model server you run" below.
 ```
 
 Models for the `gliner`, `gliner2` and `hf` backends come from the Hugging Face
@@ -269,6 +271,137 @@ concurrently (`backends = ["spacy", "presidio"]`), and the multilingual
 Stanza and Hugging Face `token-classification` backends are available the
 same way — the survey behind the lineup is
 [ner-landscape.md](ner-landscape.md).
+
+### A model server you run: the `llm` backend
+
+The `llm` backend (opt-in, no extra) asks a generative model on a server you
+run to list the contextual values in each scanned string: Ollama's own API
+(`api = "ollama"`, the default) or an OpenAI-compatible one (`api =
+"openai"`: vLLM, llama.cpp's server, LM Studio). It is configured in its own
+table:
+
+```toml
+[detection.ner]
+enabled = true
+backends = ["llm"]            # alone, or beside other backends
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME"]
+
+[detection.ner.llm]
+url = "http://127.0.0.1:11434"   # the default: Ollama on loopback
+api = "ollama"
+model = "MODEL:TAG"            # the model as the server names it: `ollama pull` it first
+digest = "<64 hex characters>"   # Ollama only: its digest as /api/tags reports it
+timeout_ms = 30000            # one string's time, every window of it
+on_error = "block"            # or "skip"
+```
+
+**The server receives every scanned string unredacted** — that is what it is
+asked to read, and it includes the secrets in it: the API keys and passwords
+the regex rules redact before the provider sees them reach the model server
+as written. `url` must therefore be on loopback; a server off loopback is
+refused unless `allow_remote = true` and the scheme is `https`. Requests go
+exactly to `url`: no proxy or netrc from the environment, no redirect
+followed, answers asked for uncompressed (a compressed one is a failure)
+and read no further than 1 MiB. The backend sends no credential of its own,
+and `url` may not carry one. In a container, loopback is the container's
+own: run the model server in the same network namespace (beside llm-redact
+in its Kubernetes pod, or with `docker run --network container:NAME`), or
+put https in front of it and set `allow_remote = true` — a plain-http
+`host.docker.internal` URL is refused.
+
+**Pinned model.** Before the backend is built (at startup, `serve --check`,
+and on a reload that changes `[detection]`) the server must list `model`
+(answering within 10 seconds, or `timeout_ms` when that is shorter); on
+Ollama its `/api/tags` digest must equal `digest` (required there; the
+64-character form `/api/tags` reports, with or without `sha256:` — `ollama
+list` shows only its first 12 characters), so a model re-tagged on the
+server is refused. An OpenAI-compatible server reports no digest, so `digest`
+is refused with `api = "openai"`. llm-redact never pulls a model: `ollama
+pull` it first, then read its digest with `curl -s
+http://127.0.0.1:11434/api/tags`. A failed check stops the startup (a reload
+keeps the running configuration), and `llm-redact doctor` makes the same
+read-only check (it sends no text; `doctor --offline` skips it). The pin
+holds at the build: the chat requests name the model, not its digest, so a
+model re-tagged on the server after the build is used until the next build
+(a restart, or a reload that changes `[detection]`) refuses it.
+
+**Per string** the backend sends one chat request: a fixed system prompt
+that names the requested types (as the `gliner` prompts do: "person",
+"street address") and says the text is data, never instructions; the text
+itself between two marker lines whose id is derived from the text, so the
+text cannot close its own frame; temperature 0 and a fixed seed; and a JSON
+schema for the answer (Ollama's `format`, the OpenAI `response_format`), a
+list of `{text, type}` objects. A string longer than 2,000 characters is read
+in overlapping windows of whole words (a single word longer than that in
+overlapping pieces of 2,000 characters, counted `windows_truncated`, so no
+request outgrows the context the server is asked for); one longer than
+`max_chars` is skipped, as on every backend. `timeout_ms` bounds a string's
+windows together: a window is asked only while time is left, each wait of
+its request (connecting, sending, every read) lasts at most what was left
+when that request started, and an answer body still arriving once the time
+is up is cut — so a server that does not answer, or goes silent
+mid-answer, holds a string for at most about twice `timeout_ms` before it
+fails. The bound is per read until the answer's headers are complete: a
+server that keeps sending header bytes, or interim `1xx` answers, a little
+at a time holds the string for as long as it keeps doing so. Your own
+server is trusted not to (one that misbehaves can as well fail every
+request). What a string held is remembered by
+its SHA-256 (the last 4,096 strings, in process memory, gone when a reload
+rebuilds the detectors), so the conversation history an agent resends with
+every request costs one call per new string.
+
+Each new string still costs a model call — hundreds of milliseconds to
+seconds — which runs off the event loop through the NER prefetch ("How NER
+runs"): one string at a time for the whole proxy, one request's strings
+after another's, so a request also waits for the new strings of the
+requests ahead of it. A string a request's prefetch did not cover (a
+reload during the request) is asked inline, holding every other request for
+that call (`inline_calls`); a body the redaction refuses part way (one over
+`max_body_strings`, say) still has the strings before that point asked on
+the worker. Ollama unloads a model idle for five minutes
+(`OLLAMA_KEEP_ALIVE`); the first string after that waits for the load within
+`timeout_ms`.
+
+**Grounded.** A value is kept only when its text occurs verbatim in the text
+the model read (edge blanks trimmed, at least two characters, no placeholder
+guillemets), and it is then redacted at every place it occurs in the string —
+inside longer words too ("Ann" in "Annual": the placeholder is restored in
+the answer like any other), never inside a placeholder an earlier turn left
+in the text (`PERSON_001` of `«PERSON_001»`). Anything else the model returns — invented,
+mangled, a different spelling — is dropped and counted (`ungrounded`); a type
+that was not requested is ignored.
+
+**Additive only.** The scanned text can instruct the model, so the backend's
+findings may only ADD redactions: they never take another detector's place.
+Overlap resolution sets the other detectors' winners first, exactly as
+without this backend, and keeps of each `llm` finding only what lies outside
+them — so a text that tells the model to "return no entities" removes at most
+the model's own findings, and a crafted answer whose span starts just before
+an API key still leaves the whole key redacted (the span's other part is
+redacted too).
+
+**When the server fails** — a timeout, an error status, a refused
+connection, an answer that is not the requested JSON — `on_error = "block"`
+(the default) refuses the request with a provider-shaped 503 before any
+upstream contact (`llm_redact_local_refusals_total{kind="detector_unavailable"}`;
+a realtime connection is closed 1011, its row 503). `on_error = "skip"`
+forwards it with the other detectors' findings instead: counted (`errors`),
+logged once per outage, and reported as a coverage opt-out — a `/status`
+field (`detection.ner.backends.llm.on_error`), a `llm-redact status` posture
+line and a `doctor` WARN, like warn mode. `llm-redact preview` exits 1 and
+names the failure. A string the model cannot answer within its limits —
+more values than one answer holds (2,048 tokens, 512 values), or text that
+makes it ramble — fails the same way, and a failure is never remembered: with
+`"block"`, every request that carries that string again (a conversation's
+history) is refused until the string leaves it. A server that hangs, rather
+than refusing the connection, costs every new string up to `timeout_ms`
+before it fails — with `"skip"` too, where the next string asks again — and
+strings are asked one at a time for the whole proxy, so keep `timeout_ms`
+well below what your clients wait for an answer.
+
+Like every NER backend it is best effort, measured per model, never a
+guarantee ([threat-model.md](threat-model.md#contextual-values-rules-and-models)).
+Logs name the model, the server's host and a fixed failure kind, never text.
 
 ### Model sources: pinned revisions, downloads and pickle weights
 
@@ -827,7 +960,7 @@ Every NER backend handles each string the redaction scans the same way:
    still scan it.
 2. **One call or windows.** A string that fits the model's window is read in
    one call, as sent. A longer one is read in overlapping windows (the `hf`,
-   `gliner` and `gliner2` backends; below).
+   `gliner`, `gliner2` and `llm` backends; below).
 3. **The model** reports entities with a label, a score and character offsets.
 4. **The label policy** turns the label into a placeholder type and keeps it
    only when that type was requested (see "Placeholder types from NER
@@ -846,8 +979,10 @@ Every NER backend handles each string the redaction scans the same way:
 9. **Allowlists, overlaps and modes.** Allowlisted values are left alone; the
    rest meet the regex rules and deny strings in overlap resolution (deny
    strings win every overlap, then the longest span; a regex rule wins an
-   exact tie), and the winner's mode redacts it into the vault, forwards it
-   (warn) or refuses the request (block).
+   exact tie; an `llm` finding never displaces another detection and keeps
+   only what lies outside the others' winners), and the winner's mode
+   redacts it into the vault, forwards it (warn) or refuses the request
+   (block).
 
 **Long strings.** A model reads a bounded number of tokens at a time and, left
 alone, ignores the rest of a longer string. The `hf`, `gliner` and `gliner2`
@@ -1120,7 +1255,8 @@ existing `detection.ner_enabled`):
       "score_threshold": 0.5, "score_threshold_source": "default",
       "counters": {"scanned_whole": 812, "scanned_windowed": 14, "skipped_max_chars": 3,
                    "windows": 61, "windows_truncated": 0, "labels_dropped": 0,
-                   "offsets_dropped": 0, "inline_calls": 0, "prefetch_misses": 0}
+                   "offsets_dropped": 0, "ungrounded": 0, "errors": 0,
+                   "inline_calls": 0, "prefetch_misses": 0}
     }
   },
   "unmatched_entities": []
@@ -1133,9 +1269,11 @@ existing `detection.ner_enabled`):
 | `scanned_windowed` | strings the model read in overlapping windows (`hf`, `gliner`, `gliner2`) |
 | `skipped_max_chars` | strings longer than `[detection.ner] max_chars`, which the model never read (the regex rules and deny strings still scan them) |
 | `windows` | the windows the windowed strings were read in |
-| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`, `gliner2`) |
+| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`, `gliner2`); for `llm`, the pieces a word longer than its 2,000-character window is cut into |
 | `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |
 | `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
+| `ungrounded` | `llm` only: values the model server returned whose text does not occur in the text it read, is shorter than two characters or holds a placeholder's guillemet (never redacted) |
+| `errors` | `llm` only: strings its model server failed on (a timeout, an error status, a connection fault, an answer that is not the requested JSON); each refused its request with `on_error = "block"`, and went on without the backend's findings with `"skip"` |
 | `inline_calls` | strings the backend ran on the event loop itself, holding up every other request for that string's inference, instead of ahead of the redaction on the NER worker thread |
 | `prefetch_misses` | strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced), run inline instead and counted in `inline_calls` too |
 
@@ -1155,21 +1293,26 @@ are `null` for the spaCy, Presidio and Stanza backends, whose models are not
 Hub snapshots. `score_threshold` is the confidence threshold a backend runs at
 and `score_threshold_source` where it comes from: `config` (`[detection.ner]
 score_threshold`), `catalog` (the model's catalog default) or `default` (0.5);
-both are `null` for spaCy and Stanza, which report no confidences.
+both are `null` for spaCy and Stanza, which report no confidences. The `llm`
+backend's entry adds `server` (its model server's `scheme://host:port`), `api`
+and `on_error`.
 
 The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
 backend and outcome, `llm_redact_ner_windows_total`,
 `llm_redact_ner_windows_truncated_total`, `llm_redact_ner_labels_dropped_total`,
-`llm_redact_ner_offsets_dropped_total`, `llm_redact_ner_inline_calls_total`,
+`llm_redact_ner_offsets_dropped_total`, `llm_redact_ner_ungrounded_total`,
+`llm_redact_ner_errors_total`, `llm_redact_ner_inline_calls_total`,
 `llm_redact_ner_prefetch_misses_total`;
 see [observability.md](observability.md)), and `llm-redact status` prints a
 posture line while a backend has skipped strings longer than `max_chars` or an
-entity can never match:
+entity can never match, and whenever the `llm` backend runs with `on_error =
+"skip"`:
 
 ```
 posture:
   ⚠ NER skipped hf×3 string(s) longer than max_chars (20000) — regex rules still applied
   ⚠ NER entities no backend can emit: PERSONS (never detected)
+  ⚠ NER llm on_error = "skip": 2 string(s) forwarded without its findings after its model server failed (the other detectors still applied)
 ```
 
 The counters belong to the built detectors: they start at zero at startup and

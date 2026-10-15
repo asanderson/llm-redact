@@ -551,3 +551,111 @@ def install_tldextract(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     monkeypatch.setattr(FakeTldExtract, "fetch", None)
     monkeypatch.setattr(FakeTldExtract, "asked", [])
     return inner
+
+
+# The llm backend's model server (detection/llm_ner.py), answering in
+# process through an httpx.MockTransport: no socket is ever opened.
+LLM_MODEL = "pii-extractor:test"
+LLM_DIGEST = "21163ebe7351c90f8dc709640062a9a8313dc3784c32714ec952bdcdf61218bd"
+
+
+def framed_text(content: str) -> str:
+    """The text between the marker lines of an llm backend user message."""
+    import re
+
+    match = re.fullmatch(r"<<<BEGIN ([0-9a-f]{16})>>>\n(.*)\n<<<END \1>>>", content, re.S)
+    assert match is not None, "the user message is not a framed text"
+    return match.group(2)
+
+
+@dataclass
+class FakeModelServer:
+    """An Ollama (``api = "ollama"``) or OpenAI-compatible model server: it
+    lists ``model`` (at ``digest`` on Ollama) and answers each chat with the
+    ``findings`` — (surface text, type) pairs — whose text occurs in the text
+    it was asked about, plus every ``invented`` pair whatever the text.
+    ``fail`` makes a chat fail (``"timeout"``, ``"status"``, ``"garbage"``,
+    ``"connection"``, ``"redirect"``), for every text or — with ``fail_on``
+    — only for a text holding that marker. It records every request."""
+
+    findings: list[tuple[str, str]] = field(default_factory=list)
+    api: str = "ollama"
+    model: str = LLM_MODEL
+    digest: str = LLM_DIGEST
+    invented: list[Any] = field(default_factory=list)
+    fail: str | None = None
+    fail_on: str | None = None
+    listed: bool = True
+    requests: list[Any] = field(default_factory=list)
+    asked: list[str] = field(default_factory=list)
+    bodies: list[dict[str, Any]] = field(default_factory=list)
+
+    def __call__(self, request: Any) -> Any:
+        import httpx
+
+        self.requests.append(request)
+        path = request.url.path
+        if path == "/api/tags" and self.api == "ollama":
+            models = [{"name": self.model, "model": self.model, "digest": self.digest}]
+            return httpx.Response(200, json={"models": models if self.listed else []})
+        if path == "/v1/models" and self.api == "openai":
+            data = [{"id": self.model, "object": "model"}]
+            return httpx.Response(200, json={"object": "list", "data": data if self.listed else []})
+        chat = "/api/chat" if self.api == "ollama" else "/v1/chat/completions"
+        if path != chat:
+            return httpx.Response(404, json={"error": "not found"})
+        body = json.loads(request.content)
+        self.bodies.append(body)
+        text = framed_text(body["messages"][1]["content"])
+        self.asked.append(text)
+        if self.fail is not None and (self.fail_on is None or self.fail_on in text):
+            return self._failure(request)
+        entities: list[Any] = [
+            {"text": surface, "type": kind} for surface, kind in self.findings if surface in text
+        ]
+        entities += self.invented
+        content = json.dumps({"entities": entities})
+        if self.api == "ollama":
+            message = {"role": "assistant", "content": content}
+            return httpx.Response(200, json={"model": self.model, "message": message})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    def _failure(self, request: Any) -> Any:
+        import httpx
+
+        if self.fail == "timeout":
+            raise httpx.ReadTimeout("timed out", request=request)
+        if self.fail == "connection":
+            raise httpx.ConnectError("refused", request=request)
+        if self.fail == "redirect":
+            return httpx.Response(307, headers={"location": "https://elsewhere.example/api/chat"})
+        if self.fail == "garbage":
+            message = {"role": "assistant", "content": "Sure! Here are the names: ..."}
+            return httpx.Response(200, json={"message": message})
+        return httpx.Response(500, json={"error": "model crashed"})
+
+    @property
+    def chats(self) -> int:
+        """How many chat requests reached the server."""
+        return len(self.bodies)
+
+
+def install_llm(monkeypatch: pytest.MonkeyPatch, server: FakeModelServer) -> FakeModelServer:
+    """Route the llm backend's requests to ``server`` (in process)."""
+    import httpx
+
+    import llm_redact.detection.llm_ner as llm_ner
+
+    monkeypatch.setattr(llm_ner, "make_transport", lambda: httpx.MockTransport(server))
+    return server
+
+
+def llm_ner_config(**llm: Any) -> Any:
+    """An enabled NerConfig running only the llm backend on the fake
+    server's model and digest, ``[detection.ner.llm]`` keys overridden by
+    ``llm`` (``entities`` too)."""
+    from llm_redact.detection.engine import LlmNerConfig, NerConfig
+
+    entities = llm.pop("entities", ("PERSON",))
+    settings: dict[str, Any] = {"model": LLM_MODEL, "digest": LLM_DIGEST, **llm}
+    return NerConfig(enabled=True, backend="llm", entities=entities, llm=LlmNerConfig(**settings))

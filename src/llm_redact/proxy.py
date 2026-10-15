@@ -90,7 +90,7 @@ from llm_redact.config import (
 )
 from llm_redact.connections import CAUSES as CONNECTION_CLOSE_CAUSES
 from llm_redact.connections import EventStream, LiveConnections, recheck_interval
-from llm_redact.detection.base import Detection, Detector
+from llm_redact.detection.base import Detection, Detector, DetectorUnavailable
 from llm_redact.detection.engine import (
     DetectionConfig,
     DetectorPlan,
@@ -1974,22 +1974,32 @@ class ProxyState:
         throwaway vault with fresh counters: no upstream request, and the
         live vault, metrics and audit are never touched. Warn-mode values
         stay in ``redacted`` — a real request forwards them (honest); a
-        block-mode match reports its type only, never the value."""
+        block-mode match reports its type only, never the value; a detector
+        that could not read the text (the llm backend's server failing,
+        ``on_error = "block"``) adds ``unavailable``: its backend and the
+        failure kind, where a real request is refused 503."""
         from llm_redact.vault import InMemoryVault
 
         redactor = Redactor(self.detectors, InMemoryVault(), self.allowlist, modes=self.modes)
         blocked: dict[str, str] | None = None
         redacted: str | None = None
+        unavailable: dict[str, str] | None = None
         try:
             redacted = redactor.redact_text(text)
         except BlockedRequest as exc:
             blocked = {"type": exc.detector_type}
-        return {
+        except DetectorUnavailable as exc:
+            # A real request would be refused 503: its backend and why.
+            unavailable = {"backend": exc.backend, "reason": exc.reason}
+        answer: dict[str, Any] = {
             "redacted": redacted,
             "detections": dict(redactor.counts),
             "warnings": dict(redactor.warn_counts),
             "blocked": blocked,
         }
+        if unavailable is not None:
+            answer["unavailable"] = unavailable
+        return answer
 
     def refresh_license_warnings(self, *, today: date | None = None) -> None:
         """Re-resolve the license for WARNING purposes only.
@@ -4795,9 +4805,10 @@ async def _prefetch_json(
 ) -> tuple[DetectorPlan, PrecomputedTable] | None:
     """The live detector plan and its model-backed (heavy) detectors'
     results for every string the redaction of this JSON body will scan
-    (``ner_prefetch``: collected on the loop, detected on a worker thread)
-    — None when the plan has no heavy detector or the collecting pass
-    failed (the redaction then runs them inline, as before)."""
+    (``ner_prefetch``: collected on the loop, detected on a worker thread;
+    a collecting pass that failed, on a body the redaction will refuse,
+    hands over what it collected before the failure) — None when the plan
+    has no heavy detector (the redaction then runs none)."""
     plan = state.redactor.plan
     if not plan.heavy_indices:
         return None
@@ -4809,8 +4820,6 @@ async def _prefetch_json(
         limit=limit,
         mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
     )
-    if strings is None:
-        return None
     return plan, await prefetch(plan, strings)
 
 
@@ -4827,8 +4836,8 @@ async def _prefetch_upload(
     plan and its heavy detectors' results for every string the upload's
     redaction will scan (its file names, form fields, text files and JSONL
     lines; a binary part's content is not text), collected by running the
-    adapter's own upload redaction with a collector — None when the plan
-    has no heavy detector or the collecting pass failed."""
+    adapter's own upload redaction with a collector (up to where it failed,
+    if it did) — None when the plan has no heavy detector."""
     plan = redactor.plan
     if not plan.heavy_indices:
         return None
@@ -4846,8 +4855,6 @@ async def _prefetch_upload(
         ),
         limit=limit,
     )
-    if strings is None:
-        return None
     return plan, await prefetch(plan, strings)
 
 
@@ -5807,12 +5814,26 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     # with the redaction): a reload meanwhile hands the request new
     # detectors, whose plan the table was not computed for — every string
     # then runs inline (counted), never a stale result. A detector's
-    # exception propagates as an inline one does (nothing is forwarded).
+    # exception propagates as an inline one does (nothing is forwarded); a
+    # required detector that could not read a string (DetectorUnavailable:
+    # the llm backend's server failing) is the recorded 503 either way.
     prefetched: tuple[DetectorPlan, PrecomputedTable] | None = None
     if adapter is not None and isinstance(parsed, dict) and not detection_off:
-        prefetched = await _prefetch_json(
-            state, adapter, request.method, path, parsed, limit=max_body_strings
-        )
+        try:
+            prefetched = await _prefetch_json(
+                state, adapter, request.method, path, parsed, limit=max_body_strings
+            )
+        except DetectorUnavailable as exc:
+            # No session yet: the row carries the configured one.
+            return _detector_unavailable_refused(
+                state,
+                state.config.vault.session,
+                adapter,
+                exc,
+                request=request,
+                path=path,
+                started=started,
+            )
     # The requester's detection overlay (tighten-only), read in the same
     # synchronous stretch as the session below, so it extends exactly the
     # detection objects the request redacts with.
@@ -6063,6 +6084,10 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             return refused_response(str(exc), adapter, "undecodable field", "unredactable")
         except SealedSessionError:
             return sealed_response(adapter)
+        except DetectorUnavailable as exc:
+            return _detector_unavailable_refused(
+                state, ctx.session_id, adapter, exc, request=request, path=path, started=started
+            )
         except state.vault_faults as exc:
             return _vault_fault_refused(
                 state, ctx.session_id, adapter, exc, request=request, path=path, started=started
@@ -6154,9 +6179,20 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # (prefetch_texts). Other requests redact meanwhile: the count
             # window restarts after the await.
             prefetch_texts: Callable[[list[str]], Awaitable[None]] | None = None
-            upload_prefetch = await _prefetch_upload(
-                upload_redactor, adapter, path, upload_body, boundary, limit=max_body_strings
-            )
+            try:
+                upload_prefetch = await _prefetch_upload(
+                    upload_redactor, adapter, path, upload_body, boundary, limit=max_body_strings
+                )
+            except DetectorUnavailable as exc:
+                return _detector_unavailable_refused(
+                    state,
+                    ctx.session_id,
+                    adapter,
+                    exc,
+                    request=request,
+                    path=path,
+                    started=started,
+                )
             if upload_prefetch is not None:
                 upload_plan, upload_table = upload_prefetch
                 upload_redactor = upload_redactor.with_precomputed(upload_table, upload_plan)
@@ -6334,6 +6370,16 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 )
             except SealedSessionError:
                 return sealed_response(adapter)
+            except DetectorUnavailable as exc:
+                return _detector_unavailable_refused(
+                    state,
+                    ctx.session_id,
+                    adapter,
+                    exc,
+                    request=request,
+                    path=path,
+                    started=started,
+                )
             except state.vault_faults as exc:
                 return _vault_fault_refused(
                     state,
@@ -6534,6 +6580,41 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         and not provider_name.startswith("custom:")
         and (adapter is None or not body_bytes),
     )
+
+
+def _detector_unavailable_refused(
+    state: ProxyState,
+    session: str,
+    adapter: ProviderAdapter,
+    exc: DetectorUnavailable,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A detector the configuration requires could not read one of this
+    request's strings (the llm NER backend's model server timed out or
+    failed, with ``on_error = "block"``): a recorded, provider-shaped 503
+    before any upstream contact — the request is not forwarded with less
+    detection than configured. Logged by backend and failure kind only."""
+    logger.warning("%s %s -> 503 %s; nothing forwarded", request.method, path, exc)
+    state.record_request(
+        session=session,
+        provider=adapter.name,
+        method=request.method,
+        path=path,
+        status=503,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+        refusal="detector_unavailable",
+    )
+    message = (
+        f"llm-redact: the {exc.backend} detector could not read this request ({exc.reason});"
+        " the request was not forwarded"
+    )
+    return JSONResponse(adapter.error_body(message, status=503), status_code=503)
 
 
 def vault_fault_types(manager: object) -> tuple[type[BaseException], ...]:

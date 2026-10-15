@@ -1005,6 +1005,78 @@ configuration check, `transformers`) is missing, although the `hf`, `gliner`
 and `gliner2` extras install them. Re-install the backend's extra: `uv sync
 --extra hf`, `uv sync --extra gliner` or `uv sync --extra gliner2`.
 
+## "[detection.ner.llm] url is off loopback, and the model server receives the scanned text UNREDACTED; a remote server needs allow_remote = true and https"
+
+From `serve` / `serve --check`, a reload and `llm-redact doctor` with
+`[detection.ner.llm]` present: the `llm` backend's server reads every string
+it scans unredacted, so `url` must name a loopback host (`127.0.0.1`, `::1`,
+`localhost`). A server elsewhere is accepted only with `allow_remote = true`
+AND an `https://` URL — plain http off loopback is refused even with
+`allow_remote`, as is a URL carrying credentials, a query string or a
+fragment, and one ending in `/api` (Ollama) or `/v1` (OpenAI-compatible):
+`url` is the server's base URL, the backend adds the API's paths. Any
+other host name counts as off loopback (it is never resolved to prove it is
+not): write the address.
+
+## "[detection.ner.llm] model is required with the \"llm\" backend" / "[detection.ner.llm] digest is required with api = \"ollama\": …" / "[detection.ner.llm] digest must be the 64-character hex digest /api/tags reports for the model …"
+
+The `llm` backend is enabled without the model its server runs, or, on
+Ollama, without the model's digest. Pull the model on the server (`ollama
+pull MODEL:TAG`), then read its digest from the server's model list —
+`curl -s http://127.0.0.1:11434/api/tags` shows each model's `digest`, 64 hex
+characters — and set both in `[detection.ner.llm]` (`sha256:` in front is
+accepted). `ollama list` shows only the first 12 characters, which are
+refused. An OpenAI-compatible server (`api = "openai"`) reports no digest, so
+`digest` is refused there ("… reports no model digest …"): the model name is
+checked against its `/v1/models`.
+
+## "[detection.ner.llm] model 'MODEL' at URL: the model server's model list could not be read (…); is the server running?"
+
+From `serve` / `serve --check`, a reload, the editor's dry run, `llm-redact
+preview` and `llm-redact doctor` (`llm`): before the `llm` backend is built,
+the server must answer its model list (Ollama's `/api/tags`, an
+OpenAI-compatible server's `/v1/models`) within 10 seconds (or `timeout_ms`
+when that is shorter). The parenthesis names what failed: a connection
+fault by its exception type (`ConnectError`: nothing listens at `url`),
+`timeout`, `HTTP NNN` (a redirect included: none is followed), or
+`unreadable model list`. Start the server, check `url` and `api` (by
+default Ollama listens on port 11434, vLLM on 8000, llama.cpp's server on
+8080, LM Studio on 1234), and check that no proxy is needed to reach it: the
+backend ignores `HTTP_PROXY`/`HTTPS_PROXY` and connects to `url` directly. A
+startup stops; a reload keeps the running configuration.
+
+## "[detection.ner.llm] model 'MODEL' at URL: the server does not serve this model (llm-redact never pulls one)" / "… the server's model has a different digest than [detection.ner.llm] digest (re-tagged or updated since the pin was written) …"
+
+The server answered, but its model list lacks `model` (spelled as the
+server names it; on Ollama a name without a tag means `:latest`), or — on
+Ollama — the model under that name now has another digest: it was pulled
+again, updated or re-tagged since the digest was pinned. llm-redact never
+pulls a model and never follows a moved tag. Check what the model is now
+on the server, then pull the model you meant or pin the digest `/api/tags`
+now reports for it.
+
+## "llm-redact: the llm detector could not read this request (…); the request was not forwarded" (HTTP 503)
+
+The `llm` backend's server failed on one of the request's strings with
+`on_error = "block"` (the default), so the request was refused before
+anything reached the provider (counted under
+`llm_redact_local_refusals_total{kind="detector_unavailable"}`; a realtime
+connection is closed 1011 with "the llm detector could not read this
+frame"). The parenthesis names the failure: `timeout` (the string, every
+window of it, took longer than `timeout_ms`; the first string after Ollama
+unloaded an idle model also waits for it to load), `HTTP NNN`, a connection
+fault by its exception type, `unreadable answer` (not the JSON the request
+asked for — a model or server version without structured output),
+`encoded answer` (the server compressed it although asked not to), `answer
+too large` or `too many entities`. The proxy logs one WARNING per outage
+(`llm NER backend: model 'MODEL' at URL failed (…)`) and an INFO line when
+the server answers again; `errors` in `/status` `detection.ner` and
+`llm_redact_ner_errors_total` count each string. Fix the server, raise
+`timeout_ms`, or set `on_error = "skip"` to forward such requests with the
+other detectors' findings — a coverage opt-out, shown by `llm-redact status`
+and `doctor`. `llm-redact preview` prints `UNAVAILABLE: …` and exits 1 for
+the same failure.
+
 ## Tool sees `«EMAIL_001»`-style tokens in responses
 
 A placeholder reached the tool unrestored. Almost always one of: the

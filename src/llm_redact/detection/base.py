@@ -2,6 +2,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
+# Detection.tier of a detection that may only ADD to what the other
+# detectors find (the llm NER backend's: a model the scanned text can
+# instruct). Overlap resolution never lets one displace another detection
+# (redactor._resolve_overlaps): the others are resolved without them, and
+# each additive detection keeps only the part of its span no winner holds.
+ADDITIVE_TIER = 2
+
 
 @dataclass(frozen=True)
 class Detection:
@@ -14,8 +21,24 @@ class Detection:
     priority: int = 100
     # 0 = user deny strings: wins ANY overlap regardless of span length or
     # start position, always redacts, bypasses the allowlist. 1 = everything
-    # else (rules, NER) — the pre-tier behavior, byte for byte.
+    # else (rules, NER) — the pre-tier behavior, byte for byte. 2
+    # (ADDITIVE_TIER) = additive only: never displaces a tier-0 or tier-1
+    # detection, cut around the ones it overlaps instead.
     tier: int = 1
+
+
+class DetectorUnavailable(Exception):
+    """A detector could not read a string, and its configuration says no
+    request may go out without it (the llm NER backend's ``on_error =
+    "block"``: its model server timed out, failed or answered something
+    unreadable). The request is refused — 503 over HTTP, a 1011 close on a
+    realtime connection — before any upstream contact. Carries the backend
+    name and a fixed failure kind only, never the text it was reading."""
+
+    def __init__(self, backend: str, reason: str) -> None:
+        super().__init__(f"the {backend} NER backend could not read a string ({reason})")
+        self.backend = backend
+        self.reason = reason
 
 
 class Detector(Protocol):

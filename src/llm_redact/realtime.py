@@ -91,7 +91,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 from llm_redact.audit import AuditWriteError
 from llm_redact.authorization import content_facts
 from llm_redact.connections import ACCESS_CLOSE_CODE
-from llm_redact.detection.base import Detection
+from llm_redact.detection.base import Detection, DetectorUnavailable
 from llm_redact.detection.engine import DetectorPlan
 from llm_redact.jsonwalk import (
     MAX_JSON_DEPTH,
@@ -2139,6 +2139,19 @@ async def _relay(
                     OVERRIDE_FAULT_REASON if raced.fault else OVERRIDE_RACED_REASON
                 )
                 return
+            except DetectorUnavailable as unavailable:
+                # A detector the configuration requires could not read this
+                # frame (the llm NER backend's server failed, on_error =
+                # "block"): never sent, and the session cannot continue
+                # without it — closed 1011 (internal error), recorded as the
+                # HTTP path's 503; backend and failure kind only.
+                logger.warning("WS %s -> closed 1011 (%s); frame not sent", path, unavailable)
+                status, refusal = 503, "detector_unavailable"
+                await close_on_policy(
+                    f"llm-redact: the {unavailable.backend} detector could not read this frame",
+                    code=1011,
+                )
+                return
             except state.vault_faults as fault:
                 # The vault could not record this frame's placeholders (a
                 # write or its COMMIT failed; the frame's batch rolled
@@ -2344,12 +2357,12 @@ async def _prefetch_frame(
     *,
     require_json: bool,
     limit: int,
-) -> "tuple[DetectorPlan, dict[str, dict[int, list[Detection]]]] | None":
+) -> "tuple[DetectorPlan, dict[str, dict[int, list[Detection]]]]":
     """The connection redactor's plan and its heavy detectors' results for
     every string this client frame's redaction will scan (the adapter's own
-    ``redact_message`` run with a collector, which parses the frame itself)
-    — None when the collecting pass failed (the frame is then detected
-    inline, and refused by its real pass if it must be)."""
+    ``redact_message`` run with a collector, which parses the frame itself;
+    up to where that collecting pass failed, if it did: the frame's real
+    pass refuses it then, after scanning those strings first)."""
     from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
 
     plan = ctx.redactor.plan
@@ -2362,8 +2375,6 @@ async def _prefetch_frame(
         ),
         limit=limit,
     )
-    if strings is None:
-        return None
     return plan, await prefetch(plan, strings)
 
 

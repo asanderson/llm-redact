@@ -92,6 +92,19 @@ groups:
           summary: "llm-redact is refusing requests because its own storage fails"
           description: "the proxy answered {{ $value | printf \"%.2f\" }}/s requests itself with a 503 over 5m (kind audit_unavailable or vault_fault, llm_redact_local_refusals_total) — check the audit and vault databases (disk, permissions, the RDBMS)."
 
+      # The llm NER backend's model server fails (a timeout, an error, an
+      # unreadable answer): with on_error = "block" (the default) each such
+      # request is refused 503 (local refusal kind detector_unavailable),
+      # with "skip" it is forwarded without the backend's findings.
+      - alert: LlmRedactNerServerFailing
+        expr: sum by (backend) (rate(llm_redact_ner_errors_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "llm-redact's NER model server is failing"
+          description: "the {{ $labels.backend }} NER backend's model server failed on {{ $value | printf \"%.3f\" }} strings/s over 5m (llm_redact_ner_errors_total): with on_error = \"block\" those requests were refused 503, with \"skip\" they were forwarded without its findings. Check the server ([detection.ner.llm] url), its load and timeout_ms; llm-redact doctor checks it."
+
       # NER coverage gap: strings longer than [detection.ner] max_chars are
       # never read by the NER models (the regex rules still scan them), so
       # names in pasted documents or large tool results go undetected. A

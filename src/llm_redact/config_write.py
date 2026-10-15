@@ -337,6 +337,7 @@ def _emit_ner_llm(llm: LlmNerConfig) -> list[str]:
         ("on_error", llm.on_error, default.on_error),
         ("allow_remote", llm.allow_remote, default.allow_remote),
         ("breaker_seconds", llm.breaker_seconds, default.breaker_seconds),
+        ("breaker_failures", llm.breaker_failures, default.breaker_failures),
         # A variable's NAME only: the key itself is never in the config.
         ("api_key_env", llm.api_key_env, default.api_key_env),
     ]

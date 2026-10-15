@@ -219,6 +219,24 @@ RESTART_ONLY_KEYS = (
     "overrides",
 )
 
+# Keys INSIDE a hot section that a hot reload pins all the same, as
+# attribute paths from Config (each the TOML path of the same key):
+# [detection] reloads hot, but not where the llm backend sends every string
+# it scans UNREDACTED, nor which environment variable's value it sends
+# there as a bearer token — whoever can change [detection] (a file edit
+# and SIGHUP, the pro editor) must not be able to point either somewhere
+# the proxy was not started with. apply_config keeps their running values
+# and reports each by its dotted name (restart_only_name), and refuses a
+# reload that would START the llm backend (pin_restart_only_paths); the
+# pro editor reads this list for its read-only fields. README.md,
+# docs/deployment.md and docs/troubleshooting.md enumerate them
+# (test_restart_only_docs.py).
+RESTART_ONLY_PATHS: tuple[tuple[str, ...], ...] = (
+    ("detection", "ner", "llm", "url"),
+    ("detection", "ner", "llm", "allow_remote"),
+    ("detection", "ner", "llm", "api_key_env"),
+)
+
 # Every top-level key the core itself parses. Anything else must be claimed
 # by a registered plugin section (plugin_api.ConfigSection) or it is a
 # ConfigError.
@@ -1668,6 +1686,7 @@ _LLM_KEYS = {
     "on_error",
     "allow_remote",
     "breaker_seconds",
+    "breaker_failures",
     "api_key_env",
 }
 # A model name as servers spell them (Ollama's "name:tag", a Hub id, a file
@@ -1675,8 +1694,10 @@ _LLM_KEYS = {
 _LLM_MODEL_RE = re.compile(r"[^\s\x00-\x1f\x7f]{1,256}")
 _LLM_DIGEST_RE = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
 LLM_TIMEOUT_MS = (100, 600_000)
-# [detection.ner.llm] breaker_seconds: 0 (off) up to an hour.
+# [detection.ner.llm] breaker_seconds: 0 (off) up to an hour;
+# breaker_failures: the failures in a row that open it, 1 (the first) to 100.
 LLM_BREAKER_SECONDS = (0, 3600)
+LLM_BREAKER_FAILURES = (1, 100)
 
 
 def llm_url_problem(url: str, *, allow_remote: bool) -> str | None:
@@ -1701,6 +1722,15 @@ def llm_url_problem(url: str, *, allow_remote: bool) -> str | None:
     return None
 
 
+def _llm_url_api_problem(url: str, api: str) -> str | None:
+    """Why ``url`` (no trailing slash) is not the base URL of an ``api``
+    server, else None: the backend adds the API's own paths."""
+    tail = {"openai": "/v1", "ollama": "/api"}[api]
+    if urllib.parse.urlsplit(url).path.endswith(tail):
+        return f"is the server's base URL, without {tail} (the backend adds the API's paths)"
+    return None
+
+
 def _parse_ner_llm(raw: object, *, required: bool) -> LlmNerConfig:
     """[detection.ner.llm] -> LlmNerConfig. ``required``: the llm backend
     is enabled and active, so its model (and, on Ollama, its digest) must be
@@ -1721,12 +1751,9 @@ def _parse_ner_llm(raw: object, *, required: bool) -> LlmNerConfig:
     if problem is not None:
         raise ConfigError(f"{where} url {problem}")
     url = url.rstrip("/")
-    tail = {"openai": "/v1", "ollama": "/api"}[api]
-    if urllib.parse.urlsplit(url).path.endswith(tail):
-        raise ConfigError(
-            f"{where} url is the server's base URL, without {tail} (the backend adds the"
-            " API's paths)"
-        )
+    problem = _llm_url_api_problem(url, api)
+    if problem is not None:
+        raise ConfigError(f"{where} url {problem}")
     model = raw.get("model")
     if model is not None and not (isinstance(model, str) and _LLM_MODEL_RE.fullmatch(model)):
         raise ConfigError(f"{where} model must be the model's name on the server")
@@ -1770,6 +1797,14 @@ def _parse_ner_llm(raw: object, *, required: bool) -> LlmNerConfig:
         or not (low <= breaker_seconds <= high)
     ):
         raise ConfigError(f"{where} breaker_seconds must be an integer from {low} (off) to {high}")
+    breaker_failures = raw.get("breaker_failures", default.breaker_failures)
+    low, high = LLM_BREAKER_FAILURES
+    if (
+        isinstance(breaker_failures, bool)
+        or not isinstance(breaker_failures, int)
+        or not (low <= breaker_failures <= high)
+    ):
+        raise ConfigError(f"{where} breaker_failures must be an integer from {low} to {high}")
     return LlmNerConfig(
         url=url,
         api=api,
@@ -1779,6 +1814,7 @@ def _parse_ner_llm(raw: object, *, required: bool) -> LlmNerConfig:
         on_error=on_error,
         allow_remote=allow_remote,
         breaker_seconds=breaker_seconds,
+        breaker_failures=breaker_failures,
         api_key_env=_llm_api_key_env(raw, where),
     )
 
@@ -1804,6 +1840,68 @@ def _llm_api_key_env(raw: Mapping[str, Any], where: str) -> str | None:
             " reach a model server; name a variable of the model server's own"
         )
     return name
+
+
+def restart_only_name(path: tuple[str, ...]) -> str:
+    """A RESTART_ONLY_PATHS entry as apply_config reports it:
+    ``detection.ner.llm.url``."""
+    return ".".join(path)
+
+
+def _path_value(config: object, path: tuple[str, ...]) -> object:
+    for name in path:
+        config = getattr(config, name)
+    return config
+
+
+def _with_path_value(config: Any, path: tuple[str, ...], value: object) -> Any:
+    """``config`` (a frozen dataclass) with the value at ``path`` replaced."""
+    head, rest = path[0], path[1:]
+    inner = _with_path_value(getattr(config, head), rest, value) if rest else value
+    return dataclasses.replace(config, **{head: inner})
+
+
+def _llm_running(ner: NerConfig) -> bool:
+    return ner.enabled and "llm" in ner.active_backends()
+
+
+def pin_restart_only_paths(fresh: Config, running: Config) -> tuple[Config, list[str]]:
+    """``fresh`` with every RESTART_ONLY_PATHS value set to ``running``'s,
+    and the dotted names of those that differed (never a value) — what a
+    hot reload applies (apply_config, and validate_config agreeing).
+
+    ConfigError, naming the restart-only keys, when that is no
+    configuration to apply hot: one that would START the llm backend —
+    enabled with "llm" among its backends while the running configuration
+    does not run it (added to the backends, NER switched on, its section
+    added) — since a running proxy never begins to send scanned text, or a
+    credential, to a model server it was not started with, even the one its
+    file named; or one the kept values make invalid (the running url with
+    a changed ``api``)."""
+    pinned = fresh
+    changed: list[str] = []
+    for path in RESTART_ONLY_PATHS:
+        kept = _path_value(running, path)
+        if _path_value(fresh, path) != kept:
+            changed.append(restart_only_name(path))
+            pinned = _with_path_value(pinned, path, kept)
+    names = ", ".join(restart_only_name(path) for path in RESTART_ONLY_PATHS)
+    if _llm_running(pinned.detection.ner) and not _llm_running(running.detection.ner):
+        raise ConfigError(
+            "[detection.ner] a reload cannot start the llm backend (the running configuration"
+            f" does not run it): where it sends the scanned text and its key ({names}) are"
+            " restart-only; restart the proxy to start it"
+        )
+    llm = pinned.detection.ner.llm
+    problem = llm_url_problem(llm.url, allow_remote=llm.allow_remote) or _llm_url_api_problem(
+        llm.url, llm.api
+    )
+    if problem is not None:
+        raise ConfigError(
+            f"[detection.ner.llm] url {problem} — the running url is kept on a reload ({names}"
+            " are restart-only); restart the proxy to apply the change"
+        )
+    return pinned, changed
 
 
 def _parse_deny(detection_raw: dict[str, Any]) -> tuple[DenyEntry, ...]:

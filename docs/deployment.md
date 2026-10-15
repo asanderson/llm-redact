@@ -303,7 +303,13 @@ injection, `max_body_bytes`, `max_body_strings`, upstream URLs, and the routing 
 host, port, allowed_hosts, allowed_origins, log, TLS, OTel, users, email, extraction, and overrides changes warn
 "require restart"
 and keep the old value; so do sections a plugin adds, such as llm-redact-pro's
-`[auth]`. A broken config file is logged and ignored — the running config
+`[auth]`, and — inside the hot `[detection]` — the `llm` backend's
+`[detection.ner.llm]` `url`, `allow_remote` and `api_key_env`, named by their
+dotted path (`detection.ner.llm.url`): whoever can change `[detection]` can
+neither move where that backend sends scanned text nor change the variable
+its key is read from, and a reload that would start that backend is refused
+(the running configuration kept; [detection.md](detection.md#a-model-server-you-run-the-llm-backend)).
+A broken config file is logged and ignored — the running config
 stays live. There is deliberately no HTTP reload endpoint (it would be a
 CSRF-reachable mutating endpoint on loopback).
 

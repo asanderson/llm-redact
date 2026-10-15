@@ -324,6 +324,7 @@ def test_doctor_checks_the_variable_offline_and_never_shows_the_key(
     assert server.requests[0].headers["authorization"] == f"Bearer {KEY}"
 
 
-def test_the_example_config_documents_both_keys() -> None:
+def test_the_example_config_documents_the_keys() -> None:
     example = (Path(__file__).resolve().parent.parent / "config.example.toml").read_text()
     assert "# api_key_env = " in example and "# breaker_seconds = 30" in example
+    assert "# breaker_failures = 3" in example

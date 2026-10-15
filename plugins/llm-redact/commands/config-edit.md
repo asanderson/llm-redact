@@ -58,7 +58,9 @@ llm-redact-pro dashboard's config editor:
    same file flow (the llm-redact-pro web editor refuses them); a chain
    may never contain a passthrough upstream, so never add one.
    host/port/vault/audit/log/tls/otel/users/email are RESTART-ONLY —
-   warn the user and stop if the change touches them.
+   warn the user and stop if the change touches them; so are the llm
+   backend's [detection.ner.llm] url, allow_remote and api_key_env, and
+   a reload never starts the llm backend (adding it takes a restart).
 3. Validate BEFORE applying: `llm-redact serve --check` must exit 0.
    If it fails, fix the file or revert it — never leave the config
    failing --check, because a SIGHUP would silently keep the old config

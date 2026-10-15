@@ -410,6 +410,7 @@ digest = "<64 hex characters>"   # Ollama only: its digest as /api/tags reports 
 timeout_ms = 30000            # one string's time, every window of it
 on_error = "block"            # or "skip"
 breaker_seconds = 30          # the circuit breaker's cooldown; 0 = off
+breaker_failures = 3          # server-down failures in a row that open it (1 to 100)
 # api_key_env = "VLLM_API_KEY"   # a server that requires a key: the variable holding it
 ```
 
@@ -427,13 +428,34 @@ namespace (beside llm-redact in its Kubernetes pod, or with `docker run
 --network container:NAME`), or put https in front of it and set
 `allow_remote = true` — a plain-http `host.docker.internal` URL is refused.
 
+**`url`, `allow_remote` and `api_key_env` take a restart.** `[detection]`
+reloads hot, but where the backend sends every scanned string, and which
+environment variable's value it sends there as its key, do not: whoever can
+change `[detection]` — a file edit and SIGHUP, the llm-redact-pro config
+editor — can neither point the backend at another server nor make it send
+another variable's value. A reload keeps the running values of these three
+keys, applies the rest of `[detection]` (the model, `timeout_ms`, the
+entities, ...), and names each kept key in its "require restart" warning
+(`detection.ner.llm.url`, `detection.ner.llm.allow_remote`,
+`detection.ner.llm.api_key_env`; the editor's answer lists the same names).
+A reload never STARTS the backend either: one that would run it while the
+running configuration does not — `"llm"` added to `backends`, NER switched
+on with it, its table added — is refused (`a reload cannot start the llm
+backend`) and the running configuration kept, even when the file named the
+same server at startup; and so is a reload the kept values make invalid (a
+changed `api` whose paths the running `url` already ends with). Restart the
+proxy to apply either. The startup and `serve --check` read the file as
+written. A running proxy therefore never begins to send scanned text, or a
+credential, to a destination it was not started with.
+
 **A server that requires a key** (vLLM started with `--api-key`, a hosted
 https endpoint, Ollama behind an authenticating reverse proxy or Ollama's
 own hosted API — all read the same header): set `api_key_env` to the NAME of
 an environment variable holding the key, never the key itself. The
-variable is read at every build (startup, `serve --check`, a reload that
-changes `[detection]`; a reload that does not keeps the key it was built
-with) from the proxy's own environment, which nothing outside the process
+variable's name takes a restart (above); its value is read at every build
+(startup, `serve --check`, a reload that changes `[detection]`; a reload
+that does not keeps the key it was built with) from the proxy's own
+environment, which nothing outside the process
 can change while it runs — a new key, or a variable exported after the
 start, takes a restart. Its edge blanks are trimmed; unset, empty or
 holding anything but visible ASCII, the build stops with an error naming
@@ -536,41 +558,50 @@ history) is refused until the string leaves it.
 
 **Circuit breaker.** A server that hangs, rather than refusing the
 connection, would cost every new string up to `timeout_ms` — and strings are
-asked one at a time for the whole proxy. So a failure that says the server
+asked one at a time for the whole proxy. So failures that say the server
 is down — a timeout, a transport fault (a refused or dropped connection), an
-HTTP 5xx answer — opens a circuit breaker for `breaker_seconds` (default 30,
-0 = off, at most 3600): until then every string that needs a call fails at
-once without contacting the server, handled exactly as a failure
+HTTP 5xx answer — `breaker_failures` of them in a row (default 3, from 1 to
+100; 1 opens it at the first), with no answer from the server between them,
+open a circuit breaker for `breaker_seconds` (default 30, 0 = off, at most
+3600). Below that count each failing string fails on its own (as below) and
+the next one asks the server again; any answer from the server — even an
+unusable one — starts the count again. Once open, until the cooldown has
+passed every string that needs a call fails at once without contacting the
+server, handled exactly as a failure
 (`on_error = "block"`: its request is refused 503 with the reason `circuit
 breaker open`; `"skip"`: it goes on with the other detectors' findings),
 and is counted in `errors` and `breaker_short_circuits`. After the cooldown
 one string's call goes out as a probe: an answer closes the breaker, a
-failure opens it again for another `breaker_seconds` (`breaker_opens` counts
-each opening). A failure from a server that answers — an error status below
-500, a redirect, an answer that is not the requested JSON — fails only its
-own string and never opens the breaker (as the probe's answer, even an
+failure opens it again at once for another `breaker_seconds` — no new run
+of failures needed (`breaker_opens` counts each opening). A failure from a
+server that answers — an error status below 500, a redirect, an answer that
+is not the requested JSON — fails only its own string, never counts toward
+an opening and starts the count again (as the probe's answer, even an
 unusable one, it closes the breaker: the server is up); so does a timeout
 once the server has answered an earlier window of the same string, which is
 that long string's own `timeout_ms` running out. A string the backend
 already read (the cache) or one with nothing to read needs no call and is
-unaffected. While it is open, `/status` shows the breaker
-(`detection.ner.backends.llm.breaker`: `state`, the failure `reason`,
-`retry_in_seconds`) and `llm-redact status` prints a posture line; the
-breaker belongs to the built backend, so a reload that rebuilds it starts a
-closed one. With `"skip"` an open breaker forwards requests without the
+unaffected. `/status` shows the breaker
+(`detection.ner.backends.llm.breaker`: `state`, `failures` — the failures in
+a row so far — and `threshold`, the failure `reason` and
+`retry_in_seconds` while it is open) and `llm-redact status` prints a
+posture line while it is open; the breaker belongs to the built backend, so
+a reload that rebuilds it starts a closed one with no failures counted. With `"skip"` an open breaker forwards requests without the
 backend's findings for the whole cooldown, even if the server recovers
 sooner — the coverage gap the posture line and `errors` count. Keep
 `timeout_ms` well below what your clients wait for an answer: the string
 that opens the breaker still waits it out.
 
-The failure that opens the breaker can come from one text: a text that
-makes the model ramble past `timeout_ms`, or that the server answers with a
-5xx, opens it for every string, not just that one — and the scanned text is
-not only yours (a web page or file an agent read lands in a request). With
-`"block"` every request that needs the server is then refused for the
-cooldown; with `"skip"` every request goes on without the backend's
-findings for it, again after each cooldown the same text comes back. Keep
-`"block"` where that matters, or set `breaker_seconds = 0` (each such
+The failures that open the breaker can come from the text: `breaker_failures`
+texts in a row that make the model ramble past `timeout_ms`, or that the
+server answers with a 5xx, open it for every string, not just theirs — and
+the scanned text is not only yours (a web page or file an agent read lands
+in a request; one such text resent with every request of a conversation, or
+a request carrying several, fails that many in a row). With `"block"` every
+request that needs the server is then refused for the cooldown; with
+`"skip"` every request goes on without the backend's findings for it, again
+after each cooldown while such texts keep coming. Keep `"block"` where that
+matters, raise `breaker_failures`, or set `breaker_seconds = 0` (each such
 string then fails alone, at a whole `timeout_ms` each).
 
 Like every NER backend it is best effort, measured per model, never a
@@ -1453,7 +1484,7 @@ existing `detection.ner_enabled`):
 | `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
 | `ungrounded` | `llm` only: values the model server returned whose text does not occur in the text it read, is shorter than two characters or holds a placeholder's guillemet (never redacted) |
 | `errors` | `llm` only: strings its model server failed on (a timeout, an error status, a connection fault, an answer that is not the requested JSON) and strings its open circuit breaker failed at once; each refused its request with `on_error = "block"`, and went on without the backend's findings with `"skip"` |
-| `breaker_opens` | `llm` only: times its circuit breaker opened (a timeout, a transport fault or an HTTP 5xx; a failed probe opens it again) |
+| `breaker_opens` | `llm` only: times its circuit breaker opened (`breaker_failures` timeouts, transport faults or HTTP 5xx answers in a row; a failed probe opens it again at once) |
 | `breaker_short_circuits` | `llm` only: strings failed at once, without asking its model server, because its circuit breaker was open (each also in `errors`) |
 | `inline_calls` | strings the backend ran on the event loop itself, holding up every other request for that string's inference, instead of ahead of the redaction on the NER worker thread |
 | `prefetch_misses` | strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced), run inline instead and counted in `inline_calls` too |
@@ -1479,7 +1510,10 @@ backend's entry adds `server` (its model server's `scheme://host:port`), `api`,
 `on_error`, `api_key` (whether a key is configured: never the key or its
 variable) and `breaker` (its circuit breaker: `state` — `closed`, `open`,
 `half_open` once the cooldown has passed, `off` with `breaker_seconds = 0` —,
-`seconds`, the `reason` that opened it and, while open, `retry_in_seconds`).
+`seconds`, `failures` — the calls failed in a row because the server is
+down, since its last answer — and `threshold` (`breaker_failures`, the
+failures in a row that open it), the `reason` that opened it and, while
+open, `retry_in_seconds`).
 
 The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
 backend and outcome, `llm_redact_ner_windows_total`,

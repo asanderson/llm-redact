@@ -152,7 +152,17 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   dependency; off by default, and no server is contacted unless you configure one.
   - **The server reads every scanned string unredacted**, so `url` must be on loopback unless
     `allow_remote = true` and the scheme is https. Requests go to that URL only: no proxy from
-    the environment, no redirect followed, answers capped.
+    the environment, no redirect followed, answers capped. `url`, `allow_remote` and
+    `api_key_env` take a restart although `[detection]` reloads hot: a reload (SIGHUP, the
+    llm-redact-pro config editor) keeps their running values, applies the rest of
+    `[detection]` and names them in its "require restart" warning (`detection.ner.llm.url`, …);
+    a reload that would start the backend (`"llm"` added to the backends, NER switched on with
+    it) is refused with the running configuration kept. Whoever can change `[detection]` can
+    therefore never make a running proxy send scanned text, or a key, somewhere it was not
+    started with. `config.RESTART_ONLY_PATHS` lists the three for the editor, and
+    `apply_config`'s restart-required list (the plugin API's `DashboardHost` contract) now
+    holds their dotted names beside the section names: an entry is a name to show, not always
+    a `Config` attribute.
   - **Only real values, and only ever more redaction.** A value is kept only when its text
     occurs verbatim in the text the model read (then it is redacted wherever it occurs in the
     string, never inside a placeholder an earlier turn left there); anything the model invents
@@ -172,18 +182,20 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     instead — a coverage opt-out, counted (`errors`) and reported in `/status`, the
     `llm-redact status` posture block and `doctor`, like warn mode.
   - **A hung server does not stall every string.** Strings are asked one at a time for the
-    whole proxy, so a server that hangs would cost each new string a whole `timeout_ms`. A
-    timeout, a refused or dropped connection or an HTTP 5xx answer now opens a circuit breaker
-    for `breaker_seconds` (default 30, `0` turns it off): until then every string that needs the
-    server fails at once without contacting it, handled as any failure (refused 503 with
-    `on_error = "block"`, forwarded with the other detectors' findings with `"skip"`); then one
-    string's call probes the server, and an answer closes the breaker. One text that makes the
-    model time out, or that the server answers with a 5xx, opens it too — for every string, so
-    with `"skip"` such a text in any request turns the backend's findings off for the cooldown
-    (docs/detection.md). `/status` shows the breaker (`detection.ner.backends.llm.breaker`),
-    `llm-redact status` prints a posture line while it is open, `doctor` WARNs
-    `breaker_seconds = 0`, and the strings it fails at once count in `errors` (so the alert
-    keeps firing) and in `breaker_short_circuits`.
+    whole proxy, so a server that hangs would cost each new string a whole `timeout_ms`.
+    `breaker_failures` (default 3, from 1 to 100) timeouts, refused or dropped connections or
+    HTTP 5xx answers in a row — any answer from the server starts the count again — open a
+    circuit breaker for `breaker_seconds` (default 30, `0` turns it off): until then every
+    string that needs the server fails at once without contacting it, handled as any failure
+    (refused 503 with `on_error = "block"`, forwarded with the other detectors' findings with
+    `"skip"`); then one string's call probes the server, an answer closes the breaker and a
+    failure opens it again at once. Texts that make the model time out, or that the server
+    answers with a 5xx, count too: `breaker_failures` such texts in a row open it for every
+    string, so with `"skip"` they turn the backend's findings off for the cooldown
+    (docs/detection.md). `/status` shows the breaker (`detection.ner.backends.llm.breaker`,
+    with the `failures` in a row and the `threshold`), `llm-redact status` prints a posture
+    line while it is open, `doctor` WARNs `breaker_seconds = 0`, and the strings it fails at
+    once count in `errors` (so the alert keeps firing) and in `breaker_short_circuits`.
   - **Servers that require a key.** `api_key_env` names the environment variable holding the
     key (never the key itself) for vLLM's `--api-key`, a hosted https endpoint, or Ollama
     behind an authenticating reverse proxy: read at every build, sent as `Authorization:

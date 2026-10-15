@@ -857,7 +857,9 @@ class DetectionOverlay:
       redacted as one placeholder (neither leaves in part); a value the
       policy blocks still refuses the request; only a value the policy
       forwards as sent (warn mode, an approved refusal override) yields to
-      it — the deny string's span is redacted, the rest sent as before.
+      it — the deny string's span is redacted, the rest sent as before (a
+      warn-mode value still counted as a warning when part of it is sent,
+      not when the redacted spans cover it whole).
 
     The core refuses the request (403) rather than drop anything it cannot
     apply, since an intended tightening would be lost: an unknown rule
@@ -894,7 +896,12 @@ class ContentFacts:
       redaction replaced with placeholders in THIS request (never another
       request's, whatever runs concurrently), sorted by type.
     - ``warned``: likewise for the warn-mode values the request forwards as
-      sent (observed, not redacted).
+      sent (observed, not redacted) — in part included where a value it is
+      joined with or an added deny string (``DetectionOverlay``) takes part
+      of it (one the redacted values cover whole does not count), but not
+      one that loses an ordinary overlap to a configured deny string or to
+      a value redacted in its place, although the rest of it is sent
+      (docs/detection.md "Per-rule modes").
     - ``unscanned_parts``: the binary upload file parts this request
       forwards unscanned (``[detection] binary_uploads = "forward"``, or an
       approved ``binary_upload`` override).

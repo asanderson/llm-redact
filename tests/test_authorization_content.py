@@ -27,7 +27,7 @@ from llm_redact.authorization import AUTHORIZATION_FAULT, AUTHORIZATION_STAGE, G
 from llm_redact.config import AuditConfig, OverridesConfig, ProviderConfig
 from llm_redact.detection.engine import DetectionConfig
 from llm_redact.overrides import OverrideStore
-from llm_redact.plugin_api import Admission, AuthorizationRequest, ContentFacts
+from llm_redact.plugin_api import Admission, AuthorizationRequest, ContentFacts, DetectionOverlay
 from llm_redact.registry import Registry
 from local_refusals import refused_once
 from test_access_seam import FakeGate
@@ -36,6 +36,7 @@ from test_authorization_seam import (
     ANTHROPIC,
     EMAIL,
     KEY,
+    OVERLAPPED,
     Upstream,
     _app,
     _client,
@@ -149,6 +150,86 @@ async def test_warn_mode_values_are_reported_as_warned(monkeypatch: pytest.Monke
     ((_request, content),) = gate.asked
     assert content == _facts(warned=(("EMAIL", 1),))
     assert EMAIL in upstream.sent()  # warn mode forwards it, honestly reported
+
+
+class OverlaidGate(ContentGate):
+    """``detection_overlay`` too: the requester's added deny strings."""
+
+    def __init__(self, deny: tuple[str, ...]) -> None:
+        super().__init__()
+        self.deny = deny
+
+    def detection_overlay(self) -> DetectionOverlay:
+        return DetectionOverlay(deny=self.deny)
+
+
+@pytest.mark.parametrize(
+    ("deny", "sent", "warned"),
+    [
+        # The added string takes part of the warn-mode value, the rest is
+        # sent as it was: a warning, once.
+        (("acme",), "mail bob.private@«DENY_001»-corp.example", (("EMAIL", 1),)),
+        # It takes all of it: nothing to warn about.
+        ((OVERLAPPED,), "mail «DENY_001»", ()),
+    ],
+    ids=["partly", "whole"],
+)
+async def test_a_warn_mode_value_an_added_string_cuts_into_is_reported_when_partly_sent(
+    monkeypatch: pytest.MonkeyPatch, deny: tuple[str, ...], sent: str, warned: Any
+) -> None:
+    gate = OverlaidGate(deny)
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    app = _app(upstream, detection=DetectionConfig(modes=(("email", "warn"),)))
+    body = _messages(f"mail {OVERLAPPED}")
+    assert (await _post(app, "/v1/messages", body, ANTHROPIC)).is_success
+    assert sent in upstream.sent()
+    ((_request, content),) = gate.asked
+    assert content == _facts(detected=(("DENY", 1),), warned=warned)
+    state = app.state.proxy
+    assert state.warn_counts == dict(warned)
+    assert state.recent[0]["warned"] == dict(warned)
+
+
+PAPER_IBAN = "GB39 WEST 3607 5983 8675 65"
+
+
+@pytest.mark.parametrize(
+    ("deny", "sent", "detected", "warned"),
+    [
+        # The joined run redacts the card number the warn-mode paper IBAN
+        # holds, the added string the IBAN's first group: " WEST " is sent.
+        (
+            ("GB39",),
+            "pay «DENY_001» WEST «CREDIT_CARD_001» now",
+            (("CREDIT_CARD", 1), ("DENY", 1)),
+            (("IBAN", 1),),
+        ),
+        # The added string takes the rest of it, one union with the card:
+        # nothing of the IBAN is sent, nothing to warn about.
+        (("GB39 WEST 3607",), "pay «DENY_001» now", (("DENY", 1),), ()),
+    ],
+    ids=["partly", "whole"],
+)
+async def test_a_warn_mode_value_a_joined_run_drops_is_reported_after_the_added_strings(
+    monkeypatch: pytest.MonkeyPatch,
+    deny: tuple[str, ...],
+    sent: str,
+    detected: Any,
+    warned: Any,
+) -> None:
+    gate = OverlaidGate(deny)
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    app = _app(upstream, detection=DetectionConfig(modes=(("iban", "warn"),)))
+    body = _messages(f"pay {PAPER_IBAN} now")
+    assert (await _post(app, "/v1/messages", body, ANTHROPIC)).is_success
+    assert sent in upstream.sent()
+    ((_request, content),) = gate.asked
+    assert content == _facts(detected=detected, warned=warned)
+    state = app.state.proxy
+    assert state.warn_counts == dict(warned)
+    assert state.recent[0]["warned"] == dict(warned)
 
 
 async def test_detection_off_is_asked_as_unscanned(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -464,10 +464,12 @@ the value's two parts ([detection.md](detection.md#how-ner-runs)).
   UNION of both spans is redacted as one placeholder, so neither leaves in
   part; a value the policy blocks refuses the request as before; it beats
   only a value the policy forwards as sent (warn mode, an approved refusal
-  override) — its own span is redacted, the rest goes as it would have. A
-  block the overlay adds is final: no refusal override is consulted or used
-  for it and its refusal carries no code — an approval would forward as sent
-  a value the configured policy redacts. The core refuses the request rather
+  override) — its own span is redacted, the rest goes as it would have (a
+  warn-mode value still counted as a warning when part of it goes, not
+  when the redacted spans cover it whole). A block the overlay adds is
+  final: no refusal override is consulted or used for it and its refusal
+  carries no code — an approval would forward as sent a value the
+  configured policy redacts. The core refuses the request rather
   than drop an overlay it cannot apply, and an overlay never turns detection
   back on for a provider configured `detection = false`. A gate may also
   decide on what the redaction FOUND (`authorize_content`): after a
@@ -563,9 +565,12 @@ an extraction service. What the core guarantees:
 ### Deliberate protection opt-outs
 
 Warn mode has always been observation-only (the matched value IS
-forwarded). Four configuration knobs and refusal overrides extend that
-family — each is a conscious decision, and each is surfaced rather than
-silent:
+forwarded, and counted in `llm_redact_warnings_total` — except a warn-mode
+value that loses an ordinary overlap to a configured deny string or to a
+value redacted in its place: the rest of it is sent uncounted,
+[detection.md](detection.md#per-rule-modes-redact-warn-block)). Four
+configuration knobs and refusal overrides extend that family — each is a
+conscious decision, and each is surfaced rather than silent:
 
 - `[providers.NAME] detection = false` forwards that provider's requests
   unredacted (rehydration stays active) — with the client's own key, a

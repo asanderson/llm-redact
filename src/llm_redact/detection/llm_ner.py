@@ -214,7 +214,8 @@ class _Client:
                 if response.status_code != 200:
                     # A redirect included: none is followed.
                     raise _Failed(f"HTTP {response.status_code}")
-                if response.headers.get("content-encoding", "identity").lower() != "identity":
+                coding = response.headers.get("content-encoding", "").strip().lower()
+                if coding not in ("", "identity"):
                     raise _Failed("encoded answer")
                 data = bytearray()
                 # Uncoded (checked above): the bytes as they arrive.

@@ -125,10 +125,10 @@ equal length, the one starting last). The stretch may run on past what the
 rule read first when that stopped at its 19th digit
 (`2024 4111 1111 1111 1111`). It must end where the run of groups ends, or
 before one more group when the card and that group are at most 19 digits
-together (`4111 1111 1111 1111 12/27`): no other rule's value can then
-start inside the card and run on past it. What the rule found before is
-found exactly as before, and no card it finds inside a run overlaps
-another of its detections.
+together (`4111 1111 1111 1111 12/27`): no other built-in rule's value
+can then start inside the card and run on past it. What the rule found
+before is found exactly as before, and no card it finds inside a run
+overlaps another of its detections.
 
 On 5,000 synthetic negatives (runs of 13 to 40 random digits in groups of
 one to four, separated by one space or one hyphen) the rule finds a card
@@ -145,15 +145,21 @@ Known residuals:
   (`Order 12 4111 1111 1111 1111 5678`): an Aadhaar number's three groups
   could start inside the card and run on past it.
 - Nor when the run of groups is followed by one of `-`, `.`, `:`, `@`,
-  `%` or `+` and more text, as a paper IBAN is not
-  (`12 4111 1111 1111 1111@example.com`: an email address takes in the
-  last group), nor when the card is written in another grouping or with
-  two separators.
+  `%` or `+`, as a paper IBAN is not, except a run of dots or one `:`
+  followed by whitespace, a closing quote or bracket, `*`, `<`, a
+  backslash or the end of the text (`12 4111 1111 1111 1111@example.com`:
+  an email address takes in the last group), nor when the card is written
+  in another grouping or with two separators.
 - The Luhn check passes one random number in ten, so a stretch of a long
   run of digit groups that is no card can be redacted as one.
 - A card read inside a run wins an overlap like any longer match: under
   `[detection.modes]` the digits it takes in follow the `credit_card`
   rule's mode.
+- The end the card must have is checked against the built-in rules only.
+  A custom rule's value or an NER span that starts inside the card and
+  runs on past it (`1111 Main Street` read as an address in
+  `Order 12 4111 1111 1111 1111 Main Street`) loses to the card, and its
+  part after the card goes upstream as sent.
 
 ## Deny strings: values that must always be redacted
 

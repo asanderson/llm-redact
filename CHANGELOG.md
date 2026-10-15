@@ -19,9 +19,11 @@ and tags `vX.Y.Z`.
   fails, the rule now looks inside what it read for a card in a card's own grouping (solid,
   groups of four, or 4-6-5 / 4-6-4) that passes the check, and redacts that. Not read yet: a card
   followed by two or more digit groups, or by one that brings the two past 19 digits, and one
-  whose run of digit groups is followed by `-`, `.`, `:`, `@`, `%` or `+` and more text
-  (docs/detection.md lists the residuals). With the default modes nothing 1.12.1 redacted is
-  forwarded now. On random runs of digit groups the rule's false positives barely move (13.58% to
+  whose run of digit groups is followed by `-`, `.`, `:`, `@`, `%` or `+` glued to more text
+  (docs/detection.md lists the residuals). With the built-in rules and the default modes nothing
+  1.12.1 redacted is forwarded now; a test pins that against 1.12.1's rules. A custom rule's
+  value or an NER span that starts inside such a card and runs on past it loses its part after
+  the card. On random runs of digit groups the rule's false positives barely move (13.58% to
   13.78% of 5,000 runs).
 
 ### Changed

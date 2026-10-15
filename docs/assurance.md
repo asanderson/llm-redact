@@ -258,7 +258,7 @@ value in your traffic ([threat-model.md](threat-model.md#contextual-values-rules
 --latency --check` gates only four deliberately generous p50 smoke ceilings
 (a 100 KB JSON body, 100 KB of dense prose, a body of 20,000 short strings,
 and the proxy's own overhead on a 100 KB body: 150, 100, 800 and 300 ms,
-about ten times the healthy numbers or more), enough to catch accidental
+several times what a healthy run measures), enough to catch accidental
 quadratic behavior and nothing finer; every other figure it prints is report
 only. The NER bench's `--latency` run is report only too until a
 configuration records `[<config>.latency]` ceilings, and none does: a

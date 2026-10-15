@@ -258,9 +258,9 @@
     {
       "type": "timeseries",
       "title": "NER strings by backend and outcome",
-      "description": "llm_redact_ner_strings_total: strings handed to each NER backend ([detection.ner]), one outcome each: scanned_whole (read in one model call), scanned_windowed (read in overlapping windows), skipped_max_chars (longer than max_chars: the model never read it, the regex rules still did). Restarts from zero when a reload rebuilds the detectors.",
+      "description": "llm_redact_ner_strings_total: strings handed to each NER backend ([detection.ner]), one outcome each: scanned_whole (read in one model call), scanned_windowed (read in overlapping windows), skipped_max_chars (longer than max_chars: the model never read it, the regex rules still did). Restarts from zero when a reload rebuilds the detectors. Samples only while [detection.ner] is enabled: without it this row shows No data.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 60 },
       "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
       "targets": [
         {
@@ -273,9 +273,9 @@
     {
       "type": "timeseries",
       "title": "NER strings SKIPPED (longer than max_chars) by backend",
-      "description": "Strings no NER model read because they are longer than [detection.ner] max_chars: names and other contextual values in them were not looked for (the regex rules still scanned them). The LlmRedactNerSkippingLongStrings alert reads it; raise max_chars if long strings hold names (docs/troubleshooting.md).",
+      "description": "Strings no NER model read because they are longer than [detection.ner] max_chars (llm_redact_ner_strings_total with outcome skipped_max_chars): names and other contextual values in them were not looked for (the regex rules still scanned them). The LlmRedactNerSkippingLongStrings alert reads it; raise max_chars if long strings hold names (each model window costs time; docs/troubleshooting.md), or accept the gap.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 60 },
       "fieldConfig": { "defaults": { "unit": "cps", "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] },
       "targets": [
         {
@@ -287,10 +287,30 @@
     },
     {
       "type": "timeseries",
+      "title": "NER strings run inline (not prefetched) by backend",
+      "description": "Where the NER models ran. inline = llm_redact_ner_inline_calls_total: strings an NER backend was run on by the redaction itself instead of ahead of it on the NER worker thread (the NER prefetch, docs/how-it-works.md). On a request's path that is the event loop: every other request on the proxy waited for that string's inference. A redaction preview in the llm-redact-pro dashboard runs the live detectors this way too, on its own worker thread, and is counted here. prefetch misses = llm_redact_ner_prefetch_misses_total: strings a request's redaction did not find among the results its prefetch computed (a reload replaced the detectors while the request waited; otherwise a string the prefetch failed to collect), each then run inline and so also counted as inline. Both stay at zero while every request is prefetched and nobody runs a preview; a sustained inline rate held requests up (the Proxy health row's overhead panel shows what it cost).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 60 },
+      "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_inline_calls_total[5m]))",
+          "legendFormat": "{{backend}} inline",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_prefetch_misses_total[5m]))",
+          "legendFormat": "{{backend}} prefetch misses",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
       "title": "NER windows by backend",
       "description": "llm_redact_ner_windows_total: the windows long strings were read in (model calls for the windowed strings). truncated = llm_redact_ner_windows_truncated_total: windows holding one word longer than the model's encoder reads, which it may read only in part.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 68 },
       "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
       "targets": [
         {
@@ -308,9 +328,9 @@
     {
       "type": "timeseries",
       "title": "NER entities dropped by backend",
-      "description": "Model entities never redacted: labels = their type cannot be a placeholder type (llm_redact_ner_labels_dropped_total; usually an [detection.ner] entities entry that cannot be one), offsets = the scanned string does not contain their span (llm_redact_ner_offsets_dropped_total). Both should stay at zero. llm backend only: ungrounded = values its model server returned that the text does not hold (llm_redact_ner_ungrounded_total), errors = strings its server failed on (llm_redact_ner_errors_total: refused 503 with on_error = block, forwarded without its findings with skip), breaker = strings its open circuit breaker failed at once without asking the server (llm_redact_ner_breaker_short_circuits_total, also in errors) and breaker opens (llm_redact_ner_breaker_opens_total).",
+      "description": "Model entities never redacted, all of which should stay at zero: labels = their type cannot be a placeholder type (llm_redact_ner_labels_dropped_total; usually an [detection.ner] entities entry that cannot be one), offsets = the scanned string does not contain their span (llm_redact_ner_offsets_dropped_total), ungrounded = values the llm backend's model server returned that the text it read does not hold, or too short to tell from the words around it (llm_redact_ner_ungrounded_total; the llm backend only, every other backend reports zero).",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 68 },
       "fieldConfig": { "defaults": { "unit": "cps", "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] },
       "targets": [
         {
@@ -327,21 +347,43 @@
           "expr": "sum by (backend) (rate(llm_redact_ner_ungrounded_total[5m]))",
           "legendFormat": "{{backend}} ungrounded",
           "refId": "C"
-        },
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "NER model server failures and circuit breaker (the llm backend)",
+      "description": "The llm NER backend's model server ([detection.ner.llm]); every other backend reports zero. Orange, server errors = llm_redact_ner_errors_total: strings the server failed on (a timeout, an error status, a connection fault, an answer the backend could not read), what the LlmRedactNerServerFailing alert reads: with on_error = \"block\" each such request was refused 503 (local refusal kind detector_unavailable), nothing forwarded; with \"skip\" it was forwarded without the backend's findings. Yellow, breaker short-circuited = llm_redact_ner_breaker_short_circuits_total: strings its open circuit breaker failed at once without asking the server (also counted in the errors). Red, breaker opens = llm_redact_ner_breaker_opens_total: times the breaker opened because the server was down (breaker_failures timeouts, transport faults or HTTP 5xx answers in a row; a failed probe opens it again).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 68 },
+      "fieldConfig": {
+        "defaults": { "unit": "cps", "color": { "mode": "fixed", "fixedColor": "orange" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "C" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          }
+        ]
+      },
+      "targets": [
         {
           "expr": "sum by (backend) (rate(llm_redact_ner_errors_total[5m]))",
           "legendFormat": "{{backend}} server errors",
-          "refId": "D"
+          "refId": "A"
         },
         {
           "expr": "sum by (backend) (rate(llm_redact_ner_breaker_short_circuits_total[5m]))",
           "legendFormat": "{{backend}} breaker short-circuited",
-          "refId": "E"
+          "refId": "B"
         },
         {
           "expr": "sum by (backend) (rate(llm_redact_ner_breaker_opens_total[5m]))",
           "legendFormat": "{{backend}} breaker opens",
-          "refId": "F"
+          "refId": "C"
         }
       ]
     },

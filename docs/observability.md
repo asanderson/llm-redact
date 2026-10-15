@@ -18,7 +18,7 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 |---|---|
 | `deploy/prometheus-scrape.yml` | A `scrape_configs` job to merge into your `prometheus.yml`. |
 | `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage, NER skipping strings longer than `max_chars`, the `llm` NER backend's model server failing, a plugin's scan sinks dropping captures). |
-| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, windows and truncated windows, entities dropped; a plugin's scan sinks: captures delivered, captures dropped by reason, queue depth). |
+| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, strings run inline instead of prefetched, windows and truncated windows, entities dropped, the `llm` backend's model server failures and circuit breaker; a plugin's scan sinks: captures delivered, captures dropped by reason, queue depth). |
 
 ## Metrics reference
 
@@ -82,6 +82,31 @@ change to `[detection]`, by SIGHUP or the dashboard editor) — Prometheus reads
 that as a counter reset, which `rate()` and `increase()` handle. A reload that
 leaves `[detection]` alone keeps them. A redaction preview in the
 llm-redact-pro dashboard runs the live detectors and is counted like a request.
+
+The shipped dashboard's **NER coverage** row charts every one of them, per
+backend (*No data* without `[detection.ner]`), three panels to a line:
+
+- strings by outcome; the strings skipped as longer than `max_chars`, in
+  orange (what `LlmRedactNerSkippingLongStrings` warns on); and where the
+  models ran: `inline` is `llm_redact_ner_inline_calls_total`, the strings a
+  backend was run on by the redaction itself instead of ahead of it on the
+  NER worker thread (the NER prefetch, [how-it-works.md](how-it-works.md)) —
+  on a request's path that is the event loop, every other request waiting
+  for that string's inference; a redaction preview in the llm-redact-pro
+  dashboard runs this way too, on its own worker thread — and `prefetch
+  misses` is `llm_redact_ner_prefetch_misses_total`, the strings a request's
+  redaction did not find among the results its prefetch computed (a reload
+  replaced the detectors while the request waited; otherwise a string the
+  prefetch failed to collect), each also counted as inline. Both stay at
+  zero while every request is prefetched and nobody runs a preview.
+- the windows long strings were read in and the truncated ones; the model
+  entities dropped (`labels`, `offsets`, and `ungrounded` values the `llm`
+  backend's model server returned), in orange; and the `llm` backend's model
+  server on a panel of its own: the strings it failed on in orange
+  (`llm_redact_ner_errors_total`, what `LlmRedactNerServerFailing` warns
+  on), the strings its open circuit breaker failed at once without asking
+  the server in yellow, and the times the breaker opened in red. Every other
+  backend reports zero on the `llm` backend's series.
 
 ## Local refusal kinds
 

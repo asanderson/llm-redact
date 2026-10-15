@@ -262,9 +262,22 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
 - **Four NER counters**: `ungrounded`, `errors`, `breaker_opens` and `breaker_short_circuits` in
   `/status` `detection.ner` and as `llm_redact_ner_ungrounded_total`,
   `llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total` and
-  `llm_redact_ner_breaker_short_circuits_total`, all on the shipped Grafana dashboard's NER
-  panel, and a `LlmRedactNerServerFailing` alert in `deploy/prometheus-alerts.yml` while the
-  model server fails.
+  `llm_redact_ner_breaker_short_circuits_total`, and a `LlmRedactNerServerFailing` alert in
+  `deploy/prometheus-alerts.yml` while the model server fails. All four are on the shipped
+  Grafana dashboard's NER coverage row: `ungrounded` beside the other entities dropped, and the
+  `llm` backend's model server on a panel of its own (as on llm-redact-pro's Subsystems
+  dashboard) — the strings it failed on in orange (what the alert reads, never recolored), the
+  strings its open circuit breaker failed at once in yellow and the breaker's openings in red.
+- **The shipped Grafana dashboard charts where the NER models ran.** A new panel in the NER
+  coverage row, beside the strings each backend read and skipped, charts
+  `llm_redact_ner_inline_calls_total` (strings a backend was run on by the redaction itself
+  instead of ahead of it on the NER worker thread: on a request's path that is the event loop,
+  every other request waiting for that string's inference; a redaction preview in the
+  llm-redact-pro dashboard runs this way too, on its own worker thread) and
+  `llm_redact_ner_prefetch_misses_total` (strings a request's redaction did not find among the
+  results its prefetch computed — a reload replaced the detectors while it waited — each also
+  counted inline), until now on `/status` and `/metrics` only. Both stay at zero while every
+  request is prefetched and nobody runs a preview. The row's panels are now three to a line.
 
 ### Fixed
 - A SIGHUP during the proxy's shutdown — a terminal closing, a reload racing a stop — could end

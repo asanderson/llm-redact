@@ -52,6 +52,7 @@ import re
 import threading
 import time
 import weakref
+from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
@@ -65,6 +66,7 @@ from llm_redact.detection.ner import NER_PRIORITY
 from llm_redact.detection.stats import NerStats
 from llm_redact.detection.windows import drop_exact_duplicates, gliner_words, word_windows
 from llm_redact.jsonwalk import json_bytes, loads_bounded
+from llm_redact.placeholders import PLACEHOLDER_RE
 
 if TYPE_CHECKING:
     from llm_redact.detection.engine import LlmNerConfig, NerConfig
@@ -93,6 +95,10 @@ MAX_ANSWER_BYTES = 1 << 20
 MAX_ENTITIES = 512
 # A value shorter than this would match inside words everywhere.
 MIN_VALUE_CHARS = 2
+# How long a detector build (and doctor) waits for the server's model list:
+# a reload runs the build on the event loop, so a hung server must not hold
+# it for a whole per-string timeout_ms.
+MODEL_LIST_SECONDS = 10.0
 # Strings whose findings are remembered (by SHA-256): the history an agent
 # resends with every request is not asked again.
 CACHE_STRINGS = 4096
@@ -184,10 +190,15 @@ class _Client:
         self._http.close()
 
     def _call(self, method: str, path: str, body: Any, timeout: float) -> Any:
-        """One request's JSON answer; ``_Failed`` naming the failure kind."""
+        """One request's JSON answer within ``timeout`` seconds in all (httpx
+        bounds each read; an answer trickling in is cut at the deadline);
+        ``_Failed`` naming the failure kind."""
         if timeout <= 0:
             raise _Failed("timeout")
-        headers = {"accept": "application/json"}
+        deadline = time.monotonic() + timeout
+        # An answer as sent: a compressed one could inflate past the cap
+        # before it is measured.
+        headers = {"accept": "application/json", "accept-encoding": "identity"}
         if body is not None:
             headers["content-type"] = "application/json"
         try:
@@ -203,11 +214,16 @@ class _Client:
                 if response.status_code != 200:
                     # A redirect included: none is followed.
                     raise _Failed(f"HTTP {response.status_code}")
+                if response.headers.get("content-encoding", "identity").lower() != "identity":
+                    raise _Failed("encoded answer")
                 data = bytearray()
+                # Uncoded (checked above): the bytes as they arrive.
                 for chunk in response.iter_bytes():
                     data += chunk
                     if len(data) > MAX_ANSWER_BYTES:
                         raise _Failed("answer too large")
+                    if time.monotonic() > deadline:
+                        raise _Failed("timeout")
         except httpx.TimeoutException:
             raise _Failed("timeout") from None
         except _Failed:
@@ -283,6 +299,13 @@ class _Client:
         if len(entities) > MAX_ENTITIES:
             raise _Failed("too many entities")
         return entities
+
+
+def _in_token(tokens: list[tuple[int, int]], ends: list[int], start: int, end: int) -> bool:
+    """Whether ``start``..``end`` overlaps one of the start-sorted, disjoint
+    placeholder ``tokens`` (``ends`` their ends)."""
+    index = bisect_right(ends, start)
+    return index < len(tokens) and tokens[index][0] < end
 
 
 def _get(value: Any, *keys: str) -> Any:
@@ -397,8 +420,15 @@ class LlmNerDetector:
         if len(text) > self._max_chars:
             self.stats.skipped_max_chars += 1
             return
+        # The placeholders an earlier turn left in the text are the proxy's
+        # own: a value the model read inside one ("PERSON_001" of
+        # «PERSON_001») is never redacted there.
+        tokens = [m.span() for m in PLACEHOLDER_RE.finditer(text)] if "«" in text else []
+        token_ends = [end for _start, end in tokens]
         for value, type_name in self._values(text):
             for match in re.finditer(re.escape(value), text):
+                if _in_token(tokens, token_ends, match.start(), match.end()):
+                    continue
                 yield Detection(
                     start=match.start(),
                     end=match.end(),
@@ -523,7 +553,7 @@ def build_llm_detector(config: "NerConfig") -> LlmNerDetector:
     policy = LabelPolicy(config.entities, backend="llm", overrides=config.labels)
     client = _Client(llm, list(policy.prompts))
     try:
-        check_server(client, llm.timeout_ms / 1000)
+        check_server(client, min(llm.timeout_ms / 1000, MODEL_LIST_SECONDS))
     except BaseException:
         client.close()
         raise

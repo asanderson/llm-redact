@@ -286,8 +286,8 @@ entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME"]
 [detection.ner.llm]
 url = "http://127.0.0.1:11434"   # the default: Ollama on loopback
 api = "ollama"
-model = "qwen2.5:3b-instruct"
-digest = "2af3b81862c6be03c769683af18efdadb2c33f60ff32ab6f83e42c043d6c7816"
+model = "MODEL:TAG"            # the model as the server names it: `ollama pull` it first
+digest = "<64 hex characters>"   # Ollama only: its digest as /api/tags reports it
 timeout_ms = 30000            # one string's time, every window of it
 on_error = "block"            # or "skip"
 ```
@@ -296,11 +296,13 @@ on_error = "block"            # or "skip"
 asked to read. `url` must therefore be on loopback; a server off loopback is
 refused unless `allow_remote = true` and the scheme is `https`. Requests go
 exactly to `url`: no proxy or netrc from the environment, no redirect
-followed, answers read no further than 1 MiB. The backend sends no
-credential of its own, and `url` may not carry one.
+followed, answers asked for uncompressed (a compressed one is a failure)
+and read no further than 1 MiB or the string's `timeout_ms`. The backend
+sends no credential of its own, and `url` may not carry one.
 
 **Pinned model.** Before the backend is built (at startup, `serve --check`,
-and on a reload that changes `[detection]`) the server must list `model`; on
+and on a reload that changes `[detection]`) the server must list `model`
+(answering within 10 seconds, or `timeout_ms` when that is shorter); on
 Ollama its `/api/tags` digest must equal `digest` (required there; the
 64-character form `/api/tags` reports, with or without `sha256:` — `ollama
 list` shows only its first 12 characters), so a model re-tagged on the
@@ -309,7 +311,7 @@ is refused with `api = "openai"`. llm-redact never pulls a model: `ollama
 pull` it first, then read its digest with `curl -s
 http://127.0.0.1:11434/api/tags`. A failed check stops the startup (a reload
 keeps the running configuration), and `llm-redact doctor` makes the same
-read-only check (it sends no text).
+read-only check (it sends no text; `doctor --offline` skips it).
 
 **Per string** the backend sends one chat request: a fixed system prompt
 that names the requested types (as the `gliner` prompts do: "person",
@@ -332,7 +334,8 @@ load within `timeout_ms`.
 the model read (edge blanks trimmed, at least two characters, no placeholder
 guillemets), and it is then redacted at every place it occurs in the string —
 inside longer words too ("Ann" in "Annual": the placeholder is restored in
-the answer like any other). Anything else the model returns — invented,
+the answer like any other), never inside a placeholder an earlier turn left
+in the text (`PERSON_001` of `«PERSON_001»`). Anything else the model returns — invented,
 mangled, a different spelling — is dropped and counted (`ungrounded`); a type
 that was not requested is ignored.
 

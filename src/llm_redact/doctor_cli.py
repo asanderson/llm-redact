@@ -722,19 +722,20 @@ def _check_ner_labels(report: _Report, config: Config) -> None:
         report.line("WARN", "ner", warning)
 
 
-# How long doctor waits for the llm backend's model server to list its
-# models (a doctor run should not hang on a stopped server).
-_LLM_CHECK_SECONDS = 5.0
-
-
-def _check_llm(report: _Report, config: Config) -> None:
+def _check_llm(report: _Report, config: Config, offline: bool = False) -> None:
     """The llm backend's model server: where the scanned text goes (WARN off
     loopback: it receives every scanned string UNREDACTED), and the
     startup's own check, read-only — the server lists its models, serves
-    the configured one and, on Ollama, at the pinned digest. Sends no text
-    and pulls nothing. Silent unless the backend is enabled."""
+    the configured one and, on Ollama, at the pinned digest (not asked with
+    ``--offline``). Sends no text and pulls nothing. Silent unless the
+    backend is enabled."""
     from llm_redact.config import _is_loopback_host
-    from llm_redact.detection.llm_ner import check_server, open_client, server_origin
+    from llm_redact.detection.llm_ner import (
+        MODEL_LIST_SECONDS,
+        check_server,
+        open_client,
+        server_origin,
+    )
 
     ner = config.detection.ner
     if not (ner.enabled and "llm" in ner.active_backends()):
@@ -750,9 +751,12 @@ def _check_llm(report: _Report, config: Config) -> None:
             f"model server {origin} is off loopback (allow_remote = true): it receives every"
             " string the llm backend scans UNREDACTED",
         )
+    if offline:
+        report.line("PASS", "llm", "model server not asked (--offline)")
+        return
     client = open_client(ner)
     try:
-        check_server(client, min(llm.timeout_ms / 1000, _LLM_CHECK_SECONDS))
+        check_server(client, min(llm.timeout_ms / 1000, MODEL_LIST_SECONDS))
     except ConfigError as problem:
         report.line("FAIL", "llm", f"{problem} — serve would refuse to start")
         return
@@ -1402,7 +1406,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_extras(report, config)
     _check_posture(report, config)
     _check_ner_labels(report, config)
-    _check_llm(report, config)
+    _check_llm(report, config, bool(getattr(args, "offline", False)))
     _check_models(report, config)
     _check_extraction(report, config)
     _check_upstream_auth(report, config)

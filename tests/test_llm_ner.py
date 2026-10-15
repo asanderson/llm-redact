@@ -107,6 +107,19 @@ def test_a_value_the_text_does_not_hold_is_dropped_and_counted(
     assert detector.stats.ungrounded == len(invented)
 
 
+def test_a_value_inside_a_placeholder_of_an_earlier_turn_is_never_redacted_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The model read "«PERSON_001»" and listed its inside as a name: the
+    # proxy's own token is left whole, the same text elsewhere is redacted.
+    server = FakeModelServer([("PERSON_001", "person")])
+    _redactor, detector = _build(monkeypatch, server)
+    text = "ask «PERSON_001» or PERSON_001, then «PERSON_001»."
+    found = detector.detect(text)
+    assert [(d.start, d.end, d.value) for d in found] == [(20, 30, "PERSON_001")]
+    assert detector.stats.ungrounded == 0
+
+
 def test_a_value_is_kept_trimmed_and_types_come_through_the_label_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -167,9 +180,14 @@ def test_an_ollama_request_is_deterministic_json_with_the_text_framed_as_data(
 def test_an_openai_compatible_request_asks_for_the_json_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    server = FakeModelServer([(NAME, "person")], api="openai", model="qwen")
+    server = FakeModelServer([(NAME, "person")], api="openai", model="local-model")
     redactor, _detector = _build(
-        monkeypatch, server, api="openai", model="qwen", digest=None, url="http://localhost:8080"
+        monkeypatch,
+        server,
+        api="openai",
+        model="local-model",
+        digest=None,
+        url="http://localhost:8080",
     )
     assert redactor.redact_text(f"hi {NAME}") == "hi «PERSON_001»"
     (body,) = server.bodies
@@ -345,6 +363,66 @@ def test_an_answer_too_large_or_too_long_is_a_failure(monkeypatch: pytest.Monkey
         detector.detect(f"two {NAME}")
 
 
+class _Clock:
+    """``time`` for llm_ner: each reading one second after the last."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        self.now += 1.0
+        return self.now
+
+
+def _answering(monkeypatch: pytest.MonkeyPatch, chat: Any) -> Any:
+    """The llm detector over a server listing the model and answering every
+    chat with ``chat(request)``."""
+    server = FakeModelServer()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return server(request) if request.url.path == "/api/tags" else chat(request)
+
+    install_llm(monkeypatch, server)
+    monkeypatch.setattr(llm_ner, "make_transport", lambda: httpx.MockTransport(handler))
+    ((_n, detector, _stats),) = ner_backend_stats(
+        build_detectors(DetectionConfig(ner=llm_ner_config(timeout_ms=3000)))
+    )
+    return detector
+
+
+def test_an_answer_trickling_past_the_deadline_is_a_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # httpx bounds each read, not the whole answer: a server sending a byte
+    # at a time within every read timeout is cut at the string's deadline.
+    content = json.dumps({"message": {"content": '{"entities": []}'}}).encode()
+
+    def trickle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=iter([content[i : i + 1] for i in range(len(content))]))
+
+    detector = _answering(monkeypatch, trickle)
+    monkeypatch.setattr(llm_ner, "time", _Clock())
+    with pytest.raises(DetectorUnavailable, match="timeout"):
+        detector.detect(f"hi {NAME}")
+    assert detector.stats.errors == 1
+
+
+def test_a_compressed_answer_is_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    import gzip
+
+    asked: list[str] = []
+
+    def compressed(request: httpx.Request) -> httpx.Response:
+        asked.append(request.headers["accept-encoding"])
+        body = gzip.compress(json.dumps({"message": {"content": '{"entities": []}'}}).encode())
+        return httpx.Response(200, content=body, headers={"content-encoding": "gzip"})
+
+    detector = _answering(monkeypatch, compressed)
+    with pytest.raises(DetectorUnavailable, match="encoded answer"):
+        detector.detect(f"hi {NAME}")
+    assert asked == ["identity"]  # it asked for none
+
+
 @pytest.mark.parametrize(
     "answer",
     [
@@ -417,10 +495,29 @@ def test_the_build_matches_an_untagged_ollama_name_and_a_prefixed_digest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = install_llm(
-        monkeypatch, FakeModelServer(model="phi3:latest", digest="sha256:" + LLM_DIGEST.upper())
+        monkeypatch,
+        FakeModelServer(model="extractor:latest", digest="sha256:" + LLM_DIGEST.upper()),
     )
-    build_detectors(DetectionConfig(ner=llm_ner_config(model="phi3")))
+    build_detectors(DetectionConfig(ner=llm_ner_config(model="extractor")))
     assert [r.url.path for r in server.requests] == ["/api/tags"]
+
+
+@pytest.mark.parametrize(("timeout_ms", "waited"), [(600_000, 10.0), (2_000, 2.0)])
+def test_the_build_waits_for_the_model_list_at_most_ten_seconds(
+    monkeypatch: pytest.MonkeyPatch, timeout_ms: int, waited: float
+) -> None:
+    # A reload builds on the event loop: a hung server holds it no longer
+    # than MODEL_LIST_SECONDS, whatever the per-string timeout_ms.
+    install_llm(monkeypatch, FakeModelServer())
+    asked: list[float] = []
+    check = llm_ner.check_server
+    monkeypatch.setattr(
+        llm_ner,
+        "check_server",
+        lambda client, timeout: (asked.append(timeout), check(client, timeout)),
+    )
+    build_detectors(DetectionConfig(ner=llm_ner_config(timeout_ms=timeout_ms)))
+    assert asked == [waited] and llm_ner.MODEL_LIST_SECONDS == 10.0
 
 
 def test_an_unreadable_model_list_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -870,6 +967,21 @@ def test_doctor_warns_about_a_remote_model_server(
 def test_doctor_says_nothing_about_an_inactive_llm_backend(tmp_path: Path) -> None:
     rows = _doctor(tmp_path, '[detection.ner.llm]\non_error = "skip"\n')
     assert "llm" not in rows
+
+
+def test_doctor_offline_asks_no_model_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from llm_redact.doctor_cli import _check_llm, _Report
+
+    server = install_llm(monkeypatch, FakeModelServer())
+    report = _Report(json_mode=True)
+    _check_llm(report, _toml(LLM_TOML), offline=True)
+    assert [(r["level"], r["message"]) for r in report.rows] == [
+        ("PASS", "model server http://127.0.0.1:11434 is on loopback (ollama API)"),
+        ("PASS", "model server not asked (--offline)"),
+    ]
+    assert server.requests == []
 
 
 # --- realtime -----------------------------------------------------------------------------

@@ -23,14 +23,16 @@ and tags `vX.Y.Z`.
     the environment, no redirect followed, answers capped.
   - **Only real values, and only ever more redaction.** A value is kept only when its text
     occurs verbatim in the text the model read (then it is redacted wherever it occurs in the
-    string); anything the model invents is dropped and counted (`ungrounded`). The findings can
+    string, never inside a placeholder an earlier turn left there); anything the model invents
+    is dropped and counted (`ungrounded`). The findings can
     never take another detector's place: a text that tells the model to "return no entities",
     or a crafted answer overlapping an API key, cannot leave anything the regex rules or other
     backends redact unredacted.
   - **Pinned and checked at startup.** The startup (and a reload that changes `[detection]`)
     checks that the server serves the model — on Ollama at the pinned digest, so a re-tagged
-    model is refused; llm-redact never pulls one. `llm-redact doctor` makes the same read-only
-    check.
+    model is refused; llm-redact never pulls one. The check waits at most 10 seconds for the
+    server's model list. `llm-redact doctor` makes the same read-only check (`doctor --offline`
+    skips it).
   - **A failing server refuses the request by default.** On a timeout or an error (`timeout_ms`
     per string, default 30 s) the request is answered 503 before anything is forwarded (a
     realtime connection is closed 1011), counted under the new local-refusal kind

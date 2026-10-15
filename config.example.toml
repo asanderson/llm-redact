@@ -512,7 +512,7 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # [detection.ner.llm]
 # url = "http://127.0.0.1:11434"   # default: Ollama on loopback
 # api = "ollama"                   # or "openai" (an OpenAI-compatible server)
-# model = "qwen2.5:3b-instruct"    # `ollama pull` it first
+# model = "MODEL:TAG"              # as the server names it; `ollama pull` it first
 # digest = "<64 hex characters from /api/tags>"   # required with api = "ollama"
 # timeout_ms = 30000               # per string, every window of it
 # on_error = "block"               # a server failure refuses the request (503);

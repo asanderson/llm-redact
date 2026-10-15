@@ -555,8 +555,8 @@ def install_tldextract(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
 
 # The llm backend's model server (detection/llm_ner.py), answering in
 # process through an httpx.MockTransport: no socket is ever opened.
-LLM_MODEL = "qwen2.5:3b-instruct"
-LLM_DIGEST = "2af3b81862c6be03c769683af18efdadb2c33f60ff32ab6f83e42c043d6c7816"
+LLM_MODEL = "pii-extractor:test"
+LLM_DIGEST = "21163ebe7351c90f8dc709640062a9a8313dc3784c32714ec952bdcdf61218bd"
 
 
 def framed_text(content: str) -> str:

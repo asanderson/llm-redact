@@ -219,7 +219,8 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--offline",
         action="store_true",
-        help="skip the routing upstream reachability probes (HEAD/GET on each base_url)",
+        help="skip the network probes: the routing upstreams' reachability (HEAD/GET on each"
+        " base_url) and the llm NER backend's model list",
     )
 
     from llm_redact.models_cli import add_parser as add_models_parser

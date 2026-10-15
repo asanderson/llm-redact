@@ -293,7 +293,9 @@ on_error = "block"            # or "skip"
 ```
 
 **The server receives every scanned string unredacted** — that is what it is
-asked to read. `url` must therefore be on loopback; a server off loopback is
+asked to read, and it includes the secrets in it: the API keys and passwords
+the regex rules redact before the provider sees them reach the model server
+as written. `url` must therefore be on loopback; a server off loopback is
 refused unless `allow_remote = true` and the scheme is `https`. Requests go
 exactly to `url`: no proxy or netrc from the environment, no redirect
 followed, answers asked for uncompressed (a compressed one is a failure)

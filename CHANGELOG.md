@@ -95,16 +95,16 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   value an access gate's added deny string redacts part of (a detection overlay: llm-redact-pro
   roles) is now counted the same way — in `llm_redact_warnings_total`, the request's row and
   `authorize_content`'s `warned`, once, when part of it is still sent — where it was not
-  counted at all. Whether part of it is still sent is decided once everything is redacted, so a
-  value whose rest an added deny string or an `llm` backend finding redacts is not counted. A
-  warn-mode value that loses an ordinary overlap — to a configured deny string, or to a value
-  redacted in its place — is still sent in part and not counted, as before (docs/detection.md,
-  "Per-rule modes", now says so). Where the proxy cannot rewrite the text (a verbatim field, an
-  upload's extracted text), a span joining two or more such values is put to refusal overrides
-  value by value: the refusal's code names every value, one approval of it lets the span through
-  as sent (an access gate's content facts count each value once), and a span holding a deny
-  string refuses with no code, as a deny string does. docs/detection.md describes how such
-  values are joined.
+  counted at all. For both, whether part of the value is still sent is decided once everything is
+  redacted: one whose rest an added deny string or an `llm` backend finding redacts is not
+  counted. A warn-mode value that loses an ordinary overlap — to a configured deny string, or to
+  a value redacted in its place — is still sent in part and not counted, as before
+  (docs/detection.md, "Per-rule modes", now says so). Where the proxy cannot rewrite the text (a
+  verbatim field, an upload's extracted text), a span joining two or more such values is put to
+  refusal overrides value by value: the refusal's code names every value, one approval of it
+  lets the span through as sent (an access gate's content facts count each value once), and a
+  span holding a deny string refuses with no code, as a deny string does. docs/detection.md
+  describes how such values are joined.
 - The latency smoke check (`python -m llm_redact.bench --latency --check`) allows the proxy's
   own overhead on a 100 KB body up to 300 ms (was 150 ms). It is a tripwire for gross
   regressions such as quadratic behavior, measured at about 44 ms; a loaded shared CI runner

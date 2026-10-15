@@ -534,7 +534,9 @@ class Redactor:
         that filter, so a value covered whole never hides one that is not);
         those an added match drops are winners, disjoint, each one value.
         None of them is a winner, so none is counted twice: ``redact_text``
-        and ``scan`` count only the winners."""
+        and ``scan`` count only the winners. Counted only once resolution
+        is complete: a block-mode value refusing the text there (``_join``,
+        ``_absorb``) leaves them uncounted, as nothing of it is sent."""
         joined: list[Detection] = []
         winners = self._resolved(text, found, joined)
         yielded: list[Detection] = []

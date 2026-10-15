@@ -95,7 +95,9 @@ groups:
       # The llm NER backend's model server fails (a timeout, an error, an
       # unreadable answer): with on_error = "block" (the default) each such
       # request is refused 503 (local refusal kind detector_unavailable),
-      # with "skip" it is forwarded without the backend's findings.
+      # with "skip" it is forwarded without the backend's findings. Strings
+      # its open circuit breaker fails at once count here too, so the alert
+      # keeps firing while the breaker spares the server.
       - alert: LlmRedactNerServerFailing
         expr: sum by (backend) (rate(llm_redact_ner_errors_total[5m])) > 0
         for: 5m
@@ -103,7 +105,7 @@ groups:
           severity: warning
         annotations:
           summary: "llm-redact's NER model server is failing"
-          description: "the {{ $labels.backend }} NER backend's model server failed on {{ $value | printf \"%.3f\" }} strings/s over 5m (llm_redact_ner_errors_total): with on_error = \"block\" those requests were refused 503, with \"skip\" they were forwarded without its findings. Check the server ([detection.ner.llm] url), its load and timeout_ms; llm-redact doctor checks it."
+          description: "the {{ $labels.backend }} NER backend's model server failed on {{ $value | printf \"%.3f\" }} strings/s over 5m (llm_redact_ner_errors_total): with on_error = \"block\" those requests were refused 503, with \"skip\" they were forwarded without its findings (strings its open circuit breaker failed at once, llm_redact_ner_breaker_short_circuits_total, included). Check the server ([detection.ner.llm] url), its load and timeout_ms; llm-redact doctor checks it."
 
       # NER coverage gap: strings longer than [detection.ner] max_chars are
       # never read by the NER models (the regex rules still scan them), so

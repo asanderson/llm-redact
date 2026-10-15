@@ -317,7 +317,8 @@ def test_a_server_failure_blocks_by_default(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fail: str, reason: str
 ) -> None:
     server = FakeModelServer([(NAME, "person")], fail=fail, fail_on="secret")
-    redactor, detector = _build(monkeypatch, server)
+    # Each string asks the server (the circuit breaker's own tests below).
+    redactor, detector = _build(monkeypatch, server, breaker_seconds=0)
     with caplog.at_level(logging.INFO, logger="llm_redact"):
         with pytest.raises(DetectorUnavailable) as raised:
             redactor.redact_text(f"secret plans of {NAME}")
@@ -353,7 +354,7 @@ def test_a_window_failing_keeps_what_the_earlier_windows_found_with_skip(
     filler = "lorem ipsum dolor sit amet " * 100
     text = f"{NAME} wrote. {filler} secret {filler}"
     server = FakeModelServer([(NAME, "person")], fail="status", fail_on="secret")
-    _redactor, detector = _build(monkeypatch, server, on_error="skip")
+    _redactor, detector = _build(monkeypatch, server, on_error="skip", breaker_seconds=0)
     assert [d.value for d in detector.detect(text)] == [NAME]
     assert detector.stats.errors == 1
     # Not remembered: the next request asks again.
@@ -899,7 +900,7 @@ async def test_a_failing_model_server_refuses_the_request_503(
     if not prefetching:
         monkeypatch.setattr(proxy_module, "_prefetch_json", _no_prefetch)
     server = FakeModelServer([(NAME, "person")], fail="timeout", fail_on="secret")
-    app, upstream = _app(monkeypatch, server)
+    app, upstream = _app(monkeypatch, server, breaker_seconds=0)
     with caplog.at_level(logging.INFO, logger="llm_redact"):
         response = await _chat(app, f"the secret of {NAME}")
     assert response.status_code == 503, response.text
@@ -967,7 +968,7 @@ def test_the_dashboard_preview_reports_an_unavailable_detector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = FakeModelServer([(NAME, "person")], fail="timeout", fail_on="secret")
-    app, _upstream = _app(monkeypatch, server)
+    app, _upstream = _app(monkeypatch, server, breaker_seconds=0)
     state = app.state.proxy
     assert state.preview(f"secret {NAME}") == {
         "redacted": None,

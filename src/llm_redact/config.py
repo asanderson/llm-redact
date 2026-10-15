@@ -1659,12 +1659,24 @@ def _parse_ner_onnx(onnx_raw: object) -> tuple[tuple[str, str], ...]:
 
 # [detection.ner.llm]: every NER backend, the model server one included.
 NER_BACKENDS = ("spacy", "gliner", "gliner2", "presidio", "stanza", "hf", "llm")
-_LLM_KEYS = {"url", "api", "model", "digest", "timeout_ms", "on_error", "allow_remote"}
+_LLM_KEYS = {
+    "url",
+    "api",
+    "model",
+    "digest",
+    "timeout_ms",
+    "on_error",
+    "allow_remote",
+    "breaker_seconds",
+    "api_key_env",
+}
 # A model name as servers spell them (Ollama's "name:tag", a Hub id, a file
 # path): printable, no blank or control character.
 _LLM_MODEL_RE = re.compile(r"[^\s\x00-\x1f\x7f]{1,256}")
 _LLM_DIGEST_RE = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
 LLM_TIMEOUT_MS = (100, 600_000)
+# [detection.ner.llm] breaker_seconds: 0 (off) up to an hour.
+LLM_BREAKER_SECONDS = (0, 3600)
 
 
 def llm_url_problem(url: str, *, allow_remote: bool) -> str | None:
@@ -1750,6 +1762,14 @@ def _parse_ner_llm(raw: object, *, required: bool) -> LlmNerConfig:
     on_error = raw.get("on_error", default.on_error)
     if on_error not in LLM_ON_ERROR:
         raise ConfigError(f"{where} on_error must be one of {list(LLM_ON_ERROR)}")
+    breaker_seconds = raw.get("breaker_seconds", default.breaker_seconds)
+    low, high = LLM_BREAKER_SECONDS
+    if (
+        isinstance(breaker_seconds, bool)
+        or not isinstance(breaker_seconds, int)
+        or not (low <= breaker_seconds <= high)
+    ):
+        raise ConfigError(f"{where} breaker_seconds must be an integer from {low} (off) to {high}")
     return LlmNerConfig(
         url=url,
         api=api,
@@ -1758,7 +1778,32 @@ def _parse_ner_llm(raw: object, *, required: bool) -> LlmNerConfig:
         timeout_ms=timeout_ms,
         on_error=on_error,
         allow_remote=allow_remote,
+        breaker_seconds=breaker_seconds,
+        api_key_env=_llm_api_key_env(raw, where),
     )
+
+
+def _llm_api_key_env(raw: Mapping[str, Any], where: str) -> str | None:
+    """[detection.ner.llm] api_key_env: the NAME of the environment variable
+    holding the server's key (the key itself never lives in the file). The
+    value is never echoed — the realistic mistake is pasting the key here —
+    and none of llm-redact's own variables may be named: one holds the vault
+    or audit keys, which must never reach a model server."""
+    name = raw.get("api_key_env")
+    if name is None:
+        return None
+    if not isinstance(name, str) or _ENV_NAME_RE.fullmatch(name) is None:
+        raise ConfigError(
+            f"{where} api_key_env must name an environment variable (letters, digits and _);"
+            " the key itself never lives in the config file"
+        )
+    if name.upper().startswith("LLM_REDACT_"):
+        raise ConfigError(
+            f"{where} api_key_env must not name an LLM_REDACT_ variable: those hold"
+            " llm-redact's own settings and keys (the vault and audit keys), which must never"
+            " reach a model server; name a variable of the model server's own"
+        )
+    return name
 
 
 def _parse_deny(detection_raw: dict[str, Any]) -> tuple[DenyEntry, ...]:

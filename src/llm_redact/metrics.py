@@ -116,6 +116,8 @@ CORE_METRIC_FAMILIES = frozenset(
         "llm_redact_ner_offsets_dropped_total",
         "llm_redact_ner_ungrounded_total",
         "llm_redact_ner_errors_total",
+        "llm_redact_ner_breaker_opens_total",
+        "llm_redact_ner_breaker_short_circuits_total",
         "llm_redact_ner_inline_calls_total",
         "llm_redact_ner_prefetch_misses_total",
         "llm_redact_routed_requests_total",
@@ -537,8 +539,23 @@ def _ner_lines(backends: list[tuple[str, "NerStats"]]) -> list[str]:
             "llm_redact_ner_errors_total",
             "errors",
             "Strings a model server failed on (the llm backend: a timeout, an error, an"
-            ' unreadable answer): with on_error = "block" each refused its request, with'
-            ' "skip" each went on without the backend\'s findings, by backend.',
+            ' unreadable answer, its circuit breaker open): with on_error = "block" each'
+            ' refused its request, with "skip" each went on without the backend\'s'
+            " findings, by backend.",
+        ),
+        (
+            "llm_redact_ner_breaker_opens_total",
+            "breaker_opens",
+            "Times the llm backend's circuit breaker opened because its model server was"
+            " down (a timeout, a transport fault, an HTTP 5xx; a failed probe opens it"
+            " again), by backend.",
+        ),
+        (
+            "llm_redact_ner_breaker_short_circuits_total",
+            "breaker_short_circuits",
+            "Strings the llm backend failed at once, without asking its model server,"
+            " because its circuit breaker was open (each also in"
+            " llm_redact_ner_errors_total), by backend.",
         ),
         (
             "llm_redact_ner_inline_calls_total",

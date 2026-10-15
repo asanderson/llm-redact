@@ -29,6 +29,19 @@ a generative model must never be trusted with:
   answers with a 503 before any upstream contact; ``"skip"`` goes on with
   the other detectors' findings, counted (``NerStats.errors``) and reported
   as a coverage opt-out.
+* **a hung server costs a timeout per string.** Strings are asked one at a
+  time for the whole proxy, so a server that hangs rather than refusing
+  would hold every new string for ``timeout_ms``. A failure that says the
+  server is down (a timeout, a transport fault, an HTTP 5xx) opens a
+  :class:`CircuitBreaker` for ``breaker_seconds``: until then every string
+  that needs a call fails at once, handled as any failure (``on_error``),
+  without contacting the server; then one probe call is let through, whose
+  success closes it and whose failure opens it again.
+* **a server may require a key.** ``api_key_env`` names an environment
+  variable read at the build and sent as ``Authorization: Bearer`` to
+  ``url`` only (no redirect is followed); the key is kept out of every
+  repr, log line, error and ``/status`` (which says only whether one is
+  configured).
 
 Each request asks for JSON matching a schema of ``{text, type}`` objects
 (``format`` for Ollama, ``response_format`` for OpenAI-compatible servers),
@@ -49,14 +62,15 @@ kind or exception type, never text.
 
 import hashlib
 import logging
+import os
 import re
 import threading
 import time
 import weakref
 from bisect import bisect_right
 from collections import OrderedDict
-from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -103,6 +117,9 @@ MODEL_LIST_SECONDS = 10.0
 # Strings whose findings are remembered (by SHA-256): the history an agent
 # resends with every request is not asked again.
 CACHE_STRINGS = 4096
+# The failure kind of a string failed at once because the circuit breaker
+# is open (no call made).
+BREAKER_OPEN = "circuit breaker open"
 
 SYSTEM_PROMPT = (
     "You find personal and secret values in a text so that they can be redacted before"
@@ -125,7 +142,151 @@ _ALNUM_RE = re.compile(r"[^\W_]")
 
 class _Failed(Exception):
     """A server call failed; the message is a fixed failure kind (never
-    text from the request or the answer)."""
+    text from the request or the answer). ``down``: the failure says the
+    server is down or overloaded — a timeout, a transport fault, an HTTP
+    5xx — and opens the circuit breaker; any other (an error status below
+    500, a redirect, an unreadable, oversized or compressed answer) came
+    from a server that answers, and does not."""
+
+    def __init__(self, reason: str, *, down: bool = False) -> None:
+        super().__init__(reason)
+        self.down = down
+
+
+class ApiKey:
+    """The model server's key (``api_key_env``), kept out of every repr —
+    its own, so a client's, a traceback's or a debugger's view of it shows
+    no key. Read once, at the build."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def header(self) -> str:
+        """The ``Authorization`` header value."""
+        return f"Bearer {self._value}"
+
+    def __repr__(self) -> str:
+        return "<api key>"
+
+    __str__ = __repr__
+
+
+def read_api_key(config: "LlmNerConfig") -> ApiKey | None:
+    """The key ``[detection.ner.llm] api_key_env`` names, from the
+    environment (None when no variable is named). ConfigError when the
+    variable is unset or empty, or holds a character a bearer token cannot
+    carry — naming the variable, never its value."""
+    from llm_redact.config import ConfigError
+
+    name = config.api_key_env
+    if name is None:
+        return None
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ConfigError(
+            f"[detection.ner.llm] api_key_env: the environment variable {name} is unset or empty"
+        )
+    if not all("!" <= char <= "~" for char in value):
+        raise ConfigError(
+            f"[detection.ner.llm] api_key_env: the environment variable {name} holds a"
+            " character a bearer token cannot carry (only visible ASCII); its value is not"
+            " shown"
+        )
+    return ApiKey(value)
+
+
+BreakerState = Literal["off", "closed", "open", "half_open"]
+
+
+class CircuitBreaker:
+    """Stops asking a model server that is down (``breaker_seconds``).
+
+    Closed, every call goes out. A call that fails because the server is
+    down (``_Failed.down``) opens it: for ``seconds`` no call goes out
+    (:meth:`admit` says no, and the string fails at once). Then it is half
+    open: :meth:`admit` lets ONE probe call through at a time, whose success
+    — or any answer from the server — closes it (:meth:`succeeded`) and
+    whose failure opens it again (:meth:`failed`). ``seconds`` 0 = off:
+    every call goes out. Thread-safe; ``clock`` is injectable (tests)."""
+
+    def __init__(self, seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self.seconds = seconds
+        self._clock = clock
+        self._lock = threading.Lock()
+        # When it last opened (None: closed), whether a probe is out, and
+        # the failure kind that opened it.
+        self._opened_at: float | None = None
+        self._probing = False
+        self._reason: str | None = None
+
+    def admit(self) -> bool:
+        """Whether a call may go to the server now."""
+        if self.seconds <= 0:
+            return True
+        with self._lock:
+            if self._opened_at is None:
+                return True
+            if self._probing or self._clock() - self._opened_at < self.seconds:
+                return False
+            self._probing = True  # half open: this call is the probe
+            return True
+
+    def succeeded(self) -> None:
+        """A call got an answer from the server: closed."""
+        with self._lock:
+            self._opened_at = None
+            self._probing = False
+            self._reason = None
+
+    def failed(self, reason: str) -> Literal["opened", "reopened"] | None:
+        """A call failed because the server is down: open (again) from now.
+        ``"opened"`` when it was closed, ``"reopened"`` when the probe
+        failed, None when it was open already (or the breaker is off)."""
+        if self.seconds <= 0:
+            return None
+        with self._lock:
+            if self._opened_at is None:
+                outcome: Literal["opened", "reopened"] | None = "opened"
+            elif self._probing:
+                outcome = "reopened"
+            else:
+                outcome = None
+            self._opened_at = self._clock()
+            self._probing = False
+            self._reason = reason
+            return outcome
+
+    def release(self) -> None:
+        """A call admitted as the probe ended neither way (an unexpected
+        exception): the next call may probe."""
+        with self._lock:
+            self._probing = False
+
+    def status(self) -> dict[str, Any]:
+        """The ``/status`` view: ``state`` (off, closed, open, half_open),
+        ``seconds``, the failure kind that opened it and, while open, the
+        seconds until a probe may go out."""
+        with self._lock:
+            state: BreakerState
+            retry_in: float | None = None
+            if self.seconds <= 0:
+                state = "off"
+            elif self._opened_at is None:
+                state = "closed"
+            else:
+                left = self.seconds - (self._clock() - self._opened_at)
+                if left > 0 and not self._probing:
+                    state, retry_in = "open", round(left, 1)
+                else:
+                    state = "half_open"
+            return {
+                "state": state,
+                "seconds": self.seconds,
+                "reason": self._reason if state in ("open", "half_open") else None,
+                "retry_in_seconds": retry_in,
+            }
 
 
 def make_transport() -> httpx.BaseTransport:
@@ -177,8 +338,12 @@ class _Client:
     """One model server: its chat and model-list calls over one httpx
     client (no proxy from the environment, no redirects, bounded answers)."""
 
-    def __init__(self, config: "LlmNerConfig", types: list[str]) -> None:
+    def __init__(
+        self, config: "LlmNerConfig", types: list[str], api_key: ApiKey | None = None
+    ) -> None:
         self.config = config
+        # Sent with every request, to the configured URL only.
+        self._api_key = api_key
         self.base = config.url.rstrip("/")
         self.origin = server_origin(config.url)
         self._schema = entity_schema(types)
@@ -186,6 +351,11 @@ class _Client:
         self._http = httpx.Client(
             transport=make_transport(), follow_redirects=False, trust_env=False
         )
+
+    @property
+    def authenticated(self) -> bool:
+        """Whether requests carry a key (``api_key_env``)."""
+        return self._api_key is not None
 
     def close(self) -> None:
         self._http.close()
@@ -198,13 +368,15 @@ class _Client:
         bound, docs/detection.md says so); ``_Failed`` naming the failure
         kind."""
         if timeout <= 0:
-            raise _Failed("timeout")
+            raise _Failed("timeout", down=True)
         deadline = time.monotonic() + timeout
         # An answer as sent: a compressed one could inflate past the cap
         # before it is measured.
         headers = {"accept": "application/json", "accept-encoding": "identity"}
         if body is not None:
             headers["content-type"] = "application/json"
+        if self._api_key is not None:
+            headers["authorization"] = self._api_key.header()
         try:
             with self._http.stream(
                 method,
@@ -216,8 +388,9 @@ class _Client:
                 timeout=timeout,
             ) as response:
                 if response.status_code != 200:
-                    # A redirect included: none is followed.
-                    raise _Failed(f"HTTP {response.status_code}")
+                    # A redirect included: none is followed (the key never
+                    # goes to a Location). A 5xx says the server is down.
+                    raise _Failed(f"HTTP {response.status_code}", down=response.status_code >= 500)
                 coding = response.headers.get("content-encoding", "").strip().lower()
                 if coding not in ("", "identity"):
                     raise _Failed("encoded answer")
@@ -228,13 +401,13 @@ class _Client:
                     if len(data) > MAX_ANSWER_BYTES:
                         raise _Failed("answer too large")
                     if time.monotonic() > deadline:
-                        raise _Failed("timeout")
+                        raise _Failed("timeout", down=True)
         except httpx.TimeoutException:
-            raise _Failed("timeout") from None
+            raise _Failed("timeout", down=True) from None
         except _Failed:
             raise
         except Exception as exc:  # noqa: BLE001 — any transport fault is a failed call
-            raise _Failed(type(exc).__name__) from None
+            raise _Failed(type(exc).__name__, down=True) from None
         try:
             return loads_bounded(bytes(data))
         except ValueError:
@@ -423,6 +596,9 @@ class LlmNerDetector:
         self.server = client.origin
         self.api = client.config.api
         self.stats = NerStats()
+        # Fails strings at once while the server is down; a reload that
+        # rebuilds the detector starts a closed one.
+        self.breaker = CircuitBreaker(client.config.breaker_seconds)
         # SHA-256 of a string -> the (value, type) pairs found in it.
         self._cache: OrderedDict[bytes, tuple[tuple[str, str], ...]] = OrderedDict()
         self._cache_lock = threading.Lock()
@@ -479,6 +655,12 @@ class LlmNerDetector:
         found: dict[str, str] = {}
         deadline = time.monotonic() + self._timeout
         for start, end, cut in windows:
+            if not self.breaker.admit():
+                # The server is down: this string fails at once, as any
+                # failure does, without asking it.
+                self.stats.breaker_short_circuits += 1
+                self._failed(BREAKER_OPEN)
+                return tuple(found.items())  # on_error = "skip": what was read
             if cut:
                 # A piece of one word longer than a window: the model
                 # reads that word only in pieces.
@@ -487,8 +669,12 @@ class LlmNerDetector:
             try:
                 entities = self._client.entities(piece, deadline - time.monotonic())
             except _Failed as exc:
-                self._failed(str(exc))
+                self._failed(str(exc), breaker=self._tripped(exc))
                 return tuple(found.items())  # on_error = "skip": what was read
+            except BaseException:
+                self.breaker.release()
+                raise
+            self.breaker.succeeded()
             for value, type_name in self._grounded(entities, piece):
                 found.setdefault(value, type_name)
         self._recovered()
@@ -543,24 +729,61 @@ class LlmNerDetector:
                 continue
             yield value, type_name
 
-    def _failed(self, reason: str) -> None:
-        """A server call failed for the string being read: counted, logged
-        once per outage (model, server and failure kind only), and with
-        on_error = "block" raised as DetectorUnavailable."""
+    def _tripped(self, failure: _Failed) -> Literal["opened", "reopened"] | None:
+        """The circuit breaker after a failed call: opened (again) when the
+        failure says the server is down (counted), else closed — the server
+        answered, so it is up."""
+        if not failure.down:
+            self.breaker.succeeded()
+            return None
+        outcome = self.breaker.failed(str(failure))
+        if outcome is not None:
+            self.stats.breaker_opens += 1
+        return outcome
+
+    def _failed(self, reason: str, *, breaker: str | None = None) -> None:
+        """A string failed (a server call failed, or the circuit breaker is
+        open): counted, logged once per outage (model, server and failure
+        kind only) — and once more when the breaker opens later in it —, and
+        with on_error = "block" raised as DetectorUnavailable."""
         self.stats.errors += 1
+        opened = (
+            f"; circuit breaker open: strings fail at once, without asking it, for"
+            f" {self.breaker.seconds} s, then one probe"
+            if breaker == "opened"
+            else ""
+        )
         if not self._failing:
             self._failing = True
             logger.warning(
-                "llm NER backend: model %r at %s failed (%s); %s",
+                "llm NER backend: model %r at %s failed (%s); %s%s",
                 self._client.config.model,
                 self.server,
                 reason,
                 "requests are refused (on_error = block)"
                 if self.on_error == "block"
                 else "requests go on without its findings (on_error = skip)",
+                opened,
+            )
+        elif opened:
+            logger.warning(
+                "llm NER backend: model server at %s failed (%s)%s", self.server, reason, opened
             )
         if self.on_error == "block":
             raise DetectorUnavailable("llm", reason)
+
+    def server_status(self) -> dict[str, Any]:
+        """The ``/status`` fields of this backend beside its counters: the
+        server's origin, its API, what a failure does (``on_error = "skip"``
+        is a coverage opt-out), whether a key is configured (never the key
+        or its variable) and the circuit breaker's state."""
+        return {
+            "server": self.server,
+            "api": self.api,
+            "on_error": self.on_error,
+            "api_key": self._client.authenticated,
+            "breaker": self.breaker.status(),
+        }
 
     def _recovered(self) -> None:
         if self._failing:
@@ -570,9 +793,11 @@ class LlmNerDetector:
 
 def open_client(config: "NerConfig") -> _Client:
     """A client of ``config``'s model server ([detection.ner.llm]), asking
-    for the types its entities request (labels.py); the caller closes it."""
+    for the types its entities request (labels.py), with its key
+    (:func:`read_api_key`: ConfigError when its variable is unset); the
+    caller closes it."""
     policy = LabelPolicy(config.entities, backend="llm", overrides=config.labels)
-    return _Client(config.llm, list(policy.prompts))
+    return _Client(config.llm, list(policy.prompts), read_api_key(config.llm))
 
 
 def build_llm_detector(config: "NerConfig") -> LlmNerDetector:
@@ -580,7 +805,9 @@ def build_llm_detector(config: "NerConfig") -> LlmNerDetector:
     server was checked (:func:`check_server`)."""
     llm = config.llm
     policy = LabelPolicy(config.entities, backend="llm", overrides=config.labels)
-    client = _Client(llm, list(policy.prompts))
+    # Read here, at every build (startup, serve --check, a reload that
+    # rebuilds the detectors): an unset variable stops the build.
+    client = _Client(llm, list(policy.prompts), read_api_key(llm))
     try:
         check_server(client, min(llm.timeout_ms / 1000, MODEL_LIST_SECONDS))
     except BaseException:

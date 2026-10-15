@@ -55,6 +55,8 @@ NER_FAMILIES = (
     "llm_redact_ner_offsets_dropped_total",
     "llm_redact_ner_ungrounded_total",
     "llm_redact_ner_errors_total",
+    "llm_redact_ner_breaker_opens_total",
+    "llm_redact_ner_breaker_short_circuits_total",
     "llm_redact_ner_inline_calls_total",
     "llm_redact_ner_prefetch_misses_total",
 )
@@ -108,6 +110,8 @@ def test_counters_start_at_zero_and_list_every_field() -> None:
         "offsets_dropped": 0,
         "ungrounded": 0,
         "errors": 0,
+        "breaker_opens": 0,
+        "breaker_short_circuits": 0,
         "inline_calls": 0,
         "prefetch_misses": 0,
     }
@@ -131,6 +135,8 @@ def test_each_string_is_scanned_or_skipped(backend: str) -> None:
         "offsets_dropped": 0,
         "ungrounded": 0,
         "errors": 0,
+        "breaker_opens": 0,
+        "breaker_short_circuits": 0,
         "inline_calls": 0,
         "prefetch_misses": 0,
     }
@@ -488,6 +494,10 @@ def test_metrics_render_each_backend() -> None:
         'llm_redact_ner_ungrounded_total{backend="gliner"} 0',
         'llm_redact_ner_errors_total{backend="hf"} 0',
         'llm_redact_ner_errors_total{backend="gliner"} 0',
+        'llm_redact_ner_breaker_opens_total{backend="hf"} 0',
+        'llm_redact_ner_breaker_opens_total{backend="gliner"} 0',
+        'llm_redact_ner_breaker_short_circuits_total{backend="hf"} 0',
+        'llm_redact_ner_breaker_short_circuits_total{backend="gliner"} 0',
         'llm_redact_ner_inline_calls_total{backend="hf"} 5',
         'llm_redact_ner_inline_calls_total{backend="gliner"} 0',
         'llm_redact_ner_prefetch_misses_total{backend="hf"} 0',

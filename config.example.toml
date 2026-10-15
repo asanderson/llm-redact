@@ -518,6 +518,14 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # on_error = "block"               # a server failure refuses the request (503);
 #                                  # "skip" forwards it without this backend's
 #                                  # findings (a coverage opt-out, counted)
+# breaker_seconds = 30             # after a timeout, transport fault or 5xx, every
+#                                  # string fails at once (as on_error says) for
+#                                  # this long without asking it, then one probe;
+#                                  # 0 = off
+# api_key_env = "VLLM_API_KEY"     # the NAME of an environment variable holding
+#                                  # the key a server requires (sent as
+#                                  # Authorization: Bearer to url only); never
+#                                  # the key itself
 # allow_remote = false
 
 [audit]

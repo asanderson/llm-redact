@@ -336,6 +336,9 @@ def _emit_ner_llm(llm: LlmNerConfig) -> list[str]:
         ("timeout_ms", llm.timeout_ms, default.timeout_ms),
         ("on_error", llm.on_error, default.on_error),
         ("allow_remote", llm.allow_remote, default.allow_remote),
+        ("breaker_seconds", llm.breaker_seconds, default.breaker_seconds),
+        # A variable's NAME only: the key itself is never in the config.
+        ("api_key_env", llm.api_key_env, default.api_key_env),
     ]
     changed = [
         f"{key} = {_toml_value(value)}"

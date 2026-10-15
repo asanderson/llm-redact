@@ -735,13 +735,15 @@ def _check_llm(report: _Report, config: Config, offline: bool = False) -> None:
     loopback: it receives every scanned string UNREDACTED), and the
     startup's own check, read-only — the server lists its models, serves
     the configured one and, on Ollama, at the pinned digest (not asked with
-    ``--offline``). Sends no text and pulls nothing. Silent unless the
+    ``--offline``). With ``api_key_env``, that its variable is set — read
+    offline, never shown. Sends no text and pulls nothing. Silent unless the
     backend is enabled."""
     from llm_redact.config import _is_loopback_host
     from llm_redact.detection.llm_ner import (
         MODEL_LIST_SECONDS,
         check_server,
         open_client,
+        read_api_key,
         server_origin,
     )
 
@@ -758,6 +760,24 @@ def _check_llm(report: _Report, config: Config, offline: bool = False) -> None:
             "llm",
             f"model server {origin} is off loopback (allow_remote = true): it receives every"
             " string the llm backend scans UNREDACTED",
+        )
+    if llm.api_key_env is not None:
+        try:
+            read_api_key(llm)
+        except ConfigError as problem:
+            report.line("FAIL", "llm", f"{problem} — serve would refuse to start")
+            return
+        report.line(
+            "PASS",
+            "llm",
+            f"api key: {llm.api_key_env} is set (sent as a bearer token to the model server only)",
+        )
+    if llm.breaker_seconds == 0:
+        report.line(
+            "WARN",
+            "llm",
+            "breaker_seconds = 0 (circuit breaker off): a model server that hangs holds every"
+            " new string for timeout_ms, one string at a time for the whole proxy",
         )
     if offline:
         report.line("PASS", "llm", "model server not asked (--offline)")

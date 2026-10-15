@@ -220,7 +220,11 @@ server reads every scanned string unredacted, so it stays on loopback unless
 model, and `doctor` checks the same. Its findings only ever add redactions.
 When the server fails a request is refused (503) unless `on_error = "skip"`,
 which forwards it without those findings — a coverage opt-out shown in
-`llm-redact status`.
+`llm-redact status`. A server that times out or is down opens a circuit
+breaker: for `breaker_seconds` (30) every string fails at once without
+asking it, then one probe; `llm-redact status` shows it while open. A
+server that requires a key reads it from the environment variable
+`api_key_env` names (sent as a bearer token, never shown).
 
 Which models exist, what each finds (names; with a PII model also
 addresses, dates of birth, usernames and account numbers, best effort) and

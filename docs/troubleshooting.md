@@ -1064,18 +1064,51 @@ anything reached the provider (counted under
 connection is closed 1011 with "the llm detector could not read this
 frame"). The parenthesis names the failure: `timeout` (the string, every
 window of it, took longer than `timeout_ms`; the first string after Ollama
-unloaded an idle model also waits for it to load), `HTTP NNN`, a connection
-fault by its exception type, `unreadable answer` (not the JSON the request
-asked for — a model or server version without structured output),
-`encoded answer` (the server compressed it although asked not to), `answer
-too large` or `too many entities`. The proxy logs one WARNING per outage
-(`llm NER backend: model 'MODEL' at URL failed (…)`) and an INFO line when
-the server answers again; `errors` in `/status` `detection.ner` and
-`llm_redact_ner_errors_total` count each string. Fix the server, raise
+unloaded an idle model also waits for it to load), `HTTP NNN` (`HTTP 401` or
+`HTTP 403`: the server requires a key — set `api_key_env` — or refuses the
+one it was given), a connection fault by its exception type, `unreadable
+answer` (not the JSON the request asked for — a model or server version
+without structured output), `encoded answer` (the server compressed it
+although asked not to), `answer too large`, `too many entities`, or `circuit
+breaker open`: an earlier string's timeout, connection fault or HTTP 5xx
+opened the backend's circuit breaker, and until `breaker_seconds` (default
+30) have passed every string that needs the server fails at once without
+asking it; then the next string's call probes the server, and an answer
+closes the breaker (`/status` `detection.ner.backends.llm.breaker` shows its
+state and `retry_in_seconds`, and `llm-redact status` a posture line while it
+is open). The proxy logs one WARNING per outage (`llm NER backend: model
+'MODEL' at URL failed (…)`, naming the breaker when it opened) and an INFO
+line when the server answers again; `errors` in `/status` `detection.ner`
+and `llm_redact_ner_errors_total` count each string (`breaker_opens` and
+`breaker_short_circuits` the breaker's part). Fix the server, raise
 `timeout_ms`, or set `on_error = "skip"` to forward such requests with the
 other detectors' findings — a coverage opt-out, shown by `llm-redact status`
 and `doctor`. `llm-redact preview` prints `UNAVAILABLE: …` and exits 1 for
 the same failure.
+
+## "[detection.ner.llm] api_key_env: the environment variable NAME is unset or empty" / "… holds a character a bearer token cannot carry (only visible ASCII) …"
+
+From `serve` / `serve --check`, a reload that changes `[detection]`, the
+editor's dry run, `llm-redact preview` and `llm-redact doctor` (`llm`):
+`api_key_env` names the variable holding the key the model server requires,
+and the process building the backend does not have it, has it empty, or has
+one with a blank, a control character or a non-ASCII character inside (edge
+blanks are trimmed). Export it in the environment `serve` runs in — a
+service unit's `Environment=`/`EnvironmentFile=`, a container's `-e` or
+Secret — or remove `api_key_env` when the server needs no key. A startup
+stops; a reload keeps the running configuration (and the key it was built
+with), and since a running proxy's environment cannot change, a variable
+exported after the start takes a restart. The message names the variable,
+never its value.
+
+## "[detection.ner.llm] api_key_env must name an environment variable …" / "… must not name an LLM_REDACT_ variable …"
+
+`api_key_env` takes a variable's NAME (letters, digits and `_`, not starting
+with a digit), never the key itself — put the key in the environment and
+its variable's name here. A name starting with `LLM_REDACT_` is refused:
+those variables hold llm-redact's own settings and keys (the vault and
+audit keys), which must never reach a model server; use a name of the
+server's own, such as `VLLM_API_KEY`.
 
 ## Tool sees `«EMAIL_001»`-style tokens in responses
 

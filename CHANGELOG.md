@@ -148,14 +148,35 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     `detector_unavailable`. `on_error = "skip"` forwards it with the other detectors' findings
     instead — a coverage opt-out, counted (`errors`) and reported in `/status`, the
     `llm-redact status` posture block and `doctor`, like warn mode.
+  - **A hung server does not stall every string.** Strings are asked one at a time for the
+    whole proxy, so a server that hangs would cost each new string a whole `timeout_ms`. A
+    timeout, a refused or dropped connection or an HTTP 5xx answer now opens a circuit breaker
+    for `breaker_seconds` (default 30, `0` turns it off): until then every string that needs the
+    server fails at once without contacting it, handled as any failure (refused 503 with
+    `on_error = "block"`, forwarded with the other detectors' findings with `"skip"`); then one
+    string's call probes the server, and an answer closes the breaker. One text that makes the
+    model time out, or that the server answers with a 5xx, opens it too — for every string, so
+    with `"skip"` such a text in any request turns the backend's findings off for the cooldown
+    (docs/detection.md). `/status` shows the breaker (`detection.ner.backends.llm.breaker`),
+    `llm-redact status` prints a posture line while it is open, `doctor` WARNs
+    `breaker_seconds = 0`, and the strings it fails at once count in `errors` (so the alert
+    keeps firing) and in `breaker_short_circuits`.
+  - **Servers that require a key.** `api_key_env` names the environment variable holding the
+    key (never the key itself) for vLLM's `--api-key`, a hosted https endpoint, or Ollama
+    behind an authenticating reverse proxy: read at every build, sent as `Authorization:
+    Bearer` to `url` only (no redirect is followed), never logged or shown — `/status` says only
+    whether a key is configured (`api_key`). An unset or empty variable stops the startup with an
+    error naming the variable; `doctor` checks it is set, offline too.
   - Each string costs a model call (a long one is read in 2,000-character windows), run off the
     event loop like every NER backend; what a string held is remembered, so the history an agent
     resends with every request is not asked again. `llm-redact preview` exits 1 and names the
     failure when the server cannot read the text.
-- **Two NER counters**: `ungrounded` and `errors` in `/status` `detection.ner` and as
-  `llm_redact_ner_ungrounded_total` / `llm_redact_ner_errors_total`, both on the shipped Grafana
-  dashboard's NER panel, and a `LlmRedactNerServerFailing` alert in
-  `deploy/prometheus-alerts.yml` while the model server fails.
+- **Four NER counters**: `ungrounded`, `errors`, `breaker_opens` and `breaker_short_circuits` in
+  `/status` `detection.ner` and as `llm_redact_ner_ungrounded_total`,
+  `llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total` and
+  `llm_redact_ner_breaker_short_circuits_total`, all on the shipped Grafana dashboard's NER
+  panel, and a `LlmRedactNerServerFailing` alert in `deploy/prometheus-alerts.yml` while the
+  model server fails.
 
 ### Fixed
 - docs/detection.md and docs/ner-landscape.md said the default `gliner` model finds 0.922 of

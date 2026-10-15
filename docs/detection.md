@@ -383,6 +383,8 @@ model = "MODEL:TAG"            # the model as the server names it: `ollama pull`
 digest = "<64 hex characters>"   # Ollama only: its digest as /api/tags reports it
 timeout_ms = 30000            # one string's time, every window of it
 on_error = "block"            # or "skip"
+breaker_seconds = 30          # the circuit breaker's cooldown; 0 = off
+# api_key_env = "VLLM_API_KEY"   # a server that requires a key: the variable holding it
 ```
 
 **The server receives every scanned string unredacted** — that is what it is
@@ -392,12 +394,33 @@ as written. `url` must therefore be on loopback; a server off loopback is
 refused unless `allow_remote = true` and the scheme is `https`. Requests go
 exactly to `url`: no proxy or netrc from the environment, no redirect
 followed, answers asked for uncompressed (a compressed one is a failure)
-and read no further than 1 MiB. The backend sends no credential of its own,
-and `url` may not carry one. In a container, loopback is the container's
-own: run the model server in the same network namespace (beside llm-redact
-in its Kubernetes pod, or with `docker run --network container:NAME`), or
-put https in front of it and set `allow_remote = true` — a plain-http
-`host.docker.internal` URL is refused.
+and read no further than 1 MiB. `url` may not carry a credential; the
+backend sends one only when `api_key_env` is set (below). In a container,
+loopback is the container's own: run the model server in the same network
+namespace (beside llm-redact in its Kubernetes pod, or with `docker run
+--network container:NAME`), or put https in front of it and set
+`allow_remote = true` — a plain-http `host.docker.internal` URL is refused.
+
+**A server that requires a key** (vLLM started with `--api-key`, a hosted
+https endpoint, Ollama behind an authenticating reverse proxy or Ollama's
+own hosted API — all read the same header): set `api_key_env` to the NAME of
+an environment variable holding the key, never the key itself. The
+variable is read at every build (startup, `serve --check`, a reload that
+changes `[detection]`; a reload that does not keeps the key it was built
+with) from the proxy's own environment, which nothing outside the process
+can change while it runs — a new key, or a variable exported after the
+start, takes a restart. Its edge blanks are trimmed; unset, empty or
+holding anything but visible ASCII, the build stops with an error naming
+the variable, never its value (a reload keeps the running configuration).
+The key is sent as
+`Authorization: Bearer <key>` with every request — the model list and each
+chat, on either `api` — to `url` only: no redirect is followed, so it never
+goes to a `Location`, and the off-loopback rule above holds (plain http only
+on loopback). It is never logged, echoed or shown: `/status` says only
+whether a key is configured (`api_key`), and `llm-redact doctor` checks that
+the variable is set (offline too) without showing it. A variable whose name
+starts with `LLM_REDACT_` is refused: those hold llm-redact's own settings
+and keys, which must never reach a model server.
 
 **Pinned model.** Before the backend is built (at startup, `serve --check`,
 and on a reload that changes `[detection]`) the server must list `model`
@@ -483,11 +506,46 @@ names the failure. A string the model cannot answer within its limits —
 more values than one answer holds (2,048 tokens, 512 values), or text that
 makes it ramble — fails the same way, and a failure is never remembered: with
 `"block"`, every request that carries that string again (a conversation's
-history) is refused until the string leaves it. A server that hangs, rather
-than refusing the connection, costs every new string up to `timeout_ms`
-before it fails — with `"skip"` too, where the next string asks again — and
-strings are asked one at a time for the whole proxy, so keep `timeout_ms`
-well below what your clients wait for an answer.
+history) is refused until the string leaves it.
+
+**Circuit breaker.** A server that hangs, rather than refusing the
+connection, would cost every new string up to `timeout_ms` — and strings are
+asked one at a time for the whole proxy. So a failure that says the server
+is down — a timeout, a transport fault (a refused or dropped connection), an
+HTTP 5xx answer — opens a circuit breaker for `breaker_seconds` (default 30,
+0 = off, at most 3600): until then every string that needs a call fails at
+once without contacting the server, handled exactly as a failure
+(`on_error = "block"`: its request is refused 503 with the reason `circuit
+breaker open`; `"skip"`: it goes on with the other detectors' findings),
+and is counted in `errors` and `breaker_short_circuits`. After the cooldown
+one string's call goes out as a probe: an answer closes the breaker, a
+failure opens it again for another `breaker_seconds` (`breaker_opens` counts
+each opening). A failure from a server that answers — an error status below
+500, a redirect, an answer that is not the requested JSON — fails only its
+own string and never opens the breaker (as the probe's answer, even an
+unusable one, it closes the breaker: the server is up); so does a timeout
+once the server has answered an earlier window of the same string, which is
+that long string's own `timeout_ms` running out. A string the backend
+already read (the cache) or one with nothing to read needs no call and is
+unaffected. While it is open, `/status` shows the breaker
+(`detection.ner.backends.llm.breaker`: `state`, the failure `reason`,
+`retry_in_seconds`) and `llm-redact status` prints a posture line; the
+breaker belongs to the built backend, so a reload that rebuilds it starts a
+closed one. With `"skip"` an open breaker forwards requests without the
+backend's findings for the whole cooldown, even if the server recovers
+sooner — the coverage gap the posture line and `errors` count. Keep
+`timeout_ms` well below what your clients wait for an answer: the string
+that opens the breaker still waits it out.
+
+The failure that opens the breaker can come from one text: a text that
+makes the model ramble past `timeout_ms`, or that the server answers with a
+5xx, opens it for every string, not just that one — and the scanned text is
+not only yours (a web page or file an agent read lands in a request). With
+`"block"` every request that needs the server is then refused for the
+cooldown; with `"skip"` every request goes on without the backend's
+findings for it, again after each cooldown the same text comes back. Keep
+`"block"` where that matters, or set `breaker_seconds = 0` (each such
+string then fails alone, at a whole `timeout_ms` each).
 
 Like every NER backend it is best effort, measured per model, never a
 guarantee ([threat-model.md](threat-model.md#contextual-values-rules-and-models)).
@@ -1348,6 +1406,7 @@ existing `detection.ner_enabled`):
       "counters": {"scanned_whole": 812, "scanned_windowed": 14, "skipped_max_chars": 3,
                    "windows": 61, "windows_truncated": 0, "labels_dropped": 0,
                    "offsets_dropped": 0, "ungrounded": 0, "errors": 0,
+                   "breaker_opens": 0, "breaker_short_circuits": 0,
                    "inline_calls": 0, "prefetch_misses": 0}
     }
   },
@@ -1365,7 +1424,9 @@ existing `detection.ner_enabled`):
 | `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |
 | `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
 | `ungrounded` | `llm` only: values the model server returned whose text does not occur in the text it read, is shorter than two characters or holds a placeholder's guillemet (never redacted) |
-| `errors` | `llm` only: strings its model server failed on (a timeout, an error status, a connection fault, an answer that is not the requested JSON); each refused its request with `on_error = "block"`, and went on without the backend's findings with `"skip"` |
+| `errors` | `llm` only: strings its model server failed on (a timeout, an error status, a connection fault, an answer that is not the requested JSON) and strings its open circuit breaker failed at once; each refused its request with `on_error = "block"`, and went on without the backend's findings with `"skip"` |
+| `breaker_opens` | `llm` only: times its circuit breaker opened (a timeout, a transport fault or an HTTP 5xx; a failed probe opens it again) |
+| `breaker_short_circuits` | `llm` only: strings failed at once, without asking its model server, because its circuit breaker was open (each also in `errors`) |
 | `inline_calls` | strings the backend ran on the event loop itself, holding up every other request for that string's inference, instead of ahead of the redaction on the NER worker thread |
 | `prefetch_misses` | strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced), run inline instead and counted in `inline_calls` too |
 
@@ -1386,14 +1447,18 @@ Hub snapshots. `score_threshold` is the confidence threshold a backend runs at
 and `score_threshold_source` where it comes from: `config` (`[detection.ner]
 score_threshold`), `catalog` (the model's catalog default) or `default` (0.5);
 both are `null` for spaCy and Stanza, which report no confidences. The `llm`
-backend's entry adds `server` (its model server's `scheme://host:port`), `api`
-and `on_error`.
+backend's entry adds `server` (its model server's `scheme://host:port`), `api`,
+`on_error`, `api_key` (whether a key is configured: never the key or its
+variable) and `breaker` (its circuit breaker: `state` — `closed`, `open`,
+`half_open` once the cooldown has passed, `off` with `breaker_seconds = 0` —,
+`seconds`, the `reason` that opened it and, while open, `retry_in_seconds`).
 
 The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
 backend and outcome, `llm_redact_ner_windows_total`,
 `llm_redact_ner_windows_truncated_total`, `llm_redact_ner_labels_dropped_total`,
 `llm_redact_ner_offsets_dropped_total`, `llm_redact_ner_ungrounded_total`,
-`llm_redact_ner_errors_total`, `llm_redact_ner_inline_calls_total`,
+`llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total`,
+`llm_redact_ner_breaker_short_circuits_total`, `llm_redact_ner_inline_calls_total`,
 `llm_redact_ner_prefetch_misses_total`;
 see [observability.md](observability.md)), and `llm-redact status` prints a
 posture line while a backend has skipped strings longer than `max_chars` or an

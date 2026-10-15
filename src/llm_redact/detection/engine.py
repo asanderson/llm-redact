@@ -104,11 +104,12 @@ class CustomRule:
 DEFAULT_SCORE_THRESHOLD = 0.5
 
 # [detection.ner.llm]: the APIs the llm backend speaks, what it does when
-# its server fails on a string, and the server it asks by default (Ollama on
-# loopback).
+# its server fails on a string, the server it asks by default (Ollama on
+# loopback) and how long its circuit breaker stays open by default.
 LLM_APIS = ("ollama", "openai")
 LLM_ON_ERROR = ("block", "skip")
 DEFAULT_LLM_URL = "http://127.0.0.1:11434"
+DEFAULT_LLM_BREAKER_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,13 @@ class LlmNerConfig:
     # reported as a coverage opt-out).
     on_error: str = "block"
     allow_remote: bool = False
+    # After a call fails because the server is down (a timeout, a transport
+    # fault, an HTTP 5xx), every string fails at once, without asking the
+    # server, for this many seconds; then one probe call. 0 = off.
+    breaker_seconds: int = DEFAULT_LLM_BREAKER_SECONDS
+    # The NAME of an environment variable holding a key the server requires
+    # (sent as Authorization: Bearer); the key itself never in the config.
+    api_key_env: str | None = None
 
 
 @dataclass(frozen=True)
@@ -785,16 +793,14 @@ def _source_fields(detector: Detector) -> dict[str, Any]:
 
 def _server_fields(detector: Detector) -> dict[str, Any]:
     """The ``/status`` fields of a backend that asks a model server (the llm
-    backend): the server's origin, its API and what a failure does
-    (``on_error = "skip"`` is a coverage opt-out). Empty for the others."""
-    on_error = getattr(detector, "on_error", None)
-    if not isinstance(on_error, str):
+    backend's ``server_status``: the server's origin, its API, what a
+    failure does — ``on_error = "skip"`` is a coverage opt-out —, whether a
+    key is configured and its circuit breaker). Empty for the others."""
+    status = getattr(detector, "server_status", None)
+    if not callable(status):
         return {}
-    return {
-        "server": getattr(detector, "server", None),
-        "api": getattr(detector, "api", None),
-        "on_error": on_error,
-    }
+    fields = status()
+    return dict(fields) if isinstance(fields, dict) else {}
 
 
 def _threshold_fields(detector: Detector) -> dict[str, Any]:

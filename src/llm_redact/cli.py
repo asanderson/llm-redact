@@ -999,9 +999,10 @@ def _print_posture(payload: dict[str, Any]) -> None:
 def _ner_posture(ner: object) -> list[str]:
     """NER coverage gaps from the /status ``detection.ner`` block (absent on
     an older proxy): strings the models never read because they were
-    longer than max_chars, configured entities no backend can emit, and a
+    longer than max_chars, configured entities no backend can emit, a
     model-server backend that lets requests go on without it when its
-    server fails (``on_error = "skip"``)."""
+    server fails (``on_error = "skip"``), and one whose circuit breaker is
+    open (every string fails at once, its server not asked)."""
     if not isinstance(ner, dict):
         return []
     lines: list[str] = []
@@ -1028,7 +1029,36 @@ def _ner_posture(ner: object) -> list[str]:
                 f'NER {name} on_error = "skip": {failed} string(s) forwarded without its'
                 " findings after its model server failed (the other detectors still applied)"
             )
+    for name, entry in backends.items():
+        breaker = entry.get("breaker") if isinstance(entry, dict) else None
+        if isinstance(breaker, dict) and breaker.get("state") in ("open", "half_open"):
+            lines.append(_breaker_posture(name, entry, breaker))
     return lines
+
+
+def _breaker_posture(name: str, entry: dict[str, Any], breaker: dict[str, Any]) -> str:
+    """The posture line of a model-server backend whose circuit breaker is
+    open: why it opened, what its failures do and when it asks again."""
+    from llm_redact.overrides import printable
+
+    reason = printable(str(breaker.get("reason") or "server down"))[:60]
+    failing = (
+        "requests that need it are refused 503"
+        if entry.get("on_error") != "skip"
+        else "requests go on WITHOUT its findings"
+    )
+    retry = breaker.get("retry_in_seconds")
+    when = (
+        f"a probe in {retry:g} s"
+        if isinstance(retry, int | float) and not isinstance(retry, bool)
+        else "the next string probes it"
+    )
+    short = (entry.get("counters") or {}).get("breaker_short_circuits") or 0
+    return (
+        f"NER {name} circuit breaker OPEN ({reason}): every string fails at once without"
+        f" asking its model server — {failing}; {when} ({short} string(s) failed at once"
+        " so far)"
+    )
 
 
 def _gate_posture(users: object) -> list[str]:

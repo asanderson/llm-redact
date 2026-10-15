@@ -93,6 +93,8 @@ def test_ner_coverage_gap_has_panels_and_an_alert() -> None:
         "llm_redact_ner_offsets_dropped_total",
         "llm_redact_ner_ungrounded_total",
         "llm_redact_ner_errors_total",
+        "llm_redact_ner_breaker_opens_total",
+        "llm_redact_ner_breaker_short_circuits_total",
     ):
         assert family in dashboard, family
     rules = yaml.safe_load((DEPLOY / "prometheus-alerts.yml").read_text())["groups"][0]["rules"]

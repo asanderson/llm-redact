@@ -15,6 +15,12 @@ IBAN; generic secrets of low and border entropy; and cards in runs of
 digit groups, next to every value. There are no exceptions: a loss is
 fixed in the rules.
 
+The same inputs check 1.12.1's pipeline too: this release's rules with
+credit_card's inside reading taken out, a digest pinning the five rules
+1.12.1 changed to their 1.12.1 definitions (1.12.1 is no subset of 1.12.0,
+so the 1.12.0 reference alone would not show that nothing 1.12.1 redacted
+is lost).
+
 This holds under the default [detection.modes]: a newly read value wins
 an overlap like any longer match, so the value it takes in follows its
 rule's mode (docs/detection.md says so).
@@ -49,6 +55,7 @@ from llm_redact.detection.regex_rules import (
     _GENERIC_VALIDATORS,
     _IBAN_PAPER_LENGTHS,
     BUILTIN_RULES,
+    RegexDetector,
     RegexRule,
 )
 from llm_redact.placeholders import PLACEHOLDER_RE
@@ -152,6 +159,9 @@ FROZEN_1_12_0 = {
 # credit_card was frozen, credit_card without its new field, still give
 # 1.12.0's digest of the 82).
 UNCHANGED_1_12_0 = (81, "f0789c5afc755577e920e7cc0a688c18a94d196d62e1dab9bd3e1e9649c3cacc")
+# The five rules 1.12.1 changed, as 1.12.1 defined them (computed from the
+# v1.12.1 source): PLAN_1_12_1 is 1.12.1's pipeline while this holds.
+CHANGED_IN_1_12_1 = (5, "a7f351daf26e85534f4f4fe17128adbd9a5d6ebf453f6e90b9c43149a06cffac")
 
 
 class Frozen:
@@ -175,12 +185,27 @@ ALLOWLIST = build_allowlist(CONFIG)
 OLD_PLAN = DetectorPlan(
     [Frozen(det.name) if det.name in FROZEN_1_12_0 else det for det in build_detectors(CONFIG)]
 )
+# 1.12.1's pipeline: this release's rules, credit_card without the inside
+# reading 1.13.0 added (CHANGED_IN_1_12_1 pins the rest to 1.12.1).
+PLAN_1_12_1 = DetectorPlan(
+    [
+        RegexDetector(dataclasses.replace(det.rule, inside=None))
+        if isinstance(det, RegexDetector) and det.name == "credit_card"
+        else det
+        for det in build_detectors(CONFIG)
+    ]
+)
 VAULT = InMemoryVault()
 RELEASE = Redactor(build_detectors(CONFIG), VAULT, ALLOWLIST)
 
 
 def redacted_by_1_12_0(text: str) -> set[int]:
     winners = _resolve_overlaps(OLD_PLAN.detect(text, ALLOWLIST))
+    return {i for d in winners for i in range(d.start, d.end)}
+
+
+def redacted_by_1_12_1(text: str) -> set[int]:
+    winners = _resolve_overlaps(PLAN_1_12_1.detect(text, ALLOWLIST))
     return {i for d in winners for i in range(d.start, d.end)}
 
 
@@ -329,17 +354,20 @@ def texts(seed: int) -> Iterable[str]:
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
-def test_nothing_1_12_0_redacted_is_forwarded(seed: int) -> None:
-    lost, gained, count = [], 0, 0
+def test_nothing_1_12_0_or_1_12_1_redacted_is_forwarded(seed: int) -> None:
+    lost, gained, gained_since_1_12_1, count = [], 0, 0, 0
     for text in texts(seed):
         count += 1
-        release, old = redacted_by_release(text), redacted_by_1_12_0(text)
-        if old - release:
-            lost.append((text, sorted(old - release)))
+        release = redacted_by_release(text)
+        old, previous = redacted_by_1_12_0(text), redacted_by_1_12_1(text)
+        if (old | previous) - release:
+            lost.append((text, sorted((old | previous) - release)))
         gained += bool(release - old)
+        gained_since_1_12_1 += bool(release - previous)
     assert lost == []
-    # Not vacuous: the inputs hold values 1.12.0 forwarded.
-    assert count > 20_000 and gained > 1_000
+    # Not vacuous: the inputs hold values 1.12.0 forwarded, and cards in
+    # runs of digit groups that 1.12.1 forwarded.
+    assert count > 20_000 and gained > 1_000 and gained_since_1_12_1 > 100
 
 
 def _as_written(func: types.FunctionType) -> tuple[types.FunctionType, str]:
@@ -410,6 +438,21 @@ def test_every_other_rule_is_as_1_12_0_defined_it(monkeypatch: pytest.MonkeyPatc
     # A helper a validator calls counts as part of it (generic_secret's).
     monkeypatch.setattr(regex_rules, "shannon_entropy", len)
     assert _digest(unchanged) != UNCHANGED_1_12_0
+
+
+def test_the_1_12_1_reference_is_1_12_1() -> None:
+    # 1.12.1's pipeline differs from this release's only in credit_card,
+    # whose inside reading it lacks.
+    changed = [rule for rule in BUILTIN_RULES if rule.name in FROZEN_1_12_0]
+    assert _digest(rule for rule in changed if rule.name != "credit_card") == CHANGED_IN_1_12_1
+    previous = {det.name: det for det in PLAN_1_12_1.detectors}
+    card = previous["credit_card"]
+    assert isinstance(card, RegexDetector) and card.rule.inside is None
+    rule = next(rule for rule in BUILTIN_RULES if rule.name == "credit_card")
+    assert card.rule == dataclasses.replace(rule, inside=None)
+    assert [det.name for det in PLAN_1_12_1.detectors] == [
+        det.name for det in build_detectors(CONFIG)
+    ]
 
 
 @pytest.mark.parametrize(

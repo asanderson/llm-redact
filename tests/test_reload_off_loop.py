@@ -667,16 +667,25 @@ async def test_a_reload_building_at_shutdown_is_cancelled_and_its_build_closed(
 
 
 async def test_build_off_loop_closes_an_answer_whose_caller_is_cancelled_as_it_is_made() -> None:
-    # The cancellation lands as the worker hands its answer over (queued on
-    # the loop before the answer is): the caller never sees the answer, and
-    # it is closed — by the cancellation or by the worker, whichever decides
-    # second (both orders: test_the_handoff_closes_a_build_...).
+    # The cancellation lands as the worker hands its answer over: the caller
+    # never sees the answer, and it is closed — by the cancellation or by
+    # the worker, whichever decides second (both orders:
+    # test_the_handoff_closes_a_build_...). The worker waits until the
+    # cancellation has landed before it answers: a cancellation merely
+    # queued first can lose to the answer (CPython 3.13 delivers it first
+    # now and then), and the caller would then rightly take the build.
     loop = asyncio.get_running_loop()
     closed: list[str] = []
+    landed = threading.Event()
     task: asyncio.Task[str]
 
+    def cancel() -> None:
+        task.cancel()
+        landed.set()
+
     def make() -> str:
-        loop.call_soon_threadsafe(task.cancel)
+        loop.call_soon_threadsafe(cancel)
+        assert landed.wait(5)
         return "build"
 
     async def caller() -> str:

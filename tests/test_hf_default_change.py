@@ -6,8 +6,8 @@ configuration that loads the hf default without naming it, and asks for an
 entity the previous default emitted but the new one cannot emit (a raw
 ``PER``, ``ORG``, ``LOC`` or ``MISC`` while raw entities keep their type), is
 refused at every detector build — startup, ``serve --check``, a reload and
-the editor's dry run — with both fixes named; doctor WARNs offline from the
-labels the model catalog records. The default entities (``PERSON``) keep
+the editor's dry run — with both fixes named; doctor FAILs it offline from
+the labels the model catalog records. The default entities (``PERSON``) keep
 working.
 """
 
@@ -348,15 +348,15 @@ def test_a_reload_and_the_editor_dry_run_refuse_and_keep_the_running_config(
 
 def _doctor(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], ner: str
-) -> list[tuple[str, str, str]]:
+) -> tuple[int, list[tuple[str, str, str]]]:
     config = tmp_path / "config.toml"
     config.write_text(f"port = 1\n[detection.ner]\n{ner}\n")
-    run_doctor(argparse.Namespace(config=config, json=True))
+    code = run_doctor(argparse.Namespace(config=config, json=True))
     checks = json.loads(capsys.readouterr().out)["checks"]
-    return [(row["level"], row["area"], row["message"]) for row in checks]
+    return code, [(row["level"], row["area"], row["message"]) for row in checks]
 
 
-def test_doctor_warns_without_loading_a_model(
+def test_doctor_fails_what_every_build_refuses_without_loading_a_model(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from ner_fakes import install_hub
@@ -365,18 +365,21 @@ def test_doctor_warns_without_loading_a_model(
     import sys
 
     monkeypatch.setitem(sys.modules, "transformers", None)  # never imported
-    rows = _doctor(tmp_path, capsys, 'enabled = true\nbackend = "hf"\nentities = ["PER", "ORG"]')
-    assert ("WARN", "ner", _message("PER", "ORG")) in rows
+    # A FAIL, as the startup refuses it (doctor exits non-zero).
+    code, rows = _doctor(
+        tmp_path, capsys, 'enabled = true\nbackend = "hf"\nentities = ["PER", "ORG"]'
+    )
+    assert ("FAIL", "ner", _message("PER", "ORG")) in rows and code == 1
     pin = f'[detection.ner.revisions]\nhf = "{DSLIM_PIN}"'
-    rows = _doctor(tmp_path, capsys, f'enabled = true\nbackend = "hf"\n{pin}')
-    assert ("WARN", "ner", PIN_MESSAGE) in rows
+    code, rows = _doctor(tmp_path, capsys, f'enabled = true\nbackend = "hf"\n{pin}')
+    assert ("FAIL", "ner", PIN_MESSAGE) in rows and code == 1
     for ner in (
         'enabled = true\nbackend = "hf"',
         'enabled = true\nbackend = "hf"\nentities = ["PER"]\nmodel = "dslim/bert-base-NER"',
         f'enabled = true\nbackend = "hf"\nmodel = "dslim/bert-base-NER"\n{pin}',
         'enabled = false\nbackend = "hf"\nentities = ["PER"]',
     ):
-        rows = _doctor(tmp_path, capsys, ner)
+        _code, rows = _doctor(tmp_path, capsys, ner)
         assert not [r for r in rows if r[1] == "ner" and "1.13.0" in r[2]], ner
 
 

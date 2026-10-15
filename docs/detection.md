@@ -662,7 +662,7 @@ startup:
   The decision uses the backend's own label policy (above), so a
   `[detection.ner.labels]` override counts: `PER = "PERSON"` makes `PER` a
   `PERSON` request, which passes. `llm-redact doctor` shows the same line as a
-  WARN without loading a model (from the labels the model catalog records for
+  FAIL without loading a model (from the labels the model catalog records for
   the new default).
 - **A revision pin written for the previous default.** `[detection.ner.revisions]
   hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"` (the commit the model catalog
@@ -671,7 +671,7 @@ startup:
   Every detector build refuses it before any file is looked up, naming both ways
   out: name `dslim/bert-base-NER` in `[detection.ner.models] hf` to keep it at
   that pin, or remove the `hf` entry of `[detection.ner.revisions]` to load the
-  new default at its own catalog pin. `llm-redact doctor` shows the same line.
+  new default at its own catalog pin. `llm-redact doctor` FAILs it the same way.
 
 `openai/privacy-filter` (Apache-2.0; a 1.5B-parameter mixture of experts,
 50M parameters active, 2.8 GB of weights) labels `private_person`,

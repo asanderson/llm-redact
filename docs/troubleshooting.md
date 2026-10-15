@@ -390,7 +390,7 @@ so starting would redact less than before. Settle it in one of two ways:
   default has no label for organizations or places (`ORG`, `LOC`, `MISC`);
   keep the previous default for those.
 
-`llm-redact doctor` shows the same line as a WARN under `ner` without
+`llm-redact doctor` shows the same line as a FAIL under `ner` without
 loading a model. docs/detection.md, "The `hf` default's change in 1.13.0".
 
 ## `[detection.ner.revisions] hf pins the commit the model catalog records for dslim/bert-base-NER, the hf backend's default model before 1.13.0, but no hf model is named, …`
@@ -409,7 +409,7 @@ another repository. Settle it in one of two ways:
   `[detection.ner.revisions]` (it then loads at its own catalog pin), and
   fetch it once with `llm-redact models pull`.
 
-`llm-redact doctor` shows the same line under `ner`.
+`llm-redact doctor` shows the same line as a FAIL under `ner`.
 
 ## `[detection.ner] entities: "…" can never match: no active backend emits it (…)`
 

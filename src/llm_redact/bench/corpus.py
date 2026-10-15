@@ -1028,6 +1028,16 @@ CARD_RUN_CONTEXTS: tuple[tuple[str, int, int], ...] = (
     ('{{"card": "{v} {h}"}}', 0, 3),
     ("Order {g} {v} {h}, thanks", 2, 3),
 )
+# A card before an expiry (a month, then a year of two or four digits)
+# written with the card's own separator {s} (either one after a solid
+# card): the candidate takes the month in and fails the check, and the card
+# is read before the expiry. {g} is a digit group of the given length.
+CARD_EXPIRY_CONTEXTS: tuple[tuple[str, int], ...] = (
+    ("card {v}{s}{m}{s}{y}", 0),
+    ("exp: {v}{s}{m}{s}{y}.", 0),
+    ('{{"card": "{v}{s}{m}{s}{y}"}}', 0),
+    ("Order {g} {v}{s}{m}{s}{y} paid", 2),
+)
 
 
 def _grouped_card(rng: random.Random) -> str:
@@ -1049,23 +1059,27 @@ def _holds_another_card(groups: list[str], card: range) -> bool:
 
 
 def card_run_samples(rng: random.Random) -> list[Sample]:
-    """One card (solid, or in groups of four) in each CARD_RUN_CONTEXTS
-    context, labeled at the card."""
+    """One card (solid, or in groups of four) in each CARD_RUN_CONTEXTS and
+    CARD_EXPIRY_CONTEXTS context, labeled at the card."""
     samples: list[Sample] = []
-    for context, before, after in CARD_RUN_CONTEXTS:
+    contexts = [(context, before, after, False) for context, before, after in CARD_RUN_CONTEXTS]
+    contexts += [(context, before, 0, True) for context, before in CARD_EXPIRY_CONTEXTS]
+    for context, before, after, expiry in contexts:
         card = _grouped_card(rng)
         own = re.split("[ -]", card)
+        separator = card[4] if card[4] in " -" else rng.choice(" -")
         while True:
             g, h = _pick(rng, "0123456789", before), _pick(rng, "0123456789", after)
+            m, y = f"{rng.randint(1, 12):02d}", _pick(rng, "0123456789", rng.choice((2, 4)))
             if before == 4:
                 # A group of four before the card leads with 0 or 1: with the
                 # card's first two it would be an Aadhaar number's 4-4-4 when
                 # it led with 2-9, and that starts first and wins.
                 g = rng.choice("01") + g[1:]
-            groups = [g] * bool(g) + own + [h] * bool(h)
+            groups = [g] * bool(g) + own + [h] * bool(h) + [m, y] * expiry
             if not _holds_another_card(groups, range(bool(g), bool(g) + len(own))):
                 break
-        text = context.format(g=g, h=h, v=card)
+        text = context.format(g=g, h=h, v=card, s=separator, m=m, y=y)
         start = text.index(card)
         samples.append(Sample(text, (LabeledSpan(start, start + len(card), "CREDIT_CARD"),)))
     return samples

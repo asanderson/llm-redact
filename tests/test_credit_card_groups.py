@@ -1,20 +1,22 @@
 """A card written next to another digit group is redacted.
 
 1.12.1 forwarded these unredacted: the credit_card regex reads up to 19
-digits in groups, so a card with a quantity before it or a CVV after it was
-read together with that group, failed the Luhn check, and the scan went on
-after it. Since 1.13.0 a vetoed candidate is looked inside
+digits in groups, so a card with a quantity before it, a CVV or an expiry
+after it was read together with those groups, failed the Luhn check, and the
+scan went on after it. Since 1.13.0 a vetoed candidate is looked inside
 (regex_rules._card_inside, RegexRule.inside): a Luhn-valid stretch from a
 group start to a group end, in a card's own grouping, ending where no other
-built-in rule's value can start inside it and run on. That nothing 1.12.1
-redacted is lost is test_no_loss_since_1_12_0.py (credit_card is frozen
-there, and 1.12.1's pipeline is checked too).
+built-in rule's value can start inside it and run on (where the run ends,
+before one group, or before an expiry: test_no_rule_runs_on_from_inside_a_card
+tries every built-in pattern). That nothing 1.12.1 redacted is lost is
+test_no_loss_since_1_12_0.py (credit_card is frozen there, and 1.12.1's
+pipeline is checked too).
 """
 
 import dataclasses
 import random
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import pytest
 
@@ -71,6 +73,34 @@ def test_a_card_next_to_a_digit_group_is_redacted(text: str, expected: str) -> N
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # An expiry after the card: a month, then a year of two or four
+        # digits, each after the card's own separator.
+        ("card 4111 1111 1111 1111 12 27", "card «CREDIT_CARD_001» 12 27"),
+        ("card 4111-1111-1111-1111-12-27", "card «CREDIT_CARD_001»-12-27"),
+        ("card 4111 1111 1111 1111 01 2031", "card «CREDIT_CARD_001» 01 2031"),
+        ("card 4111-1111-1111-1111-09-2031", "card «CREDIT_CARD_001»-09-2031"),
+        # A solid card's expiry takes either separator, the same twice.
+        ("card 4111111111111111 12 27", "card «CREDIT_CARD_001» 12 27"),
+        ("card 4111111111111111-12-2027", "card «CREDIT_CARD_001»-12-2027"),
+        # American Express and Diners Club; a group before the card too.
+        ("Amex 3782 822463 10005 12 27", "Amex «CREDIT_CARD_001» 12 27"),
+        ("Diners 3056 930902 5904 10 29", "Diners «CREDIT_CARD_001» 10 29"),
+        ("Order 12 4111 1111 1111 1111 12 27", "Order 12 «CREDIT_CARD_001» 12 27"),
+        # At the end of a sentence, a clause, a JSON string.
+        ("card 4111 1111 1111 1111 12 27.", "card «CREDIT_CARD_001» 12 27."),
+        ("4111 1111 1111 1111 12 27: paid", "«CREDIT_CARD_001» 12 27: paid"),
+        ('{"card": "4111 1111 1111 1111 12 27"}', '{"card": "«CREDIT_CARD_001» 12 27"}'),
+    ],
+)
+def test_a_card_before_an_expiry_is_redacted(text: str, expected: str) -> None:
+    assert redacted(text) == expected
+    # 1.12.1 forwarded each of them.
+    assert list(CARD_1_12_1.detect(text)) == []
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "Order 12 4111 1111 1111 1112",  # no stretch passes the check
@@ -89,10 +119,15 @@ def test_near_misses_stay_unredacted(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        # Two groups after the card, or one that makes the two more than
-        # 19 digits: an Aadhaar number (4-4-4) could start inside the card
-        # and run on past it. docs/detection.md lists these residuals.
-        "card 4111 1111 1111 1111 12 34",
+        # Two groups after the card that are no expiry, more than two, or
+        # one that makes the two more than 19 digits: an Aadhaar number
+        # (4-4-4) could start inside the card and run on past it.
+        # docs/detection.md lists these residuals.
+        "card 4111 1111 1111 1111 13 27",  # no month 13
+        "card 4111 1111 1111 1111 12 345",  # nor a three-digit year
+        "card 4111 1111 1111 1111 12 27 123",
+        "card 4111 1111 1111 1111-12-27",  # not the card's separator
+        "card 4111111111111111 12-27",  # nor one separator twice
         "Order 12 4111 1111 1111 1111 5678",
         # An email address could start in its last group.
         "Order 12 4111 1111 1111 1111@example.com",
@@ -168,12 +203,13 @@ def _inside_by_brute_force(match: re.Match[str], limit: int) -> tuple[int, int] 
     for start in range(match.start(), match.end()):
         if start > match.start() and text[start - 1] not in " -":
             continue
-        digits = ""
+        digits, separator = "", None
         for end in range(start + 1, limit + 1):
             last = text[end - 1]
             if last in " -":
                 if text[end - 2] in " -":
                     break
+                separator = separator or last
                 continue
             if not last.isdecimal():
                 break
@@ -182,6 +218,8 @@ def _inside_by_brute_force(match: re.Match[str], limit: int) -> tuple[int, int] 
                 break
             if end < len(text) and re.match(r"\w", text[end]):
                 continue  # inside a group
+            # After the run's end, one group (the two at most 19 digits) or
+            # an expiry after the card's separator (a solid card's: either).
             after = _CARD_END.match(text, end)
             if (
                 len(digits) >= 13
@@ -189,6 +227,7 @@ def _inside_by_brute_force(match: re.Match[str], limit: int) -> tuple[int, int] 
                 and _CARD_GROUPING.fullmatch(text[start:end])
                 and after is not None
                 and (after.group(1) is None or len(digits) + len(after.group(1)) <= 19)
+                and after.group(2) in (None, separator or after.group(2))
                 and _luhn(digits)
                 and (best is None or (len(digits), start) > best[:2])
             ):
@@ -202,7 +241,8 @@ def test_the_card_read_inside_is_the_one_its_definition_names() -> None:
     # them): _card_inside finds what a search of every stretch finds.
     rng = random.Random(21)
     pieces = ("4111", "1111", "12", "123", "3782", "822463", "10005", "x") + (
-        "4111 1111 1111 1111", "4111-1111-1111-1111", "3782 822463 10005", "4111111111111111"
+        "4111 1111 1111 1111", "4111-1111-1111-1111", "3782 822463 10005", "4111111111111111",
+        "12 27", "09-2031", "13 27", "27", "2031",
     )  # fmt: skip
     joins = (" ", "-") * 6 + ("", ".", ". ", ":", ": ", "/", "@", "\u00a0", "  ")
     card = VALUE_GENERATORS["credit_card"][1]
@@ -255,17 +295,90 @@ def test_what_1_12_1_found_is_found_as_before() -> None:
     assert added > 0
 
 
+def _cards_before_tails() -> Iterator[tuple[str, int, int]]:
+    """Cards in every grouping _card_inside reads (solid, fours, 4-6-5,
+    4-6-4) at every length, with each separator, before every tail
+    _card_ends lets them have (the run's end, one group, an expiry) and
+    what may follow it: (text, card start, card end). The digits are 2s
+    (every built-in rule's first digit may be one) or random."""
+    rng = random.Random(3)
+    groupings: list[list[int]] = [[n] for n in range(13, 20)]
+    groupings += [[4] * (n // 4) + ([n % 4] if n % 4 else []) for n in range(13, 20)]
+    groupings += [[4, 6, 5], [4, 6, 4]]
+    for sizes in groupings:
+        for separator in " -":
+            digits = sum(sizes)
+            tails = ["", *(separator + "2" * n for n in range(1, min(4, 20 - digits)))]
+            for expiry_separator in " -" if len(sizes) == 1 else separator:
+                tails += [
+                    expiry_separator + month + expiry_separator + year
+                    for month in ("02", "12")
+                    for year in ("22", "2222")
+                ]
+            for tail in tails:
+                for fill in ("2", None):
+                    groups = [
+                        "".join(fill or rng.choice("0123456789") for _ in range(size))
+                        for size in sizes
+                    ]
+                    card = separator.join(groups)
+                    for before in ("", "x "):
+                        for after in ("", ". x", ": x", " x", "\\n"):
+                            text = f"{before}{card}{tail}{after}"
+                            yield text, len(before), len(before) + len(card)
+
+
+def test_no_rule_runs_on_from_inside_a_card() -> None:
+    # Where _card_inside lets a card end, no other built-in rule's pattern
+    # matches from a place inside the card (its own context around it) to
+    # one past its end: no built-in value can lose characters to the card.
+    patterns = [rule.pattern for rule in BUILTIN_RULES if rule.name != "credit_card"]
+    tried = 0
+    for text, start, end in _cards_before_tails():
+        for pattern in patterns:
+            for pos in range(start + 1, end):
+                found = pattern.match(text, pos)
+                assert found is None or found.end() <= end, (text, pattern.pattern)
+                tried += 1
+    assert tried > 500_000
+
+
+def _expiry_runs(seed: int, count: int) -> list[str]:
+    """Runs of 13 to 40 random digits in groups of one to four, then an
+    expiry-shaped tail (a month 01 to 12, then a year of two or four
+    random digits), all separated by one space or one hyphen."""
+    rng = random.Random(seed)
+    texts = []
+    for _ in range(count):
+        groups, left = [], rng.randint(13, 40)
+        while left:
+            size = min(left, rng.randint(1, 4))
+            groups.append("".join(rng.choice("0123456789") for _ in range(size)))
+            left -= size
+        separator = rng.choice(" -")
+        month = f"{rng.randint(1, 12):02d}"
+        year = f"{rng.randrange(10000):04d}" if rng.random() < 0.5 else f"{rng.randrange(100):02d}"
+        texts.append("ref " + separator.join([*groups, month, year]) + " done")
+    return texts
+
+
 def test_random_digit_runs_hardly_gain_false_positives() -> None:
     # The grouping and the end the stretch must have keep the added false
     # positives small: on these 3,000 runs 12.93% held a Luhn-valid
-    # candidate before and 13.13% now (docs/detection.md's 13.58% and
-    # 13.78% are another 5,000 such runs; without the grouping requirement
-    # 60.40% of those).
+    # candidate before and 13.13% now.
     texts = _runs(7, 3000)
     now = sum(bool(list(CARD.detect(text))) for text in texts)
     before = sum(bool(list(CARD_1_12_1.detect(text))) for text in texts)
     assert before > 300  # Luhn passes one random run in ten
     assert now - before <= len(texts) // 200
+
+
+def test_the_documented_false_positive_figures() -> None:
+    # docs/detection.md's figures: 5,000 runs of digit groups, and 5,000
+    # such runs ending in an expiry-shaped tail, before (1.12.1) and now.
+    for texts, before, now in ((_runs(0, 5000), 672, 686), (_expiry_runs(1, 5000), 724, 729)):
+        assert sum(bool(list(CARD_1_12_1.detect(text))) for text in texts) == before
+        assert sum(bool(list(CARD.detect(text))) for text in texts) == now
 
 
 def test_the_detector_plan_reads_cards_inside_runs() -> None:

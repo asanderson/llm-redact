@@ -113,37 +113,47 @@ Known residuals:
 The `credit_card` rule reads 13 to 19 digits, separated by single spaces
 or hyphens, and checks them with the Luhn algorithm. Up to 1.12.1 a card
 written next to another digit group (a quantity or a year before it, a
-CVV or an expiry month after it) was read together with that group, failed
-the check, and went upstream as sent: `Order 12 4111 1111 1111 1111`,
-`4111 1111 1111 1111 123`. Since 1.13.0, when the check fails, the rule
-looks for a card inside what it read: a stretch from the start of a group
-to the end of one, 13 to 19 digits, written in a card's own grouping
-(solid; groups of four, the last of one to four digits; or 4-6-5 and 4-6-4
-as American Express and Diners Club print them; one separator throughout)
-that passes the check. Of several, it takes the one of most digits (of
-equal length, the one starting last). The stretch may run on past what the
-rule read first when that stopped at its 19th digit
-(`2024 4111 1111 1111 1111`). It must end where the run of groups ends, or
-before one more group when the card and that group are at most 19 digits
-together (`4111 1111 1111 1111 12/27`): no other built-in rule's value
-can then start inside the card and run on past it. What the rule found
-before is found exactly as before, and no card it finds inside a run
-overlaps another of its detections.
+CVV or an expiry after it) was read together with that group, failed the
+check, and went upstream as sent: `Order 12 4111 1111 1111 1111`,
+`4111 1111 1111 1111 123`, `4111 1111 1111 1111 12 27`. Since 1.13.0,
+when the check fails, the rule looks for a card inside what it read: a
+stretch from the start of a group to the end of one, 13 to 19 digits,
+written in a card's own grouping (solid; groups of four, the last of one
+to four digits; or 4-6-5 and 4-6-4 as American Express and Diners Club
+print them; one separator throughout) that passes the check. Of several,
+it takes the one of most digits (of equal length, the one starting last).
+The stretch may run on past what the rule read first when that stopped at
+its 19th digit (`2024 4111 1111 1111 1111`). It must end where the run of
+groups ends; before one more group when the card and that group are at
+most 19 digits together (`4111 1111 1111 1111 12/27`); or before an
+expiry, a month (`01` to `12`) then a year of two or four digits, each
+after the card's own separator (either one, the same twice, after a solid
+card): `4111 1111 1111 1111 12 27`, `4111-1111-1111-1111-12-2027`. No
+other built-in rule's value can then start inside the card and run on past
+it (a test tries every built-in pattern from every place inside cards of
+every grouping). What the rule found before is found exactly as before,
+and no card it finds inside a run overlaps another of its detections.
 
 On 5,000 synthetic negatives (runs of 13 to 40 random digits in groups of
 one to four, separated by one space or one hyphen) the rule finds a card
-in 13.78% of them, against 13.58% before (Luhn passes one random number
-in ten); looking only for a card after a leading group it would be 13.70%,
-and without the grouping requirement 60.40% (37.76% after a leading group
-only).
+in 13.72% of them, against 13.44% in 1.12.1 (Luhn passes one random number
+in ten); the expiry reading adds none there. On 5,000 such runs followed
+by an expiry-shaped pair of groups it finds one in 14.58%, against 14.48%
+in 1.12.1 and 14.50% without the expiry reading. Looking only for a card
+after a leading group it would be 13.54% of the first sample, and without
+the grouping requirement 36.96% (26.94% after a leading group only).
+`tests/test_credit_card_groups.py` pins the shipped figures.
 
 Known residuals:
 
-- A card in a longer run is not read when two or more groups follow it
-  (`4111 1111 1111 1111 12 34`, a card right before a SIN or an NHS
-  number) or one that brings the two past 19 digits
-  (`Order 12 4111 1111 1111 1111 5678`): an Aadhaar number's three groups
-  could start inside the card and run on past it.
+- A card in a longer run is not read when groups follow it that are no
+  expiry (`4111 1111 1111 1111 13 27`, `4111 1111 1111 1111 12 27 123`, a
+  card right before a SIN or an NHS number), an expiry written with
+  another separator (`4111 1111 1111 1111-12-27`), or one group that
+  brings the two past 19 digits (`Order 12 4111 1111 1111 1111 5678`):
+  another rule's value could start inside the card and run on past it (an
+  Aadhaar number's three groups; a US SSN's shape, `111-12-2027` in
+  `4111 1111 1111 111-12-2027`).
 - Nor when the run of groups is followed by one of `-`, `.`, `:`, `@`,
   `%` or `+`, as a paper IBAN is not, except a run of dots or one `:`
   followed by whitespace, a closing quote or bracket, `*`, `<`, a

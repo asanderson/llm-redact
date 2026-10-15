@@ -754,10 +754,31 @@ _GROUP = re.compile(r"\d+")
 # Where such a card may end, so that no other rule's value can start inside
 # it and run on past its end: where the run of groups ends, before what may
 # follow a paper IBAN (a run of dots or one ":" then _CLOSE, else none of
-# "-.:@%+"); or one group (group 1) before such an end, read with the card
-# as one candidate of at most 19 digits (_card_inside checks the length).
+# "-.:@%+"); one group (group 1) before such an end, read with the card as
+# one candidate of at most 19 digits (_card_inside checks the length); or an
+# expiry before such an end, a month (01 to 12) then a year of two or four
+# digits, each after the same separator (group 2), the card's own when it
+# has one (_card_ends): then no built-in rule's value can start inside the
+# card and run on into it (test_credit_card_groups.py tries every one; with
+# a separator of its own, a US SSN can: "4111 1111 1111 111-12-2027").
 _CARD_RUN_END = rf"(?:(?:\.++|:){_CLOSE}|(?![-.:@%+]|[ -]?\d))"
-_CARD_END = re.compile(rf"{_CARD_RUN_END}|[ -](\d+)\b{_CARD_RUN_END}")
+_CARD_END = re.compile(
+    rf"{_CARD_RUN_END}|[ -](\d+)\b{_CARD_RUN_END}"
+    rf"|([ -])(?:0[1-9]|1[0-2])\2(?:\d{{2}}|\d{{4}})\b{_CARD_RUN_END}"
+)
+
+
+def _card_ends(grouping: re.Match[str], after: re.Match[str], digits: int) -> bool:
+    """Whether a card of ``digits`` digits written as ``grouping`` (a
+    _CARD_GROUPING match) may end where ``after`` (the _CARD_END match after
+    it) says: where its run of groups ends; before one group, the two at
+    most 19 digits; or before an expiry written with the card's separator
+    (with either one, the same twice, when the card is solid)."""
+    group, separator = after.group(1, 2)
+    if group is not None:
+        return digits + len(group) <= 19
+    own = grouping.group(1) or grouping.group(2)
+    return own is None or separator in (None, own)
 
 
 def _card_inside(match: re.Match[str], limit: int) -> re.Match[str] | None:
@@ -792,9 +813,9 @@ def _card_inside(match: re.Match[str], limit: int) -> re.Match[str] | None:
                 13 <= digits <= 19
                 and (start, end) != match.span()
                 and (best is None or (digits, start) > best[:2])
-                and _CARD_GROUPING.fullmatch(text, start, end)
+                and (grouping := _CARD_GROUPING.fullmatch(text, start, end)) is not None
                 and (after := _CARD_END.match(text, end)) is not None
-                and (after.group(1) is None or digits + len(after.group(1)) <= 19)
+                and _card_ends(grouping, after, digits)
                 and (card := pattern.match(text, start, end)) is not None
                 and _luhn_ok(card)
             ):

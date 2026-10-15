@@ -34,6 +34,7 @@ import pytest
 
 from llm_redact.config import ConfigError
 from llm_redact.detection.engine import DetectionConfig, NerConfig, build_detectors
+from llm_redact.detection.model_catalog import DEFAULT_MODELS
 from llm_redact.detection.model_files import names_a_path, resolve_model
 from ner_fakes import (
     DEFAULT_REPO,
@@ -42,14 +43,17 @@ from ner_fakes import (
     FakeGliner2,
     FakeHfPipe,
     FakeHub,
+    FakeModelServer,
     FakeSpacy,
     FakeTldExtract,
     install_gliner,
     install_gliner2,
+    install_llm,
     install_presidio,
     install_spacy,
     install_stanza,
     install_transformers,
+    llm_ner_config,
 )
 
 
@@ -109,6 +113,10 @@ def _install(monkeypatch: pytest.MonkeyPatch, backend: str, hub: FakeHub) -> Any
         model2 = FakeGliner2([("Jane Roe", "person", 0.9)])
         install_gliner2(monkeypatch, model2, hub)
         return model2
+    if backend == "llm":
+        # The model server the operator configured (loopback by default),
+        # answering in process: the backend's only connections go there.
+        return install_llm(monkeypatch, FakeModelServer([("Jane Roe", "person")]))
     if backend == "presidio":
         analyzer = FakeAnalyzer(
             [("Jane Roe", "PERSON", 0.9), ("jane.roe@example.com", "EMAIL_ADDRESS", 0.9)],
@@ -128,16 +136,21 @@ def _reach(host: str) -> None:
     socket.create_connection((host, 443), timeout=5)
 
 
-@pytest.mark.parametrize("backend", ["hf", "gliner", "gliner2", "spacy", "presidio", "stanza"])
+@pytest.mark.parametrize(
+    "backend", ["hf", "gliner", "gliner2", "spacy", "presidio", "stanza", "llm"]
+)
 def test_every_backend_starts_and_detects_without_a_connection(
     monkeypatch: pytest.MonkeyPatch, guard: Guard, backend: str
 ) -> None:
     hub = NetworkedHub()
     model = _install(monkeypatch, backend, hub)
     entities = ("PERSON", "EMAIL") if backend == "presidio" else ("PERSON",)
-    config = DetectionConfig(
-        enabled=(), ner=NerConfig(enabled=True, backend=backend, entities=entities)
+    ner = (
+        llm_ner_config()
+        if backend == "llm"
+        else NerConfig(enabled=True, backend=backend, entities=entities)
     )
+    config = DetectionConfig(enabled=(), ner=ner)
     (detector,) = build_detectors(config, startup=True)  # serve / serve --check
     found = {d.value for d in detector.detect(TEXT)}
     assert "Jane Roe" in found
@@ -154,17 +167,34 @@ def test_every_backend_starts_and_detects_without_a_connection(
     if backend == "presidio":
         # Presidio's email check asked tldextract (offline) about the address.
         assert FakeTldExtract.asked == ["jane.roe@example.com"]
+    if backend == "llm":
+        # Its model list at startup, one chat for the text: both to the
+        # configured server and nowhere else.
+        assert [(r.url.host, r.url.port, r.url.path) for r in model.requests] == [
+            ("127.0.0.1", 11434, "/api/tags"),
+            ("127.0.0.1", 11434, "/api/chat"),
+        ]
+        assert hub.calls == []
 
 
 def test_the_guard_sees_a_startup_download(monkeypatch: pytest.MonkeyPatch, guard: Guard) -> None:
     # The fakes reach the network where the libraries would: an allowed
     # startup download of a model the cache lacks.
-    hub = NetworkedHub(uncached={"dslim/bert-base-NER"})
+    hub = NetworkedHub(uncached={DEFAULT_MODELS["hf"]})
     install_transformers(monkeypatch, FakeHfPipe([]), hub)
     config = DetectionConfig(ner=NerConfig(enabled=True, backend="hf", allow_download=True))
     with pytest.raises(ConfigError, match="could not be fetched from the Hugging Face Hub"):
         build_detectors(config, startup=True)
     assert guard.attempts == ["create_connection ('huggingface.co', 443)"]
+
+
+def test_the_guard_sees_the_llm_backends_own_connection(guard: Guard) -> None:
+    # Unfaked, the llm backend's startup check dials its configured server
+    # (loopback by default) — and only that one: in an enclave the server
+    # sits inside it, and an unreachable one stops the start.
+    with pytest.raises(ConfigError, match="model list could not be read"):
+        build_detectors(DetectionConfig(enabled=(), ner=llm_ner_config()), startup=True)
+    assert guard.attempts == ["create_connection ('127.0.0.1', 11434)"]
 
 
 def test_the_guard_sees_tldextracts_own_suffix_list_fetch(
@@ -245,7 +275,7 @@ def test_a_local_folder_loads_without_the_hub_or_a_connection(
 @pytest.mark.parametrize(
     "value",
     [
-        "/models/hf-dslim--bert-base-NER",
+        "/models/hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1",
         "./models/hf-x",
         "~/models/hf-x",
         "models/hf/x",
@@ -291,8 +321,7 @@ def test_the_airgap_configs_load_what_pull_prints() -> None:
         pulled = tomllib.loads((here / pull_name).read_text(encoding="utf-8"))
         served = tomllib.loads((here / serve_name).read_text(encoding="utf-8"))
         ner = pulled["detection"]["ner"]
-        defaults = {"hf": "dslim/bert-base-NER", "gliner": "urchade/gliner_small-v2.1"}
-        models = {b: ner.get("models", {}).get(b, defaults[b]) for b in ner["backends"]}
+        models = {b: ner.get("models", {}).get(b, DEFAULT_MODELS[b]) for b in ner["backends"]}
         expected = {b: f"/models/{folder_name(b, m)}" for b, m in models.items()}
         assert served["detection"]["ner"]["models"] == expected
         assert served["detection"]["ner"]["backends"] == ner["backends"]

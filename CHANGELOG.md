@@ -11,26 +11,194 @@ and tags `vX.Y.Z`.
 
 ## [Unreleased]
 
+**Upgrading:** the `hf` backend has a new default model. A configuration that names no model
+for it (no `[detection.ner.models] hf`, and no `[detection.ner] model` with `hf` the only backend)
+loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-base-NER`:
+- Fetch it once with `llm-redact models pull` (566 MB of weights; `dslim/bert-base-NER` has
+  433 MB). Downloads are off by default, so until then the startup and `serve --check` stop with
+  "hf model 'OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1' at revision … is not (completely) in
+  the local Hugging Face cache … run `llm-redact models pull`". For an air-gapped host, write its
+  folder with `llm-redact models pull --to` (docs/air-gapped.md).
+- To keep the previous default instead, set `[detection.ner.models] hf = "dslim/bert-base-NER"`:
+  it stays in the model catalog at its pin and loads from the cache it already used.
+- `entities = ["PERSON"]` (the default) keeps the `PERSON` placeholder type: the new model's
+  `first_name` and `last_name` labels fold into it.
+- An entity only the previous default emitted — a raw `PER`, `ORG`, `LOC` or `MISC`, which keeps
+  its own type until 2.0.0 — is refused at startup, by `serve --check` and on a reload (which
+  keeps the running configuration), with a message naming the entities: pin
+  `dslim/bert-base-NER` as above, or write `PERSON` instead of `PER`. The new model emits no
+  `ORG`, `LOC` or `MISC`: its nearest labels (`company_name`; `city`, `state`, `country`) are
+  narrower and, asked for, come with types of their own (`COMPANY_NAME`, `CITY`, …), so keep the
+  previous default for those. `llm-redact doctor` FAILs it the same way.
+- A `[detection.ner.revisions] hf` pin of `dslim/bert-base-NER`'s commit
+  (`d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc`, the example pin docs/detection.md showed) with
+  no `hf` model named would now pin the new default to a commit of another repository: it is
+  refused the same way (doctor FAILs it too), before any file is looked up. Name `dslim/bert-base-NER` in
+  `[detection.ner.models] hf` to keep it at that pin, or remove the pin.
+- The new model is trained on NVIDIA Nemotron-PII (CC BY 4.0): if you redistribute its weights
+  (a model folder, an image you build with them), credit "Trained on NVIDIA Nemotron-PII,
+  CC BY 4.0".
+
 ### Security
 - **A card number written next to another digit group went upstream unredacted.**
-  `Order 12 4111 1111 1111 1111`, `4111 1111 1111 1111 123` (a CVV after it) and
-  `exp: 4111 1111 1111 1111 12/27` were forwarded as sent: the `credit_card` rule read the card
-  together with the other group, the Luhn check failed, and nothing was redacted. When the check
-  fails, the rule now looks inside what it read for a card in a card's own grouping (solid,
-  groups of four, or 4-6-5 / 4-6-4) that passes the check, and redacts that. Not read yet: a card
-  followed by two or more digit groups, or by one that brings the two past 19 digits, and one
-  whose run of digit groups is followed by `-`, `.`, `:`, `@`, `%` or `+` glued to more text
-  (docs/detection.md lists the residuals). With the built-in rules and the default modes nothing
-  1.12.1 redacted is forwarded now; a test pins that against 1.12.1's rules. A custom rule's
-  value or an NER span that starts inside such a card and runs on past it loses its part after
-  the card. On random runs of digit groups the rule's false positives barely move (13.58% to
-  13.78% of 5,000 runs).
+  `Order 12 4111 1111 1111 1111`, `4111 1111 1111 1111 123` (a CVV after it),
+  `exp: 4111 1111 1111 1111 12/27` and `4111 1111 1111 1111 12 27` (an expiry after it) were
+  forwarded as sent: the `credit_card` rule read the card together with the other groups, the
+  Luhn check failed, and nothing was redacted. When the check fails, the rule now looks inside
+  what it read for a card in a card's own grouping (solid, groups of four, or 4-6-5 / 4-6-4) that
+  passes the check, and redacts that. Not read yet: a card followed by groups that are no expiry
+  (a month `01`-`12`, then a year of two or four digits, written with the card's own
+  separator), by one group that brings the two past 19 digits, and one whose run of digit
+  groups is followed by `-`, `.`, `:`, `@`, `%` or `+` glued to more text (docs/detection.md
+  lists the residuals). On random runs of digit groups the rule's false positives barely move
+  (13.44% to 13.72% of 5,000 runs; 14.48% to 14.58% of 5,000 runs ending in an expiry-shaped
+  pair of groups).
+- **A custom rule's value or an NER span overlapping a spaced IBAN lost its part outside the
+  IBAN.** In `pay GB82 WEST 1234 5698 7654 32 Main Street`, with `32 Main Street` read as an
+  address, the IBAN (read since 1.12.1) won the overlap and `Main Street` went upstream as sent;
+  a card read inside a run of digit groups (above) would have done the same. Both are now
+  joined with every value they overlap, directly or through other overlapping values: whatever
+  any of them redacts is redacted, overlapping ones as one placeholder typed after the one
+  starting first (`pay «IBAN_001»`), and a value in block mode among them refuses the request.
+  (A finding of the new `llm` backend is not joined: like everywhere, it keeps only what lies
+  outside the other values, here as a placeholder of its own.)
+  Nothing 1.12.1 redacted or refused is forwarded now, with custom rules, NER spans and
+  `[detection.modes]` too: tests pin that against 1.12.1's pipeline (and, for the built-in rules
+  under the default modes, against 1.12.0's).
 
 ### Changed
+- **The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`**
+  (Apache-2.0; `microsoft/deberta-v3-small` fine-tuned on NVIDIA Nemotron-PII), replacing
+  `dslim/bert-base-NER` (see Upgrading). Asked for `PERSON`, the default entities, it finds more
+  names on every measured set outside its own training data: the synthetic corpus 1.000 against
+  0.974 (exact spans 1.000 against 0.951), OpenPII's first 2,000 English rows 0.989 against 0.911,
+  OpenPII's first 2,000 rows (eight languages) 0.829 against 0.527 (both OpenPII figures for the
+  new model measured before 1.12.0's word-by-word decoding), with no false positive on the
+  agent-traffic negatives for either and the same latency class (175 against 176 ms per
+  500-character string measured side by side). Its model catalog status stays "caution" (its
+  five-type measurement misses the false-positive and latency bars); docs/ner-landscape.md, "The
+  `hf` default", records the decision, what holds for the default entities and the caveats. The
+  `hf-default` NER bench baselines are re-recorded for it, and the CI `ner-models` job also
+  pulls `dslim/bert-base-NER`, which the `real_model` tests still read by name.
+- A spaced IBAN no longer imposes the `iban` rule's mode on a value it overlaps (it did since
+  1.12.1; the default modes are unaffected): with `credit_card = "block"` a spaced IBAN holding a
+  Luhn-valid card number refuses the request again, and with `iban = "warn"` that card number is
+  redacted. Values overlapping a card read inside a run of digit groups are treated alike, and a
+  warn-mode value among them is forwarded only where no redacted value covers it. Where the
+  proxy cannot rewrite the text (a verbatim field, an upload's extracted text), a span joining
+  two or more such values refuses the request with no override code, as a deny string does.
+  docs/detection.md describes how such values are joined.
 - The latency smoke check (`python -m llm_redact.bench --latency --check`) allows the proxy's
   own overhead on a 100 KB body up to 300 ms (was 150 ms). It is a tripwire for gross
   regressions such as quadratic behavior, measured at about 44 ms; a loaded shared CI runner
   once landed at 150.3 ms on an unchanged hot path. docs/assurance.md lists the ceilings.
+
+### Added
+- A configuration that loads the `hf` default without naming it and asks for an entity the
+  previous default emitted but the new one cannot is refused at every detector build (startup,
+  `serve --check`, a reload, the config editor's check) instead of redacting less, decided by the
+  backend's own label policy (a `[detection.ner.labels]` override counts) and named in a
+  message that lists the entities and both fixes; `llm-redact doctor` FAILs it under `ner` from
+  the labels the model catalog records for the new default, without loading a model. A
+  `[detection.ner.revisions] hf` pin of the previous default's commit with no `hf` model named
+  is refused alike, with its two fixes.
+- **A read-only capture seam for plugins: scan sinks.** A plugin (llm-redact-pro's opt-in capture of
+  training text is what it is for) may register sinks through `Registry.build_scan_sinks`; each is
+  handed, off the event loop, the strings a request's redaction scanned — JSON body strings, upload
+  form fields, file names and text or JSONL file parts, text an upload inspector extracted, realtime
+  client frames — with every detection's type, span and the rule or NER backend that found it. Only
+  once the redaction succeeded and the request is handed to its upstream: a refused request is never
+  captured, and nothing the proxy forwards without scanning it (a `detection = false` provider, a
+  pass-through route) is. The contract is `plugin_api.ScanSink` (`wants`, `capture`, `close`) with
+  the frozen `ScanContext`, `ScannedString` and `ScannedDetection`. **A sink receives unredacted
+  text** — the values the proxy keeps from the provider; what it keeps is outside the vault's
+  protections (docs/plugins.md, docs/threat-model.md). Captures are handed to the sinks on one
+  worker thread behind a bounded queue (256 captures, 16 Mi characters, 256 Ki strings plus
+  detections): a full queue drops and counts, a slow sink never delays a request (only `wants`, a
+  cheap synchronous yes or no, is asked on the event loop), and a sink's fault is counted
+  (`llm_redact_bookkeeping_errors_total{stage="scan_sink"}`) and logged by exception type only. A
+  sink with an `async def` member, or a factory answer that is not a tuple of sinks, refuses the
+  startup. The queue drains (at most 5 s, beside the vault's map-write drain, so the shutdown budget
+  is unchanged) before the sinks close at shutdown. `/status` gains a `scan_capture` block (sinks,
+  queued, delivered, dropped — in all and by reason —, faults) and `llm-redact status` a posture
+  line while any sink is registered. The Free core registers no sink, and then nothing is recorded
+  or queued: the request path is unchanged.
+- **Prometheus metrics for the scan sinks' capture queue.** While a plugin registers a scan sink,
+  `/metrics` serves `llm_redact_scan_captures_delivered_total` (one for each sink a capture
+  reached), `llm_redact_scan_captures_dropped_total{reason}` (the queue bound a dropped capture
+  would have passed — `captures`, `characters`, `items` — or `shutdown`, every reason from zero)
+  and the gauge `llm_redact_scan_capture_queue_depth`; without a sink only their `# HELP`/`# TYPE`
+  lines are there, as for the audit sinks' counters. A new alert in
+  `deploy/prometheus-alerts.yml`, `LlmRedactScanCapturesDropped` (warning), fires when captures
+  keep being dropped for 30 minutes: the requests are unaffected, the plugin misses their text.
+- **An opt-in `llm` NER backend: a generative model on a server you run finds names, addresses
+  and other contextual values.** Add `"llm"` to `[detection.ner] backends` and name the server in
+  `[detection.ner.llm]`: Ollama (`api = "ollama"`, the default, at `http://127.0.0.1:11434`) or
+  an OpenAI-compatible server (`api = "openai"`: vLLM, llama.cpp's server, LM Studio), the
+  `model`, and on Ollama the model's `digest` as `/api/tags` reports it. No extra and no new
+  dependency; off by default, and no server is contacted unless you configure one.
+  - **The server reads every scanned string unredacted**, so `url` must be on loopback unless
+    `allow_remote = true` and the scheme is https. Requests go to that URL only: no proxy from
+    the environment, no redirect followed, answers capped.
+  - **Only real values, and only ever more redaction.** A value is kept only when its text
+    occurs verbatim in the text the model read (then it is redacted wherever it occurs in the
+    string, never inside a placeholder an earlier turn left there); anything the model invents
+    is dropped and counted (`ungrounded`). The findings can
+    never take another detector's place: a text that tells the model to "return no entities",
+    or a crafted answer overlapping an API key, cannot leave anything the regex rules or other
+    backends redact unredacted.
+  - **Pinned and checked at startup.** The startup (and a reload that changes `[detection]`)
+    checks that the server serves the model — on Ollama at the pinned digest, so a re-tagged
+    model is refused; llm-redact never pulls one. The check waits at most 10 seconds for the
+    server's model list. `llm-redact doctor` makes the same read-only check (`doctor --offline`
+    skips it).
+  - **A failing server refuses the request by default.** On a timeout or an error (`timeout_ms`
+    per string, default 30 s) the request is answered 503 before anything is forwarded (a
+    realtime connection is closed 1011), counted under the new local-refusal kind
+    `detector_unavailable`. `on_error = "skip"` forwards it with the other detectors' findings
+    instead — a coverage opt-out, counted (`errors`) and reported in `/status`, the
+    `llm-redact status` posture block and `doctor`, like warn mode.
+  - **A hung server does not stall every string.** Strings are asked one at a time for the
+    whole proxy, so a server that hangs would cost each new string a whole `timeout_ms`. A
+    timeout, a refused or dropped connection or an HTTP 5xx answer now opens a circuit breaker
+    for `breaker_seconds` (default 30, `0` turns it off): until then every string that needs the
+    server fails at once without contacting it, handled as any failure (refused 503 with
+    `on_error = "block"`, forwarded with the other detectors' findings with `"skip"`); then one
+    string's call probes the server, and an answer closes the breaker. One text that makes the
+    model time out, or that the server answers with a 5xx, opens it too — for every string, so
+    with `"skip"` such a text in any request turns the backend's findings off for the cooldown
+    (docs/detection.md). `/status` shows the breaker (`detection.ner.backends.llm.breaker`),
+    `llm-redact status` prints a posture line while it is open, `doctor` WARNs
+    `breaker_seconds = 0`, and the strings it fails at once count in `errors` (so the alert
+    keeps firing) and in `breaker_short_circuits`.
+  - **Servers that require a key.** `api_key_env` names the environment variable holding the
+    key (never the key itself) for vLLM's `--api-key`, a hosted https endpoint, or Ollama
+    behind an authenticating reverse proxy: read at every build, sent as `Authorization:
+    Bearer` to `url` only (no redirect is followed), never logged or shown — `/status` says only
+    whether a key is configured (`api_key`). An unset or empty variable stops the startup with an
+    error naming the variable; `doctor` checks it is set, offline too.
+  - Each string costs a model call (a long one is read in 2,000-character windows), run off the
+    event loop like every NER backend; what a string held is remembered, so the history an agent
+    resends with every request is not asked again. `llm-redact preview` exits 1 and names the
+    failure when the server cannot read the text.
+- **Four NER counters**: `ungrounded`, `errors`, `breaker_opens` and `breaker_short_circuits` in
+  `/status` `detection.ner` and as `llm_redact_ner_ungrounded_total`,
+  `llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total` and
+  `llm_redact_ner_breaker_short_circuits_total`, all on the shipped Grafana dashboard's NER
+  panel, and a `LlmRedactNerServerFailing` alert in `deploy/prometheus-alerts.yml` while the
+  model server fails.
+
+### Fixed
+- docs/detection.md and docs/ner-landscape.md said the default `gliner` model finds 0.922 of
+  OpenPII's English names, a figure no recorded bench result backs (none of the `gliner`
+  default's recorded runs covers that slice); it is gone, and the `hf` figure beside it is now
+  the new default's.
+- **A request the redaction refuses part way no longer runs its NER models on the event loop.**
+  With NER enabled, a body holding more strings than `max_body_strings` (or a part the redaction
+  cannot read) had every string before that point detected inline, holding every other request
+  meanwhile — up to 100,000 model calls by default before the 413. Those strings are now detected
+  on the NER worker thread like any other request's; the refusal itself is unchanged.
+
 
 ## [1.12.1] - 2026-10-14
 

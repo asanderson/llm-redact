@@ -41,7 +41,7 @@ from llm_redact.config import (
     UsersConfig,
     VaultKmsConfig,
 )
-from llm_redact.detection.engine import DetectionConfig
+from llm_redact.detection.engine import DetectionConfig, LlmNerConfig
 
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 
@@ -324,6 +324,30 @@ def _emit_vault_kms(lines: list[str], kms: VaultKmsConfig) -> None:
             lines.append(f"{key} = {_toml_str(getattr(kms, key))}")
 
 
+def _emit_ner_llm(llm: LlmNerConfig) -> list[str]:
+    """[detection.ner.llm], its keys that differ from the defaults (none at
+    all when every one is the default)."""
+    default = LlmNerConfig()
+    values: list[tuple[str, str | int | bool | None, str | int | bool | None]] = [
+        ("url", llm.url, default.url),
+        ("api", llm.api, default.api),
+        ("model", llm.model, default.model),
+        ("digest", llm.digest, default.digest),
+        ("timeout_ms", llm.timeout_ms, default.timeout_ms),
+        ("on_error", llm.on_error, default.on_error),
+        ("allow_remote", llm.allow_remote, default.allow_remote),
+        ("breaker_seconds", llm.breaker_seconds, default.breaker_seconds),
+        # A variable's NAME only: the key itself is never in the config.
+        ("api_key_env", llm.api_key_env, default.api_key_env),
+    ]
+    changed = [
+        f"{key} = {_toml_value(value)}"
+        for key, value, unset in values
+        if value != unset and value is not None
+    ]
+    return ["\n[detection.ner.llm]", *changed] if changed else []
+
+
 def emit_config_toml(config: Config, *, banner: bool = True) -> str:
     # banner=False for display surfaces (`config show`): the editor banner
     # talks about file-writing and .bak, which is wrong for stdout.
@@ -461,6 +485,7 @@ def emit_config_toml(config: Config, *, banner: bool = True) -> str:
         lines.append("\n[detection.ner.labels]")
         for label, type_name in ner.labels:
             lines.append(f"{_toml_str(label)} = {_toml_str(type_name)}")
+    lines.extend(_emit_ner_llm(ner.llm))
 
     for entry in detection.deny_strings:
         # Always the canonical per-entry form: the `deny = [...]` sugar folds

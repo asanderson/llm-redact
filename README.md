@@ -523,8 +523,10 @@ the curl output shows the originals restored in the stream.
 - Optional **NER models** (off by default) for what no rule can match:
   person names, and with a PII-trained model street addresses, dates of
   birth, usernames and account numbers — best effort, measured per model by
-  the NER bench, never a guarantee. Six backends (spaCy, GLiNER, GLiNER2,
-  Presidio, Stanza, and any Hugging Face token-classification model);
+  the NER bench, never a guarantee. Seven backends (spaCy, GLiNER, GLiNER2,
+  Presidio, Stanza, any Hugging Face token-classification model, and an
+  opt-in generative model on a server you run, which reads the text
+  unredacted and can only add redactions);
   strings longer than a model's window are read in overlapping windows, and
   every string a model did not read is counted in `/status` and `/metrics`.
   Models load at a pinned commit for a catalogued model or when you pin

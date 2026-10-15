@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from llm_redact.bench import corpus as recall_corpus
@@ -950,6 +950,9 @@ _STOPS = set("\"'`()[]{}<>")
     window=st.sampled_from([6, 9, 512]),
     every_piece=st.booleans(),
 )
+# A word read in parts whose second part starts on a character no piece
+# covers (the fake byte-level tokenizer leaves "_" out).
+@example(text="0:0000_0", picks=["O", "B-first_name"], style="bpe", window=6, every_piece=False)
 def test_spans_cover_whole_words_and_tagged_characters_only(
     text: str, picks: list[str], style: str, window: int, every_piece: bool
 ) -> None:
@@ -995,8 +998,15 @@ def test_spans_cover_whole_words_and_tagged_characters_only(
         start, end, name = entity["start"], entity["end"], entity["entity_group"]
         assert 0 <= start < end <= len(text)
         # A span starts at a word, at a piece inside one (a word no window
-        # reads whole is read in parts) or at a character it grew over …
-        assert start in word_starts or start in piece_starts or grows(start, name)
+        # reads whole is read in parts), where the part before it ended (a
+        # part runs from there, so a character no piece covers goes with the
+        # part after it) or at a character it grew over …
+        assert (
+            start in word_starts
+            or start in piece_starts
+            or (start in piece_ends and start in in_word)
+            or grows(start, name)
+        )
         assert end in word_ends or end in piece_ends or grows(end - 1, name)
         # … holds no quote, bracket or newline, and between its words only
         # one or two blanks, a comma and a space, a slash, or characters

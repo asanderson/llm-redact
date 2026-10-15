@@ -3,7 +3,8 @@
 How to run llm-redact, NER models included, inside an enclave that has no
 route to the internet. Everything the proxy needs is prepared on a connected
 machine and carried in; inside, nothing is downloaded and nothing but your
-LLM provider is ever contacted.
+LLM provider is ever contacted (and, when you enable the opt-in `llm` NER
+backend, the model server you name for it, on loopback by default).
 
 With `[detection.ner] allow_download` unset (it defaults to `false`) the
 proxy opens no connection to load a model: the Hub backends (`hf`, `gliner`,
@@ -123,7 +124,7 @@ enabled = true
 backends = ["hf", "gliner"]
 
 [detection.ner.models]
-hf = "/models/hf-dslim--bert-base-NER"
+hf = "/models/hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1"
 gliner = "/models/gliner-urchade--gliner_small-v2.1"
 ```
 
@@ -164,7 +165,7 @@ extraConfig: |
   enabled = true
   backends = ["hf", "gliner"]
   [detection.ner.models]
-  hf = "/models/hf-dslim--bert-base-NER"
+  hf = "/models/hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1"
   gliner = "/models/gliner-urchade--gliner_small-v2.1"
 ```
 
@@ -189,7 +190,8 @@ folders, so it needs no writable cache.
 service manager cannot attach the cgroup BPF programs it needs, so systemd
 logs `unit configures an IP firewall, but not running as root.` once and
 starts the service with no filter at all. To keep the proxy from reaching
-anything but your provider, use one of these instead:
+anything but your provider (and, with the `llm` NER backend, its model
+server: on loopback it needs no rule of its own), use one of these instead:
 
 - **The host's (or the enclave's) firewall**, for the account the proxy
   runs as. Run it under a dedicated account so the rule limits nothing

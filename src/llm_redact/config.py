@@ -16,8 +16,11 @@ from typing import TYPE_CHECKING, Any
 from llm_redact.detection.deny import DenyEntry
 from llm_redact.detection.engine import (
     BINARY_UPLOAD_MODES,
+    LLM_APIS,
+    LLM_ON_ERROR,
     CustomRule,
     DetectionConfig,
+    LlmNerConfig,
     NerConfig,
 )
 from llm_redact.detection.labels import normalize_label
@@ -1654,6 +1657,155 @@ def _parse_ner_onnx(onnx_raw: object) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(files.items()))
 
 
+# [detection.ner.llm]: every NER backend, the model server one included.
+NER_BACKENDS = ("spacy", "gliner", "gliner2", "presidio", "stanza", "hf", "llm")
+_LLM_KEYS = {
+    "url",
+    "api",
+    "model",
+    "digest",
+    "timeout_ms",
+    "on_error",
+    "allow_remote",
+    "breaker_seconds",
+    "api_key_env",
+}
+# A model name as servers spell them (Ollama's "name:tag", a Hub id, a file
+# path): printable, no blank or control character.
+_LLM_MODEL_RE = re.compile(r"[^\s\x00-\x1f\x7f]{1,256}")
+_LLM_DIGEST_RE = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
+LLM_TIMEOUT_MS = (100, 600_000)
+# [detection.ner.llm] breaker_seconds: 0 (off) up to an hour.
+LLM_BREAKER_SECONDS = (0, 3600)
+
+
+def llm_url_problem(url: str, *, allow_remote: bool) -> str | None:
+    """Why ``url`` cannot be the llm backend's model server, else None: an
+    http(s) URL with a host and no credentials, query or fragment, and — as
+    the server receives the scanned text UNREDACTED — loopback, unless
+    ``allow_remote`` is set and the scheme is https."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "must look like http://127.0.0.1:11434"
+    if parts.username is not None or parts.password is not None:
+        return "must not carry credentials"
+    if parts.query or parts.fragment:
+        return "must not carry a query string or fragment"
+    if _is_loopback_host(parts.hostname):
+        return None
+    if not allow_remote or parts.scheme != "https":
+        return (
+            "is off loopback, and the model server receives the scanned text UNREDACTED;"
+            " a remote server needs allow_remote = true and https"
+        )
+    return None
+
+
+def _parse_ner_llm(raw: object, *, required: bool) -> LlmNerConfig:
+    """[detection.ner.llm] -> LlmNerConfig. ``required``: the llm backend
+    is enabled and active, so its model (and, on Ollama, its digest) must be
+    set. Messages name keys, never a value."""
+    where = "[detection.ner.llm]"
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table")
+    _require_keys(raw, _LLM_KEYS, where)
+    default = LlmNerConfig()
+    api = raw.get("api", default.api)
+    if api not in LLM_APIS:
+        raise ConfigError(f"{where} api must be one of {list(LLM_APIS)}")
+    allow_remote = _bool_key(raw, "allow_remote", default.allow_remote, where)
+    url = raw.get("url", default.url)
+    if not isinstance(url, str):
+        raise ConfigError(f"{where} url must be a string")
+    problem = llm_url_problem(url, allow_remote=allow_remote)
+    if problem is not None:
+        raise ConfigError(f"{where} url {problem}")
+    url = url.rstrip("/")
+    tail = {"openai": "/v1", "ollama": "/api"}[api]
+    if urllib.parse.urlsplit(url).path.endswith(tail):
+        raise ConfigError(
+            f"{where} url is the server's base URL, without {tail} (the backend adds the"
+            " API's paths)"
+        )
+    model = raw.get("model")
+    if model is not None and not (isinstance(model, str) and _LLM_MODEL_RE.fullmatch(model)):
+        raise ConfigError(f"{where} model must be the model's name on the server")
+    digest = raw.get("digest")
+    if digest is not None:
+        if api != "ollama":
+            raise ConfigError(
+                f"{where} digest: an OpenAI-compatible server reports no model digest (api ="
+                ' "openai"); leave it out — the model name is checked against /v1/models'
+            )
+        found = _LLM_DIGEST_RE.fullmatch(digest.lower()) if isinstance(digest, str) else None
+        if found is None:
+            raise ConfigError(
+                f"{where} digest must be the 64-character hex digest /api/tags reports for the"
+                " model (with or without sha256:); `ollama list` shows only its first 12"
+            )
+        digest = found.group(1)
+    if required and model is None:
+        raise ConfigError(f'{where} model is required with the "llm" backend')
+    if required and api == "ollama" and digest is None:
+        raise ConfigError(
+            f'{where} digest is required with api = "ollama": pin the digest /api/tags'
+            " reports for the model, so a model re-tagged on the server is refused"
+        )
+    timeout_ms = raw.get("timeout_ms", default.timeout_ms)
+    low, high = LLM_TIMEOUT_MS
+    if (
+        isinstance(timeout_ms, bool)
+        or not isinstance(timeout_ms, int)
+        or not (low <= timeout_ms <= high)
+    ):
+        raise ConfigError(f"{where} timeout_ms must be an integer from {low} to {high}")
+    on_error = raw.get("on_error", default.on_error)
+    if on_error not in LLM_ON_ERROR:
+        raise ConfigError(f"{where} on_error must be one of {list(LLM_ON_ERROR)}")
+    breaker_seconds = raw.get("breaker_seconds", default.breaker_seconds)
+    low, high = LLM_BREAKER_SECONDS
+    if (
+        isinstance(breaker_seconds, bool)
+        or not isinstance(breaker_seconds, int)
+        or not (low <= breaker_seconds <= high)
+    ):
+        raise ConfigError(f"{where} breaker_seconds must be an integer from {low} (off) to {high}")
+    return LlmNerConfig(
+        url=url,
+        api=api,
+        model=model,
+        digest=digest,
+        timeout_ms=timeout_ms,
+        on_error=on_error,
+        allow_remote=allow_remote,
+        breaker_seconds=breaker_seconds,
+        api_key_env=_llm_api_key_env(raw, where),
+    )
+
+
+def _llm_api_key_env(raw: Mapping[str, Any], where: str) -> str | None:
+    """[detection.ner.llm] api_key_env: the NAME of the environment variable
+    holding the server's key (the key itself never lives in the file). The
+    value is never echoed — the realistic mistake is pasting the key here —
+    and none of llm-redact's own variables may be named: one holds the vault
+    or audit keys, which must never reach a model server."""
+    name = raw.get("api_key_env")
+    if name is None:
+        return None
+    if not isinstance(name, str) or _ENV_NAME_RE.fullmatch(name) is None:
+        raise ConfigError(
+            f"{where} api_key_env must name an environment variable (letters, digits and _);"
+            " the key itself never lives in the config file"
+        )
+    if name.upper().startswith("LLM_REDACT_"):
+        raise ConfigError(
+            f"{where} api_key_env must not name an LLM_REDACT_ variable: those hold"
+            " llm-redact's own settings and keys (the vault and audit keys), which must never"
+            " reach a model server; name a variable of the model server's own"
+        )
+    return name
+
+
 def _parse_deny(detection_raw: dict[str, Any]) -> tuple[DenyEntry, ...]:
     """Both deny surfaces -> one canonical, sorted DenyEntry tuple.
 
@@ -2572,10 +2724,11 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
             "onnx",
             "allow_download",
             "allow_pickle_weights",
+            "llm",
         },
         "[detection.ner]",
     )
-    known_backends = ("spacy", "gliner", "gliner2", "presidio", "stanza", "hf")
+    known_backends = NER_BACKENDS
     backend_name = str(ner_raw.get("backend", "spacy"))
     if backend_name not in known_backends:
         raise ConfigError(
@@ -2592,9 +2745,23 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         if not backends:
             raise ConfigError("[detection.ner] backends must not be empty when set")
     models_raw = ner_raw.get("models", {})
+    if isinstance(models_raw, dict) and "llm" in models_raw:
+        raise ConfigError(
+            "[detection.ner.models] llm: the llm backend's model is set in"
+            " [detection.ner.llm] model"
+        )
     _require_keys(models_raw, set(known_backends), "[detection.ner.models]")
     models = tuple(sorted((str(k), str(v)) for k, v in models_raw.items()))
     active = backends if backends is not None else (backend_name,)
+    enabled = _bool_key(ner_raw, "enabled", False, "[detection.ner]")
+    if enabled and active == ("llm",) and "model" in ner_raw:
+        # The single `model` key applies to a lone backend, but this one's
+        # model lives in its own table: a silently inert key misleads (kept
+        # while NER is off, as an editor switching backends may keep it).
+        raise ConfigError(
+            "[detection.ner] model does not apply to the llm backend; set [detection.ner.llm] model"
+        )
+    llm = _parse_ner_llm(ner_raw.get("llm", {}), required=enabled and "llm" in active)
     if "score_threshold" in ner_raw and not any(b in CONFIDENCE_BACKENDS for b in active):
         # spaCy and stanza emit no per-entity confidences; a silently ignored
         # knob would violate the reject-unknown-keys spirit.
@@ -2603,7 +2770,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         )
     default_ner = NerConfig()
     ner = NerConfig(
-        enabled=_bool_key(ner_raw, "enabled", False, "[detection.ner]"),
+        enabled=enabled,
         backend=backend_name,
         backends=backends,
         entities=_str_list(ner_raw, "entities", default_ner.entities, "[detection.ner]"),
@@ -2625,6 +2792,7 @@ def parse_config(raw: dict[str, Any], where: str) -> Config:
         # the form.
         allow_download=_bool_key(ner_raw, "allow_download", False, "[detection.ner]"),
         allow_pickle_weights=_bool_key(ner_raw, "allow_pickle_weights", False, "[detection.ner]"),
+        llm=llm,
     )
     if ner.enabled and languages is not None and ner.language.lower() not in languages:
         # Loud, not silent: an NER model scanning a language the deployment

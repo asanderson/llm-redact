@@ -90,7 +90,7 @@ from llm_redact.config import (
 )
 from llm_redact.connections import CAUSES as CONNECTION_CLOSE_CAUSES
 from llm_redact.connections import EventStream, LiveConnections, recheck_interval
-from llm_redact.detection.base import Detection, Detector
+from llm_redact.detection.base import Detection, Detector, DetectorUnavailable
 from llm_redact.detection.engine import (
     DetectionConfig,
     DetectorPlan,
@@ -153,6 +153,7 @@ from llm_redact.plugin_api import (
     RoutePlan,
     Router,
     RouteRefusal,
+    ScanContext,
     Telemetry,
     UploadInspector,
     UpstreamAuth,
@@ -192,6 +193,15 @@ from llm_redact.redactor import (
 )
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
+from llm_redact.scan_capture import (
+    CLOSE_SECONDS as SCAN_CLOSE_SECONDS,
+)
+from llm_redact.scan_capture import (
+    ScanCapture,
+    ScanRecorder,
+    build_scan_capture,
+    capture_status,
+)
 from llm_redact.sse import SSEEvent, SSEParser, serialize
 from llm_redact.upload_content import classify_file
 from llm_redact.upload_inspection import (
@@ -896,7 +906,9 @@ class ProxyState:
         # timed out (the connection is closed: connections.LiveConnections);
         # "realtime_frame" a realtime client frame's check that failed (the
         # connection is closed) and "realtime_server_frame" the router's
-        # observation of an upstream frame (contained: the frame is sent).
+        # observation of an upstream frame (contained: the frame is sent);
+        # "scan_sink" a registered scan sink's fault (contained, off the
+        # event loop: the request is long gone — scan_capture).
         self.bookkeeping_errors: Counter[str] = Counter()
         bind_fault_counter = getattr(self.vault_manager, "bind_fault_counter", None)
         if callable(bind_fault_counter):
@@ -1131,6 +1143,13 @@ class ProxyState:
             )
         self.inspection_limits: Limits | None = (
             inspector_limits(self.upload_inspector) if self.upload_inspector is not None else None
+        )
+        # Read-only capture of the strings a request's redaction scanned
+        # (plugin_api.ScanSink, scan_capture): None without a registered
+        # sink — the Free core — and then no redactor records anything and
+        # nothing is queued. Restart-only: built once with the resolved tier.
+        self.scan_capture: ScanCapture | None = build_scan_capture(
+            registry.build_scan_sinks(config, self.license.tier), self.bookkeeping_errors
         )
         # Inspected binary upload parts by (provider, outcome) — an honesty
         # counter like unscanned_uploads (upload_inspection.OUTCOMES).
@@ -1955,22 +1974,32 @@ class ProxyState:
         throwaway vault with fresh counters: no upstream request, and the
         live vault, metrics and audit are never touched. Warn-mode values
         stay in ``redacted`` — a real request forwards them (honest); a
-        block-mode match reports its type only, never the value."""
+        block-mode match reports its type only, never the value; a detector
+        that could not read the text (the llm backend's server failing,
+        ``on_error = "block"``) adds ``unavailable``: its backend and the
+        failure kind, where a real request is refused 503."""
         from llm_redact.vault import InMemoryVault
 
         redactor = Redactor(self.detectors, InMemoryVault(), self.allowlist, modes=self.modes)
         blocked: dict[str, str] | None = None
         redacted: str | None = None
+        unavailable: dict[str, str] | None = None
         try:
             redacted = redactor.redact_text(text)
         except BlockedRequest as exc:
             blocked = {"type": exc.detector_type}
-        return {
+        except DetectorUnavailable as exc:
+            # A real request would be refused 503: its backend and why.
+            unavailable = {"backend": exc.backend, "reason": exc.reason}
+        answer: dict[str, Any] = {
             "redacted": redacted,
             "detections": dict(redactor.counts),
             "warnings": dict(redactor.warn_counts),
             "blocked": blocked,
         }
+        if unavailable is not None:
+            answer["unavailable"] = unavailable
+        return answer
 
     def refresh_license_warnings(self, *, today: date | None = None) -> None:
         """Re-resolve the license for WARNING purposes only.
@@ -3108,6 +3137,12 @@ async def _handle_local(
                 # an approved override let its values through). Counts only.
                 "inspected_uploads_total": _inspected_by_provider(state.inspected_uploads),
                 "upload_inspector": _inspector_status(state),
+                # Registered scan sinks (plugin_api.ScanSink: they receive
+                # the UNREDACTED strings of the requests they capture) and
+                # their queue: waiting, delivered (one for each sink a
+                # capture reached), dropped (the queue full, or left at
+                # shutdown), failed. Counts only.
+                "scan_capture": capture_status(state.scan_capture),
                 # How many browser origins the operator listed in
                 # allowed_origins (the count, not the list): pages there can
                 # read restored values back through the proxy — opt-in.
@@ -3274,6 +3309,9 @@ async def _handle_local(
                 audit_sink_rows_dropped=_sink_counts(state, "rows_dropped"),
                 map_write_queue_depth=state.map_writes_pending(),
                 map_write_wait_timeouts=state.map_write_wait_timeouts,
+                scan_capture=state.scan_capture.counts()
+                if state.scan_capture is not None
+                else None,
                 ner_stats=[(name, stats) for name, _, stats in ner_backend_stats(state.detectors)],
             )
             + plugin_text,
@@ -4770,9 +4808,10 @@ async def _prefetch_json(
 ) -> tuple[DetectorPlan, PrecomputedTable] | None:
     """The live detector plan and its model-backed (heavy) detectors'
     results for every string the redaction of this JSON body will scan
-    (``ner_prefetch``: collected on the loop, detected on a worker thread)
-    — None when the plan has no heavy detector or the collecting pass
-    failed (the redaction then runs them inline, as before)."""
+    (``ner_prefetch``: collected on the loop, detected on a worker thread;
+    a collecting pass that failed, on a body the redaction will refuse,
+    hands over what it collected before the failure) — None when the plan
+    has no heavy detector (the redaction then runs none)."""
     plan = state.redactor.plan
     if not plan.heavy_indices:
         return None
@@ -4784,8 +4823,6 @@ async def _prefetch_json(
         limit=limit,
         mcp_exempt=frozenset(state.config.detection.mcp_exempt_servers),
     )
-    if strings is None:
-        return None
     return plan, await prefetch(plan, strings)
 
 
@@ -4802,8 +4839,8 @@ async def _prefetch_upload(
     plan and its heavy detectors' results for every string the upload's
     redaction will scan (its file names, form fields, text files and JSONL
     lines; a binary part's content is not text), collected by running the
-    adapter's own upload redaction with a collector — None when the plan
-    has no heavy detector or the collecting pass failed."""
+    adapter's own upload redaction with a collector (up to where it failed,
+    if it did) — None when the plan has no heavy detector."""
     plan = redactor.plan
     if not plan.heavy_indices:
         return None
@@ -4821,8 +4858,6 @@ async def _prefetch_upload(
         ),
         limit=limit,
     )
-    if strings is None:
-        return None
     return plan, await prefetch(plan, strings)
 
 
@@ -5060,6 +5095,49 @@ def _settle_upload(
             path,
             unscanned[0],
         )
+
+
+def _recording(
+    redactor: Redactor,
+    capture: ScanCapture,
+    upload: _UploadFate,
+    request: Request,
+    adapter: ProviderAdapter,
+    *,
+    provider_name: str,
+    path: str,
+    session_id: str,
+    identity: bool,
+) -> Redactor:
+    """``redactor`` recording what it scans (``Redactor.with_recorder``)
+    when a registered scan sink wants this request (``ScanCapture.recorder``,
+    told the request's facts: ``plugin_api.ScanContext``), else ``redactor``
+    itself. The capture is queued once the request is handed to its
+    upstream (``upload`` settled sent) and dropped on every other way out:
+    a refused request is never captured."""
+    recorder = capture.recorder(
+        ScanContext(
+            surface="http",
+            provider=provider_name,
+            adapter=adapter.name,
+            method=request.method,
+            path=path,
+            session_id=session_id,
+            subject=_REQUEST_USER.get(),
+            identity=identity,
+        )
+    )
+    if recorder is None:
+        return redactor
+    upload.hold(functools.partial(_settle_capture, capture, recorder))
+    return redactor.with_recorder(recorder)
+
+
+def _settle_capture(capture: ScanCapture, recorder: ScanRecorder, sent: bool) -> None:
+    """A recorded request's fate (``_UploadFate``): queued for its sinks
+    when it went out, else forgotten."""
+    if sent:
+        capture.submit(recorder)
 
 
 def _plan_request(
@@ -5739,12 +5817,26 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
     # with the redaction): a reload meanwhile hands the request new
     # detectors, whose plan the table was not computed for — every string
     # then runs inline (counted), never a stale result. A detector's
-    # exception propagates as an inline one does (nothing is forwarded).
+    # exception propagates as an inline one does (nothing is forwarded); a
+    # required detector that could not read a string (DetectorUnavailable:
+    # the llm backend's server failing) is the recorded 503 either way.
     prefetched: tuple[DetectorPlan, PrecomputedTable] | None = None
     if adapter is not None and isinstance(parsed, dict) and not detection_off:
-        prefetched = await _prefetch_json(
-            state, adapter, request.method, path, parsed, limit=max_body_strings
-        )
+        try:
+            prefetched = await _prefetch_json(
+                state, adapter, request.method, path, parsed, limit=max_body_strings
+            )
+        except DetectorUnavailable as exc:
+            # No session yet: the row carries the configured one.
+            return _detector_unavailable_refused(
+                state,
+                state.config.vault.session,
+                adapter,
+                exc,
+                request=request,
+                path=path,
+                started=started,
+            )
     # The requester's detection overlay (tighten-only), read in the same
     # synchronous stretch as the session below, so it extends exactly the
     # detection objects the request redacts with.
@@ -5935,6 +6027,21 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         # The copy is this body's own: it counts the strings it redacts
         # against max_body_strings.
         budgeted = ctx.redactor.with_budget(max_body_strings)
+        if state.scan_capture is not None:
+            # A registered scan sink: the strings this redaction scans are
+            # recorded (when a sink wants them) and queued for it once the
+            # request is handed upstream.
+            budgeted = _recording(
+                budgeted,
+                state.scan_capture,
+                upload,
+                request,
+                adapter,
+                provider_name=provider_name,
+                path=path,
+                session_id=ctx.session_id,
+                identity=proxy_credential,
+            )
         if prefetched is not None:
             # The model-backed detections computed off the loop (above).
             budgeted = budgeted.with_precomputed(prefetched[1], prefetched[0])
@@ -5980,6 +6087,10 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             return refused_response(str(exc), adapter, "undecodable field", "unredactable")
         except SealedSessionError:
             return sealed_response(adapter)
+        except DetectorUnavailable as exc:
+            return _detector_unavailable_refused(
+                state, ctx.session_id, adapter, exc, request=request, path=path, started=started
+            )
         except state.vault_faults as exc:
             return _vault_fault_refused(
                 state, ctx.session_id, adapter, exc, request=request, path=path, started=started
@@ -6047,6 +6158,21 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # This body's own copy, counting its strings (form fields, file
             # names, JSONL lines, extracted texts) against max_body_strings.
             upload_redactor = ctx.redactor.with_budget(max_body_strings)
+            if state.scan_capture is not None:
+                # As for a JSON body: every string the upload's redaction
+                # scans (an inspector's extracted texts included), queued
+                # for a scan sink that wants them once the upload is sent.
+                upload_redactor = _recording(
+                    upload_redactor,
+                    state.scan_capture,
+                    upload,
+                    request,
+                    adapter,
+                    provider_name=provider_name,
+                    path=path,
+                    session_id=ctx.session_id,
+                    identity=proxy_credential,
+                )
             if scope is not None:
                 upload_redactor = upload_redactor.with_overrides(scope)
             # NER off the event loop, as for a JSON body: every string the
@@ -6056,9 +6182,20 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
             # (prefetch_texts). Other requests redact meanwhile: the count
             # window restarts after the await.
             prefetch_texts: Callable[[list[str]], Awaitable[None]] | None = None
-            upload_prefetch = await _prefetch_upload(
-                upload_redactor, adapter, path, upload_body, boundary, limit=max_body_strings
-            )
+            try:
+                upload_prefetch = await _prefetch_upload(
+                    upload_redactor, adapter, path, upload_body, boundary, limit=max_body_strings
+                )
+            except DetectorUnavailable as exc:
+                return _detector_unavailable_refused(
+                    state,
+                    ctx.session_id,
+                    adapter,
+                    exc,
+                    request=request,
+                    path=path,
+                    started=started,
+                )
             if upload_prefetch is not None:
                 upload_plan, upload_table = upload_prefetch
                 upload_redactor = upload_redactor.with_precomputed(upload_table, upload_plan)
@@ -6236,6 +6373,16 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
                 )
             except SealedSessionError:
                 return sealed_response(adapter)
+            except DetectorUnavailable as exc:
+                return _detector_unavailable_refused(
+                    state,
+                    ctx.session_id,
+                    adapter,
+                    exc,
+                    request=request,
+                    path=path,
+                    started=started,
+                )
             except state.vault_faults as exc:
                 return _vault_fault_refused(
                     state,
@@ -6436,6 +6583,41 @@ async def _handle(request: Request, upload: _UploadFate) -> Response:
         and not provider_name.startswith("custom:")
         and (adapter is None or not body_bytes),
     )
+
+
+def _detector_unavailable_refused(
+    state: ProxyState,
+    session: str,
+    adapter: ProviderAdapter,
+    exc: DetectorUnavailable,
+    *,
+    request: Request,
+    path: str,
+    started: float,
+) -> JSONResponse:
+    """A detector the configuration requires could not read one of this
+    request's strings (the llm NER backend's model server timed out or
+    failed, with ``on_error = "block"``): a recorded, provider-shaped 503
+    before any upstream contact — the request is not forwarded with less
+    detection than configured. Logged by backend and failure kind only."""
+    logger.warning("%s %s -> 503 %s; nothing forwarded", request.method, path, exc)
+    state.record_request(
+        session=session,
+        provider=adapter.name,
+        method=request.method,
+        path=path,
+        status=503,
+        started=started,
+        streamed=False,
+        detections={},
+        rehydrations={},
+        refusal="detector_unavailable",
+    )
+    message = (
+        f"llm-redact: the {exc.backend} detector could not read this request ({exc.reason});"
+        " the request was not forwarded"
+    )
+    return JSONResponse(adapter.error_body(message, status=503), status_code=503)
 
 
 def vault_fault_types(manager: object) -> tuple[type[BaseException], ...]:
@@ -8165,6 +8347,20 @@ async def _drain_map_writes(state: ProxyState) -> None:
         await asyncio.to_thread(drain, SHUTDOWN_DRAIN_SECONDS)
 
 
+async def _close_scan_capture(state: ProxyState) -> None:
+    """At shutdown, once the requests have finished: drain the scan sinks'
+    queue and close the sinks (off the loop, at most
+    ``scan_capture.CLOSE_SECONDS`` in all); what is still queued then is
+    counted and dropped. A fault is logged by type and never skips the rest
+    of the shutdown (the audit flush, the database closes)."""
+    if state.scan_capture is None:
+        return
+    try:
+        await asyncio.to_thread(state.scan_capture.close, SCAN_CLOSE_SECONDS)
+    except Exception as exc:  # noqa: BLE001 — contained: the shutdown goes on
+        logger.warning("closing the scan sinks failed (%s)", type(exc).__name__)
+
+
 def create_app(
     config: Config,
     *,
@@ -8259,8 +8455,10 @@ def create_app(
                     logger.warning("a background task had failed (%s)", type(outcome).__name__)
             await state.client.aclose()
             # The vault's background map writes land now (bounded): nothing
-            # submits another once the requests have finished.
-            await _drain_map_writes(state)
+            # submits another once the requests have finished. Beside them,
+            # as long at most, the scan sinks' queue drains and the sinks
+            # close (scan_capture): the shutdown budget is unchanged.
+            await asyncio.gather(_drain_map_writes(state), _close_scan_capture(state))
             if state.router is not None:
                 _close_contained("router", state.router.close)
             _close_upstream_auths(state.upstream_auth)

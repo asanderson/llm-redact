@@ -125,7 +125,8 @@ def test_stride_is_set_once_at_construction(monkeypatch: pytest.MonkeyPatch) -> 
     pipe = FakeHfPipe([("Jane Doe", "PER", 0.9)])
     hub = FakeHub()
     install_transformers(monkeypatch, pipe, hub)
-    detector = build_hf_detector(NerConfig(enabled=True, backend="hf"))
+    # A WordPiece model, named: the strided pipeline's word-level aggregation.
+    detector = build_hf_detector(NerConfig(enabled=True, backend="hf", model=DSLIM))
     loaded, strided = pipe.built_with
     # The model loads from its local folder at the pinned revision.
     folder = hub.snapshot_download("dslim/bert-base-NER", revision=DSLIM_REVISION)
@@ -366,8 +367,9 @@ def test_drop_exact_duplicates_keeps_order_and_distinct_types() -> None:
 
 # --- a real model (deselected by default) -----------------------------------------
 
-# dslim/bert-base-NER (MIT; trained on CoNLL-2003 Reuters news), the default hf
-# model, at the revision checked on 2026-10-05.
+# dslim/bert-base-NER (MIT; trained on CoNLL-2003 Reuters news), the hf
+# backend's default model before 1.13.0 (a WordPiece tokenizer), at the
+# revision checked on 2026-10-05; tests/real_model_configs pulls it.
 DSLIM = "dslim/bert-base-NER"
 DSLIM_REVISION = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
 DSLIM_FILES = [
@@ -388,8 +390,8 @@ def test_real_model_reports_a_name_as_whole_words(monkeypatch: pytest.MonkeyPatc
     pytest.importorskip("transformers")
     offline_hub(monkeypatch)
     cached_snapshot(DSLIM, DSLIM_REVISION, DSLIM_FILES)
-    # The default model, resolved from the cache at its catalog pin.
-    detector = build_hf_detector(NerConfig(enabled=True, backend="hf"))
+    # Named, resolved from the cache at its catalog pin.
+    detector = build_hf_detector(NerConfig(enabled=True, backend="hf", model=DSLIM))
     for text, names in [
         ("Yesterday Angela Merkel met the press.", ["Angela Merkel"]),
         ('{"name":"Angela Merkel","role":"chancellor"}', ["Angela Merkel"]),
@@ -471,8 +473,8 @@ def test_real_model_a_bfloat16_checkpoint_runs_in_float32(
 ) -> None:
     # A checkpoint saved in bfloat16 (openai/privacy-filter is) loads in
     # float32 all the same: transformers' default keeps the stored
-    # precision, which runs slower on a CPU. A bfloat16 copy of the default
-    # model, read from a local folder, stands in for one.
+    # precision, which runs slower on a CPU. A bfloat16 copy of
+    # dslim/bert-base-NER, read from a local folder, stands in for one.
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers")
     safetensors_torch = pytest.importorskip("safetensors.torch")

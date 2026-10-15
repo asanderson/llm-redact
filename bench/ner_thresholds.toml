@@ -36,7 +36,7 @@
 #   recall = { PERSON = 0.85 }
 #   leak_max = 0.15
 #   recorded = "2026-10-05"
-#   note = "dslim/bert-base-NER at <revision>"
+#   note = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at <revision>"
 
 # --- Recorded baselines --------------------------------------------------------
 # Measured 2026-10-06 on an x86-64 CPU (4 cores) with torch 2.13.0 (CPU build),
@@ -50,15 +50,6 @@
 # corpus's gold characters, always leaked): leak_max alone would let PERSON
 # leakage grow about fivefold, so type_leak_max gates the requested type.
 
-[hf-default.synthetic]
-recall = { PERSON = 0.92 }
-exact_recall = { PERSON = 0.90 }
-leak_max = 0.45
-type_leak_max = { PERSON = 0.09 }
-over_redaction_max = 0.01
-recorded = "2026-10-06"
-note = "dslim/bert-base-NER at d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc; measured PERSON recall 0.974 (exact 0.951), precision 0.913, leak 0.3979 (PERSON 0.0366), over-redaction 0.0031, structured regressions 0"
-
 [gliner-default.synthetic]
 recall = { PERSON = 0.95 }
 exact_recall = { PERSON = 0.95 }
@@ -67,6 +58,23 @@ type_leak_max = { PERSON = 0.05 }
 over_redaction_max = 0.04
 recorded = "2026-10-06"
 note = "urchade/gliner_small-v2.1 at 4e091416cf7c3481db542c2a3d26156916f3a47f with base model microsoft/deberta-v3-small at a36c739020e01763fe789b4b85e2df55d6180012; measured PERSON recall 1.000 (exact 1.000), precision 0.639, leak 0.3244 (PERSON 0.0000), over-redaction 0.0152, structured regressions 0"
+
+# hf-default re-recorded 2026-10-14, when the hf backend's default model
+# became OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 (1.13.0), on the same
+# kind of machine (Intel(R) Xeon(R) Processor @ 2.80GHz, 4 cores; torch 2.13.0
+# CPU build, transformers 5.10.1; other jobs ran on the machine), with the
+# same rounding; it requests PERSON only, as above. The previous default's
+# last baseline (2026-10-06, dslim/bert-base-NER at
+# d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc): PERSON recall 0.974 (exact
+# 0.951), precision 0.913, leak 0.3979 (PERSON 0.0366), over-redaction 0.0031.
+[hf-default.synthetic]
+recall = { PERSON = 0.95 }
+exact_recall = { PERSON = 0.95 }
+leak_max = 0.44
+type_leak_max = { PERSON = 0.05 }
+over_redaction_max = 0.01
+recorded = "2026-10-14"
+note = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at a2360d3f42526fc660ac3b2b2301e1c2d94eba61, float32, word-by-word decoding (first piece); measured PERSON recall 1.000 (exact 1.000), precision 0.937, leak 0.3850 (PERSON 0.0000), over-redaction 0.0020, structured regressions 0"
 
 # Measured 2026-10-07 on the same kind of machine (one shared x86-64 CPU,
 # Intel(R) Xeon(R) Processor @ 2.80GHz, 4 cores; torch 2.13.0 CPU build,

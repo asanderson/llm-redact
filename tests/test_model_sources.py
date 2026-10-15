@@ -48,6 +48,9 @@ from ner_fakes import (
 DOCS = Path(__file__).resolve().parents[1] / "docs" / "detection.md"
 DSLIM = "dslim/bert-base-NER"
 DSLIM_PIN = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
+# The hf backend's default model since 1.13.0, at its catalog pin.
+HF_DEFAULT = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+HF_DEFAULT_PIN = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 RESTRICTED = "Isotonic/distilbert_finetuned_ai4privacy_v2"
 
@@ -63,6 +66,15 @@ def _fields(**overrides: object) -> dict[str, object]:
             NerConfig(backend="hf"),
             "hf",
             _fields(
+                source="hub", model_id=HF_DEFAULT, revision=HF_DEFAULT_PIN, pinned=True,
+                catalog="caution", license="Apache-2.0",
+            ),
+            "catalog",
+        ),
+        (
+            NerConfig(backend="hf", model=DSLIM),
+            "hf",
+            _fields(
                 source="hub", model_id=DSLIM, revision=DSLIM_PIN, pinned=True,
                 catalog="vetted", license="MIT",
             ),
@@ -72,8 +84,8 @@ def _fields(**overrides: object) -> dict[str, object]:
             NerConfig(backend="hf", revisions=(("hf", SHA),)),
             "hf",
             _fields(
-                source="hub", model_id=DSLIM, revision=SHA, pinned=True, catalog="vetted",
-                license="MIT",
+                source="hub", model_id=HF_DEFAULT, revision=SHA, pinned=True, catalog="caution",
+                license="Apache-2.0",
             ),
             "config",
         ),
@@ -161,7 +173,12 @@ def test_the_build_records_each_hub_backends_source(monkeypatch: pytest.MonkeyPa
     detectors = build_detectors(DetectionConfig(ner=ner))
     block = ner_status(ner, detectors)["backends"]
     assert {key: block["hf"][key] for key in UNKNOWN_SOURCE_FIELDS} == _fields(
-        source="hub", model_id=DSLIM, revision=SHA, pinned=True, catalog="vetted", license="MIT"
+        source="hub",
+        model_id=HF_DEFAULT,
+        revision=SHA,
+        pinned=True,
+        catalog="caution",
+        license="Apache-2.0",
     )
     # spaCy pipelines are not Hub snapshots: nothing to say.
     assert {key: block["spacy"][key] for key in UNKNOWN_SOURCE_FIELDS} == UNKNOWN_SOURCE_FIELDS

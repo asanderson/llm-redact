@@ -53,6 +53,10 @@ from ner_fakes import (
 )
 
 HF = NerConfig(enabled=True, backend="hf")
+# The hf backend's default model (since 1.13.0) at its catalog pin, and the
+# default before it, which a local folder's sidecar names below.
+HF_DEFAULT = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+HF_DEFAULT_PIN = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"
 DSLIM_PIN = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
 
 
@@ -123,11 +127,11 @@ def test_an_hf_model_is_shown_resolved_with_the_catalog_facts(
     policy = Policy()
     build_detectors(_detection(), model_policy=policy)
     (load,) = policy.loads
-    assert load.backend == "hf" and load.model == "dslim/bert-base-NER"
-    assert load.model_id == "dslim/bert-base-NER" and load.revision == DSLIM_PIN
+    assert load.backend == "hf" and load.model == HF_DEFAULT
+    assert load.model_id == HF_DEFAULT and load.revision == HF_DEFAULT_PIN
     assert not load.local and not load.assembled and load.onnx is None
-    assert load.catalog_status == "vetted" and load.license == "MIT"
-    assert load.lineage == ("conll2003",) and load.attribution
+    assert load.catalog_status == "caution" and load.license == "Apache-2.0"
+    assert load.lineage == ("nemotron-cc-by",) and "Nemotron-PII" in load.attribution
     names = [name for name, _ in load.files]
     assert names == sorted(names) and "model.safetensors" in names and "config.json" in names
     assert load.path is not None
@@ -148,7 +152,7 @@ def test_the_policy_runs_before_the_weights_load(monkeypatch: pytest.MonkeyPatch
 def test_files_that_cannot_be_resolved_fail_before_the_policy_is_asked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    hub = FakeHub(uncached={"dslim/bert-base-NER"})
+    hub = FakeHub(uncached={HF_DEFAULT})
     install_transformers(monkeypatch, FakeHfPipe([]), hub)
     policy = Policy()
     with pytest.raises(ModelNotCached):
@@ -159,7 +163,7 @@ def test_files_that_cannot_be_resolved_fail_before_the_policy_is_asked(
 def test_a_startup_that_may_download_shows_the_downloaded_files(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    hub = FakeHub(uncached={"dslim/bert-base-NER"})
+    hub = FakeHub(uncached={HF_DEFAULT})
     install_transformers(monkeypatch, FakeHfPipe([]), hub)
     policy = Policy()
     build_detectors(_detection(allow_download=True), startup=True, model_policy=policy)
@@ -254,7 +258,7 @@ def test_nothing_fails_open(monkeypatch: pytest.MonkeyPatch, answer: Any, messag
     with pytest.raises(ConfigError, match=message) as refused:
         build_detectors(_detection(), model_policy=Policy(answer))
     assert "secret detail" not in str(refused.value)
-    assert "[detection.ner] hf model 'dslim/bert-base-NER'" in str(refused.value)
+    assert f"[detection.ner] hf model '{HF_DEFAULT}'" in str(refused.value)
 
 
 def test_an_awaitable_answer_is_closed_and_refuses(monkeypatch: pytest.MonkeyPatch) -> None:

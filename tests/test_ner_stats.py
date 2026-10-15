@@ -46,6 +46,9 @@ from ner_fakes import (
     install_transformers,
 )
 
+# The hf backend's default model since 1.13.0, at its catalog pin.
+HF_DEFAULT = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+HF_DEFAULT_PIN = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"
 UPSTREAM = "https://api.openai.test"
 NER_FAMILIES = (
     "llm_redact_ner_strings_total",
@@ -53,6 +56,10 @@ NER_FAMILIES = (
     "llm_redact_ner_windows_truncated_total",
     "llm_redact_ner_labels_dropped_total",
     "llm_redact_ner_offsets_dropped_total",
+    "llm_redact_ner_ungrounded_total",
+    "llm_redact_ner_errors_total",
+    "llm_redact_ner_breaker_opens_total",
+    "llm_redact_ner_breaker_short_circuits_total",
     "llm_redact_ner_inline_calls_total",
     "llm_redact_ner_prefetch_misses_total",
 )
@@ -104,6 +111,10 @@ def test_counters_start_at_zero_and_list_every_field() -> None:
         "windows_truncated": 0,
         "labels_dropped": 0,
         "offsets_dropped": 0,
+        "ungrounded": 0,
+        "errors": 0,
+        "breaker_opens": 0,
+        "breaker_short_circuits": 0,
         "inline_calls": 0,
         "prefetch_misses": 0,
     }
@@ -125,6 +136,10 @@ def test_each_string_is_scanned_or_skipped(backend: str) -> None:
         "windows_truncated": 0,
         "labels_dropped": 0,
         "offsets_dropped": 0,
+        "ungrounded": 0,
+        "errors": 0,
+        "breaker_opens": 0,
+        "breaker_short_circuits": 0,
         "inline_calls": 0,
         "prefetch_misses": 0,
     }
@@ -257,13 +272,13 @@ def test_status_block_names_each_backend(monkeypatch: pytest.MonkeyPatch) -> Non
         "max_chars": 20000,
         "backends": {
             "hf": {
-                "model": "dslim/bert-base-NER",
+                "model": HF_DEFAULT,
                 "source": "hub",
-                "model_id": "dslim/bert-base-NER",
-                "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",
+                "model_id": HF_DEFAULT,
+                "revision": HF_DEFAULT_PIN,
                 "pinned": True,
-                "catalog": "vetted",
-                "license": "MIT",
+                "catalog": "caution",
+                "license": "Apache-2.0",
                 "score_threshold": 0.5,
                 "score_threshold_source": "default",
                 "counters": zero,
@@ -361,11 +376,11 @@ async def test_status_counts_requests_previews_and_resets_on_rebuild(
         sent = [message["content"] for message in json.loads(seen[0])["messages"]]
         assert sent == ["hi «PERSON_001»", LONG]
         hf = after["detection"]["ner"]["backends"]["hf"]
-        assert hf["model"] == "dslim/bert-base-NER"
+        assert hf["model"] == HF_DEFAULT
         assert (hf["revision"], hf["catalog"], hf["license"], hf["pinned"]) == (
-            "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",
-            "vetted",
-            "MIT",
+            HF_DEFAULT_PIN,
+            "caution",
+            "Apache-2.0",
             True,
         )
         assert hf["counters"]["scanned_whole"] == 1
@@ -478,6 +493,14 @@ def test_metrics_render_each_backend() -> None:
         'llm_redact_ner_labels_dropped_total{backend="gliner"} 0',
         'llm_redact_ner_offsets_dropped_total{backend="hf"} 3',
         'llm_redact_ner_offsets_dropped_total{backend="gliner"} 0',
+        'llm_redact_ner_ungrounded_total{backend="hf"} 0',
+        'llm_redact_ner_ungrounded_total{backend="gliner"} 0',
+        'llm_redact_ner_errors_total{backend="hf"} 0',
+        'llm_redact_ner_errors_total{backend="gliner"} 0',
+        'llm_redact_ner_breaker_opens_total{backend="hf"} 0',
+        'llm_redact_ner_breaker_opens_total{backend="gliner"} 0',
+        'llm_redact_ner_breaker_short_circuits_total{backend="hf"} 0',
+        'llm_redact_ner_breaker_short_circuits_total{backend="gliner"} 0',
         'llm_redact_ner_inline_calls_total{backend="hf"} 5',
         'llm_redact_ner_inline_calls_total{backend="gliner"} 0',
         'llm_redact_ner_prefetch_misses_total{backend="hf"} 0',

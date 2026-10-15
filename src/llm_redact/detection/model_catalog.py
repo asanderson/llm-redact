@@ -88,8 +88,26 @@ DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(
     {
         "gliner": "urchade/gliner_small-v2.1",
         "gliner2": "fastino/gliner2-base-v1",
-        "hf": "dslim/bert-base-NER",
+        "hf": "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1",
     }
+)
+# The hf backend's default model before 1.13.0 (owner decision D6) and the
+# entity labels its config.json id2label names at the catalog pin:
+# CoNLL-2003's MISC, PER, ORG and LOC, B-/I- tagged ("O", no entity, left
+# out: the model never emitted it). A configuration that loads the hf
+# default without naming it is refused when an entity this model emitted is
+# one the new default cannot emit (engine.default_change_losses): a minor
+# upgrade never silently narrows what is redacted.
+PREVIOUS_HF_DEFAULT = "dslim/bert-base-NER"
+PREVIOUS_HF_DEFAULT_LABELS = (
+    "B-MISC",
+    "I-MISC",
+    "B-PER",
+    "I-PER",
+    "B-ORG",
+    "I-ORG",
+    "B-LOC",
+    "I-LOC",
 )
 
 # A full commit id. Branch and tag names move, so a pin is always this.
@@ -201,6 +219,12 @@ class CatalogEntry:
     # A BIOES/BILOU tagger's calibration file (repo-relative, fetched with
     # the model): transition biases for the constrained Viterbi decoder.
     viterbi_calibration: str | None = None
+    # The entity labels an hf model's config.json id2label names at the
+    # pinned revision (B-/I- tags and "O" left out), recorded where a check
+    # must know what the model can emit without loading it: doctor's row for
+    # the hf default's change (engine.default_change_losses). Empty: not
+    # recorded.
+    model_labels: tuple[str, ...] = ()
     window: int | None = None
     # (distribution, minimum version) the model needs beyond the extras'.
     min_versions: tuple[tuple[str, str], ...] = ()
@@ -235,20 +259,26 @@ class CatalogEntry:
         return f"{who}: {self.reason} ({self.card_url}, checked {self.checked})"
 
 
+def _default_note(backend: str, model_id: str) -> str:
+    """The reason's clause naming ``backend``'s default model (empty for any
+    other model)."""
+    return f" the {backend} backend's default model;" if DEFAULT_MODELS[backend] == model_id else ""
+
+
 def _urchade_v21(size: str, backbone: str, backbone_revision: str, revision: str) -> CatalogEntry:
     # urchade's v2.1 GLiNER checkpoints ship gliner_config.json and weights
     # only: no tokenizer and no encoder_config, so the backbone named in
     # gliner_config.json (model_name) supplies both and is pinned here.
     model_id = f"urchade/gliner_{size}-v2.1"
-    default = " the gliner backend's default model;" if model_id == DEFAULT_MODELS["gliner"] else ""
     return CatalogEntry(
         model_id=model_id,
         backends=("gliner",),
         license="Apache-2.0",
         status="vetted",
         reason=(
-            f"Apache-2.0;{default} trained on urchade/pile-mistral-v0.1 (Apache-2.0); ships"
-            f" no tokenizer or encoder_config, so its backbone {backbone} (MIT) is pinned too"
+            f"Apache-2.0;{_default_note('gliner', model_id)} trained on"
+            " urchade/pile-mistral-v0.1 (Apache-2.0); ships no tokenizer or encoder_config,"
+            f" so its backbone {backbone} (MIT) is pinned too"
         ),
         revision=revision,
         backbone=backbone,
@@ -311,6 +341,68 @@ def _knowledgator(
     )
 
 
+# The hf backend's default model since 1.13.0 (owner decision D6) and the 54
+# entity labels its config.json id2label names at the catalog pin, each B-/I-
+# tagged (checked 2026-10-14; tests/test_hf_default_change.py compares them
+# with the cached snapshot).
+_OPENMED_SMALL = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+_OPENMED_LABELS = (
+    "account_number",
+    "age",
+    "api_key",
+    "bank_routing_number",
+    "biometric_identifier",
+    "blood_type",
+    "certificate_license_number",
+    "city",
+    "company_name",
+    "coordinate",
+    "country",
+    "county",
+    "credit_debit_card",
+    "customer_id",
+    "cvv",
+    "date",
+    "date_of_birth",
+    "date_time",
+    "device_identifier",
+    "education_level",
+    "email",
+    "employee_id",
+    "employment_status",
+    "fax_number",
+    "first_name",
+    "gender",
+    "health_plan_beneficiary_number",
+    "http_cookie",
+    "ipv4",
+    "ipv6",
+    "language",
+    "last_name",
+    "license_plate",
+    "mac_address",
+    "medical_record_number",
+    "occupation",
+    "password",
+    "phone_number",
+    "pin",
+    "political_view",
+    "postcode",
+    "race_ethnicity",
+    "religious_belief",
+    "sexuality",
+    "ssn",
+    "state",
+    "street_address",
+    "swift_bic",
+    "tax_id",
+    "time",
+    "unique_id",
+    "url",
+    "user_name",
+    "vehicle_identifier",
+)
+
 # transformers learned ModernBERT (the ettin encoders' model_type) in 4.48.0.
 _MODERNBERT = (("transformers", "4.48.0"),)
 _AI4PRIVACY_400K = (
@@ -326,9 +418,9 @@ CATALOG: tuple[CatalogEntry, ...] = (
         license="MIT",
         status="vetted",
         reason=(
-            "MIT; the hf backend's default model; bert-base-cased fine-tuned on CoNLL-2003"
-            " (Reuters news), labels PER, ORG, LOC, MISC; model.safetensors; no tokenizer.json"
-            " (the fast tokenizer is built from vocab.txt)"
+            "MIT; the hf backend's default model before 1.13.0; bert-base-cased fine-tuned on"
+            " CoNLL-2003 (Reuters news), labels PER, ORG, LOC, MISC; model.safetensors; no"
+            " tokenizer.json (the fast tokenizer is built from vocab.txt)"
         ),
         revision="d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",
         attribution=(
@@ -448,13 +540,13 @@ CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
         # main since 2026-01-13. BIO tags, first sub-token labelled only;
         # 54 entity types, 5 of them sensitive attributes (D10: not folded).
-        model_id="OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1",
+        model_id=_OPENMED_SMALL,
         backends=("hf",),
         license="Apache-2.0",
         status="caution",
         reason=(
-            "Apache-2.0; microsoft/deberta-v3-small (MIT) fine-tuned on nvidia/Nemotron-PII"
-            " (CC BY 4.0); 54 entity types; "
+            f"Apache-2.0;{_default_note('hf', _OPENMED_SMALL)} microsoft/deberta-v3-small (MIT)"
+            " fine-tuned on nvidia/Nemotron-PII (CC BY 4.0); 54 entity types; "
             + measured(recall=1.00, leak=0.05, false_positives=18, p50_ms=136)
         ),
         checked="2026-10-07",
@@ -470,6 +562,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         # The card's "Max Sequence Length: 384 tokens" (the model takes 512
         # positions).
         window=384,
+        model_labels=_OPENMED_LABELS,
     ),
     CatalogEntry(
         # main since 2026-05-22. BIO tags; 55 entity types, 5 of them

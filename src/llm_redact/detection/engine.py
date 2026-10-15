@@ -13,7 +13,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.labels import LabelPolicy, raw_entity_deprecations
-from llm_redact.detection.model_catalog import DEFAULT_MODELS, HUB_BACKENDS, pinned_revision
+from llm_redact.detection.model_catalog import (
+    DEFAULT_MODELS,
+    HUB_BACKENDS,
+    PREVIOUS_HF_DEFAULT,
+    PREVIOUS_HF_DEFAULT_LABELS,
+    lookup,
+    pinned_revision,
+)
 from llm_redact.detection.regex_rules import BUILTIN_RULES, PreparedText, RegexDetector, RegexRule
 from llm_redact.detection.stats import NerStats
 
@@ -96,6 +103,47 @@ class CustomRule:
 # and whose configuration sets none (NerConfig.score_threshold_for).
 DEFAULT_SCORE_THRESHOLD = 0.5
 
+# [detection.ner.llm]: the APIs the llm backend speaks, what it does when
+# its server fails on a string, the server it asks by default (Ollama on
+# loopback) and how long its circuit breaker stays open by default.
+LLM_APIS = ("ollama", "openai")
+LLM_ON_ERROR = ("block", "skip")
+DEFAULT_LLM_URL = "http://127.0.0.1:11434"
+DEFAULT_LLM_BREAKER_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class LlmNerConfig:
+    """``[detection.ner.llm]``: the model server the ``llm`` backend asks
+    (detection/llm_ner.py). The server receives the scanned text
+    UNREDACTED, so ``url`` must be loopback unless ``allow_remote`` is set
+    and the scheme is https (config.py checks it)."""
+
+    url: str = DEFAULT_LLM_URL
+    # "ollama" (its native /api/chat) or "openai" (an OpenAI-compatible
+    # /v1/chat/completions: vLLM, llama.cpp's server, LM Studio).
+    api: str = "ollama"
+    # The model the server runs; required when the backend is active.
+    model: str | None = None
+    # Ollama only, and required there: the digest /api/tags reports for
+    # the model, as 64 lowercase hex characters (a "sha256:" prefix is
+    # dropped). The build refuses a model re-tagged to another digest.
+    digest: str | None = None
+    # One string's time (every window of it) before it counts as a failure.
+    timeout_ms: int = 30000
+    # A failure: "block" refuses the request (503, nothing forwarded);
+    # "skip" forwards it with the other detectors' findings (counted, and
+    # reported as a coverage opt-out).
+    on_error: str = "block"
+    allow_remote: bool = False
+    # After a call fails because the server is down (a timeout, a transport
+    # fault, an HTTP 5xx), every string fails at once, without asking the
+    # server, for this many seconds; then one probe call. 0 = off.
+    breaker_seconds: int = DEFAULT_LLM_BREAKER_SECONDS
+    # The NAME of an environment variable holding a key the server requires
+    # (sent as Authorization: Bearer); the key itself never in the config.
+    api_key_env: str | None = None
+
 
 @dataclass(frozen=True)
 class NerConfig:
@@ -103,7 +151,7 @@ class NerConfig:
     # `presidio` for presidio) and adds per-string latency the regex hot
     # path doesn't have.
     enabled: bool = False
-    backend: str = "spacy"  # or "gliner" / "gliner2" / "presidio" / "stanza" / "hf"
+    backend: str = "spacy"  # or "gliner" / "gliner2" / "presidio" / "stanza" / "hf" / "llm"
     # Multi-backend form: when set it wins over `backend` (which stays the
     # one-element legacy spelling); every listed backend runs concurrently
     # behind the same Detector protocol, and same-span same-type hits
@@ -122,7 +170,8 @@ class NerConfig:
     # model-name override: the spaCy pipeline for spacy/presidio (default
     # en_core_web_sm), the HF model id for gliner (default
     # urchade/gliner_small-v2.1), gliner2 (default fastino/gliner2-base-v1)
-    # and hf (default dslim/bert-base-NER).
+    # and hf (default OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 since
+    # 1.13.0, dslim/bert-base-NER before: default_change_losses).
     language: str = "en"
     model: str | None = None
     # Per-backend model overrides ([detection.ner.models], stored sorted
@@ -153,6 +202,8 @@ class NerConfig:
     onnx: tuple[tuple[str, str], ...] = ()
     allow_download: bool = False
     allow_pickle_weights: bool = False
+    # [detection.ner.llm]: the llm backend's model server.
+    llm: LlmNerConfig = field(default_factory=LlmNerConfig)
 
     def active_backends(self) -> tuple[str, ...]:
         return self.backends if self.backends is not None else (self.backend,)
@@ -418,6 +469,11 @@ def build_detectors(
 
         built: list[Detector] = []
         for backend_name in config.ner.active_backends():
+            if backend_name == "hf":
+                # Before any file is resolved or fetched: the hf default's
+                # change must not narrow what is redacted (from the model
+                # catalog's facts here; from the loaded model below).
+                check_default_change(config.ner)
             # Each backend builder still sees a single-backend view with
             # its own resolved model and effective revision (the user's
             # pin, else the catalog's) — the builders stay untouched.
@@ -467,6 +523,11 @@ def build_detectors(
                 from llm_redact.detection.hf_ner import build_hf_detector
 
                 inner = build_hf_detector(single)
+                check_default_change(config.ner, inner)
+            elif backend_name == "llm":
+                from llm_redact.detection.llm_ner import build_llm_detector
+
+                inner = build_llm_detector(single)
             else:
                 from llm_redact.detection.ner import build_ner_detector
 
@@ -479,6 +540,117 @@ def build_detectors(
             detectors.append(TypeFilteredDetector(inner, suppressed) if suppressed else inner)
         _mark_unmatched(config.ner.entities, built)
     return detectors
+
+
+def default_change_losses(ner: NerConfig, detector: Detector | None = None) -> tuple[str, ...]:
+    """The configured entities the hf backend loses to the change of its
+    default model in 1.13.0 (owner decision D6: from
+    :data:`~llm_redact.detection.model_catalog.PREVIOUS_HF_DEFAULT` to
+    ``DEFAULT_MODELS["hf"]``): each entity the previous default's labels
+    (``PREVIOUS_HF_DEFAULT_LABELS``) would have been emitted as and the
+    new default cannot emit. Only while the hf backend loads its default
+    without the configuration naming a model for it (no
+    ``[detection.ner.models] hf``, no legacy single ``model`` key); empty
+    otherwise. Decided as the never-match check decides
+    (:func:`_mark_unmatched`): by the backend's label policy (labels.py)
+    and the placeholder types its model emits — those of the built
+    ``detector``'s loaded model, or, without one (before the load; doctor,
+    which loads nothing), the labels the model catalog records for the
+    default at its pin (``CatalogEntry.model_labels``; nothing is decided
+    for another revision). Config names only, never detected text."""
+    if "hf" not in ner.active_backends() or ner.model_for("hf") is not None:
+        return ()
+    if detector is None:
+        # The policy the hf builder builds (build_hf_detector).
+        planned = LabelPolicy(ner.entities, backend="hf", overrides=ner.labels)
+        policy: LabelPolicy | None = planned
+        emittable = _catalog_types(ner, planned)
+    else:
+        policy = _label_policy(detector)
+        emittable = getattr(detector, "emittable_types", None)
+    if policy is None or emittable is None:
+        return ()
+    previous = {policy.classify(label) for label in PREVIOUS_HF_DEFAULT_LABELS}
+    return tuple(
+        entity
+        for entity in dict.fromkeys(ner.entities)
+        if (type_name := policy.classify(entity)) is not None
+        and type_name in previous
+        and type_name not in emittable
+    )
+
+
+def _catalog_types(ner: NerConfig, policy: LabelPolicy) -> frozenset[str] | None:
+    """The placeholder types the hf default model emits under ``policy``,
+    from the labels the model catalog records for it; None when it records
+    none, or ``ner`` pins the backend to another revision than the
+    catalog's (whose labels the catalog does not know)."""
+    entry = lookup(DEFAULT_MODELS["hf"])
+    if entry is None or not entry.model_labels or ner.revision_for("hf") != entry.revision:
+        return None
+    types = (policy.classify(label) for label in entry.model_labels)
+    return frozenset(t for t in types if t is not None)
+
+
+def default_change_message(losses: Sequence[str]) -> str:
+    """Why a configuration losing ``losses`` to the hf default's change is
+    refused, and both ways out (entity names only)."""
+    names = ", ".join(f'"{entity}"' for entity in losses)
+    return (
+        f"[detection.ner] entities: the hf backend's default model changed in 1.13.0 from"
+        f" {PREVIOUS_HF_DEFAULT} to {DEFAULT_MODELS['hf']}, which cannot emit {names}"
+        " (refused rather than redact less): set [detection.ner.models]"
+        f' hf = "{PREVIOUS_HF_DEFAULT}" to keep the previous default, or change'
+        ' [detection.ner] entities to types the new default emits (for example "PERSON")'
+    )
+
+
+def pins_previous_default(ner: NerConfig) -> bool:
+    """Whether the hf backend loads its default without the configuration
+    naming a model for it while ``[detection.ner.revisions] hf`` pins the
+    commit the model catalog records for the previous default
+    (:data:`~llm_redact.detection.model_catalog.PREVIOUS_HF_DEFAULT`): a pin
+    written for that model (the docs before 1.13.0 showed it), which would
+    now pin the new default to a commit of another repository."""
+    if "hf" not in ner.active_backends() or ner.model_for("hf") is not None:
+        return False
+    previous = lookup(PREVIOUS_HF_DEFAULT)
+    return previous is not None and ner.configured_revision("hf") == previous.revision
+
+
+def previous_default_pin_message() -> str:
+    """Why a configuration :func:`pins_previous_default` is refused, and both
+    ways out (the pin itself is never echoed)."""
+    return (
+        "[detection.ner.revisions] hf pins the commit the model catalog records for"
+        f" {PREVIOUS_HF_DEFAULT}, the hf backend's default model before 1.13.0, but no hf"
+        f" model is named, so the new default, {DEFAULT_MODELS['hf']}, would load at a"
+        " commit of another repository: set [detection.ner.models]"
+        f' hf = "{PREVIOUS_HF_DEFAULT}" to keep the previous default at that pin, or remove'
+        " the hf entry of [detection.ner.revisions] to load the new default at its catalog pin"
+    )
+
+
+def default_change_problem(ner: NerConfig, detector: Detector | None = None) -> str | None:
+    """Why the hf default's change in 1.13.0 refuses ``ner``, or None: a
+    revision pin written for the previous default (decided from the
+    configuration alone, so only without a ``detector``), else the entities
+    :func:`default_change_losses` finds."""
+    if detector is None and pins_previous_default(ner):
+        return previous_default_pin_message()
+    losses = default_change_losses(ner, detector)
+    return default_change_message(losses) if losses else None
+
+
+def check_default_change(ner: NerConfig, detector: Detector | None = None) -> None:
+    """Refuse an hf backend that would redact less, or load the wrong
+    commit, after its default model's change (:func:`default_change_problem`):
+    a ConfigError naming the entities (or the pin) and both fixes."""
+    problem = default_change_problem(ner, detector)
+    if problem is not None:
+        from llm_redact.config import ConfigError
+
+        raise ConfigError(problem)
 
 
 def check_min_versions(ner: NerConfig, backend: str) -> None:
@@ -619,6 +791,18 @@ def _source_fields(detector: Detector) -> dict[str, Any]:
     return dict(UNKNOWN_SOURCE_FIELDS) if source is None else source.status_fields()
 
 
+def _server_fields(detector: Detector) -> dict[str, Any]:
+    """The ``/status`` fields of a backend that asks a model server (the llm
+    backend's ``server_status``: the server's origin, its API, what a
+    failure does — ``on_error = "skip"`` is a coverage opt-out —, whether a
+    key is configured and its circuit breaker). Empty for the others."""
+    status = getattr(detector, "server_status", None)
+    if not callable(status):
+        return {}
+    fields = status()
+    return dict(fields) if isinstance(fields, dict) else {}
+
+
 def _threshold_fields(detector: Detector) -> dict[str, Any]:
     """The ``/status`` threshold fields of an NER backend: the confidence
     threshold it was built with and its source (config, catalog or
@@ -680,6 +864,7 @@ def ner_status(ner: NerConfig, detectors: Sequence[Detector]) -> dict[str, Any]:
                 "model": getattr(backend, "model_name", None),
                 **_source_fields(backend),
                 **_threshold_fields(backend),
+                **_server_fields(backend),
                 "counters": stats.as_dict(),
             }
             for name, backend, stats in ner_backend_stats(detectors)
@@ -905,6 +1090,50 @@ def _runner(det: Detector, heavy: _Heavy | None) -> Callable[[PreparedText], Ite
     return lambda prepared: det.detect(prepared.text)
 
 
+class DetectorSource(NamedTuple):
+    """Which detector found a detection (``DetectorPlan.detect_sourced``).
+
+    ``kind``: ``rule`` (a built-in regex rule), ``custom`` (a
+    ``[[detection.custom_rules]]`` rule), ``deny`` (a deny string), ``ner``
+    (a model-backed NER backend) or ``other`` (any other detector, a
+    plugin's). ``name``: the rule's name, the NER backend's as configured
+    and as ``/status`` ``detection.ner.backends`` names it (``spacy``,
+    ``hf``, ``gliner``, …), ``deny_strings``, else the detector's own name.
+    Names only — never a value."""
+
+    kind: str
+    name: str
+
+
+# The built-in rules by identity: a custom rule is a RegexRule of its own,
+# even one spelled exactly like a built-in.
+_BUILTIN_RULE_IDS = frozenset(id(rule) for rule in BUILTIN_RULES)
+
+
+def detector_source(det: Detector, *, heavy: bool) -> DetectorSource:
+    """``det`` as ``DetectorSource`` names it (``heavy``: it runs a model —
+    an NER backend, or a type filter around one, named after the backend:
+    its label policy's backend name, which the spaCy backend's detector
+    ``name``, ``ner``, is not)."""
+    if isinstance(det, RegexDetector):
+        return DetectorSource("rule" if id(det.rule) in _BUILTIN_RULE_IDS else "custom", det.name)
+    if isinstance(det, DenyDetector):
+        return DetectorSource("deny", det.name)
+    inner = det.inner if isinstance(det, TypeFilteredDetector) else det
+    policy = _label_policy(inner)
+    name = policy.backend if policy is not None else getattr(inner, "name", None)
+    return DetectorSource(
+        "ner" if heavy else "other", name if isinstance(name, str) else type(inner).__name__
+    )
+
+
+def _detection_order(d: Detection) -> tuple[int, int, int]:
+    """The order detections are handed to overlap resolution in: by start,
+    longest first, then by priority (a stable sort keeps list order for the
+    rest)."""
+    return (d.start, -(d.end - d.start), d.priority)
+
+
 def _gate_group(required: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
     """The CNF group a rule is gated on: any one group is a necessary
     condition; the one whose shortest literal is longest skips most."""
@@ -1053,6 +1282,41 @@ class DetectorPlan:
                 found[index] = list(self.detectors[index].detect(text))
         return found
 
+    @functools.cached_property
+    def sources(self) -> tuple[DetectorSource, ...]:
+        """Each detector's ``DetectorSource``, in list order (named once,
+        when a redactor recording what it scans first asks)."""
+        return tuple(
+            detector_source(det, heavy=index in self._heavy)
+            for index, det in enumerate(self.detectors)
+        )
+
+    def detect_sourced(
+        self,
+        text: str,
+        allowlist: Allowlist,
+        precomputed: Mapping[int, Sequence[Detection]] | None = None,
+    ) -> list[tuple[Detection, DetectorSource]]:
+        """``detect``'s detections, each with the detector that found it
+        (``sources``): the same detections in the same order. Every
+        candidate detector runs once, through the same per-detector code
+        (``_run``, one index at a time); each one's results come sorted, and
+        the stable sort of their concatenation in list order by the same
+        key is ``detect``'s order — ties keep list order, then each
+        detector's own (tests/test_scan_sinks.py runs both over the recall
+        and fp corpora). Asked only by a redactor that records what it
+        scans (``Redactor.with_recorder``): ``detect`` stays as it is."""
+        prepared = PreparedText(text)
+        order = self._every if len(text) > self.gated_max_chars else self.candidates(prepared)
+        sources = self.sources
+        found = [
+            (d, sources[index])
+            for index in order
+            for d in self._run((index,), prepared, allowlist, precomputed)
+        ]
+        found.sort(key=lambda pair: _detection_order(pair[0]))
+        return found
+
     def count_prefetch_miss(self) -> None:
         """One text a request's redaction found no precomputed results for
         (``Redactor.with_precomputed``): counted on every heavy detector
@@ -1085,7 +1349,7 @@ class DetectorPlan:
             detections.extend(
                 d for d in found if d.tier == 0 or not allows(d.detector_type, d.value)
             )
-        detections.sort(key=lambda d: (d.start, -(d.end - d.start), d.priority))
+        detections.sort(key=_detection_order)
         return detections
 
 

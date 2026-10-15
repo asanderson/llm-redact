@@ -362,10 +362,55 @@ until you upgrade to 2.0.0. Settle it now in one of two ways:
   switch to that type now (new placeholders such as «PERSON_001»; metrics and
   alerts keyed on the old type move with them);
 - or keep today's type for good with the override the message names
-  (`[detection.ner.labels] PER = "PER"`).
+  (`[detection.ner.labels] PER = "PER"`). On the `hf` backend this needs a
+  model that emits `PER`: the default since 1.13.0 emits none, so name
+  `dslim/bert-base-NER` in `[detection.ner.models] hf` too (the next entry).
 
 Either way the warning goes away. See docs/detection.md "Placeholder types
 from NER models".
+
+## `[detection.ner] entities: the hf backend's default model changed in 1.13.0 from dslim/bert-base-NER to OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1, which cannot emit "…" (refused rather than redact less): …`
+
+The startup (and `serve --check`, a reload, the config editor's check) refused
+the configuration; a reload keeps the running one. `[detection.ner]` runs the
+`hf` backend without naming a model for it, so it loads the default model,
+which is `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` since 1.13.0. The
+quoted entities are ones the previous default, `dslim/bert-base-NER`, emitted
+(its CoNLL-2003 labels `PER`, `ORG`, `LOC` and `MISC`, which keep their own
+type while raw entities do not fold, until 2.0.0) and the new default cannot,
+so starting would redact less than before. Settle it in one of two ways:
+
+- keep the previous default: name it in `[detection.ner.models]`
+  (`hf = "dslim/bert-base-NER"`; with `hf` the only backend,
+  `[detection.ner] model = "dslim/bert-base-NER"` works too). It loads at its
+  catalog pin, from the cache it already used;
+- or ask for types the new default emits: `entities = ["PERSON"]` (the
+  default) instead of `["PER"]`. Placeholders then read «PERSON_001» instead
+  of «PER_001», and metrics or alerts keyed on `PER` move with them. The new
+  default emits no `ORG`, `LOC` or `MISC`: its nearest labels (`company_name`;
+  `city`, `state`, `country`) are narrower and, asked for, come with types of
+  their own (`COMPANY_NAME`, `CITY`, …); keep the previous default for those.
+
+`llm-redact doctor` shows the same line as a FAIL under `ner` without
+loading a model. docs/detection.md, "The `hf` default's change in 1.13.0".
+
+## `[detection.ner.revisions] hf pins the commit the model catalog records for dslim/bert-base-NER, the hf backend's default model before 1.13.0, but no hf model is named, …`
+
+The startup (and `serve --check`, a reload, the config editor's check) refused
+the configuration before looking up any file; a reload keeps the running one.
+`[detection.ner.revisions] hf` holds the commit the model catalog records for
+`dslim/bert-base-NER` (docs/detection.md showed it as the example pin before
+1.13.0), but no model is named for the `hf` backend, so it would load the new
+default, `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, at a commit of
+another repository. Settle it in one of two ways:
+
+- keep the previous default at that pin: add `hf = "dslim/bert-base-NER"` to
+  `[detection.ner.models]`;
+- or load the new default: remove the `hf` entry of
+  `[detection.ner.revisions]` (it then loads at its own catalog pin), and
+  fetch it once with `llm-redact models pull`.
+
+`llm-redact doctor` shows the same line as a FAIL under `ner`.
 
 ## `[detection.ner] entities: "…" can never match: no active backend emits it (…)`
 
@@ -589,6 +634,10 @@ urchade model); the folder itself is never fetched.
 A reload (SIGHUP, the dashboard editor) never downloads, whatever
 `allow_download` says: after a reload naming a new model, the running
 configuration is kept — fetch the model, then reload again, or restart.
+After an upgrade to 1.13.0 a configuration that names no `hf` model meets
+this for `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, the `hf` backend's
+new default: run `llm-redact models pull` once (566 MB), or name the previous
+default, `dslim/bert-base-NER`, in `[detection.ner.models] hf` to keep it.
 "(completely)": the cache holds the revision but not every file the loader
 needs, such as after an interrupted download; the message then ends with
 `; missing: …`, naming the kinds of files absent (`config.json`, `weights`,
@@ -955,6 +1004,111 @@ The `huggingface_hub` package (or, for a GLiNER or GLiNER2 model's
 configuration check, `transformers`) is missing, although the `hf`, `gliner`
 and `gliner2` extras install them. Re-install the backend's extra: `uv sync
 --extra hf`, `uv sync --extra gliner` or `uv sync --extra gliner2`.
+
+## "[detection.ner.llm] url is off loopback, and the model server receives the scanned text UNREDACTED; a remote server needs allow_remote = true and https"
+
+From `serve` / `serve --check`, a reload and `llm-redact doctor` with
+`[detection.ner.llm]` present: the `llm` backend's server reads every string
+it scans unredacted, so `url` must name a loopback host (`127.0.0.1`, `::1`,
+`localhost`). A server elsewhere is accepted only with `allow_remote = true`
+AND an `https://` URL — plain http off loopback is refused even with
+`allow_remote`, as is a URL carrying credentials, a query string or a
+fragment, and one ending in `/api` (Ollama) or `/v1` (OpenAI-compatible):
+`url` is the server's base URL, the backend adds the API's paths. Any
+other host name counts as off loopback (it is never resolved to prove it is
+not): write the address.
+
+## "[detection.ner.llm] model is required with the \"llm\" backend" / "[detection.ner.llm] digest is required with api = \"ollama\": …" / "[detection.ner.llm] digest must be the 64-character hex digest /api/tags reports for the model …"
+
+The `llm` backend is enabled without the model its server runs, or, on
+Ollama, without the model's digest. Pull the model on the server (`ollama
+pull MODEL:TAG`), then read its digest from the server's model list —
+`curl -s http://127.0.0.1:11434/api/tags` shows each model's `digest`, 64 hex
+characters — and set both in `[detection.ner.llm]` (`sha256:` in front is
+accepted). `ollama list` shows only the first 12 characters, which are
+refused. An OpenAI-compatible server (`api = "openai"`) reports no digest, so
+`digest` is refused there ("… reports no model digest …"): the model name is
+checked against its `/v1/models`.
+
+## "[detection.ner.llm] model 'MODEL' at URL: the model server's model list could not be read (…); is the server running?"
+
+From `serve` / `serve --check`, a reload, the editor's dry run, `llm-redact
+preview` and `llm-redact doctor` (`llm`): before the `llm` backend is built,
+the server must answer its model list (Ollama's `/api/tags`, an
+OpenAI-compatible server's `/v1/models`) within 10 seconds (or `timeout_ms`
+when that is shorter). The parenthesis names what failed: a connection
+fault by its exception type (`ConnectError`: nothing listens at `url`),
+`timeout`, `HTTP NNN` (a redirect included: none is followed), or
+`unreadable model list`. Start the server, check `url` and `api` (by
+default Ollama listens on port 11434, vLLM on 8000, llama.cpp's server on
+8080, LM Studio on 1234), and check that no proxy is needed to reach it: the
+backend ignores `HTTP_PROXY`/`HTTPS_PROXY` and connects to `url` directly. A
+startup stops; a reload keeps the running configuration.
+
+## "[detection.ner.llm] model 'MODEL' at URL: the server does not serve this model (llm-redact never pulls one)" / "… the server's model has a different digest than [detection.ner.llm] digest (re-tagged or updated since the pin was written) …"
+
+The server answered, but its model list lacks `model` (spelled as the
+server names it; on Ollama a name without a tag means `:latest`), or — on
+Ollama — the model under that name now has another digest: it was pulled
+again, updated or re-tagged since the digest was pinned. llm-redact never
+pulls a model and never follows a moved tag. Check what the model is now
+on the server, then pull the model you meant or pin the digest `/api/tags`
+now reports for it.
+
+## "llm-redact: the llm detector could not read this request (…); the request was not forwarded" (HTTP 503)
+
+The `llm` backend's server failed on one of the request's strings with
+`on_error = "block"` (the default), so the request was refused before
+anything reached the provider (counted under
+`llm_redact_local_refusals_total{kind="detector_unavailable"}`; a realtime
+connection is closed 1011 with "the llm detector could not read this
+frame"). The parenthesis names the failure: `timeout` (the string, every
+window of it, took longer than `timeout_ms`; the first string after Ollama
+unloaded an idle model also waits for it to load), `HTTP NNN` (`HTTP 401` or
+`HTTP 403`: the server requires a key — set `api_key_env` — or refuses the
+one it was given), a connection fault by its exception type, `unreadable
+answer` (not the JSON the request asked for — a model or server version
+without structured output), `encoded answer` (the server compressed it
+although asked not to), `answer too large`, `too many entities`, or `circuit
+breaker open`: an earlier string's timeout, connection fault or HTTP 5xx
+opened the backend's circuit breaker, and until `breaker_seconds` (default
+30) have passed every string that needs the server fails at once without
+asking it; then the next string's call probes the server, and an answer
+closes the breaker (`/status` `detection.ner.backends.llm.breaker` shows its
+state and `retry_in_seconds`, and `llm-redact status` a posture line while it
+is open). The proxy logs one WARNING per outage (`llm NER backend: model
+'MODEL' at URL failed (…)`, naming the breaker when it opened) and an INFO
+line when the server answers again; `errors` in `/status` `detection.ner`
+and `llm_redact_ner_errors_total` count each string (`breaker_opens` and
+`breaker_short_circuits` the breaker's part). Fix the server, raise
+`timeout_ms`, or set `on_error = "skip"` to forward such requests with the
+other detectors' findings — a coverage opt-out, shown by `llm-redact status`
+and `doctor`. `llm-redact preview` prints `UNAVAILABLE: …` and exits 1 for
+the same failure.
+
+## "[detection.ner.llm] api_key_env: the environment variable NAME is unset or empty" / "… holds a character a bearer token cannot carry (only visible ASCII) …"
+
+From `serve` / `serve --check`, a reload that changes `[detection]`, the
+editor's dry run, `llm-redact preview` and `llm-redact doctor` (`llm`):
+`api_key_env` names the variable holding the key the model server requires,
+and the process building the backend does not have it, has it empty, or has
+one with a blank, a control character or a non-ASCII character inside (edge
+blanks are trimmed). Export it in the environment `serve` runs in — a
+service unit's `Environment=`/`EnvironmentFile=`, a container's `-e` or
+Secret — or remove `api_key_env` when the server needs no key. A startup
+stops; a reload keeps the running configuration (and the key it was built
+with), and since a running proxy's environment cannot change, a variable
+exported after the start takes a restart. The message names the variable,
+never its value.
+
+## "[detection.ner.llm] api_key_env must name an environment variable …" / "… must not name an LLM_REDACT_ variable …"
+
+`api_key_env` takes a variable's NAME (letters, digits and `_`, not starting
+with a digit), never the key itself — put the key in the environment and
+its variable's name here. A name starting with `LLM_REDACT_` is refused:
+those variables hold llm-redact's own settings and keys (the vault and
+audit keys), which must never reach a model server; use a name of the
+server's own, such as `VLLM_API_KEY`.
 
 ## Tool sees `«EMAIL_001»`-style tokens in responses
 

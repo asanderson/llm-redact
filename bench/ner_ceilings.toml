@@ -28,7 +28,7 @@
 # Example (not a baseline):
 #   [hf-default]
 #   recorded = "2026-10-05"
-#   note = "dslim/bert-base-NER at <revision>"
+#   note = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at <revision>"
 #   per_100kb_max = 2.0
 #   [hf-default."rfc_excerpt.txt"]
 #   PERSON = 4
@@ -42,29 +42,6 @@
 # Wonderland), rfc_excerpt.txt (the RFC's authors) and README.md (the corpus's
 # own attributions) hold real names on purpose: a model finding them is
 # right. The others' hits are false positives, kept as measured.
-
-[hf-default]
-recorded = "2026-10-06"
-note = "dslim/bert-base-NER at d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc; measured 566 NER detections in 269437 bytes, 210.07 per 100 KB"
-per_100kb_max = 221.0
-
-[hf-default."README.md"]
-PERSON = 6
-
-[hf-default."gutenberg_prose.txt"]
-PERSON = 537
-
-[hf-default."rfc_excerpt.txt"]
-PERSON = 49
-
-[hf-default."sqlite_excerpt.c"]
-PERSON = 2
-
-[hf-default."synthetic_config.yaml"]
-PERSON = 3
-
-[hf-default."synthetic_natids_r10.log"]
-PERSON = 2
 
 [gliner-default]
 recorded = "2026-10-06"
@@ -97,6 +74,32 @@ PERSON = 10
 
 [gliner-default."synthetic_runbook.md"]
 PERSON = 3
+
+# hf-default re-recorded 2026-10-14, when the hf backend's default model
+# became OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 (same environment as
+# bench/ner_thresholds.toml's hf-default baseline), same rounding. Beyond the
+# three files that hold real names it made one detection (in
+# sqlite_excerpt.c). The previous default, dslim/bert-base-NER at
+# d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc, made 566 detections (210.07 per
+# 100 KB) on 2026-10-06, among them false positives in sqlite_excerpt.c,
+# synthetic_config.yaml and synthetic_natids_r10.log.
+
+[hf-default]
+recorded = "2026-10-14"
+note = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1 at a2360d3f42526fc660ac3b2b2301e1c2d94eba61, float32, word-by-word decoding; measured 501 NER detections in 269437 bytes, 185.94 per 100 KB"
+per_100kb_max = 196.0
+
+[hf-default."README.md"]
+PERSON = 4
+
+[hf-default."gutenberg_prose.txt"]
+PERSON = 466
+
+[hf-default."rfc_excerpt.txt"]
+PERSON = 57
+
+[hf-default."sqlite_excerpt.c"]
+PERSON = 2
 
 # Measured 2026-10-07 (same environment as bench/ner_thresholds.toml's
 # 2026-10-07 baselines), same rounding.

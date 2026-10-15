@@ -429,14 +429,23 @@ allowlist_patterns = ['^10\.', '^192\.168\.']
 #   CREDIT_CARD) fold into the built-in placeholder names.
 # backend = "stanza": uv sync --extra stanza (60+ languages, no scores).
 # backend = "hf": uv sync --extra hf (torch + transformers); any Hugging Face
-#   token-classification model, PII models included; supports score_threshold.
-#   A PII model for addresses, dates of birth, usernames and account numbers
-#   (fetch it once with `llm-redact models pull`; docs/detection.md "PII
-#   models for the hf backend"):
+#   token-classification model; supports score_threshold. Its default model
+#   (since 1.13.0) is the PII model OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1
+#   (566 MB; trained on NVIDIA Nemotron-PII, CC BY 4.0): fetch it once with
+#   `llm-redact models pull`. It also finds addresses, dates of birth,
+#   usernames and account numbers when asked (docs/detection.md "PII models
+#   for the hf backend"):
 #     backend = "hf"
 #     entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
-#   and name the model in the `[detection.ner.models]` table below:
-#     hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+#   The default before 1.13.0, dslim/bert-base-NER (people, organizations,
+#   places), loads when named in the `[detection.ner.models]` table below:
+#     hf = "dslim/bert-base-NER"
+#   A configuration that names no hf model and asks for an entity only that
+#   model emitted (a raw PER, ORG, LOC or MISC) is refused at startup.
+# backend = "llm": no extra; a generative model on a model server you run
+#   (Ollama, or an OpenAI-compatible server: vLLM, llama.cpp, LM Studio),
+#   configured in `[detection.ner.llm]` below. The server receives every
+#   scanned string UNREDACTED; its answers only ever ADD redactions.
 enabled = false
 backend = "spacy"
 # Run several backends at once, each toggled individually (wins over
@@ -448,7 +457,7 @@ backend = "spacy"
 # spacy = "en_core_web_md"
 # gliner = "urchade/gliner_medium-v2.1"
 # gliner2 = "fastino/gliner2-base-v1"
-# hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
+# hf = "dslim/bert-base-NER"
 # Model labels become placeholder types through one label policy for every
 # backend (docs/detection.md "Placeholder types from NER models"): synonyms
 # fold into one type (PER, FIRST_NAME, SURNAME -> PERSON; EMAIL_ADDRESS ->
@@ -495,11 +504,34 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # names are refused: they move). Without an entry, a model llm-redact's
 # catalog knows uses the catalog's pin (the default models included).
 # [detection.ner.revisions]
-# hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"
+# hf = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"
 # Load the gliner model's ONNX export (onnxruntime, in the gliner extra) instead of its torch
 # weights: a .onnx file inside the model; only that file is fetched.
 # [detection.ner.onnx]
 # gliner = "onnx/model_quint8.onnx"
+# The llm backend's model server (docs/detection.md "A model server you run").
+# It receives every string the backend scans UNREDACTED: loopback only,
+# unless allow_remote = true AND the url is https. The startup checks that
+# the server serves the model (on Ollama at the pinned digest, the 64-hex
+# one /api/tags reports); llm-redact never pulls a model.
+# [detection.ner.llm]
+# url = "http://127.0.0.1:11434"   # default: Ollama on loopback
+# api = "ollama"                   # or "openai" (an OpenAI-compatible server)
+# model = "MODEL:TAG"              # as the server names it; `ollama pull` it first
+# digest = "<64 hex characters from /api/tags>"   # required with api = "ollama"
+# timeout_ms = 30000               # per string, every window of it
+# on_error = "block"               # a server failure refuses the request (503);
+#                                  # "skip" forwards it without this backend's
+#                                  # findings (a coverage opt-out, counted)
+# breaker_seconds = 30             # after a timeout, transport fault or 5xx, every
+#                                  # string fails at once (as on_error says) for
+#                                  # this long without asking it, then one probe;
+#                                  # 0 = off
+# api_key_env = "VLLM_API_KEY"     # the NAME of an environment variable holding
+#                                  # the key a server requires (sent as
+#                                  # Authorization: Bearer to url only); never
+#                                  # the key itself
+# allow_remote = false
 
 [audit]
 # Opt-in local log of proxy activity: detector types and counts, paths,

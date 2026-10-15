@@ -16,7 +16,9 @@ Each string a backend is handed lands in exactly one of
 overlapping windows (``scanned_windowed``, each window counted in
 ``windows``), or not read at all because it is longer than
 ``[detection.ner] max_chars`` (``skipped_max_chars``). The other counters are
-per model entity or window, and two count where the model ran: on the
+per model entity or window (``ungrounded``, ``errors``, ``breaker_opens``
+and ``breaker_short_circuits`` only the llm backend's, which asks a model
+server), and two count where the model ran: on the
 event loop (``inline_calls``) and how many of those a request's NER prefetch
 should have covered (``prefetch_misses``). To add a counter, add a field:
 the ``/status`` block lists every field.
@@ -53,6 +55,22 @@ class NerStats:
     # contain (or that came without offsets): never redacted, since only
     # the exact sent text can be restored.
     offsets_dropped: int = 0
+    # Entities a model server returned (the llm backend) whose text does
+    # not occur in the text it was given, or is shorter than two
+    # characters: invented or mangled, never redacted.
+    ungrounded: int = 0
+    # Strings a model server failed on (the llm backend: a timeout, an
+    # error status, a connection fault, an answer it could not read). With
+    # on_error = "block" each refused its request; with "skip" each went on
+    # without the backend's findings past the failure. Strings failed at
+    # once by its open circuit breaker are counted here too.
+    errors: int = 0
+    # Times the llm backend's circuit breaker opened (a timeout, a
+    # transport fault or an HTTP 5xx; a failed probe opens it again).
+    breaker_opens: int = 0
+    # Strings the llm backend failed at once, without asking its server,
+    # because its circuit breaker was open (each also counted in errors).
+    breaker_short_circuits: int = 0
     # Strings this backend was run on BY THE EVENT LOOP (DetectorPlan._run)
     # instead of ahead of the redaction on the NER worker thread
     # (ner_prefetch): every call that held up every other request on the

@@ -91,7 +91,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 from llm_redact.audit import AuditWriteError
 from llm_redact.authorization import content_facts
 from llm_redact.connections import ACCESS_CLOSE_CODE
-from llm_redact.detection.base import Detection
+from llm_redact.detection.base import Detection, DetectorUnavailable
 from llm_redact.detection.engine import DetectorPlan
 from llm_redact.jsonwalk import (
     MAX_JSON_DEPTH,
@@ -130,7 +130,12 @@ if TYPE_CHECKING:
     from llm_redact.detection.base import Detector
     from llm_redact.detection.engine import Allowlist
     from llm_redact.overrides import OverrideScope
-    from llm_redact.plugin_api import AuthorizationRequest, ConnectionRecheck, UpstreamAuth
+    from llm_redact.plugin_api import (
+        AuthorizationRequest,
+        ConnectionRecheck,
+        ScanContext,
+        UpstreamAuth,
+    )
     from llm_redact.proxy import ProxyState, RequestContext
 
 logger = logging.getLogger("llm_redact")
@@ -1345,6 +1350,27 @@ async def _authorize_upgrade(
     return http_url, headers, subprotocols
 
 
+def _scan_context(
+    adapter: WsAdapter, path: str, session_id: str, *, identity: bool
+) -> "ScanContext":
+    """A realtime connection's frames as a scan sink is told about them
+    (``plugin_api.ScanContext``): the upgrade's facts, the connection's
+    session and admitted subject."""
+    from llm_redact.plugin_api import ScanContext
+    from llm_redact.proxy import _REQUEST_USER
+
+    return ScanContext(
+        surface="websocket",
+        provider=adapter.provider,
+        adapter=adapter.name,
+        method="GET",
+        path=path,
+        session_id=session_id,
+        subject=_REQUEST_USER.get(),
+        identity=identity,
+    )
+
+
 def _upgrade_request(
     adapter: WsAdapter, path: str, query: QueryParams, identity: bool
 ) -> "AuthorizationRequest":
@@ -1803,6 +1829,15 @@ async def _relay(
     # by the models on the worker thread before the frame is checked and
     # redacted.
     prefetching = provider_config.detection and bool(ctx.redactor.plan.heavy_indices)
+    # A registered scan sink (scan_capture; none in the Free core): each
+    # client frame a sink wants has the strings its redaction scans
+    # recorded, queued for it right before the frame is sent.
+    capture = state.scan_capture if provider_config.detection else None
+    scan_context = (
+        _scan_context(adapter, path, ctx.session_id, identity=require_json)
+        if capture is not None
+        else None
+    )
 
     # The access gate asked again with the model each setup frame or model
     # update names (its optional authorize_request; Gemini/Vertex Live
@@ -1932,6 +1967,12 @@ async def _relay(
                     frame_redactor = frame_redactor.with_precomputed(frame_table[1], frame_table[0])
                 if frame_scope is not None:
                     frame_redactor = frame_redactor.with_overrides(frame_scope)
+                frame_recorder = None
+                if capture is not None:
+                    assert scan_context is not None  # built with the capture
+                    frame_recorder = capture.recorder(scan_context)
+                    if frame_recorder is not None:
+                        frame_redactor = frame_redactor.with_recorder(frame_recorder)
                 frame_ctx = RequestContext(
                     ctx.session_id, ctx.vault, frame_redactor, ctx.rehydrator
                 )
@@ -2015,6 +2056,9 @@ async def _relay(
                     override_marker = frame_marker or override_marker
                     # Handed to the upstream next, with no check between.
                     frame_scope.settle(sent=True)
+                if frame_recorder is not None and capture is not None:
+                    # Redacted and handed to the upstream next: captured.
+                    capture.submit(frame_recorder)
                 await upstream.send(outbound)
             except _ContentRefused as refused:
                 # The access gate refused what this frame's redaction found
@@ -2093,6 +2137,19 @@ async def _relay(
                 refusal = "override_fault" if raced.fault else "override_raced"
                 await close_on_policy(
                     OVERRIDE_FAULT_REASON if raced.fault else OVERRIDE_RACED_REASON
+                )
+                return
+            except DetectorUnavailable as unavailable:
+                # A detector the configuration requires could not read this
+                # frame (the llm NER backend's server failed, on_error =
+                # "block"): never sent, and the session cannot continue
+                # without it — closed 1011 (internal error), recorded as the
+                # HTTP path's 503; backend and failure kind only.
+                logger.warning("WS %s -> closed 1011 (%s); frame not sent", path, unavailable)
+                status, refusal = 503, "detector_unavailable"
+                await close_on_policy(
+                    f"llm-redact: the {unavailable.backend} detector could not read this frame",
+                    code=1011,
                 )
                 return
             except state.vault_faults as fault:
@@ -2300,12 +2357,12 @@ async def _prefetch_frame(
     *,
     require_json: bool,
     limit: int,
-) -> "tuple[DetectorPlan, dict[str, dict[int, list[Detection]]]] | None":
+) -> "tuple[DetectorPlan, dict[str, dict[int, list[Detection]]]]":
     """The connection redactor's plan and its heavy detectors' results for
     every string this client frame's redaction will scan (the adapter's own
-    ``redact_message`` run with a collector, which parses the frame itself)
-    — None when the collecting pass failed (the frame is then detected
-    inline, and refused by its real pass if it must be)."""
+    ``redact_message`` run with a collector, which parses the frame itself;
+    up to where that collecting pass failed, if it did: the frame's real
+    pass refuses it then, after scanning those strings first)."""
     from llm_redact.proxy import RequestContext  # runtime: avoids the import cycle
 
     plan = ctx.redactor.plan
@@ -2318,8 +2375,6 @@ async def _prefetch_frame(
         ),
         limit=limit,
     )
-    if strings is None:
-        return None
     return plan, await prefetch(plan, strings)
 
 

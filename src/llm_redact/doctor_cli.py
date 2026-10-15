@@ -563,6 +563,10 @@ def _check_extras(report: _Report, config: Config) -> None:
         # EVERY active backend, not just the legacy single one — a
         # multi-backend config with one missing extra fails serve at startup.
         for backend in config.detection.ner.active_backends():
+            if backend == "llm":
+                # A model server, asked over HTTP: no extra (_check_llm).
+                report.line("PASS", "ner", "llm backend needs no extra (it asks a model server)")
+                continue
             hint = f"install it: uv sync --extra {_NER_EXTRAS[backend]}"
             modules = (_NER_MODULES[backend], *_NER_LOAD_MODULES.get(backend, ()))
             if config.detection.ner.onnx_for(backend) is not None:
@@ -711,11 +715,83 @@ def _check_licensed_features(report: _Report, config: Config) -> None:
 def _check_ner_labels(report: _Report, config: Config) -> None:
     """The NER label policy's config-only warnings (doctor never loads a
     model): configured raw entities whose placeholder type changes in
-    2.0.0 — the same lines serve logs at startup."""
-    from llm_redact.detection.engine import ner_warnings
+    2.0.0 — the same lines serve logs at startup — and, as a FAIL, what
+    every detector build refuses since the hf backend's default model
+    changed in 1.13.0: the entities it no longer emits (from the labels the
+    model catalog records) and a revision pin written for the previous
+    default."""
+    from llm_redact.detection.engine import default_change_problem, ner_warnings
 
     for warning in ner_warnings(config.detection):
         report.line("WARN", "ner", warning)
+    ner = config.detection.ner
+    problem = default_change_problem(ner) if ner.enabled else None
+    if problem is not None:
+        report.line("FAIL", "ner", problem)
+
+
+def _check_llm(report: _Report, config: Config, offline: bool = False) -> None:
+    """The llm backend's model server: where the scanned text goes (WARN off
+    loopback: it receives every scanned string UNREDACTED), and the
+    startup's own check, read-only — the server lists its models, serves
+    the configured one and, on Ollama, at the pinned digest (not asked with
+    ``--offline``). With ``api_key_env``, that its variable is set — read
+    offline, never shown. Sends no text and pulls nothing. Silent unless the
+    backend is enabled."""
+    from llm_redact.config import _is_loopback_host
+    from llm_redact.detection.llm_ner import (
+        MODEL_LIST_SECONDS,
+        check_server,
+        open_client,
+        read_api_key,
+        server_origin,
+    )
+
+    ner = config.detection.ner
+    if not (ner.enabled and "llm" in ner.active_backends()):
+        return
+    llm = ner.llm
+    origin = server_origin(llm.url)
+    if _is_loopback_host(urllib.parse.urlsplit(llm.url).hostname or ""):
+        report.line("PASS", "llm", f"model server {origin} is on loopback ({llm.api} API)")
+    else:
+        report.line(
+            "WARN",
+            "llm",
+            f"model server {origin} is off loopback (allow_remote = true): it receives every"
+            " string the llm backend scans UNREDACTED",
+        )
+    if llm.api_key_env is not None:
+        try:
+            read_api_key(llm)
+        except ConfigError as problem:
+            report.line("FAIL", "llm", f"{problem} — serve would refuse to start")
+            return
+        report.line(
+            "PASS",
+            "llm",
+            f"api key: {llm.api_key_env} is set (sent as a bearer token to the model server only)",
+        )
+    if llm.breaker_seconds == 0:
+        report.line(
+            "WARN",
+            "llm",
+            "breaker_seconds = 0 (circuit breaker off): a model server that hangs holds every"
+            " new string for timeout_ms, one string at a time for the whole proxy",
+        )
+    if offline:
+        report.line("PASS", "llm", "model server not asked (--offline)")
+        return
+    client = open_client(ner)
+    try:
+        check_server(client, min(llm.timeout_ms / 1000, MODEL_LIST_SECONDS))
+    except ConfigError as problem:
+        report.line("FAIL", "llm", f"{problem} — serve would refuse to start")
+        return
+    finally:
+        client.close()
+    pinned = " at the pinned digest" if llm.api == "ollama" else ""
+    report.line("PASS", "llm", f"model server serves {llm.model!r}{pinned}")
 
 
 def _check_models(report: _Report, config: Config) -> None:
@@ -950,6 +1026,17 @@ def _check_posture(report: _Report, config: Config) -> None:
             "posture",
             f"{len(exempt)} MCP server(s) exempt from detection — their content"
             " blocks are forwarded unredacted",
+        )
+
+    ner = config.detection.ner
+    if ner.enabled and "llm" in ner.active_backends() and ner.llm.on_error == "skip":
+        opted_out = True
+        report.line(
+            "WARN",
+            "posture",
+            '[detection.ner.llm] on_error = "skip": when the model server times out or'
+            " fails, requests are FORWARDED without the llm backend's findings (counted in"
+            " /status; the other detectors still apply)",
         )
 
     if config.detection.languages is not None:
@@ -1347,6 +1434,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     _check_extras(report, config)
     _check_posture(report, config)
     _check_ner_labels(report, config)
+    _check_llm(report, config, bool(getattr(args, "offline", False)))
     _check_models(report, config)
     _check_extraction(report, config)
     _check_upstream_auth(report, config)

@@ -30,6 +30,7 @@ from llm_redact.bench.ner_metrics import (
 )
 from llm_redact.detection.base import Detection, Detector
 from llm_redact.detection.engine import DetectionConfig, build_detectors
+from llm_redact.detection.model_catalog import DEFAULT_MODELS
 from ner_fakes import FakeHfPipe, install_transformers
 
 
@@ -61,6 +62,8 @@ def _span(text: str, surface: str, label: str) -> GoldSpan:
     start = text.index(surface)
     return GoldSpan(start, start + len(surface), label)
 
+
+HF_DEFAULT = DEFAULT_MODELS["hf"]
 
 LABELS = {
     "name": "PERSON",
@@ -429,9 +432,9 @@ def test_cli_scores_reports_and_gates(
     assert report["config"] == "hf-fake"
     spec = DATASETS["rules"]
     assert report["samples"] == len(list(spec.adapter(spec, LoadRequest(split="generated"))))
-    assert report["backends"] == ["hf: dslim/bert-base-NER"]
+    assert report["backends"] == [f"hf: {HF_DEFAULT}"]
     assert report["structured_regressions"] == 0
-    assert "NER backends: hf: dslim/bert-base-NER." in (out / "report.md").read_text()
+    assert f"NER backends: hf: {HF_DEFAULT}." in (out / "report.md").read_text()
 
     # A floor on a type the dataset never holds fails the gate.
     thresholds.write_text("[renamed.rules]\nrecall = { PERSON = 0.5 }\n")
@@ -724,9 +727,9 @@ def test_latency_run_times_each_backend_and_the_pipeline(monkeypatch: pytest.Mon
         pipeline, detectors, lengths=(50, 500), iterations=2, many_small=30, many_small_iterations=1
     )
     assert [(s.target, s.length, s.iterations) for s in stats] == [
-        ("hf: dslim/bert-base-NER", 50, 2),
+        (f"hf: {HF_DEFAULT}", 50, 2),
         ("pipeline", 50, 2),
-        ("hf: dslim/bert-base-NER", 500, 2),
+        (f"hf: {HF_DEFAULT}", 500, 2),
         ("pipeline", 500, 2),
         ("many_small", 30, 1),
     ]
@@ -735,7 +738,7 @@ def test_latency_run_times_each_backend_and_the_pipeline(monkeypatch: pytest.Mon
     markdown = ner_latency.to_markdown(stats, env)
     assert "CPU: Example CPU." in markdown
     assert "| many_small | (30 strings) |" in markdown
-    assert ner_latency.to_json(stats, env)["stats"][0]["target"] == "hf: dslim/bert-base-NER"  # type: ignore[index]
+    assert ner_latency.to_json(stats, env)["stats"][0]["target"] == f"hf: {HF_DEFAULT}"  # type: ignore[index]
     assert set(ner_latency.environment()) == {"cpu", "python", "platform"}
 
 

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         DbPasswordProvider,
         ModelPolicy,
         Router,
+        ScanSink,
         Telemetry,
         UploadInspector,
         UpstreamAuth,
@@ -152,6 +153,16 @@ def build_model_policy(config: Config, tier: str) -> ModelPolicy | None:
     nothing)."""
     del config, tier
     return None
+
+
+def build_scan_sinks(config: Config, tier: str) -> tuple[ScanSink, ...]:
+    """No sinks: the core hands the strings its redaction scanned to no
+    one, and with no sink nothing is recorded or queued (``scan_capture``).
+    A plugin may replace this factory (llm-redact-pro's opt-in training
+    capture); ``config`` and ``tier`` are part of the factory contract and
+    unused here (the core gates nothing)."""
+    del config, tier
+    return ()
 
 
 def build_access_gate(config: Config, license: ResolvedLicense) -> AccessGate | None:

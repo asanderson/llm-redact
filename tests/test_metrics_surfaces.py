@@ -453,8 +453,15 @@ async def test_a_slow_gate_is_bounded_and_never_asked_twice_at_once(
     assert gate.calls == 1
     assert app.state.proxy.bookkeeping_errors[PLUGIN_METRICS_STAGE] == 2
     hold.set()  # the abandoned call ends; its answer is discarded
-    await _until(lambda: gate.finished == 1)
+    # The gate's method returning is not its call being done: the worker
+    # thread's future completes on the loop afterwards, and until then a
+    # scrape still finds the call running past its deadline. A fresh call
+    # then gets a loaded runner's time (a macOS runner once missed 50 ms).
+    state = app.state.proxy
+    await _until(lambda: gate.finished == 1 and state._plugin_metrics_call.done())
+    monkeypatch.setattr(proxy, "PLUGIN_METRICS_TIMEOUT_SECONDS", 5)
     assert "llm_redact_seats_used 1" in await _scrape(app)
+    assert gate.calls == 2
 
 
 async def _until(done: Any, timeout: float = 10.0) -> None:
@@ -647,3 +654,11 @@ async def test_every_core_family_is_known_and_documented() -> None:
     shorthands = re.findall(r"/ `(_[a-z_]+)`", reference)
     for family in rendered:
         assert f"`{family}`" in reference or any(family.endswith(s) for s in shorthands), family
+    # And the other way: every family the table names is one the core renders.
+    named = {
+        name
+        for line in reference.splitlines()
+        if line.startswith("| `llm_redact_")
+        for name in re.findall(r"`(llm_redact_[a-z_]+)`", line.split(" | ", 1)[0])
+    }
+    assert named and named <= rendered, sorted(named - rendered)

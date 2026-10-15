@@ -219,7 +219,8 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--offline",
         action="store_true",
-        help="skip the routing upstream reachability probes (HEAD/GET on each base_url)",
+        help="skip the network probes: the routing upstreams' reachability (HEAD/GET on each"
+        " base_url) and the llm NER backend's model list",
     )
 
     from llm_redact.models_cli import add_parser as add_models_parser
@@ -601,6 +602,7 @@ def run_preview(args: argparse.Namespace) -> int:
     import sys
 
     from llm_redact.config import load_config
+    from llm_redact.detection.base import DetectorUnavailable
     from llm_redact.detection.engine import build_allowlist, build_detectors, build_modes
     from llm_redact.licensing import resolve_license
     from llm_redact.redactor import BlockedRequest, Redactor
@@ -625,25 +627,29 @@ def run_preview(args: argparse.Namespace) -> int:
     )
     blocked: str | None = None
     redacted: str | None = None
+    unavailable: DetectorUnavailable | None = None
     try:
         redacted = redactor.redact_text(text)
     except BlockedRequest as exc:
         blocked = exc.detector_type
+    except DetectorUnavailable as exc:
+        unavailable = exc
 
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "redacted": redacted,
-                    "detections": dict(redactor.counts),
-                    "warnings": dict(redactor.warn_counts),
-                    "blocked": blocked,
-                },
-                indent=2,
-            )
-        )
-        return 0
+        answer: dict[str, object] = {
+            "redacted": redacted,
+            "detections": dict(redactor.counts),
+            "warnings": dict(redactor.warn_counts),
+            "blocked": blocked,
+        }
+        if unavailable is not None:
+            answer["unavailable"] = {"backend": unavailable.backend, "reason": unavailable.reason}
+        print(json.dumps(answer, indent=2))
+        return 0 if unavailable is None else 1
 
+    if unavailable is not None:
+        print(f"UNAVAILABLE: {unavailable}; a real request would be refused (503)")
+        return 1
     if blocked is not None:
         print(f"BLOCKED: a {blocked} value matched a block-mode rule (a real request would 400)")
         return 0
@@ -940,6 +946,12 @@ def _print_posture(payload: dict[str, Any]) -> None:
             f"overrides: {overrides.get('always', 0)} every-time rule(s), uses {seen} —"
             " refused values/bodies FORWARDED as sent (`llm-redact override list`)"
         )
+    scan = payload.get("scan_capture") or {}
+    if scan.get("sinks"):
+        lines.append(
+            f"scan sinks: {scan['sinks']} registered — they receive the UNREDACTED text of the"
+            f" requests they capture ({scan.get('dropped_total', 0)} dropped)"
+        )
     inactive = payload.get("detection", {}).get("language_inactive_rules") or []
     if inactive:
         lines.append(f"language-inactive rules: {', '.join(inactive)} (not detected)")
@@ -987,7 +999,10 @@ def _print_posture(payload: dict[str, Any]) -> None:
 def _ner_posture(ner: object) -> list[str]:
     """NER coverage gaps from the /status ``detection.ner`` block (absent on
     an older proxy): strings the models never read because they were
-    longer than max_chars, and configured entities no backend can emit."""
+    longer than max_chars, configured entities no backend can emit, a
+    model-server backend that lets requests go on without it when its
+    server fails (``on_error = "skip"``), and one whose circuit breaker is
+    open (every string fails at once, its server not asked)."""
     if not isinstance(ner, dict):
         return []
     lines: list[str] = []
@@ -1005,7 +1020,45 @@ def _ner_posture(ner: object) -> list[str]:
     unmatched = ner.get("unmatched_entities") or []
     if unmatched:
         lines.append(f"NER entities no backend can emit: {', '.join(unmatched)} (never detected)")
+    for name, entry in backends.items():
+        if isinstance(entry, dict) and entry.get("on_error") == "skip":
+            # A coverage opt-out like warn mode: reported whether or not the
+            # model server has failed yet.
+            failed = (entry.get("counters") or {}).get("errors") or 0
+            lines.append(
+                f'NER {name} on_error = "skip": {failed} string(s) forwarded without its'
+                " findings after its model server failed (the other detectors still applied)"
+            )
+    for name, entry in backends.items():
+        breaker = entry.get("breaker") if isinstance(entry, dict) else None
+        if isinstance(breaker, dict) and breaker.get("state") in ("open", "half_open"):
+            lines.append(_breaker_posture(name, entry, breaker))
     return lines
+
+
+def _breaker_posture(name: str, entry: dict[str, Any], breaker: dict[str, Any]) -> str:
+    """The posture line of a model-server backend whose circuit breaker is
+    open: why it opened, what its failures do and when it asks again."""
+    from llm_redact.overrides import printable
+
+    reason = printable(str(breaker.get("reason") or "server down"))[:60]
+    failing = (
+        "requests that need it are refused 503"
+        if entry.get("on_error") != "skip"
+        else "requests go on WITHOUT its findings"
+    )
+    retry = breaker.get("retry_in_seconds")
+    when = (
+        f"a probe in {retry:g} s"
+        if isinstance(retry, int | float) and not isinstance(retry, bool)
+        else "the next string probes it"
+    )
+    short = (entry.get("counters") or {}).get("breaker_short_circuits") or 0
+    return (
+        f"NER {name} circuit breaker OPEN ({reason}): every string fails at once without"
+        f" asking its model server — {failing}; {when} ({short} string(s) failed at once"
+        " so far)"
+    )
 
 
 def _gate_posture(users: object) -> list[str]:

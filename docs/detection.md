@@ -96,12 +96,12 @@ Known residuals:
   about 9,300, and one random `xxd -u` line in about 7,500, has a run that
   passes the checksum and is redacted as an IBAN (twenty million random
   lines of each).
-- A newly read value wins an overlap like any longer match, so under
-  `[detection.modes]` what it takes in follows its own rule's mode: the
-  digits of a spaced IBAN that also form a card number follow the `iban`
-  rule's (in warn mode they are forwarded, and a `credit_card` rule in
-  block mode no longer refuses the request), and a generic secret inside a
-  PlanetScale token's run follows `planetscale_token`'s.
+- A PlanetScale token's run wins an overlap like any longer match, so
+  under `[detection.modes]` a generic secret inside it follows
+  `planetscale_token`'s mode. A spaced IBAN is joined with the values it
+  overlaps instead ([below](#values-overlapping-a-card-read-in-a-run-or-a-paper-iban)):
+  a card number inside it in block mode refuses the request, and with
+  `iban` in warn mode the card number is still redacted.
 - An allowlist entry is an exact value: one in the solid form does not
   cover the same IBAN in the paper format. List both, or use
   `allowlist_patterns`.
@@ -113,37 +113,47 @@ Known residuals:
 The `credit_card` rule reads 13 to 19 digits, separated by single spaces
 or hyphens, and checks them with the Luhn algorithm. Up to 1.12.1 a card
 written next to another digit group (a quantity or a year before it, a
-CVV or an expiry month after it) was read together with that group, failed
-the check, and went upstream as sent: `Order 12 4111 1111 1111 1111`,
-`4111 1111 1111 1111 123`. Since 1.13.0, when the check fails, the rule
-looks for a card inside what it read: a stretch from the start of a group
-to the end of one, 13 to 19 digits, written in a card's own grouping
-(solid; groups of four, the last of one to four digits; or 4-6-5 and 4-6-4
-as American Express and Diners Club print them; one separator throughout)
-that passes the check. Of several, it takes the one of most digits (of
-equal length, the one starting last). The stretch may run on past what the
-rule read first when that stopped at its 19th digit
-(`2024 4111 1111 1111 1111`). It must end where the run of groups ends, or
-before one more group when the card and that group are at most 19 digits
-together (`4111 1111 1111 1111 12/27`): no other built-in rule's value
-can then start inside the card and run on past it. What the rule found
-before is found exactly as before, and no card it finds inside a run
-overlaps another of its detections.
+CVV or an expiry after it) was read together with that group, failed the
+check, and went upstream as sent: `Order 12 4111 1111 1111 1111`,
+`4111 1111 1111 1111 123`, `4111 1111 1111 1111 12 27`. Since 1.13.0,
+when the check fails, the rule looks for a card inside what it read: a
+stretch from the start of a group to the end of one, 13 to 19 digits,
+written in a card's own grouping (solid; groups of four, the last of one
+to four digits; or 4-6-5 and 4-6-4 as American Express and Diners Club
+print them; one separator throughout) that passes the check. Of several,
+it takes the one of most digits (of equal length, the one starting last).
+The stretch may run on past what the rule read first when that stopped at
+its 19th digit (`2024 4111 1111 1111 1111`). It must end where the run of
+groups ends; before one more group when the card and that group are at
+most 19 digits together (`4111 1111 1111 1111 12/27`); or before an
+expiry, a month (`01` to `12`) then a year of two or four digits, each
+after the card's own separator (either one, the same twice, after a solid
+card): `4111 1111 1111 1111 12 27`, `4111-1111-1111-1111-12-2027`. No
+other built-in rule's value can then start inside the card and run on past
+it (a test tries every built-in pattern from every place inside cards of
+every grouping). What the rule found before is found exactly as before,
+and no card it finds inside a run overlaps another of its detections.
 
 On 5,000 synthetic negatives (runs of 13 to 40 random digits in groups of
 one to four, separated by one space or one hyphen) the rule finds a card
-in 13.78% of them, against 13.58% before (Luhn passes one random number
-in ten); looking only for a card after a leading group it would be 13.70%,
-and without the grouping requirement 60.40% (37.76% after a leading group
-only).
+in 13.72% of them, against 13.44% in 1.12.1 (Luhn passes one random number
+in ten); the expiry reading adds none there. On 5,000 such runs followed
+by an expiry-shaped pair of groups it finds one in 14.58%, against 14.48%
+in 1.12.1 and 14.50% without the expiry reading. Looking only for a card
+after a leading group it would be 13.54% of the first sample, and without
+the grouping requirement 36.96% (26.94% after a leading group only).
+`tests/test_credit_card_groups.py` pins the shipped figures.
 
 Known residuals:
 
-- A card in a longer run is not read when two or more groups follow it
-  (`4111 1111 1111 1111 12 34`, a card right before a SIN or an NHS
-  number) or one that brings the two past 19 digits
-  (`Order 12 4111 1111 1111 1111 5678`): an Aadhaar number's three groups
-  could start inside the card and run on past it.
+- A card in a longer run is not read when groups follow it that are no
+  expiry (`4111 1111 1111 1111 13 27`, `4111 1111 1111 1111 12 27 123`, a
+  card right before a SIN or an NHS number), an expiry written with
+  another separator (`4111 1111 1111 1111-12-27`), or one group that
+  brings the two past 19 digits (`Order 12 4111 1111 1111 1111 5678`):
+  another rule's value could start inside the card and run on past it (an
+  Aadhaar number's three groups; a US SSN's shape, `111-12-2027` in
+  `4111 1111 1111 111-12-2027`).
 - Nor when the run of groups is followed by one of `-`, `.`, `:`, `@`,
   `%` or `+`, as a paper IBAN is not, except a run of dots or one `:`
   followed by whitespace, a closing quote or bracket, `*`, `<`, a
@@ -152,14 +162,43 @@ Known residuals:
   in another grouping or with two separators.
 - The Luhn check passes one random number in ten, so a stretch of a long
   run of digit groups that is no card can be redacted as one.
-- A card read inside a run wins an overlap like any longer match: under
-  `[detection.modes]` the digits it takes in follow the `credit_card`
-  rule's mode.
-- The end the card must have is checked against the built-in rules only.
-  A custom rule's value or an NER span that starts inside the card and
-  runs on past it (`1111 Main Street` read as an address in
-  `Order 12 4111 1111 1111 1111 Main Street`) loses to the card, and its
-  part after the card goes upstream as sent.
+
+### Values overlapping a card read in a run or a paper IBAN
+
+A card read inside a longer run of digit groups and an IBAN in the paper
+format are values earlier releases did not read, written right next to
+text another value may hold. So neither takes characters from another
+value: each is joined with every value it overlaps, directly or through
+other overlapping values — a custom rule's value, an NER span, another
+rule's value, a deny string. In such a run of overlapping values:
+
+- A value in block mode refuses the request (an approved override lets
+  it through as sent, where nothing redacted covers it).
+- Every value that is redacted (redact mode, a deny string) is redacted.
+  Values overlapping one another become one placeholder over their union,
+  typed after the one starting first (of those, the longest):
+  `Order 12 4111 1111 1111 1111 Main Street`, with `1111 Main Street` an
+  address a custom rule or an NER model reads, goes upstream as
+  `Order 12 «CREDIT_CARD_001»`, and the answer gets the whole union back.
+  A value covering all the others stays itself (a paper IBAN holding a
+  card number is redacted as the IBAN).
+- A value in warn mode is forwarded only where no redacted value covers
+  it, and counted as a warning only when no redacted value overlaps it.
+- Each value is checked against the allowlists before it is joined: an
+  allowlisted value joins nothing, and the joined text itself is no value
+  an allowlist entry names.
+- A joined span is counted once, under its type. Where the proxy cannot
+  rewrite the text (a verbatim field, an upload's extracted text), a span
+  joining two or more values refuses the request with no override code,
+  as a deny string does: no one approval names them all.
+- An `llm` backend's finding is never joined: as everywhere, it keeps only
+  what lies outside the other values, so the card or IBAN keeps its own
+  placeholder (`Order «PERSON_001» «CREDIT_CARD_001» «PERSON_002» Road`
+  when the model reads `12 4111 1111 1111 1111 Main` as a name).
+
+Everywhere else overlaps resolve as before: the value starting first wins,
+of those the longest, and under `[detection.modes]` the winner's mode
+applies to the characters it takes in.
 
 ## Deny strings: values that must always be redacted
 
@@ -177,7 +216,9 @@ case_sensitive = true
 type = "PROJECT"                 # -> «PROJECT_001»
 ```
 
-A deny match wins any overlap against rule matches (even longer ones),
+A deny match wins any overlap against rule matches (even longer ones;
+one overlapping a card read inside a run or a paper IBAN is redacted
+together with it, [above](#values-overlapping-a-card-read-in-a-run-or-a-paper-iban)),
 bypasses the allowlist, and is never subject to per-rule modes — it always
 redacts. Matching is literal substring ("Auroras" gets its "Aurora"
 redacted); each casing variant round-trips back to exactly what was sent.
@@ -234,6 +275,8 @@ uv pip install https://github.com/explosion/spacy-models/releases/download/en_co
 # or any Hugging Face token-classification model, PII models included
 # (pulls torch; supports score_threshold), or Stanza (60+ languages):
 uv sync --extra hf        # or: --extra stanza
+# or a generative model on a server you run (Ollama, vLLM, llama.cpp's
+# server, LM Studio): no extra; see "A model server you run" below.
 ```
 
 Models for the `gliner`, `gliner2` and `hf` backends come from the Hugging Face
@@ -260,7 +303,9 @@ spacy/presidio (default `en_core_web_sm`), a Hugging Face model id for
 GLiNER (default `urchade/gliner_small-v2.1`) or GLiNER2 (default
 `fastino/gliner2-base-v1`) or, for the `hf` backend, a
 Hugging Face `token-classification` model id (default
-`dslim/bert-base-NER`); Stanza ignores it. `score_threshold` (a number
+`OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` since 1.13.0,
+`dslim/bert-base-NER` before; see "The `hf` default's change in 1.13.0"
+below); Stanza ignores it. `score_threshold` (a number
 greater than 0 and at most 1) drops entities below that confidence on the backends that report one — gliner, gliner2,
 presidio and hf; spaCy and Stanza report none, so the key is a config error
 when only they are active. Left unset, each of those backends runs at its
@@ -299,7 +344,8 @@ at 453 ms per 500-character string — "caution", with the numbers in [ner-lands
 runs at it without a `score_threshold` of its own (one set wins). The default
 trades recall on real text for fewer false positives on agent traffic: on the
 published OpenPII data it finds 0.786 of the English names at 0.9 (the
-default `hf` and `gliner` models find 0.911 and 0.922; see
+default `hf` model finds 0.989, measured asked for `PERSON` before
+word-by-word decoding; see
 [ner-landscape.md](ner-landscape.md#fastino-gliner2-pii-gliner2)), so a
 deployment that prefers recall sets `score_threshold` lower:
 
@@ -320,6 +366,195 @@ Stanza and Hugging Face `token-classification` backends are available the
 same way — the survey behind the lineup is
 [ner-landscape.md](ner-landscape.md).
 
+### A model server you run: the `llm` backend
+
+The `llm` backend (opt-in, no extra) asks a generative model on a server you
+run to list the contextual values in each scanned string: Ollama's own API
+(`api = "ollama"`, the default) or an OpenAI-compatible one (`api =
+"openai"`: vLLM, llama.cpp's server, LM Studio). It is configured in its own
+table:
+
+```toml
+[detection.ner]
+enabled = true
+backends = ["llm"]            # alone, or beside other backends
+entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME"]
+
+[detection.ner.llm]
+url = "http://127.0.0.1:11434"   # the default: Ollama on loopback
+api = "ollama"
+model = "MODEL:TAG"            # the model as the server names it: `ollama pull` it first
+digest = "<64 hex characters>"   # Ollama only: its digest as /api/tags reports it
+timeout_ms = 30000            # one string's time, every window of it
+on_error = "block"            # or "skip"
+breaker_seconds = 30          # the circuit breaker's cooldown; 0 = off
+# api_key_env = "VLLM_API_KEY"   # a server that requires a key: the variable holding it
+```
+
+**The server receives every scanned string unredacted** — that is what it is
+asked to read, and it includes the secrets in it: the API keys and passwords
+the regex rules redact before the provider sees them reach the model server
+as written. `url` must therefore be on loopback; a server off loopback is
+refused unless `allow_remote = true` and the scheme is `https`. Requests go
+exactly to `url`: no proxy or netrc from the environment, no redirect
+followed, answers asked for uncompressed (a compressed one is a failure)
+and read no further than 1 MiB. `url` may not carry a credential; the
+backend sends one only when `api_key_env` is set (below). In a container,
+loopback is the container's own: run the model server in the same network
+namespace (beside llm-redact in its Kubernetes pod, or with `docker run
+--network container:NAME`), or put https in front of it and set
+`allow_remote = true` — a plain-http `host.docker.internal` URL is refused.
+
+**A server that requires a key** (vLLM started with `--api-key`, a hosted
+https endpoint, Ollama behind an authenticating reverse proxy or Ollama's
+own hosted API — all read the same header): set `api_key_env` to the NAME of
+an environment variable holding the key, never the key itself. The
+variable is read at every build (startup, `serve --check`, a reload that
+changes `[detection]`; a reload that does not keeps the key it was built
+with) from the proxy's own environment, which nothing outside the process
+can change while it runs — a new key, or a variable exported after the
+start, takes a restart. Its edge blanks are trimmed; unset, empty or
+holding anything but visible ASCII, the build stops with an error naming
+the variable, never its value (a reload keeps the running configuration).
+The key is sent as
+`Authorization: Bearer <key>` with every request — the model list and each
+chat, on either `api` — to `url` only: no redirect is followed, so it never
+goes to a `Location`, and the off-loopback rule above holds (plain http only
+on loopback). It is never logged, echoed or shown: `/status` says only
+whether a key is configured (`api_key`), and `llm-redact doctor` checks that
+the variable is set (offline too) without showing it. A variable whose name
+starts with `LLM_REDACT_` is refused: those hold llm-redact's own settings
+and keys, which must never reach a model server.
+
+**Pinned model.** Before the backend is built (at startup, `serve --check`,
+and on a reload that changes `[detection]`) the server must list `model`
+(answering within 10 seconds, or `timeout_ms` when that is shorter); on
+Ollama its `/api/tags` digest must equal `digest` (required there; the
+64-character form `/api/tags` reports, with or without `sha256:` — `ollama
+list` shows only its first 12 characters), so a model re-tagged on the
+server is refused. An OpenAI-compatible server reports no digest, so `digest`
+is refused with `api = "openai"`. llm-redact never pulls a model: `ollama
+pull` it first, then read its digest with `curl -s
+http://127.0.0.1:11434/api/tags`. A failed check stops the startup (a reload
+keeps the running configuration), and `llm-redact doctor` makes the same
+read-only check (it sends no text; `doctor --offline` skips it). The pin
+holds at the build: the chat requests name the model, not its digest, so a
+model re-tagged on the server after the build is used until the next build
+(a restart, or a reload that changes `[detection]`) refuses it.
+
+**Per string** the backend sends one chat request: a fixed system prompt
+that names the requested types (as the `gliner` prompts do: "person",
+"street address") and says the text is data, never instructions; the text
+itself between two marker lines whose id is derived from the text, so the
+text cannot close its own frame; temperature 0 and a fixed seed; and a JSON
+schema for the answer (Ollama's `format`, the OpenAI `response_format`), a
+list of `{text, type}` objects. A string longer than 2,000 characters is read
+in overlapping windows of whole words (a single word longer than that in
+overlapping pieces of 2,000 characters, counted `windows_truncated`, so no
+request outgrows the context the server is asked for); one longer than
+`max_chars` is skipped, as on every backend. `timeout_ms` bounds a string's
+windows together: a window is asked only while time is left, each wait of
+its request (connecting, sending, every read) lasts at most what was left
+when that request started, and an answer body still arriving once the time
+is up is cut — so a server that does not answer, or goes silent
+mid-answer, holds a string for at most about twice `timeout_ms` before it
+fails. The bound is per read until the answer's headers are complete: a
+server that keeps sending header bytes, or interim `1xx` answers, a little
+at a time holds the string for as long as it keeps doing so. Your own
+server is trusted not to (one that misbehaves can as well fail every
+request). What a string held is remembered by
+its SHA-256 (the last 4,096 strings, in process memory, gone when a reload
+rebuilds the detectors), so the conversation history an agent resends with
+every request costs one call per new string.
+
+Each new string still costs a model call — hundreds of milliseconds to
+seconds — which runs off the event loop through the NER prefetch ("How NER
+runs"): one string at a time for the whole proxy, one request's strings
+after another's, so a request also waits for the new strings of the
+requests ahead of it. A string a request's prefetch did not cover (a
+reload during the request) is asked inline, holding every other request for
+that call (`inline_calls`); a body the redaction refuses part way (one over
+`max_body_strings`, say) still has the strings before that point asked on
+the worker. Ollama unloads a model idle for five minutes
+(`OLLAMA_KEEP_ALIVE`); the first string after that waits for the load within
+`timeout_ms`.
+
+**Grounded.** A value is kept only when its text occurs verbatim in the text
+the model read (edge blanks trimmed, at least two characters, no placeholder
+guillemets), and it is then redacted at every place it occurs in the string —
+inside longer words too ("Ann" in "Annual": the placeholder is restored in
+the answer like any other), never inside a placeholder an earlier turn left
+in the text (`PERSON_001` of `«PERSON_001»`). Anything else the model returns — invented,
+mangled, a different spelling — is dropped and counted (`ungrounded`); a type
+that was not requested is ignored.
+
+**Additive only.** The scanned text can instruct the model, so the backend's
+findings may only ADD redactions: they never take another detector's place.
+Overlap resolution sets the other detectors' winners first, exactly as
+without this backend, and keeps of each `llm` finding only what lies outside
+them — so a text that tells the model to "return no entities" removes at most
+the model's own findings, and a crafted answer whose span starts just before
+an API key still leaves the whole key redacted (the span's other part is
+redacted too).
+
+**When the server fails** — a timeout, an error status, a refused
+connection, an answer that is not the requested JSON — `on_error = "block"`
+(the default) refuses the request with a provider-shaped 503 before any
+upstream contact (`llm_redact_local_refusals_total{kind="detector_unavailable"}`;
+a realtime connection is closed 1011, its row 503). `on_error = "skip"`
+forwards it with the other detectors' findings instead: counted (`errors`),
+logged once per outage, and reported as a coverage opt-out — a `/status`
+field (`detection.ner.backends.llm.on_error`), a `llm-redact status` posture
+line and a `doctor` WARN, like warn mode. `llm-redact preview` exits 1 and
+names the failure. A string the model cannot answer within its limits —
+more values than one answer holds (2,048 tokens, 512 values), or text that
+makes it ramble — fails the same way, and a failure is never remembered: with
+`"block"`, every request that carries that string again (a conversation's
+history) is refused until the string leaves it.
+
+**Circuit breaker.** A server that hangs, rather than refusing the
+connection, would cost every new string up to `timeout_ms` — and strings are
+asked one at a time for the whole proxy. So a failure that says the server
+is down — a timeout, a transport fault (a refused or dropped connection), an
+HTTP 5xx answer — opens a circuit breaker for `breaker_seconds` (default 30,
+0 = off, at most 3600): until then every string that needs a call fails at
+once without contacting the server, handled exactly as a failure
+(`on_error = "block"`: its request is refused 503 with the reason `circuit
+breaker open`; `"skip"`: it goes on with the other detectors' findings),
+and is counted in `errors` and `breaker_short_circuits`. After the cooldown
+one string's call goes out as a probe: an answer closes the breaker, a
+failure opens it again for another `breaker_seconds` (`breaker_opens` counts
+each opening). A failure from a server that answers — an error status below
+500, a redirect, an answer that is not the requested JSON — fails only its
+own string and never opens the breaker (as the probe's answer, even an
+unusable one, it closes the breaker: the server is up); so does a timeout
+once the server has answered an earlier window of the same string, which is
+that long string's own `timeout_ms` running out. A string the backend
+already read (the cache) or one with nothing to read needs no call and is
+unaffected. While it is open, `/status` shows the breaker
+(`detection.ner.backends.llm.breaker`: `state`, the failure `reason`,
+`retry_in_seconds`) and `llm-redact status` prints a posture line; the
+breaker belongs to the built backend, so a reload that rebuilds it starts a
+closed one. With `"skip"` an open breaker forwards requests without the
+backend's findings for the whole cooldown, even if the server recovers
+sooner — the coverage gap the posture line and `errors` count. Keep
+`timeout_ms` well below what your clients wait for an answer: the string
+that opens the breaker still waits it out.
+
+The failure that opens the breaker can come from one text: a text that
+makes the model ramble past `timeout_ms`, or that the server answers with a
+5xx, opens it for every string, not just that one — and the scanned text is
+not only yours (a web page or file an agent read lands in a request). With
+`"block"` every request that needs the server is then refused for the
+cooldown; with `"skip"` every request goes on without the backend's
+findings for it, again after each cooldown the same text comes back. Keep
+`"block"` where that matters, or set `breaker_seconds = 0` (each such
+string then fails alone, at a whole `timeout_ms` each).
+
+Like every NER backend it is best effort, measured per model, never a
+guarantee ([threat-model.md](threat-model.md#contextual-values-rules-and-models)).
+Logs name the model, the server's host and a fixed failure kind, never text.
+
 ### Model sources: pinned revisions, downloads and pickle weights
 
 ![Flowchart of where NER model weights come from: the model catalog's pins and the Hugging Face Hub feed llm-redact models pull (or a startup with allow_download = true), which fills the local Hugging Face cache; models verify checks the files offline; a model-load policy, when a plugin installs one (llm-redact-pro's [models]), is shown the cached files before anything loads and may refuse the build; once allowed, the load assembles a GLiNER base model into a local folder when the checkpoint needs one, and the startup loads local files only (safetensors or ONNX, never repository code) and reloads never download. Beside it the air-gap path: models pull --to writes portable folders with a SHA-256 manifest, which are carried into the enclave, checked with models verify --dir and loaded with downloads off](diagrams/model-supply-chain.png)
@@ -335,7 +570,7 @@ allow_download = false        # the default
 allow_pickle_weights = false  # the default; hf only
 
 [detection.ner.revisions]
-hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
+hf = "a2360d3f42526fc660ac3b2b2301e1c2d94eba61"   # a full commit id
 ```
 
 - `revisions` pins a backend's model to one commit: a full 40-character
@@ -344,8 +579,9 @@ hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"   # a full commit id
   `main` is a config error, because it moves. A backend with no entry uses
   the pin llm-redact's model catalog records for the model it loads, when
   there is one: every model in the vetted and caution tables below, the
-  defaults (`urchade/gliner_small-v2.1`, `dslim/bert-base-NER`,
-  `fastino/gliner2-base-v1`) included, is pinned to the commit its `main`
+  defaults (`urchade/gliner_small-v2.1`,
+  `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, `fastino/gliner2-base-v1`)
+  included, is pinned to the commit its `main`
   branch pointed at when its entry was checked (2026-10-05 to 2026-10-07; the
   date is in `llm-redact models list --json`, under `facts`). An entry for a
   backend that is not active is kept and ignored, like a
@@ -499,10 +735,13 @@ by the model its `llm-redact-model.json` names.
 | `urchade/gliner_multi_pii-v1` | gliner | Apache-2.0 | `1fcf13e85f4e` | `microsoft/mdeberta-v3-base` (`a0484667b223`) |
 <!-- /model-catalog -->
 
-The defaults are `urchade/gliner_small-v2.1` (`gliner`) and
-`dslim/bert-base-NER` (`hf`); the `gliner2` default, `fastino/gliner2-base-v1`,
-is listed under caution below. A base model is pinned where the GLiNER
-checkpoint ships no tokenizer or encoder configuration of its own.
+The `gliner` default, `urchade/gliner_small-v2.1`, is vetted; the `hf`
+default since 1.13.0, `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, and
+the `gliner2` default, `fastino/gliner2-base-v1`, are listed under caution
+below. `dslim/bert-base-NER`, the `hf` default before 1.13.0, stays vetted and
+pinned: a configuration that names it keeps loading it. A base model is
+pinned where the GLiNER checkpoint ships no tokenizer or encoder
+configuration of its own.
 
 Configurable, status caution (their cards do not name the training data):
 Knowledgator's GLiNER-PII models — `-edge` and `-base` with the bench numbers
@@ -626,39 +865,42 @@ unchanged. `-small` and `-large` are not measured yet.
 
 ### PII models for the `hf` backend
 
-The `hf` backend's default, `dslim/bert-base-NER`, is a general NER model
-(people, organizations, places). Two PII models trained on NVIDIA's
-Nemotron-PII (CC BY 4.0, which asks for attribution: "Trained on NVIDIA
-Nemotron-PII, CC BY 4.0") are catalogued: `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`
-(Apache-2.0, DeBERTa-v3-small, read in windows of 384 tokens, its card's
-sequence length) and `kalyan-ks/ettin-68m-nemotron-pii` (MIT, a ModernBERT
-encoder: transformers 4.48 or newer). Both label 54–55 kinds of data; their
-`first_name`/`last_name`, `street_address`, `date_of_birth`, `user_name` and
-`account_number` labels fold into `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`,
-`USERNAME` and `ACCOUNT_NUMBER`, and their sensitive-attribute labels
-(gender, race or ethnicity, religious belief, political view, sexuality)
-are never folded:
+The `hf` backend's default since 1.13.0 is
+`OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` (Apache-2.0,
+DeBERTa-v3-small, 566 MB of weights, read in windows of 384 tokens, its
+card's sequence length), a PII model trained on NVIDIA's Nemotron-PII (CC BY
+4.0, which asks for attribution: "Trained on NVIDIA Nemotron-PII, CC BY
+4.0"). Before 1.13.0 it was `dslim/bert-base-NER` (MIT, 433 MB), a general
+NER model (people, organizations, places), which stays catalogued and pinned:
+name it to keep it. `kalyan-ks/ettin-68m-nemotron-pii` (MIT, a ModernBERT
+encoder: transformers 4.48 or newer) is trained on the same data. Both PII
+models label 54–55 kinds of data; their `first_name`/`last_name`,
+`street_address`, `date_of_birth`, `user_name` and `account_number` labels
+fold into `PERSON`, `ADDRESS`, `DATE_OF_BIRTH`, `USERNAME` and
+`ACCOUNT_NUMBER`, and their sensitive-attribute labels (gender, race or
+ethnicity, religious belief, political view, sexuality) are never folded. The
+default configuration asks for `PERSON`; to have the default model find the
+other contextual types too:
 
 ```toml
 [detection.ner]
 enabled = true
 backend = "hf"
 entities = ["PERSON", "ADDRESS", "DATE_OF_BIRTH", "USERNAME", "ACCOUNT_NUMBER"]
-
-[detection.ner.models]
-hf = "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1"
 ```
 
 Measured by the NER bench (2026-10-07, the same machine and rules as the
 GLiNER table above; the two PII models re-measured that day with
 word-by-word decoding, while other jobs ran on the machine, so their
-latencies are indicative only):
+latencies are indicative only; the default's accuracy re-measured with the
+same results on 2026-10-14 as the `hf-default` bench configuration, its
+latency taken side by side with `dslim/bert-base-NER` on 2026-10-07):
 
 | Model, entities | PERSON recall (exact) | Character leak | Over-redaction | Agent-traffic false positives per 50 KB | p50, 500 characters |
 |---|---|---|---|---|---|
-| `dslim/bert-base-NER` (the default), `PERSON` | 0.97 (0.95) | 0.40 | 0.003 | 0 | 176 ms |
-| OpenMed-PII Small 44M, `PERSON` | 1.00 (1.00) | 0.39 | 0.002 | 0 | — |
+| OpenMed-PII Small 44M (the default), `PERSON` | 1.00 (1.00) | 0.39 | 0.002 | 0 | 175 ms |
 | OpenMed-PII Small 44M, five types | 1.00 (1.00) | 0.05 | 0.006 | 18 | 136 ms |
+| `dslim/bert-base-NER` (the default before 1.13.0), `PERSON` | 0.97 (0.95) | 0.40 | 0.003 | 0 | 176 ms |
 | ettin-68m-nemotron-pii, five types | 0.98 (0.87) | 0.14 | 0.005 | 16 | 127 ms |
 
 `kalyan-ks/ettin-68m-nemotron-pii` tags every sub-word piece of a value as
@@ -666,13 +908,55 @@ the start of a value; read word by word ("BIO taggers without word-piece
 marks" above), its names are whole values, but most of its account numbers
 carry labels that are not folded into `ACCOUNT_NUMBER` (`customer_id`,
 `unique_id`, …), so a quarter of the synthetic corpus's account numbers is
-found and three quarters of their digits leak. Both stay "caution" with
-these numbers. The `PERSON`-only rows request what the default configuration requests, so
-their character leak counts every other labelled value as leaked. The bench
-supports OpenMed-PII Small 44M as a better default for this backend than
-`dslim/bert-base-NER`; the default is unchanged in 1.x, and the switch is
-planned together with raw-entity folding in the next major release (2.0.0;
-[ner-landscape.md](ner-landscape.md#what-the-measurements-decided)).
+found and three quarters of their digits leak. Both PII models are catalogued
+"caution" with their five-type numbers (agent-traffic false positives above
+one per 50 KB, latency above 100 ms). The `PERSON`-only rows request what the
+default configuration requests, so their character leak counts every other
+labelled value as leaked; asked for `PERSON` only, OpenMed-PII Small 44M finds
+more names than `dslim/bert-base-NER` with no agent-traffic false positive
+for either ([ner-landscape.md](ner-landscape.md#the-hf-default)).
+
+#### The `hf` default's change in 1.13.0
+
+A configuration that names no model for the `hf` backend (no
+`[detection.ner.models] hf`, and no `[detection.ner] model` with `hf` the only
+backend) loads the new default after the upgrade. Three things can stop its
+startup:
+
+- **The model is not in the cache.** Downloads are off by default, so the
+  startup (and `serve --check`) stops with "hf model
+  'OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1' at revision a2360d3f42526fc660ac3b2b2301e1c2d94eba61 is
+  not (completely) in the local Hugging Face cache … run `llm-redact models
+  pull`". Run `llm-redact models pull` once (566 MB), or write the model's
+  folder for an air-gapped host with `models pull --to` ([air-gapped.md](air-gapped.md)).
+- **An entity only the previous default served.** While raw entities keep
+  their own type (until 2.0.0), the previous default's CoNLL-2003 labels
+  served a raw `PER`, `ORG`, `LOC` or `MISC` in `entities`; the new default
+  emits none of them. Rather than redact less, every detector build — the
+  startup, `serve --check`, a reload (which keeps the running configuration)
+  and the config editor's check — refuses such a configuration, naming the
+  entities (never a value) and both ways out: keep the previous default with
+
+  ```toml
+  [detection.ner.models]
+  hf = "dslim/bert-base-NER"
+  ```
+
+  or change `entities` to types the new default emits (`PERSON` instead of
+  `PER`; `["PERSON"]`, the default, keeps the `PERSON` placeholder type).
+  The decision uses the backend's own label policy (above), so a
+  `[detection.ner.labels]` override counts: `PER = "PERSON"` makes `PER` a
+  `PERSON` request, which passes. `llm-redact doctor` shows the same line as a
+  FAIL without loading a model (from the labels the model catalog records for
+  the new default).
+- **A revision pin written for the previous default.** `[detection.ner.revisions]
+  hf = "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc"` (the commit the model catalog
+  records for `dslim/bert-base-NER`; these docs showed it before 1.13.0) with no
+  `hf` model named would pin the new default to a commit of another repository.
+  Every detector build refuses it before any file is looked up, naming both ways
+  out: name `dslim/bert-base-NER` in `[detection.ner.models] hf` to keep it at
+  that pin, or remove the `hf` entry of `[detection.ner.revisions]` to load the
+  new default at its own catalog pin. `llm-redact doctor` FAILs it the same way.
 
 `openai/privacy-filter` (Apache-2.0; a 1.5B-parameter mixture of experts,
 50M parameters active, 2.8 GB of weights) labels `private_person`,
@@ -762,7 +1046,8 @@ llm-redact models verify --dir DIR  # check a folder written by `models pull --t
   Downloads need network access to huggingface.co (and `HF_TOKEN` for a gated
   model); exit 1 when a model cannot be fetched.
 - `pull --to DIR` also writes one self-contained folder per model into `DIR`
-  (`hf-dslim--bert-base-NER`, `gliner-urchade--gliner_small-v2.1`,
+  (`hf-OpenMed--OpenMed-PII-SuperClinical-Small-44M-v1`,
+  `gliner-urchade--gliner_small-v2.1`,
   `gliner2-fastino--gliner2-base-v1`): its files copied, a GLiNER model's
   base-model tokenizer and configuration included (the folder loads with no
   base model and no assembly; a GLiNER2 checkpoint is self-contained, its
@@ -827,7 +1112,7 @@ Every NER backend handles each string the redaction scans the same way:
    still scan it.
 2. **One call or windows.** A string that fits the model's window is read in
    one call, as sent. A longer one is read in overlapping windows (the `hf`,
-   `gliner` and `gliner2` backends; below).
+   `gliner`, `gliner2` and `llm` backends; below).
 3. **The model** reports entities with a label, a score and character offsets.
 4. **The label policy** turns the label into a placeholder type and keeps it
    only when that type was requested (see "Placeholder types from NER
@@ -846,20 +1131,27 @@ Every NER backend handles each string the redaction scans the same way:
 9. **Allowlists, overlaps and modes.** Allowlisted values are left alone; the
    rest meet the regex rules and deny strings in overlap resolution (deny
    strings win every overlap, then the longest span; a regex rule wins an
-   exact tie), and the winner's mode redacts it into the vault, forwards it
-   (warn) or refuses the request (block).
+   exact tie; an `llm` finding never displaces another detection and keeps
+   only what lies outside the others' winners), and the winner's mode
+   redacts it into the vault, forwards it (warn) or refuses the request
+   (block). A span of any other backend overlapping a card read inside a
+   run of digit groups or a paper IBAN is joined with it instead
+   ([Values overlapping a card read in a run or a paper IBAN](#values-overlapping-a-card-read-in-a-run-or-a-paper-iban));
+   an `llm` finding is not: it keeps only what lies outside the card or IBAN.
 
 **Long strings.** A model reads a bounded number of tokens at a time and, left
 alone, ignores the rest of a longer string. The `hf`, `gliner` and `gliner2`
 backends read a longer string in overlapping windows, so a name anywhere in it
 is found at its exact offsets:
 
-- `hf`: a window is the model's limit (the smaller of its tokenizer's
-  `model_max_length` and its config's `max_position_embeddings`, 512 when
-  neither says; 512 tokens for `dslim/bert-base-NER`), and consecutive windows
-  share a quarter of it. Windowing needs a fast tokenizer — the only kind that
-  reports character offsets — so an `hf` model without one is refused at
-  startup. A model whose tokenizer marks word pieces (WordPiece, as BERT and
+- `hf`: a window is the model's limit (the window the model catalog records
+  for it — 384 tokens for the default,
+  `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`, its card's sequence
+  length — else the smaller of its tokenizer's `model_max_length` and its
+  config's `max_position_embeddings`, 512 when neither says; 512 tokens for
+  `dslim/bert-base-NER`), and consecutive windows share a quarter of it.
+  Windowing needs a fast tokenizer — the only kind that reports character
+  offsets — so an `hf` model without one is refused at startup. A model whose tokenizer marks word pieces (WordPiece, as BERT and
   `dslim/bert-base-NER` use) labels each word by its first piece, so a name
   is reported as whole words, never cut inside one ("Angela Merk"). Other
   tokenizers (SentencePiece, byte-level BPE) do not tell the pipeline where
@@ -1111,14 +1403,16 @@ existing `detection.ner_enabled`):
   "max_chars": 20000,
   "backends": {
     "hf": {
-      "model": "dslim/bert-base-NER",
-      "source": "hub", "model_id": "dslim/bert-base-NER",
-      "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc", "pinned": true,
-      "catalog": "vetted", "license": "MIT",
+      "model": "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1",
+      "source": "hub", "model_id": "OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1",
+      "revision": "a2360d3f42526fc660ac3b2b2301e1c2d94eba61", "pinned": true,
+      "catalog": "caution", "license": "Apache-2.0",
       "score_threshold": 0.5, "score_threshold_source": "default",
       "counters": {"scanned_whole": 812, "scanned_windowed": 14, "skipped_max_chars": 3,
                    "windows": 61, "windows_truncated": 0, "labels_dropped": 0,
-                   "offsets_dropped": 0, "inline_calls": 0, "prefetch_misses": 0}
+                   "offsets_dropped": 0, "ungrounded": 0, "errors": 0,
+                   "breaker_opens": 0, "breaker_short_circuits": 0,
+                   "inline_calls": 0, "prefetch_misses": 0}
     }
   },
   "unmatched_entities": []
@@ -1131,9 +1425,13 @@ existing `detection.ner_enabled`):
 | `scanned_windowed` | strings the model read in overlapping windows (`hf`, `gliner`, `gliner2`) |
 | `skipped_max_chars` | strings longer than `[detection.ner] max_chars`, which the model never read (the regex rules and deny strings still scan them) |
 | `windows` | the windows the windowed strings were read in |
-| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`, `gliner2`) |
+| `windows_truncated` | windows (a string read whole counts as one) holding a single word longer than the model's encoder reads, which it may read only in part (`gliner`, `gliner2`); for `llm`, the pieces a word longer than its 2,000-character window is cut into |
 | `labels_dropped` | model entities whose type cannot be a placeholder type (never emitted) |
 | `offsets_dropped` | model entities of a requested type whose span the scanned string does not contain, or that came without one (never redacted: only the exact text sent can be restored) |
+| `ungrounded` | `llm` only: values the model server returned whose text does not occur in the text it read, is shorter than two characters or holds a placeholder's guillemet (never redacted) |
+| `errors` | `llm` only: strings its model server failed on (a timeout, an error status, a connection fault, an answer that is not the requested JSON) and strings its open circuit breaker failed at once; each refused its request with `on_error = "block"`, and went on without the backend's findings with `"skip"` |
+| `breaker_opens` | `llm` only: times its circuit breaker opened (a timeout, a transport fault or an HTTP 5xx; a failed probe opens it again) |
+| `breaker_short_circuits` | `llm` only: strings failed at once, without asking its model server, because its circuit breaker was open (each also in `errors`) |
 | `inline_calls` | strings the backend ran on the event loop itself, holding up every other request for that string's inference, instead of ahead of the redaction on the NER worker thread |
 | `prefetch_misses` | strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced), run inline instead and counted in `inline_calls` too |
 
@@ -1153,21 +1451,30 @@ are `null` for the spaCy, Presidio and Stanza backends, whose models are not
 Hub snapshots. `score_threshold` is the confidence threshold a backend runs at
 and `score_threshold_source` where it comes from: `config` (`[detection.ner]
 score_threshold`), `catalog` (the model's catalog default) or `default` (0.5);
-both are `null` for spaCy and Stanza, which report no confidences.
+both are `null` for spaCy and Stanza, which report no confidences. The `llm`
+backend's entry adds `server` (its model server's `scheme://host:port`), `api`,
+`on_error`, `api_key` (whether a key is configured: never the key or its
+variable) and `breaker` (its circuit breaker: `state` — `closed`, `open`,
+`half_open` once the cooldown has passed, `off` with `breaker_seconds = 0` —,
+`seconds`, the `reason` that opened it and, while open, `retry_in_seconds`).
 
 The same counts are Prometheus counters (`llm_redact_ner_strings_total` by
 backend and outcome, `llm_redact_ner_windows_total`,
 `llm_redact_ner_windows_truncated_total`, `llm_redact_ner_labels_dropped_total`,
-`llm_redact_ner_offsets_dropped_total`, `llm_redact_ner_inline_calls_total`,
+`llm_redact_ner_offsets_dropped_total`, `llm_redact_ner_ungrounded_total`,
+`llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total`,
+`llm_redact_ner_breaker_short_circuits_total`, `llm_redact_ner_inline_calls_total`,
 `llm_redact_ner_prefetch_misses_total`;
 see [observability.md](observability.md)), and `llm-redact status` prints a
 posture line while a backend has skipped strings longer than `max_chars` or an
-entity can never match:
+entity can never match, and whenever the `llm` backend runs with `on_error =
+"skip"`:
 
 ```
 posture:
   ⚠ NER skipped hf×3 string(s) longer than max_chars (20000) — regex rules still applied
   ⚠ NER entities no backend can emit: PERSONS (never detected)
+  ⚠ NER llm on_error = "skip": 2 string(s) forwarded without its findings after its model server failed (the other detectors still applied)
 ```
 
 The counters belong to the built detectors: they start at zero at startup and

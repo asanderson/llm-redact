@@ -56,6 +56,10 @@ refused, not forwarded unscanned).
   we do not defend against a provider actively attacking the client.
 - **The agentic tool is trusted.** It holds the API credentials and the
   user's files; the proxy adds privacy, not sandboxing.
+- **The `llm` NER backend's model server, when enabled, is trusted with the
+  unredacted text** it is asked to read (opt-in, off by default): it is
+  the operator's own server, on loopback unless `allow_remote = true` and
+  https. Its ANSWERS are not trusted — see "Contextual values" below.
 - **The browser is hostile.** Any web page can issue requests to
   127.0.0.1. This is the one boundary where an active network attacker is
   in scope — see "Requests from web pages" and the local ops surface
@@ -292,9 +296,29 @@ What that claim rests on, and what it does not:
   date of birth or username is: they reach the provider as typed.
 - **Structured values stay with the rules.** A model span longer than a
   rule's match wins overlap resolution (the longest span wins) and replaces
-  it; the bench counts such cases as structured regressions (none on the
+  it (one overlapping a card read inside a run of digit groups or a paper
+  IBAN is joined with it into one placeholder: [detection.md](detection.md#values-overlapping-a-card-read-in-a-run-or-a-paper-iban));
+  the bench counts such cases as structured regressions (none on the
   generated corpus for any configuration measured; one for ettin and two for
-  `openai/privacy-filter` on OpenPII's English slice).
+  `openai/privacy-filter` on OpenPII's English slice). The `llm` backend's
+  findings never do: they keep only what lies outside every other
+  detector's winner.
+- **A generative model reads text that can instruct it** (the opt-in `llm`
+  backend, [detection.md](detection.md#a-model-server-you-run-the-llm-backend)).
+  Its prompt frames the text as data between markers the text cannot forge,
+  but a model may still obey the text. What that cannot do: remove or
+  shorten another detector's redaction (its findings are additive only,
+  pinned by a property test), or make the proxy redact a value the text
+  does not hold (only verbatim text is kept, so an "invented" value never
+  enters the vault). What it can do: make the model miss values it would
+  have listed — the regex rules, deny strings and other NER backends still
+  apply — list ordinary words, which are then over-redacted (restored in
+  the answer), or make its answer fail (too long, too many values). A
+  failing server refuses the request (`on_error = "block"`, the default)
+  rather than forward it with less detection than configured — so a text
+  that reliably fails the model (a fetched page written to) refuses every
+  request carrying it, a conversation's history included, until it leaves
+  the history: denial of service by content, never a leak.
 - **Gaps are surfaced, not hidden.** An entity no backend can emit warns at
   startup, and what a model did not read is counted (long text, below).
 
@@ -467,6 +491,40 @@ the value's two parts ([detection.md](detection.md#how-ner-runs)).
   allowlists; it sits behind the same Host/Origin checks, as do
   `/sessions` and `/events`).
 
+### Scan sinks (a plugin reading what the redaction scanned)
+
+A plugin may register scan sinks (`plugin_api.ScanSink`,
+`Registry.build_scan_sinks`; the seam exists for llm-redact-pro's opt-in
+capture of training text). The Free core registers none, and without a sink nothing is recorded
+or queued. A sink receives the strings a request's redaction scanned
+**exactly as the client sent them — unredacted** — with each detection's
+type, span and the rule or NER backend that found it: the values the proxy
+exists to keep from the provider, handed to code running in the proxy's
+process. What a sink keeps is outside the vault's protections (and outside
+`[vault] encryption`): it is the sink's to protect, and installing one is
+the operator's trust decision, like an upload inspector that sends files to
+an extraction service. What the core guarantees:
+
+- read-only: a sink sees copies of facts and can change nothing a request,
+  its redaction or its answer does; its `capture` runs on one worker
+  thread off the event loop, behind a bounded queue (a full queue drops
+  and counts — a slow capture costs captures, never a request's time),
+  only its `wants`, a synchronous yes or no that must stay cheap, is asked
+  on the event loop before each redaction, and its faults are contained
+  and logged by exception type only (a sink with an `async def` member is
+  refused at startup);
+- only what the redaction scanned, only once it succeeded and the request
+  is handed to its upstream: a refused request or frame is never captured,
+  and nothing the core forwards without scanning it (`detection = false`,
+  a pass-through route, an exempt MCP server's blocks, the MCP connector
+  configuration and its credentials, a binary part sent unscanned)
+  reaches a sink through this seam;
+- no vault data: never a placeholder the proxy issued, never a mapping
+  (a string the client itself sent holding a placeholder holds it);
+- surfaced: `/status` `scan_capture` (the number of sinks and the queue's
+  delivered/dropped/fault counts), the `llm_redact_scan_capture*` metrics
+  and a `llm-redact status` posture line while any sink is registered.
+
 ### Logging posture
 
 - Log lines carry path, status, and detection counts. Never values,
@@ -547,6 +605,15 @@ silent:
 - `[detection] languages` narrows which national-id rules are built;
   universal rules (emails, keys, cards, IBANs, phones) always run, and
   the scoped-out rules are listed in `/status` and by `doctor`.
+- `[detection.ner.llm] on_error = "skip"` forwards a request without the
+  `llm` backend's findings when its model server times out or fails (the
+  default `"block"` refuses it 503): the other detectors still apply, and
+  each such string is counted (`errors` in `/status` and
+  `llm_redact_ner_errors_total`), with a `status` posture line and a
+  `doctor` WARN. While its circuit breaker is open (`breaker_seconds`
+  after a timeout, a transport fault or an HTTP 5xx) that holds for every
+  string that needs the server, even once the server has recovered, until
+  a probe succeeds — counted the same, with a posture line of its own.
 - Refusal overrides (`[overrides]`, OFF by default — an operator opts in
   with `enabled = true`; docs/overrides.md): a detection refusal then
   carries a single-use code, and once a person approves
@@ -639,8 +706,10 @@ row, is [resilience.md](resilience.md).
 |---|---|
 | Novel secret formats the rules miss | User-extensible custom rules; NER extras; fp/recall gates keep the shipped set honest |
 | Contextual personal values no rule can match (addresses, passport and driver's-licence numbers, dates of birth, usernames, account numbers, most names) | Outside the rules by design. With a PII model enabled and the types requested, redacted on a best-effort basis: measured per model on a generated corpus and published slices ([ner-landscape.md](ner-landscape.md#verdicts-at-a-glance)), never guaranteed on your traffic; a model misses values and draws false positives; passport and driver's-licence numbers have no recorded baseline; the default configuration asks for names only, and `llm-redact preview` shows what fires on a text |
+| The opt-in `llm` NER backend: its model server reads every scanned string, and the text can instruct its model | Loopback by default; a remote server needs `allow_remote = true` and https, its model is pinned by name and (Ollama) digest at every build, and nothing is followed but the configured URL — a key the server requires (`api_key_env`, read from the environment) goes only there, never logged or shown. Answers are grounded (only verbatim text is kept) and additive only (never displacing another detection); a failing server refuses the request unless `on_error = "skip"` (counted, a posture line). Residual: a model the text instructs may miss the values it alone would find, over-redact ordinary words, or fail on that text — refusing every request carrying it under `"block"`; a text that makes the model time out, or the server answer 5xx, opens the circuit breaker (`breaker_seconds`, default 30) for every string: every request needing the server refused under `"block"`, forwarded without the backend's findings under `"skip"`, again after each cooldown while that text keeps coming (`breaker_seconds = 0` limits a failure to its own string); a model re-tagged on the server after the build is used until the next build; the server's operator sees the unredacted text |
 | Text beyond what an NER model reads | Longer strings are read in overlapping windows (`hf`, `gliner`, `gliner2`); a string over `max_chars` (default 20,000 characters) is read by no model, the rules still scan it, and every skip is counted (`/status`, `/metrics`, a `llm-redact status` posture line, the `LlmRedactNerSkippingLongStrings` alert). Residual: names in such a string reach the provider; a word longer than the encoder reads is read in part (`windows_truncated`); an `hf` model decoded word by word never takes a quote or bracket into a value, so one inside a value goes upstream between the placeholders of its two parts |
 | NER model supply chain: weights or a tokenizer from a model repository that changed or was replaced | Models load at a full commit id (the user's pin or the model catalog's; an unpinned model is a `doctor` WARN), with explicit file names, never running repository code (`auto_map` refused, `trust_remote_code` never set) and, for `hf`, safetensors only unless `allow_pickle_weights` (a `doctor` WARN); a GLiNER ONNX export (`[detection.ner.onnx]`) fetches and reads only the one named file; GLiNER base models are pinned and assembled locally; downloads are off by default and startup-only, and with them off the Hugging Face libraries' own offline switches are set before they are imported, so no model load opens a connection (a CI job proves a start inside a network namespace with no route). Models carried into an enclave travel as portable folders checked against a SHA-256 manifest (`llm-redact models verify --dir`); the manifest travels with the folders, so its hash needs a separate channel. The model catalog states neutral facts (license, training data, a pin, measured numbers) and the core refuses nothing for them: a restricted model logs a startup WARNING, and a plugin's model-load policy (llm-redact-pro's `[models]`) may refuse. Residual: a pinned commit is trusted as published (no signature exists to check), a model the catalog does not know loads unpinned unless the operator pins it, GLiNER still loads a `pytorch_model.bin` through torch's `weights_only` loader (torch >= 2.6), a base model the catalog does not pin loads at its newest cached revision (a startup WARNING and a `doctor` WARN name it), and a model, though loaded as data and never as code, reads every scanned string inside the proxy's process |
+| A registered scan sink (a plugin's, none in the Free core) keeps the unredacted text it is handed | By design of the seam: the operator installs the plugin and enables its capture. The core hands a sink only what a successful redaction scanned, off the event loop, read-only, and says so (`/status` `scan_capture`, a `llm-redact status` posture line); everything after that — storage, retention, encryption, purge — is the plugin's to get right |
 | LLM mangles a placeholder beyond fuzzy repair | Pass-through verbatim (never a wrong value); bracket swaps deliberately unrestored |
 | History compaction rewrites the session anchor | Fails safe: fresh session, no cross-session restore — verified by the dogfood compaction probe. The fork never issues a token its summary carries: the summary is the fork's anchor, so every request of it carries the summary's tokens and the token floor numbers new values past them |
 | A request carries tokens its session did not issue (a pasted answer, a foreign proxy's token) | The token floor keeps the request (and a realtime connection) that carries them from issuing those names. Residual, documented in [compaction-relink.md](compaction-relink.md): a number the session had already issued before the foreign token arrived, another request sharing the session that does not carry the token, and provider-side history (a `previous_response_id` chain, a realtime model's own output) no request of the session carries — the last is what llm-redact-pro's sealed sessions cover |

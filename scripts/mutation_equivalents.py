@@ -66,24 +66,47 @@ EQUIVALENT_MUTANTS: dict[str, str] = {
         "load-bearing."
     ),
     "llm_redact.redactor.x__resolve_overlaps__mutmut_2": (
-        "fast-path predicate all(tier != 0) -> all(tier == 0): the fast path is a "
-        "pure optimization of the two-phase sweep. With only tiers {0, 1} "
-        "present, the two-phase path degenerates to _sweep(all) whenever the tier "
-        "set is uniform, so routing to it produces the identical result."
+        "fast-path predicate all(tier != ADDITIVE_TIER) -> all(tier == ADDITIVE_TIER): "
+        "with no additive detection the split path computes _resolve_tiers(all) and "
+        "cuts nothing (_outside(fixed, []) == []), the same list in the same start "
+        "order; with only additive ones the mutant sweeps them whole while the split "
+        "path sweeps them re-sorted by (start, -length, priority) and _outside([], ...) "
+        "keeps each as it is. Every caller hands detections in exactly that order "
+        "(DetectorPlan.detect / detect_sourced sort by engine._detection_order), so "
+        "the re-sort is the identity and both routes give the identical result."
     ),
-    "llm_redact.redactor.x__resolve_overlaps__mutmut_3": (
-        "fast-path predicate all(tier != 0) -> all(tier != 1): same reasoning — "
-        "only tiers {0, 1} exist, and the two-phase path already computes the "
-        "correct result for every tier composition, so a different route to it is "
-        "observationally identical."
+    "llm_redact.redactor.x__resolve_overlaps__mutmut_15": (
+        "additive sort key -(end - start) -> -(end + start): the key's first element is "
+        "start, so the second only orders detections with the SAME start, where "
+        "-(end + start) and -(end - start) differ by the constant 2*start and order "
+        "them identically (longest first). Same sorted list for every input."
     ),
-    "llm_redact.redactor.x__resolve_overlaps__mutmut_22": (
-        "bisect_right(deny_ends, d.start, lo=i) -> bisect_right(deny_ends, d.start): "
-        "the chosen deny spans are disjoint and start-sorted, so deny_ends is sorted "
-        "and the answer is the first index whose end exceeds d.start; candidates come "
-        "start-sorted, so that index never falls below the previous answer i. lo=i "
-        "only bounds the search (cost), never its result — every input gives the "
-        "same index."
+    "llm_redact.redactor.xǁRedactorǁ_resolved__mutmut_33": (
+        "additive sort key -(end - start) -> -(end + start) in Redactor._resolved: the "
+        "same key as _resolve_overlaps' (mutant 15 there) — among equal starts both "
+        "order longest first, so the sort is unchanged for every input."
+    ),
+    "llm_redact.redactor.x__piece__mutmut_13": (
+        "start < end -> start <= end in _piece: at start == end the slice "
+        "d.value[k:k] is '' exactly as the else branch, so raw is '' either way and "
+        "the piece is dropped (kept.strip() is empty). No input differs."
+    ),
+    "llm_redact.redactor.x__resolve_tiers__mutmut_2": (
+        "fast-path predicate all(tier != 0) -> all(tier == 0) (the pre-1.13 "
+        "_resolve_overlaps' mutant 2, moved with its sweep): the fast path is a pure "
+        "optimization of the two-phase sweep, which treats every non-zero tier alike. "
+        "With no tier-0 detection it keeps every candidate (no deny span) and returns "
+        "_sweep of them in start order; with only tier-0 ones it returns _sweep(all). "
+        "Either route gives the identical result for any tiers, the additive winners "
+        "_absorb hands it included."
+    ),
+    "llm_redact.redactor.x__resolve_tiers__mutmut_22": (
+        "bisect_right(deny_ends, d.start, lo=i) -> bisect_right(deny_ends, d.start) "
+        "(the pre-1.13 _resolve_overlaps' mutant 22): the chosen deny spans are "
+        "disjoint and start-sorted, so deny_ends is sorted and the answer is the first "
+        "index whose end exceeds d.start; candidates come start-sorted (every caller, "
+        "_absorb's sorted(..., key=start) included), so that index never falls below "
+        "the previous answer i. lo=i only bounds the search (cost), never its result."
     ),
     "llm_redact.redactor.x__sweep__mutmut_4": (
         "last_end = -1 -> -2: a sentinel below every real detection start (>= 0). "

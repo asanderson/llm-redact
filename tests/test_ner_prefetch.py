@@ -508,28 +508,35 @@ def test_the_collected_strings_feed_a_complete_table() -> None:
     assert model.stats.inline_calls == model.stats.prefetch_misses == 0
 
 
-def test_an_over_budget_body_disables_the_prefetch() -> None:
+def test_an_over_budget_body_prefetches_the_strings_within_its_budget() -> None:
+    # The collecting pass stops where the real pass will refuse the body:
+    # the strings before that point are detected ahead of it, so the real
+    # pass runs no model inline on its way to its own refusal.
     shape = next(shape for shape in SHAPES if shape.id == "openai-chat")
     adapter = _adapter(shape)
-    assert collect_request_strings(adapter, shape.method, shape.path, shape.body, limit=3) is None
-    # The real pass refuses it on its own.
-    redactor = Redactor(build_detectors(DetectionConfig()), InMemoryVault(), Allowlist())
+    whole = collect_request_strings(adapter, shape.method, shape.path, shape.body, limit=LIMIT)
+    collected = collect_request_strings(adapter, shape.method, shape.path, shape.body, limit=3)
+    assert len(whole) > 3 and collected == whole[:3]
+    model = FakeModel()
+    redactor = Redactor([*build_detectors(DetectionConfig()), model], InMemoryVault(), Allowlist())
+    table = _table(redactor.plan, collected)
     with pytest.raises(TooManyStrings):
         prepare_route_request(
             adapter,
             shape.method,
             shape.path,
             shape.body,
-            redactor.with_budget(3),
+            redactor.with_precomputed(table, redactor.plan).with_budget(3),
             inject_note=False,
         )
+    assert model.stats.inline_calls == model.stats.prefetch_misses == 0
 
 
-def test_an_undecodable_bedrock_blob_disables_the_prefetch() -> None:
+def test_an_undecodable_bedrock_blob_collects_nothing_and_is_refused() -> None:
     adapter = _adapter(next(shape for shape in SHAPES if shape.adapter == "BedrockAdapter"))
     path = "/model/anthropic.claude-x/count-tokens"
     body = {"input": {"invokeModel": {"body": base64.b64encode(b"\xff not json").decode()}}}
-    assert collect_request_strings(adapter, "POST", path, body, limit=LIMIT) is None
+    assert collect_request_strings(adapter, "POST", path, body, limit=LIMIT) == []
     redactor = Redactor(build_detectors(DetectionConfig()), InMemoryVault(), Allowlist())
     with pytest.raises(UnredactableRequest):
         prepare_route_request(adapter, "POST", path, body, redactor, inject_note=False)
@@ -540,7 +547,8 @@ def test_any_failure_of_a_collecting_pass_is_contained() -> None:
         collector.redact_text("a")
         raise RuntimeError("anything")
 
-    assert collect(broken, limit=10) is None
+    # What it collected before the failure.
+    assert collect(broken, limit=10) == ["a"]
     assert collect(lambda collector: collector.redact_text("a"), limit=10) == ["a"]
 
 

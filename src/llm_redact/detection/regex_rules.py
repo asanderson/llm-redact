@@ -65,8 +65,13 @@ class RegexRule:
     # A valid match a vetoed one may hold (None: none), given where the
     # next match of the pattern starts (the text's length when none does):
     # the scan itself stays finditer's, and what this returns lies before
-    # that next match. For a rule without anchors.
+    # that next match; it is joined (Detection.joins). For a rule without
+    # anchors.
     inside: Callable[[re.Match[str], int], re.Match[str] | None] | None = None
+    # Whether a match is joined with the values it overlaps instead of
+    # competing with them for its characters (Detection.joins; None: none
+    # is): a reading an earlier release did not make.
+    joins: Callable[[re.Match[str]], bool] | None = None
 
 
 # `\d` in a str pattern is any Unicode decimal digit (category Nd), not just
@@ -736,6 +741,12 @@ def _iban_ok(match: re.Match[str]) -> bool:
     return int("".join(str(int(ch, 36)) for ch in rearranged)) % 97 == 1
 
 
+def _iban_paper(match: re.Match[str]) -> bool:
+    """Whether an IBAN is written in the paper format (read since 1.12.1):
+    joined with the values it overlaps (Detection.joins)."""
+    return match.group(0)[4] in _IBAN_SEPARATORS
+
+
 def _iban_resume(match: re.Match[str]) -> int:
     """Where the scan goes on after a vetoed candidate: at its second group
     in the paper format, where an IBAN can start ("IS12 GB82 WEST 1234 5698
@@ -754,10 +765,31 @@ _GROUP = re.compile(r"\d+")
 # Where such a card may end, so that no other rule's value can start inside
 # it and run on past its end: where the run of groups ends, before what may
 # follow a paper IBAN (a run of dots or one ":" then _CLOSE, else none of
-# "-.:@%+"); or one group (group 1) before such an end, read with the card
-# as one candidate of at most 19 digits (_card_inside checks the length).
+# "-.:@%+"); one group (group 1) before such an end, read with the card as
+# one candidate of at most 19 digits (_card_inside checks the length); or an
+# expiry before such an end, a month (01 to 12) then a year of two or four
+# digits, each after the same separator (group 2), the card's own when it
+# has one (_card_ends): then no built-in rule's value can start inside the
+# card and run on into it (test_credit_card_groups.py tries every one; with
+# a separator of its own, a US SSN can: "4111 1111 1111 111-12-2027").
 _CARD_RUN_END = rf"(?:(?:\.++|:){_CLOSE}|(?![-.:@%+]|[ -]?\d))"
-_CARD_END = re.compile(rf"{_CARD_RUN_END}|[ -](\d+)\b{_CARD_RUN_END}")
+_CARD_END = re.compile(
+    rf"{_CARD_RUN_END}|[ -](\d+)\b{_CARD_RUN_END}"
+    rf"|([ -])(?:0[1-9]|1[0-2])\2(?:\d{{2}}|\d{{4}})\b{_CARD_RUN_END}"
+)
+
+
+def _card_ends(grouping: re.Match[str], after: re.Match[str], digits: int) -> bool:
+    """Whether a card of ``digits`` digits written as ``grouping`` (a
+    _CARD_GROUPING match) may end where ``after`` (the _CARD_END match after
+    it) says: where its run of groups ends; before one group, the two at
+    most 19 digits; or before an expiry written with the card's separator
+    (with either one, the same twice, when the card is solid)."""
+    group, separator = after.group(1, 2)
+    if group is not None:
+        return digits + len(group) <= 19
+    own = grouping.group(1) or grouping.group(2)
+    return own is None or separator in (None, own)
 
 
 def _card_inside(match: re.Match[str], limit: int) -> re.Match[str] | None:
@@ -792,9 +824,9 @@ def _card_inside(match: re.Match[str], limit: int) -> re.Match[str] | None:
                 13 <= digits <= 19
                 and (start, end) != match.span()
                 and (best is None or (digits, start) > best[:2])
-                and _CARD_GROUPING.fullmatch(text, start, end)
+                and (grouping := _CARD_GROUPING.fullmatch(text, start, end)) is not None
                 and (after := _CARD_END.match(text, end)) is not None
-                and (after.group(1) is None or digits + len(after.group(1)) <= 19)
+                and _card_ends(grouping, after, digits)
                 and (card := pattern.match(text, start, end)) is not None
                 and _luhn_ok(card)
             ):
@@ -933,6 +965,7 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         pattern=_iban_pattern(),
         validator=_iban_ok,
         resume=_iban_resume,
+        joins=_iban_paper,
     ),
     RegexRule(
         # Ethereum (and every EVM chain): 0x + 40 hex. A mixed-case address
@@ -1867,26 +1900,27 @@ class RegexDetector:
         if self._rule.resume is not None:
             return self._detections_from(self._resumed(text, self._rule.resume), validated=True)
         if self._rule.inside is not None:
-            return self._detections_from(self._insides(text, self._rule.inside), validated=True)
+            return self._insides(text, self._rule.inside)
         return self._detections_from(self._rule.pattern.finditer(text))
 
     def _insides(
         self, text: str, inside: Callable[["re.Match[str]", int], "re.Match[str] | None"]
-    ) -> Iterator["re.Match[str]"]:
+    ) -> Iterator[Detection]:
         """finditer's matches the validator accepts and, for each one it
-        vetoes, the match ``inside`` finds in it, before the next one: what
-        the validator accepted alone is found exactly as without it."""
+        vetoes, the match ``inside`` finds in it, before the next one,
+        joined (Detection.joins): what the validator accepted alone is found
+        exactly as without it."""
         validator = self._validator
         matches = self._rule.pattern.finditer(text)
         match = next(matches, None)
         while match is not None:
             following = next(matches, None)
             if validator is None or validator(match):
-                yield match
+                yield self._detection(match)
             elif (
                 found := inside(match, len(text) if following is None else following.start())
             ) is not None:
-                yield found
+                yield self._detection(found, joins=True)
             match = following
 
     def _resumed(
@@ -1906,21 +1940,28 @@ class RegexDetector:
     def _detections_from(
         self, matches: Iterable["re.Match[str]"], validated: bool = False
     ) -> Iterable[Detection]:
-        rule = self._rule
         validator = None if validated else self._validator
         for match in matches:
             if validator is not None and not validator(match):
                 continue
-            if rule.group and match.group("value") is not None:
-                start, end = match.span("value")
-                value = match.group("value")
-            else:
-                start, end = match.span(0)
-                value = match.group(0)
-            yield Detection(
-                start=start,
-                end=end,
-                detector_type=rule.detector_type,
-                value=value,
-                priority=rule.priority,
-            )
+            yield self._detection(match)
+
+    def _detection(self, match: "re.Match[str]", joins: bool = False) -> Detection:
+        """The detection a match the validator accepted makes: joined
+        (Detection.joins) when ``joins`` says so or the rule's own
+        ``joins`` does."""
+        rule = self._rule
+        if rule.group and match.group("value") is not None:
+            start, end = match.span("value")
+            value = match.group("value")
+        else:
+            start, end = match.span(0)
+            value = match.group(0)
+        return Detection(
+            start=start,
+            end=end,
+            detector_type=rule.detector_type,
+            value=value,
+            priority=rule.priority,
+            joins=joins or (rule.joins is not None and rule.joins(match)),
+        )

@@ -308,7 +308,7 @@
     {
       "type": "timeseries",
       "title": "NER entities dropped by backend",
-      "description": "Model entities never redacted: labels = their type cannot be a placeholder type (llm_redact_ner_labels_dropped_total; usually an [detection.ner] entities entry that cannot be one), offsets = the scanned string does not contain their span (llm_redact_ner_offsets_dropped_total). Both should stay at zero.",
+      "description": "Model entities never redacted: labels = their type cannot be a placeholder type (llm_redact_ner_labels_dropped_total; usually an [detection.ner] entities entry that cannot be one), offsets = the scanned string does not contain their span (llm_redact_ner_offsets_dropped_total). Both should stay at zero. llm backend only: ungrounded = values its model server returned that the text does not hold (llm_redact_ner_ungrounded_total), errors = strings its server failed on (llm_redact_ner_errors_total: refused 503 with on_error = block, forwarded without its findings with skip), breaker = strings its open circuit breaker failed at once without asking the server (llm_redact_ner_breaker_short_circuits_total, also in errors) and breaker opens (llm_redact_ner_breaker_opens_total).",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
       "fieldConfig": { "defaults": { "unit": "cps", "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] },
@@ -322,6 +322,26 @@
           "expr": "sum by (backend) (rate(llm_redact_ner_offsets_dropped_total[5m]))",
           "legendFormat": "{{backend}} offsets",
           "refId": "B"
+        },
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_ungrounded_total[5m]))",
+          "legendFormat": "{{backend}} ungrounded",
+          "refId": "C"
+        },
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_errors_total[5m]))",
+          "legendFormat": "{{backend}} server errors",
+          "refId": "D"
+        },
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_breaker_short_circuits_total[5m]))",
+          "legendFormat": "{{backend}} breaker short-circuited",
+          "refId": "E"
+        },
+        {
+          "expr": "sum by (backend) (rate(llm_redact_ner_breaker_opens_total[5m]))",
+          "legendFormat": "{{backend}} breaker opens",
+          "refId": "F"
         }
       ]
     }

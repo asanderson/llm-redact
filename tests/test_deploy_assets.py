@@ -91,6 +91,10 @@ def test_ner_coverage_gap_has_panels_and_an_alert() -> None:
         "llm_redact_ner_windows_truncated_total",
         "llm_redact_ner_labels_dropped_total",
         "llm_redact_ner_offsets_dropped_total",
+        "llm_redact_ner_ungrounded_total",
+        "llm_redact_ner_errors_total",
+        "llm_redact_ner_breaker_opens_total",
+        "llm_redact_ner_breaker_short_circuits_total",
     ):
         assert family in dashboard, family
     rules = yaml.safe_load((DEPLOY / "prometheus-alerts.yml").read_text())["groups"][0]["rules"]
@@ -99,6 +103,27 @@ def test_ner_coverage_gap_has_panels_and_an_alert() -> None:
     assert rule["labels"]["severity"] == "warning"
     assert rule["annotations"]["summary"]
     assert "max_chars" in rule["annotations"]["description"]
+    # The llm backend's model server failing: refused or forwarded without
+    # its findings, either way worth a look.
+    server = {r["alert"]: r for r in rules}["LlmRedactNerServerFailing"]
+    assert "llm_redact_ner_errors_total" in server["expr"]
+    assert server["labels"]["severity"] == "warning"
+    assert "on_error" in server["annotations"]["description"]
+
+
+def test_dropped_scan_captures_have_an_alert() -> None:
+    # A plugin's scan sinks that cannot keep up lose captures: the requests
+    # are unaffected, so the alert says so and names the queue's metrics;
+    # a process's last drain (reason shutdown) is no trend.
+    rules = yaml.safe_load((DEPLOY / "prometheus-alerts.yml").read_text())["groups"][0]["rules"]
+    rule = {r["alert"]: r for r in rules}["LlmRedactScanCapturesDropped"]
+    assert 'llm_redact_scan_captures_dropped_total{reason!="shutdown"}' in rule["expr"]
+    assert rule["labels"]["severity"] == "warning"
+    assert rule["annotations"]["summary"]
+    description = rule["annotations"]["description"]
+    assert "requests are unaffected" in description
+    assert "llm_redact_scan_capture_queue_depth" in description
+    assert 'llm_redact_bookkeeping_errors_total{stage="scan_sink"}' in description
 
 
 def test_prometheus_scrape_targets_reserved_path() -> None:

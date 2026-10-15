@@ -50,7 +50,10 @@ one vault transaction — taking the models' results from that table. A
 string the table lacks (or every string, when a configuration reload
 replaced the detectors meanwhile) is run through the models inline, so the
 result never depends on the table, and is counted (`inline_calls`,
-`prefetch_misses` in docs/detection.md "NER coverage counters"). An
+`prefetch_misses` in docs/detection.md "NER coverage counters"). A body
+the redaction will refuse part way (more strings than `max_body_strings`,
+a part it cannot read) still has the strings before that point detected on
+the worker thread, never inline on the way to the refusal. An
 upload inspector's extracted texts are detected the same way once the
 inspector has read them, and a realtime frame read while a reload replaced
 the connection's detectors is closed (1012) without being sent.
@@ -64,6 +67,15 @@ string at a time: a string the redaction must still detect inline (a
 table miss) waits for at most the string the worker is on, never the whole
 batch. A model fault refuses the request (nothing is forwarded), exactly as
 it did when the models ran inline.
+
+A plugin may register scan sinks (none in the Free core; docs/plugins.md
+"Scan sinks"): a sink that wants a request is handed, after its redaction
+succeeded and right before the request leaves for its upstream, each
+distinct string the redaction scanned — UNREDACTED, as the client sent it
+— with every detection's type, span and the rule or model that found it.
+The hand-off is a bounded queue served by one worker thread, so a sink
+never holds up a request; a refused request is never handed over. Without
+a sink nothing is recorded.
 
 A request body with nothing to redact is forwarded as its original bytes
 (no parse-and-reserialize round trip). The one exception is a JSON object

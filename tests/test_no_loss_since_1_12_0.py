@@ -1,16 +1,25 @@
-"""Nothing 1.12.0 redacted goes upstream in 1.12.1.
+"""Nothing 1.12.0 redacted goes upstream since.
 
 1.12.1 changes five built-in rules: belgian_nn, swiss_ahv, ipv6, iban and
-planetscale_token. Their 1.12.0 definitions are frozen below. The 1.12.0
-pipeline is the production rule list with those five swapped back, through
-the same overlap resolution; every character it redacts must be redacted by
-this release's production Redactor. The inputs: the bench corpus at three
-seeds (every rule's values in every punctuation context); every value
-glued to punctuation (a JSON string's escapes too), to another value and
-to a PlanetScale run (dots past the 64-character cap, another token
-inside); the start of every value grafted onto the end of a
-checksum-valid spaced IBAN; and generic secrets of low and border
-entropy. There are no exceptions: a loss is fixed in the rules.
+planetscale_token; 1.13.0 changes credit_card (a card inside a longer run
+of digit groups, regex_rules._card_inside). Their 1.12.0 definitions are
+frozen below (1.12.1 kept credit_card's). The 1.12.0 pipeline is the
+production rule list with those six swapped back, through the same overlap
+resolution; every character it redacts must be redacted by this release's
+production Redactor. The inputs: the bench corpus at three seeds (every
+rule's values in every punctuation context); every value glued to
+punctuation (a JSON string's escapes too), to another value and to a
+PlanetScale run (dots past the 64-character cap, another token inside);
+the start of every value grafted onto the end of a checksum-valid spaced
+IBAN; generic secrets of low and border entropy; and cards in runs of
+digit groups, next to every value. There are no exceptions: a loss is
+fixed in the rules.
+
+The same inputs check 1.12.1's pipeline too: this release's rules with
+credit_card's inside reading taken out, a digest pinning the five rules
+1.12.1 changed to their 1.12.1 definitions (1.12.1 is no subset of 1.12.0,
+so the 1.12.0 reference alone would not show that nothing 1.12.1 redacted
+is lost).
 
 This holds under the default [detection.modes]: a newly read value wins
 an overlap like any longer match, so the value it takes in follows its
@@ -46,6 +55,7 @@ from llm_redact.detection.regex_rules import (
     _GENERIC_VALIDATORS,
     _IBAN_PAPER_LENGTHS,
     BUILTIN_RULES,
+    RegexDetector,
     RegexRule,
 )
 from llm_redact.placeholders import PLACEHOLDER_RE
@@ -99,6 +109,26 @@ def _belgian_nn_ok(match: re.Match[str]) -> bool:
     return any(check == 97 - int(prefix + body) % 97 for prefix in ("", "2"))
 
 
+def _luhn_checksum(digits: list[int]) -> int:
+    checksum = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        checksum += d
+    return checksum % 10
+
+
+def _luhn_ok(match: re.Match[str]) -> bool:
+    digits = [int(c) for c in re.sub(r"[ -]", "", match.group(0))]
+    if not 13 <= len(digits) <= 19:
+        return False
+    if not any(digits):
+        return False
+    return _luhn_checksum(digits) == 0
+
+
 # name -> (detector type, priority, pattern, validator)
 FROZEN_1_12_0 = {
     "ipv6": (
@@ -121,11 +151,17 @@ FROZEN_1_12_0 = {
         r"\bpscale_(?:tkn|oauth|pw)_[A-Za-z0-9=._-]{30,64}(?![\w=.-])",
         None,
     ),
+    "credit_card": ("CREDIT_CARD", 100, r"\b\d(?:[ -]?\d){12,18}\b", _luhn_ok),
 }
 
-# Every other built-in rule as 1.12.0 defined it: _digest of its 82 rules,
-# computed from the v1.12.0 source.
-UNCHANGED_1_12_0 = (82, "810b4a010f221874fff0be32a087dc343432845606d0c8e14392767aae45e31e")
+# Every other built-in rule as 1.12.0 defined it: _digest of its 81 rules,
+# computed from the v1.12.0 source (the 82 the digest pinned before
+# credit_card was frozen, credit_card without its new field, still give
+# 1.12.0's digest of the 82).
+UNCHANGED_1_12_0 = (81, "f0789c5afc755577e920e7cc0a688c18a94d196d62e1dab9bd3e1e9649c3cacc")
+# The five rules 1.12.1 changed, as 1.12.1 defined them (computed from the
+# v1.12.1 source): PLAN_1_12_1 is 1.12.1's pipeline while this holds.
+CHANGED_IN_1_12_1 = (5, "a7f351daf26e85534f4f4fe17128adbd9a5d6ebf453f6e90b9c43149a06cffac")
 
 
 class Frozen:
@@ -149,12 +185,27 @@ ALLOWLIST = build_allowlist(CONFIG)
 OLD_PLAN = DetectorPlan(
     [Frozen(det.name) if det.name in FROZEN_1_12_0 else det for det in build_detectors(CONFIG)]
 )
+# 1.12.1's pipeline: this release's rules, credit_card without the inside
+# reading 1.13.0 added (CHANGED_IN_1_12_1 pins the rest to 1.12.1).
+PLAN_1_12_1 = DetectorPlan(
+    [
+        RegexDetector(dataclasses.replace(det.rule, inside=None))
+        if isinstance(det, RegexDetector) and det.name == "credit_card"
+        else det
+        for det in build_detectors(CONFIG)
+    ]
+)
 VAULT = InMemoryVault()
 RELEASE = Redactor(build_detectors(CONFIG), VAULT, ALLOWLIST)
 
 
 def redacted_by_1_12_0(text: str) -> set[int]:
     winners = _resolve_overlaps(OLD_PLAN.detect(text, ALLOWLIST))
+    return {i for d in winners for i in range(d.start, d.end)}
+
+
+def redacted_by_1_12_1(text: str) -> set[int]:
+    winners = _resolve_overlaps(PLAN_1_12_1.detect(text, ALLOWLIST))
     return {i for d in winners for i in range(d.start, d.end)}
 
 
@@ -244,12 +295,45 @@ def planetscale_run(rng: random.Random) -> str:
     return f"pscale_{kind}_{body[:cut]}{inner}{body[cut:]}" + "." * rng.randrange(0, 70)
 
 
+def luhn_card(rng: random.Random) -> str:
+    """A Luhn-valid card number of 13 to 19 digits."""
+    digits = [rng.randrange(10) for _ in range(rng.randrange(12, 19))]
+    for check in range(10):
+        if _luhn_checksum([*digits, check]) == 0:
+            return "".join(map(str, [*digits, check]))
+    raise AssertionError("one check digit always fits")
+
+
+def card_run(rng: random.Random, value: str) -> str:
+    """A card (solid, or in groups of four or 4-6-5 by one separator) in a
+    run of digit groups, at times with ``value`` beside it: what the
+    credit_card rule reads inside a longer run."""
+    card = luhn_card(rng)
+    separator = rng.choice(" -")
+    if len(card) == 15 and rng.random() < 0.5:
+        groups = [card[:4], card[4:10], card[10:]]
+    elif rng.random() < 0.8:
+        groups = [card[i : i + 4] for i in range(0, len(card), 4)]
+    else:
+        groups = [card]
+
+    def digit_groups() -> list[str]:
+        return ["".join(rng.choice("0123456789") for _ in range(rng.randrange(1, 7)))
+                for _ in range(rng.choice((0, 0, 1, 1, 2, 3)))]  # fmt: skip
+
+    run = [*digit_groups(), separator.join(groups), *digit_groups()]
+    text = "".join(f"{part}{rng.choice(' -')}" for part in run[:-1]) + run[-1]
+    joiner = rng.choice(JOINERS)
+    return rng.choice((text, value + joiner + text, text + joiner + value)) + rng.choice(ENDINGS)
+
+
 def texts(seed: int) -> Iterable[str]:
     rng = random.Random(seed)
     yield from (sample.text for sample in generate(seed=seed))
     for _ in range(3):
         values = [gen(rng) for gen in GENERATORS]
         for value in values:
+            yield from (card_run(rng, value) for _ in range(10))
             yield from (value + ending for ending in ENDINGS)
             yield from (joiner + value for joiner in JOINERS)
             other = rng.choice(values)
@@ -270,17 +354,20 @@ def texts(seed: int) -> Iterable[str]:
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
-def test_nothing_1_12_0_redacted_is_forwarded(seed: int) -> None:
-    lost, gained, count = [], 0, 0
+def test_nothing_1_12_0_or_1_12_1_redacted_is_forwarded(seed: int) -> None:
+    lost, gained, gained_since_1_12_1, count = [], 0, 0, 0
     for text in texts(seed):
         count += 1
-        release, old = redacted_by_release(text), redacted_by_1_12_0(text)
-        if old - release:
-            lost.append((text, sorted(old - release)))
+        release = redacted_by_release(text)
+        old, previous = redacted_by_1_12_0(text), redacted_by_1_12_1(text)
+        if (old | previous) - release:
+            lost.append((text, sorted((old | previous) - release)))
         gained += bool(release - old)
+        gained_since_1_12_1 += bool(release - previous)
     assert lost == []
-    # Not vacuous: the inputs hold values 1.12.0 forwarded.
-    assert count > 20_000 and gained > 1_000
+    # Not vacuous: the inputs hold values 1.12.0 forwarded, and cards in
+    # runs of digit groups that 1.12.1 forwarded.
+    assert count > 20_000 and gained > 1_000 and gained_since_1_12_1 > 100
 
 
 def _as_written(func: types.FunctionType) -> tuple[types.FunctionType, str]:
@@ -353,6 +440,21 @@ def test_every_other_rule_is_as_1_12_0_defined_it(monkeypatch: pytest.MonkeyPatc
     assert _digest(unchanged) != UNCHANGED_1_12_0
 
 
+def test_the_1_12_1_reference_is_1_12_1() -> None:
+    # 1.12.1's pipeline differs from this release's only in credit_card,
+    # whose inside reading it lacks.
+    changed = [rule for rule in BUILTIN_RULES if rule.name in FROZEN_1_12_0]
+    assert _digest(rule for rule in changed if rule.name != "credit_card") == CHANGED_IN_1_12_1
+    previous = {det.name: det for det in PLAN_1_12_1.detectors}
+    card = previous["credit_card"]
+    assert isinstance(card, RegexDetector) and card.rule.inside is None
+    rule = next(rule for rule in BUILTIN_RULES if rule.name == "credit_card")
+    assert card.rule == dataclasses.replace(rule, inside=None)
+    assert [det.name for det in PLAN_1_12_1.detectors] == [
+        det.name for det in build_detectors(CONFIG)
+    ]
+
+
 @pytest.mark.parametrize(
     ("text", "forwarded"),
     [
@@ -362,6 +464,8 @@ def test_every_other_rule_is_as_1_12_0_defined_it(monkeypatch: pytest.MonkeyPatc
         ("2001:db8::1: unreachable", "2001:db8::1"),
         ("pay GB82 WEST 1234 5698 7654 32 now", "GB82 WEST 1234 5698 7654 32"),
         ("token pscale_tkn_" + "a1B2c3D4" * 8 + ". Done", "pscale_tkn_" + "a1B2c3D4" * 8),
+        ("Order 12 4111 1111 1111 1111", "4111 1111 1111 1111"),
+        ("card 4111 1111 1111 1111 12", "4111 1111 1111 1111"),
     ],
 )
 def test_the_reference_is_1_12_0(text: str, forwarded: str) -> None:

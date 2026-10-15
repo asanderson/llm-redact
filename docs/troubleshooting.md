@@ -219,9 +219,9 @@ allowed_hosts, allowed_origins, vault, audit, log, tls, otel, users, email,
 extraction, and overrides changes are kept as they were and named in the
 "require restart" line — and so are the `llm` backend's `[detection.ner.llm]`
 `url`, `allow_remote` and `api_key_env`, named by their dotted path
-(`detection.ner.llm.url`), and a reload starts that backend only at the
-values the proxy started with (see "a reload cannot start the llm backend"
-below).
+(`detection.ner.llm.url`); a reload never starts that backend on a proxy
+started without it, and starts it again only at the values the proxy
+started with (see "a reload cannot start the llm backend" below).
 
 ## "the vault at {path} is encrypted; set [vault] encryption = \"fernet\" …"
 
@@ -1116,22 +1116,30 @@ reloads hot. A reload (SIGHUP, the llm-redact-pro config editor) that changed
 them keeps their running values — the ones the proxy started with —, applies
 the rest and names each kept key (`detection.ner.llm.url`,
 `detection.ner.llm.allow_remote`, `detection.ner.llm.api_key_env`) in its
-"require restart" warning. A reload may START the backend — `"llm"` added to
-`[detection.ner] backends`, NER switched on with it, its table added, or
-re-added after a previous reload stopped it — only at those values: the
-startup file's, or the defaults when that file had no `[detection.ner.llm]`
-table. One that would start it with any of them changed is refused
-(`config reload failed; keeping current config: [detection.ner] a reload
-cannot start the llm backend anywhere but where the proxy was started to
-send it: detection.ner.llm.url changed (…)`, the editor's 400), naming the
-keys that changed: set them back and reload again to start it, or restart
-the proxy (`serve --check` first) to start it at the new ones. So is a
-reload the kept `url` makes invalid (`url is the server's base URL, without
-/v1 … — the running url is kept on a reload`: a changed `api`); restart the
-proxy to apply the file as written. A start the reload allows builds as
-the startup does: an unset key variable (above), a server that does not
-answer or no longer serves the pinned model refuses it with the running
-configuration kept.
+"require restart" warning. A reload never starts the backend on a proxy
+started without it, and starts it again only at the values the proxy
+started with:
+
+- `config reload failed; keeping current config: [detection.ner] a reload
+  cannot start the llm backend: the proxy was not started running it (…)`
+  (the editor's 400): the reload would start the backend — `"llm"` added to
+  `[detection.ner] backends`, NER switched on with it, its table added — on
+  a proxy whose startup did not run it, even at the `url` and key variable
+  of a `[detection.ner.llm]` table the startup file held with NER off.
+  Restart the proxy (`serve --check` first) to start it.
+- `… a reload cannot start the llm backend anywhere but where the proxy was
+  started to send it: detection.ner.llm.url changed (…)`: the proxy was
+  started running the backend, a reload stopped it, and this one would start
+  it again with the named keys changed. Set them back and reload again to
+  start it where it ran, or restart the proxy to start it at the new ones.
+
+So is a reload the kept `url` makes invalid (`url is the server's base URL,
+without /v1 … — the running url is kept on a reload`: a changed `api`);
+restart the proxy to apply the file as written. Each message names keys,
+never a value. A re-activation the reload allows builds as the startup
+does: an unset key variable (above), a server that does not answer or no
+longer serves the pinned model refuses it with the running configuration
+kept.
 
 ## "[detection.ner.llm] api_key_env must name an environment variable …" / "… must not name an LLM_REDACT_ variable …"
 

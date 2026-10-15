@@ -462,7 +462,8 @@ proxy whose startup did not run the backend, whatever the file names: a
 `[detection.ner.llm]` table the startup file held with NER off, or the
 defaults (`a reload cannot start the llm backend: the proxy was not
 started running it`). On a proxy started running it, a reload that
-stopped it (NER switched off, `"llm"` or its table removed) can be
+stopped it (NER switched off, or `"llm"` removed from `backends`, with
+or without its table) can be
 followed by one that re-activates it, applied when the file names the
 `url`, `allow_remote` and `api_key_env` the proxy started with; the build
 then reads the key's variable and checks the server and its model exactly

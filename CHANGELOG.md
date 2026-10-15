@@ -247,9 +247,11 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   now follows the signal by the build's length (seconds when NER models load), `/status` says
   where reloads stand — a `config_reload` block: `running`, `running_seconds`,
   `requested_total`, `applied_total`, `failed_total` and the `last` outcome (`applied` or
-  `failed`) — `llm-redact status` prints a posture line while one runs ("config reload in
-  progress": the status is the configuration before it) and while the last one has failed,
-  and the `/llm-redact:config-edit` agent command now notes `requested_total`, sends the
+  `failed`, and whether a configuration applied since — a config editor save — has
+  `superseded` a failed one) — `llm-redact status` prints a posture line while one runs
+  ("config reload in progress": the status is the configuration before it) and while the
+  last one has failed and nothing applied since, and the `/llm-redact:config-edit` agent
+  command now notes `requested_total`, sends the
   signal and waits for that reload to end before it reads the posture back (it once could
   report the posture from before a change as the change's, and calls a failed reload failed).
   A reload still running after 120 seconds is logged once ("config reload still running") — a

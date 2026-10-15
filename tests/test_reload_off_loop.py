@@ -413,8 +413,24 @@ async def test_status_says_a_reload_is_still_building_and_how_it_ended(
         failed = await status()
         block = failed["config_reload"]
         assert block["requested_total"] == 3 and block["failed_total"] == 1
-        assert block["last"]["outcome"] == "failed"
+        assert block["last"]["outcome"] == "failed" and block["last"]["superseded"] is False
         assert failed["mcp_exempt_servers"] == 1  # the configuration kept
+        # The config editor then applies a fixed file (apply_config, no
+        # SIGHUP): the failure no longer describes what runs. It is still
+        # reported, superseded, so `llm-redact status` drops its warning.
+        path.write_text(EMAIL_ONLY)
+        state.apply_config(apply_env_overrides(load_config(path)))
+        saved = await status()
+        assert saved["mcp_exempt_servers"] == 0  # the file is what runs
+        block = saved["config_reload"]
+        assert block["last"]["outcome"] == "failed" and block["last"]["superseded"] is True
+        assert (block["applied_total"], block["failed_total"]) == (2, 1)
+        # A SIGHUP reload records its own outcome over the mark.
+        path.write_text('[detection]\nenabled = ["no_such_rule"]\n')
+        state.reloads.request()
+        await state.reloads.wait()
+        block = (await status())["config_reload"]
+        assert block["last"]["outcome"] == "failed" and block["last"]["superseded"] is False
 
 
 async def test_a_reload_still_running_past_the_bound_is_logged_once(

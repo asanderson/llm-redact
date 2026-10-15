@@ -2055,7 +2055,8 @@ class ProxyState:
         Failures are ``reload``'s, and so are their log lines: a file that
         does not parse, a build that fails (an unknown rule, a missing NER
         extra, a model not cached, a reload that would start the llm
-        backend) is logged "config reload failed; keeping current config"
+        backend on a process started without it or at other values than it
+        started with) is logged "config reload failed; keeping current config"
         and nothing is swapped — after the "changes require restart" lines
         ``apply_config`` logs before it builds, when the file got that far
         (``_DetectionBuildFailed``: the build failed on the worker, so those
@@ -2315,6 +2316,9 @@ class ProxyState:
         for warning in effective.routing.warnings:
             logger.warning("routing: %s", warning)
         logger.info("config reloaded (%d detection rules)", len(detection.detectors))
+        # A SIGHUP reload that failed before this apply no longer describes
+        # what runs (/status config_reload ``last.superseded``).
+        self.reloads.note_applied()
         return restart_required
 
     def _revoke_stale_relays(self) -> None:

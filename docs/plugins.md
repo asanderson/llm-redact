@@ -156,7 +156,9 @@ command says so instead of reading a posture back as the change's.
 A session as Claude Code presents it (the agent narration is
 illustrative; every command output is the fixture rig's real output,
 executed in this order — note the posture read-back catching the
-warn-mode opt-out):
+warn-mode opt-out; the shots predate the reload wait: they leave out the
+note of `config_reload.requested_total` before the signal and the poll
+after it, which the command now runs before any read-back):
 
 ![/llm-redact:config-edit in Claude Code: the agent reads the config path, appends a deny string and a warn-mode trial, passes the serve --check gate, reloads via SIGHUP, and the status posture read-back shows the warn-mode forwarding warning](screenshots/plugins/config-edit.svg)
 

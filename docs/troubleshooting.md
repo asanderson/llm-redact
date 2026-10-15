@@ -230,7 +230,8 @@ it applied. Until then `/status` describes the configuration before it:
 its `config_reload` block (`running`, `requested_total`, `applied_total`,
 `failed_total`, `last`) says whether the reload is still building and
 how the last one ended, and `llm-redact status` prints a posture line
-while one runs and while the last one has failed. A second `kill -HUP`
+while one runs and while the last one has failed (until a configuration
+applied since — a config editor save — supersedes it). A second `kill -HUP`
 while one runs is not lost: one more reload runs right after it and
 reads the file again.
 

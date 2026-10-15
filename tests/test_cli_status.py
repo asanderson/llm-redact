@@ -102,8 +102,16 @@ def test_posture_says_a_reload_is_running_or_failed(capsys: pytest.CaptureFixtur
         "the last config reload FAILED at 2026-10-15T09:00:00+00:00: the proxy kept its previous"
         " configuration, not the file it read" in out
     )
-    # Applied, idle, or an older proxy without the block: nothing to say.
-    for quiet in ({"running": False, "last": {"outcome": "applied", "at": "x"}}, None, "junk"):
+    # Applied, a failure a later apply superseded (the config editor's save:
+    # the file is what runs), idle, or an older proxy without the block:
+    # nothing to say.
+    superseded = {"outcome": "failed", "at": "x", "superseded": True}
+    for quiet in (
+        {"running": False, "last": {"outcome": "applied", "at": "x"}},
+        {"running": False, "last": superseded},
+        None,
+        "junk",
+    ):
         assert "all traffic redacted" in posture(quiet)
 
 

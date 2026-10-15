@@ -1003,7 +1003,9 @@ def _reload_posture(block: object) -> list[str]:
     after this one included — is the configuration BEFORE it (the new one
     is still being built off the event loop); a last reload that failed
     means the proxy kept its previous configuration, so the file it read is
-    not what runs."""
+    not what runs — unless a configuration applied since (the config
+    editor's save) superseded it (``last.superseded``): then nothing is
+    said."""
     if not isinstance(block, dict):
         return []
     lines: list[str] = []
@@ -1015,7 +1017,7 @@ def _reload_posture(block: object) -> list[str]:
             " configuration BEFORE it — run `llm-redact status` again once it ends"
         )
     last = block.get("last")
-    if isinstance(last, dict) and last.get("outcome") == "failed":
+    if isinstance(last, dict) and last.get("outcome") == "failed" and not last.get("superseded"):
         at = f" at {last['at']}" if last.get("at") else ""
         lines.append(
             f"the last config reload FAILED{at}: the proxy kept its previous configuration,"

@@ -48,10 +48,13 @@ ReloadOutcome = Literal["applied", "failed"]
 
 
 class _Finished(NamedTuple):
-    """The last reload's outcome and when it ended (``time.time()``)."""
+    """The last reload's outcome and when it ended (``time.time()``), and
+    whether a configuration applied since then by another path (the config
+    editor's save, a direct ``reload()``) has superseded a failed one."""
 
     outcome: ReloadOutcome
     at: float
+    superseded: bool = False
 
 
 class _Handoff(Generic[_T]):
@@ -200,6 +203,17 @@ class ReloadScheduler:
             self.failed += 1
         self.last = _Finished(outcome, time.time())
 
+    def note_applied(self) -> None:
+        """A configuration was applied (``apply_config`` succeeded, whatever
+        asked for it): a failed reload before it no longer describes what
+        runs — the proxy kept its previous configuration then, but runs the
+        one applied since. Marked superseded (still reported, with its
+        time), so a reader is not told the file is not what runs once the
+        config editor's save, say, has applied it. A reload this scheduler
+        runs records its own outcome right after, over this mark."""
+        if self.last is not None and self.last.outcome == "failed":
+            self.last = self.last._replace(superseded=True)
+
     def status(self) -> dict[str, object]:
         """The ``/status`` ``config_reload`` block — counts, a flag and
         times, never a file name or a value: whether a reload is running
@@ -209,7 +223,9 @@ class ReloadScheduler:
         and the last one's outcome and end. A caller that noted
         ``requested_total`` before its signal knows the reload it asked for
         has ended once ``requested_total`` is above that and ``running`` is
-        false: ``last`` is then its outcome or a later one's."""
+        false: ``last`` is then its outcome or a later one's. ``last`` says
+        ``superseded`` when a configuration applied since a failed reload
+        (``note_applied``) is what runs."""
         began = self._began
         seconds = None
         if self.running:
@@ -217,7 +233,11 @@ class ReloadScheduler:
         last = None
         if self.last is not None:
             ended = datetime.fromtimestamp(self.last.at, tz=UTC)
-            last = {"outcome": self.last.outcome, "at": ended.isoformat(timespec="seconds")}
+            last = {
+                "outcome": self.last.outcome,
+                "at": ended.isoformat(timespec="seconds"),
+                "superseded": self.last.superseded,
+            }
         return {
             "running": self.running,
             "running_seconds": seconds,

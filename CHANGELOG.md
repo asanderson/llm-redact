@@ -22,14 +22,16 @@ and tags `vX.Y.Z`.
   The contract is `plugin_api.ScanSink` (`wants`, `capture`, `close`) with the frozen
   `ScanContext`, `ScannedString` and `ScannedDetection`. **A sink receives unredacted text** — the
   values the proxy keeps from the provider; what it keeps is outside the vault's protections
-  (docs/plugins.md, docs/threat-model.md). Sinks run on one worker thread behind a bounded queue
-  (256 captures, 16 Mi characters): a full queue drops and counts, a slow sink never delays a
-  request, and a sink's fault is counted (`llm_redact_bookkeeping_errors_total{stage="scan_sink"}`)
-  and logged by exception type only. The queue drains (at most 5 s, beside the vault's map-write
-  drain, so the shutdown budget is unchanged) before the sinks close at shutdown. `/status` gains a
-  `scan_capture` block (sinks, queued, delivered, dropped, faults) and `llm-redact status` a
-  posture line while any sink is registered. The Free core registers no sink, and then nothing is
-  recorded or queued: the request path is unchanged.
+  (docs/plugins.md, docs/threat-model.md). Captures are handed to the sinks on one worker thread
+  behind a bounded queue (256 captures, 16 Mi characters): a full queue drops and counts, a slow
+  sink never delays a request (only `wants`, a cheap synchronous yes or no, is asked on the event
+  loop), and a sink's fault is counted (`llm_redact_bookkeeping_errors_total{stage="scan_sink"}`)
+  and logged by exception type only. A sink with an `async def` member, or a factory answer that
+  is not a tuple of sinks, refuses the startup. The queue drains (at most 5 s, beside the vault's
+  map-write drain, so the shutdown budget is unchanged) before the sinks close at shutdown.
+  `/status` gains a `scan_capture` block (sinks, queued, delivered, dropped, faults) and
+  `llm-redact status` a posture line while any sink is registered. The Free core registers no
+  sink, and then nothing is recorded or queued: the request path is unchanged.
 
 ## [1.12.1] - 2026-10-14
 

@@ -482,10 +482,13 @@ the operator's trust decision, like an upload inspector that sends files to
 an extraction service. What the core guarantees:
 
 - read-only: a sink sees copies of facts and can change nothing a request,
-  its redaction or its answer does; it runs on one worker thread off the
-  event loop, behind a bounded queue (a full queue drops and counts — a
-  slow sink costs captures, never a request's time), and its faults are
-  contained and logged by exception type only;
+  its redaction or its answer does; its `capture` runs on one worker
+  thread off the event loop, behind a bounded queue (a full queue drops
+  and counts — a slow capture costs captures, never a request's time),
+  only its `wants`, a synchronous yes or no that must stay cheap, is asked
+  on the event loop before each redaction, and its faults are contained
+  and logged by exception type only (a sink with an `async def` member is
+  refused at startup);
 - only what the redaction scanned, only once it succeeded and the request
   is handed to its upstream: a refused request or frame is never captured,
   and nothing the core forwards unredacted (`detection = false`, a

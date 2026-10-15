@@ -92,14 +92,18 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   warn-mode value among them is forwarded only where no redacted value covers it, and counted as
   a warning, once, even where a redacted value overlaps it, as long as part of it lies outside the
   redacted values (that part goes upstream; one wholly inside them is not counted). A warn-mode
-  value an access gate's added deny string redacts part of (a detection overlay: llm-redact-pro
-  roles) is now counted the same way — in `llm_redact_warnings_total`, the request's row and
-  `authorize_content`'s `warned`, once, when part of it is still sent — where it was not
-  counted at all. For both, whether part of the value is still sent is decided once everything is
-  redacted: one whose rest an added deny string or an `llm` backend finding redacts is not
-  counted. A warn-mode value that loses an ordinary overlap — to a configured deny string, or to
-  a value redacted in its place — is still sent in part and not counted, as before
-  (docs/detection.md, "Per-rule modes", now says so). Where the proxy cannot rewrite the text (a
+  value part of which anything else redacts is now counted the same way — in
+  `llm_redact_warnings_total`, the request's row and `authorize_content`'s `warned`, once, when
+  part of it is still sent — where it was not counted at all: one an access gate's added deny
+  string redacts part of (a detection overlay: llm-redact-pro roles), and one that loses an
+  ordinary overlap to a configured deny string or to a value redacted in its place (with
+  `deny = ["acme"]` and `email = "warn"`, `bob.private@«DENY_001»-corp.example` goes upstream
+  and counts as one warning, as with an added `acme`: the same bytes, the same count). Whether
+  part of the value is still sent is decided once everything is redacted: one whose rest an
+  added deny string or an `llm` backend finding redacts is not counted, nor one that lost only
+  to another value forwarded as sent (the winner is what is counted); of overlapping ones, one
+  value two detectors find counts once (docs/detection.md, "Per-rule modes"). What is redacted
+  or refused is unchanged. Where the proxy cannot rewrite the text (a
   verbatim field, an upload's extracted text), a span joining two or more such values is put to
   refusal overrides value by value: the refusal's code names every value, one approval of it
   lets the span through as sent (an access gate's content facts count each value once), and a

@@ -466,7 +466,8 @@ the value's two parts ([detection.md](detection.md#how-ner-runs)).
   only a value the policy forwards as sent (warn mode, an approved refusal
   override) — its own span is redacted, the rest goes as it would have (a
   warn-mode value still counted as a warning when part of it goes, not
-  when the redacted spans cover it whole). A block the overlay adds is
+  when the redacted spans cover it whole — as when a configured deny
+  string cuts it). A block the overlay adds is
   final: no refusal override is consulted or used for it and its refusal
   carries no code — an approval would forward as sent a value the
   configured policy redacts. The core refuses the request rather
@@ -565,9 +566,11 @@ an extraction service. What the core guarantees:
 ### Deliberate protection opt-outs
 
 Warn mode has always been observation-only (the matched value IS
-forwarded, and counted in `llm_redact_warnings_total` — except a warn-mode
-value that loses an ordinary overlap to a configured deny string or to a
-value redacted in its place: the rest of it is sent uncounted,
+forwarded, and counted in `llm_redact_warnings_total` — also one part of
+which something redacts after all, a configured or added deny string, a
+value redacted in its place, a value it is joined with: the rest of it is
+sent, counted once; one the redacted spans cover whole sends nothing and is
+not counted,
 [detection.md](detection.md#per-rule-modes-redact-warn-block)). Four
 configuration knobs and refusal overrides extend that family — each is a
 conscious decision, and each is surfaced rather than silent:

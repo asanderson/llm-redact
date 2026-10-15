@@ -296,8 +296,10 @@ once at startup (restart-only); the contract is `plugin_api.ScanSink`:
   string the redaction scanned, once, in the order first scanned
   (`ScannedString.text`), with every detection found in it
   (`ScannedDetection`: type, start, end, and the detector — `kind` `rule`,
-  `custom`, `deny`, `ner` or `other`, `source` the rule's or NER backend's
-  name), after the allowlists and before overlap resolution and modes.
+  `custom`, `deny`, `ner` or `other`, `source` the rule's name or the NER
+  backend's as configured — `spacy`, `hf`, `gliner`, … as `/status`
+  `detection.ner.backends` names them), after the allowlists and before
+  overlap resolution and modes.
   `context` (`ScanContext`) carries the surface (`http` or `websocket`),
   provider, adapter, method, path, vault session, the access gate's
   subject and whether a credential the proxy holds is spent — never a

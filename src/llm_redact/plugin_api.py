@@ -1433,7 +1433,8 @@ class ScannedDetection:
     ``[[detection.custom_rules]]`` rule), ``deny`` (a deny string, the
     operator's or an access gate's overlay), ``ner`` (an NER backend) or
     ``other`` (any other detector); ``source`` the rule's name, the NER
-    backend's (``hf``, ``gliner``, …) or ``deny_strings``.
+    backend's as configured (``spacy``, ``hf``, ``gliner``, …: the names
+    ``/status`` ``detection.ner.backends`` uses) or ``deny_strings``.
 
     Every detection is listed, as found — after the allowlists, BEFORE
     overlap resolution and modes: a span a longer or higher-priority

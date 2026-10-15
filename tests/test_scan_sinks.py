@@ -211,6 +211,20 @@ def test_a_model_backed_detector_is_ner_and_a_filter_is_named_after_it() -> None
     assert plan.sources == (DetectorSource("ner", "hf"), DetectorSource("other", "_Nameless"))
 
 
+def test_an_ner_backend_is_named_as_configured_not_by_its_detector_name() -> None:
+    # The spaCy backend's detector is named "ner"; a sink is told "spacy",
+    # the name /status detection.ner.backends uses (its label policy's).
+    from llm_redact.detection.labels import LabelPolicy
+
+    class _Spacy(_Heavy):
+        name = "ner"
+        label_policy = LabelPolicy(("PERSON",), backend="spacy")
+
+    wrapped = engine_mod.TypeFilteredDetector(_Spacy(), frozenset())  # type: ignore[arg-type]
+    assert detector_source(wrapped, heavy=True) == DetectorSource("ner", "spacy")
+    assert detector_source(_Spacy(), heavy=True) == DetectorSource("ner", "spacy")
+
+
 def test_a_custom_rule_spelled_like_a_builtin_is_still_custom() -> None:
     (email,) = [r for r in engine_mod.BUILTIN_RULES if r.name == "email"]
     det = engine_mod.RegexDetector(dataclasses.replace(email))
@@ -477,9 +491,9 @@ async def test_a_message_names_each_detection_and_its_detector(
         ScannedString(
             text,
             (
-                ScannedDetection("PERSON", 5, 13, "ner", "ner"),
+                ScannedDetection("PERSON", 5, 13, "ner", "spacy"),
                 ScannedDetection("EMAIL", 17, 38, "rule", "email"),
-                ScannedDetection("PERSON", 43, 52, "ner", "ner"),
+                ScannedDetection("PERSON", 43, 52, "ner", "spacy"),
             ),
         ),
     )

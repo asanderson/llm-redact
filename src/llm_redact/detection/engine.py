@@ -911,9 +911,10 @@ class DetectorSource(NamedTuple):
     ``kind``: ``rule`` (a built-in regex rule), ``custom`` (a
     ``[[detection.custom_rules]]`` rule), ``deny`` (a deny string), ``ner``
     (a model-backed NER backend) or ``other`` (any other detector, a
-    plugin's). ``name``: the rule's name, the NER backend's (``hf``,
-    ``gliner``, …), ``deny_strings``, else the detector's own name. Names
-    only — never a value."""
+    plugin's). ``name``: the rule's name, the NER backend's as configured
+    and as ``/status`` ``detection.ner.backends`` names it (``spacy``,
+    ``hf``, ``gliner``, …), ``deny_strings``, else the detector's own name.
+    Names only — never a value."""
 
     kind: str
     name: str
@@ -926,13 +927,16 @@ _BUILTIN_RULE_IDS = frozenset(id(rule) for rule in BUILTIN_RULES)
 
 def detector_source(det: Detector, *, heavy: bool) -> DetectorSource:
     """``det`` as ``DetectorSource`` names it (``heavy``: it runs a model —
-    an NER backend, or a type filter around one, named after the backend)."""
+    an NER backend, or a type filter around one, named after the backend:
+    its label policy's backend name, which the spaCy backend's detector
+    ``name``, ``ner``, is not)."""
     if isinstance(det, RegexDetector):
         return DetectorSource("rule" if id(det.rule) in _BUILTIN_RULE_IDS else "custom", det.name)
     if isinstance(det, DenyDetector):
         return DetectorSource("deny", det.name)
     inner = det.inner if isinstance(det, TypeFilteredDetector) else det
-    name = getattr(inner, "name", None)
+    policy = _label_policy(inner)
+    name = policy.backend if policy is not None else getattr(inner, "name", None)
     return DetectorSource(
         "ner" if heavy else "other", name if isinstance(name, str) else type(inner).__name__
     )

@@ -17,18 +17,17 @@ exceptions: a loss is
 fixed in the rules.
 
 The same inputs check 1.12.1's pipeline too: this release's rules with
-credit_card's inside reading and the IBAN's joining (RegexRule.joins, a
-redactor matter: the references are the overlap sweep) taken out, a digest
-pinning the five rules 1.12.1 changed to their 1.12.1 definitions (1.12.1
-is no subset of 1.12.0, so the 1.12.0 reference alone would not show that
-nothing 1.12.1 redacted is lost). With custom rules and NER spans the
-1.12.1 reference is test_joined_values.py's.
+credit_card's inside reading and the joining (RegexRule.joins: of the paper
+IBAN and of the readings 1.12.1 added before a run of dots; a redactor
+matter, the references are the overlap sweep) taken out, a digest pinning
+the five rules 1.12.1 changed to their 1.12.1 definitions (1.12.1 is no
+subset of 1.12.0, so the 1.12.0 reference alone would not show that
+nothing 1.12.1 redacted is lost).
 
-This holds under the default [detection.modes]: a value newly read since
-1.12.0 that joins nothing (a PlanetScale token's run) wins an overlap like
-any longer match, so the value it takes in follows its rule's mode
-(docs/detection.md says so); a card read inside a run and a paper IBAN are
-joined with what they overlap (test_joined_values.py).
+Here under the default [detection.modes]. Every value read since 1.12.0 is
+joined with what it overlaps instead of winning the overlap, so with custom
+rules, NER spans and any modes too nothing either release redacted or
+refused is forwarded: test_joined_values.py pins that against both.
 
 A digest pins every other rule to its 1.12.0 definition (its fields, and
 its validator with every helper and table it uses), so changing one later
@@ -194,8 +193,8 @@ OLD_PLAN = DetectorPlan(
 
 def as_1_12_1(rule: RegexRule) -> RegexRule:
     """A rule as 1.12.1 defined it, while CHANGED_IN_1_12_1 holds: without
-    the fields 1.13.0 added (credit_card's inside reading, the paper IBAN's
-    joining)."""
+    the fields 1.13.0 added (credit_card's inside reading, the joining of
+    the paper IBAN and of the readings before a run of dots)."""
     return dataclasses.replace(rule, inside=None, joins=None)
 
 
@@ -477,24 +476,23 @@ def test_every_other_rule_is_as_1_12_0_defined_it(monkeypatch: pytest.MonkeyPatc
 
 def test_the_1_12_1_reference_is_1_12_1() -> None:
     # 1.12.1's pipeline differs from this release's only in credit_card,
-    # whose inside reading it lacks, and the paper IBAN's joining.
+    # whose inside reading it lacks, and in the joining of the readings
+    # 1.12.1 added (the paper IBAN, the values before a run of dots): the
+    # six rules frozen above, and no other.
     changed = [rule for rule in BUILTIN_RULES if rule.name in FROZEN_1_12_0]
     assert (
         _digest(as_1_12_1(rule) for rule in changed if rule.name != "credit_card")
         == CHANGED_IN_1_12_1
     )
     previous = {det.name: det for det in PLAN_1_12_1.detectors}
-    for name in ("credit_card", "iban"):
+    for name in FROZEN_1_12_0:
         rule = next(rule for rule in BUILTIN_RULES if rule.name == name)
         old = previous[name]
         assert isinstance(old, RegexDetector) and old.rule == as_1_12_1(rule) != rule
-    assert (
-        sum(
-            isinstance(det, RegexDetector) and det.rule != as_1_12_1(det.rule)
-            for det in build_detectors(CONFIG)
-        )
-        == 2
-    )
+    assert sum(
+        isinstance(det, RegexDetector) and det.rule != as_1_12_1(det.rule)
+        for det in build_detectors(CONFIG)
+    ) == len(FROZEN_1_12_0)
     assert [det.name for det in PLAN_1_12_1.detectors] == [
         det.name for det in build_detectors(CONFIG)
     ]

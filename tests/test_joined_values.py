@@ -1,22 +1,26 @@
 """A value overlapping a newly read one is joined with it, never cut.
 
 1.13.0 reads a card inside a longer run of digit groups
-(regex_rules._card_inside) and 1.12.1 the IBAN's paper format: values no
-earlier release read, right next to text another value may hold. A custom
-rule's value or an NER span starting inside such a card or IBAN and running
-on past it lost its tail to it, since the earlier-starting value won the
-start-ordered overlap sweep (redactor._resolve_overlaps). Both readings now
-JOIN (Detection.joins): in a run of values overlapping one, directly or
-through others, Redactor._join redacts every value that redacts (values
-overlapping one another as one placeholder over their union, typed after
-the first), refuses for every value in block mode and forwards a warn-mode
-value only where nothing redacted covers it.
+(regex_rules._card_inside), and 1.12.1 the IBAN's paper format and a value
+ending before a run of dots (belgian_nn, swiss_ahv, ipv6 — also before one
+":" — and a PlanetScale token's run past 64 characters): values no earlier
+release read, right next to text another value may hold. A custom rule's
+value or an NER span starting inside such a value and running on past it
+lost its tail to it, since the earlier-starting value won the start-ordered
+overlap sweep (redactor._resolve_overlaps). These readings now JOIN
+(Detection.joins): in a run of values overlapping one, directly or through
+others, Redactor._join redacts every value that redacts (values overlapping
+one another as one placeholder over their union, typed after the first),
+refuses for every value in block mode and forwards a warn-mode value only
+where nothing redacted covers it (counted as a warning either way). Where
+the proxy cannot rewrite the text (Redactor.scan), a union is put to the
+requester's overrides value by value.
 
-The differential at the end pins it against 1.12.1's pipeline over the
-recall and fp corpora and generated texts, with the same custom rules and
-fake NER spans (ner_fakes.FakeSpacy): every character 1.12.1 redacted stays
-redacted, every request it refused is refused, under the default modes and
-random ones.
+The differential at the end pins it against 1.12.1's and 1.12.0's pipelines
+over the recall and fp corpora and generated texts, with the same custom
+rules and fake NER spans (ner_fakes.FakeSpacy): every character either
+redacted stays redacted, every request either refused is refused, under the
+default modes and random ones.
 """
 
 import random
@@ -46,7 +50,15 @@ from llm_redact.redactor import BlockedRequest, Redactor, _resolve_overlaps, _sw
 from llm_redact.rehydrate import Rehydrator
 from llm_redact.vault import InMemoryVault
 from ner_fakes import FakeSpacy
-from test_no_loss_since_1_12_0 import ENDINGS, JOINERS, as_1_12_1, card_run, luhn_card
+from test_no_loss_since_1_12_0 import (
+    ENDINGS,
+    FROZEN_1_12_0,
+    JOINERS,
+    Frozen,
+    as_1_12_1,
+    card_run,
+    luhn_card,
+)
 
 CARD = "4111 1111 1111 1111"
 # A paper IBAN whose digits after the bank code are a Luhn-valid card number.
@@ -54,6 +66,14 @@ IBAN = "GB39 WEST 3607 5983 8675 65"
 IBAN_CARD = "3607 5983 8675 65"
 STREET = CustomRule(name="street", detector_type="ADDRESS", pattern=r"\d{2,4} [A-Z][a-z]+ Street")
 ORDER = CustomRule(name="order", detector_type="ORDER_REF", pattern=r"Order \d{1,4} \d{4}")
+# A value's last characters, a run of dots or one ":", and a capitalized
+# word: starts inside a value ending before a run of dots and runs on.
+TAIL = CustomRule(
+    name="tail", detector_type="TAIL", pattern=r"[0-9A-Za-z]{1,4}(?:\.+|:) [A-Z][a-z]+"
+)
+# A PlanetScale token whose body is 64 characters: with the dots after it, a
+# run past 64 (read since 1.12.1).
+TOKEN64 = "pscale_tkn_" + "a1B2c3D4" * 8
 FP_CORPUS = Path(__file__).resolve().parent.parent / "bench" / "fp_corpus"
 
 
@@ -176,10 +196,11 @@ def test_two_joined_runs_and_a_value_touching_one() -> None:
     assert redactor.counts == Counter({"CREDIT_CARD": 2, "QTY": 1})
 
 
-def test_a_forwarded_value_touching_a_redacted_one_is_kept() -> None:
+def test_a_forwarded_value_overlapping_a_redacted_one_yields_and_is_counted() -> None:
     # Forwarded values in the joined run: one overlapping the card yields to
-    # it, one only touching it (ending where it starts, starting where it
-    # ends) is forwarded and counted as before.
+    # it, and is still counted as a warning (it was found, and what lies
+    # outside the card goes upstream); one only touching it (ending where it
+    # starts, starting where it ends) is forwarded and counted as before.
     rules = (
         CustomRule(name="qty", detector_type="QTY", pattern=r"Qty \d+ "),
         CustomRule(name="lead", detector_type="LEAD", pattern=r"\d+ 4111"),
@@ -190,12 +211,35 @@ def test_a_forwarded_value_touching_a_redacted_one_is_kept() -> None:
     redactor = _redactor(*rules, modes=modes)
     text = f"Qty 12 {CARD} Main Street"
     assert _redacted(redactor, text) == "Qty 12 «CREDIT_CARD_001» Main Street"
-    assert redactor.warn_counts == Counter({"QTY": 1, "REST": 1})
+    assert redactor.warn_counts == Counter({"QTY": 1, "LEAD": 1, "TAIL": 1, "REST": 1})
+    # A check ahead of the redaction counts nothing.
+    redactor.warn_counts.clear()
+    assert redactor.blocked_type(text) is None and redactor.warn_counts == Counter()
+    # Nor does a scan count a value twice: once per value it drops.
+    assert redactor.scan(text, redactable=True).found == Counter({"CREDIT_CARD": 1})
+    assert redactor.warn_counts == Counter({"QTY": 1, "LEAD": 1, "TAIL": 1, "REST": 1})
+
+
+def test_a_warn_mode_value_overlapping_two_redacted_ones_is_counted_once() -> None:
+    # One warn-mode value across the card and an address apart from it:
+    # both redacted, the value dropped, counted once.
+    span = CustomRule(name="span", detector_type="SPAN", pattern=r"12 4111.*Street")
+    redactor = _redactor(span, STREET, modes={"SPAN": "warn"})
+    text = f"Order 12 {CARD} via 22 Main Street"
+    assert _redacted(redactor, text) == "Order 12 «CREDIT_CARD_001» via «ADDRESS_001»"
+    assert redactor.warn_counts == Counter({"SPAN": 1})
+    # An approved block-mode value dropped alike is no warning.
+    value = f"12 {CARD} via 22 Main Street"
+    approved = Approved(value)
+    blocked = _redactor(span, STREET, modes={"SPAN": "block"}).with_overrides(approved)
+    assert _redacted(blocked, text) == "Order 12 «CREDIT_CARD_001» via «ADDRESS_001»"
+    assert blocked.warn_counts == Counter() and approved.asked == [("SPAN", value)]
 
 
 def test_with_an_overlay_a_forwarded_value_never_takes_the_card() -> None:
     # An access gate's added deny strings (Redactor._absorb) sweep the
-    # winners again: a warn-mode value the joined run dropped stays dropped.
+    # winners again: a warn-mode value the joined run dropped stays dropped
+    # (counted once, by the join).
     config = DetectionConfig()
     detectors: list[Detector] = list(build_detectors(config))
     detectors.append(
@@ -209,6 +253,7 @@ def test_with_an_overlay_a_forwarded_value_never_takes_the_card() -> None:
         added_deny=DetectorPlan([DenyDetector([DenyEntry("paid")])]),
     )
     assert _redacted(redactor, f"Qty 12 {CARD} paid") == "Qty 12 «CREDIT_CARD_001» «DENY_001»"
+    assert redactor.warn_counts == Counter({"PERSON": 1})
 
 
 def test_a_joining_value_alone_is_redacted_as_before() -> None:
@@ -229,16 +274,125 @@ def test_a_paper_iban_holding_a_card_number_is_the_iban() -> None:
     assert scan.overridden and scan.found == Counter() and approved.asked == [("IBAN", IBAN)]
 
 
+# --- values ending before a run of dots (1.12.1) -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "rules", "ner", "expected"),
+    [
+        # A custom rule's value starting inside the value and running on
+        # past its run of dots (1.12.0 read no value there, so it redacted
+        # the custom one whole; 1.12.1 forwarded ". Done").
+        ("AHV 756.9217.0769.85. Done", (TAIL,), (), "AHV «CH_AHV_001»"),
+        ("NN 93.05.18-223.61... Paid", (TAIL,), (), "NN «BE_NN_001»"),
+        ("gw 2001:db8::1: Unreachable", (TAIL,), (), "gw «IPV6_001»"),
+        ("gw 2001:db8::1. Down", (TAIL,), (), "gw «IPV6_001»"),
+        (f"token {TOKEN64}. Done", (TAIL,), (), "token «PLANETSCALE_TOKEN_001»"),
+        # An NER span doing the same.
+        (
+            "AHV 756.9217.0769.85. Jane Doe",
+            (),
+            (("85. Jane", "PERSON"),),
+            "AHV «CH_AHV_001» Doe",
+        ),
+        # Starting before the value and ending inside it: typed after it.
+        ("Ship to 2001:db8::1. Done", (), (("to 2001", "ADDRESS"),), "Ship «ADDRESS_001». Done"),
+        (
+            f"user Jane {TOKEN64}.",
+            (),
+            (("Jane pscale", "PERSON"),),
+            "user «PERSON_001»",
+        ),
+    ],
+)
+def test_a_value_overlapping_one_ending_before_dots_is_redacted_with_it(
+    text: str, rules: tuple[CustomRule, ...], ner: tuple[tuple[str, str], ...], expected: str
+) -> None:
+    redactor = _redactor(*rules, ner=ner)
+    detections = redactor.plan.detect(text, Allowlist())
+    assert any(d.joins for d in detections)
+    assert _redacted(redactor, text) == expected
+    assert sum(redactor.counts.values()) == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # What 1.12.0 read joins nothing: the custom value starting inside
+        # it loses its tail, as in every release.
+        ("AHV 756.9217.0769.85 Done", "AHV «CH_AHV_001» Done"),
+        ("gw 2001:db8::1 Down", "gw «IPV6_001» Down"),
+        # Nor a token whose body and dots stop at 64 characters.
+        (f"token {TOKEN64[:-2]}.. Done", "token «PLANETSCALE_TOKEN_001» Done"),
+    ],
+)
+def test_what_1_12_0_read_joins_nothing(text: str, expected: str) -> None:
+    redactor = _redactor(
+        CustomRule(name="tail", detector_type="TAIL", pattern=r"\w{2}\.* Done|1 Down")
+    )
+    assert not any(d.joins for d in redactor.plan.detect(text, Allowlist()))
+    assert _redacted(redactor, text) == expected
+
+
+def test_a_value_ending_before_dots_and_modes() -> None:
+    text = "AHV 756.9217.0769.85. Done"
+    # A block-mode value it overlaps refuses (1.12.1's sweep let the AHV
+    # number take its place, and the block never fired).
+    for blocked in ("TAIL", "CH_AHV"):
+        redactor = _redactor(TAIL, modes={blocked: "block"})
+        with pytest.raises(BlockedRequest, match=blocked):
+            redactor.redact_text(text)
+        assert redactor.blocked_type(text) == blocked
+    # A warn-mode number is forwarded where the custom value does not cover
+    # it, and counted.
+    warned = _redactor(TAIL, modes={"CH_AHV": "warn"})
+    assert _redacted(warned, text) == "AHV 756.9217.0769.«TAIL_001»"
+    assert warned.warn_counts == Counter({"CH_AHV": 1})
+    # A warn-mode custom value yields to the number, counted.
+    warned = _redactor(TAIL, modes={"TAIL": "warn"})
+    assert _redacted(warned, text) == "AHV «CH_AHV_001». Done"
+    assert warned.warn_counts == Counter({"TAIL": 1})
+
+
+def test_a_value_inside_a_planetscale_run_keeps_its_mode() -> None:
+    # A generic secret read with the same span as a PlanetScale token's run
+    # past 64 characters: the run joins, so the secret's block mode refuses
+    # (1.12.1 let the token's mode govern it). A token of 64 characters
+    # with its dots joins nothing: it wins the overlap, as in 1.12.0.
+    blocking = _redactor(modes={"SECRET": "block"})
+    with pytest.raises(BlockedRequest, match="SECRET"):
+        blocking.redact_text(f"password = {TOKEN64}. Done")
+    assert blocking.blocked_type(f"password = {TOKEN64}. Done") == "SECRET"
+    assert _redacted(blocking, f"password = {TOKEN64} Done") == (
+        "password = «PLANETSCALE_TOKEN_001» Done"
+    )
+    assert _redacted(_redactor(), f"password = {TOKEN64}. Done") == (
+        "password = «PLANETSCALE_TOKEN_001» Done"
+    )
+
+
+def test_a_union_with_a_value_ending_before_dots_is_approved_value_by_value() -> None:
+    redactor = _redactor(TAIL)
+    text = "gw 2001:db8::1: Unreachable"
+    members = [("IPV6", "2001:db8::1"), ("TAIL", "1: Unreachable")]
+    approved = Approved("2001:db8::1")
+    assert redactor.with_overrides(approved).scan(text) == (Counter({"IPV6": 1}), False)
+    assert approved.asked == members
+    approved = Approved("2001:db8::1", "1: Unreachable")
+    assert redactor.with_overrides(approved).scan(text) == (Counter(), True)
+
+
 # --- modes, deny strings, allowlists, overrides --------------------------------------
 
 
 @pytest.mark.parametrize(
     ("modes", "expected", "warned"),
     [
-        # A warn-mode card never keeps the other value from being redacted.
-        ({"CREDIT_CARD": "warn"}, "Order 12 4111 1111 1111 «ADDRESS_001»", {}),
+        # A warn-mode card never keeps the other value from being redacted;
+        # it is counted (what lies outside the address goes upstream).
+        ({"CREDIT_CARD": "warn"}, "Order 12 4111 1111 1111 «ADDRESS_001»", {"CREDIT_CARD": 1}),
         # Nor a warn-mode value the card.
-        ({"ADDRESS": "warn"}, "Order 12 «CREDIT_CARD_001» Main Street", {}),
+        ({"ADDRESS": "warn"}, "Order 12 «CREDIT_CARD_001» Main Street", {"ADDRESS": 1}),
         # Both forwarded: the sweep picks the one counted.
         (
             {"ADDRESS": "warn", "CREDIT_CARD": "warn"},
@@ -280,7 +434,7 @@ def test_a_block_mode_card_inside_a_paper_iban_refuses() -> None:
     warned = _redactor(modes={"IBAN": "warn"})
     assert _redacted(warned, text) == "pay GB39 WEST «CREDIT_CARD_001» now"
     assert warned._vault.original_for("«CREDIT_CARD_001»") == IBAN_CARD
-    assert warned.warn_counts == Counter()
+    assert warned.warn_counts == Counter({"IBAN": 1})
 
 
 def test_an_approved_block_mode_value_is_forwarded_where_nothing_redacts() -> None:
@@ -314,21 +468,64 @@ def test_a_deny_string_joined_with_a_card_is_never_put_to_the_overrides() -> Non
     assert _redacted(covering, f"Order 12 {CARD}") == "Order «DENY_001»"
 
 
-def test_a_joined_union_is_never_put_to_the_overrides() -> None:
-    # No one approval names a card and an address together: a span joining
-    # two values refuses for good in text the proxy cannot rewrite.
+def test_a_joined_union_is_put_to_the_overrides_value_by_value() -> None:
+    # In text the proxy cannot rewrite, a span joining a card and an
+    # address is forwarded as sent only when both values are approved; each
+    # is asked, none skipped, so a refusal's code names them all.
     redactor = _redactor(STREET)
     text = f"Order 12 {CARD} Main Street"
-    approved = Approved(CARD, "1111 Main Street", f"{CARD} Main Street")
-    scan = redactor.with_overrides(approved).scan(text)
-    assert scan.found == Counter({"CREDIT_CARD": 1}) and approved.final == 1
-    assert approved.asked == []
-    # Convert mode redacts it: nothing made final.
-    approved = Approved()
+    both = [("CREDIT_CARD", CARD), ("ADDRESS", "1111 Main Street")]
+    approved = Approved(CARD, "1111 Main Street")
+    assert redactor.with_overrides(approved).scan(text) == (Counter(), True)
+    assert redactor.with_overrides(approved).scan_text(text) == Counter()
+    assert approved.asked == both * 2 and approved.final == 0
+    # One of them approved: refused, both asked (the first refusal too).
+    for one in (CARD, "1111 Main Street"):
+        approved = Approved(one)
+        scan = redactor.with_overrides(approved).scan(text)
+        assert scan == (Counter({"CREDIT_CARD": 1}), False)
+        assert approved.asked == both and approved.final == 0
+    # Their union is no value an approval names.
+    approved = Approved(f"{CARD} Main Street", f"12 {CARD} Main Street")
+    assert redactor.with_overrides(approved).scan(text).found == Counter({"CREDIT_CARD": 1})
+    # Convert mode redacts it: nothing asked, nothing made final.
+    approved = Approved(CARD, "1111 Main Street")
     assert redactor.with_overrides(approved).scan(text, redactable=True).found == Counter(
         {"CREDIT_CARD": 1}
     )
-    assert approved.final == 0
+    assert approved.asked == [] and approved.final == 0
+    # Rewritable text redacts it whatever is approved.
+    copy = redactor.with_overrides(approved)
+    assert _redacted(copy, text) == "Order 12 «CREDIT_CARD_001»" and approved.asked == []
+
+
+def test_a_union_holding_a_value_the_overlay_made_final_is_never_put_to_the_overrides() -> None:
+    # A type whose block mode a detection overlay added refuses for good
+    # (Redactor.final_blocks): no grant consulted, no code. Its block mode
+    # refuses the run before any union forms...
+    text = f"Order 12 {CARD} Main Street"
+    approved = Approved(CARD, "1111 Main Street")
+    config = DetectionConfig(custom_rules=(STREET,))
+    blocking = Redactor(
+        build_detectors(config),
+        InMemoryVault(),
+        build_allowlist(config),
+        modes={"ADDRESS": "block"},
+        final_blocks=frozenset({"ADDRESS"}),
+    ).with_overrides(approved)
+    with pytest.raises(BlockedRequest, match="ADDRESS"):
+        blocking.scan(text)
+    assert approved.asked == [] and approved.final == 1
+    # ...and a union holding such a type is never approved either.
+    approved = Approved(CARD, "1111 Main Street")
+    union = Redactor(
+        build_detectors(config),
+        InMemoryVault(),
+        build_allowlist(config),
+        final_blocks=frozenset({"ADDRESS"}),
+    ).with_overrides(approved)
+    assert union.scan(text) == (Counter({"CREDIT_CARD": 1}), False)
+    assert approved.asked == [] and approved.final == 1
 
 
 def test_each_value_is_allowlisted_before_it_is_joined() -> None:
@@ -513,30 +710,49 @@ CUSTOM_RULES = (
     CustomRule(name="groups", detector_type="ACCOUNT", pattern=r"\b\d{2,4}(?:[ -]\d{2,4}){2,5}\b"),
     # An IBAN's last groups and a word.
     CustomRule(name="code", detector_type="CODE", pattern=r"\b[A-Z0-9]{2,4} \d{2,4} [a-z]{3,}\b"),
+    # A value's last characters before a run of dots or one ":", and a word.
+    TAIL,
 )
-TYPES = ("CREDIT_CARD", "IBAN", "ADDRESS", "ORDER_REF", "ACCOUNT", "CODE", "PERSON", "DENY")
+TYPES = (
+    "CREDIT_CARD", "IBAN", "CH_AHV", "BE_NN", "IPV6", "PLANETSCALE_TOKEN", "ADDRESS", "ORDER_REF",
+    "ACCOUNT", "CODE", "TAIL", "PERSON", "DENY",
+)  # fmt: skip
 WORDS = (" Main Street", " now", " 12 Main Street", "-x", " Jane Doe", ", paid", " Rue 3")
+# The types of the values 1.12.1 reads before a run of dots.
+DOTTED_TYPES = frozenset({"CH_AHV", "BE_NN", "IPV6", "PLANETSCALE_TOKEN"})
+# What may follow such a run (regex_rules._CLOSE: "" goes on into WORDS),
+# and what may not (".x", "-").
+CLOSES = ("", "", " ", '"', ")", "**", "<br>", "\\n", ".x", "-")
+ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
-def _pipelines(config: DetectionConfig, nlp: FakeSpacy) -> tuple[DetectorPlan, DetectorPlan]:
-    """This release's detectors and 1.12.1's (its rules without the fields
-    1.13.0 added, test_no_loss_since_1_12_0.as_1_12_1), each with the same
-    custom rules, deny strings and fake NER backend."""
+def _pipelines(
+    config: DetectionConfig, nlp: FakeSpacy
+) -> tuple[DetectorPlan, DetectorPlan, DetectorPlan]:
+    """This release's detectors, 1.12.1's (its rules without the fields
+    1.13.0 added, test_no_loss_since_1_12_0.as_1_12_1) and 1.12.0's (the six
+    rules changed since frozen as 1.12.0 defined them,
+    test_no_loss_since_1_12_0.Frozen), each with the same custom rules, deny
+    strings and fake NER backend."""
     release: list[Detector] = list(build_detectors(config))
     previous: list[Detector] = [
         RegexDetector(as_1_12_1(det.rule)) if isinstance(det, RegexDetector) else det
         for det in release
     ]
+    old: list[Detector] = [
+        Frozen(det.name) if isinstance(det, RegexDetector) and det.name in FROZEN_1_12_0 else det
+        for det in release
+    ]
     ner = NerDetector(nlp, frozenset({"PERSON", "ADDRESS"}), 1_000_000)
-    return DetectorPlan([*release, ner]), DetectorPlan([*previous, ner])
+    return DetectorPlan([*release, ner]), DetectorPlan([*previous, ner]), DetectorPlan([*old, ner])
 
 
-def _by_1_12_1(
+def _by_sweep(
     plan: DetectorPlan, allowlist: Allowlist, text: str, modes: Mapping[str, str]
 ) -> set[int] | None:
-    """What 1.12.1's Redactor redacted in ``text`` (offsets), transcribed:
-    the overlap sweep's winners, each by its mode — None when a block-mode
-    winner refused the text."""
+    """What 1.12.1's or 1.12.0's Redactor redacted in ``text`` (offsets)
+    with ``plan``, transcribed: the overlap sweep's winners, each by its
+    mode — None when a block-mode winner refused the text."""
     offsets: set[int] = set()
     for d in _resolve_overlaps(plan.detect(text, allowlist)):
         mode = "redact" if d.tier == 0 else modes.get(d.detector_type, "redact")
@@ -588,9 +804,10 @@ def _crossing(rng: random.Random, text: str, joining: list[Detection]) -> list[t
 
 
 def _generated(rng: random.Random) -> Iterable[str]:
-    """Cards in runs of digit groups (some before an expiry) and paper
-    IBANs, next to words and values the custom rules and NER spans take
-    in."""
+    """Cards in runs of digit groups (some before an expiry), paper IBANs
+    and values before a run of dots (a PlanetScale token's run past 64
+    characters among them), next to words and values the custom rules and
+    NER spans take in."""
     iban = VALUE_GENERATORS["iban"][1]
     values = [gen(rng) for _type, gen in VALUE_GENERATORS.values()]
     for _ in range(1500):
@@ -607,6 +824,16 @@ def _generated(rng: random.Random) -> Iterable[str]:
         fours = rng.choice(" -").join(card[i : i + 4] for i in range(0, len(card), 4))
         word = rng.choice(("Order", "Qty", "Item", "ref", ""))
         yield f"{word} {rng.randrange(1, 100)} {fours}" + rng.choice(WORDS + ENDINGS)
+        # A value before a run of dots (an IPv6 address: or one ":"), then
+        # what may, or may not, follow such a run.
+        name = rng.choice(("swiss_ahv", "belgian_nn", "ipv6"))
+        dots = rng.choice((".", "...", ":") if name == "ipv6" else (".", ".."))
+        before = rng.choice(("", "AHV ", "NN ", "gw ", "Jane ", "Order 12 "))
+        dotted = before + VALUE_GENERATORS[name][1](rng) + dots
+        yield dotted + rng.choice(CLOSES) + rng.choice(WORDS + ENDINGS)
+        body = "".join(rng.choice(ALNUM) for _ in range(64))
+        token = f"pscale_{rng.choice(('tkn', 'oauth', 'pw'))}_{body}" + "." * rng.randrange(1, 4)
+        yield rng.choice(("", "token ", "Jane ")) + token + rng.choice(CLOSES) + rng.choice(WORDS)
 
 
 def _texts(seed: int) -> list[str]:
@@ -631,9 +858,10 @@ def test_nothing_1_12_1_redacted_or_refused_is_forwarded(seed: int) -> None:
     ]
     built = [(config, build_allowlist(config), *_pipelines(config, nlp)) for config in configs]
     lost = []
-    checked = joined = cut_without_joining = refused_now = random_modes = 0
+    checked = joined = joined_dotted = cut_without_joining = refused_now = random_modes = 0
+    lost_by_1_12_1 = 0
     for index, text in enumerate(_texts(seed)):
-        config, allowlist, release, previous = built[index % 2 * 2 + (index % 7 == 0)]
+        config, allowlist, release, previous, oldest = built[index % 2 * 2 + (index % 7 == 0)]
         nlp.findings = []
         joining = [d for d in release.detect(text, allowlist) if d.joins]
         nlp.findings = [(s, label, 1.0) for s, label in _crossing(rng, text, joining)]
@@ -643,27 +871,91 @@ def test_nothing_1_12_1_redacted_or_refused_is_forwarded(seed: int) -> None:
             modes = {t: rng.choice(("redact", "warn", "block")) for t in rng.sample(TYPES, 3)}
         vault = InMemoryVault()
         redactor = Redactor(release, vault, allowlist, modes=modes)
-        before = _by_1_12_1(previous, allowlist, text, modes)
+        before = _by_sweep(previous, allowlist, text, modes)
+        old = _by_sweep(oldest, allowlist, text, modes)
         now = _by_release(redactor, vault, text)
         checked += 1
         joined += bool(joining)
+        joined_dotted += any(d.detector_type in DOTTED_TYPES for d in joining)
+        if old is not None and before is not None:
+            # What 1.12.1's sweep forwarded of what 1.12.0 redacted.
+            lost_by_1_12_1 += bool(old - before)
         if now is None:
             refused_now += before is not None
             continue
-        if before is None or before - now:
-            lost.append((text, modes, None if before is None else sorted(before - now)))
+        if before is None or old is None or (before | old) - now:
+            lost.append(
+                (text, modes, None if None in (before, old) else sorted((before | old) - now))
+            )
             continue
         detections = release.detect(text, allowlist)
         # Without joining, this release's own detections would lose some.
-        swept = _by_1_12_1(release, allowlist, text, modes)
+        swept = _by_sweep(release, allowlist, text, modes)
         cut_without_joining += swept is not None and bool(before - swept)
         # A joining value that redacts is redacted whole.
         for d in detections:
             if d.joins and modes.get(d.detector_type, "redact") == "redact":
                 assert set(range(d.start, d.end)) <= now, text
     assert lost == []
-    # Not vacuous: joining values in thousands of texts, values the sweep
-    # would cut without joining, requests refused for a block-mode value
-    # joined with one.
+    # Not vacuous: joining values in thousands of texts (values before a
+    # run of dots in thousands too), values the sweep would cut without
+    # joining, requests refused for a block-mode value joined with one, and
+    # values 1.12.0 redacted that 1.12.1 forwarded.
     assert checked > 15_000 and joined > 3_000 and random_modes > 5_000
-    assert cut_without_joining > 100 and refused_now > 100
+    assert joined_dotted > 1_000
+    assert cut_without_joining > 100 and refused_now > 100 and lost_by_1_12_1 > 100
+
+
+# Values 1.12.1 reads before a run of dots (an IPv6 address: or one ":"; a
+# PlanetScale token with its run past 64 characters), and the pipelines of
+# the property below: a custom rule taking in a value's last characters and
+# a word after them, an address rule, and a fake NER backend.
+DOTTED = ("756.9217.0769.85", "93.05.18-223.61", "2001:db8::1", "2001:db8:1a2b::", TOKEN64)
+_DOTTED_CONFIG = DetectionConfig(custom_rules=(TAIL, STREET))
+_DOTTED_NLP = FakeSpacy([])
+_DOTTED_PLANS = _pipelines(_DOTTED_CONFIG, _DOTTED_NLP)
+
+
+@settings(deadline=None, max_examples=400)
+@given(
+    st.sampled_from(("", "AHV ", "Jane ", "x ", "Order 12 ")),
+    st.sampled_from(DOTTED),
+    st.sampled_from(("", ".", "...", ":", "::")),
+    st.sampled_from(CLOSES),
+    st.sampled_from(WORDS + (" Done", " 12 Main Street Jane")),
+    st.lists(
+        st.tuples(st.integers(0, 110), st.integers(1, 30), st.sampled_from(("PERSON", "ADDRESS"))),
+        max_size=3,
+    ),
+    st.dictionaries(st.sampled_from(TYPES), st.sampled_from(("redact", "warn", "block"))),
+)
+def test_a_value_before_a_run_of_dots_never_takes_another_values_characters(
+    before: str,
+    value: str,
+    dots: str,
+    close: str,
+    word: str,
+    spans: list[tuple[int, int, str]],
+    modes: dict[str, str],
+) -> None:
+    # A value 1.12.1 reads before a run of dots, next to custom rule values
+    # and NER spans anywhere, under any modes: every character 1.12.0 or
+    # 1.12.1 redacted is redacted, every text either refused is refused, and
+    # a joining value that redacts is redacted whole.
+    release, previous, oldest = _DOTTED_PLANS
+    allowlist = build_allowlist(_DOTTED_CONFIG)
+    text = before + value + dots + close + word
+    _DOTTED_NLP.findings = [
+        (text[a : a + n], label, 1.0) for a, n, label in spans if text[a : a + n].strip()
+    ]
+    vault = InMemoryVault()
+    now = _by_release(Redactor(release, vault, allowlist, modes=modes), vault, text)
+    if now is None:
+        return
+    old = _by_sweep(oldest, allowlist, text, modes)
+    earlier = _by_sweep(previous, allowlist, text, modes)
+    assert old is not None and earlier is not None
+    assert old | earlier <= now
+    for d in release.detect(text, allowlist):
+        if d.joins and modes.get(d.detector_type, "redact") == "redact":
+            assert set(range(d.start, d.end)) <= now

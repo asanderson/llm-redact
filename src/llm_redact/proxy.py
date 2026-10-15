@@ -922,25 +922,51 @@ class _PreparedConfig:
         self.take()
 
 
-def _prepared_detection(
-    prepared: object, detection: DetectionConfig, running: DetectionSnapshot
-) -> DetectionSnapshot | None:
-    """The snapshot ``prepared`` holds when ``apply_config`` may adopt it
-    for ``detection``: built by ``prepare_config`` (a ``_PreparedConfig``)
-    for an equal ``[detection]``, against the generation still running —
-    else None, and the apply builds as without it. A ``_PreparedConfig`` is
-    spent either way (taken: a snapshot not adopted is dropped); any other
-    object is left alone, never called into."""
+class _Taken(NamedTuple):
+    """What ``apply_config`` takes from a prepared build, first thing: the
+    snapshot and the generation it was prepared against."""
+
+    against: int
+    snapshot: DetectionSnapshot
+
+
+def _spend_prepared(prepared: object) -> _Taken | None:
+    """Spend ``prepared`` (``apply_config``'s first step, so an apply that
+    then fails holds nothing of it): a ``_PreparedConfig``'s snapshot, taken
+    with the generation it was prepared against — None when it holds none
+    (closed, taken already, or prepared for the running ``[detection]``).
+    Any other object is left alone, never called into."""
     if not isinstance(prepared, _PreparedConfig):
         return None
     snapshot = prepared.take()
-    if (
-        snapshot is None
-        or prepared.against != running.generation
-        or snapshot.detection != detection
-    ):
+    return None if snapshot is None else _Taken(prepared.against, snapshot)
+
+
+def _prepared_detection(
+    taken: _Taken | None, detection: DetectionConfig, running: DetectionSnapshot
+) -> DetectionSnapshot | None:
+    """The taken snapshot when ``apply_config`` may adopt it as the build of
+    ``detection`` — the ``[detection]`` the apply BUILDS (its effective
+    config's, every restart-only part kept from the running one), never the
+    one it was handed: prepared for an equal ``[detection]`` against the
+    generation still running. Else None (the snapshot is dropped) and the
+    apply builds as without it: a build prepared for keys the apply keeps
+    from the running config is never run under the config that kept them."""
+    if taken is None or taken.against != running.generation:
         return None
-    return snapshot
+    return taken.snapshot if taken.snapshot.detection == detection else None
+
+
+def _kept_restart_only(fresh: Config, running: Config) -> Config:
+    """``fresh`` as ``apply_config`` runs it: every restart-only section
+    (RESTART_ONLY_KEYS) and every plugin section kept from ``running``. Its
+    ``[detection]`` is the one the apply builds, and the one a prepared
+    build is adopted against."""
+    return dataclasses.replace(
+        fresh,
+        extensions=running.extensions,
+        **{name: getattr(running, name) for name in RESTART_ONLY_KEYS},
+    )
 
 
 class ProxyState:
@@ -1915,14 +1941,18 @@ class ProxyState:
         ``prepared`` (``prepare_config``'s answer, built off the event loop
         for the candidate ``fresh`` came from): a changed ``[detection]`` is
         taken from it instead of being built again here — every NER model
-        loaded once per save — when it was prepared for an equal
-        ``[detection]`` against the detection generation still running;
+        loaded once per save — when it was prepared for a ``[detection]``
+        equal to the one this apply builds (``effective``'s, every
+        restart-only part kept from the running config; never compared with
+        ``fresh``'s) against the detection generation still running;
         otherwise it is ignored and the apply builds as without it. Spent
         (closed) either way, first thing: an apply that then fails holds
         nothing of it.
         """
         running = self.detection_snapshot
-        adopted = _prepared_detection(prepared, fresh.detection, running)
+        # Spent first thing; adopted below only as the build of the
+        # [detection] this apply runs (``effective``'s, not ``fresh``'s).
+        taken = _spend_prepared(prepared)
         restart_required = [
             field_name
             for field_name in RESTART_ONLY_KEYS
@@ -1939,11 +1969,7 @@ class ProxyState:
             logger.warning(
                 "config reload: [%s] changes require restart; keeping current", field_name
             )
-        effective = dataclasses.replace(
-            fresh,
-            extensions=self.config.extensions,
-            **{name: getattr(self.config, name) for name in RESTART_ONLY_KEYS},
-        )
+        effective = _kept_restart_only(fresh, self.config)
 
         # Re-resolve the license BEFORE anything is built or swapped:
         # [license] itself is hot, so renewals apply without a restart.
@@ -1957,9 +1983,9 @@ class ProxyState:
             # A new snapshot, adopted from ``prepared`` or built here: its
             # overlay builds are new too — every cached overlay build dies
             # with the objects it extended.
-            detection = adopted or _build_detection(
-                effective.detection, model_policy=self.model_policy
-            )
+            detection = _prepared_detection(
+                taken, effective.detection, running
+            ) or _build_detection(effective.detection, model_policy=self.model_policy)
             _log_ner_warnings(effective.detection, detection.detectors)
         redactor = Redactor(
             detection.plan,

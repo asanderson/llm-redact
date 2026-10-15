@@ -191,8 +191,8 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   errors as `validate_config`, keeping the NER models it loaded for a changed `[detection]` in an
   opaque `plugin_api.PreparedConfig` and safe on a worker thread — and the `prepared` keyword of
   `apply_config`, which adopts those models instead of loading them again on the event loop
-  when they were prepared for the same `[detection]` and no reload changed it since (otherwise
-  the apply builds as before). `validate_config` is `prepare_config` followed by `close()`; a
+  when they were prepared for the `[detection]` the apply runs (restart-only parts kept) and no
+  reload changed it since (otherwise the apply builds as before). `validate_config` is `prepare_config` followed by `close()`; a
   SIGHUP reload is unchanged (docs/plugins.md, "The dashboard host").
 - **Four NER counters**: `ungrounded`, `errors`, `breaker_opens` and `breaker_short_circuits` in
   `/status` `detection.ner` and as `llm_redact_ner_ungrounded_total`,

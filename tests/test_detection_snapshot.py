@@ -386,6 +386,69 @@ def test_a_prepared_build_for_another_detection_is_ignored(
     assert state.detection_snapshot is live and _spent(stale)
 
 
+# A [detection] key an apply keeps from the running config (a stand-in for
+# the restart-only keys inside [detection], such as where the llm backend
+# sends scanned text): the apply builds SECOND with the running modes.
+PINNED = dataclasses.replace(SECOND, modes=FIRST.modes)
+
+
+def _keeping_the_modes(monkeypatch: pytest.MonkeyPatch) -> list[DetectionConfig]:
+    """Make ``apply_config`` keep the running ``[detection.modes]`` (its
+    effective config's ``[detection]`` then differs from the one it was
+    handed) and count the detection builds; answers the build list."""
+    real_kept = proxy_mod._kept_restart_only
+    real_build = proxy_mod._build_detection
+    builds: list[DetectionConfig] = []
+
+    def kept(fresh: Config, running: Config) -> Config:
+        effective = real_kept(fresh, running)
+        detection = dataclasses.replace(effective.detection, modes=running.detection.modes)
+        return dataclasses.replace(effective, detection=detection)
+
+    def counting(detection: DetectionConfig, **kwargs: Any) -> DetectionSnapshot:
+        builds.append(detection)
+        return real_build(detection, **kwargs)
+
+    monkeypatch.setattr(proxy_mod, "_kept_restart_only", kept)
+    monkeypatch.setattr(proxy_mod, "_build_detection", counting)
+    return builds
+
+
+def test_a_build_prepared_for_a_kept_key_is_never_run_under_the_kept_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Prepared for the [detection] the apply is handed, which asks for a key
+    # the apply keeps from the running config: adopting it would run that
+    # key's new value under a config that says the old one is live.
+    state = _state()
+    builds = _keeping_the_modes(monkeypatch)
+    prepared = state.prepare_config(_with(state, SECOND))
+    assert builds == [SECOND]
+    state.apply_config(_with(state, SECOND), prepared=prepared)
+    assert builds == [SECOND, PINNED] and _spent(prepared)  # built for what runs
+    assert state.config.detection == state.detection_snapshot.detection == PINNED
+    assert (
+        state.modes == build_modes(PINNED) and state.redactor.plan is state.detection_snapshot.plan
+    )
+    answer = state.preview(TEXT)  # the kept modes: the address redacted, not warned on
+    assert answer["warnings"] == {} and answer["detections"] == {"EMAIL": 1, "TICKET": 1}
+
+
+def test_a_build_prepared_for_what_the_apply_builds_is_adopted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Prepared for the [detection] with the kept key's running value (as a
+    # prepare that keeps the same keys makes it), then applied with the one
+    # the editor saved: adopted — compared with what the apply builds, not
+    # with what it was handed, so it is not built a second time.
+    state = _state()
+    builds = _keeping_the_modes(monkeypatch)
+    prepared = state.prepare_config(_with(state, PINNED))
+    state.apply_config(_with(state, SECOND), prepared=prepared)
+    assert builds == [PINNED] and _spent(prepared)
+    assert state.config.detection == state.detection_snapshot.detection == PINNED
+
+
 def test_closed_foreign_and_other_proxies_builds_are_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

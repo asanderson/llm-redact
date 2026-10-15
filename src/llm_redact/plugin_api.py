@@ -629,10 +629,12 @@ class DashboardHost(Protocol):
       itself is required; an older core's takes ``fresh`` alone, so pass
       ``prepared`` only what ``prepare_config`` returned): the apply adopts
       the prepared detection objects instead of building them again on the
-      event loop when they were prepared for an equal ``[detection]``
-      against the detection generation still running (no apply that
-      changed ``[detection]`` landed since); otherwise it ignores them and
-      builds as without. It spends — closes — ``prepared`` either way.
+      event loop when they were prepared for a ``[detection]`` equal to
+      the one the apply builds (``fresh``'s with every restart-only part
+      kept from the running config) against the detection generation
+      still running (no apply that changed ``[detection]`` landed since);
+      otherwise it ignores them and builds as without. It spends — closes
+      — ``prepared`` either way.
     - OPTIONAL ``preview_snapshot: bool`` — True when ``preview`` reads the
       detection objects as ONE snapshot (an apply swaps them in one
       assignment): a preview on a worker thread then describes the

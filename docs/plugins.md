@@ -386,10 +386,11 @@ make that safe and cheap:
 - `apply_config(fresh, prepared=...)`: hand the prepared build to the
   apply, on the event loop, and its detection objects are adopted instead
   of being built a second time there — a save loads each NER model once,
-  off the loop. They are adopted only when they were prepared for an equal
-  `[detection]` and no apply that changed `[detection]` (a SIGHUP reload,
-  another save) landed since; otherwise the apply builds as it would
-  without them. The apply spends the prepared build either way; close one
+  off the loop. They are adopted only when they were prepared for a
+  `[detection]` equal to the one the apply builds (the saved one, with any
+  restart-only part kept from the running configuration) and no apply that
+  changed `[detection]` (a SIGHUP reload, another save) landed since;
+  otherwise the apply builds as it would without them. The apply spends the prepared build either way; close one
   you do not apply (closing twice is harmless).
 
 A SIGHUP reload is unchanged: it builds on the event loop.

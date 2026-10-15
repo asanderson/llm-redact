@@ -72,10 +72,14 @@ PROTOCOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
                 "(self, request: 'Request') -> 'tuple[Any, None] | tuple[None, Response]'"
             ),
             "validate_config": "(self, candidate: 'Config') -> 'None'",
-            "apply_config": "(self, fresh: 'Config') -> 'list[str]'",
+            "apply_config": (
+                "(self, fresh: 'Config', *, prepared: 'PreparedConfig | None' = None)"
+                " -> 'list[str]'"
+            ),
             "preview": "(self, text: 'str') -> 'dict[str, Any]'",
         },
     ),
+    "PreparedConfig": ((), {"close": "(self) -> 'None'"}),
     "Telemetry": (
         (),
         {
@@ -279,6 +283,7 @@ ALL: tuple[str, ...] = (
     "MAX_RESPONSE_ROWS",
     "ModelLoad",
     "ModelPolicy",
+    "PreparedConfig",
     "RESPONSE_PRUNE_EVERY",
     "ResponseContext",
     "ResponseObserver",
@@ -443,6 +448,14 @@ OPTIONAL_MEMBERS: dict[str, tuple[str, ...]] = {
         "``map_writes_pending() -> int``",
     ),
     "WriteAheadAudit": ("``amend(token, entry) -> None``",),
+    # The other direction: members of the CORE's host a dashboard plugin
+    # reads with getattr (an older core lacks them). ``apply_config`` is
+    # required; its ``prepared`` keyword is the optional part.
+    "DashboardHost": (
+        "``prepare_config(candidate: Config) -> PreparedConfig``",
+        "``apply_config(fresh: Config, *, prepared: PreparedConfig | None = None) -> list[str]``",
+        "``preview_snapshot: bool``",
+    ),
 }
 
 
@@ -451,5 +464,6 @@ def test_optional_members_are_documented(name: str) -> None:
     doc = " ".join((getattr(plugin_api, name).__doc__ or "").split())
     for member in OPTIONAL_MEMBERS[name]:
         assert member in doc, f"{name}: {member}"
-    documented = set(re.findall(r"OPTIONAL (?:member[^:]*: )?``(\w+)\(", doc))
-    assert documented == {m.strip("`").split("(")[0] for m in OPTIONAL_MEMBERS[name]}
+    # A call shape ``name(...)`` or a data member ``name: type``.
+    documented = set(re.findall(r"OPTIONAL (?:member[^:]*: )?``(\w+)[(:]", doc))
+    assert documented == {re.match(r"\w+", m.strip("`"))[0] for m in OPTIONAL_MEMBERS[name]}

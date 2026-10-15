@@ -296,4 +296,14 @@ only_mutate = [
 # copies by default — a path missing here fails the BASELINE run and every
 # mutant reports "not checked".
 also_copy = ["docs", "deploy", "bench", "plugins", "scripts", ".claude-plugin", ".github", "config.example.toml", "README.md", "CHANGELOG.md", "CLAUDE.md", "Dockerfile", "LICENSE", "uv.lock"]
-pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]
+# The one wall-clock comparison of two Redactor paths is left out of mutmut's
+# runs: every call into redactor.py goes through a mutmut trampoline there, so
+# the path making more calls (a joined run, since 1.13.0) is timed as slower
+# than it is. It runs, and holds, in every ordinary pytest run and CI job.
+pytest_add_cli_args = [
+    "-p",
+    "no:cacheprovider",
+    "-q",
+    "--deselect",
+    "tests/test_value_punctuation.py::test_no_adversarial_input_costs_more_than_1_12_0s_worst",
+]

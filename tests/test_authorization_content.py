@@ -480,6 +480,35 @@ async def test_a_value_an_override_lets_through_is_reported_by_type(
     assert EMAIL not in repr(facts)
 
 
+async def test_each_value_of_a_joined_span_an_override_lets_through_is_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A card read inside a run of digit groups joined with the address a
+    # custom rule reads from inside it, in a verbatim field: ONE span, two
+    # values, both approved by one code. Both go upstream raw: each shows,
+    # once, under its own type.
+    from llm_redact.detection.engine import CustomRule
+
+    gate = ContentGate(subject=None)
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    store_path = tmp_path / "overrides.db"
+    street = CustomRule(name="street", detector_type="ADDRESS", pattern=r"\d{4} [A-Z][a-z]+ Street")
+    app = _app(
+        upstream,
+        detection=DetectionConfig(custom_rules=(street,)),
+        overrides=OverridesConfig(enabled=True, path=str(store_path)),
+    )
+    suffix = "Order 12 4111 1111 1111 1111 Main Street"
+    body = {"model": "gpt-4o-mini", "training_file": "file-abc", "suffix": suffix}
+    async with _client(app) as client:
+        _approved(store_path, await client.post("/v1/fine_tuning/jobs", json=body, headers=KEY))
+        passed = await client.post("/v1/fine_tuning/jobs", json=body, headers=KEY)
+    assert passed.status_code == 200 and suffix in upstream.sent()
+    ((_request, content),) = gate.asked
+    assert content == _facts(overridden=True, overridden_types=(("ADDRESS", 1), ("CREDIT_CARD", 1)))
+
+
 async def test_override_counts_are_each_requests_own(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -105,11 +105,13 @@ DEFAULT_SCORE_THRESHOLD = 0.5
 
 # [detection.ner.llm]: the APIs the llm backend speaks, what it does when
 # its server fails on a string, the server it asks by default (Ollama on
-# loopback) and how long its circuit breaker stays open by default.
+# loopback), how long its circuit breaker stays open by default and after
+# how many failures in a row it opens.
 LLM_APIS = ("ollama", "openai")
 LLM_ON_ERROR = ("block", "skip")
 DEFAULT_LLM_URL = "http://127.0.0.1:11434"
 DEFAULT_LLM_BREAKER_SECONDS = 30
+DEFAULT_LLM_BREAKER_FAILURES = 3
 
 
 @dataclass(frozen=True)
@@ -136,10 +138,13 @@ class LlmNerConfig:
     # reported as a coverage opt-out).
     on_error: str = "block"
     allow_remote: bool = False
-    # After a call fails because the server is down (a timeout, a transport
-    # fault, an HTTP 5xx), every string fails at once, without asking the
-    # server, for this many seconds; then one probe call. 0 = off.
+    # Once calls failed because the server is down (a timeout, a transport
+    # fault, an HTTP 5xx) breaker_failures times in a row, every string fails
+    # at once, without asking the server, for breaker_seconds; then one probe
+    # call. breaker_seconds 0 = off; breaker_failures 1 = the first such
+    # failure opens it.
     breaker_seconds: int = DEFAULT_LLM_BREAKER_SECONDS
+    breaker_failures: int = DEFAULT_LLM_BREAKER_FAILURES
     # The NAME of an environment variable holding a key the server requires
     # (sent as Authorization: Bearer); the key itself never in the config.
     api_key_env: str | None = None

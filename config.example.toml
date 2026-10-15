@@ -513,7 +513,9 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # It receives every string the backend scans UNREDACTED: loopback only,
 # unless allow_remote = true AND the url is https. The startup checks that
 # the server serves the model (on Ollama at the pinned digest, the 64-hex
-# one /api/tags reports); llm-redact never pulls a model.
+# one /api/tags reports); llm-redact never pulls a model. url, allow_remote
+# and api_key_env take a restart: a reload keeps their running values (and
+# never starts the backend), though the rest of [detection] reloads hot.
 # [detection.ner.llm]
 # url = "http://127.0.0.1:11434"   # default: Ollama on loopback
 # api = "ollama"                   # or "openai" (an OpenAI-compatible server)
@@ -523,10 +525,13 @@ language = "en"     # presidio wires this through the analyzer; stanza loads its
 # on_error = "block"               # a server failure refuses the request (503);
 #                                  # "skip" forwards it without this backend's
 #                                  # findings (a coverage opt-out, counted)
-# breaker_seconds = 30             # after a timeout, transport fault or 5xx, every
-#                                  # string fails at once (as on_error says) for
-#                                  # this long without asking it, then one probe;
+# breaker_seconds = 30             # after breaker_failures timeouts, transport
+#                                  # faults or 5xx answers in a row, every string
+#                                  # fails at once (as on_error says) for this
+#                                  # long without asking it, then one probe;
 #                                  # 0 = off
+# breaker_failures = 3             # 1 to 100; any answer from the server
+#                                  # starts the count again
 # api_key_env = "VLLM_API_KEY"     # the NAME of an environment variable holding
 #                                  # the key a server requires (sent as
 #                                  # Authorization: Bearer to url only); never

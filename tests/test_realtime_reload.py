@@ -643,16 +643,18 @@ async def test_stale_names_what_the_reload_changed() -> None:
     assert relay.stale(state) == "upstream authorizer"
     state.upstream_auth = {}
     # Rebuilt detection objects — even equal ones: apply_config rebuilds
-    # them exactly when [detection] changed.
+    # them exactly when [detection] changed (a new snapshot).
     for name, rebuilt in (
         ("detectors", build_detectors(state.config.detection)),
         ("allowlist", build_allowlist(state.config.detection)),
         ("modes", build_modes(state.config.detection)),
     ):
-        live = getattr(state, name)
-        setattr(state, name, rebuilt)
+        live = state.detection_snapshot
+        state.detection_snapshot = dataclasses.replace(live, **{name: rebuilt})
         assert relay.stale(state) == "[detection] policy", name
-        setattr(state, name, live)
+        state.detection_snapshot = live
+    # A new snapshot over the very same objects changes no admission.
+    state.detection_snapshot = dataclasses.replace(state.detection_snapshot)
     assert relay.stale(state) is None
 
 

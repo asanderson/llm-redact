@@ -18,7 +18,7 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 |---|---|
 | `deploy/prometheus-scrape.yml` | A `scrape_configs` job to merge into your `prometheus.yml`. |
 | `deploy/prometheus-alerts.yml` | Alerting rules (proxy down, warn-mode value forwarding, high block rate, compaction forks, upstream errors, high proxy-overhead p95, refusals caused by the proxy's own storage, NER skipping strings longer than `max_chars`, the `llm` NER backend's model server failing, a plugin's scan sinks dropping captures). |
-| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, windows and truncated windows, entities dropped). |
+| `deploy/grafana-dashboard.json` | An importable Grafana dashboard (traffic, end-to-end duration, detections/warnings/blocks by type, vault + compaction, unscanned uploads, proxy overhead, local refusals by kind, vault map writes, NER coverage: strings by outcome, strings skipped as longer than `max_chars`, windows and truncated windows, entities dropped; a plugin's scan sinks: captures delivered, captures dropped by reason, queue depth). |
 
 ## Metrics reference
 
@@ -29,7 +29,7 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | `llm_redact_proxy_overhead_seconds` | histogram | `provider` | The proxy's OWN time per HTTP request: the request duration minus every wait on the upstream (sending the request, its answer's headers and body, each streamed chunk, a routed retry's delay) and on the client (reading its request body, a stream's consumer taking each chunk). What remains is redaction, rehydration, vault and audit writes, a `[vault] map_writes = "before_answer"` wait, an upload inspection and an identity authorizer's credential fetch, plus event-loop scheduling under load. Buckets from 1 ms to 5 s. Realtime connections are not observed (their duration is the connection's life). |
 | `llm_redact_local_refusals_total` | counter | `kind`, `provider` | Responses the PROXY ITSELF generated instead of forwarding the request (realtime: instead of relaying the connection or a frame), once per request, by kind (the table below) and provider (`passthrough` when none was attributed, as in `llm_redact_requests_total`). An upstream's own answer is never counted, whatever its status. Also `/status` `local_refusals_total` (by kind). |
 | `llm_redact_detections_total` | counter | `type` | Values redacted, by placeholder type. |
-| `llm_redact_warnings_total` | counter | `type` | Warn-mode hits — **the value was forwarded upstream**. |
+| `llm_redact_warnings_total` | counter | `type` | Warn-mode hits — **the value was forwarded upstream** (where a redacted value overlaps it, the part outside it; docs/detection.md "Values joined with the ones they overlap"). |
 | `llm_redact_blocked_total` | counter | `type` | Requests rejected 400 by block-mode rules. |
 | `llm_redact_rehydrations_total` | counter | `type` | Placeholders restored in responses. |
 | `llm_redact_compaction_forks_total` | counter | — | Per-conversation sessions forked by history compaction. |
@@ -42,7 +42,7 @@ Ready-to-use assets live in [`deploy/`](../deploy):
 | `llm_redact_ner_offsets_dropped_total` | counter | `backend` | Model entities of a requested type never redacted because the scanned string does not contain their span (or they came without one). |
 | `llm_redact_ner_ungrounded_total` | counter | `backend` | Entities the `llm` backend's model server returned whose text does not occur in the text it read (invented or mangled), is shorter than two characters or holds a placeholder's guillemet: never redacted. |
 | `llm_redact_ner_errors_total` | counter | `backend` | Strings the `llm` backend's model server failed on (a timeout, an error status, a connection fault, an answer that is not the requested JSON), and strings its open circuit breaker failed at once. With `on_error = "block"` each refused its request (`detector_unavailable`); with `"skip"` each was **forwarded without the backend's findings** — a coverage gap, also a `llm-redact status` posture line. |
-| `llm_redact_ner_breaker_opens_total` | counter | `backend` | Times the `llm` backend's circuit breaker opened (`[detection.ner.llm] breaker_seconds`): a call failed because its model server is down — a timeout, a transport fault, an HTTP 5xx — or the probe after a cooldown failed. While open, `/status` `detection.ner.backends.llm.breaker` says so and `llm-redact status` prints a posture line. |
+| `llm_redact_ner_breaker_opens_total` | counter | `backend` | Times the `llm` backend's circuit breaker opened (`[detection.ner.llm] breaker_seconds`): `breaker_failures` calls in a row failed because its model server is down — a timeout, a transport fault, an HTTP 5xx — or the probe after a cooldown failed. While open, `/status` `detection.ner.backends.llm.breaker` says so and `llm-redact status` prints a posture line. |
 | `llm_redact_ner_breaker_short_circuits_total` | counter | `backend` | Strings the `llm` backend failed at once, without asking its model server, because its circuit breaker was open; each is also counted in `llm_redact_ner_errors_total` (refused, or forwarded without its findings, as `on_error` says). |
 | `llm_redact_ner_inline_calls_total` | counter | `backend` | Strings an NER backend ran on the event loop itself — every other request waited for that string's inference — instead of ahead of the redaction on the NER worker thread. |
 | `llm_redact_ner_prefetch_misses_total` | counter | `backend` | Strings a request's redaction did not find among its precomputed NER results (or found computed for detectors a reload has since replaced) and ran inline instead; each is also counted in `llm_redact_ner_inline_calls_total`. |
@@ -69,7 +69,12 @@ The three `llm_redact_scan_capture*` families render their samples only
 while a plugin registers a scan sink — then every drop reason, zeros
 included — as the audit sinks' and NER counters render theirs only for a
 running sink or backend; their `# HELP`/`# TYPE` lines are always there, so
-a dashboard or an alert reading them finds the family either way.
+a dashboard or an alert reading them finds the family either way. The
+shipped dashboard's **Scan sinks** row therefore shows *No data* in the Free
+core (which registers no sink); with a sink, its drops panel colors the
+reasons `LlmRedactScanCapturesDropped` warns on (`captures`, `characters`,
+`items`) orange and `shutdown` — a process's last drain, never a trend —
+grey.
 
 The `llm_redact_ner_*` counters belong to the built NER detectors: they
 restart from zero when a configuration reload rebuilds the detectors (any

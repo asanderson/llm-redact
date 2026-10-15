@@ -344,6 +344,59 @@
           "refId": "F"
         }
       ]
+    },
+    { "type": "row", "title": "Scan sinks (a plugin's capture)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 76 } },
+    {
+      "type": "timeseries",
+      "title": "Scan captures delivered to the sinks",
+      "description": "llm_redact_scan_captures_delivered_total: captures of the strings a request's redaction scanned that a plugin's scan sink took, one for each sink a capture reached and that returned without a fault (a sink's fault counts as llm_redact_bookkeeping_errors_total{stage=\"scan_sink\"} instead). A sink receives the UNREDACTED text. Samples only while a plugin registers a scan sink (none in the Free core): without one this row shows No data.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 77 },
+      "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_redact_scan_captures_delivered_total[5m]))",
+          "legendFormat": "delivered",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Scan captures DROPPED by reason (the plugin misses their text)",
+      "description": "llm_redact_scan_captures_dropped_total: captures never handed to the sinks. Orange, the reasons the LlmRedactScanCapturesDropped alert reads: the first queue bound the capture would pass — captures (256 waiting), characters (16 Mi), items (256 Ki strings plus detections) — so the sinks do not keep up with the traffic. Grey, shutdown: still queued when a process's 5 s shutdown drain ended, a last drain and never a trend. Requests are unaffected either way: only the plugin that registered the sinks misses their text. Samples only while a plugin registers a scan sink (none in the Free core).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 77 },
+      "fieldConfig": {
+        "defaults": { "unit": "cps", "color": { "mode": "fixed", "fixedColor": "orange" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "#8e8e8e" } }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(llm_redact_scan_captures_dropped_total{reason!=\"shutdown\"}[5m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (rate(llm_redact_scan_captures_dropped_total{reason=\"shutdown\"}[5m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Scan capture queue depth",
+      "description": "llm_redact_scan_capture_queue_depth: captures queued for the scan sinks or in flight on their worker thread. The queue holds at most 256 captures, 16 Mi characters and 256 Ki strings plus detections: a depth that keeps climbing toward 256 means the sinks do not keep up (large captures can reach the characters or items bound at a lower depth — the drops panel names the bound). Samples only while a plugin registers a scan sink (none in the Free core).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 77 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [{ "expr": "max(llm_redact_scan_capture_queue_depth)", "legendFormat": "depth", "refId": "A" }]
     }
   ]
 }

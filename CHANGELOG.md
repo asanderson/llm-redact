@@ -53,18 +53,21 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   lists the residuals). On random runs of digit groups the rule's false positives barely move
   (13.44% to 13.72% of 5,000 runs; 14.48% to 14.58% of 5,000 runs ending in an expiry-shaped
   pair of groups).
-- **A custom rule's value or an NER span overlapping a spaced IBAN lost its part outside the
-  IBAN.** In `pay GB82 WEST 1234 5698 7654 32 Main Street`, with `32 Main Street` read as an
-  address, the IBAN (read since 1.12.1) won the overlap and `Main Street` went upstream as sent;
-  a card read inside a run of digit groups (above) would have done the same. Both are now
-  joined with every value they overlap, directly or through other overlapping values: whatever
-  any of them redacts is redacted, overlapping ones as one placeholder typed after the one
-  starting first (`pay «IBAN_001»`), and a value in block mode among them refuses the request.
-  (A finding of the new `llm` backend is not joined: like everywhere, it keeps only what lies
-  outside the other values, here as a placeholder of its own.)
-  Nothing 1.12.1 redacted or refused is forwarded now, with custom rules, NER spans and
-  `[detection.modes]` too: tests pin that against 1.12.1's pipeline (and, for the built-in rules
-  under the default modes, against 1.12.0's).
+- **A custom rule's value or an NER span overlapping a value read since 1.12.1 lost its part
+  outside that value.** In `pay GB82 WEST 1234 5698 7654 32 Main Street`, with `32 Main Street`
+  read as an address, the spaced IBAN won the overlap and `Main Street` went upstream as sent;
+  in `AHV 756.9217.0769.85. Done`, with `85. Done` a custom rule's value, `. Done` did (the
+  readings 1.12.1 added before a run of dots: `belgian_nn`, `swiss_ahv`, `ipv6` — also before
+  one `:` — and a PlanetScale token's run past 64 characters; 1.12.0 read no value there and
+  redacted the custom one whole); a card read inside a run of digit groups (above) would have
+  done the same. All of them are now joined with every value they overlap, directly or through
+  other overlapping values: whatever any of them redacts is redacted, overlapping ones as one
+  placeholder typed after the one starting first (`pay «IBAN_001»`, `AHV «CH_AHV_001»`), and a
+  value in block mode among them refuses the request. (A finding of the new `llm` backend is not
+  joined: like everywhere, it keeps only what lies outside the other values, here as a
+  placeholder of its own.) Nothing 1.12.0 or 1.12.1 redacted or refused is forwarded now, with
+  custom rules, NER spans and `[detection.modes]` too: tests pin that against both releases'
+  pipelines.
 
 ### Changed
 - **The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`**
@@ -80,14 +83,20 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   `hf` default", records the decision, what holds for the default entities and the caveats. The
   `hf-default` NER bench baselines are re-recorded for it, and the CI `ner-models` job also
   pulls `dslim/bert-base-NER`, which the `real_model` tests still read by name.
-- A spaced IBAN no longer imposes the `iban` rule's mode on a value it overlaps (it did since
-  1.12.1; the default modes are unaffected): with `credit_card = "block"` a spaced IBAN holding a
-  Luhn-valid card number refuses the request again, and with `iban = "warn"` that card number is
-  redacted. Values overlapping a card read inside a run of digit groups are treated alike, and a
-  warn-mode value among them is forwarded only where no redacted value covers it. Where the
+- A spaced IBAN, a value read before a run of dots and a PlanetScale token's run past 64
+  characters no longer impose their rule's mode on a value they overlap (they did since 1.12.1;
+  the default modes are unaffected): with `credit_card = "block"` a spaced IBAN holding a
+  Luhn-valid card number refuses the request again, with `iban = "warn"` that card number is
+  redacted, and a generic secret in block mode inside a PlanetScale token's run refuses the
+  request. Values overlapping a card read inside a run of digit groups are treated alike. A
+  warn-mode value among them is forwarded only where no redacted value covers it, and counted as
+  a warning, once, even where a redacted value overlaps it, as long as part of it lies outside the
+  redacted values (that part goes upstream; one wholly inside them is not counted). Where the
   proxy cannot rewrite the text (a verbatim field, an upload's extracted text), a span joining
-  two or more such values refuses the request with no override code, as a deny string does.
-  docs/detection.md describes how such values are joined.
+  two or more such values is put to refusal overrides value by value: the refusal's code names
+  every value, one approval of it lets the span through as sent (an access gate's content facts
+  count each value once), and a span holding a deny string refuses with no code, as a deny
+  string does. docs/detection.md describes how such values are joined.
 - The latency smoke check (`python -m llm_redact.bench --latency --check`) allows the proxy's
   own overhead on a 100 KB body up to 300 ms (was 150 ms). It is a tripwire for gross
   regressions such as quadratic behavior, measured at about 44 ms; a loaded shared CI runner
@@ -131,6 +140,10 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   lines are there, as for the audit sinks' counters. A new alert in
   `deploy/prometheus-alerts.yml`, `LlmRedactScanCapturesDropped` (warning), fires when captures
   keep being dropped for 30 minutes: the requests are unaffected, the plugin misses their text.
+  `deploy/grafana-dashboard.json` gains a **Scan sinks** row charting the three: captures
+  delivered, captures dropped by reason — the reasons the alert reads in orange, `shutdown` (a
+  process's last drain) in grey — and the queue depth; it shows *No data* while no sink is
+  registered, as in the Free core.
 - **An opt-in `llm` NER backend: a generative model on a server you run finds names, addresses
   and other contextual values.** Add `"llm"` to `[detection.ner] backends` and name the server in
   `[detection.ner.llm]`: Ollama (`api = "ollama"`, the default, at `http://127.0.0.1:11434`) or
@@ -139,7 +152,17 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   dependency; off by default, and no server is contacted unless you configure one.
   - **The server reads every scanned string unredacted**, so `url` must be on loopback unless
     `allow_remote = true` and the scheme is https. Requests go to that URL only: no proxy from
-    the environment, no redirect followed, answers capped.
+    the environment, no redirect followed, answers capped. `url`, `allow_remote` and
+    `api_key_env` take a restart although `[detection]` reloads hot: a reload (SIGHUP, the
+    llm-redact-pro config editor) keeps their running values, applies the rest of
+    `[detection]` and names them in its "require restart" warning (`detection.ner.llm.url`, …);
+    a reload that would start the backend (`"llm"` added to the backends, NER switched on with
+    it) is refused with the running configuration kept. Whoever can change `[detection]` can
+    therefore never make a running proxy send scanned text, or a key, somewhere it was not
+    started with. `config.RESTART_ONLY_PATHS` lists the three for the editor, and
+    `apply_config`'s restart-required list (the plugin API's `DashboardHost` contract) now
+    holds their dotted names beside the section names: an entry is a name to show, not always
+    a `Config` attribute.
   - **Only real values, and only ever more redaction.** A value is kept only when its text
     occurs verbatim in the text the model read (then it is redacted wherever it occurs in the
     string, never inside a placeholder an earlier turn left there); anything the model invents
@@ -159,18 +182,20 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     instead — a coverage opt-out, counted (`errors`) and reported in `/status`, the
     `llm-redact status` posture block and `doctor`, like warn mode.
   - **A hung server does not stall every string.** Strings are asked one at a time for the
-    whole proxy, so a server that hangs would cost each new string a whole `timeout_ms`. A
-    timeout, a refused or dropped connection or an HTTP 5xx answer now opens a circuit breaker
-    for `breaker_seconds` (default 30, `0` turns it off): until then every string that needs the
-    server fails at once without contacting it, handled as any failure (refused 503 with
-    `on_error = "block"`, forwarded with the other detectors' findings with `"skip"`); then one
-    string's call probes the server, and an answer closes the breaker. One text that makes the
-    model time out, or that the server answers with a 5xx, opens it too — for every string, so
-    with `"skip"` such a text in any request turns the backend's findings off for the cooldown
-    (docs/detection.md). `/status` shows the breaker (`detection.ner.backends.llm.breaker`),
-    `llm-redact status` prints a posture line while it is open, `doctor` WARNs
-    `breaker_seconds = 0`, and the strings it fails at once count in `errors` (so the alert
-    keeps firing) and in `breaker_short_circuits`.
+    whole proxy, so a server that hangs would cost each new string a whole `timeout_ms`.
+    `breaker_failures` (default 3, from 1 to 100) timeouts, refused or dropped connections or
+    HTTP 5xx answers in a row — any answer from the server starts the count again — open a
+    circuit breaker for `breaker_seconds` (default 30, `0` turns it off): until then every
+    string that needs the server fails at once without contacting it, handled as any failure
+    (refused 503 with `on_error = "block"`, forwarded with the other detectors' findings with
+    `"skip"`); then one string's call probes the server, an answer closes the breaker and a
+    failure opens it again at once. Texts that make the model time out, or that the server
+    answers with a 5xx, count too: `breaker_failures` such texts in a row open it for every
+    string, so with `"skip"` they turn the backend's findings off for the cooldown
+    (docs/detection.md). `/status` shows the breaker (`detection.ner.backends.llm.breaker`,
+    with the `failures` in a row and the `threshold`), `llm-redact status` prints a posture
+    line while it is open, `doctor` WARNs `breaker_seconds = 0`, and the strings it fails at
+    once count in `errors` (so the alert keeps firing) and in `breaker_short_circuits`.
   - **Servers that require a key.** `api_key_env` names the environment variable holding the
     key (never the key itself) for vLLM's `--api-key`, a hosted https endpoint, or Ollama
     behind an authenticating reverse proxy: read at every build, sent as `Authorization:
@@ -181,6 +206,19 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     event loop like every NER backend; what a string held is remembered, so the history an agent
     resends with every request is not asked again. `llm-redact preview` exits 1 and names the
     failure when the server cannot read the text.
+- **A dashboard's preview and config check can run off the event loop safely, and a save loads
+  each NER model once.** The proxy's detectors, allowlists and modes are now one immutable
+  snapshot that a reload or a save swaps in a single step, and the redaction preview reads it
+  once: a preview a reload overlaps describes the configuration live when it began, never the
+  old detectors with the new modes. Three optional members of `plugin_api.DashboardHost`, read
+  with `getattr` (an older core lacks them), let a dashboard plugin use this:
+  `preview_snapshot` (True), `prepare_config(candidate)` — the config check, raising the same
+  errors as `validate_config`, keeping the NER models it loaded for a changed `[detection]` in an
+  opaque `plugin_api.PreparedConfig` and safe on a worker thread — and the `prepared` keyword of
+  `apply_config`, which adopts those models instead of loading them again on the event loop
+  when they were prepared for the `[detection]` the apply runs (restart-only parts kept) and no
+  reload changed it since (otherwise the apply builds as before). `validate_config` is `prepare_config` followed by `close()`; a
+  SIGHUP reload is unchanged (docs/plugins.md, "The dashboard host").
 - **Four NER counters**: `ungrounded`, `errors`, `breaker_opens` and `breaker_short_circuits` in
   `/status` `detection.ner` and as `llm_redact_ner_ungrounded_total`,
   `llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total` and

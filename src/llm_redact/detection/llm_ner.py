@@ -31,14 +31,15 @@ a generative model must never be trusted with:
   as a coverage opt-out.
 * **a hung server costs a timeout per string.** Strings are asked one at a
   time for the whole proxy, so a server that hangs rather than refusing
-  would hold every new string for ``timeout_ms``. A failure that says the
-  server is down (a timeout, a transport fault, an HTTP 5xx) opens a
+  would hold every new string for ``timeout_ms``. ``breaker_failures``
+  failures in a row that say the server is down (a timeout, a transport
+  fault, an HTTP 5xx; any answer from the server clears the count) open a
   :class:`CircuitBreaker` for ``breaker_seconds``: until then every string
   that needs a call fails at once, handled as any failure (``on_error``),
   without contacting the server; then one probe call is let through, whose
   success closes it and whose failure opens it again. A timeout once the
   server answered an earlier window of the same string is that string's own
-  ``timeout_ms`` running out, and fails only that string.
+  ``timeout_ms`` running out: it fails only that string and never counts.
 * **a server may require a key.** ``api_key_env`` names an environment
   variable read at the build and sent as ``Authorization: Bearer`` to
   ``url`` only (no redirect is followed); the key is kept out of every
@@ -211,25 +212,38 @@ BreakerState = Literal["off", "closed", "open", "half_open"]
 
 
 class CircuitBreaker:
-    """Stops asking a model server that is down (``breaker_seconds``).
+    """Stops asking a model server that is down (``breaker_seconds``,
+    ``breaker_failures``).
 
     Closed, every call goes out. A call that fails because the server is
-    down (``_Failed.down``) opens it: for ``seconds`` no call goes out
-    (:meth:`admit` says no, and the string fails at once). Then it is half
-    open: :meth:`admit` lets ONE probe call through at a time, whose success
-    — or any answer from the server — closes it (:meth:`succeeded`) and
-    whose failure opens it again (:meth:`failed`). ``seconds`` 0 = off:
-    every call goes out. Thread-safe; ``clock`` is injectable (tests)."""
+    down (``_Failed.down``) counts; ``threshold`` such failures in a row
+    open it, and any answer from the server (:meth:`succeeded`) clears the
+    count. Open, for ``seconds`` no call goes out (:meth:`admit` says no,
+    and the string fails at once). Then it is half open: :meth:`admit` lets
+    ONE probe call through at a time, whose success — or any answer from
+    the server — closes it and whose failure opens it again at once, no
+    new count needed (:meth:`failed`). ``seconds`` 0 = off: every call goes
+    out, nothing is counted. Thread-safe; ``clock`` is injectable
+    (tests)."""
 
-    def __init__(self, seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        seconds: float,
+        *,
+        threshold: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.seconds = seconds
+        self.threshold = threshold
         self._clock = clock
         self._lock = threading.Lock()
-        # When it last opened (None: closed), whether a probe is out, and
-        # the failure kind that opened it.
+        # When it last opened (None: closed), whether a probe is out, the
+        # failure kind that opened it, and the calls that failed because
+        # the server is down since its last answer.
         self._opened_at: float | None = None
         self._probing = False
         self._reason: str | None = None
+        self._failures = 0
 
     def admit(self) -> bool:
         """Whether a call may go to the server now."""
@@ -244,21 +258,30 @@ class CircuitBreaker:
             return True
 
     def succeeded(self) -> None:
-        """A call got an answer from the server: closed."""
+        """A call got an answer from the server: closed, the count of
+        failures in a row cleared."""
         with self._lock:
             self._opened_at = None
             self._probing = False
             self._reason = None
+            self._failures = 0
 
     def failed(self, reason: str) -> Literal["opened", "reopened"] | None:
-        """A call failed because the server is down: open (again) from now.
-        ``"opened"`` when it was closed, ``"reopened"`` when the probe
-        failed, None when it was open already (or the breaker is off)."""
+        """A call failed because the server is down: counted; open from now
+        when it is the ``threshold``-th in a row, open again from now when
+        it was the probe (or a call admitted before it opened, failing
+        late: the cooldown restarts). ``"opened"`` when it was closed and
+        opens, ``"reopened"`` when the probe failed, None otherwise (still
+        closed below the threshold, open already, or the breaker off)."""
         if self.seconds <= 0:
             return None
         with self._lock:
+            self._failures += 1
+            outcome: Literal["opened", "reopened"] | None
             if self._opened_at is None:
-                outcome: Literal["opened", "reopened"] | None = "opened"
+                if self._failures < self.threshold:
+                    return None
+                outcome = "opened"
             elif self._probing:
                 outcome = "reopened"
             else:
@@ -276,8 +299,10 @@ class CircuitBreaker:
 
     def status(self) -> dict[str, Any]:
         """The ``/status`` view: ``state`` (off, closed, open, half_open),
-        ``seconds``, the failure kind that opened it and, while open, the
-        seconds until a probe may go out."""
+        ``seconds``, the failures in a row since the server last answered
+        (``failures``) and how many open it (``threshold``), the failure
+        kind that opened it and, while open, the seconds until a probe may
+        go out."""
         with self._lock:
             state: BreakerState
             retry_in: float | None = None
@@ -294,6 +319,8 @@ class CircuitBreaker:
             return {
                 "state": state,
                 "seconds": self.seconds,
+                "failures": self._failures,
+                "threshold": self.threshold,
                 "reason": self._reason if state in ("open", "half_open") else None,
                 "retry_in_seconds": retry_in,
             }
@@ -608,7 +635,9 @@ class LlmNerDetector:
         self.stats = NerStats()
         # Fails strings at once while the server is down; a reload that
         # rebuilds the detector starts a closed one.
-        self.breaker = CircuitBreaker(client.config.breaker_seconds)
+        self.breaker = CircuitBreaker(
+            client.config.breaker_seconds, threshold=client.config.breaker_failures
+        )
         # SHA-256 of a string -> the (value, type) pairs found in it.
         self._cache: OrderedDict[bytes, tuple[tuple[str, str], ...]] = OrderedDict()
         self._cache_lock = threading.Lock()
@@ -743,13 +772,14 @@ class LlmNerDetector:
             yield value, type_name
 
     def _tripped(self, failure: _Failed, *, answered: bool) -> Literal["opened", "reopened"] | None:
-        """The circuit breaker after a failed call: opened (again) when the
-        failure says the server is down (counted), else closed — the server
-        answered, so it is up. A timeout once the server ``answered`` an
-        earlier window of the same string is that string's own time running
-        out (a long string on a slow server: ``timeout_ms`` bounds its
-        windows together), not a server that is down: it fails that string
-        only."""
+        """The circuit breaker after a failed call: a failure that says the
+        server is down counts toward ``breaker_failures`` (an opening is
+        counted in ``breaker_opens``), any other closes it and clears the
+        count — the server answered, so it is up. A timeout once the server
+        ``answered`` an earlier window of the same string is that string's
+        own time running out (a long string on a slow server: ``timeout_ms``
+        bounds its windows together), not a server that is down: it fails
+        that string only."""
         if not failure.down or (answered and isinstance(failure, _TimedOut)):
             self.breaker.succeeded()
             return None
@@ -764,8 +794,10 @@ class LlmNerDetector:
         kind only) — and once more when the breaker opens later in it —, and
         with on_error = "block" raised as DetectorUnavailable."""
         self.stats.errors += 1
+        threshold = self.breaker.threshold
         opened = (
-            f"; circuit breaker open: strings fail at once, without asking it, for"
+            f"; circuit breaker open after {threshold} failure{'s' if threshold != 1 else ''}"
+            f" in a row: strings fail at once, without asking it, for"
             f" {self.breaker.seconds} s, then one probe"
             if breaker == "opened"
             else ""

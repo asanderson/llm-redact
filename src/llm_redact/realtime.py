@@ -1242,10 +1242,11 @@ class RealtimeRelay:
             return f"[providers.{self.provider}] settings"
         if state.upstream_auth.get(self.provider) is not self.upstream_auth:
             return "upstream authorizer"
+        detection = state.detection_snapshot
         if (
-            state.detectors is not self.detectors
-            or state.allowlist is not self.allowlist
-            or state.modes is not self.modes
+            detection.detectors is not self.detectors
+            or detection.allowlist is not self.allowlist
+            or detection.modes is not self.modes
         ):
             return "[detection] policy"
         return None
@@ -1549,13 +1550,14 @@ async def ws_handle(websocket: WebSocket) -> None:
     # from here on — the awaited authorization check included — so a reload
     # that changes it, or the gate ending it, revokes the relay at any point
     # (RealtimeRelay); every way out releases it.
+    detection = state.detection_snapshot
     relay = RealtimeRelay(
         adapter.provider,
         provider_config,
         upstream_auth,
-        state.detectors,
-        state.allowlist,
-        state.modes,
+        detection.detectors,
+        detection.allowlist,
+        detection.modes,
         subject=admission.subject,
         grant=getattr(admission, "grant", None),
         recheck=getattr(admission, "recheck", None),

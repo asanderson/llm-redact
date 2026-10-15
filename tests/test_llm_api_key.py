@@ -227,6 +227,39 @@ async def test_the_key_appears_in_no_log_repr_error_status_or_metric(
     assert {r.headers["authorization"] for r in server.requests} == {f"Bearer {KEY}"}
 
 
+def test_the_real_transport_logs_no_key_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The production transport (httpx over httpcore, whose DEBUG trace logs
+    # each request), its network replaced by httpcore's in-memory backend.
+    import httpcore
+
+    sent: list[bytes] = []
+
+    class Stream(httpcore.MockStream):
+        def write(self, buffer: bytes, timeout: float | None = None) -> None:
+            sent.append(bytes(buffer))
+
+    class Backend(httpcore.MockBackend):
+        def connect_tcp(self, *args: Any, **kwargs: Any) -> httpcore.MockStream:
+            return Stream(list(self._buffer))
+
+    answer = json.dumps({"models": []}).encode()
+    reply = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+    reply += b"content-length: %d\r\n\r\n" % len(answer) + answer
+    transport = httpx.HTTPTransport()
+    transport._pool = httpcore.ConnectionPool(network_backend=Backend([reply]))
+    monkeypatch.setattr(llm_ner, "make_transport", lambda: transport)
+    client = llm_ner._Client(llm_ner_config().llm, ["person"], llm_ner.ApiKey(KEY))
+    with caplog.at_level(logging.DEBUG):
+        assert client.models(5) == {"models": []}
+    client.close()
+    assert any(record.name.startswith("httpcore") for record in caplog.records)
+    assert KEY not in caplog.text
+    # It did go out, on the wire.
+    assert f"\r\nauthorization: Bearer {KEY}\r\n".encode() in b"".join(sent)
+
+
 def test_a_build_failure_names_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(VAR, KEY)
     server = install_llm(monkeypatch, FakeModelServer(listed=False))

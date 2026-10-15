@@ -36,7 +36,9 @@ a generative model must never be trusted with:
   :class:`CircuitBreaker` for ``breaker_seconds``: until then every string
   that needs a call fails at once, handled as any failure (``on_error``),
   without contacting the server; then one probe call is let through, whose
-  success closes it and whose failure opens it again.
+  success closes it and whose failure opens it again. A timeout once the
+  server answered an earlier window of the same string is that string's own
+  ``timeout_ms`` running out, and fails only that string.
 * **a server may require a key.** ``api_key_env`` names an environment
   variable read at the build and sent as ``Authorization: Bearer`` to
   ``url`` only (no redirect is followed); the key is kept out of every
@@ -151,6 +153,14 @@ class _Failed(Exception):
     def __init__(self, reason: str, *, down: bool = False) -> None:
         super().__init__(reason)
         self.down = down
+
+
+class _TimedOut(_Failed):
+    """A call ran out of the string's time (``timeout_ms`` bounds a string's
+    windows together)."""
+
+    def __init__(self) -> None:
+        super().__init__("timeout", down=True)
 
 
 class ApiKey:
@@ -368,7 +378,7 @@ class _Client:
         bound, docs/detection.md says so); ``_Failed`` naming the failure
         kind."""
         if timeout <= 0:
-            raise _Failed("timeout", down=True)
+            raise _TimedOut
         deadline = time.monotonic() + timeout
         # An answer as sent: a compressed one could inflate past the cap
         # before it is measured.
@@ -401,9 +411,9 @@ class _Client:
                     if len(data) > MAX_ANSWER_BYTES:
                         raise _Failed("answer too large")
                     if time.monotonic() > deadline:
-                        raise _Failed("timeout", down=True)
+                        raise _TimedOut
         except httpx.TimeoutException:
-            raise _Failed("timeout", down=True) from None
+            raise _TimedOut from None
         except _Failed:
             raise
         except Exception as exc:  # noqa: BLE001 — any transport fault is a failed call
@@ -654,6 +664,8 @@ class LlmNerDetector:
             return ()  # no letter or digit: nothing to find, nothing asked
         found: dict[str, str] = {}
         deadline = time.monotonic() + self._timeout
+        # Whether the server answered an earlier window of this string.
+        answered = False
         for start, end, cut in windows:
             if not self.breaker.admit():
                 # The server is down: this string fails at once, as any
@@ -669,12 +681,13 @@ class LlmNerDetector:
             try:
                 entities = self._client.entities(piece, deadline - time.monotonic())
             except _Failed as exc:
-                self._failed(str(exc), breaker=self._tripped(exc))
+                self._failed(str(exc), breaker=self._tripped(exc, answered=answered))
                 return tuple(found.items())  # on_error = "skip": what was read
             except BaseException:
                 self.breaker.release()
                 raise
             self.breaker.succeeded()
+            answered = True
             for value, type_name in self._grounded(entities, piece):
                 found.setdefault(value, type_name)
         self._recovered()
@@ -729,11 +742,15 @@ class LlmNerDetector:
                 continue
             yield value, type_name
 
-    def _tripped(self, failure: _Failed) -> Literal["opened", "reopened"] | None:
+    def _tripped(self, failure: _Failed, *, answered: bool) -> Literal["opened", "reopened"] | None:
         """The circuit breaker after a failed call: opened (again) when the
         failure says the server is down (counted), else closed — the server
-        answered, so it is up."""
-        if not failure.down:
+        answered, so it is up. A timeout once the server ``answered`` an
+        earlier window of the same string is that string's own time running
+        out (a long string on a slow server: ``timeout_ms`` bounds its
+        windows together), not a server that is down: it fails that string
+        only."""
+        if not failure.down or (answered and isinstance(failure, _TimedOut)):
             self.breaker.succeeded()
             return None
         outcome = self.breaker.failed(str(failure))

@@ -45,10 +45,13 @@ and tags `vX.Y.Z`.
     for `breaker_seconds` (default 30, `0` turns it off): until then every string that needs the
     server fails at once without contacting it, handled as any failure (refused 503 with
     `on_error = "block"`, forwarded with the other detectors' findings with `"skip"`); then one
-    string's call probes the server, and an answer closes the breaker. `/status` shows the
-    breaker (`detection.ner.backends.llm.breaker`), `llm-redact status` prints a posture line
-    while it is open, `doctor` WARNs `breaker_seconds = 0`, and the strings it fails at once
-    count in `errors` (so the alert keeps firing) and in `breaker_short_circuits`.
+    string's call probes the server, and an answer closes the breaker. One text that makes the
+    model time out, or that the server answers with a 5xx, opens it too — for every string, so
+    with `"skip"` such a text in any request turns the backend's findings off for the cooldown
+    (docs/detection.md). `/status` shows the breaker (`detection.ner.backends.llm.breaker`),
+    `llm-redact status` prints a posture line while it is open, `doctor` WARNs
+    `breaker_seconds = 0`, and the strings it fails at once count in `errors` (so the alert
+    keeps firing) and in `breaker_short_circuits`.
   - **Servers that require a key.** `api_key_env` names the environment variable holding the
     key (never the key itself) for vLLM's `--api-key`, a hosted https endpoint, or Ollama
     behind an authenticating reverse proxy: read at every build, sent as `Authorization:

@@ -1048,7 +1048,9 @@ blanks are trimmed). Export it in the environment `serve` runs in — a
 service unit's `Environment=`/`EnvironmentFile=`, a container's `-e` or
 Secret — or remove `api_key_env` when the server needs no key. A startup
 stops; a reload keeps the running configuration (and the key it was built
-with). The message names the variable, never its value.
+with), and since a running proxy's environment cannot change, a variable
+exported after the start takes a restart. The message names the variable,
+never its value.
 
 ## "[detection.ner.llm] api_key_env must name an environment variable …" / "… must not name an LLM_REDACT_ variable …"
 

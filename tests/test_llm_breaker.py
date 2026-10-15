@@ -284,6 +284,43 @@ def test_a_long_string_stops_at_the_first_window_once_it_opens(
     assert server.chats == 1
 
 
+def test_a_long_string_running_out_of_its_time_on_a_server_that_answers_never_opens_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # timeout_ms bounds a string's windows together: a long string whose
+    # windows the server answers, slowly, runs out of time part way. That
+    # fails the string, not the server: the next string is asked as before.
+    import types
+
+    import llm_redact.detection.llm_ner as llm_ner
+
+    clock = _Clock()
+    server = FakeModelServer([(NAME, "person")])
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        answer = server(request)
+        if request.url.path == "/api/chat":
+            clock.now += 0.6  # each window answered in 0.6 s
+        return answer
+
+    _redactor, detector = _build(monkeypatch, server, on_error="skip", timeout_ms=1000)
+    monkeypatch.setattr(llm_ner, "time", types.SimpleNamespace(monotonic=clock))
+    detector._client._http = httpx.Client(transport=httpx.MockTransport(slow))
+    filler = "lorem ipsum dolor sit amet " * 300
+    assert detector.detect(f"{filler} {NAME}") == []  # out of time before its end
+    assert server.chats == 2 and detector.stats.errors == 1
+    assert detector.stats.breaker_opens == 0
+    assert detector.breaker.status()["state"] == "closed"
+    assert [d.value for d in detector.detect(f"hi {NAME}")] == [NAME]
+    assert server.chats == 3
+    # A first window timing out (the server answered nothing of the string)
+    # still opens it.
+    server.fail = "timeout"
+    assert detector.detect(f"bye {NAME}") == []
+    assert detector.stats.breaker_opens == 1
+    assert detector.breaker.status()["state"] == "open"
+
+
 def test_breaker_seconds_0_asks_the_server_for_every_string(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -314,9 +314,12 @@ own hosted API — all read the same header): set `api_key_env` to the NAME of
 an environment variable holding the key, never the key itself. The
 variable is read at every build (startup, `serve --check`, a reload that
 changes `[detection]`; a reload that does not keeps the key it was built
-with), its edge blanks trimmed; unset, empty or holding anything but
-visible ASCII, the build stops with an error naming the variable, never its
-value (a reload keeps the running configuration). The key is sent as
+with) from the proxy's own environment, which nothing outside the process
+can change while it runs — a new key, or a variable exported after the
+start, takes a restart. Its edge blanks are trimmed; unset, empty or
+holding anything but visible ASCII, the build stops with an error naming
+the variable, never its value (a reload keeps the running configuration).
+The key is sent as
 `Authorization: Bearer <key>` with every request — the model list and each
 chat, on either `api` — to `url` only: no redirect is followed, so it never
 goes to a `Location`, and the off-loopback rule above holds (plain http only
@@ -427,9 +430,12 @@ failure opens it again for another `breaker_seconds` (`breaker_opens` counts
 each opening). A failure from a server that answers — an error status below
 500, a redirect, an answer that is not the requested JSON — fails only its
 own string and never opens the breaker (as the probe's answer, even an
-unusable one, it closes the breaker: the server is up). A string the backend already read (the cache) or one with nothing to
-read needs no call and is unaffected. While it is open, `/status` shows the
-breaker (`detection.ner.backends.llm.breaker`: `state`, the failure `reason`,
+unusable one, it closes the breaker: the server is up); so does a timeout
+once the server has answered an earlier window of the same string, which is
+that long string's own `timeout_ms` running out. A string the backend
+already read (the cache) or one with nothing to read needs no call and is
+unaffected. While it is open, `/status` shows the breaker
+(`detection.ner.backends.llm.breaker`: `state`, the failure `reason`,
 `retry_in_seconds`) and `llm-redact status` prints a posture line; the
 breaker belongs to the built backend, so a reload that rebuilds it starts a
 closed one. With `"skip"` an open breaker forwards requests without the
@@ -437,6 +443,16 @@ backend's findings for the whole cooldown, even if the server recovers
 sooner — the coverage gap the posture line and `errors` count. Keep
 `timeout_ms` well below what your clients wait for an answer: the string
 that opens the breaker still waits it out.
+
+The failure that opens the breaker can come from one text: a text that
+makes the model ramble past `timeout_ms`, or that the server answers with a
+5xx, opens it for every string, not just that one — and the scanned text is
+not only yours (a web page or file an agent read lands in a request). With
+`"block"` every request that needs the server is then refused for the
+cooldown; with `"skip"` every request goes on without the backend's
+findings for it, again after each cooldown the same text comes back. Keep
+`"block"` where that matters, or set `breaker_seconds = 0` (each such
+string then fails alone, at a whole `timeout_ms` each).
 
 Like every NER backend it is best effort, measured per model, never a
 guarantee ([threat-model.md](threat-model.md#contextual-values-rules-and-models)).

@@ -513,9 +513,10 @@ an extraction service. What the core guarantees:
   refused at startup);
 - only what the redaction scanned, only once it succeeded and the request
   is handed to its upstream: a refused request or frame is never captured,
-  and nothing the core forwards unredacted (`detection = false`, a
-  pass-through route, an exempt MCP server's blocks, a binary part sent
-  unscanned) reaches a sink through this seam;
+  and nothing the core forwards without scanning it (`detection = false`,
+  a pass-through route, an exempt MCP server's blocks, the MCP connector
+  configuration and its credentials, a binary part sent unscanned)
+  reaches a sink through this seam;
 - no vault data: never a placeholder the proxy issued, never a mapping
   (a string the client itself sent holding a placeholder holds it);
 - surfaced: `/status` `scan_capture` (the number of sinks and the queue's

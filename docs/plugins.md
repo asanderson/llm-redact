@@ -314,19 +314,24 @@ upload inspector extracted from a binary part, a convert-mode document's
 text, realtime client frames. What is not: a request refused at any point
 (a block, an access gate's check, the `[audit] required` START row, an
 upstream authorizer, a routing budget), and anything the core forwards
-unredacted (`[providers.NAME] detection = false`, pass-through routes, an
-exempt MCP server's blocks, a binary part sent unscanned) or adds itself
-(the system note).
+without scanning it (`[providers.NAME] detection = false`, pass-through
+routes, an exempt MCP server's blocks, the MCP connector configuration —
+`mcp_servers`, `tools` of type `mcp`, with their credentials — a binary
+part sent unscanned, the structural values the redaction skips such as a
+`model` or base64 data) or adds itself (the system note).
 
 `capture` runs on ONE worker thread, never on the event loop and never two
 calls at once (not always the same thread: the worker exits after 5 s
 idle and a new one starts with the next capture), in the order requests
-were handed upstream. The queue in front of it holds at most 256 captures
-and 16 Mi characters: a capture that does not fit is dropped and counted,
-never waited for, so a slow sink loses captures rather than slowing any
-request (the worker is a thread of the proxy's process: a sink that
-computes much competes with the event loop for the interpreter, so hand
-heavy work to another process). A sink's exception is contained, counted
+were handed upstream. The queue in front of it holds at most 256
+captures, 16 Mi characters and 256 Ki strings plus detections (each held
+as an object of its own, which costs far more memory than a short
+string's characters): a capture that does not fit is dropped and
+counted, never waited for, so a slow sink loses captures rather than
+slowing any request (the worker is a thread of the proxy's process: a
+sink that computes much competes with the event loop for the
+interpreter, so hand heavy work to another process). A sink's exception
+— a `BaseException` such as `SystemExit` included — is contained, counted
 (`llm_redact_bookkeeping_errors_total{stage="scan_sink"}`) and logged by
 its type only, once per outage. At shutdown the queue drains for at most
 5 s beside the vault's map-write drain (the shutdown budget is unchanged;

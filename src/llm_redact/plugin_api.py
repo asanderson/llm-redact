@@ -1406,14 +1406,15 @@ class ScanContext:
 
     ``surface`` is ``http`` (one request) or ``websocket`` (one client
     frame of a realtime connection: each frame is a capture of its own);
-    ``provider`` the provider it goes to; ``adapter`` the provider
-    adapter's name; ``method`` the HTTP method (``GET`` for a realtime
-    frame: its connection's upgrade); ``path`` the request path (the
-    upgrade's for a frame); ``session_id`` the vault session it is redacted
-    in (with llm-redact-pro's named users, the user's own copy);
-    ``subject`` the access gate's admitted subject (None without one: the
-    local operator); ``identity`` whether it reaches its provider with a
-    credential the proxy holds."""
+    ``provider`` the provider it is addressed to (with a routing layer,
+    the upstream that serves it is the router's choice); ``adapter`` the
+    provider adapter's name; ``method`` the HTTP method (``GET`` for a
+    realtime frame: its connection's upgrade); ``path`` the request path,
+    never its query (the upgrade's for a frame); ``session_id`` the vault
+    session it is redacted in (with llm-redact-pro's named users, the
+    user's own copy); ``subject`` the access gate's admitted subject (None
+    without one: the local operator); ``identity`` whether it reaches its
+    provider with a credential the proxy holds."""
 
     surface: str
     provider: str
@@ -1452,11 +1453,13 @@ class ScannedDetection:
 
 @dataclass(frozen=True)
 class ScannedString:
-    """One string the request's redaction scanned, exactly as the client
-    sent it — UNREDACTED: the original values, never a placeholder the
-    proxy issued for them — with its detections, by start (longest first
-    where two start together). A string the client sent holding a
-    placeholder (a pasted answer, a compacted history) holds it here too."""
+    """One string the request's redaction scanned, exactly as the
+    redaction read it — a JSON string's value, a form field, a file's
+    decoded text, the text an upload inspector extracted from a file —
+    UNREDACTED: the original values, never a placeholder the proxy issued
+    for them — with its detections, by start (longest first where two
+    start together). A string the client sent holding a placeholder (a
+    pasted answer, a compacted history) holds it here too."""
 
     text: str = field(repr=False)
     detections: tuple[ScannedDetection, ...]
@@ -1480,10 +1483,12 @@ class ScanSink(Protocol):
     strings, verbatim and label fields, an upload's form fields, file
     names, text and JSONL file parts, the text an upload inspector
     extracted from a binary part, a convert-mode document's text, a
-    realtime frame's strings. Not covered: a body the core forwards
-    unredacted (``[providers.NAME] detection = false``, a pass-through
-    route, an exempt MCP server's blocks, a binary part forwarded
-    unscanned) and the system note the core adds.
+    realtime frame's strings. Not covered: what the core forwards without
+    scanning it (``[providers.NAME] detection = false``, a pass-through
+    route, an exempt MCP server's blocks, the MCP connector configuration
+    the provider receives as sent, a binary part forwarded unscanned, the
+    structural values the walk skips — a ``model``, a role, base64 data)
+    and the system note the core adds.
 
     ``capture`` gets, for a request a sink wanted, each DISTINCT string its
     redaction scanned, once, in the order first scanned — only once the

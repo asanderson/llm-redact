@@ -509,6 +509,29 @@ async def test_a_message_names_each_detection_and_its_detector(
     app.state.proxy.scan_capture.close(1)
 
 
+async def test_the_context_names_the_path_never_its_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Gemini API key rides the query (?key=): the context a sink is told
+    # names the path only.
+    sink = Sink()
+    _register(monkeypatch, sink)
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(Upstream()))
+    path = "/v1beta/models/gemini-2.5-pro:generateContent"
+    async with _client(app) as client:
+        response = await client.post(
+            f"{path}?key=AIzaSECRETSECRET",
+            json={"contents": [{"role": "user", "parts": [{"text": f"to {EMAIL}"}]}]},
+        )
+    assert response.status_code == 200, response.text
+    await _delivered(app)
+    ((context, strings),) = sink.captures
+    assert context.path == path and context.provider == "gemini"
+    assert "SECRET" not in repr(context)
+    assert [scanned.text for scanned in strings] == [f"to {EMAIL}"]
+    app.state.proxy.scan_capture.close(1)
+
+
 async def test_the_admitted_subject_and_a_routed_hop_are_captured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -602,6 +625,42 @@ async def test_a_body_forwarded_unredacted_is_never_recorded(
         passthrough = await client.get("/v1/unknown/thing", headers=OPENAI_HEADERS)
     assert response.status_code == 200 and passthrough.status_code == 200
     assert sink.wanted == []  # never even asked
+    app.state.proxy.scan_capture.close(1)
+
+
+async def test_the_mcp_connector_configuration_is_never_captured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Provider-directed configuration the provider receives as sent (an MCP
+    # server's URL and credential): never scanned, so never captured.
+    sink = Sink()
+    _register(monkeypatch, sink)
+    upstream = Upstream()
+    app = create_app(Config(), upstream_transport=httpx.MockTransport(upstream))
+    token = "mcp-credential-0123456789"
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/messages",
+            headers=ANTHROPIC_HEADERS,
+            json={
+                "model": "claude-x",
+                "max_tokens": 16,
+                "mcp_servers": [
+                    {
+                        "type": "url",
+                        "url": "https://mcp.example/sse",
+                        "name": "tools",
+                        "authorization_token": token,
+                    }
+                ],
+                "messages": [{"role": "user", "content": f"to {EMAIL}"}],
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert token.encode() in upstream.bodies[0]  # forwarded as sent
+    await _delivered(app)
+    ((_context, strings),) = sink.captures
+    assert [scanned.text for scanned in strings] == [f"to {EMAIL}"]
     app.state.proxy.scan_capture.close(1)
 
 
@@ -1235,6 +1294,26 @@ def test_a_capture_past_the_character_bound_is_dropped() -> None:
     capture.close(1)
 
 
+def test_a_capture_past_the_item_bound_is_dropped() -> None:
+    # Strings and detections are objects of ~100 bytes each besides their
+    # text: a body of many short strings is bounded by their number too.
+    sink = Sink()
+    sink.release.clear()
+    capture = ScanCapture([sink], Counter(), max_items=4)
+    capture.submit(_recorded(_CONTEXT, *"abcdefgh"))  # an empty queue takes any one
+    assert sink.entered.wait(5)
+    detected = ScanRecorder(_CONTEXT, (0,))
+    detected.record("xy", [(Detection(0, 1, "T", "x"), DetectorSource("rule", "r"))])
+    capture.submit(detected)  # one string and one detection: queued
+    capture.submit(_recorded(_CONTEXT, "p", "q", "r"))  # 2 + 3 > 4: dropped
+    capture.submit(_recorded(_CONTEXT, "s", "t"))  # 2 + 2: queued
+    assert capture.status()["dropped_total"] == 1 and capture.status()["queued"] == 3
+    sink.release.set()
+    assert capture.drain(5) == 0
+    assert sink.texts() == [list("abcdefgh"), ["xy"], ["s", "t"]]
+    capture.close(1)
+
+
 def test_a_full_queue_logs_once_per_episode(caplog: pytest.LogCaptureFixture) -> None:
     sink = Sink()
     sink.release.clear()
@@ -1295,12 +1374,33 @@ def test_a_sink_whose_close_fails_or_hangs_is_contained(caplog: pytest.LogCaptur
         def close(self) -> None:
             self.release.wait(10)
 
-    hanging = Hanging()
-    capture = ScanCapture([Failing(), hanging], Counter())
+    class Awaiting(Sink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.coroutines: list[Any] = []
+
+        def close(self) -> None:
+            async def later() -> None:
+                raise AssertionError("an answer of a scan sink is never awaited")
+
+            self.coroutines.append(later())
+            return self.coroutines[-1]  # type: ignore[no-any-return]
+
+    class Exiting(Sink):
+        def close(self) -> None:
+            raise SystemExit(EMAIL)
+
+    hanging, awaiting, exiting = Hanging(), Awaiting(), Exiting()
+    capture = ScanCapture([Failing(), awaiting, exiting, hanging], Counter())
     hanging.release.clear()
     with caplog.at_level(logging.WARNING, logger="llm_redact"):
         capture.close(0.3)
     assert "closing sink Failing failed (OSError)" in caplog.text
+    # An awaitable answer is closed unrun; a BaseException is contained: the
+    # sinks after them are still closed.
+    assert awaiting.coroutines[0].cr_frame is None
+    assert "closing sink Awaiting failed (TypeError)" in caplog.text
+    assert "closing sink Exiting failed (SystemExit)" in caplog.text
     assert "a sink did not close in time" in caplog.text
     assert EMAIL not in caplog.text
     hanging.release.set()
@@ -1321,23 +1421,61 @@ def test_the_worker_idles_out_and_comes_back() -> None:
     capture.close(1)
 
 
-def test_a_worker_dying_hands_the_queue_to_another() -> None:
-    class Dying(Sink):
+def test_a_sink_raising_a_base_exception_is_contained(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Plugin code on the core's thread: a SystemExit, a CancelledError or a
+    # KeyboardInterrupt it raises ends neither the worker nor the capture
+    # of the next request, is counted, and is logged by its type only —
+    # never printed by threading.excepthook with its message.
+    class Exiting(Sink):
         def capture(self, context: ScanContext, strings: Any) -> None:
-            if strings[0].text == "die":
-                raise KeyboardInterrupt  # a BaseException: the thread ends
+            if strings[0].text == "exit":
+                raise SystemExit(f"cannot store {EMAIL}")
+            if strings[0].text == "cancel":
+                raise asyncio.CancelledError(EMAIL)
             super().capture(context, strings)
 
-    sink = Dying()
+    hooked: list[Any] = []
+    old = threading.excepthook
+    threading.excepthook = hooked.append
+    faults: Counter[str] = Counter()
+    sink = Exiting()
+    capture = ScanCapture([sink], faults)
+    try:
+        with caplog.at_level(logging.WARNING, logger="llm_redact"):
+            for text in ("exit", "cancel", "after"):
+                capture.submit(_recorded(_CONTEXT, text))
+            assert capture.drain(5) == 0
+    finally:
+        threading.excepthook = old
+    assert sink.texts() == [["after"]] and hooked == []
+    assert faults["scan_sink"] == 2 and capture.status()["faults_total"] == 2
+    assert "sink Exiting failed (SystemExit)" in caplog.text
+    assert EMAIL not in caplog.text
+    capture.close(1)
+
+
+def test_a_worker_dying_hands_the_queue_to_another() -> None:
+    # The worker itself failing (a fault of the capture's own, here
+    # injected: a sink's are contained) hands what is queued to another.
+    sink = Sink()
     capture = ScanCapture([sink], Counter())
     gate = threading.Event()
     original = capture._next
+    deliver = capture._deliver
 
     def held() -> Any:
         gate.wait(5)
         return original()
 
+    def dying(queued: Any) -> None:
+        if queued.strings[0].text == "die":
+            raise KeyboardInterrupt  # a BaseException: the thread ends
+        deliver(queued)
+
     capture._next = held  # type: ignore[method-assign]
+    capture._deliver = dying  # type: ignore[method-assign]
     capture.submit(_recorded(_CONTEXT, "die"))
     capture.submit(_recorded(_CONTEXT, "after"))
     old = threading.excepthook

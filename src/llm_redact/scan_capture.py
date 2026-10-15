@@ -21,11 +21,15 @@ is the one without the seam. With sinks:
 3. ONE worker thread hands each queued capture to the sinks that wanted it
    (``ScanSink.capture``), in order, never on the event loop and never two
    at once. The queue is BOUNDED (``MAX_PENDING_CAPTURES`` captures,
-   ``MAX_PENDING_CHARS`` characters): a capture that does not fit is
+   ``MAX_PENDING_CHARS`` characters, ``MAX_PENDING_ITEMS`` strings and
+   detections — the objects that hold them, which cost far more memory
+   than a short string's characters): a capture that does not fit is
    dropped and counted, never waited for, so a slow sink costs a request
-   nothing beyond the enqueue. A sink's exception is contained: counted
-   (bookkeeping stage ``scan_sink``, posted to the event loop that queued
-   the capture) and logged by its TYPE only, once per outage;
+   nothing beyond the enqueue. A sink's exception — any, a
+   ``BaseException`` included: it is plugin code on the core's thread — is
+   contained: counted (bookkeeping stage ``scan_sink``, posted to the event
+   loop that queued the capture) and logged by its TYPE only, once per
+   outage;
 4. at shutdown the queue is drained for at most ``CLOSE_SECONDS`` (beside
    the vault's map-write drain, so the shutdown budget is unchanged), what
    is left is dropped and counted, and each sink is closed once, after its
@@ -65,6 +69,10 @@ MAX_PENDING_CAPTURES = 256
 # take the queue past it is dropped — unless the queue is empty (one capture
 # is bounded by the request's own limits: max_body_bytes, max_body_strings).
 MAX_PENDING_CHARS = 16 * 1024 * 1024
+# Strings plus detections waiting for the worker, at most, likewise. Each is
+# an object of ~100 bytes besides its text, so a body of many short strings
+# would otherwise hold some 25 times the memory its characters count.
+MAX_PENDING_ITEMS = 256 * 1024
 # The worker thread exits after this long without work.
 IDLE_SECONDS = 5.0
 # How long the shutdown drains the queue and waits for the sinks to close,
@@ -107,12 +115,14 @@ class ScanRecorder:
 
 class _Capture(NamedTuple):
     """A queued capture: what the sinks receive, which of them wanted it,
-    and its size in characters (the queue's bound)."""
+    and its size in characters and in strings plus detections (the queue's
+    bounds)."""
 
     context: ScanContext
     strings: tuple[ScannedString, ...]
     sinks: tuple[int, ...]
     chars: int
+    items: int
 
 
 def _sink_problem(sink: object) -> str | None:
@@ -151,6 +161,7 @@ class ScanCapture:
         *,
         max_pending: int = MAX_PENDING_CAPTURES,
         max_chars: int = MAX_PENDING_CHARS,
+        max_items: int = MAX_PENDING_ITEMS,
         idle_seconds: float = IDLE_SECONDS,
     ) -> None:
         self.sinks = tuple(sinks)
@@ -158,11 +169,13 @@ class ScanCapture:
         self._faults = faults
         self._max_pending = max_pending
         self._max_chars = max_chars
+        self._max_items = max_items
         self._idle_seconds = idle_seconds
         # Guards everything below; never held while a sink runs.
         self._cond = threading.Condition()
         self._queue: deque[_Capture] = deque()
         self._chars = 0
+        self._items = 0
         self._in_flight: _Capture | None = None
         self._thread: threading.Thread | None = None
         self._closed = False
@@ -210,14 +223,22 @@ class ScanCapture:
         with suppress(RuntimeError):
             self._loop = asyncio.get_running_loop()
         chars = sum(len(scanned.text) for scanned in strings)
+        items = len(strings) + sum(len(scanned.detections) for scanned in strings)
         with self._cond:
             fits = not self._closed and (
                 not self._queue
-                or (len(self._queue) < self._max_pending and self._chars + chars <= self._max_chars)
+                or (
+                    len(self._queue) < self._max_pending
+                    and self._chars + chars <= self._max_chars
+                    and self._items + items <= self._max_items
+                )
             )
             if fits:
-                self._queue.append(_Capture(recorder.context, strings, recorder.sinks, chars))
+                self._queue.append(
+                    _Capture(recorder.context, strings, recorder.sinks, chars, items)
+                )
                 self._chars += chars
+                self._items += items
                 self._ensure_thread()
                 self._cond.notify_all()
             else:
@@ -230,10 +251,11 @@ class ScanCapture:
         if not self._overflowing:
             self._overflowing = True
             logger.warning(
-                "scan capture: the sinks' queue is full (%d captures or %d characters);"
-                " further captures are dropped until it drains",
+                "scan capture: the sinks' queue is full (%d captures, %d characters or %d"
+                " strings and detections); further captures are dropped until it drains",
                 self._max_pending,
                 self._max_chars,
+                self._max_items,
             )
 
     def status(self) -> dict[str, Any]:
@@ -277,6 +299,7 @@ class ScanCapture:
             dropped = len(self._queue)
             self._queue.clear()
             self._chars = 0
+            self._items = 0
             self._dropped += dropped
             thread = self._thread
             self._cond.notify_all()
@@ -303,8 +326,11 @@ class ScanCapture:
     def _close_sinks(self) -> None:
         for name, sink in zip(self._names, self.sinks, strict=True):
             try:
-                sink.close()
-            except Exception as exc:  # noqa: BLE001 — contained: logged by type
+                # Typed as the contract allows a plugin to get it wrong.
+                close: Callable[[], object] = sink.close
+                if _awaitable(close()):
+                    raise TypeError("close() answered an awaitable")
+            except BaseException as exc:  # noqa: BLE001 — plugin code: logged by type
                 logger.warning(
                     "scan capture: closing sink %s failed (%s)", name, type(exc).__name__
                 )
@@ -335,7 +361,8 @@ class ScanCapture:
         finally:
             with self._cond:
                 # Only reached with the thread still registered when it died
-                # (a BaseException): another thread takes what is queued.
+                # (a fault of this module's own: a sink's are contained in
+                # _deliver): another thread takes what is queued.
                 if self._thread is threading.current_thread():
                     self._thread = None
                     self._in_flight = None
@@ -353,6 +380,7 @@ class ScanCapture:
             if self._queue and not self._closed:
                 capture = self._queue.popleft()
                 self._chars -= capture.chars
+                self._items -= capture.items
                 self._in_flight = capture
                 return capture
             self._thread = None
@@ -367,7 +395,11 @@ class ScanCapture:
                 deliver: Callable[..., object] = self.sinks[index].capture
                 if _awaitable(deliver(capture.context, capture.strings)):
                     raise TypeError("capture() answered an awaitable")
-            except Exception as exc:  # noqa: BLE001 — contained: counted, logged by type
+            except BaseException as exc:  # noqa: BLE001 — plugin code: counted, logged by type
+                # A BaseException too (SystemExit, a CancelledError, …): on
+                # this thread it would end the worker, losing the capture
+                # uncounted, and threading.excepthook would print its
+                # message — which may quote the text it was handed.
                 self._failed(index, exc)
                 self._post(self._count_fault)
             else:
@@ -376,7 +408,7 @@ class ScanCapture:
             self._in_flight = None
             self._cond.notify_all()
 
-    def _failed(self, index: int, exc: Exception) -> None:
+    def _failed(self, index: int, exc: BaseException) -> None:
         with self._cond:
             self._fault_count += 1
             first = index not in self._failing

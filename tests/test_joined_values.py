@@ -752,6 +752,26 @@ def test_a_recorder_sees_the_same_joined_redaction() -> None:
     assert recorder.texts == [text, text]
 
 
+def test_a_recorder_counts_the_warn_values_a_joined_run_drops() -> None:
+    # The recorded path (_recorded_winners) counts the warn-mode values a
+    # joined run drops exactly as the plain one does.
+    class Recorder:
+        def record(self, text: str, found: object) -> None:
+            pass
+
+    rules = (
+        CustomRule(name="qty", detector_type="QTY", pattern=r"Qty \d+ "),
+        CustomRule(name="lead", detector_type="LEAD", pattern=r"\d+ 4111"),
+        CustomRule(name="tail", detector_type="TAIL", pattern=r"1111 Main"),
+    )
+    modes = {"QTY": "warn", "LEAD": "warn", "TAIL": "warn"}
+    text = f"Qty 12 {CARD} Main Street"
+    plain = _redactor(*rules, modes=modes)
+    recorded = _redactor(*rules, modes=modes).with_recorder(Recorder())
+    assert _redacted(recorded, text) == _redacted(plain, text)
+    assert recorded.warn_counts == plain.warn_counts == Counter({"QTY": 1, "LEAD": 1, "TAIL": 1})
+
+
 @pytest.mark.parametrize(
     ("surface", "expected"),
     [

@@ -583,6 +583,17 @@ class Router(Protocol):
 # endpoint. The core stamps the security headers on whatever it returns.
 
 
+class PreparedConfig(Protocol):
+    """A candidate configuration's builds, made off the event loop by the
+    host's optional ``prepare_config`` for one ``apply_config(fresh,
+    prepared=)`` (``DashboardHost``). Opaque: a plugin only hands it back or
+    closes it. ``close`` releases what it holds — idempotent, on any thread
+    (``apply_config`` closes the one it is handed, so a close after it is
+    harmless)."""
+
+    def close(self) -> None: ...
+
+
 class DashboardHost(Protocol):
     """What the core exposes to a plugin-served dashboard (``ProxyState``
     satisfies it structurally).
@@ -611,6 +622,33 @@ class DashboardHost(Protocol):
     pipeline over caller text on a throwaway vault (no upstream, vault,
     metrics or audit write) and returns ``{redacted, detections, warnings,
     blocked}`` — ``blocked`` is ``{"type": T}`` or None, never a value.
+
+    OPTIONAL members (cores before 1.13 lack them: read with ``getattr``),
+    for running the preview and the editor's check off the event loop:
+
+    - OPTIONAL ``prepare_config(candidate: Config) -> PreparedConfig`` —
+      ``validate_config``'s checks, raising the same errors, with the
+      detection objects built for a changed ``[detection]`` (every NER
+      model loaded) KEPT in the answer instead of dropped. Safe on a worker
+      thread: it assigns nothing on the host and never touches the event
+      loop. ``validate_config`` is exactly ``prepare_config`` then ``close``.
+    - OPTIONAL ``apply_config(fresh: Config, *, prepared: PreparedConfig |
+      None = None) -> list[str]`` — the ``prepared`` keyword (the method
+      itself is required; an older core's takes ``fresh`` alone, so pass
+      ``prepared`` only what ``prepare_config`` returned): the apply adopts
+      the prepared detection objects instead of building them again on the
+      event loop when they were prepared for a ``[detection]`` equal to
+      the one the apply builds (``fresh``'s with every restart-only part
+      kept from the running config) against the detection generation
+      still running (no apply that changed ``[detection]`` landed since);
+      otherwise it ignores them and builds as without. It spends — closes
+      — ``prepared`` either way.
+    - OPTIONAL ``preview_snapshot: bool`` — True when ``preview`` reads the
+      detection objects as ONE snapshot (an apply swaps them in one
+      assignment): a preview on a worker thread then describes the
+      configuration live when it began, whatever an apply assigns
+      meanwhile. Without it (an older core), a preview an apply overlapped
+      may have mixed two configurations.
     """
 
     config: Config
@@ -628,7 +666,9 @@ class DashboardHost(Protocol):
 
     def validate_config(self, candidate: Config) -> None: ...
 
-    def apply_config(self, fresh: Config) -> list[str]: ...
+    def apply_config(
+        self, fresh: Config, *, prepared: PreparedConfig | None = None
+    ) -> list[str]: ...
 
     def preview(self, text: str) -> dict[str, Any]: ...
 
@@ -1610,6 +1650,7 @@ __all__ = [
     "MAX_RESPONSE_ROWS",
     "ModelLoad",
     "ModelPolicy",
+    "PreparedConfig",
     "RESPONSE_PRUNE_EVERY",
     "ResponseContext",
     "ResponseObserver",

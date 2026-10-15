@@ -206,6 +206,19 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     event loop like every NER backend; what a string held is remembered, so the history an agent
     resends with every request is not asked again. `llm-redact preview` exits 1 and names the
     failure when the server cannot read the text.
+- **A dashboard's preview and config check can run off the event loop safely, and a save loads
+  each NER model once.** The proxy's detectors, allowlists and modes are now one immutable
+  snapshot that a reload or a save swaps in a single step, and the redaction preview reads it
+  once: a preview a reload overlaps describes the configuration live when it began, never the
+  old detectors with the new modes. Three optional members of `plugin_api.DashboardHost`, read
+  with `getattr` (an older core lacks them), let a dashboard plugin use this:
+  `preview_snapshot` (True), `prepare_config(candidate)` — the config check, raising the same
+  errors as `validate_config`, keeping the NER models it loaded for a changed `[detection]` in an
+  opaque `plugin_api.PreparedConfig` and safe on a worker thread — and the `prepared` keyword of
+  `apply_config`, which adopts those models instead of loading them again on the event loop
+  when they were prepared for the `[detection]` the apply runs (restart-only parts kept) and no
+  reload changed it since (otherwise the apply builds as before). `validate_config` is `prepare_config` followed by `close()`; a
+  SIGHUP reload is unchanged (docs/plugins.md, "The dashboard host").
 - **Four NER counters**: `ungrounded`, `errors`, `breaker_opens` and `breaker_short_circuits` in
   `/status` `detection.ner` and as `llm_redact_ner_ungrounded_total`,
   `llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total` and

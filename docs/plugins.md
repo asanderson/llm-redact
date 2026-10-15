@@ -18,7 +18,9 @@ These are plugins for the agent tool. A separately installed Python package
 one that decides which NER models may load, the model-load policy, is
 described in [detection.md](detection.md#model-load-policies-plugins), and
 the one that reads what the redaction scanned, scan sinks, in
-[Scan sinks](#scan-sinks-a-registry-seam) below.
+[Scan sinks](#scan-sinks-a-registry-seam) below, and what a browser
+dashboard may call on the proxy in
+[The dashboard host](#the-dashboard-host-a-registry-seam).
 
 ## Install
 
@@ -352,6 +354,47 @@ posture line while any sink is registered. While a sink is registered,
 Grafana dashboard's Scan sinks row charts all three). The threat model's
 [Scan sinks](threat-model.md#scan-sinks-a-plugin-reading-what-the-redaction-scanned)
 section states what the core does and does not guarantee.
+
+## The dashboard host (a registry seam)
+
+A plugin's browser dashboard (`Registry.build_dashboard`, llm-redact-pro's
+page, config editor and redaction preview) receives only the core's fixed
+dashboard paths and calls back into the proxy through
+`plugin_api.DashboardHost`, which the proxy's state satisfies: the live
+config, the request guards, `validate_config(candidate)` (the dry run of
+everything an apply builds, raising and changing nothing),
+`apply_config(fresh)` (the SIGHUP hot-apply path) and `preview(text)` (the
+live detection pipeline over a sample text on a throwaway vault).
+
+A preview runs an NER model over the text and a check of a changed
+`[detection]` loads every NER model, so a dashboard runs both on a worker
+thread of its own, never on the event loop that serves every request. Three
+optional members (read them with `getattr`: a core before 1.13 lacks them)
+make that safe and cheap:
+
+- `preview_snapshot` (True): the detectors, allowlists and modes are ONE
+  immutable snapshot that an apply swaps in a single assignment, and
+  `preview` reads it once — a preview an apply overlaps describes the
+  configuration that was live when it began, never a mix of two. (Without
+  it, a preview may have read the old detectors with the new modes; such a
+  run must be repeated.)
+- `prepare_config(candidate)`: `validate_config`'s checks, raising the same
+  errors, that keeps the detection objects it built for a changed
+  `[detection]` (every NER model loaded) in an opaque
+  `plugin_api.PreparedConfig`. Safe on a worker thread: it changes nothing
+  on the proxy and never touches the event loop. `validate_config` is
+  `prepare_config` followed by `close()`.
+- `apply_config(fresh, prepared=...)`: hand the prepared build to the
+  apply, on the event loop, and its detection objects are adopted instead
+  of being built a second time there — a save loads each NER model once,
+  off the loop. They are adopted only when they were prepared for a
+  `[detection]` equal to the one the apply builds (the saved one, with any
+  restart-only part kept from the running configuration) and no apply that
+  changed `[detection]` (a SIGHUP reload, another save) landed since;
+  otherwise the apply builds as it would without them. The apply spends the prepared build either way; close one
+  you do not apply (closing twice is harmless).
+
+A SIGHUP reload is unchanged: it builds on the event loop.
 
 ## For contributors
 

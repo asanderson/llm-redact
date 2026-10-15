@@ -95,7 +95,11 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   value an access gate's added deny string redacts part of (a detection overlay: llm-redact-pro
   roles) is now counted the same way — in `llm_redact_warnings_total`, the request's row and
   `authorize_content`'s `warned`, once, when part of it is still sent — where it was not
-  counted at all. Where the proxy cannot rewrite the text (a verbatim field, an
+  counted at all. Whether part of it is still sent is decided once everything is redacted, so a
+  value whose rest an added deny string or an `llm` backend finding redacts is not counted. A
+  warn-mode value that loses an ordinary overlap — to a configured deny string, or to a value
+  redacted in its place — is still sent in part and not counted, as before (docs/detection.md,
+  "Per-rule modes", now says so). Where the proxy cannot rewrite the text (a verbatim field, an
   upload's extracted text), a span joining two or more such values is put to refusal overrides
   value by value: the refusal's code names every value, one approval of it lets the span through
   as sent (an access gate's content facts count each value once), and a span holding a deny

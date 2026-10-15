@@ -191,6 +191,47 @@ async def test_a_warn_mode_value_an_added_string_cuts_into_is_reported_when_part
     assert state.recent[0]["warned"] == dict(warned)
 
 
+PAPER_IBAN = "GB39 WEST 3607 5983 8675 65"
+
+
+@pytest.mark.parametrize(
+    ("deny", "sent", "detected", "warned"),
+    [
+        # The joined run redacts the card number the warn-mode paper IBAN
+        # holds, the added string the IBAN's first group: " WEST " is sent.
+        (
+            ("GB39",),
+            "pay «DENY_001» WEST «CREDIT_CARD_001» now",
+            (("CREDIT_CARD", 1), ("DENY", 1)),
+            (("IBAN", 1),),
+        ),
+        # The added string takes the rest of it, one union with the card:
+        # nothing of the IBAN is sent, nothing to warn about.
+        (("GB39 WEST 3607",), "pay «DENY_001» now", (("DENY", 1),), ()),
+    ],
+    ids=["partly", "whole"],
+)
+async def test_a_warn_mode_value_a_joined_run_drops_is_reported_after_the_added_strings(
+    monkeypatch: pytest.MonkeyPatch,
+    deny: tuple[str, ...],
+    sent: str,
+    detected: Any,
+    warned: Any,
+) -> None:
+    gate = OverlaidGate(deny)
+    _registry(monkeypatch, gate)
+    upstream = Upstream()
+    app = _app(upstream, detection=DetectionConfig(modes=(("iban", "warn"),)))
+    body = _messages(f"pay {PAPER_IBAN} now")
+    assert (await _post(app, "/v1/messages", body, ANTHROPIC)).is_success
+    assert sent in upstream.sent()
+    ((_request, content),) = gate.asked
+    assert content == _facts(detected=detected, warned=warned)
+    state = app.state.proxy
+    assert state.warn_counts == dict(warned)
+    assert state.recent[0]["warned"] == dict(warned)
+
+
 async def test_detection_off_is_asked_as_unscanned(monkeypatch: pytest.MonkeyPatch) -> None:
     gate = ContentGate()
     _registry(monkeypatch, gate)

@@ -565,9 +565,12 @@ an extraction service. What the core guarantees:
 ### Deliberate protection opt-outs
 
 Warn mode has always been observation-only (the matched value IS
-forwarded). Four configuration knobs and refusal overrides extend that
-family — each is a conscious decision, and each is surfaced rather than
-silent:
+forwarded, and counted in `llm_redact_warnings_total` — except a warn-mode
+value that loses an ordinary overlap to a configured deny string or to a
+value redacted in its place: the rest of it is sent uncounted,
+[detection.md](detection.md#per-rule-modes-redact-warn-block)). Four
+configuration knobs and refusal overrides extend that family — each is a
+conscious decision, and each is surfaced rather than silent:
 
 - `[providers.NAME] detection = false` forwards that provider's requests
   unredacted (rehydration stays active) — with the client's own key, a

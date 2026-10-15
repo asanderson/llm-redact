@@ -432,9 +432,12 @@ keep the previous default with `[detection.ner.models] hf =
 `dslim/bert-base-NER`'s `id2label`, and "cannot be emitted" by the loaded
 model's `id2label` (before the load, and in `llm-redact doctor`, by the labels
 the model catalog records for the new default at its pin), as the startup's
-never-match warning decides. `entities = ["PERSON"]`, the default, is
-unaffected. Default-model users fetch the new model once (`llm-redact models
-pull`; downloads are off by default).
+never-match warning decides. A `[detection.ner.revisions] hf` pin of
+`dslim/bert-base-NER`'s catalog commit with no `hf` model named (the example
+pin the docs showed before 1.13.0) is refused the same way: it would pin the
+new default to a commit of another repository. `entities = ["PERSON"]`, the
+default, is unaffected. Default-model users fetch the new model once
+(`llm-redact models pull`; downloads are off by default).
 
 ### OpenAI Privacy Filter (`hf`)
 

@@ -92,6 +92,27 @@ def test_command_names_and_argument_plumbing() -> None:
     assert "disable-model-invocation: true" in render_claude(config_edit)
 
 
+def test_config_edit_waits_for_the_reload_before_reading_the_posture_back() -> None:
+    # A SIGHUP reload builds off the proxy's event loop, so for its build's
+    # length /status still describes the configuration BEFORE the change: a
+    # posture read right after `kill -HUP` would report an opt-out the edit
+    # adds as absent. The flow notes the reload count, signals, waits for
+    # that reload to end (/status config_reload), refuses to call a failed
+    # one applied, and only then reads the posture back.
+    body = next(c for c in COMMANDS if c.name == "config-edit").body
+    steps = [
+        "note\n   `config_reload.requested_total`",
+        "`kill -HUP <pid>`",
+        "until `config_reload.requested_total`\n   is above the noted value and"
+        " `config_reload.running` is false",
+        '`config_reload.last.outcome` is "failed"',
+        "never report the change as applied",
+        "read the posture block back",
+    ]
+    positions = [body.index(step) for step in steps]
+    assert positions == sorted(positions)
+
+
 def test_lookup_is_never_a_plugin_command() -> None:
     # `llm-redact lookup` prints secret VALUES; an agent that runs it would
     # carry them into its conversation and send them upstream — the exact

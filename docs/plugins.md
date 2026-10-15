@@ -96,7 +96,7 @@ have edited — it refuses and asks for `--force`.
 | `recent` | Newest-first table of recent requests (path, provider, status, detections) | dashboard recent-request table |
 | `sessions` | Vault session list (metadata only); prune only on explicit confirmation | dashboard session browser |
 | `config-show` | Effective config with env overrides named | config editor (read side) |
-| `config-edit` | Guarded config change: effective-config read → TOML edit → `serve --check` gate → SIGHUP → posture read-back | config editor (write side) |
+| `config-edit` | Guarded config change: effective-config read → TOML edit → `serve --check` gate → SIGHUP → wait for the reload → posture read-back | config editor (write side) |
 | `preview` | Local dry-run: what WOULD be redacted in a sample text | dashboard preview card |
 | `doctor` | Read-only diagnostics, failures explained via troubleshooting.md | — |
 | `audit` | Tamper-evident chain verification verdict | dashboard audit block |
@@ -144,7 +144,15 @@ guide, or the requires-pro line without that package):
 **`/llm-redact:config-edit`** — a guarded config change driven from
 inside the agent (what the llm-redact-pro config editor does in the
 browser): read the effective config, edit the TOML, gate on
-`serve --check`, reload via SIGHUP, and read the coverage posture back.
+`serve --check`, reload via SIGHUP, wait for that reload to apply, and
+read the coverage posture back. The wait matters: the proxy builds the
+new configuration off its event loop (seconds when NER models load) and
+answers `/status` from the configuration BEFORE the change until it
+applies, so the command notes `config_reload.requested_total` before the
+signal and polls `llm-redact status --json` until that count has moved
+past it and `config_reload.running` is false; a `config_reload.last`
+outcome of `failed` means the proxy kept its old configuration, and the
+command says so instead of reading a posture back as the change's.
 A session as Claude Code presents it (the agent narration is
 illustrative; every command output is the fixture rig's real output,
 executed in this order — note the posture read-back catching the
@@ -394,7 +402,15 @@ make that safe and cheap:
   otherwise the apply builds as it would without them. The apply spends the prepared build either way; close one
   you do not apply (closing twice is harmless).
 
-A SIGHUP reload is unchanged: it builds on the event loop.
+A SIGHUP reload builds off the event loop the same way: the core reads and
+parses the file and builds a changed `[detection]` on a worker thread, then
+applies with that build on the loop (with none of the dry run's extra
+checks: an apply makes the builds that matter itself). So a plugin's
+`ConfigSection.parse` and its model-load policy's `check` may be called on
+a worker thread. A SIGHUP reload that lands while a save's check runs makes
+the save's prepared build stale, as before; a save that lands while a
+SIGHUP reload builds makes the reload drop its build and read the file the
+save wrote.
 
 ## For contributors
 

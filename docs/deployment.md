@@ -315,11 +315,42 @@ A broken config file is logged and ignored — the running config
 stays live. There is deliberately no HTTP reload endpoint (it would be a
 CSRF-reachable mutating endpoint on loopback).
 
+The reload's slow part runs off the event loop: the proxy reads and parses
+the file and builds what changed — for a changed `[detection]`, every NER
+model it names, seconds of loading — on a worker thread while it keeps
+serving requests, then swaps the new configuration in one step. A second
+SIGHUP while a reload runs is not lost: exactly one more reload runs after
+it and reads the file again. A config editor save (llm-redact-pro) landing
+while a reload builds wins: the reload drops its build (made from the file
+as it was before the save) and starts over from the file the save wrote;
+after three such overlaps it builds on the event loop instead, holding
+requests for that build (a WARNING says so). A reload still building when
+the proxy shuts down applies nothing ([resilience.md](resilience.md#configuration-reloads-sighup)).
+
+So the new configuration goes live some time after the signal — seconds
+when NER models load — and until then `/__llm-redact/status` (and
+`llm-redact status`) describes the configuration before it. Check before
+reading a change back: the `/status` `config_reload` block says whether a
+reload is `running` (and for how long, `running_seconds`), how many were
+requested (`requested_total`: one per SIGHUP, those coalesced included),
+applied (`applied_total`) and failed (`failed_total`, the running
+configuration kept), and how the `last` one ended (`outcome` `applied` or
+`failed`, `at` an ISO time). Note `requested_total` before the signal and
+wait until it has moved past that and `running` is false: `last` is then
+the reload's outcome (or a later one's). `llm-redact status` prints a
+posture line while a reload runs ("config reload in progress … run
+`llm-redact status` again once it ends") and while the last one has
+failed. A reload still running after 120 seconds is logged
+(`config reload still running after 120 s` — a build that hangs, such
+as a stalled model volume, which /healthz cannot show: the proxy keeps
+answering, and every later SIGHUP waits behind it).
+
 The same guarded flow is available from inside an agent: the
 `/llm-redact:config-edit` plugin command reads the effective config,
-edits the file, gates on `serve --check`, reloads via SIGHUP, and reads
-back the coverage posture — and `/llm-redact:doctor` runs the same
-read-only preflight as the CLI ([plugins.md](plugins.md)).
+edits the file, gates on `serve --check`, reloads via SIGHUP, waits for
+that reload to apply (`config_reload`), and reads back the coverage
+posture — and `/llm-redact:doctor` runs the same read-only preflight as
+the CLI ([plugins.md](plugins.md)).
 
 ### Reloads and open realtime connections
 
@@ -344,9 +375,10 @@ changed and never a value. Reconnecting puts the client under the new
 configuration in the same vault session, so tokens issued before the
 reload still restore.
 
-Reloads run on the proxy's event loop, and the relay checks for a reload
-between reading a client frame and redacting it, so no frame it reads after
-the reload is redacted or forwarded under the old configuration. The one
+A reload's swap runs on the proxy's event loop (a SIGHUP reload builds off
+it first, then swaps there), and the relay checks for a reload between
+reading a client frame and redacting it, so no frame it reads after the
+swap is redacted or forwarded under the old configuration. The one
 exception is a frame the relay had already read and handed to the
 provider's socket when the reload ran. A connection still being authorized
 under the proxy's identity when the reload lands is never dialled: it is

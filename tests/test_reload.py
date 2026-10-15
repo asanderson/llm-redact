@@ -242,6 +242,37 @@ def test_reload_drops_and_closes_router_when_disabled(
     assert state.config.routing.enabled is False
 
 
+def test_a_failing_close_of_the_displaced_router_never_fails_the_applied_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The swap has happened when the displaced router closes: a fault there
+    # is logged by type and the reload reports success, as every other close
+    # after the swap does.
+    from fake_router import ROUTED_TOML, FakeRouter, install
+
+    class FailingClose(FakeRouter):
+        def close(self) -> None:
+            super().close()
+            raise RuntimeError("https://router.example/?token=SECRET")
+
+    router = FailingClose()
+    install(monkeypatch, router)
+    config_path = tmp_path / "config.toml"
+    _write(config_path, ROUTED_TOML)
+    state = _state(config_path)
+
+    _write(config_path, ROUTED_TOML.replace("enabled = true", "enabled = false"))
+    with caplog.at_level("INFO", logger="llm_redact"):
+        state.reload()
+    assert state.router is None and router.closed == 1
+    assert state.config.routing.enabled is False
+    messages = [record.getMessage() for record in caplog.records]
+    assert "closing the router failed (RuntimeError)" in messages
+    assert any(message.startswith("config reloaded") for message in messages)
+    assert not any("reload failed" in message for message in messages)
+    assert "SECRET" not in caplog.text
+
+
 def test_raising_reconfigure_keeps_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

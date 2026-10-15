@@ -24,7 +24,7 @@ headers.
   twin: `llm-redact status`, `llm-redact preview`, `llm-redact config
   show`, and the guarded `/llm-redact:config-edit` plugin command
   (effective-config read → TOML edit → `serve --check` gate → SIGHUP →
-  posture read-back).
+  wait for the reload → posture read-back).
 - **Live request feed**: `GET /__llm-redact/recent` returns the last
   requests (metadata-only rows, newest first) and
   `GET /__llm-redact/events` streams the same rows as server-sent events
@@ -79,7 +79,8 @@ headers.
   Claude Code, Codex, OpenCode, and Cursor —
   `/llm-redact:status`, `/llm-redact:recent`, `/llm-redact:preview`, a
   guarded `/llm-redact:config-edit` (effective-config read → TOML edit →
-  `serve --check` gate → SIGHUP → posture read-back), `/llm-redact:routes`
+  `serve --check` gate → SIGHUP → wait for the reload → posture
+  read-back), `/llm-redact:routes`
   and `/llm-redact:spend`, and more. Claude
   Code installs the repo as a plugin marketplace
   (`/plugin marketplace add asanderson/llm-redact`); every tool can also

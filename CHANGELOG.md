@@ -39,6 +39,21 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   (a model folder, an image you build with them), credit "Trained on NVIDIA Nemotron-PII,
   CC BY 4.0".
 
+### Security
+- **A card number written next to another digit group went upstream unredacted.**
+  `Order 12 4111 1111 1111 1111`, `4111 1111 1111 1111 123` (a CVV after it) and
+  `exp: 4111 1111 1111 1111 12/27` were forwarded as sent: the `credit_card` rule read the card
+  together with the other group, the Luhn check failed, and nothing was redacted. When the check
+  fails, the rule now looks inside what it read for a card in a card's own grouping (solid,
+  groups of four, or 4-6-5 / 4-6-4) that passes the check, and redacts that. Not read yet: a card
+  followed by two or more digit groups, or by one that brings the two past 19 digits, and one
+  whose run of digit groups is followed by `-`, `.`, `:`, `@`, `%` or `+` glued to more text
+  (docs/detection.md lists the residuals). With the built-in rules and the default modes nothing
+  1.12.1 redacted is forwarded now; a test pins that against 1.12.1's rules. A custom rule's
+  value or an NER span that starts inside such a card and runs on past it loses its part after
+  the card. On random runs of digit groups the rule's false positives barely move (13.58% to
+  13.78% of 5,000 runs).
+
 ### Changed
 - **The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`**
   (Apache-2.0; `microsoft/deberta-v3-small` fine-tuned on NVIDIA Nemotron-PII), replacing
@@ -53,6 +68,10 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   `hf` default", records the decision, what holds for the default entities and the caveats. The
   `hf-default` NER bench baselines are re-recorded for it, and the CI `ner-models` job also
   pulls `dslim/bert-base-NER`, which the `real_model` tests still read by name.
+- The latency smoke check (`python -m llm_redact.bench --latency --check`) allows the proxy's
+  own overhead on a 100 KB body up to 300 ms (was 150 ms). It is a tripwire for gross
+  regressions such as quadratic behavior, measured at about 44 ms; a loaded shared CI runner
+  once landed at 150.3 ms on an unchanged hot path. docs/assurance.md lists the ceilings.
 
 ### Added
 - A configuration that loads the `hf` default without naming it and asks for an entity the

@@ -55,6 +55,14 @@ def _luhn_complete(rng: random.Random) -> str:
     return "".join(str(d) for d in digits)
 
 
+def _luhn_valid(digits: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch) * (2 if i % 2 else 1)
+        total += d - 9 if d > 9 else d
+    return total % 10 == 0
+
+
 def _jwt(rng: random.Random) -> str:
     header = base64.urlsafe_b64encode(json.dumps({"alg": "HS256"}).encode()).decode().rstrip("=")
     payload = (
@@ -1006,6 +1014,63 @@ PUNCTUATION_CONTEXTS: tuple[str, ...] = (
 )
 
 
+# A card written next to another digit group (a quantity, a year, a CVV,
+# an expiry month): the candidate the credit_card regex reads takes the
+# group in and fails the Luhn check, and the card is read inside it
+# (regex_rules._card_inside). {g} and {h} are digit groups of the given
+# lengths, drawn so that every candidate holding one fails the check.
+CARD_RUN_CONTEXTS: tuple[tuple[str, int, int], ...] = (
+    ("Order {g} {v} shipped.", 2, 0),
+    ("Item {g}-{v}", 1, 0),
+    ("ref {g} {v}", 4, 0),
+    ("card {v} {h}", 0, 3),
+    ("card {v} {h}/27", 0, 2),
+    ('{{"card": "{v} {h}"}}', 0, 3),
+    ("Order {g} {v} {h}, thanks", 2, 3),
+)
+
+
+def _grouped_card(rng: random.Random) -> str:
+    card = _luhn_complete(rng)
+    separator = rng.choice(("", " ", "-"))
+    return separator.join(card[i : i + 4] for i in range(0, 16, 4)) if separator else card
+
+
+def _holds_another_card(groups: list[str], card: range) -> bool:
+    """Whether a run of consecutive ``groups`` that takes in one outside
+    ``card`` (the card's own groups) is 13 to 19 digits and passes the
+    Luhn check: a card the rule could read instead of the labeled one."""
+    for i in range(len(groups)):
+        for j in range(i + 1, len(groups) + 1):
+            run = "".join(groups[i:j])
+            if (i < card.start or j > card.stop) and 13 <= len(run) <= 19 and _luhn_valid(run):
+                return True
+    return False
+
+
+def card_run_samples(rng: random.Random) -> list[Sample]:
+    """One card (solid, or in groups of four) in each CARD_RUN_CONTEXTS
+    context, labeled at the card."""
+    samples: list[Sample] = []
+    for context, before, after in CARD_RUN_CONTEXTS:
+        card = _grouped_card(rng)
+        own = re.split("[ -]", card)
+        while True:
+            g, h = _pick(rng, "0123456789", before), _pick(rng, "0123456789", after)
+            if before == 4:
+                # A group of four before the card leads with 0 or 1: with the
+                # card's first two it would be an Aadhaar number's 4-4-4 when
+                # it led with 2-9, and that starts first and wins.
+                g = rng.choice("01") + g[1:]
+            groups = [g] * bool(g) + own + [h] * bool(h)
+            if not _holds_another_card(groups, range(bool(g), bool(g) + len(own))):
+                break
+        text = context.format(g=g, h=h, v=card)
+        start = text.index(card)
+        samples.append(Sample(text, (LabeledSpan(start, start + len(card), "CREDIT_CARD"),)))
+    return samples
+
+
 def _decoys(rng: random.Random) -> list[str]:
     return [
         f"request id {uuid.UUID(int=rng.getrandbits(128))}",
@@ -1138,6 +1203,7 @@ def generate(seed: int = 42, samples_per_rule: int = 25) -> list[Sample]:
     for _ in range(samples_per_rule):
         for decoy in _decoys(rng):
             corpus.append(Sample(decoy, ()))
+        corpus.extend(card_run_samples(rng))
 
     corpus.extend(punctuation_samples(rng))
 

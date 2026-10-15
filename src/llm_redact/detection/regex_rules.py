@@ -62,6 +62,11 @@ class RegexRule:
     # its end, as finditer); a match that can start inside a vetoed one is
     # then read. For a rule without anchors whose matches are never empty.
     resume: Callable[[re.Match[str]], int] | None = None
+    # A valid match a vetoed one may hold (None: none), given where the
+    # next match of the pattern starts (the text's length when none does):
+    # the scan itself stays finditer's, and what this returns lies before
+    # that next match. For a rule without anchors.
+    inside: Callable[[re.Match[str], int], re.Match[str] | None] | None = None
 
 
 # `\d` in a str pattern is any Unicode decimal digit (category Nd), not just
@@ -739,6 +744,64 @@ def _iban_resume(match: re.Match[str]) -> int:
     return match.start() + 5 if match.group(0)[4] in _IBAN_SEPARATORS else match.end()
 
 
+# A card read inside a longer run of digit groups (_card_inside) is in a
+# card's own grouping: solid, in groups of four with a last one of one to
+# four digits, or 4-6-5 / 4-6-4; one separator throughout.
+_CARD_GROUPING = re.compile(
+    r"\d+|\d{4}([ -])\d{4}\1\d{4}\1(?:\d{4}\1)?\d{1,4}|\d{4}([ -])\d{6}\2\d{4,5}"
+)
+_GROUP = re.compile(r"\d+")
+# Where such a card may end, so that no other rule's value can start inside
+# it and run on past its end: where the run of groups ends, before what may
+# follow a paper IBAN (a run of dots or one ":" then _CLOSE, else none of
+# "-.:@%+"); or one group (group 1) before such an end, read with the card
+# as one candidate of at most 19 digits (_card_inside checks the length).
+_CARD_RUN_END = rf"(?:(?:\.++|:){_CLOSE}|(?![-.:@%+]|[ -]?\d))"
+_CARD_END = re.compile(rf"{_CARD_RUN_END}|[ -](\d+)\b{_CARD_RUN_END}")
+
+
+def _card_inside(match: re.Match[str], limit: int) -> re.Match[str] | None:
+    """The card a credit_card candidate the Luhn check vetoed holds, when a
+    digit group was written next to one ("Order 12 4111 1111 1111 1111",
+    "4111 1111 1111 1111 123"): of the stretches from a group start to a
+    group end (the candidate itself aside) that are 13 to 19 digits, in a
+    card's grouping (_CARD_GROUPING), end where _CARD_END lets them and pass
+    the check, the one of most digits, of equal length the one starting
+    last. A stretch may run on past the candidate's end (the candidate
+    stopped at its 19th digit, "2024 4111 1111 1111 1111"), never into the
+    pattern's next match, which starts at ``limit`` (the text's length when
+    there is none). The Match returned is the pattern's own, read with the
+    text ending where the stretch does."""
+    text, pattern = match.string, match.re
+    starts = [match.start()] + [i + 1 for i in range(match.start(), match.end()) if text[i] in " -"]
+    best: tuple[int, int, re.Match[str]] | None = None
+    for start in starts:
+        # A card's grouping opens with a group of four, or is one group.
+        group = _GROUP.match(text, start)
+        if group is None or (len(group[0]) != 4 and len(group[0]) < 13):
+            continue
+        run = pattern.match(text, start, limit)
+        if run is None:
+            continue
+        digits = 0
+        for end in range(start, run.end() + 1):
+            if end < run.end() and text[end] not in " -":
+                digits += 1
+                continue
+            if (
+                13 <= digits <= 19
+                and (start, end) != match.span()
+                and (best is None or (digits, start) > best[:2])
+                and _CARD_GROUPING.fullmatch(text, start, end)
+                and (after := _CARD_END.match(text, end)) is not None
+                and (after.group(1) is None or digits + len(after.group(1)) <= 19)
+                and (card := pattern.match(text, start, end)) is not None
+                and _luhn_ok(card)
+            ):
+                best = (digits, start, card)
+    return None if best is None else best[2]
+
+
 def shannon_entropy(s: str) -> float:
     if not s:
         return 0.0
@@ -827,6 +890,7 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         detector_type="CREDIT_CARD",
         pattern=re.compile(r"\b\d(?:[ -]?\d){12,18}\b"),
         validator=_luhn_ok,
+        inside=_card_inside,
     ),
     RegexRule(
         # Precision-first grammar: E.164 (+country, separator-tolerant) or
@@ -1802,7 +1866,28 @@ class RegexDetector:
     def detect(self, text: str) -> Iterable[Detection]:
         if self._rule.resume is not None:
             return self._detections_from(self._resumed(text, self._rule.resume), validated=True)
+        if self._rule.inside is not None:
+            return self._detections_from(self._insides(text, self._rule.inside), validated=True)
         return self._detections_from(self._rule.pattern.finditer(text))
+
+    def _insides(
+        self, text: str, inside: Callable[["re.Match[str]", int], "re.Match[str] | None"]
+    ) -> Iterator["re.Match[str]"]:
+        """finditer's matches the validator accepts and, for each one it
+        vetoes, the match ``inside`` finds in it, before the next one: what
+        the validator accepted alone is found exactly as without it."""
+        validator = self._validator
+        matches = self._rule.pattern.finditer(text)
+        match = next(matches, None)
+        while match is not None:
+            following = next(matches, None)
+            if validator is None or validator(match):
+                yield match
+            elif (
+                found := inside(match, len(text) if following is None else following.start())
+            ) is not None:
+                yield found
+            match = following
 
     def _resumed(
         self, text: str, resume: Callable[["re.Match[str]"], int]

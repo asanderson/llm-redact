@@ -145,6 +145,8 @@ def test_a_value_overlapping_a_joining_one_is_redacted_with_it(
     assert _redacted(redactor, text) == expected
     # Counted once, under the placeholder's type.
     assert sum(redactor.counts.values()) == 1
+    # Nothing in block mode: nothing to refuse for, the union built alike.
+    assert redactor.blocked_type(text) is None
 
 
 def test_without_a_joining_value_the_sweep_decides_as_before() -> None:

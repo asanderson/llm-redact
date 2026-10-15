@@ -194,10 +194,13 @@ run of overlapping values:
   the whole union back. A value covering all the others stays itself (a
   paper IBAN holding a card number is redacted as the IBAN).
 - A value in warn mode is forwarded only where no redacted value covers
-  it, and counted as a warning, once, also when a redacted value overlaps
-  it: it was found, and what lies outside the redacted values goes
-  upstream. (Of warn-mode values overlapping one another and no redacted
-  value, the one the overlap sweep keeps is counted, as everywhere.)
+  it, and counted as a warning also when a redacted value overlaps it, as
+  long as part of it lies outside the redacted values: that part goes
+  upstream. One lying wholly inside them (a warn-mode rule's `9217` in
+  `AHV 756.9217.0769.85. Done`) sends nothing and is not counted. Of
+  warn-mode values overlapping one another, the one the overlap sweep
+  keeps is counted, as everywhere — so one value two detectors find (a
+  custom rule and an NER model reading the same address) counts once.
 - Each value is checked against the allowlists before it is joined: an
   allowlisted value joins nothing, and the joined text itself is no value
   an allowlist entry names.

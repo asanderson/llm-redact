@@ -12,7 +12,8 @@ overlap sweep (redactor._resolve_overlaps). These readings now JOIN
 others, Redactor._join redacts every value that redacts (values overlapping
 one another as one placeholder over their union, typed after the first),
 refuses for every value in block mode and forwards a warn-mode value only
-where nothing redacted covers it (counted as a warning either way). Where
+where nothing redacted covers it (counted as a warning when part of it goes
+upstream, once however many detectors read it). Where
 the proxy cannot rewrite the text (Redactor.scan), a union is put to the
 requester's overrides value by value.
 
@@ -234,6 +235,78 @@ def test_a_warn_mode_value_overlapping_two_redacted_ones_is_counted_once() -> No
     blocked = _redactor(span, STREET, modes={"SPAN": "block"}).with_overrides(approved)
     assert _redacted(blocked, text) == "Order 12 «CREDIT_CARD_001» via «ADDRESS_001»"
     assert blocked.warn_counts == Counter() and approved.asked == [("SPAN", value)]
+
+
+AHV_DOT = "AHV 756.9217.0769.85. Done"
+# Redacted where it touches the AHV number (starting where the number ends).
+DOT = CustomRule(name="dot", detector_type="DOT", pattern=r"\. Done")
+
+
+@pytest.mark.parametrize(
+    ("text", "pattern", "rules", "expected", "warned"),
+    [
+        # Wholly inside the joined value: nothing of it goes upstream, so
+        # it is no warning — as with the same number read without the
+        # sentence's dot (1.12.0's reading, which joins nothing).
+        (AHV_DOT, r"\b9217\b", (), "AHV «CH_AHV_001». Done", 0),
+        ("AHV 756.9217.0769.85 Done", r"\b9217\b", (), "AHV «CH_AHV_001» Done", 0),
+        (f"pay {IBAN} now", r"\b5983\b", (), "pay «IBAN_001» now", 0),
+        # Starting where it starts, ending where it ends.
+        (AHV_DOT, r"\b756\b", (), "AHV «CH_AHV_001». Done", 0),
+        (AHV_DOT, r"\b85\b", (), "AHV «CH_AHV_001». Done", 0),
+        # Inside two redacted values touching each other.
+        (AHV_DOT, r"85\. Do", (DOT,), "AHV «CH_AHV_001»«DOT_001»", 0),
+        (AHV_DOT, r"85\. Done", (DOT,), "AHV «CH_AHV_001»«DOT_001»", 0),
+        # A character past them is part of it going upstream: counted.
+        (AHV_DOT, r" 756\b", (), "AHV «CH_AHV_001». Done", 1),
+        (AHV_DOT, r"\b85\.", (), "AHV «CH_AHV_001». Done", 1),
+        (f"{AHV_DOT}e", r"85\. Donee", (DOT,), "AHV «CH_AHV_001»«DOT_001»e", 1),
+    ],
+)
+def test_a_warn_mode_value_inside_the_redacted_values_is_no_warning(
+    text: str, pattern: str, rules: tuple[CustomRule, ...], expected: str, warned: int
+) -> None:
+    pin = CustomRule(name="pin", detector_type="PIN", pattern=pattern)
+    redactor = _redactor(pin, *rules, modes={"PIN": "warn"})
+    assert any(d.detector_type == "PIN" for d in redactor.plan.detect(text, Allowlist()))
+    expect = Counter({"PIN": warned} if warned else {})
+    assert _redacted(redactor, text) == expected
+    assert redactor.warn_counts == expect
+    # A scan reads it alike; a check ahead of the redaction counts nothing.
+    redactor.warn_counts.clear()
+    redactor.scan(text, redactable=True)
+    assert redactor.warn_counts == expect
+    redactor.warn_counts.clear()
+    assert redactor.blocked_type(text) is None and redactor.warn_counts == Counter()
+
+
+@pytest.mark.parametrize(
+    ("rules", "ner"),
+    [
+        # Two custom rules reading the same address.
+        (
+            (STREET, CustomRule(name="street2", detector_type="ADDRESS", pattern=STREET.pattern)),
+            (),
+        ),
+        # A custom rule and an NER model reading it.
+        ((STREET,), (("1111 Main Street", "ADDRESS"),)),
+        # Two values overlapping each other: the one the sweep keeps.
+        ((STREET, CustomRule(name="part", detector_type="PART", pattern=r"1111 Main")), ()),
+    ],
+)
+def test_one_warn_mode_value_two_detectors_find_is_counted_once(
+    rules: tuple[CustomRule, ...], ner: tuple[tuple[str, str], ...]
+) -> None:
+    # A warn-mode value a joined run drops counts as the sweep without the
+    # card counts it: once.
+    modes = {"ADDRESS": "warn", "PART": "warn"}
+    redactor = _redactor(*rules, ner=ner, modes=modes)
+    text = f"Order 12 {CARD} Main Street"
+    assert _redacted(redactor, text) == "Order 12 «CREDIT_CARD_001» Main Street"
+    assert redactor.warn_counts == Counter({"ADDRESS": 1})
+    alone = _redactor(*rules, ner=ner, modes=modes)
+    assert _redacted(alone, "Ship to 1111 Main Street") == "Ship to 1111 Main Street"
+    assert alone.warn_counts == Counter({"ADDRESS": 1})
 
 
 def test_with_an_overlay_a_forwarded_value_never_takes_the_card() -> None:
@@ -611,6 +684,37 @@ def test_joining_never_redacts_or_refuses_less_than_a_sweep_without_some(
     for d in detections:
         if d.joins and (d.tier == 0 or modes.get(d.detector_type, "redact") == "redact"):
             assert set(range(d.start, d.end)) <= now
+
+
+@settings(deadline=None, max_examples=500)
+@given(st.lists(SPAN, max_size=10), MODES)
+def test_a_dropped_warn_mode_value_is_counted_only_when_part_of_it_goes_upstream(
+    spans: list[tuple[int, int, str, bool, int]], modes: dict[str, str]
+) -> None:
+    # What the join counts as warnings (the winners it returns are counted
+    # by redact_text and scan): only warn-mode values it did not keep with a
+    # character no winner redacts, each span once however many detections
+    # read it — and nothing without a joining value (the sweep's own).
+    detections = _sorted(spans)
+    redactor = Redactor([], InMemoryVault(), Allowlist(), modes=modes)
+    warned: Counter[str] = Counter()
+    try:
+        winners = redactor._resolved("x" * 60, detections, warned)
+    except BlockedRequest:
+        return
+    if not any(d.joins for d in detections):
+        assert warned == Counter()
+    redacted = _redacts(winners, modes)
+    if redacted is None:
+        return
+    forwarded = {
+        (d.start, d.end, d.detector_type)
+        for d in detections
+        if modes.get(d.detector_type) == "warn"
+        and d not in winners
+        and not set(range(d.start, d.end)) <= redacted
+    }
+    assert warned <= Counter(kind for _start, _end, kind in forwarded)
 
 
 class _Additive:

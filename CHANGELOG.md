@@ -90,7 +90,8 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   redacted, and a generic secret in block mode inside a PlanetScale token's run refuses the
   request. Values overlapping a card read inside a run of digit groups are treated alike. A
   warn-mode value among them is forwarded only where no redacted value covers it, and counted as
-  a warning, once, even where a redacted value overlaps it (part of it goes upstream). Where the
+  a warning, once, even where a redacted value overlaps it, as long as part of it lies outside the
+  redacted values (that part goes upstream; one wholly inside them is not counted). Where the
   proxy cannot rewrite the text (a verbatim field, an upload's extracted text), a span joining
   two or more such values is put to refusal overrides value by value: the refusal's code names
   every value, one approval of it lets the span through as sent (an access gate's content facts

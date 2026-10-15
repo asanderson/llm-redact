@@ -295,6 +295,30 @@ def _clear_of(
     return kept, dropped
 
 
+def _partly_outside(spans: list[Detection], others: list[Detection]) -> list[Detection]:
+    """Those of ``others`` — each overlapping one of ``spans`` (disjoint,
+    start-sorted: ``_clear_of``'s dropped) — with a character outside all
+    of them, in their order. Touching spans are merged into the stretches
+    they cover together, so a binary search finds the stretch holding a
+    detection's first character (the first ending after its start; one
+    always does, as it overlaps a span): the detection lies inside them
+    all exactly when it lies inside that stretch."""
+    starts: list[int] = []
+    ends: list[int] = []
+    for d in spans:
+        if ends and d.start == ends[-1]:
+            ends[-1] = d.end
+        else:
+            starts.append(d.start)
+            ends.append(d.end)
+    outside: list[Detection] = []
+    for d in others:
+        i = bisect_right(ends, d.start)
+        if d.start < starts[i] or d.end > ends[i]:
+            outside.append(d)
+    return outside
+
+
 class Redactor:
     def __init__(
         self,
@@ -458,8 +482,8 @@ class Redactor:
     def _winners(self, text: str) -> list[Detection]:
         """The detections redaction acts on in ``text``: the configured
         policy's (``_resolved``, a warn-mode value a joined run drops
-        counted in ``warn_counts``), with the added deny strings' matches
-        taken in (``_absorb``)."""
+        counted in ``warn_counts`` when part of it goes upstream), with the
+        added deny strings' matches taken in (``_absorb``)."""
         if self._recorder is not None:
             return self._recorded_winners(text, self._recorder)
         winners = self._resolved(text, self._detect(text), self.warn_counts)
@@ -500,15 +524,15 @@ class Redactor:
         through others that holds one that joins (``Detection.joins``: a
         card read inside a run of digit groups, an IBAN in the paper
         format, a value ending before a run of dots since 1.12.1), which is
-        ``_join``ed — a warn-mode value it drops counted in ``warned`` (None:
-        nowhere, a check ahead of the redaction). Without one, the sweep's
-        own, byte for byte; with one, every character the sweep without the
-        joining values would redact is redacted, and every value it refuses
-        for still refuses. Additive detections (``ADDITIVE_TIER``: the llm
-        NER backend's) are never joined: they keep only what lies outside
-        the winners, exactly as ``_resolve_overlaps`` treats them, so one
-        never takes the place of a card or an IBAN, or of the type its
-        placeholder carries."""
+        ``_join``ed — a warn-mode value it drops counted in ``warned`` when
+        part of it goes upstream (None: nowhere, a check ahead of the
+        redaction). Without one, the sweep's own, byte for byte; with one,
+        every character the sweep without the joining values would redact
+        is redacted, and every value it refuses for still refuses. Additive
+        detections (``ADDITIVE_TIER``: the llm NER backend's) are never
+        joined: they keep only what lies outside the winners, exactly as
+        ``_resolve_overlaps`` treats them, so one never takes the place of
+        a card or an IBAN, or of the type its placeholder carries."""
         if not any(d.joins for d in detections):
             return _resolve_overlaps(detections)
         joined: list[Detection] = []
@@ -537,16 +561,18 @@ class Redactor:
         redacted — values overlapping one another as ONE placeholder over
         their union typed after the first (``_covering``); a value forwarded
         as sent (warn mode, an approved block) only where no redacted value
-        covers it: one overlapping such a value yields to it, and is
-        counted in ``warned`` when in warn mode (it was found, and what lies
-        outside the redacted values goes upstream), once."""
+        covers it: one overlapping such a value yields to it. A warn-mode
+        one is still counted in ``warned`` when part of it lies outside the
+        redacted values (``_partly_outside``: that part goes upstream) —
+        not when it lies inside them — and as the sweep counts the values
+        it forwards: once per value it reads among them (``_sweep``; two
+        detectors finding one value count once)."""
         redacting, passing = self._by_mode(run)
         covered = [_covering(text, values) for values in _overlapping(redacting)]
         kept, dropped = _clear_of(covered, passing)
         if warned is not None:
-            warned.update(
-                d.detector_type for d in dropped if self._modes.get(d.detector_type) == "warn"
-            )
+            warn = [d for d in dropped if self._modes.get(d.detector_type) == "warn"]
+            warned.update(d.detector_type for d in _sweep(_partly_outside(covered, warn)))
         # Disjoint, so in start order once ``_resolved`` sorts them.
         return covered + _sweep(kept)
 

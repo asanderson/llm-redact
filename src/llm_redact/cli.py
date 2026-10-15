@@ -874,7 +874,7 @@ def _print_posture(payload: dict[str, Any]) -> None:
     """Loud, honest reminders of every runtime coverage opt-out. Silent when
     nothing reduces protection — the same contract as `doctor`'s posture
     check, but reporting live counts rather than static config."""
-    lines: list[str] = []
+    lines: list[str] = _reload_posture(payload.get("config_reload"))
     license_info = payload.get("license") or {}
     for license_warning in license_info.get("warnings") or []:
         lines.append(f"license: {license_warning}")
@@ -994,6 +994,34 @@ def _print_posture(payload: dict[str, Any]) -> None:
             print(f"  ⚠ {line}")
     else:
         print("posture: all traffic redacted (no coverage opt-outs)")
+
+
+def _reload_posture(block: object) -> list[str]:
+    """Where SIGHUP reloads stand, from the /status ``config_reload`` block
+    (absent on an older proxy, whose reload ran before it answered): one
+    still running means everything this status prints — the posture lines
+    after this one included — is the configuration BEFORE it (the new one
+    is still being built off the event loop); a last reload that failed
+    means the proxy kept its previous configuration, so the file it read is
+    not what runs."""
+    if not isinstance(block, dict):
+        return []
+    lines: list[str] = []
+    if block.get("running"):
+        seconds = block.get("running_seconds")
+        ran = f" for {seconds:.0f}s" if isinstance(seconds, int | float) else ""
+        lines.append(
+            f"config reload in progress{ran}: this status (the posture below included) is the"
+            " configuration BEFORE it — run `llm-redact status` again once it ends"
+        )
+    last = block.get("last")
+    if isinstance(last, dict) and last.get("outcome") == "failed":
+        at = f" at {last['at']}" if last.get("at") else ""
+        lines.append(
+            f"the last config reload FAILED{at}: the proxy kept its previous configuration,"
+            " not the file it read (its log says why; `llm-redact serve --check`)"
+        )
+    return lines
 
 
 def _ner_posture(ner: object) -> list[str]:

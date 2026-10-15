@@ -221,16 +221,28 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   A SIGHUP reload now does the same: it reads and parses the file and builds a changed
   `[detection]` (every NER model loaded, the `llm` backend's model-list check) on a worker
   thread while the proxy keeps answering, then applies that build on the event loop — with no
-  check added (the editor's dry-run probes stay the editor's) and its log lines and outcomes
-  unchanged. SIGHUPs arriving while a reload runs start exactly one more after it, which reads
-  the file again; a config editor save landing during the build makes the reload drop its
-  build and start over from the file the save wrote, never undoing the save (after three such
-  overlaps it builds on the event loop, with a WARNING); a reload still building at shutdown is
-  cancelled before anything closes and applies nothing, the build its worker finishes later
-  dropped. A reload failing unexpectedly is logged by exception type only ("config reload
-  failed unexpectedly"), never fatal. A plugin's `ConfigSection.parse` and model-load policy
-  `check` may therefore run on a worker thread (docs/plugins.md, "The dashboard host";
-  docs/resilience.md, "Configuration reloads (SIGHUP)").
+  check added (the editor's dry-run probes stay the editor's) and its outcomes and log lines
+  unchanged (a build that fails still logs the "changes require restart" lines first, as the
+  synchronous reload logs them). SIGHUPs arriving while a reload runs start exactly one more
+  after it, which reads the file again; a config editor save landing during the build makes
+  the reload drop its build and start over from the file the save wrote, never undoing the
+  save (after three such overlaps it builds on the event loop, with a WARNING); a reload still
+  building at shutdown has ended before the shutdown awaits anything else and applies nothing,
+  the build its worker finishes later dropped. A reload failing unexpectedly is logged by
+  exception type only ("config reload failed unexpectedly"), never fatal. Because the swap
+  now follows the signal by the build's length (seconds when NER models load), `/status` says
+  where reloads stand — a `config_reload` block: `running`, `running_seconds`,
+  `requested_total`, `applied_total`, `failed_total` and the `last` outcome (`applied` or
+  `failed`) — `llm-redact status` prints a posture line while one runs ("config reload in
+  progress": the status is the configuration before it) and while the last one has failed,
+  and the `/llm-redact:config-edit` agent command now notes `requested_total`, sends the
+  signal and waits for that reload to end before it reads the posture back (it once could
+  report the posture from before a change as the change's, and calls a failed reload failed).
+  A reload still running after 120 seconds is logged once ("config reload still running") — a
+  build that hangs would otherwise be invisible, every later SIGHUP waiting behind it. Since
+  the reload reads and builds on a worker thread, a plugin's `ConfigSection.parse` and
+  model-load policy `check` may be called there (docs/plugins.md, "The dashboard host";
+  docs/resilience.md, "Configuration reloads (SIGHUP)"; docs/deployment.md).
 - **Four NER counters**: `ungrounded`, `errors`, `breaker_opens` and `breaker_short_circuits` in
   `/status` `detection.ner` and as `llm_redact_ner_ungrounded_total`,
   `llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total` and
@@ -239,6 +251,11 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   model server fails.
 
 ### Fixed
+- A SIGHUP during the proxy's shutdown — a terminal closing, a reload racing a stop — could end
+  the process in the middle of the audit sinks' final flush (up to 45 seconds), before the audit
+  database and the vault closed: the shutdown removed the SIGHUP handler first, which restores
+  the default action. The handler now stays registered until the shutdown's last step, and a
+  signal meanwhile does nothing.
 - A configuration reload whose displaced router (llm-redact-pro routing turned off) failed to
   close was reported as failed — the config editor answered 500, a SIGHUP logged a traceback —
   although the new configuration was already live. The fault is now logged by exception type

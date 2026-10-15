@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import threading
 import time
 from typing import Any
@@ -574,9 +575,10 @@ async def test_a_reload_still_building_is_stopped_first_and_never_applied(
 ) -> None:
     # A SIGHUP reload builds off the event loop (a changed [detection]: NER
     # models load for seconds). One still building when the shutdown starts
-    # is cancelled before anything closes — never applied over a closing
-    # router, gate or vault — and the build its worker finishes later is
-    # closed (its models freed), after the databases closed.
+    # has ENDED — cancelled, not merely asked to stop — before the first
+    # step that awaits, and a build its worker finishes during that step is
+    # closed (its models freed), never applied over a closing router, gate
+    # or vault.
     events: list[str] = []
     _register(monkeypatch, events)
     app = _app(events, httpx.MockTransport(_answer))
@@ -604,22 +606,74 @@ async def test_a_reload_still_building_is_stopped_first_and_never_applied(
 
     monkeypatch.setattr(state, "_prepare_reload", prepare)
     monkeypatch.setattr(state, "apply_config", apply)
+    reloading: list[asyncio.Task[None]] = []
+    stop = state.connections.stop
 
-    class Router:
-        def close(self) -> None:
-            events.append(f"router.close (reload running: {state.reloads.running})")
+    async def first_awaited_step() -> None:
+        [task] = reloading
+        events.append(f"connections.stop (reload ended: {task.done()})")
+        # The build finishes now, while the shutdown awaits: a reload still
+        # waiting for it would take it and apply it here.
+        release.set()
+        for _ in range(500):
+            if "build.close" in events:
+                break
+            await asyncio.sleep(0.01)
+        await stop()
 
+    monkeypatch.setattr(state.connections, "stop", first_awaited_step)
     async with app.router.lifespan_context(app):
         await asyncio.sleep(0)
-        state.router = Router()
         state.reloads.request()
+        assert state.reloads._task is not None
+        reloading.append(state.reloads._task)
         assert await asyncio.to_thread(entered.wait, 10)
-    assert events[0] == "router.close (reload running: False)"
-    assert events[-2:] == ["audit.close", "vault.close"]
-    release.set()
-    for _ in range(500):
-        if "build.close" in events:
-            break
-        await asyncio.sleep(0.01)
-    assert events[-3:] == ["audit.close", "vault.close", "build.close"]
+    assert events[:2] == ["connections.stop (reload ended: True)", "build.close"]
     assert "apply" not in events
+    assert events[-2:] == ["audit.close", "vault.close"]
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="no SIGHUP on this platform")
+async def test_the_sighup_handler_stays_registered_until_the_shutdown_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # asyncio's remove_signal_handler restores the default action, which
+    # ends the process on a SIGHUP (the terminal closing, a reload racing a
+    # stop): removed first, a signal during the sinks' final flush would cut
+    # it — and the audit and vault closes after it — short. The handler stays
+    # until everything is closed, and a signal meanwhile reaches the closed
+    # reload scheduler, which begins no reload.
+    events: list[str] = []
+    handlers: dict[int, Any] = {}
+    states: list[Any] = []
+
+    class SignalledSink(SpoolSink):
+        async def aclose(self) -> None:
+            handlers[signal.SIGHUP]()  # the signal arrives during the final flush
+            events.append(f"sighup (reload running: {states[0].reloads.running})")
+            await super().aclose()
+
+    _register(
+        monkeypatch,
+        events,
+        lambda audit: (SignalledSink("s3", audit, events), SpoolSink("azure", audit, events)),
+    )
+    app = _app(events, httpx.MockTransport(_answer))
+    states.append(app.state.proxy)
+    loop = asyncio.get_running_loop()
+
+    def add(sig: int, callback: Any) -> None:
+        handlers[sig] = callback
+
+    def remove(sig: int) -> bool:
+        events.append("sighup handler removed")
+        return handlers.pop(sig) is not None
+
+    monkeypatch.setattr(loop, "add_signal_handler", add)
+    monkeypatch.setattr(loop, "remove_signal_handler", remove)
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0)
+        assert signal.SIGHUP in handlers
+    assert "sighup (reload running: False)" in events
+    assert events[-3:] == ["audit.close", "vault.close", "sighup handler removed"]
+    assert app.state.proxy.reloads.requested == 0  # the closed scheduler took none

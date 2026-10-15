@@ -993,6 +993,26 @@ class _ReloadBuild(NamedTuple):
         self.prepared.close()
 
 
+# What a reload reports as a failed configuration (logged "config reload
+# failed; keeping current config", nothing swapped): ConfigError and
+# tomllib.TOMLDecodeError are both ValueErrors.
+_RELOAD_ERRORS = (ValueError, OSError, re.error, ImportError)
+
+
+class _DetectionBuildFailed(Exception):
+    """A SIGHUP reload's build of a changed ``[detection]`` failed on its
+    worker thread (``ProxyState._prepare_reload``). Carries the file's
+    configuration (``fresh``) beside the failure (``cause``), so the reload
+    logs the lines ``apply_config`` logs before ITS build — the
+    restart-required ones — ahead of the failure, as ``reload`` logs them
+    for the same file. The message is the cause's TYPE only."""
+
+    def __init__(self, fresh: Config, cause: Exception) -> None:
+        super().__init__(type(cause).__name__)
+        self.fresh = fresh
+        self.cause = cause
+
+
 class ProxyState:
     def __init__(
         self,
@@ -1337,7 +1357,8 @@ class ProxyState:
         # its ``request`` as the signal handler): one at a time, the file
         # read and a changed [detection] built off the event loop
         # (``reload_off_loop``), signals arriving meanwhile coalesced into one
-        # more reload; closed first thing at shutdown.
+        # more reload; where they stand in /status ``config_reload``; closed
+        # first thing at shutdown.
         self.reloads = ReloadScheduler(self.reload_off_loop)
 
     def override_scope(self) -> OverrideScope | None:
@@ -1967,13 +1988,14 @@ class ProxyState:
         these were plain attributes."""
         self.detection_snapshot = dataclasses.replace(self.detection_snapshot, **changes)
 
-    def reload(self) -> None:
+    def reload(self) -> bool:
         """Rebuild hot-swappable config from the file; never crash a running
         proxy. Synchronous: the file is read and everything that changed is
         built ON the event loop, and the swap has happened when this
-        returns. SIGHUP runs ``reload_off_loop`` instead (through
-        ``reloads``), which builds off the loop; this form is what it falls
-        back to when applies keep overlapping its builds.
+        returns True (False: the reload failed and the running
+        configuration is kept). SIGHUP runs ``reload_off_loop`` instead
+        (through ``reloads``), which builds off the loop; this form is what
+        it falls back to when applies keep overlapping its builds.
 
         Hot: detection rules/allowlists/custom rules/NER, rehydration.fuzzy,
         inject_system_note, max_body_bytes, provider upstreams. Requires
@@ -1990,11 +2012,12 @@ class ProxyState:
             # rule names, bad custom regex, missing NER extra — all deferred
             # past parse_config) leaves the running state untouched.
             self.apply_config(fresh)
-        # ConfigError and tomllib.TOMLDecodeError are both ValueErrors.
-        except (ValueError, OSError, re.error, ImportError) as exc:
+        except _RELOAD_ERRORS as exc:
             logger.error("config reload failed; keeping current config: %s", exc)
+            return False
+        return True
 
-    async def reload_off_loop(self) -> None:
+    async def reload_off_loop(self) -> bool:
         """``reload`` with its slow part off the event loop — what SIGHUP
         runs (``reloads``): the file is read and parsed, and a changed
         ``[detection]`` built (every NER model loaded; the llm backend's
@@ -2019,10 +2042,16 @@ class ProxyState:
         After ``RELOAD_BUILD_ATTEMPTS`` overlapped builds the reload runs
         ``reload()`` on the loop (the file as it is, built there).
 
-        Failures are ``reload``'s: a file that does not parse, a build that
-        fails (an unknown rule, a missing NER extra, a model not cached, a
-        reload that would start the llm backend) is logged "config reload
-        failed; keeping current config" and nothing is swapped. Cancelled
+        Failures are ``reload``'s, and so are their log lines: a file that
+        does not parse, a build that fails (an unknown rule, a missing NER
+        extra, a model not cached, a reload that would start the llm
+        backend) is logged "config reload failed; keeping current config"
+        and nothing is swapped — after the "changes require restart" lines
+        ``apply_config`` logs before it builds, when the file got that far
+        (``_DetectionBuildFailed``: the build failed on the worker, so those
+        lines are logged on the loop before the failure, as ``reload`` logs
+        them). Answers True when the reload applied, False when it failed
+        (``reloads`` counts both: /status ``config_reload``). Cancelled
         (the shutdown began), it applies nothing and the build its worker
         finishes is closed (``build_off_loop``)."""
         for _attempt in range(RELOAD_BUILD_ATTEMPTS):
@@ -2031,19 +2060,30 @@ class ProxyState:
                 built = await build_off_loop(
                     functools.partial(self._prepare_reload, live), _ReloadBuild.close
                 )
-            except (ValueError, OSError, re.error, ImportError) as exc:
-                if self.config is live:
-                    logger.error("config reload failed; keeping current config: %s", exc)
-                    return
-                continue  # judged against a configuration no longer running
+            except _DetectionBuildFailed as failed:
+                if self.config is not live:
+                    continue  # judged against a configuration no longer running
+                # The file parsed and its restart-only paths pinned: what
+                # apply_config logs before its build, then the failure.
+                self._restart_required(failed.fresh)
+                if not isinstance(failed.cause, _RELOAD_ERRORS):
+                    raise failed.cause from None  # logged by type (``reloads``)
+                logger.error("config reload failed; keeping current config: %s", failed.cause)
+                return False
+            except _RELOAD_ERRORS as exc:
+                if self.config is not live:
+                    continue  # judged against a configuration no longer running
+                logger.error("config reload failed; keeping current config: %s", exc)
+                return False
             try:
                 if self.config is not live:
                     continue  # an apply landed meanwhile: read and build again
                 try:
                     self.apply_config(built.fresh, prepared=built.prepared)
-                except (ValueError, OSError, re.error, ImportError) as exc:
+                except _RELOAD_ERRORS as exc:
                     logger.error("config reload failed; keeping current config: %s", exc)
-                return
+                    return False
+                return True
             finally:
                 built.close()  # spent by the apply; closing again is harmless
         logger.warning(
@@ -2051,39 +2091,74 @@ class ProxyState:
             " building on it",
             RELOAD_BUILD_ATTEMPTS,
         )
-        self.reload()
+        return self.reload()
 
     def _prepare_reload(self, live: Config) -> _ReloadBuild:
         """On a worker thread: the config file read and parsed (env
-        overrides applied, as ``reload`` applies them) and the detection
-        objects of its changed ``[detection]`` built (``_prepare_detection``,
-        the restart-only paths kept from ``live``, the running configuration
-        when the reload began). Raises what ``reload`` would log: a file
-        that cannot be read or parsed, a build that fails. Assigns nothing
-        on the proxy."""
+        overrides applied, as ``reload`` applies them), its restart-only
+        paths inside ``[detection]`` kept from ``live`` (the running
+        configuration when the reload began; ``pin_restart_only_paths``),
+        and the detection objects of its changed ``[detection]`` built
+        (``_prepare_detection``). Raises what ``reload`` would log: a file
+        that cannot be read or parsed, or that the pinned paths refuse, as
+        is (``apply_config`` refuses it before it logs anything); a build
+        that fails as ``_DetectionBuildFailed``, carrying the file's
+        configuration (``apply_config`` logs its restart-required lines
+        before it builds). Assigns nothing on the proxy."""
         fresh = apply_env_overrides(load_config(self.config_path))
-        _pinned, prepared = self._prepare_detection(fresh, live)
+        candidate, _kept = pin_restart_only_paths(fresh, live)
+        try:
+            prepared = self._prepare_detection(candidate)
+        except Exception as exc:
+            raise _DetectionBuildFailed(fresh, exc) from exc
         return _ReloadBuild(fresh, prepared)
 
-    def _prepare_detection(
-        self, candidate: Config, running: Config
-    ) -> tuple[Config, _PreparedConfig]:
+    def _prepare_detection(self, candidate: Config) -> _PreparedConfig:
         """The detection part of a prepared build, shared by
-        ``prepare_config`` (the editor's dry run) and a SIGHUP reload: the
-        candidate with ``running``'s values kept for the restart-only paths
-        inside ``[detection]`` (``pin_restart_only_paths`` — refusing one
-        that would start the llm backend, or that the kept values make
-        invalid), and the detection objects built for its ``[detection]``
-        when that differs from the running snapshot's (None when it does
-        not: an apply keeps the live objects), with that snapshot's
-        generation. Reads the running snapshot once; assigns nothing (safe on
-        a worker thread)."""
-        candidate, _kept = pin_restart_only_paths(candidate, running)
+        ``prepare_config`` (the editor's dry run) and a SIGHUP reload, for a
+        candidate whose restart-only paths inside ``[detection]`` are
+        already pinned (``pin_restart_only_paths``): the detection objects
+        built for its ``[detection]`` when that differs from the running
+        snapshot's (None when it does not: an apply keeps the live
+        objects), with that snapshot's generation. Reads the running
+        snapshot once; assigns nothing (safe on a worker thread)."""
         snapshot = self.detection_snapshot
         built = None
         if candidate.detection != snapshot.detection:
             built = _build_detection(candidate.detection, model_policy=self.model_policy)
-        return candidate, _PreparedConfig(snapshot.generation, built)
+        return _PreparedConfig(snapshot.generation, built)
+
+    def _restart_required(self, fresh: Config) -> tuple[Config, list[str]]:
+        """``fresh`` with its restart-only paths inside ``[detection]`` kept
+        from the running configuration (``pin_restart_only_paths``: a
+        ConfigError, before anything is logged, for one that would start
+        the llm backend or that the kept values make invalid), and the
+        names of every restart-only part that differs from the running
+        configuration — RESTART_ONLY_KEYS sections, plugin sections by their
+        names, then the dotted paths — each logged as a WARNING ("changes
+        require restart; keeping current"). What ``apply_config`` logs
+        before it builds anything; a SIGHUP reload whose build failed off
+        the loop logs the same before its failure."""
+        fresh, kept_paths = pin_restart_only_paths(fresh, self.config)
+        restart_required = [
+            field_name
+            for field_name in RESTART_ONLY_KEYS
+            if getattr(fresh, field_name) != getattr(self.config, field_name)
+        ]
+        # Plugin-owned sections (plugin_api.ConfigSection) are restart-only
+        # too, reported by their own section names.
+        restart_required += sorted(
+            name
+            for name in set(fresh.extensions) | set(self.config.extensions)
+            if fresh.extensions.get(name) != self.config.extensions.get(name)
+        )
+        for field_name in restart_required:
+            logger.warning(
+                "config reload: [%s] changes require restart; keeping current", field_name
+            )
+        for path_name in kept_paths:
+            logger.warning("config reload: %s changes require restart; keeping current", path_name)
+        return fresh, restart_required + kept_paths
 
     def apply_config(self, fresh: Config, *, prepared: PreparedConfig | None = None) -> list[str]:
         """Swap in the hot-swappable parts of ``fresh``; shared by SIGHUP
@@ -2116,27 +2191,9 @@ class ProxyState:
         taken = _spend_prepared(prepared)
         # Keys inside a hot section that are restart-only all the same (where
         # the llm backend sends scanned text, and its key): kept from the
-        # running configuration, or the reload refused.
-        fresh, kept_paths = pin_restart_only_paths(fresh, self.config)
-        restart_required = [
-            field_name
-            for field_name in RESTART_ONLY_KEYS
-            if getattr(fresh, field_name) != getattr(self.config, field_name)
-        ]
-        # Plugin-owned sections (plugin_api.ConfigSection) are restart-only
-        # too, reported by their own section names.
-        restart_required += sorted(
-            name
-            for name in set(fresh.extensions) | set(self.config.extensions)
-            if fresh.extensions.get(name) != self.config.extensions.get(name)
-        )
-        for field_name in restart_required:
-            logger.warning(
-                "config reload: [%s] changes require restart; keeping current", field_name
-            )
-        for path_name in kept_paths:
-            logger.warning("config reload: %s changes require restart; keeping current", path_name)
-        restart_required += kept_paths
+        # running configuration, or the reload refused. Every restart-only
+        # change is named (and logged) before anything is built.
+        fresh, restart_required = self._restart_required(fresh)
         effective = _kept_restart_only(fresh, self.config)
 
         # Re-resolve the license BEFORE anything is built or swapped:
@@ -2309,7 +2366,8 @@ class ProxyState:
         apply swapping them meanwhile is either seen whole or not at all
         (and the generation tells apply_config which).
         """
-        candidate, prepared = self._prepare_detection(candidate, self.config)
+        candidate, _kept = pin_restart_only_paths(candidate, self.config)
+        prepared = self._prepare_detection(candidate)
         try:
             effective = apply_env_overrides(candidate)
             resolved = _resolve_license_info(effective)
@@ -3472,6 +3530,12 @@ async def _handle_local(
                 "session": config.vault.session,
                 "session_mode": config.vault.session_mode,
                 "compaction_forks": state.compaction_forks,
+                # SIGHUP reloads (reloads.ReloadScheduler.status): one may
+                # still be building off the event loop, and until it applies
+                # this answer describes the configuration before it — a
+                # caller waits for running = false and requested_total past
+                # what it read before its signal, then reads last.outcome.
+                "config_reload": state.reloads.status(),
                 "vault": vault_block,
                 "detections_total": dict(state.redactor.counts),
                 "rehydrations_total": dict(state.rehydration_counts),
@@ -8828,9 +8892,12 @@ def create_app(
             # First, before anything here awaits: no configuration reload is
             # begun or applied once the shutdown has begun. One still
             # building off the loop is cancelled, and the build its worker
-            # thread finishes later is closed, never applied.
-            if sighup_registered:
-                loop.remove_signal_handler(signal.SIGHUP)
+            # thread finishes later is closed, never applied. The SIGHUP
+            # handler stays registered (a signal now asks a closed
+            # scheduler, which ignores it) until the very end:
+            # remove_signal_handler restores the default action, and a
+            # SIGHUP then (a terminal closing) would end the process in the
+            # middle of the sinks' final flush or the database closes.
             await state.reloads.close()
             await state.connections.stop()
             for task in background_tasks:
@@ -8870,6 +8937,10 @@ def create_app(
                 # Flush the batched exporters; telemetry buffered at shutdown
                 # would otherwise be dropped.
                 state.telemetry.shutdown()
+            if sighup_registered:
+                # Last: everything is closed, nothing a SIGHUP's default
+                # action could cut short.
+                loop.remove_signal_handler(signal.SIGHUP)
 
     app = Starlette(
         routes=[

@@ -225,8 +225,26 @@ below).
 The reload reads the file and builds what changed (every NER model of a
 changed `[detection]`) off the event loop, so the proxy keeps answering
 while it runs, and then swaps it in; the "config reloaded" INFO line says
-it applied. A second `kill -HUP` while one runs is not lost: one more
-reload runs right after it and reads the file again.
+it applied. Until then `/status` describes the configuration before it:
+its `config_reload` block (`running`, `requested_total`, `applied_total`,
+`failed_total`, `last`) says whether the reload is still building and
+how the last one ended, and `llm-redact status` prints a posture line
+while one runs and while the last one has failed. A second `kill -HUP`
+while one runs is not lost: one more reload runs right after it and
+reads the file again.
+
+## "config reload still running after 120 s; the configuration before it stays live and SIGHUPs meanwhile wait for it"
+
+A WARNING, once per reload: a `kill -HUP` reload is still building two
+minutes after it began — far longer than NER models take to load. The
+proxy keeps serving the configuration it had (`/healthz` stays green), and
+every later SIGHUP waits for this reload to end (`/status`
+`config_reload.running` stays true, `running_seconds` grows). Look for
+what the build waits on: a model folder on a network volume that stopped
+answering, an `llm` backend server that accepted the connection and never
+answered the model list (that check gives up after 10 s), or a plugin's
+model-load policy or config section that never returns. A restart
+applies the file afresh.
 
 ## "config reload failed unexpectedly (TYPE)"
 

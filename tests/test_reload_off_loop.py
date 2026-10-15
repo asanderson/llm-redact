@@ -13,7 +13,11 @@ and are logged as before (an unexpected one by type only); an apply landing
 during the build (an editor save) making the reload start over, never put
 back the file it read before that save — bounded, then built on the loop;
 a shutdown that cancels a reload still building and closes the build its
-worker finishes later; and the signal handler the lifespan registers.
+worker finishes later; the signal handler the lifespan registers; and, since
+the swap now follows the signal by the build's length, where reloads stand
+(/status ``config_reload``: a caller waits for its reload before reading the
+configuration back), the restart-required lines a failed build still logs
+first, and the WARNING for a reload that keeps running.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ import pytest
 import llm_redact.proxy as proxy_mod
 from llm_redact.config import apply_env_overrides, load_config
 from llm_redact.proxy import ProxyState, create_app
-from llm_redact.reloads import ReloadScheduler, _Handoff, build_off_loop
+from llm_redact.reloads import SLOW_RELOAD_SECONDS, ReloadScheduler, _Handoff, build_off_loop
 
 PROXY = "http://127.0.0.1:8787"
 EMAIL_ONLY = '[detection]\nenabled = ["email"]\n'
@@ -295,11 +299,187 @@ async def test_an_unexpected_failure_is_logged_by_type_and_never_fatal(
     assert state.config is before
     assert "config reload failed unexpectedly (TypeError)" in caplog.text
     assert "SECRET" not in caplog.text
+    assert state.reloads.failed == 1 and state.reloads.last is not None
+    assert state.reloads.last.outcome == "failed"
     # The scheduler survived it: the next signal reloads.
     monkeypatch.setattr(proxy_mod, "_build_detection", real)
     state.reloads.request()
     await state.reloads.wait()
     assert _enabled(state) == ("email", "ipv4", "jwt")
+
+
+# --- the lines a failed build logs ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # The file parses; its [detection] build fails (on the worker): the
+        # restart-required line apply_config logs before its build comes
+        # first, as the synchronous reload logs it.
+        (
+            '[vault]\nsession = "two"\n[detection]\nenabled = ["no_such_rule"]\n',
+            [
+                "config reload: [vault] changes require restart; keeping current",
+                "config reload failed; keeping current config",
+            ],
+        ),
+        # The file does not parse: nothing is compared, the failure alone.
+        (
+            '[vault]\nsession = "two"\nnot toml [ [\n',
+            ["config reload failed; keeping current config"],
+        ),
+    ],
+)
+async def test_a_failed_reload_logs_what_the_synchronous_reload_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, body: str, expected: list[str]
+) -> None:
+    app, state, path = _app(tmp_path, '[vault]\nsession = "one"\n')
+    path.write_text(body)
+
+    def logged() -> list[str]:
+        failed = "config reload failed; keeping current config"
+        # A failure's cause cut off (a path, the built-in rule list).
+        lines = [record.getMessage() for record in caplog.records]
+        caplog.clear()
+        return [failed if line.startswith(failed) else line for line in lines]
+
+    with caplog.at_level(logging.INFO, logger="llm_redact"):
+        assert state.reload() is False
+        synchronous = logged()
+        state.reloads.request()  # what SIGHUP runs
+        await state.reloads.wait()
+        off_loop = logged()
+    assert off_loop == synchronous == expected
+    assert state.config.vault.session == "one"
+    assert state.reloads.failed == 1
+
+
+# --- where reloads stand (/status config_reload) ------------------------------------------
+
+
+async def test_status_says_a_reload_is_still_building_and_how_it_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The swap follows the signal by the build's length, so /status answers
+    # from the configuration before it meanwhile — the config-edit command's
+    # read-back would report an opt-out the file adds as absent. The
+    # config_reload block says a reload runs, and how the one asked for
+    # ended: the caller waits for it before reading the posture back.
+    app, state, path = _app(tmp_path)
+    builds = GatedBuilds(monkeypatch)
+    path.write_text(EMAIL_ONLY + '[detection.mcp]\nexempt_servers = ["github"]\n')
+    async with app.router.lifespan_context(app), _client(app) as client:
+
+        async def status() -> dict[str, Any]:
+            reply = await client.get("/__llm-redact/status")
+            assert reply.status_code == 200
+            body: dict[str, Any] = reply.json()
+            return body
+
+        idle = (await status())["config_reload"]
+        assert idle == {
+            "running": False,
+            "running_seconds": None,
+            "requested_total": 0,
+            "applied_total": 0,
+            "failed_total": 0,
+            "last": None,
+        }
+        state.reloads.request()  # SIGHUP
+        await builds.wait_entered()
+        state.reloads.request()  # another while it builds: coalesced
+        building = await status()
+        assert building["mcp_exempt_servers"] == 0  # still the configuration before it
+        block = building["config_reload"]
+        assert block["running"] is True and block["requested_total"] == 2
+        assert isinstance(block["running_seconds"], float) and block["running_seconds"] >= 0
+        assert block["applied_total"] == 0 and block["last"] is None
+        builds.release.set()
+        await state.reloads.wait()
+        applied = await status()
+        assert applied["mcp_exempt_servers"] == 1
+        block = applied["config_reload"]
+        assert block["running"] is False and block["running_seconds"] is None
+        # Two reloads ran for the two signals (the second re-read the file).
+        assert block["requested_total"] == 2 and block["applied_total"] == 2
+        assert block["failed_total"] == 0
+        assert block["last"]["outcome"] == "applied"
+        assert block["last"]["at"].endswith("+00:00")
+        # A reload that fails keeps the running configuration and says so.
+        path.write_text('[detection]\nenabled = ["no_such_rule"]\n')
+        state.reloads.request()
+        await state.reloads.wait()
+        failed = await status()
+        block = failed["config_reload"]
+        assert block["requested_total"] == 3 and block["failed_total"] == 1
+        assert block["last"]["outcome"] == "failed"
+        assert failed["mcp_exempt_servers"] == 1  # the configuration kept
+
+
+async def test_a_reload_still_running_past_the_bound_is_logged_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A build that hangs (a stalled model volume, a plugin that never
+    # answers): /healthz stays green and every later SIGHUP waits behind it,
+    # so a WARNING names it — once per reload, never for one that ends in
+    # time.
+    assert SLOW_RELOAD_SECONDS == 120
+    release = asyncio.Event()
+    runs: list[str] = []
+
+    async def reload() -> bool:
+        runs.append("reload")
+        if len(runs) == 1:
+            await release.wait()
+        return True
+
+    scheduler = ReloadScheduler(reload, slow_seconds=0.05)
+    message = (
+        "config reload still running after 0 s; the configuration before it stays live"
+        " and SIGHUPs meanwhile wait for it"
+    )
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
+        scheduler.request()
+        for _ in range(500):
+            if caplog.records:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        assert [record.getMessage() for record in caplog.records] == [message]
+        assert scheduler.status()["running"] is True
+        release.set()
+        await scheduler.wait()
+        scheduler.request()  # one that ends in time
+        await scheduler.wait()
+        await asyncio.sleep(0.1)
+    assert [record.getMessage() for record in caplog.records] == [message]
+    assert runs == ["reload", "reload"] and scheduler.applied == 2
+
+
+async def test_running_stays_true_until_a_cancelled_reload_has_ended() -> None:
+    unwinding, finish = asyncio.Event(), asyncio.Event()
+
+    async def reload() -> bool:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await finish.wait()  # still unwinding (a build closing, say)
+            raise
+        return True
+
+    scheduler = ReloadScheduler(reload)
+    scheduler.request()
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(scheduler.close())
+    await unwinding.wait()
+    assert scheduler.running and not closing.done()
+    finish.set()
+    await closing
+    assert not scheduler.running
+    assert scheduler.status()["running"] is False
+    assert scheduler.applied == scheduler.failed == 0  # cancelled: no outcome
 
 
 # --- an apply landing during the build ----------------------------------------------------
@@ -392,11 +572,13 @@ async def test_builds_overlapped_every_time_fall_back_to_the_loop(
     assert builds.off_loop == 2 and builds.on_loop == 1  # the fallback built on the loop
 
 
+@pytest.mark.parametrize("stage", ["parse", "build"])
 async def test_a_failure_overlapped_by_an_apply_is_judged_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, stage: str
 ) -> None:
-    # A build that failed against a configuration no longer running is not
-    # reported: the reload reads and builds again, against the running one.
+    # A file read, parse or build that failed against a configuration no
+    # longer running is not reported (nor its restart-required lines): the
+    # reload reads and builds again, against the running one.
     app, state, path = _app(tmp_path)
     loop = asyncio.get_running_loop()
     real = state._prepare_reload
@@ -413,16 +595,23 @@ async def test_a_failure_overlapped_by_an_apply_is_judged_again(
 
             loop.call_soon_threadsafe(apply)
             assert applied.wait(HOLD_SECONDS)
-            raise proxy_mod.ConfigError("judged against the old configuration")
+            failure = proxy_mod.ConfigError("judged against the old configuration")
+            if stage == "build":
+                fresh = dataclasses.replace(
+                    state.config, vault=dataclasses.replace(state.config.vault, session="two")
+                )
+                raise proxy_mod._DetectionBuildFailed(fresh, failure)
+            raise failure
         return real(live)
 
     monkeypatch.setattr(state, "_prepare_reload", first_fails)
     path.write_text(THREE_RULES)
-    with caplog.at_level(logging.ERROR, logger="llm_redact"):
+    with caplog.at_level(logging.WARNING, logger="llm_redact"):
         state.reloads.request()
         await state.reloads.wait()
     assert len(calls) == 2
     assert "config reload failed" not in caplog.text
+    assert "require restart" not in caplog.text
     assert _enabled(state) == ("email", "ipv4", "jwt")
 
 

@@ -300,7 +300,11 @@ refused unless `allow_remote = true` and the scheme is `https`. Requests go
 exactly to `url`: no proxy or netrc from the environment, no redirect
 followed, answers asked for uncompressed (a compressed one is a failure)
 and read no further than 1 MiB. The backend sends no credential of its own,
-and `url` may not carry one.
+and `url` may not carry one. In a container, loopback is the container's
+own: run the model server in the same network namespace (beside llm-redact
+in its Kubernetes pod, or with `docker run --network container:NAME`), or
+put https in front of it and set `allow_remote = true` — a plain-http
+`host.docker.internal` URL is refused.
 
 **Pinned model.** Before the backend is built (at startup, `serve --check`,
 and on a reload that changes `[detection]`) the server must list `model`
@@ -386,7 +390,11 @@ names the failure. A string the model cannot answer within its limits —
 more values than one answer holds (2,048 tokens, 512 values), or text that
 makes it ramble — fails the same way, and a failure is never remembered: with
 `"block"`, every request that carries that string again (a conversation's
-history) is refused until the string leaves it.
+history) is refused until the string leaves it. A server that hangs, rather
+than refusing the connection, costs every new string up to `timeout_ms`
+before it fails — with `"skip"` too, where the next string asks again — and
+strings are asked one at a time for the whole proxy, so keep `timeout_ms`
+well below what your clients wait for an answer.
 
 Like every NER backend it is best effort, measured per model, never a
 guarantee ([threat-model.md](threat-model.md#contextual-values-rules-and-models)).

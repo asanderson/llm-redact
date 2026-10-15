@@ -13,7 +13,6 @@ countries. A value glued into a longer token is still not one. That nothing
 """
 
 import json
-import re
 import time
 from collections.abc import Callable
 
@@ -205,14 +204,27 @@ def test_the_paper_format_is_read_only_at_the_registry_length() -> None:
         for size in range(15, 35):
             value = with_check_digits(country, ("XYZW" + "1234567890" * 3)[: size - 4])
             paper = " ".join(value[i : i + 4] for i in range(0, len(value), 4))
-            output = redacted(f"IBAN {paper} ok")
+            text = f"IBAN {paper} ok"
             if size == length:
-                assert output == "IBAN «IBAN_001» ok"
+                assert redacted(text) == "IBAN «IBAN_001» ok"
             else:
                 # Not an IBAN. Its digit groups may hold a Luhn-valid card
-                # since 1.13.0 (test_credit_card_groups.py), nothing else.
-                assert set(re.findall(r"«([A-Z_]+)_\d+»", output)) <= {"CREDIT_CARD"}
-                assert re.sub(r"«CREDIT_CARD_\d+»", "", output).startswith(f"IBAN {paper[:9]}")
+                # since 1.13.0 (test_credit_card_groups.py): exactly the
+                # cards the credit_card rule reads are redacted.
+                assert redacted(text) == _cards_redacted(text)
+
+
+def _cards_redacted(text: str) -> str:
+    """``text`` with what the credit_card rule alone reads in it replaced,
+    numbered as the vault numbers them."""
+    card = next(det for det in DETECTORS if det.name == "credit_card")
+    numbers: dict[str, int] = {}
+    output, pos = [], 0
+    for found in card.detect(text):
+        number = numbers.setdefault(found.value, len(numbers) + 1)
+        output += [text[pos : found.start], f"«CREDIT_CARD_{number:03d}»"]
+        pos = found.end
+    return "".join(output) + text[pos:]
 
 
 # --- cost ---------------------------------------------------------------------

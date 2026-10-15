@@ -6,19 +6,27 @@ read together with that group, failed the Luhn check, and the scan went on
 after it. Since 1.13.0 a vetoed candidate is looked inside
 (regex_rules._card_inside, RegexRule.inside): a Luhn-valid stretch from a
 group start to a group end, in a card's own grouping, ending where no other
-rule's value can start inside it and run on. That nothing 1.12.1 redacted
-is lost is test_no_loss_since_1_12_0.py (credit_card is frozen there).
+built-in rule's value can start inside it and run on. That nothing 1.12.1
+redacted is lost is test_no_loss_since_1_12_0.py (credit_card is frozen
+there, and 1.12.1's pipeline is checked too).
 """
 
 import dataclasses
 import random
+import re
 from collections.abc import Callable
 
 import pytest
 
 from llm_redact.bench.corpus import VALUE_GENERATORS
 from llm_redact.detection.engine import DetectionConfig, DetectorPlan, build_detectors
-from llm_redact.detection.regex_rules import BUILTIN_RULES, RegexDetector
+from llm_redact.detection.regex_rules import (
+    _CARD_END,
+    _CARD_GROUPING,
+    BUILTIN_RULES,
+    RegexDetector,
+    _card_inside,
+)
 from llm_redact.redactor import Redactor
 from llm_redact.vault import InMemoryVault
 from test_value_punctuation import ALLOWLIST, DETECTORS, _seconds, redacted
@@ -138,6 +146,95 @@ def _runs(seed: int, count: int) -> list[str]:
     return texts
 
 
+def _luhn(digits: str) -> bool:
+    """The Luhn check, transcribed apart from the rule's (bench/corpus.py
+    has a third): not all zeros, and the doubled-digit sum ends in 0."""
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch) * (1 + i % 2)
+        total += d // 10 + d % 10
+    return total % 10 == 0 and any(int(ch) for ch in digits)
+
+
+def _inside_by_brute_force(match: re.Match[str], limit: int) -> tuple[int, int] | None:
+    """What _card_inside's docstring says it returns, searched for by
+    trying every stretch: from a group start inside the vetoed candidate to
+    a group end before ``limit``, digit groups joined by single separators,
+    13 to 19 digits, the candidate itself aside; in a card's grouping,
+    ending where _CARD_END lets it, passing the check; the one of most
+    digits, of equal length the one starting last."""
+    text = match.string
+    best: tuple[int, int, int] | None = None
+    for start in range(match.start(), match.end()):
+        if start > match.start() and text[start - 1] not in " -":
+            continue
+        digits = ""
+        for end in range(start + 1, limit + 1):
+            last = text[end - 1]
+            if last in " -":
+                if text[end - 2] in " -":
+                    break
+                continue
+            if not last.isdecimal():
+                break
+            digits += last
+            if len(digits) > 19:
+                break
+            if end < len(text) and re.match(r"\w", text[end]):
+                continue  # inside a group
+            after = _CARD_END.match(text, end)
+            if (
+                len(digits) >= 13
+                and (start, end) != match.span()
+                and _CARD_GROUPING.fullmatch(text[start:end])
+                and after is not None
+                and (after.group(1) is None or len(digits) + len(after.group(1)) <= 19)
+                and _luhn(digits)
+                and (best is None or (len(digits), start) > best[:2])
+            ):
+                best = (len(digits), start, end)
+    return None if best is None else best[1:]
+
+
+def test_the_card_read_inside_is_the_one_its_definition_names() -> None:
+    # Every vetoed candidate of random runs of digit groups (cards and
+    # card-shaped groups among them, other separators and words beside
+    # them): _card_inside finds what a search of every stretch finds.
+    rng = random.Random(21)
+    pieces = ("4111", "1111", "12", "123", "3782", "822463", "10005", "x") + (
+        "4111 1111 1111 1111", "4111-1111-1111-1111", "3782 822463 10005", "4111111111111111"
+    )  # fmt: skip
+    joins = (" ", "-") * 6 + ("", ".", ". ", ":", ": ", "/", "@", "\u00a0", "  ")
+    card = VALUE_GENERATORS["credit_card"][1]
+    texts = [
+        "".join(
+            (rng.choice(pieces) if rng.random() < 0.7 else str(rng.randrange(10**6)))
+            + rng.choice(joins)
+            for _ in range(rng.randrange(1, 10))
+        )
+        for _ in range(4000)
+    ]
+    # Two stretches pass: a card, and the card with the group after it.
+    for _ in range(300):
+        number = card(rng)
+        while not _luhn(number + (after := str(rng.randrange(1, 1000)))):
+            pass
+        fours = " ".join(number[i : i + 4] for i in range(0, 16, 4))
+        texts.append(f"{rng.randrange(1, 100)} {fours} {after}")
+    checked = found = 0
+    for text in texts:
+        matches = list(RULE.pattern.finditer(text))
+        for i, match in enumerate(matches):
+            if RULE.validator is not None and RULE.validator(match):
+                continue
+            limit = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            card = _card_inside(match, limit)
+            assert (card and card.span()) == _inside_by_brute_force(match, limit), text
+            checked += 1
+            found += card is not None
+    assert checked > 1500 and found > 300
+
+
 def test_what_1_12_1_found_is_found_as_before() -> None:
     # The scan is finditer's, and what the check accepted alone is found
     # exactly as before: only what is found inside a vetoed candidate is
@@ -160,9 +257,10 @@ def test_what_1_12_1_found_is_found_as_before() -> None:
 
 def test_random_digit_runs_hardly_gain_false_positives() -> None:
     # The grouping and the end the stretch must have keep the added false
-    # positives small: measured on 5,000 such runs, 13.58% of them held a
-    # Luhn-valid candidate before and 13.78% now; without the grouping
-    # requirement it would be 60.40%.
+    # positives small: on these 3,000 runs 12.93% held a Luhn-valid
+    # candidate before and 13.13% now (docs/detection.md's 13.58% and
+    # 13.78% are another 5,000 such runs; without the grouping requirement
+    # 60.40% of those).
     texts = _runs(7, 3000)
     now = sum(bool(list(CARD.detect(text))) for text in texts)
     before = sum(bool(list(CARD_1_12_1.detect(text))) for text in texts)
@@ -192,12 +290,14 @@ def test_no_adversarial_digit_run_costs_more_than_1_12_1s_worst() -> None:
     # The rule is linear on every run (ten times the input, under thirty
     # times the time: about ten), and the whole Redactor takes on each less
     # than twice what the 1.12.1 pipeline took on the slowest of them:
-    # measured, the slowest ties with it. Over that bound both are timed
-    # again, so a burst of other load does not fail it.
-    from test_no_loss_since_1_12_0 import OLD_PLAN
+    # measured, about one and a half times (the rule alone about three
+    # times 1.12.1's on these runs, where nearly every candidate is looked
+    # inside). Over that bound both are timed again, so a burst of other
+    # load does not fail it.
+    from test_no_loss_since_1_12_0 import PLAN_1_12_1
 
     release = Redactor(DETECTORS, InMemoryVault(), ALLOWLIST).redact_text
-    before = Redactor(OLD_PLAN, InMemoryVault(), ALLOWLIST).redact_text
+    before = Redactor(PLAN_1_12_1, InMemoryVault(), ALLOWLIST).redact_text
     scan: Callable[[str], object] = lambda text: list(CARD.detect(text))  # noqa: E731
 
     def reference() -> float:

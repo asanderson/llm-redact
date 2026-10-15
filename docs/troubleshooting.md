@@ -217,7 +217,10 @@ crash; fix the file (`serve --check` shows the error) and HUP again. The
 second lists sections that only apply on a full restart: host, port,
 allowed_hosts, allowed_origins, vault, audit, log, tls, otel, users, email,
 extraction, and overrides changes are kept as they were and named in the
-"require restart" line.
+"require restart" line — and so are the `llm` backend's `[detection.ner.llm]`
+`url`, `allow_remote` and `api_key_env`, named by their dotted path
+(`detection.ner.llm.url`; see "a reload cannot start the llm backend"
+below).
 
 ## "the vault at {path} is encrypted; set [vault] encryption = \"fernet\" …"
 
@@ -1070,18 +1073,20 @@ one it was given), a connection fault by its exception type, `unreadable
 answer` (not the JSON the request asked for — a model or server version
 without structured output), `encoded answer` (the server compressed it
 although asked not to), `answer too large`, `too many entities`, or `circuit
-breaker open`: an earlier string's timeout, connection fault or HTTP 5xx
-opened the backend's circuit breaker, and until `breaker_seconds` (default
-30) have passed every string that needs the server fails at once without
-asking it; then the next string's call probes the server, and an answer
-closes the breaker (`/status` `detection.ner.backends.llm.breaker` shows its
-state and `retry_in_seconds`, and `llm-redact status` a posture line while it
-is open). The proxy logs one WARNING per outage (`llm NER backend: model
+breaker open`: `breaker_failures` (default 3) earlier strings in a row failed
+on a timeout, connection fault or HTTP 5xx and opened the backend's circuit
+breaker, and until `breaker_seconds` (default 30) have passed every string
+that needs the server fails at once without asking it; then the next
+string's call probes the server, and an answer closes the breaker (`/status`
+`detection.ner.backends.llm.breaker` shows its state, the `failures` in a
+row against its `threshold` and `retry_in_seconds`, and `llm-redact status`
+a posture line while it is open). The proxy logs one WARNING per outage (`llm NER backend: model
 'MODEL' at URL failed (…)`, naming the breaker when it opened) and an INFO
 line when the server answers again; `errors` in `/status` `detection.ner`
 and `llm_redact_ner_errors_total` count each string (`breaker_opens` and
 `breaker_short_circuits` the breaker's part). Fix the server, raise
-`timeout_ms`, or set `on_error = "skip"` to forward such requests with the
+`timeout_ms` (or `breaker_failures`, when single strings that make the model
+time out keep opening it), or set `on_error = "skip"` to forward such requests with the
 other detectors' findings — a coverage opt-out, shown by `llm-redact status`
 and `doctor`. `llm-redact preview` prints `UNAVAILABLE: …` and exits 1 for
 the same failure.
@@ -1100,6 +1105,23 @@ stops; a reload keeps the running configuration (and the key it was built
 with), and since a running proxy's environment cannot change, a variable
 exported after the start takes a restart. The message names the variable,
 never its value.
+
+## "[detection.ner] a reload cannot start the llm backend …" / "config reload: detection.ner.llm.url changes require restart"
+
+The `llm` backend's `url`, `allow_remote` and `api_key_env` — where it
+sends every scanned string unredacted, and which variable's value it sends
+there as its key — take a restart, although the rest of `[detection]`
+reloads hot. A reload (SIGHUP, the llm-redact-pro config editor) that changed
+them keeps their running values, applies the rest and names each kept key
+(`detection.ner.llm.url`, `detection.ner.llm.allow_remote`,
+`detection.ner.llm.api_key_env`) in its "require restart" warning. A reload
+that would START the backend — `"llm"` added to `[detection.ner] backends`,
+NER switched on with it, its table added; also one a previous reload
+stopped — is refused (`config reload failed; keeping current config: …`,
+the editor's 400), and so is one the kept `url` makes invalid (`url is the
+server's base URL, without /v1 … — the running url is kept on a reload`: a
+changed `api`). Restart the proxy (`serve --check` first) to apply the file
+as written.
 
 ## "[detection.ner.llm] api_key_env must name an environment variable …" / "… must not name an LLM_REDACT_ variable …"
 

@@ -84,6 +84,7 @@ from llm_redact.config import (
     load_config,
     map_writes_mode,
     normalize_origin,
+    pin_restart_only_paths,
     resolve_config_path,
     resolve_credentials,
     unsupported_plugin_capabilities,
@@ -1756,7 +1757,9 @@ class ProxyState:
 
         Hot: detection rules/allowlists/custom rules/NER, rehydration.fuzzy,
         inject_system_note, max_body_bytes, provider upstreams. Requires
-        restart (kept with a warning): vault, audit, host, port. An open
+        restart (kept with a warning): vault, audit, host, port, the llm
+        backend's url, allow_remote and api_key_env (and a reload that
+        would start that backend is refused). An open
         realtime connection whose provider settings, upstream authorizer or
         detection policy changed is closed 1012 (reconnect). The access
         gate's optional ``reload`` then re-reads its own policy.
@@ -1775,10 +1778,20 @@ class ProxyState:
         """Swap in the hot-swappable parts of ``fresh``; shared by SIGHUP
         reload and the config editor endpoint.
 
-        Restart-only fields (vault, audit, host, port, log, tls, otel) are
+        Restart-only fields (RESTART_ONLY_KEYS: vault, audit, host, port,
+        log, tls, otel, ...; plugin sections; RESTART_ONLY_PATHS inside
+        [detection]: the llm backend's url, allow_remote, api_key_env) are
         pinned to their running values; the names of any that differed are
-        returned (and warned) so callers can surface "restart required".
+        returned (and warned) so callers can surface "restart required" —
+        a section's name, a path's dotted one (``detection.ner.llm.url``).
+        A ``fresh`` the pinned paths refuse (one that would start the llm
+        backend, or one they make invalid) is a ConfigError before anything
+        is logged or built: the running configuration stays.
         """
+        # Keys inside a hot section that are restart-only all the same (where
+        # the llm backend sends scanned text, and its key): kept from the
+        # running configuration, or the reload refused.
+        fresh, kept_paths = pin_restart_only_paths(fresh, self.config)
         restart_required = [
             field_name
             for field_name in RESTART_ONLY_KEYS
@@ -1795,6 +1808,9 @@ class ProxyState:
             logger.warning(
                 "config reload: [%s] changes require restart; keeping current", field_name
             )
+        for path_name in kept_paths:
+            logger.warning("config reload: %s changes require restart; keeping current", path_name)
+        restart_required += kept_paths
         effective = dataclasses.replace(
             fresh,
             extensions=self.config.extensions,
@@ -1947,7 +1963,12 @@ class ProxyState:
         live detectors for it, so a build here would only load a second
         copy of every NER model on each editor save. (``[detection]`` has
         no env override, so the candidate's is the one apply would use.)
+        Like apply_config, it keeps the running values of the restart-only
+        keys inside ``[detection]`` (RESTART_ONLY_PATHS) and refuses a
+        candidate that would start the llm backend or that the kept values
+        make invalid.
         """
+        candidate, _kept = pin_restart_only_paths(candidate, self.config)
         if candidate.detection != self.config.detection:
             build_detectors(candidate.detection, model_policy=self.model_policy)
             build_allowlist(candidate.detection)

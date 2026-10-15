@@ -1433,7 +1433,8 @@ class ModelPolicy(Protocol):
     exception, an empty string or any other answer refuses too (the core
     then names the exception TYPE only): nothing fails open. The message is
     shown and logged: name models, backends, licenses and files, never
-    file content."""
+    file content. A reload's build and the editor's dry run run off the
+    event loop, so ``check`` may be called on a worker thread."""
 
     def check(self, load: ModelLoad) -> str | None: ...
 
@@ -1620,6 +1621,8 @@ class ConfigSection(Protocol):
     for ``config show`` and the config editor's rewrite, so the section
     round-trips. Plugin sections are restart-only: a reload that changes
     one keeps the running value and reports ``name`` as restart-required.
+    A SIGHUP reload reads and parses the file off the event loop, so
+    ``parse`` may be called on a worker thread.
     """
 
     name: str

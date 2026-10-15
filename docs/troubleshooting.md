@@ -222,6 +222,31 @@ extraction, and overrides changes are kept as they were and named in the
 (`detection.ner.llm.url`; see "a reload cannot start the llm backend"
 below).
 
+The reload reads the file and builds what changed (every NER model of a
+changed `[detection]`) off the event loop, so the proxy keeps answering
+while it runs, and then swaps it in; the "config reloaded" INFO line says
+it applied. A second `kill -HUP` while one runs is not lost: one more
+reload runs right after it and reads the file again.
+
+## "config reload failed unexpectedly (TYPE)"
+
+A reload failed in a way no configuration error explains — a bug, or a
+plugin raising something unexpected while the new configuration was read
+or built. Only the exception type is logged (its message could quote the
+file). Nothing was swapped: the running configuration stays live and the
+proxy keeps serving; the next `kill -HUP` reloads as usual. Check the file
+with `serve --check`, and report the type if it repeats.
+
+## "config reload: the configuration changed during 3 builds off the event loop; building on it"
+
+A WARNING from a `kill -HUP`: while the reload built the new configuration
+off the event loop, a config editor save (llm-redact-pro) applied another
+one — three times in a row. A build made from the file as it was before a
+save is never applied (that would undo the save), so the reload started
+over each time; now it reads the file and builds on the event loop, holding
+requests for that build (seconds when NER models load). Nothing to fix:
+avoid saving in the editor and signalling at the same moment.
+
 ## "the vault at {path} is encrypted; set [vault] encryption = \"fernet\" …"
 
 The vault was migrated to encrypted form (schema v3, one-way) but the

@@ -394,7 +394,15 @@ make that safe and cheap:
   otherwise the apply builds as it would without them. The apply spends the prepared build either way; close one
   you do not apply (closing twice is harmless).
 
-A SIGHUP reload is unchanged: it builds on the event loop.
+A SIGHUP reload builds off the event loop the same way: the core reads and
+parses the file and builds a changed `[detection]` on a worker thread, then
+applies with that build on the loop (with none of the dry run's extra
+checks: an apply makes the builds that matter itself). So a plugin's
+`ConfigSection.parse` and its model-load policy's `check` may be called on
+a worker thread. A SIGHUP reload that lands while a save's check runs makes
+the save's prepared build stale, as before; a save that lands while a
+SIGHUP reload builds makes the reload drop its build and read the file the
+save wrote.
 
 ## For contributors
 

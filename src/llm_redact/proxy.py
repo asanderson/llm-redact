@@ -198,6 +198,7 @@ from llm_redact.redactor import (
 )
 from llm_redact.registry import get_registry, loaded_plugins, pro_package_installed
 from llm_redact.rehydrate import Rehydrator, RehydratorPool
+from llm_redact.reloads import ReloadScheduler, build_off_loop
 from llm_redact.scan_capture import (
     CLOSE_SECONDS as SCAN_CLOSE_SECONDS,
 )
@@ -278,6 +279,14 @@ def _listed_samples(samples: Callable[[], object]) -> list[object]:
 # work negligible.
 _TTL_PRUNE_INTERVAL_SECONDS = 3600.0
 _LICENSE_REFRESH_INTERVAL_SECONDS = 86400.0
+
+# How many times a SIGHUP reload builds off the event loop while an apply
+# (a config editor save, a ``reload()``) keeps landing during its build
+# (``ProxyState.reload_off_loop``): each landing may have rewritten the
+# file, so the build read a file no longer current and is redone. Past it
+# the reload reads and builds ON the loop (``reload``), as every reload once
+# did: always the file as it is, at the cost of holding requests meanwhile.
+RELOAD_BUILD_ATTEMPTS = 3
 
 # The llm-redact-pro sinks' own bound on one upload (their HTTP client's
 # timeout): the shutdown deadline below must never be the one that cuts a
@@ -970,6 +979,20 @@ def _kept_restart_only(fresh: Config, running: Config) -> Config:
     )
 
 
+class _ReloadBuild(NamedTuple):
+    """What a SIGHUP reload makes off the event loop
+    (``ProxyState._prepare_reload``): the file's configuration, env
+    overrides applied (``fresh``, as ``reload`` hands it to
+    ``apply_config``), and the detection objects built for its changed
+    ``[detection]`` (``prepared``, ``_PreparedConfig``)."""
+
+    fresh: Config
+    prepared: _PreparedConfig
+
+    def close(self) -> None:
+        self.prepared.close()
+
+
 class ProxyState:
     def __init__(
         self,
@@ -1310,6 +1333,12 @@ class ProxyState:
         self.override_config_arg = (
             hint_config(config_path, os.environ) if self.overrides is not None else None
         )
+        # SIGHUP's reloads (reloads.ReloadScheduler; the lifespan registers
+        # its ``request`` as the signal handler): one at a time, the file
+        # read and a changed [detection] built off the event loop
+        # (``reload_off_loop``), signals arriving meanwhile coalesced into one
+        # more reload; closed first thing at shutdown.
+        self.reloads = ReloadScheduler(self.reload_off_loop)
 
     def override_scope(self) -> OverrideScope | None:
         """This request's view of its requester's overrides — the subject
@@ -1939,7 +1968,12 @@ class ProxyState:
         self.detection_snapshot = dataclasses.replace(self.detection_snapshot, **changes)
 
     def reload(self) -> None:
-        """Rebuild hot-swappable config on SIGHUP; never crash a running proxy.
+        """Rebuild hot-swappable config from the file; never crash a running
+        proxy. Synchronous: the file is read and everything that changed is
+        built ON the event loop, and the swap has happened when this
+        returns. SIGHUP runs ``reload_off_loop`` instead (through
+        ``reloads``), which builds off the loop; this form is what it falls
+        back to when applies keep overlapping its builds.
 
         Hot: detection rules/allowlists/custom rules/NER, rehydration.fuzzy,
         inject_system_note, max_body_bytes, provider upstreams. Requires
@@ -1959,6 +1993,97 @@ class ProxyState:
         # ConfigError and tomllib.TOMLDecodeError are both ValueErrors.
         except (ValueError, OSError, re.error, ImportError) as exc:
             logger.error("config reload failed; keeping current config: %s", exc)
+
+    async def reload_off_loop(self) -> None:
+        """``reload`` with its slow part off the event loop — what SIGHUP
+        runs (``reloads``): the file is read and parsed, and a changed
+        ``[detection]`` built (every NER model loaded; the llm backend's
+        model-list check), on a worker thread (``_prepare_reload``), while
+        the loop keeps serving requests; then ``apply_config`` runs on the
+        loop with that build (``prepared=``), adopting it instead of
+        building again, in the one synchronous step it always was. Only
+        WHERE the build runs changes: the reload's checks, its outcomes and
+        its log lines are ``reload``'s — no dry-run probe is added (the
+        router's, the upstream authorizers', the access gate's
+        ``validate_reload``: an apply runs the builds that matter itself,
+        and the gate's own ``reload`` keeps its previous policy with a
+        WARNING, as before).
+
+        An apply landing on the loop while the build runs (a config editor
+        save, a ``reload()``) changes the running configuration — and may
+        have rewritten the file — so the build, checked against a
+        configuration no longer running and possibly read from a file no
+        longer current, is closed and the reload starts over: it reads the
+        file again and builds again off the loop. Never applied as it was:
+        that could put back the file as it was before an editor's save.
+        After ``RELOAD_BUILD_ATTEMPTS`` overlapped builds the reload runs
+        ``reload()`` on the loop (the file as it is, built there).
+
+        Failures are ``reload``'s: a file that does not parse, a build that
+        fails (an unknown rule, a missing NER extra, a model not cached, a
+        reload that would start the llm backend) is logged "config reload
+        failed; keeping current config" and nothing is swapped. Cancelled
+        (the shutdown began), it applies nothing and the build its worker
+        finishes is closed (``build_off_loop``)."""
+        for _attempt in range(RELOAD_BUILD_ATTEMPTS):
+            live = self.config
+            try:
+                built = await build_off_loop(
+                    functools.partial(self._prepare_reload, live), _ReloadBuild.close
+                )
+            except (ValueError, OSError, re.error, ImportError) as exc:
+                if self.config is live:
+                    logger.error("config reload failed; keeping current config: %s", exc)
+                    return
+                continue  # judged against a configuration no longer running
+            try:
+                if self.config is not live:
+                    continue  # an apply landed meanwhile: read and build again
+                try:
+                    self.apply_config(built.fresh, prepared=built.prepared)
+                except (ValueError, OSError, re.error, ImportError) as exc:
+                    logger.error("config reload failed; keeping current config: %s", exc)
+                return
+            finally:
+                built.close()  # spent by the apply; closing again is harmless
+        logger.warning(
+            "config reload: the configuration changed during %d builds off the event loop;"
+            " building on it",
+            RELOAD_BUILD_ATTEMPTS,
+        )
+        self.reload()
+
+    def _prepare_reload(self, live: Config) -> _ReloadBuild:
+        """On a worker thread: the config file read and parsed (env
+        overrides applied, as ``reload`` applies them) and the detection
+        objects of its changed ``[detection]`` built (``_prepare_detection``,
+        the restart-only paths kept from ``live``, the running configuration
+        when the reload began). Raises what ``reload`` would log: a file
+        that cannot be read or parsed, a build that fails. Assigns nothing
+        on the proxy."""
+        fresh = apply_env_overrides(load_config(self.config_path))
+        _pinned, prepared = self._prepare_detection(fresh, live)
+        return _ReloadBuild(fresh, prepared)
+
+    def _prepare_detection(
+        self, candidate: Config, running: Config
+    ) -> tuple[Config, _PreparedConfig]:
+        """The detection part of a prepared build, shared by
+        ``prepare_config`` (the editor's dry run) and a SIGHUP reload: the
+        candidate with ``running``'s values kept for the restart-only paths
+        inside ``[detection]`` (``pin_restart_only_paths`` — refusing one
+        that would start the llm backend, or that the kept values make
+        invalid), and the detection objects built for its ``[detection]``
+        when that differs from the running snapshot's (None when it does
+        not: an apply keeps the live objects), with that snapshot's
+        generation. Reads the running snapshot once; assigns nothing (safe on
+        a worker thread)."""
+        candidate, _kept = pin_restart_only_paths(candidate, running)
+        snapshot = self.detection_snapshot
+        built = None
+        if candidate.detection != snapshot.detection:
+            built = _build_detection(candidate.detection, model_policy=self.model_policy)
+        return candidate, _PreparedConfig(snapshot.generation, built)
 
     def apply_config(self, fresh: Config, *, prepared: PreparedConfig | None = None) -> list[str]:
         """Swap in the hot-swappable parts of ``fresh``; shared by SIGHUP
@@ -2109,7 +2234,10 @@ class ProxyState:
         # logged and counted (bookkeeping stage gate_reload).
         self.authorization.reload_policy(effective)
         if displaced_router is not None:
-            displaced_router.close()
+            # Contained like every close after the swap: the new
+            # configuration is live, so a fault here is logged by type and
+            # never reported as a failed reload.
+            _close_contained("router", displaced_router.close)
         _close_upstream_auths(displaced_auths)
         for warning in effective.routing.warnings:
             logger.warning("routing: %s", warning)
@@ -2181,29 +2309,31 @@ class ProxyState:
         apply swapping them meanwhile is either seen whole or not at all
         (and the generation tells apply_config which).
         """
-        candidate, _kept = pin_restart_only_paths(candidate, self.config)
-        running = self.detection_snapshot
-        snapshot = None
-        if candidate.detection != running.detection:
-            snapshot = _build_detection(candidate.detection, model_policy=self.model_policy)
-        effective = apply_env_overrides(candidate)
-        resolved = _resolve_license_info(effective)
-        resolve_credentials(candidate.routing, os.environ)
-        router = self.router
-        if router is not None:
-            router.validate(candidate)
-        elif candidate.routing.enabled:
-            probe = get_registry().build_router(effective, resolved.tier)
-            if probe is not None:
-                probe.close()
-        # Upstream authorizers: a build-and-close probe (construction does no
-        # network I/O), so a missing package or an unresolvable region is a
-        # 400 in the editor rather than a failed apply after the write.
-        _close_upstream_auths(_build_upstream_auths(effective.providers))
-        # The access gate's own dry run of its policy (its optional
-        # validate_reload): a refusal is a ConfigError like any above.
-        self.authorization.validate_policy(candidate)
-        return _PreparedConfig(running.generation, snapshot)
+        candidate, prepared = self._prepare_detection(candidate, self.config)
+        try:
+            effective = apply_env_overrides(candidate)
+            resolved = _resolve_license_info(effective)
+            resolve_credentials(candidate.routing, os.environ)
+            router = self.router
+            if router is not None:
+                router.validate(candidate)
+            elif candidate.routing.enabled:
+                probe = get_registry().build_router(effective, resolved.tier)
+                if probe is not None:
+                    probe.close()
+            # Upstream authorizers: a build-and-close probe (construction does
+            # no network I/O), so a missing package or an unresolvable region
+            # is a 400 in the editor rather than a failed apply after the write.
+            _close_upstream_auths(_build_upstream_auths(effective.providers))
+            # The access gate's own dry run of its policy (its optional
+            # validate_reload): a refusal is a ConfigError like any above.
+            self.authorization.validate_policy(candidate)
+        except BaseException:
+            # A refused candidate: what was built for it is dropped now, not
+            # with the last reference to the exception.
+            prepared.close()
+            raise
+        return prepared
 
     # DashboardHost's optional marker: ``preview`` reads ONE detection
     # snapshot, so a preview on a worker thread never mixes two
@@ -8657,7 +8787,9 @@ def create_app(
         sighup_registered = False
         if hasattr(signal, "SIGHUP"):
             try:
-                loop.add_signal_handler(signal.SIGHUP, state.reload)
+                # The reload runs as a task (state.reloads): the file read
+                # and a changed [detection] built off the event loop.
+                loop.add_signal_handler(signal.SIGHUP, state.reloads.request)
                 sighup_registered = True
             except (NotImplementedError, RuntimeError, ValueError):
                 # Windows event loops / non-main threads (uvloop raises
@@ -8692,9 +8824,15 @@ def create_app(
             # sinks their final flush from the STILL-OPEN audit database,
             # close the audit database, and the vault last (its background
             # map writes drained before the sinks' flush).
-            await state.connections.stop()
+            #
+            # First, before anything here awaits: no configuration reload is
+            # begun or applied once the shutdown has begun. One still
+            # building off the loop is cancelled, and the build its worker
+            # thread finishes later is closed, never applied.
             if sighup_registered:
                 loop.remove_signal_handler(signal.SIGHUP)
+            await state.reloads.close()
+            await state.connections.stop()
             for task in background_tasks:
                 task.cancel()
             # A task that had already died (a sink's run() raising) must not

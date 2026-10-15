@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Any
 
@@ -566,3 +567,59 @@ async def test_a_failing_scan_close_never_skips_the_flush_or_the_closes(
     assert events[3:] == ["audit.close", "vault.close"]
     assert "closing the scan sinks failed (RuntimeError)" in caplog.text
     assert "SECRET" not in caplog.text
+
+
+async def test_a_reload_still_building_is_stopped_first_and_never_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A SIGHUP reload builds off the event loop (a changed [detection]: NER
+    # models load for seconds). One still building when the shutdown starts
+    # is cancelled before anything closes — never applied over a closing
+    # router, gate or vault — and the build its worker finishes later is
+    # closed (its models freed), after the databases closed.
+    events: list[str] = []
+    _register(monkeypatch, events)
+    app = _app(events, httpx.MockTransport(_answer))
+    state = app.state.proxy
+    entered, release = threading.Event(), threading.Event()
+
+    class Build:
+        fresh = state.config
+
+        @property
+        def prepared(self) -> Build:
+            return self
+
+        def close(self) -> None:
+            events.append("build.close")
+
+    def prepare(live: object) -> Build:
+        entered.set()
+        assert release.wait(10)
+        return Build()
+
+    def apply(*args: object, **kwargs: object) -> list[str]:
+        events.append("apply")
+        return []
+
+    monkeypatch.setattr(state, "_prepare_reload", prepare)
+    monkeypatch.setattr(state, "apply_config", apply)
+
+    class Router:
+        def close(self) -> None:
+            events.append(f"router.close (reload running: {state.reloads.running})")
+
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0)
+        state.router = Router()
+        state.reloads.request()
+        assert await asyncio.to_thread(entered.wait, 10)
+    assert events[0] == "router.close (reload running: False)"
+    assert events[-2:] == ["audit.close", "vault.close"]
+    release.set()
+    for _ in range(500):
+        if "build.close" in events:
+            break
+        await asyncio.sleep(0.01)
+    assert events[-3:] == ["audit.close", "vault.close", "build.close"]
+    assert "apply" not in events

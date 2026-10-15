@@ -313,6 +313,18 @@ A broken config file is logged and ignored — the running config
 stays live. There is deliberately no HTTP reload endpoint (it would be a
 CSRF-reachable mutating endpoint on loopback).
 
+The reload's slow part runs off the event loop: the proxy reads and parses
+the file and builds what changed — for a changed `[detection]`, every NER
+model it names, seconds of loading — on a worker thread while it keeps
+serving requests, then swaps the new configuration in one step. A second
+SIGHUP while a reload runs is not lost: exactly one more reload runs after
+it and reads the file again. A config editor save (llm-redact-pro) landing
+while a reload builds wins: the reload drops its build (made from the file
+as it was before the save) and starts over from the file the save wrote;
+after three such overlaps it builds on the event loop instead, holding
+requests for that build (a WARNING says so). A reload still building when
+the proxy shuts down applies nothing ([resilience.md](resilience.md#configuration-reloads-sighup)).
+
 The same guarded flow is available from inside an agent: the
 `/llm-redact:config-edit` plugin command reads the effective config,
 edits the file, gates on `serve --check`, reloads via SIGHUP, and reads
@@ -342,9 +354,10 @@ changed and never a value. Reconnecting puts the client under the new
 configuration in the same vault session, so tokens issued before the
 reload still restore.
 
-Reloads run on the proxy's event loop, and the relay checks for a reload
-between reading a client frame and redacting it, so no frame it reads after
-the reload is redacted or forwarded under the old configuration. The one
+A reload's swap runs on the proxy's event loop (a SIGHUP reload builds off
+it first, then swaps there), and the relay checks for a reload between
+reading a client frame and redacting it, so no frame it reads after the
+swap is redacted or forwarded under the old configuration. The one
 exception is a frame the relay had already read and handed to the
 provider's socket when the reload ran. A connection still being authorized
 under the proxy's identity when the reload lands is never dialled: it is

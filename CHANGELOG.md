@@ -206,10 +206,10 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     event loop like every NER backend; what a string held is remembered, so the history an agent
     resends with every request is not asked again. `llm-redact preview` exits 1 and names the
     failure when the server cannot read the text.
-- **A dashboard's preview and config check can run off the event loop safely, and a save loads
-  each NER model once.** The proxy's detectors, allowlists and modes are now one immutable
-  snapshot that a reload or a save swaps in a single step, and the redaction preview reads it
-  once: a preview a reload overlaps describes the configuration live when it began, never the
+- **A dashboard's preview and config check can run off the event loop safely, a save loads
+  each NER model once, and a SIGHUP reload builds off the event loop.** The proxy's
+  detectors, allowlists and modes are now one immutable snapshot that a reload or a save swaps
+  in a single step, and the redaction preview reads it once: a preview a reload overlaps describes the configuration live when it began, never the
   old detectors with the new modes. Three optional members of `plugin_api.DashboardHost`, read
   with `getattr` (an older core lacks them), let a dashboard plugin use this:
   `preview_snapshot` (True), `prepare_config(candidate)` — the config check, raising the same
@@ -217,8 +217,20 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   opaque `plugin_api.PreparedConfig` and safe on a worker thread — and the `prepared` keyword of
   `apply_config`, which adopts those models instead of loading them again on the event loop
   when they were prepared for the `[detection]` the apply runs (restart-only parts kept) and no
-  reload changed it since (otherwise the apply builds as before). `validate_config` is `prepare_config` followed by `close()`; a
-  SIGHUP reload is unchanged (docs/plugins.md, "The dashboard host").
+  reload changed it since (otherwise the apply builds as before). `validate_config` is `prepare_config` followed by `close()`.
+  A SIGHUP reload now does the same: it reads and parses the file and builds a changed
+  `[detection]` (every NER model loaded, the `llm` backend's model-list check) on a worker
+  thread while the proxy keeps answering, then applies that build on the event loop — with no
+  check added (the editor's dry-run probes stay the editor's) and its log lines and outcomes
+  unchanged. SIGHUPs arriving while a reload runs start exactly one more after it, which reads
+  the file again; a config editor save landing during the build makes the reload drop its
+  build and start over from the file the save wrote, never undoing the save (after three such
+  overlaps it builds on the event loop, with a WARNING); a reload still building at shutdown is
+  cancelled before anything closes and applies nothing, the build its worker finishes later
+  dropped. A reload failing unexpectedly is logged by exception type only ("config reload
+  failed unexpectedly"), never fatal. A plugin's `ConfigSection.parse` and model-load policy
+  `check` may therefore run on a worker thread (docs/plugins.md, "The dashboard host";
+  docs/resilience.md, "Configuration reloads (SIGHUP)").
 - **Four NER counters**: `ungrounded`, `errors`, `breaker_opens` and `breaker_short_circuits` in
   `/status` `detection.ner` and as `llm_redact_ner_ungrounded_total`,
   `llm_redact_ner_errors_total`, `llm_redact_ner_breaker_opens_total` and
@@ -227,6 +239,11 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   model server fails.
 
 ### Fixed
+- A configuration reload whose displaced router (llm-redact-pro routing turned off) failed to
+  close was reported as failed — the config editor answered 500, a SIGHUP logged a traceback —
+  although the new configuration was already live. The fault is now logged by exception type
+  ("closing the router failed") and the reload reports success, like every other close after
+  the swap.
 - docs/detection.md and docs/ner-landscape.md said the default `gliner` model finds 0.922 of
   OpenPII's English names, a figure no recorded bench result backs (none of the `gliner`
   default's recorded runs covers that slice); it is gone, and the `hf` figure beside it is now

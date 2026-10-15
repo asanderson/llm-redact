@@ -471,7 +471,8 @@ starts with `LLM_REDACT_` is refused: those hold llm-redact's own settings
 and keys, which must never reach a model server.
 
 **Pinned model.** Before the backend is built (at startup, `serve --check`,
-and on a reload that changes `[detection]`) the server must list `model`
+and on a reload that changes `[detection]` — which builds on a worker
+thread, so the wait holds no request) the server must list `model`
 (answering within 10 seconds, or `timeout_ms` when that is shorter); on
 Ollama its `/api/tags` digest must equal `digest` (required there; the
 64-character form `/api/tags` reports, with or without `sha256:` — `ollama

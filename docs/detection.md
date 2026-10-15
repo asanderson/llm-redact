@@ -329,9 +329,14 @@ request outgrows the context the server is asked for); one longer than
 `max_chars` is skipped, as on every backend. `timeout_ms` bounds a string's
 windows together: a window is asked only while time is left, each wait of
 its request (connecting, sending, every read) lasts at most what was left
-when that request started, and an answer still arriving once the time is up
-is cut — so a server that goes silent mid-answer can hold a string for up to
-about twice `timeout_ms` before it fails. What a string held is remembered by
+when that request started, and an answer body still arriving once the time
+is up is cut — so a server that does not answer, or goes silent
+mid-answer, holds a string for at most about twice `timeout_ms` before it
+fails. The bound is per read until the answer's headers are complete: a
+server that keeps sending header bytes, or interim `1xx` answers, a little
+at a time holds the string for as long as it keeps doing so. Your own
+server is trusted not to (one that misbehaves can as well fail every
+request). What a string held is remembered by
 its SHA-256 (the last 4,096 strings, in process memory, gone when a reload
 rebuilds the detectors), so the conversation history an agent resends with
 every request costs one call per new string.

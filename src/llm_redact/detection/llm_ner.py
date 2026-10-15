@@ -191,9 +191,12 @@ class _Client:
         self._http.close()
 
     def _call(self, method: str, path: str, body: Any, timeout: float) -> Any:
-        """One request's JSON answer within ``timeout`` seconds in all (httpx
-        bounds each read; an answer trickling in is cut at the deadline);
-        ``_Failed`` naming the failure kind."""
+        """One request's JSON answer, each wait for the server (connecting,
+        sending, every read) bounded by ``timeout`` seconds and an answer
+        body still arriving at that deadline cut (httpx bounds each read,
+        not the whole answer; until the headers are complete it is the only
+        bound, docs/detection.md says so); ``_Failed`` naming the failure
+        kind."""
         if timeout <= 0:
             raise _Failed("timeout")
         deadline = time.monotonic() + timeout

@@ -10,7 +10,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Literal, NamedTuple, get_args
 
 if TYPE_CHECKING:
     from llm_redact.detection.stats import NerStats
@@ -127,12 +127,28 @@ CORE_METRIC_FAMILIES = frozenset(
         "llm_redact_map_write_queue_depth",
         "llm_redact_map_write_wait_timeouts_total",
         "llm_redact_map_writes_mode",
+        "llm_redact_scan_captures_delivered_total",
+        "llm_redact_scan_captures_dropped_total",
+        "llm_redact_scan_capture_queue_depth",
         "llm_redact_vault_entries",
         "llm_redact_vault_sessions",
         "llm_redact_start_time_seconds",
         "llm_redact_uptime_seconds",
     }
 )
+
+
+class ScanCaptureCounts(NamedTuple):
+    """A plugin's scan sinks' queue, at one instant
+    (``scan_capture.ScanCapture.counts``): captures queued or in flight,
+    deliveries (one for each sink a capture reached and that returned
+    without a fault), dropped captures by reason (every reason present) and
+    sink faults."""
+
+    queued: int
+    delivered: int
+    dropped: Mapping[str, int]
+    faults: int
 
 
 def _escape_label(value: str) -> str:
@@ -247,6 +263,7 @@ class Metrics:
         audit_sink_rows_dropped: "Counter[str] | None" = None,
         map_write_queue_depth: int = 0,
         map_write_wait_timeouts: "Counter[str] | None" = None,
+        scan_capture: ScanCaptureCounts | None = None,
         ner_stats: "Iterable[tuple[str, NerStats]]" = (),
     ) -> str:
         lines: list[str] = []
@@ -469,6 +486,8 @@ class Metrics:
                 f'llm_redact_map_writes_mode{{mode="{_escape_label(self.map_writes_mode)}"}} 1'
             )
 
+        lines.extend(_scan_capture_lines(scan_capture))
+
         for name, help_text, value in (
             ("llm_redact_vault_entries", "Placeholder mappings held.", vault_entries),
             ("llm_redact_vault_sessions", "Vault sessions in use.", vault_sessions),
@@ -480,6 +499,44 @@ class Metrics:
             lines.append(f"{name} {value}")
 
         return "\n".join(lines) + "\n"
+
+
+def _scan_capture_lines(counts: ScanCaptureCounts | None) -> list[str]:
+    """The scan sinks' queue (scan_capture.py): the HELP/TYPE lines always,
+    so dashboards and alerts reading the families always find them — the
+    samples only while a plugin's sink is registered (None: the Free core
+    registers none), every drop reason then, zeros included."""
+    lines = [
+        "# HELP llm_redact_scan_captures_delivered_total Captures of the strings a request's"
+        " redaction scanned that a plugin's scan sink took: one for each sink a capture"
+        " reached and that returned without a fault (a fault counts under the bookkeeping"
+        " stage scan_sink).",
+        "# TYPE llm_redact_scan_captures_delivered_total counter",
+    ]
+    if counts is not None:
+        lines.append(f"llm_redact_scan_captures_delivered_total {counts.delivered}")
+    lines.append(
+        "# HELP llm_redact_scan_captures_dropped_total Captures never handed to the scan"
+        " sinks, by reason: captures, characters or items (the capture would take the queue"
+        " past its bound of captures, characters, or strings plus detections — the sinks do"
+        " not keep up), shutdown (still queued when the shutdown's drain ended, or handed in"
+        " once the sinks closed). The requests themselves were unaffected."
+    )
+    lines.append("# TYPE llm_redact_scan_captures_dropped_total counter")
+    if counts is not None:
+        for reason, count in sorted(counts.dropped.items()):
+            lines.append(
+                f'llm_redact_scan_captures_dropped_total{{reason="{_escape_label(reason)}"}}'
+                f" {count}"
+            )
+    lines.append(
+        "# HELP llm_redact_scan_capture_queue_depth Captures queued for the scan sinks or in"
+        " flight on their worker thread."
+    )
+    lines.append("# TYPE llm_redact_scan_capture_queue_depth gauge")
+    if counts is not None:
+        lines.append(f"llm_redact_scan_capture_queue_depth {counts.queued}")
+    return lines
 
 
 def _ner_lines(backends: list[tuple[str, "NerStats"]]) -> list[str]:

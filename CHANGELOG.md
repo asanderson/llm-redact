@@ -118,9 +118,17 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   sink with an `async def` member, or a factory answer that is not a tuple of sinks, refuses the
   startup. The queue drains (at most 5 s, beside the vault's map-write drain, so the shutdown budget
   is unchanged) before the sinks close at shutdown. `/status` gains a `scan_capture` block (sinks,
-  queued, delivered, dropped, faults) and `llm-redact status` a posture line while any sink is
-  registered. The Free core registers no sink, and then nothing is recorded or queued: the request
-  path is unchanged.
+  queued, delivered, dropped — in all and by reason —, faults) and `llm-redact status` a posture
+  line while any sink is registered. The Free core registers no sink, and then nothing is recorded
+  or queued: the request path is unchanged.
+- **Prometheus metrics for the scan sinks' capture queue.** While a plugin registers a scan sink,
+  `/metrics` serves `llm_redact_scan_captures_delivered_total` (one for each sink a capture
+  reached), `llm_redact_scan_captures_dropped_total{reason}` (the queue bound a dropped capture
+  would have passed — `captures`, `characters`, `items` — or `shutdown`, every reason from zero)
+  and the gauge `llm_redact_scan_capture_queue_depth`; without a sink only their `# HELP`/`# TYPE`
+  lines are there, as for the audit sinks' counters. A new alert in
+  `deploy/prometheus-alerts.yml`, `LlmRedactScanCapturesDropped` (warning), fires when captures
+  keep being dropped for 30 minutes: the requests are unaffected, the plugin misses their text.
 - **An opt-in `llm` NER backend: a generative model on a server you run finds names, addresses
   and other contextual values.** Add `"llm"` to `[detection.ner] backends` and name the server in
   `[detection.ner.llm]`: Ollama (`api = "ollama"`, the default, at `http://127.0.0.1:11434`) or

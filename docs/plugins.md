@@ -340,8 +340,15 @@ and counted, and each sink is closed once — never while a capture still
 runs: when one is still running as the 5 s run out, no sink is closed.
 
 `/status` `scan_capture` reports `sinks`, `queued`, `delivered_total` (one
-for each sink a capture reached), `dropped_total` and `faults_total`, and
-`llm-redact status` prints a posture line while any sink is registered. The threat model's
+for each sink a capture reached), `dropped_total`, `dropped_by_reason` (the
+queue bound a dropped capture would have passed — `captures`, `characters`,
+`items` — or `shutdown`) and `faults_total`, and `llm-redact status` prints a
+posture line while any sink is registered. While a sink is registered,
+`/metrics` serves the same as `llm_redact_scan_captures_delivered_total`,
+`llm_redact_scan_captures_dropped_total{reason}` and
+`llm_redact_scan_capture_queue_depth`
+([observability.md](observability.md#metrics-reference); the
+`LlmRedactScanCapturesDropped` alert warns when the queue keeps dropping). The threat model's
 [Scan sinks](threat-model.md#scan-sinks-a-plugin-reading-what-the-redaction-scanned)
 section states what the core does and does not guarantee.
 

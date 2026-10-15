@@ -647,3 +647,11 @@ async def test_every_core_family_is_known_and_documented() -> None:
     shorthands = re.findall(r"/ `(_[a-z_]+)`", reference)
     for family in rendered:
         assert f"`{family}`" in reference or any(family.endswith(s) for s in shorthands), family
+    # And the other way: every family the table names is one the core renders.
+    named = {
+        name
+        for line in reference.splitlines()
+        if line.startswith("| `llm_redact_")
+        for name in re.findall(r"`(llm_redact_[a-z_]+)`", line.split(" | ", 1)[0])
+    }
+    assert named and named <= rendered, sorted(named - rendered)

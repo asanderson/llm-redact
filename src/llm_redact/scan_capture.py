@@ -24,16 +24,23 @@ is the one without the seam. With sinks:
    ``MAX_PENDING_CHARS`` characters, ``MAX_PENDING_ITEMS`` strings and
    detections — the objects that hold them, which cost far more memory
    than a short string's characters): a capture that does not fit is
-   dropped and counted, never waited for, so a slow sink costs a request
-   nothing beyond the enqueue. A sink's exception — any, a
+   dropped and counted by the bound it would pass (``DROP_REASONS``),
+   never waited for, so a slow sink costs a request nothing beyond the
+   enqueue. A sink's exception — any, a
    ``BaseException`` included: it is plugin code on the core's thread — is
    contained: counted (bookkeeping stage ``scan_sink``, posted to the event
    loop that queued the capture) and logged by its TYPE only, once per
    outage;
 4. at shutdown the queue is drained for at most ``CLOSE_SECONDS`` (beside
    the vault's map-write drain, so the shutdown budget is unchanged), what
-   is left is dropped and counted, and each sink is closed once, after its
-   last capture returned.
+   is left is dropped and counted (reason ``shutdown``), and each sink is
+   closed once, after its last capture returned.
+
+The counts are served by ``/status`` ``scan_capture`` and, while a sink is
+registered, by ``/metrics`` (``ScanCapture.counts``:
+``llm_redact_scan_captures_delivered_total``,
+``llm_redact_scan_captures_dropped_total{reason}``,
+``llm_redact_scan_capture_queue_depth``).
 
 A sink receives UNREDACTED text: the values the proxy exists to keep from
 the provider (docs/plugins.md, docs/threat-model.md). This module never
@@ -53,16 +60,25 @@ import time
 from collections import Counter, deque
 from collections.abc import Callable, Sequence
 from contextlib import suppress
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple, get_args
 
 from llm_redact.detection.base import Detection
 from llm_redact.detection.engine import DetectorSource
+from llm_redact.metrics import ScanCaptureCounts
 from llm_redact.plugin_api import ScanContext, ScannedDetection, ScannedString, ScanSink
 
 logger = logging.getLogger("llm_redact")
 
 # The bookkeeping stage a sink's faults count in (``bookkeeping_errors``).
 STAGE = "scan_sink"
+# Why a capture was dropped (``llm_redact_scan_captures_dropped_total``'s
+# ``reason``; docs/observability.md names each): the first queue bound it
+# would pass, in this order — ``captures`` (MAX_PENDING_CAPTURES),
+# ``characters`` (MAX_PENDING_CHARS), ``items`` (MAX_PENDING_ITEMS) — or
+# ``shutdown`` (still queued when the shutdown's drain ended, or handed in
+# once the sinks closed).
+DropReason = Literal["captures", "characters", "items", "shutdown"]
+DROP_REASONS: tuple[DropReason, ...] = get_args(DropReason)
 # Captures waiting for the worker, at most (each one request or frame).
 MAX_PENDING_CAPTURES = 256
 # Characters of text waiting for the worker, at most: a capture that would
@@ -180,13 +196,17 @@ class ScanCapture:
         self._thread: threading.Thread | None = None
         self._closed = False
         self._delivered = 0
-        self._dropped = 0
+        # Dropped captures by reason, every reason present (zeros included:
+        # a counter series exists before its first increase).
+        self._dropped: dict[str, int] = dict.fromkeys(DROP_REASONS, 0)
         self._fault_count = 0
         # The sinks (by index) whose last call failed: one WARNING per
         # outage, one INFO when the sink works again.
         self._failing: set[int] = set()
-        # Whether the queue is full (one WARNING per episode).
+        # Whether the queue is full (one WARNING per episode), and whether a
+        # capture arrived once the sinks closed (one WARNING).
         self._overflowing = False
+        self._late = False
         # The event loop the counters are posted to (the submitter's).
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -225,15 +245,8 @@ class ScanCapture:
         chars = sum(len(scanned.text) for scanned in strings)
         items = len(strings) + sum(len(scanned.detections) for scanned in strings)
         with self._cond:
-            fits = not self._closed and (
-                not self._queue
-                or (
-                    len(self._queue) < self._max_pending
-                    and self._chars + chars <= self._max_chars
-                    and self._items + items <= self._max_items
-                )
-            )
-            if fits:
+            reason = self._refusal(chars, items)
+            if reason is None:
                 self._queue.append(
                     _Capture(recorder.context, strings, recorder.sinks, chars, items)
                 )
@@ -242,32 +255,69 @@ class ScanCapture:
                 self._ensure_thread()
                 self._cond.notify_all()
             else:
-                self._dropped += 1
-        if fits:
+                self._dropped[reason] += 1
+        if reason is None:
             if self._overflowing:
                 self._overflowing = False
                 logger.info("scan capture: caught up; captures are queued again")
             return
+        if reason == "shutdown":
+            if not self._late:
+                self._late = True
+                logger.warning(
+                    "scan capture: captures arrive after the sinks closed; they are dropped"
+                )
+            return
         if not self._overflowing:
             self._overflowing = True
             logger.warning(
-                "scan capture: the sinks' queue is full (%d captures, %d characters or %d"
-                " strings and detections); further captures are dropped until it drains",
+                "scan capture: the sinks' queue is full (its %s bound: at most %d captures,"
+                " %d characters, %d strings and detections); further captures are dropped"
+                " until it drains",
+                reason,
                 self._max_pending,
                 self._max_chars,
                 self._max_items,
             )
 
+    def _refusal(self, chars: int, items: int) -> DropReason | None:
+        """Why a capture of ``chars`` characters and ``items`` strings plus
+        detections cannot be queued (under ``_cond``): the sinks closed, or
+        the first bound it would pass — an empty queue takes any one; None
+        when it fits."""
+        if self._closed:
+            return "shutdown"
+        if not self._queue:
+            return None
+        if len(self._queue) >= self._max_pending:
+            return "captures"
+        if self._chars + chars > self._max_chars:
+            return "characters"
+        if self._items + items > self._max_items:
+            return "items"
+        return None
+
+    def counts(self) -> ScanCaptureCounts:
+        """One consistent snapshot of the queue's counts (``/metrics``)."""
+        with self._cond:
+            return ScanCaptureCounts(
+                queued=len(self._queue) + (self._in_flight is not None),
+                delivered=self._delivered,
+                dropped=dict(self._dropped),
+                faults=self._fault_count,
+            )
+
     def status(self) -> dict[str, Any]:
         """The /status ``scan_capture`` block: counts only."""
-        with self._cond:
-            return {
-                "sinks": len(self.sinks),
-                "queued": len(self._queue) + (self._in_flight is not None),
-                "delivered_total": self._delivered,
-                "dropped_total": self._dropped,
-                "faults_total": self._fault_count,
-            }
+        counts = self.counts()
+        return {
+            "sinks": len(self.sinks),
+            "queued": counts.queued,
+            "delivered_total": counts.delivered,
+            "dropped_total": sum(counts.dropped.values()),
+            "dropped_by_reason": dict(counts.dropped),
+            "faults_total": counts.faults,
+        }
 
     # -- shutdown (off the event loop: blocking) ---------------------------------
 
@@ -300,7 +350,7 @@ class ScanCapture:
             self._queue.clear()
             self._chars = 0
             self._items = 0
-            self._dropped += dropped
+            self._dropped["shutdown"] += dropped
             thread = self._thread
             self._cond.notify_all()
         if dropped:
@@ -474,6 +524,7 @@ def capture_status(capture: ScanCapture | None) -> dict[str, Any]:
             "queued": 0,
             "delivered_total": 0,
             "dropped_total": 0,
+            "dropped_by_reason": dict.fromkeys(DROP_REASONS, 0),
             "faults_total": 0,
         }
     return capture.status()

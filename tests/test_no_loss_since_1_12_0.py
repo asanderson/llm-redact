@@ -12,18 +12,23 @@ punctuation (a JSON string's escapes too), to another value and to a
 PlanetScale run (dots past the 64-character cap, another token inside);
 the start of every value grafted onto the end of a checksum-valid spaced
 IBAN; generic secrets of low and border entropy; and cards in runs of
-digit groups, next to every value. There are no exceptions: a loss is
+digit groups (some before an expiry), next to every value. There are no
+exceptions: a loss is
 fixed in the rules.
 
 The same inputs check 1.12.1's pipeline too: this release's rules with
-credit_card's inside reading taken out, a digest pinning the five rules
-1.12.1 changed to their 1.12.1 definitions (1.12.1 is no subset of 1.12.0,
-so the 1.12.0 reference alone would not show that nothing 1.12.1 redacted
-is lost).
+credit_card's inside reading and the IBAN's joining (RegexRule.joins, a
+redactor matter: the references are the overlap sweep) taken out, a digest
+pinning the five rules 1.12.1 changed to their 1.12.1 definitions (1.12.1
+is no subset of 1.12.0, so the 1.12.0 reference alone would not show that
+nothing 1.12.1 redacted is lost). With custom rules and NER spans the
+1.12.1 reference is test_joined_values.py's.
 
-This holds under the default [detection.modes]: a newly read value wins
-an overlap like any longer match, so the value it takes in follows its
-rule's mode (docs/detection.md says so).
+This holds under the default [detection.modes]: a value newly read since
+1.12.0 that joins nothing (a PlanetScale token's run) wins an overlap like
+any longer match, so the value it takes in follows its rule's mode
+(docs/detection.md says so); a card read inside a run and a paper IBAN are
+joined with what they overlap (test_joined_values.py).
 
 A digest pins every other rule to its 1.12.0 definition (its fields, and
 its validator with every helper and table it uses), so changing one later
@@ -185,13 +190,20 @@ ALLOWLIST = build_allowlist(CONFIG)
 OLD_PLAN = DetectorPlan(
     [Frozen(det.name) if det.name in FROZEN_1_12_0 else det for det in build_detectors(CONFIG)]
 )
-# 1.12.1's pipeline: this release's rules, credit_card without the inside
-# reading 1.13.0 added (CHANGED_IN_1_12_1 pins the rest to 1.12.1).
+
+
+def as_1_12_1(rule: RegexRule) -> RegexRule:
+    """A rule as 1.12.1 defined it, while CHANGED_IN_1_12_1 holds: without
+    the fields 1.13.0 added (credit_card's inside reading, the paper IBAN's
+    joining)."""
+    return dataclasses.replace(rule, inside=None, joins=None)
+
+
+# 1.12.1's pipeline: this release's rules as 1.12.1 defined them
+# (CHANGED_IN_1_12_1 pins the five it changed).
 PLAN_1_12_1 = DetectorPlan(
     [
-        RegexDetector(dataclasses.replace(det.rule, inside=None))
-        if isinstance(det, RegexDetector) and det.name == "credit_card"
-        else det
+        RegexDetector(as_1_12_1(det.rule)) if isinstance(det, RegexDetector) else det
         for det in build_detectors(CONFIG)
     ]
 )
@@ -304,10 +316,13 @@ def luhn_card(rng: random.Random) -> str:
     raise AssertionError("one check digit always fits")
 
 
-def card_run(rng: random.Random, value: str) -> str:
+def card_run(rng: random.Random, value: str, *, expiry: bool = False) -> str:
     """A card (solid, or in groups of four or 4-6-5 by one separator) in a
     run of digit groups, at times with ``value`` beside it: what the
-    credit_card rule reads inside a longer run."""
+    credit_card rule reads inside a longer run. ``expiry``: the card ends
+    the run, followed by an expiry (a month, then a year of two or four
+    digits) after the card's own separator (a solid card's: either one,
+    the same twice)."""
     card = luhn_card(rng)
     separator = rng.choice(" -")
     if len(card) == 15 and rng.random() < 0.5:
@@ -321,8 +336,12 @@ def card_run(rng: random.Random, value: str) -> str:
         return ["".join(rng.choice("0123456789") for _ in range(rng.randrange(1, 7)))
                 for _ in range(rng.choice((0, 0, 1, 1, 2, 3)))]  # fmt: skip
 
-    run = [*digit_groups(), separator.join(groups), *digit_groups()]
+    run = [*digit_groups(), separator.join(groups), *([] if expiry else digit_groups())]
     text = "".join(f"{part}{rng.choice(' -')}" for part in run[:-1]) + run[-1]
+    if expiry:
+        own = separator if len(groups) > 1 else rng.choice(" -")
+        year = rng.choice((f"{rng.randrange(100):02d}", f"{rng.randrange(10000):04d}"))
+        text += f"{own}{rng.randint(1, 12):02d}{own}{year}"
     joiner = rng.choice(JOINERS)
     return rng.choice((text, value + joiner + text, text + joiner + value)) + rng.choice(ENDINGS)
 
@@ -334,6 +353,7 @@ def texts(seed: int) -> Iterable[str]:
         values = [gen(rng) for gen in GENERATORS]
         for value in values:
             yield from (card_run(rng, value) for _ in range(10))
+            yield from (card_run(rng, value, expiry=True) for _ in range(3))
             yield from (value + ending for ending in ENDINGS)
             yield from (joiner + value for joiner in JOINERS)
             other = rng.choice(values)
@@ -368,6 +388,21 @@ def test_nothing_1_12_0_or_1_12_1_redacted_is_forwarded(seed: int) -> None:
     # Not vacuous: the inputs hold values 1.12.0 forwarded, and cards in
     # runs of digit groups that 1.12.1 forwarded.
     assert count > 20_000 and gained > 1_000 and gained_since_1_12_1 > 100
+
+
+def test_cards_before_an_expiry_lose_nothing_next_to_every_value() -> None:
+    # texts() holds cards before an expiry next to every value; here they
+    # are counted: nothing 1.12.0 or 1.12.1 redacted is lost, and the card
+    # is read in many that 1.12.1 forwarded (the others end in what the
+    # expiry may not be followed by: "-1", "@a.example", ".x").
+    rng = random.Random(4)
+    runs = [card_run(rng, gen(rng), expiry=True) for gen in GENERATORS for _ in range(10)]
+    gained = 0
+    for text in runs:
+        release, previous = redacted_by_release(text), redacted_by_1_12_1(text)
+        assert redacted_by_1_12_0(text) | previous <= release, text
+        gained += bool(release - previous)
+    assert gained > len(runs) // 4
 
 
 def _as_written(func: types.FunctionType) -> tuple[types.FunctionType, str]:
@@ -442,14 +477,24 @@ def test_every_other_rule_is_as_1_12_0_defined_it(monkeypatch: pytest.MonkeyPatc
 
 def test_the_1_12_1_reference_is_1_12_1() -> None:
     # 1.12.1's pipeline differs from this release's only in credit_card,
-    # whose inside reading it lacks.
+    # whose inside reading it lacks, and the paper IBAN's joining.
     changed = [rule for rule in BUILTIN_RULES if rule.name in FROZEN_1_12_0]
-    assert _digest(rule for rule in changed if rule.name != "credit_card") == CHANGED_IN_1_12_1
+    assert (
+        _digest(as_1_12_1(rule) for rule in changed if rule.name != "credit_card")
+        == CHANGED_IN_1_12_1
+    )
     previous = {det.name: det for det in PLAN_1_12_1.detectors}
-    card = previous["credit_card"]
-    assert isinstance(card, RegexDetector) and card.rule.inside is None
-    rule = next(rule for rule in BUILTIN_RULES if rule.name == "credit_card")
-    assert card.rule == dataclasses.replace(rule, inside=None)
+    for name in ("credit_card", "iban"):
+        rule = next(rule for rule in BUILTIN_RULES if rule.name == name)
+        old = previous[name]
+        assert isinstance(old, RegexDetector) and old.rule == as_1_12_1(rule) != rule
+    assert (
+        sum(
+            isinstance(det, RegexDetector) and det.rule != as_1_12_1(det.rule)
+            for det in build_detectors(CONFIG)
+        )
+        == 2
+    )
     assert [det.name for det in PLAN_1_12_1.detectors] == [
         det.name for det in build_detectors(CONFIG)
     ]

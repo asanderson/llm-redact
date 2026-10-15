@@ -41,18 +41,28 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
 
 ### Security
 - **A card number written next to another digit group went upstream unredacted.**
-  `Order 12 4111 1111 1111 1111`, `4111 1111 1111 1111 123` (a CVV after it) and
-  `exp: 4111 1111 1111 1111 12/27` were forwarded as sent: the `credit_card` rule read the card
-  together with the other group, the Luhn check failed, and nothing was redacted. When the check
-  fails, the rule now looks inside what it read for a card in a card's own grouping (solid,
-  groups of four, or 4-6-5 / 4-6-4) that passes the check, and redacts that. Not read yet: a card
-  followed by two or more digit groups, or by one that brings the two past 19 digits, and one
-  whose run of digit groups is followed by `-`, `.`, `:`, `@`, `%` or `+` glued to more text
-  (docs/detection.md lists the residuals). With the built-in rules and the default modes nothing
-  1.12.1 redacted is forwarded now; a test pins that against 1.12.1's rules. A custom rule's
-  value or an NER span that starts inside such a card and runs on past it loses its part after
-  the card. On random runs of digit groups the rule's false positives barely move (13.58% to
-  13.78% of 5,000 runs).
+  `Order 12 4111 1111 1111 1111`, `4111 1111 1111 1111 123` (a CVV after it),
+  `exp: 4111 1111 1111 1111 12/27` and `4111 1111 1111 1111 12 27` (an expiry after it) were
+  forwarded as sent: the `credit_card` rule read the card together with the other groups, the
+  Luhn check failed, and nothing was redacted. When the check fails, the rule now looks inside
+  what it read for a card in a card's own grouping (solid, groups of four, or 4-6-5 / 4-6-4) that
+  passes the check, and redacts that. Not read yet: a card followed by groups that are no expiry
+  (a month `01`-`12`, then a year of two or four digits, written with the card's own
+  separator), by one group that brings the two past 19 digits, and one whose run of digit
+  groups is followed by `-`, `.`, `:`, `@`, `%` or `+` glued to more text (docs/detection.md
+  lists the residuals). On random runs of digit groups the rule's false positives barely move
+  (13.44% to 13.72% of 5,000 runs; 14.48% to 14.58% of 5,000 runs ending in an expiry-shaped
+  pair of groups).
+- **A custom rule's value or an NER span overlapping a spaced IBAN lost its part outside the
+  IBAN.** In `pay GB82 WEST 1234 5698 7654 32 Main Street`, with `32 Main Street` read as an
+  address, the IBAN (read since 1.12.1) won the overlap and `Main Street` went upstream as sent;
+  a card read inside a run of digit groups (above) would have done the same. Both are now
+  joined with every value they overlap, directly or through other overlapping values: whatever
+  any of them redacts is redacted, overlapping ones as one placeholder typed after the one
+  starting first (`pay «IBAN_001»`), and a value in block mode among them refuses the request.
+  Nothing 1.12.1 redacted or refused is forwarded now, with custom rules, NER spans and
+  `[detection.modes]` too: tests pin that against 1.12.1's pipeline (and, for the built-in rules
+  under the default modes, against 1.12.0's).
 
 ### Changed
 - **The `hf` backend's default model is now `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1`**
@@ -68,6 +78,14 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   `hf` default", records the decision, what holds for the default entities and the caveats. The
   `hf-default` NER bench baselines are re-recorded for it, and the CI `ner-models` job also
   pulls `dslim/bert-base-NER`, which the `real_model` tests still read by name.
+- A spaced IBAN no longer imposes the `iban` rule's mode on a value it overlaps (it did since
+  1.12.1; the default modes are unaffected): with `credit_card = "block"` a spaced IBAN holding a
+  Luhn-valid card number refuses the request again, and with `iban = "warn"` that card number is
+  redacted. Values overlapping a card read inside a run of digit groups are treated alike, and a
+  warn-mode value among them is forwarded only where no redacted value covers it. Where the
+  proxy cannot rewrite the text (a verbatim field, an upload's extracted text), a span joining
+  two or more such values refuses the request with no override code, as a deny string does.
+  docs/detection.md describes how such values are joined.
 - The latency smoke check (`python -m llm_redact.bench --latency --check`) allows the proxy's
   own overhead on a 100 KB body up to 300 ms (was 150 ms). It is a tripwire for gross
   regressions such as quadratic behavior, measured at about 44 ms; a loaded shared CI runner

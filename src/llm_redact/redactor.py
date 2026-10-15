@@ -217,11 +217,10 @@ def _resolve_tiers(detections: Sequence[Detection]) -> list[Detection]:
     return sorted(deny_chosen + _sweep(others), key=lambda d: d.start)
 
 
-def _unite(text: str, spans: list[Detection]) -> list[Detection]:
-    """``spans`` in start order, every run of overlapping spans joined into
-    ONE detection over their union (``_joined``); a span overlapping no other
-    is kept as it is. Linear: each span is looked at a fixed number of
-    times, and each union sliced from ``text`` once."""
+def _overlapping(spans: Sequence[Detection]) -> list[list[Detection]]:
+    """``spans`` in start order (a stable sort), cut into runs of spans that
+    overlap one another directly or through others: each run starts where
+    every earlier one has ended. Linear: each span is looked at once."""
     runs: list[list[Detection]] = []
     # Where each run ends so far.
     ends: list[int] = []
@@ -232,7 +231,15 @@ def _unite(text: str, spans: list[Detection]) -> list[Detection]:
         else:
             runs.append([d])
             ends.append(d.end)
-    return [_joined(text, run) for run in runs]
+    return runs
+
+
+def _unite(text: str, spans: list[Detection]) -> list[Detection]:
+    """``spans`` in start order, every run of overlapping spans joined into
+    ONE detection over their union (``_joined``); a span overlapping no other
+    is kept as it is. Linear: each span is looked at a fixed number of
+    times, and each union sliced from ``text`` once."""
+    return [_joined(text, run) for run in _overlapping(spans)]
 
 
 def _joined(text: str, run: list[Detection]) -> Detection:
@@ -245,6 +252,34 @@ def _joined(text: str, run: list[Detection]) -> Detection:
         return first
     end = max(d.end for d in run)
     return Detection(first.start, end, first.detector_type, text[first.start : end], tier=0)
+
+
+def _covering(text: str, run: list[Detection]) -> Detection:
+    """One run of overlapping values a joined cluster redacts
+    (``Redactor._join``) as what is redacted in their place: a value
+    covering the others itself (a lone value; a paper IBAN holding a card
+    number), as the overlap sweep would have chosen it — unless a deny
+    string is among the others, which no mode or override may then reach;
+    any other run ONE tier-0 detection over their union (``_joined``)."""
+    first = run[0]
+    if all(d.end <= first.end and (d.tier or not first.tier) for d in run[1:]):
+        return first
+    return _joined(text, run)
+
+
+def _clear_of(spans: list[Detection], others: list[Detection]) -> list[Detection]:
+    """``others`` without each one overlapping one of ``spans`` (disjoint
+    and start-sorted, so their ends are sorted too: a binary search finds
+    the first one ending after a detection's start, its only possible
+    overlap)."""
+    ends = [d.end for d in spans]
+    kept: list[Detection] = []
+    for d in others:
+        i = bisect_right(ends, d.start)
+        if i < len(spans) and spans[i].start < d.end:
+            continue
+        kept.append(d)
+    return kept
 
 
 class Redactor:
@@ -409,11 +444,11 @@ class Redactor:
 
     def _winners(self, text: str) -> list[Detection]:
         """The detections redaction acts on in ``text``: the configured
-        policy's (``_resolve_overlaps``), with the added deny strings'
-        matches taken in (``_absorb``)."""
+        policy's (``_resolved``), with the added deny strings' matches taken
+        in (``_absorb``)."""
         if self._recorder is not None:
             return self._recorded_winners(text, self._recorder)
-        winners = _resolve_overlaps(self._detect(text))
+        winners = self._resolved(text, self._detect(text))
         if self._added_deny is None:
             return winners
         return self._absorb(text, winners, self._added_deny.detect(text, self._allowlist))
@@ -438,10 +473,58 @@ class Redactor:
             else []
         )
         recorder.record(text, found + added)
-        winners = _resolve_overlaps([d for d, _source in found])
+        winners = self._resolved(text, [d for d, _source in found])
         if self._added_deny is None:
             return winners
         return self._absorb(text, winners, [d for d, _source in added])
+
+    def _resolved(self, text: str, detections: list[Detection]) -> list[Detection]:
+        """The configured detections' winners: ``_resolve_overlaps``'s,
+        except in a run of values overlapping one another directly or
+        through others that holds one that joins (``Detection.joins``: a
+        card read inside a run of digit groups, an IBAN in the paper
+        format), which is ``_join``ed. Without one, the sweep's own, byte
+        for byte; with one, every character the sweep without the joining
+        values would redact is redacted, and every value it refuses for
+        still refuses."""
+        if not any(d.joins for d in detections):
+            return _resolve_overlaps(detections)
+        joined: list[Detection] = []
+        swept: list[Detection] = []
+        for run in _overlapping(detections):
+            if any(d.joins for d in run):
+                joined += self._join(text, run)
+            else:
+                swept += run
+        return sorted(joined + _resolve_overlaps(swept), key=lambda d: d.start)
+
+    def _join(self, text: str, run: list[Detection]) -> list[Detection]:
+        """One run of overlapping values holding one that joins, redacted so
+        that no value loses characters to another: a value in block mode
+        refuses the text (``BlockedRequest``) unless an approved override
+        passes it; every value that redacts (redact mode, a deny string) is
+        redacted — values overlapping one another as ONE placeholder over
+        their union typed after the first (``_covering``); a value forwarded
+        as sent (warn mode, an approved block) only where no redacted value
+        covers it (one overlapping such a value yields to it, uncounted)."""
+        redacting, passing = self._by_mode(run)
+        covered = [_covering(text, values) for values in _overlapping(redacting)]
+        # Disjoint, so in start order once ``_resolved`` sorts them.
+        return covered + _sweep(_clear_of(covered, passing))
+
+    def _by_mode(self, detections: list[Detection]) -> tuple[list[Detection], list[Detection]]:
+        """``detections`` as the ones that redact (redact mode, a deny
+        string) and the ones forwarded as sent (warn mode, a block an
+        approved override passes); a block no approval passes refuses the
+        text right here (``BlockedRequest``), as ``redact_text`` would."""
+        redacting: list[Detection] = []
+        passing: list[Detection] = []
+        for d in detections:
+            mode = self._modes.get(d.detector_type, "redact") if d.tier else "redact"
+            if mode == "block" and not self._overridden(d):
+                raise BlockedRequest(d.detector_type)
+            (redacting if mode == "redact" else passing).append(d)
+        return redacting, passing
 
     def _absorb(
         self, text: str, winners: list[Detection], added: list[Detection]
@@ -457,13 +540,7 @@ class Redactor:
         effect, and the UNION of its span and every added match overlapping
         it is redacted as one placeholder (``_unite``) — so neither the value
         the policy redacts nor the added string leaves in part."""
-        redacting: list[Detection] = []
-        passing: list[Detection] = []
-        for d in winners:
-            mode = self._modes.get(d.detector_type, "redact") if d.tier else "redact"
-            if mode == "block" and not self._overridden(d):
-                raise BlockedRequest(d.detector_type)
-            (redacting if mode == "redact" else passing).append(d)
+        redacting, passing = self._by_mode(winners)
         # Every united span an added match is part of is tier 0, so the
         # configured resolution's own tier-0 rule drops each passing winner
         # one overlaps; the other spans are disjoint from every winner (the
@@ -502,10 +579,10 @@ class Redactor:
         parts: list[str] = []
         cursor = 0
         for d in detections:
-            # Tier-0 (deny, and an added deny string's union with what it
-            # overlaps) always redacts: keying modes by type could let a
-            # user-chosen deny type accidentally inherit a warn/block mode
-            # from a rule sharing that type.
+            # Tier-0 (deny, an added deny string's union with what it
+            # overlaps, joined values' union) always redacts: keying modes
+            # by type could let a user-chosen deny type accidentally inherit
+            # a warn/block mode from a rule sharing that type.
             mode = "redact" if d.tier == 0 else self._modes.get(d.detector_type, "redact")
             if mode == "block":
                 if self._overridden(d):
@@ -551,7 +628,9 @@ class Redactor:
         overrides. A deny string in text that is not ``redactable`` refuses
         it for good (``OverrideCheck.unoverridable``) — an added one too,
         with the value it overlaps (``_absorb``: the proxy could not redact
-        their union). Charged against the string budget as one string."""
+        their union), and so does a span joining values (``_join``: no one
+        approval names them all). Charged against the string budget as one
+        string."""
         self.charge(1)
         found: Counter[str] = Counter()
         overridden = False
@@ -560,7 +639,8 @@ class Redactor:
                 # Deny strings (tier 0) take no mode, exactly as in
                 # redact_text, and are the operator's always-redact list —
                 # or an access gate's, added to it (with the value it
-                # overlaps): never put to the requester's overrides.
+                # overlaps): never put to the requester's overrides; nor is
+                # a span joining values (``_join``).
                 found[d.detector_type] += 1
                 if not redactable and self._overrides is not None:
                     self._overrides.unoverridable()
@@ -583,14 +663,20 @@ class Redactor:
         return "block" in self._modes.values()
 
     def blocked_type(self, text: str) -> str | None:
-        """The detector type ``redact_text`` would refuse ``text`` for — its
+        """The detector type ``redact_text`` would refuse ``text`` for — a
+        block-mode value joined with a joining one (``_join``), else its
         first block-mode winner, under the same allowlists, deny strings
         and overlap resolution — else None. Nothing is issued, counted or
         charged: a check AHEAD of the redaction that will scan ``text`` and
         count it (an upload's pieces, before its binary parts are handed to
         an upload inspector). Added deny strings take no part: they never
         block, nor take a block-mode winner's place (``_absorb``)."""
-        for d in _resolve_overlaps(self._detect(text)):
+        try:
+            winners = self._resolved(text, self._detect(text))
+        except BlockedRequest as blocked:
+            # A block-mode value joined with a joining one (``_join``).
+            return blocked.detector_type
+        for d in winners:
             # Deny strings (tier 0) never block, exactly as in redact_text.
             if d.tier and self._modes.get(d.detector_type) == "block" and not self._overridden(d):
                 return d.detector_type

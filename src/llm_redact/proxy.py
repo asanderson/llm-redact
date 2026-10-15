@@ -1890,25 +1890,52 @@ class ProxyState:
 
     # The running detection objects, read through the snapshot: one
     # attribute assigned once per change (apply_config), never these three
-    # one at a time. Read-only: a change is a new DetectionSnapshot.
+    # one at a time. A change is a new DetectionSnapshot: the setters are
+    # TRANSITIONAL, for writers that predate the snapshot (llm-redact-pro's
+    # tests add a detector with ``state.detectors = [...]``) — each derives
+    # a whole new snapshot and swaps it in one assignment (_replace_detection).
 
     @property
     def detectors(self) -> Sequence[Detector]:
         return self.detection_snapshot.detectors
 
+    @detectors.setter
+    def detectors(self, detectors: Sequence[Detector]) -> None:
+        self._replace_detection(detectors=detectors)
+
     @property
     def allowlist(self) -> Allowlist:
         return self.detection_snapshot.allowlist
+
+    @allowlist.setter
+    def allowlist(self, allowlist: Allowlist) -> None:
+        self._replace_detection(allowlist=allowlist)
 
     @property
     def modes(self) -> Mapping[str, str]:
         return self.detection_snapshot.modes
 
+    @modes.setter
+    def modes(self, modes: Mapping[str, str]) -> None:
+        self._replace_detection(modes=modes)
+
     @property
     def overlay_builds(self) -> OverlayBuilds:
         """The access gate's detection overlays (authorization.py), built per
-        distinct overlay against exactly the running detection objects."""
+        distinct overlay against exactly the running detection objects.
+        Read-only: derived from the snapshot's objects, never assigned."""
         return self.detection_snapshot.overlay_builds
+
+    def _replace_detection(self, **changes: Any) -> None:
+        """The transitional setters' one write: a NEW snapshot over the
+        running one with ``changes`` (``dataclasses.replace``: its plan,
+        overlay builds and generation derived anew from the objects it
+        holds), swapped in ONE assignment — a reader holding the old
+        reference keeps it whole, and a build prepared against the old
+        generation is no longer adopted. Only the snapshot changes: the
+        static redactor keeps the objects it was built over, as it did when
+        these were plain attributes."""
+        self.detection_snapshot = dataclasses.replace(self.detection_snapshot, **changes)
 
     def reload(self) -> None:
         """Rebuild hot-swappable config on SIGHUP; never crash a running proxy.

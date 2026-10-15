@@ -72,7 +72,7 @@ def _spent(prepared: Any) -> bool:
 # --- one snapshot, one assignment ----------------------------------------------------
 
 
-def test_the_attributes_read_the_snapshot_and_are_read_only() -> None:
+def test_the_attributes_read_the_snapshot() -> None:
     state = _state()
     snapshot = state.detection_snapshot
     assert state.detectors is snapshot.detectors
@@ -81,11 +81,58 @@ def test_the_attributes_read_the_snapshot_and_are_read_only() -> None:
     assert state.overlay_builds is snapshot.overlay_builds
     # The static redactor detects through the snapshot's own plan.
     assert state.redactor.plan is snapshot.plan
-    for name in ("detectors", "allowlist", "modes", "overlay_builds"):
-        with pytest.raises(AttributeError):
-            setattr(state, name, getattr(state, name))
+    # Derived from the snapshot's objects, never assigned.
+    with pytest.raises(AttributeError):
+        state.overlay_builds = snapshot.overlay_builds  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         snapshot.modes = {}  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("name", ["detectors", "allowlist", "modes"])
+def test_a_transitional_setter_swaps_a_whole_new_snapshot(name: str) -> None:
+    # Writers that predate the snapshot (llm-redact-pro's tests add a
+    # detector with ``state.detectors = [...]``) keep working: the setter
+    # derives a new snapshot and swaps it in ONE assignment.
+    state = _state()
+    old = state.detection_snapshot
+    redactor = state.redactor
+    prepared = state.prepare_config(_with(state, SECOND))
+    value = {
+        "detectors": [*old.detectors],
+        "allowlist": type(old.allowlist)(),
+        "modes": {"EMAIL": "warn"},
+    }[name]
+    setattr(state, name, value)
+    new = state.detection_snapshot
+    assert new is not old and getattr(state, name) is value
+    for other in {"detectors", "allowlist", "modes"} - {name}:
+        assert getattr(new, other) is getattr(old, other)
+    # Derived anew from the objects it holds: plan, overlay builds, generation.
+    assert new.plan.source is new.detectors and new.generation != old.generation
+    assert new.overlay_builds is not old.overlay_builds and new.detection == old.detection
+    # A reader holding the old reference keeps it whole; the static redactor
+    # keeps what it was built over, as an attribute assignment left it.
+    assert old.plan.source is old.detectors and state.redactor is redactor
+    # A build prepared against the replaced generation is no longer adopted.
+    builds: list[DetectionConfig] = []
+    with pytest.MonkeyPatch.context() as patch:
+        real = proxy_mod._build_detection
+        patch.setattr(
+            proxy_mod,
+            "_build_detection",
+            lambda detection, **kwargs: builds.append(detection) or real(detection, **kwargs),
+        )
+        state.apply_config(_with(state, SECOND), prepared=prepared)
+    assert builds == [SECOND] and _spent(prepared)
+
+
+def test_a_preview_reads_what_a_transitional_setter_assigned() -> None:
+    state = _state()
+    state.detectors = [*state.detectors, _Holding(released=True)]
+    assert state.preview("from Ada")["detections"] == {"PERSON": 1}
+    state.modes = {"PERSON": "warn"}
+    answer = state.preview("from Ada")
+    assert answer["warnings"] == {"PERSON": 1} and answer["detections"] == {}
 
 
 def test_an_apply_swaps_the_whole_snapshot_or_keeps_it() -> None:
@@ -123,9 +170,11 @@ class _Holding:
     name = "holding"
     heavy = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, released: bool = False) -> None:
         self.entered = threading.Event()
         self.release = threading.Event()
+        if released:
+            self.release.set()
 
     def detect(self, text: str) -> Iterable[Detection]:
         self.entered.set()

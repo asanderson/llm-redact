@@ -29,6 +29,7 @@ import re
 import secrets
 import signal
 import sqlite3
+import threading
 import time
 import unicodedata
 import urllib.parse
@@ -92,6 +93,7 @@ from llm_redact.connections import CAUSES as CONNECTION_CLOSE_CAUSES
 from llm_redact.connections import EventStream, LiveConnections, recheck_interval
 from llm_redact.detection.base import Detection, Detector, DetectorUnavailable
 from llm_redact.detection.engine import (
+    Allowlist,
     DetectionConfig,
     DetectorPlan,
     PrecomputedTable,
@@ -102,6 +104,7 @@ from llm_redact.detection.engine import (
     ner_backend_stats,
     ner_status,
     ner_warnings,
+    plan_for,
 )
 from llm_redact.eventstream import EventStreamError, EventStreamParser
 from llm_redact.eventstream import serialize as serialize_eventstream
@@ -146,6 +149,7 @@ from llm_redact.plugin_api import (
     HopResult,
     LocalAnswer,
     ModelPolicy,
+    PreparedConfig,
     ResponseContext,
     ResponseObserver,
     RouteDelivery,
@@ -832,6 +836,113 @@ def _log_ner_warnings(detection: DetectionConfig, detectors: Sequence[Detector])
         logger.warning("%s", warning)
 
 
+# Each detection build's generation (DetectionSnapshot.generation): unique in
+# the process, so a prepared build can tell whether the snapshot it was
+# prepared against is still the running one. next() on a count is atomic
+# under the GIL: a build on a worker thread draws its own number.
+_DETECTION_GENERATIONS = itertools.count(1)
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class DetectionSnapshot:
+    """One generation of the proxy's detection objects, built from one
+    ``[detection]`` (``detection``) and held as ONE reference,
+    ``ProxyState.detection_snapshot``: the detectors, the allowlist and the
+    detector-TYPE-keyed modes, plus what is derived from them — the
+    ``DetectorPlan`` they detect through (``engine.plan_for``: the plan every
+    Redactor over them shares), the access gate's overlay builds against
+    them (``authorization.OverlayBuilds``) and a ``generation`` number unique
+    in the process.
+
+    Never changed once built: ``apply_config`` swaps in a new snapshot in
+    one assignment, so a reader that takes the reference once — a preview on
+    the dashboard's worker thread, a realtime relay's admission — uses one
+    configuration whatever an apply on the event loop assigns meanwhile.
+    ``dataclasses.replace`` derives a new plan, overlay builds and
+    generation from the objects it is given."""
+
+    detection: DetectionConfig
+    detectors: Sequence[Detector]
+    allowlist: Allowlist
+    modes: Mapping[str, str]
+    plan: DetectorPlan = dataclasses.field(init=False)
+    overlay_builds: OverlayBuilds = dataclasses.field(init=False)
+    generation: int = dataclasses.field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "plan", plan_for(self.detectors))
+        object.__setattr__(self, "overlay_builds", OverlayBuilds(self.detection, self.modes))
+        object.__setattr__(self, "generation", next(_DETECTION_GENERATIONS))
+
+
+def _build_detection(
+    detection: DetectionConfig, *, model_policy: ModelPolicy | None, startup: bool = False
+) -> DetectionSnapshot:
+    """The detection objects ``detection`` asks for, as one snapshot (every
+    NER model loaded; ``startup``: the process's startup build, the only one
+    that may download model files). Raises what the builds raise (an unknown
+    rule name, a bad custom regex, a missing NER extra, a model the model
+    policy refuses) and touches no state of the proxy: safe on any thread."""
+    if startup:
+        detectors = build_detectors(detection, startup=True, model_policy=model_policy)
+    else:
+        detectors = build_detectors(detection, model_policy=model_policy)
+    return DetectionSnapshot(
+        detection, detectors, build_allowlist(detection), build_modes(detection)
+    )
+
+
+class _PreparedConfig:
+    """``ProxyState.prepare_config``'s answer (``plugin_api.PreparedConfig``:
+    opaque to plugins, which hand it to ``apply_config(prepared=)`` or close
+    it): the detection snapshot built for the candidate's ``[detection]`` —
+    None when that equals the running one, which an apply keeps — and the
+    generation of the running snapshot it was prepared against.
+    ``apply_config`` adopts the snapshot only while that generation still
+    runs and the applied ``[detection]`` equals the candidate's, and spends
+    the prepared either way. ``close`` drops the snapshot (idempotent, on any
+    thread): its NER models are then freed with the last reference, as a
+    displaced generation's are."""
+
+    __slots__ = ("against", "_lock", "_snapshot")
+
+    def __init__(self, against: int, snapshot: DetectionSnapshot | None) -> None:
+        self.against = against
+        self._snapshot = snapshot
+        self._lock = threading.Lock()
+
+    def take(self) -> DetectionSnapshot | None:
+        """The snapshot, handed out once: every later call — and one after
+        ``close`` — answers None."""
+        with self._lock:
+            snapshot, self._snapshot = self._snapshot, None
+        return snapshot
+
+    def close(self) -> None:
+        self.take()
+
+
+def _prepared_detection(
+    prepared: object, detection: DetectionConfig, running: DetectionSnapshot
+) -> DetectionSnapshot | None:
+    """The snapshot ``prepared`` holds when ``apply_config`` may adopt it
+    for ``detection``: built by ``prepare_config`` (a ``_PreparedConfig``)
+    for an equal ``[detection]``, against the generation still running —
+    else None, and the apply builds as without it. A ``_PreparedConfig`` is
+    spent either way (taken: a snapshot not adopted is dropped); any other
+    object is left alone, never called into."""
+    if not isinstance(prepared, _PreparedConfig):
+        return None
+    snapshot = prepared.take()
+    if (
+        snapshot is None
+        or prepared.against != running.generation
+        or snapshot.detection != detection
+    ):
+        return None
+    return snapshot
+
+
 class ProxyState:
     def __init__(
         self,
@@ -872,15 +983,13 @@ class ProxyState:
         )
         # The startup build: the only one that may download NER model files
         # (with [detection.ner] allow_download); reloads and dry runs never do.
-        self.detectors = build_detectors(
+        # One snapshot (DetectionSnapshot): the detectors, allowlist, modes,
+        # their plan and the access gate's overlay builds against exactly
+        # these objects, swapped by apply_config in ONE assignment.
+        self.detection_snapshot: DetectionSnapshot = _build_detection(
             config.detection, startup=True, model_policy=self.model_policy
         )
-        self.allowlist = build_allowlist(config.detection)
-        self.modes = build_modes(config.detection)
-        _log_ner_warnings(config.detection, self.detectors)
-        # The access gate's detection overlays (authorization.py), built per
-        # distinct overlay against exactly these detection objects.
-        self.overlay_builds = OverlayBuilds(config.detection, self.modes)
+        _log_ner_warnings(config.detection, self.detection_snapshot.detectors)
         # Process-lifetime totals by type (for /status), shared across all
         # per-session redactors/rehydrators.
         self.detection_counts: Counter[str] = Counter()
@@ -953,11 +1062,11 @@ class ProxyState:
         # provider: an honesty counter — those bytes left unread.
         self.unscanned_uploads: Counter[str] = Counter()
         self.redactor = Redactor(
-            self.detectors,
+            self.detection_snapshot.plan,
             self.vault,
-            self.allowlist,
+            self.detection_snapshot.allowlist,
             counts=self.detection_counts,
-            modes=self.modes,
+            modes=self.detection_snapshot.modes,
             warn_counts=self.warn_counts,
         )
         self.rehydrator = Rehydrator(
@@ -1332,12 +1441,13 @@ class ProxyState:
                 )
         # Thin per-request wrappers over the shared detectors, allowlist and
         # counters: object construction only — no regex compilation, no DB open.
+        detection = self.detection_snapshot
         redactor = Redactor(
-            self.detectors,
+            detection.plan,
             _SealedVault(vault) if sealed is not None else vault,
-            self.allowlist,
+            detection.allowlist,
             counts=self.detection_counts,
-            modes=overlay.modes if overlay is not None else self.modes,
+            modes=overlay.modes if overlay is not None else detection.modes,
             warn_counts=self.warn_counts,
             added_deny=overlay.deny if overlay is not None else None,
             final_blocks=overlay.final_blocks if overlay is not None else frozenset(),
@@ -1354,10 +1464,11 @@ class ProxyState:
         rehydrator."""
         if overlay is None:
             return ctx
+        detection = self.detection_snapshot
         redactor = Redactor(
-            self.detectors,
+            detection.plan,
             ctx.vault,
-            self.allowlist,
+            detection.allowlist,
             counts=self.detection_counts,
             modes=overlay.modes,
             warn_counts=self.warn_counts,
@@ -1751,6 +1862,28 @@ class ProxyState:
             vault, fuzzy=self.config.rehydration.fuzzy, counts=self.rehydration_counts
         )
 
+    # The running detection objects, read through the snapshot: one
+    # attribute assigned once per change (apply_config), never these three
+    # one at a time. Read-only: a change is a new DetectionSnapshot.
+
+    @property
+    def detectors(self) -> Sequence[Detector]:
+        return self.detection_snapshot.detectors
+
+    @property
+    def allowlist(self) -> Allowlist:
+        return self.detection_snapshot.allowlist
+
+    @property
+    def modes(self) -> Mapping[str, str]:
+        return self.detection_snapshot.modes
+
+    @property
+    def overlay_builds(self) -> OverlayBuilds:
+        """The access gate's detection overlays (authorization.py), built per
+        distinct overlay against exactly the running detection objects."""
+        return self.detection_snapshot.overlay_builds
+
     def reload(self) -> None:
         """Rebuild hot-swappable config on SIGHUP; never crash a running proxy.
 
@@ -1771,14 +1904,25 @@ class ProxyState:
         except (ValueError, OSError, re.error, ImportError) as exc:
             logger.error("config reload failed; keeping current config: %s", exc)
 
-    def apply_config(self, fresh: Config) -> list[str]:
+    def apply_config(self, fresh: Config, *, prepared: PreparedConfig | None = None) -> list[str]:
         """Swap in the hot-swappable parts of ``fresh``; shared by SIGHUP
         reload and the config editor endpoint.
 
         Restart-only fields (vault, audit, host, port, log, tls, otel) are
         pinned to their running values; the names of any that differed are
         returned (and warned) so callers can surface "restart required".
+
+        ``prepared`` (``prepare_config``'s answer, built off the event loop
+        for the candidate ``fresh`` came from): a changed ``[detection]`` is
+        taken from it instead of being built again here — every NER model
+        loaded once per save — when it was prepared for an equal
+        ``[detection]`` against the detection generation still running;
+        otherwise it is ignored and the apply builds as without it. Spent
+        (closed) either way, first thing: an apply that then fails holds
+        nothing of it.
         """
+        running = self.detection_snapshot
+        adopted = _prepared_detection(prepared, fresh.detection, running)
         restart_required = [
             field_name
             for field_name in RESTART_ONLY_KEYS
@@ -1808,23 +1952,21 @@ class ProxyState:
         # Build everything first, then swap in one block: in-flight requests
         # keep their old object references.
         if effective.detection == self.config.detection:
-            detectors = self.detectors
-            allowlist = self.allowlist
-            modes = self.modes
-            overlay_builds = self.overlay_builds
+            detection = running
         else:
-            detectors = build_detectors(effective.detection, model_policy=self.model_policy)
-            allowlist = build_allowlist(effective.detection)
-            modes = build_modes(effective.detection)
-            _log_ner_warnings(effective.detection, detectors)
-            # Every cached overlay build dies with the objects it extended.
-            overlay_builds = OverlayBuilds(effective.detection, modes)
+            # A new snapshot, adopted from ``prepared`` or built here: its
+            # overlay builds are new too — every cached overlay build dies
+            # with the objects it extended.
+            detection = adopted or _build_detection(
+                effective.detection, model_policy=self.model_policy
+            )
+            _log_ner_warnings(effective.detection, detection.detectors)
         redactor = Redactor(
-            detectors,
+            detection.plan,
             self.vault,
-            allowlist,
+            detection.allowlist,
             counts=self.detection_counts,
-            modes=modes,
+            modes=detection.modes,
             warn_counts=self.warn_counts,
         )
         rehydrator = Rehydrator(
@@ -1874,10 +2016,9 @@ class ProxyState:
         self.config = effective
         self.license = license_resolved
         self.adapters = adapters
-        self.detectors = detectors
-        self.allowlist = allowlist
-        self.modes = modes
-        self.overlay_builds = overlay_builds
+        # ONE assignment: a reader holding the snapshot reference (a preview
+        # on the dashboard's worker thread) never sees two configurations.
+        self.detection_snapshot = detection
         self.redactor = redactor
         self.rehydrator = rehydrator
         self._static_context = RequestContext(
@@ -1903,7 +2044,7 @@ class ProxyState:
         _close_upstream_auths(displaced_auths)
         for warning in effective.routing.warnings:
             logger.warning("routing: %s", warning)
-        logger.info("config reloaded (%d detection rules)", len(detectors))
+        logger.info("config reloaded (%d detection rules)", len(detection.detectors))
         return restart_required
 
     def _revoke_stale_relays(self) -> None:
@@ -1934,29 +2075,48 @@ class ProxyState:
         return await _guarded_post_json(request, self)
 
     def validate_config(self, candidate: Config) -> None:
-        """Dry-run everything apply_config would build for ``candidate``
-        (the file-level config, env overrides NOT yet applied), changing
-        nothing: detectors/allowlists/modes (bad regexes, unknown rules,
-        missing NER extras), license resolution (a bad [license] value),
-        the routing credentials (an ``env:VAR`` that vanished), and the
-        router's own checks — or, when the file enabled routing since
-        startup, a build-and-close probe so a refusal (package absent,
-        Free tier, bad price file) surfaces here rather than after a write.
+        """Dry-run everything apply_config would build for ``candidate``,
+        changing nothing: ``prepare_config``, its builds then dropped. Raises
+        exactly what ``prepare_config`` raises."""
+        self.prepare_config(candidate).close()
 
-        An unchanged ``[detection]`` is not built: apply_config keeps the
-        live detectors for it, so a build here would only load a second
-        copy of every NER model on each editor save. (``[detection]`` has
-        no env override, so the candidate's is the one apply would use.)
+    def prepare_config(self, candidate: Config) -> _PreparedConfig:
+        """Build and check everything apply_config would build for
+        ``candidate`` (the file-level config, env overrides NOT yet
+        applied), changing nothing: detectors/allowlists/modes (bad
+        regexes, unknown rules, missing NER extras), license resolution (a
+        bad [license] value), the routing credentials (an ``env:VAR`` that
+        vanished), and the router's own checks — or, when the file enabled
+        routing since startup, a build-and-close probe so a refusal (package
+        absent, Free tier, bad price file) surfaces here rather than after a
+        write. Raises ``ValueError`` (``ConfigError``) / ``TypeError`` /
+        ``re.error`` / ``ImportError`` like a failing apply would.
+
+        The detection objects of a changed ``[detection]`` are KEPT in the
+        answer (``_PreparedConfig``), with the generation of the running
+        detection snapshot they were prepared against: handed to
+        ``apply_config(prepared=)``, they are adopted instead of built a
+        second time on the event loop. An unchanged ``[detection]`` is not
+        built: apply_config keeps the live objects for it. (``[detection]``
+        has no env override, so the candidate's is the one apply would use.)
+        The caller closes the answer it does not apply.
+
+        Safe on a worker thread (a dashboard runs it off the event loop): it
+        assigns nothing on the proxy and never touches the event loop; it
+        reads the running detection snapshot and the router once each, so an
+        apply swapping them meanwhile is either seen whole or not at all
+        (and the generation tells apply_config which).
         """
-        if candidate.detection != self.config.detection:
-            build_detectors(candidate.detection, model_policy=self.model_policy)
-            build_allowlist(candidate.detection)
-            build_modes(candidate.detection)
+        running = self.detection_snapshot
+        snapshot = None
+        if candidate.detection != running.detection:
+            snapshot = _build_detection(candidate.detection, model_policy=self.model_policy)
         effective = apply_env_overrides(candidate)
         resolved = _resolve_license_info(effective)
         resolve_credentials(candidate.routing, os.environ)
-        if self.router is not None:
-            self.router.validate(candidate)
+        router = self.router
+        if router is not None:
+            router.validate(candidate)
         elif candidate.routing.enabled:
             probe = get_registry().build_router(effective, resolved.tier)
             if probe is not None:
@@ -1968,6 +2128,12 @@ class ProxyState:
         # The access gate's own dry run of its policy (its optional
         # validate_reload): a refusal is a ConfigError like any above.
         self.authorization.validate_policy(candidate)
+        return _PreparedConfig(running.generation, snapshot)
+
+    # DashboardHost's optional marker: ``preview`` reads ONE detection
+    # snapshot, so a preview on a worker thread never mixes two
+    # configurations, whatever an apply on the event loop assigns meanwhile.
+    preview_snapshot = True
 
     def preview(self, text: str) -> dict[str, Any]:
         """Run the LIVE detectors/allowlist/modes over ``text`` on a
@@ -1977,10 +2143,18 @@ class ProxyState:
         block-mode match reports its type only, never the value; a detector
         that could not read the text (the llm backend's server failing,
         ``on_error = "block"``) adds ``unavailable``: its backend and the
-        failure kind, where a real request is refused 503."""
+        failure kind, where a real request is refused 503.
+
+        The detection objects come from ONE read of the running snapshot
+        (``detection_snapshot``): run on another thread while an apply swaps
+        it, the answer describes the configuration that was live when the
+        preview began — never a mix of two."""
         from llm_redact.vault import InMemoryVault
 
-        redactor = Redactor(self.detectors, InMemoryVault(), self.allowlist, modes=self.modes)
+        detection = self.detection_snapshot
+        redactor = Redactor(
+            detection.plan, InMemoryVault(), detection.allowlist, modes=detection.modes
+        )
         blocked: dict[str, str] | None = None
         redacted: str | None = None
         unavailable: dict[str, str] | None = None

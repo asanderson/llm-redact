@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -53,6 +54,39 @@ def test_grafana_dashboard_is_valid_json() -> None:
     dashboard = json.loads((DEPLOY / "grafana-dashboard.json").read_text())
     assert dashboard["uid"] == "llm-redact"
     assert dashboard["panels"], "dashboard has no panels"
+
+
+def _dashboard_panels() -> list[dict[str, Any]]:
+    panels: list[dict[str, Any]] = json.loads((DEPLOY / "grafana-dashboard.json").read_text())[
+        "panels"
+    ]
+    return panels
+
+
+def test_dashboard_panels_fit_the_grid_without_overlap() -> None:
+    # Grafana does not refuse an import whose panels overlap: it shoves one
+    # below the other, so a panel added at a taken spot lands somewhere else
+    # (or under the wrong row) without a word. Every panel fits the 24-column
+    # grid, none covers another, an id (Grafana assigns one on import when a
+    # panel has none) is never shared, and each queries the data source the
+    # importer picks.
+    panels = _dashboard_panels()
+    boxes = []
+    for panel in panels:
+        grid = panel["gridPos"]
+        x, y, w, h = grid["x"], grid["y"], grid["w"], grid["h"]
+        assert x >= 0 and y >= 0 and w > 0 and h > 0 and x + w <= 24, panel["title"]
+        boxes.append((panel["title"], x, y, w, h))
+    for index, (title, x, y, w, h) in enumerate(boxes):
+        for other, ox, oy, ow, oh in boxes[index + 1 :]:
+            apart = x + w <= ox or ox + ow <= x or y + h <= oy or oy + oh <= y
+            assert apart, f"{title!r} overlaps {other!r}"
+    ids = [panel["id"] for panel in panels if "id" in panel]
+    assert len(ids) == len(set(ids)), ids
+    assert len({panel["title"] for panel in panels}) == len(panels)
+    for panel in panels:
+        if panel["type"] != "row":
+            assert panel["datasource"] == {"type": "prometheus", "uid": "${datasource}"}, panel
 
 
 @pytest.mark.anyio
@@ -124,6 +158,59 @@ def test_dropped_scan_captures_have_an_alert() -> None:
     assert "requests are unaffected" in description
     assert "llm_redact_scan_capture_queue_depth" in description
     assert 'llm_redact_bookkeeping_errors_total{stage="scan_sink"}' in description
+
+
+def test_scan_capture_panels_read_what_the_alert_reads() -> None:
+    # The dashboard's Scan sinks row charts all three families. The drops
+    # panel colors the reasons LlmRedactScanCapturesDropped pages on (every
+    # reason but shutdown) like the dashboard's other warning panels, and
+    # the shutdown reason (a process's last drain, never a trend) apart.
+    # The families have samples only while a plugin registers a sink, so
+    # each panel says why it is empty in the Free core.
+    panels = _dashboard_panels()
+    row = next(p for p in panels if p["type"] == "row" and "Scan sinks" in p["title"])
+    by_family = {
+        family: [p for p in panels if any(family in t["expr"] for t in p.get("targets", []))]
+        for family in (
+            "llm_redact_scan_captures_delivered_total",
+            "llm_redact_scan_captures_dropped_total",
+            "llm_redact_scan_capture_queue_depth",
+        )
+    }
+    for family, found in by_family.items():
+        assert len(found) == 1, family
+        panel = found[0]
+        assert panel["gridPos"]["y"] == row["gridPos"]["y"] + row["gridPos"]["h"], family
+        assert family in panel["description"]
+        assert "only while a plugin registers a scan sink" in panel["description"]
+    delivered = by_family["llm_redact_scan_captures_delivered_total"][0]
+    assert "rate(llm_redact_scan_captures_delivered_total[" in delivered["targets"][0]["expr"]
+    assert "UNREDACTED" in delivered["description"]
+    depth = by_family["llm_redact_scan_capture_queue_depth"][0]
+    assert depth["fieldConfig"]["defaults"]["unit"] == "short"
+    assert "rate(" not in depth["targets"][0]["expr"]
+
+    dropped = by_family["llm_redact_scan_captures_dropped_total"][0]
+    rules = yaml.safe_load((DEPLOY / "prometheus-alerts.yml").read_text())["groups"][0]["rules"]
+    alert = {r["alert"]: r for r in rules}["LlmRedactScanCapturesDropped"]
+    selector = 'llm_redact_scan_captures_dropped_total{reason!="shutdown"}'
+    assert selector in alert["expr"]
+    targets = {t["refId"]: t for t in dropped["targets"]}
+    alerting = [ref for ref, t in targets.items() if selector in t["expr"]]
+    assert len(alerting) == 1
+    (shutdown,) = (ref for ref in targets if ref not in alerting)
+    assert 'reason="shutdown"' in targets[shutdown]["expr"]
+    for target in targets.values():
+        assert "sum by (reason) (rate(" in target["expr"]
+        assert target["legendFormat"] == "{{reason}}"
+    defaults = dropped["fieldConfig"]["defaults"]
+    assert defaults["color"] == {"mode": "fixed", "fixedColor": "orange"}
+    (override,) = dropped["fieldConfig"]["overrides"]
+    assert override["matcher"] == {"id": "byFrameRefID", "options": shutdown}
+    (color,) = override["properties"]
+    assert color["id"] == "color" and color["value"]["fixedColor"] != "orange"
+    assert "LlmRedactScanCapturesDropped" in dropped["description"]
+    assert "Requests are unaffected" in dropped["description"]
 
 
 def test_prometheus_scrape_targets_reserved_path() -> None:

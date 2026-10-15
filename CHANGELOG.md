@@ -26,8 +26,10 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
 - An entity only the previous default emitted — a raw `PER`, `ORG`, `LOC` or `MISC`, which keeps
   its own type until 2.0.0 — is refused at startup, by `serve --check` and on a reload (which
   keeps the running configuration), with a message naming the entities: pin
-  `dslim/bert-base-NER` as above, or write `PERSON` instead of `PER` (the new model has no label
-  for organizations or places). `llm-redact doctor` FAILs it the same way.
+  `dslim/bert-base-NER` as above, or write `PERSON` instead of `PER`. The new model emits no
+  `ORG`, `LOC` or `MISC`: its nearest labels (`company_name`; `city`, `state`, `country`) are
+  narrower and, asked for, come with types of their own (`COMPANY_NAME`, `CITY`, …), so keep the
+  previous default for those. `llm-redact doctor` FAILs it the same way.
 - A `[detection.ner.revisions] hf` pin of `dslim/bert-base-NER`'s commit
   (`d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc`, the example pin docs/detection.md showed) with
   no `hf` model named would now pin the new default to a commit of another repository: it is
@@ -43,7 +45,8 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   `dslim/bert-base-NER` (see Upgrading). Asked for `PERSON`, the default entities, it finds more
   names on every measured set outside its own training data: the synthetic corpus 1.000 against
   0.974 (exact spans 1.000 against 0.951), OpenPII's first 2,000 English rows 0.989 against 0.911,
-  OpenPII's first 2,000 rows (eight languages) 0.829 against 0.527, with no false positive on the
+  OpenPII's first 2,000 rows (eight languages) 0.829 against 0.527 (both OpenPII figures for the
+  new model measured before 1.12.0's word-by-word decoding), with no false positive on the
   agent-traffic negatives for either and the same latency class (175 against 176 ms per
   500-character string measured side by side). Its model catalog status stays "caution" (its
   five-type measurement misses the false-positive and latency bars); docs/ner-landscape.md, "The

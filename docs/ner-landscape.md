@@ -94,8 +94,9 @@ Dated decision record (2026-10-07; the `hf` default's change decided
 NER bench ([ner-bench.md](ner-bench.md)) and the catalog status each was
 given ([detection.md](detection.md#the-model-catalog)). Every number comes
 from one shared machine: an `Intel(R) Xeon(R) Processor @ 2.80GHz` with 4
-cores (other work ran beside some of the accuracy runs, never beside a
-latency run), torch 2.13.0 (CPU build), transformers 5.10.1, gliner 0.2.28,
+cores (other work ran beside some runs; a latency taken beside it is
+marked as indicative or no comparison where it is quoted), torch 2.13.0 (CPU
+build), transformers 5.10.1, gliner 0.2.28,
 models loaded offline at their catalog pins, `score_threshold` 0.5 unless a
 row says otherwise. Accuracy numbers are deterministic for a model and
 revision; latency is this machine's.

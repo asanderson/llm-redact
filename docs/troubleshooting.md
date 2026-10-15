@@ -387,8 +387,9 @@ so starting would redact less than before. Settle it in one of two ways:
 - or ask for types the new default emits: `entities = ["PERSON"]` (the
   default) instead of `["PER"]`. Placeholders then read «PERSON_001» instead
   of «PER_001», and metrics or alerts keyed on `PER` move with them. The new
-  default has no label for organizations or places (`ORG`, `LOC`, `MISC`);
-  keep the previous default for those.
+  default emits no `ORG`, `LOC` or `MISC`: its nearest labels (`company_name`;
+  `city`, `state`, `country`) are narrower and, asked for, come with types of
+  their own (`COMPANY_NAME`, `CITY`, …); keep the previous default for those.
 
 `llm-redact doctor` shows the same line as a FAIL under `ner` without
 loading a model. docs/detection.md, "The `hf` default's change in 1.13.0".

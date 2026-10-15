@@ -409,7 +409,8 @@ essentials:
   warning, and so are sections a plugin adds (llm-redact-pro's `[auth]`) and,
   inside `[detection]`, the `llm` backend's `[detection.ner.llm]` `url`,
   `allow_remote` and `api_key_env` (where it sends scanned text, and its key) —
-  a reload that would start that backend is refused.
+  a reload never starts that backend on a proxy started without it, and starts
+  it again only at the values the proxy started with.
   A broken config file is logged and ignored — the running config stays
   active. An open realtime connection whose provider settings, upstream
   identity or detection policy the reload changed is closed with code

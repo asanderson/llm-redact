@@ -82,6 +82,7 @@ from llm_redact.config import (
     apply_env_overrides,
     default_config_path,
     identity_upstream_problem,
+    llm_backend_runs,
     load_config,
     map_writes_mode,
     normalize_origin,
@@ -1017,6 +1018,13 @@ class ProxyState:
             config.detection, startup=True, model_policy=self.model_policy
         )
         _log_ner_warnings(config.detection, self.detection_snapshot.detectors)
+        # Whether this process started running the llm backend: the one
+        # startup fact a reload may need that the running config does not
+        # keep (a reload may stop the backend). Written here only, read by
+        # every pin_restart_only_paths of the process (apply_config,
+        # prepare_config): a reload may start the backend again only on a
+        # proxy started with it, at the values it started with.
+        self._llm_at_startup = llm_backend_runs(config.detection.ner)
         # Process-lifetime totals by type (for /status), shared across all
         # per-session redactors/rehydrators.
         self.detection_counts: Counter[str] = Counter()
@@ -1945,10 +1953,11 @@ class ProxyState:
         inject_system_note, max_body_bytes, provider upstreams. Requires
         restart (kept with a warning): vault, audit, host, port, the llm
         backend's url, allow_remote and api_key_env (and a reload that
-        would start that backend is refused). An open
-        realtime connection whose provider settings, upstream authorizer or
-        detection policy changed is closed 1012 (reconnect). The access
-        gate's optional ``reload`` then re-reads its own policy.
+        would start that backend is refused unless the proxy was started
+        running it and the reload names the values it started with). An
+        open realtime connection whose provider settings, upstream
+        authorizer or detection policy changed is closed 1012 (reconnect).
+        The access gate's optional ``reload`` then re-reads its own policy.
         """
         try:
             fresh = apply_env_overrides(load_config(self.config_path))
@@ -1971,8 +1980,11 @@ class ProxyState:
         returned (and warned) so callers can surface "restart required" —
         a section's name, a path's dotted one (``detection.ner.llm.url``).
         A ``fresh`` the pinned paths refuse (one that would start the llm
-        backend, or one they make invalid) is a ConfigError before anything
-        is logged or built: the running configuration stays.
+        backend on a process started without it running, or with any of
+        them changed — a reload starts it again only at the running values,
+        the ones the process started with —, or one they make invalid) is a
+        ConfigError before anything is logged or built: the running
+        configuration stays.
 
         ``prepared`` (``prepare_config``'s answer, built off the event loop
         for the candidate ``fresh`` came from): a changed ``[detection]`` is
@@ -1992,7 +2004,9 @@ class ProxyState:
         # Keys inside a hot section that are restart-only all the same (where
         # the llm backend sends scanned text, and its key): kept from the
         # running configuration, or the reload refused.
-        fresh, kept_paths = pin_restart_only_paths(fresh, self.config)
+        fresh, kept_paths = pin_restart_only_paths(
+            fresh, self.config, llm_at_startup=self._llm_at_startup
+        )
         restart_required = [
             field_name
             for field_name in RESTART_ONLY_KEYS
@@ -2172,8 +2186,9 @@ class ProxyState:
 
         Like apply_config, it keeps the running values of the restart-only
         keys inside ``[detection]`` (RESTART_ONLY_PATHS) and refuses a
-        candidate that would start the llm backend or that the kept values
-        make invalid.
+        candidate that would start the llm backend on a process started
+        without it running or with any of them changed, or that the kept
+        values make invalid.
 
         Safe on a worker thread (a dashboard runs it off the event loop): it
         assigns nothing on the proxy and never touches the event loop; it
@@ -2181,7 +2196,9 @@ class ProxyState:
         apply swapping them meanwhile is either seen whole or not at all
         (and the generation tells apply_config which).
         """
-        candidate, _kept = pin_restart_only_paths(candidate, self.config)
+        candidate, _kept = pin_restart_only_paths(
+            candidate, self.config, llm_at_startup=self._llm_at_startup
+        )
         running = self.detection_snapshot
         snapshot = None
         if candidate.detection != running.detection:

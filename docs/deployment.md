@@ -307,8 +307,10 @@ and keep the old value; so do sections a plugin adds, such as llm-redact-pro's
 `[detection.ner.llm]` `url`, `allow_remote` and `api_key_env`, named by their
 dotted path (`detection.ner.llm.url`): whoever can change `[detection]` can
 neither move where that backend sends scanned text nor change the variable
-its key is read from, and a reload that would start that backend is refused
-(the running configuration kept; [detection.md](detection.md#a-model-server-you-run-the-llm-backend)).
+its key is read from, and a reload never starts that backend on a proxy
+started without it, and starts it again only at the values the proxy started
+with (any other start is refused, the running configuration kept;
+[detection.md](detection.md#a-model-server-you-run-the-llm-backend)).
 A broken config file is logged and ignored — the running config
 stays live. There is deliberately no HTTP reload endpoint (it would be a
 CSRF-reachable mutating endpoint on loopback).

@@ -464,10 +464,12 @@ the value's two parts ([detection.md](detection.md#how-ner-runs)).
   UNION of both spans is redacted as one placeholder, so neither leaves in
   part; a value the policy blocks refuses the request as before; it beats
   only a value the policy forwards as sent (warn mode, an approved refusal
-  override) — its own span is redacted, the rest goes as it would have. A
-  block the overlay adds is final: no refusal override is consulted or used
-  for it and its refusal carries no code — an approval would forward as sent
-  a value the configured policy redacts. The core refuses the request rather
+  override) — its own span is redacted, the rest goes as it would have (a
+  warn-mode value still counted as a warning when part of it goes, not
+  when the redacted spans cover it whole). A block the overlay adds is
+  final: no refusal override is consulted or used for it and its refusal
+  carries no code — an approval would forward as sent a value the
+  configured policy redacts. The core refuses the request rather
   than drop an overlay it cannot apply, and an overlay never turns detection
   back on for a provider configured `detection = false`. A gate may also
   decide on what the redaction FOUND (`authorize_content`): after a

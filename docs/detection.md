@@ -263,7 +263,13 @@ Warn-mode hits show up in `/status` (`warnings_total`), Prometheus
 (`llm_redact_warnings_total`), and `llm-redact status`, so you can measure a
 rule's noise on your real traffic before trusting it with redaction. Be
 aware warn is *observation only* — the matched value (and anything a longer
-warn-mode match overlaps) is sent to the provider. Block-mode rejections
+warn-mode match overlaps) is sent to the provider. A warn-mode value part
+of which is redacted after all — by a value it is joined with
+([above](#values-joined-with-the-ones-they-overlap)), or by a deny string
+an access gate adds for its requester (an llm-redact-pro role's detection
+overlay, which only tightens this policy) — is counted the same way: once,
+when part of it is still sent, and not at all when the redacted values
+cover it whole. Block-mode rejections
 return a provider-shaped 400 whose message names the rule type, which
 agentic tools surface directly. `llm-redact preview` shows which mode a
 given text would trigger; the llm-redact-pro dashboard's config editor has

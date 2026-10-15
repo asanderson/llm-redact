@@ -92,14 +92,14 @@ DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(
     }
 )
 # The hf backend's default model before 1.13.0 (owner decision D6) and the
-# labels its config.json id2label names at the catalog pin: CoNLL-2003's
-# MISC, PER, ORG and LOC, B-/I- tagged. A configuration that loads the hf
+# entity labels its config.json id2label names at the catalog pin:
+# CoNLL-2003's MISC, PER, ORG and LOC, B-/I- tagged ("O", no entity, left
+# out: the model never emitted it). A configuration that loads the hf
 # default without naming it is refused when an entity this model emitted is
 # one the new default cannot emit (engine.default_change_losses): a minor
 # upgrade never silently narrows what is redacted.
 PREVIOUS_HF_DEFAULT = "dslim/bert-base-NER"
 PREVIOUS_HF_DEFAULT_LABELS = (
-    "O",
     "B-MISC",
     "I-MISC",
     "B-PER",

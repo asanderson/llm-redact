@@ -63,7 +63,7 @@ def _id2label(names: tuple[str, ...]) -> dict[int, str]:
 
 # The new default's labels as its config.json names them (the catalog's facts).
 OPENMED_ID2LABEL = _id2label(_ENTRY.model_labels)
-DSLIM_ID2LABEL = dict(enumerate(PREVIOUS_HF_DEFAULT_LABELS))
+DSLIM_ID2LABEL = dict(enumerate(("O", *PREVIOUS_HF_DEFAULT_LABELS)))
 
 
 def _pipe(id2label: dict[int, str] | None = None) -> FakeHfPipe:
@@ -106,6 +106,8 @@ def _message(*entities: str) -> str:
         (("PER", "PER"), ("PER",)),
         # Neither model emits a typo: the never-match warning's case.
         (("PERSONS",), ()),
+        # "O" is no entity: neither model ever emitted one (both name it).
+        (("O",), ()),
         # Only the new default emits these: nothing is lost.
         (("first_name", "ACCOUNT_NUMBER"), ()),
     ],
@@ -114,6 +116,13 @@ def test_the_entities_the_previous_default_emitted_and_the_new_one_cannot(
     entities: tuple[str, ...], lost: tuple[str, ...]
 ) -> None:
     assert default_change_losses(_ner(entities=entities)) == lost
+
+
+def test_o_is_no_entity_before_or_after_the_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Both models' id2label name "O", but neither ever emitted it: the
+    # catalog's facts and the loaded model agree that nothing is lost.
+    install_transformers(monkeypatch, _pipe())
+    assert build_detectors(DetectionConfig(enabled=(), ner=_ner(entities=("O",))))
 
 
 def test_only_while_the_hf_default_loads_unnamed() -> None:
@@ -398,7 +407,7 @@ def test_real_the_catalog_records_the_defaults_labels(monkeypatch: pytest.Monkey
     previous = lookup(PREVIOUS_HF_DEFAULT)
     assert previous is not None and previous.revision is not None
     id2label = _cached_config(PREVIOUS_HF_DEFAULT, previous.revision)["id2label"]
-    assert [id2label[str(i)] for i in range(len(id2label))] == list(PREVIOUS_HF_DEFAULT_LABELS)
+    assert [id2label[str(i)] for i in range(len(id2label))] == ["O", *PREVIOUS_HF_DEFAULT_LABELS]
     id2label = _cached_config(HF_DEFAULT, HF_DEFAULT_PIN)["id2label"]
     names = {label.split("-", 1)[1] for label in id2label.values() if label != "O"}
     assert sorted(names) == sorted(_ENTRY.model_labels)

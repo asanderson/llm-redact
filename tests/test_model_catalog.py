@@ -285,15 +285,16 @@ def test_the_previous_hf_default_stays_catalogued_with_its_pin() -> None:
     assert entry.revision == _DSLIM_PIN
     assert "the hf backend's default model before 1.13.0;" in entry.reason
     assert DEFAULT_MODELS["hf"] != PREVIOUS_HF_DEFAULT
-    # Its config.json id2label: CoNLL-2003's four types, B-/I- tagged.
-    assert PREVIOUS_HF_DEFAULT_LABELS[0] == "O"
-    assert sorted({label[2:] for label in PREVIOUS_HF_DEFAULT_LABELS[1:]}) == [
+    # Its config.json id2label's entity labels: CoNLL-2003's four types,
+    # B-/I- tagged ("O" is no entity: it never emitted one).
+    assert "O" not in PREVIOUS_HF_DEFAULT_LABELS
+    assert sorted({label[2:] for label in PREVIOUS_HF_DEFAULT_LABELS}) == [
         "LOC",
         "MISC",
         "ORG",
         "PER",
     ]
-    assert all(label[:2] in ("B-", "I-") for label in PREVIOUS_HF_DEFAULT_LABELS[1:])
+    assert all(label[:2] in ("B-", "I-") for label in PREVIOUS_HF_DEFAULT_LABELS)
 
 
 def test_model_labels_are_recorded_for_the_hf_default_only() -> None:

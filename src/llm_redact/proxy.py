@@ -1945,9 +1945,10 @@ class ProxyState:
         inject_system_note, max_body_bytes, provider upstreams. Requires
         restart (kept with a warning): vault, audit, host, port, the llm
         backend's url, allow_remote and api_key_env (and a reload that
-        would start that backend is refused). An open
-        realtime connection whose provider settings, upstream authorizer or
-        detection policy changed is closed 1012 (reconnect). The access
+        would start that backend at other values than the proxy started
+        with is refused). An open realtime connection whose provider
+        settings, upstream authorizer or detection policy changed is closed
+        1012 (reconnect). The access
         gate's optional ``reload`` then re-reads its own policy.
         """
         try:
@@ -1971,8 +1972,10 @@ class ProxyState:
         returned (and warned) so callers can surface "restart required" —
         a section's name, a path's dotted one (``detection.ner.llm.url``).
         A ``fresh`` the pinned paths refuse (one that would start the llm
-        backend, or one they make invalid) is a ConfigError before anything
-        is logged or built: the running configuration stays.
+        backend with any of them changed — it starts only at the running
+        values, the ones the process started with —, or one they make
+        invalid) is a ConfigError before anything is logged or built: the
+        running configuration stays.
 
         ``prepared`` (``prepare_config``'s answer, built off the event loop
         for the candidate ``fresh`` came from): a changed ``[detection]`` is
@@ -2172,8 +2175,8 @@ class ProxyState:
 
         Like apply_config, it keeps the running values of the restart-only
         keys inside ``[detection]`` (RESTART_ONLY_PATHS) and refuses a
-        candidate that would start the llm backend or that the kept values
-        make invalid.
+        candidate that would start the llm backend with any of them changed
+        or that the kept values make invalid.
 
         Safe on a worker thread (a dashboard runs it off the event loop): it
         assigns nothing on the proxy and never touches the event loop; it

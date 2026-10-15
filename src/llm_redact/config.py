@@ -226,9 +226,10 @@ RESTART_ONLY_KEYS = (
 # there as a bearer token — whoever can change [detection] (a file edit
 # and SIGHUP, the pro editor) must not be able to point either somewhere
 # the proxy was not started with. apply_config keeps their running values
-# and reports each by its dotted name (restart_only_name), and refuses a
-# reload that would START the llm backend (pin_restart_only_paths); the
-# pro editor reads this list for its read-only fields. README.md,
+# (the startup ones: every apply keeps them) and reports each by its dotted
+# name (restart_only_name), and refuses a reload that would START the llm
+# backend at any other values (pin_restart_only_paths); the pro editor
+# reads this list for its read-only fields. README.md,
 # docs/deployment.md and docs/troubleshooting.md enumerate them
 # (test_restart_only_docs.py).
 RESTART_ONLY_PATHS: tuple[tuple[str, ...], ...] = (
@@ -1868,16 +1869,30 @@ def _llm_running(ner: NerConfig) -> bool:
 def pin_restart_only_paths(fresh: Config, running: Config) -> tuple[Config, list[str]]:
     """``fresh`` with every RESTART_ONLY_PATHS value set to ``running``'s,
     and the dotted names of those that differed (never a value) — what a
-    hot reload applies (apply_config, and validate_config agreeing).
+    hot reload applies (apply_config, and prepare_config/validate_config
+    agreeing: each calls this first, against the same running config).
 
-    ConfigError, naming the restart-only keys, when that is no
-    configuration to apply hot: one that would START the llm backend —
-    enabled with "llm" among its backends while the running configuration
-    does not run it (added to the backends, NER switched on, its section
-    added) — since a running proxy never begins to send scanned text, or a
-    credential, to a model server it was not started with, even the one its
-    file named; or one the kept values make invalid (the running url with
-    a changed ``api``)."""
+    ``running``'s values ARE the ones the process started with: the
+    running configuration is written only at startup and by apply_config,
+    which writes this function's answer — the running values again — so
+    no apply can move them (tests/test_llm_restart_only.py runs the
+    sequence). A separate startup snapshot would be a second copy of the
+    same three values, one that could drift from the copy enforced here.
+
+    A reload may START the llm backend — enabled with "llm" among its
+    backends while the running configuration does not run it (added to the
+    backends, NER switched on, its section added, re-added after a reload
+    removed it) — only at those values: when ``fresh`` names the running
+    value of every restart-only key, the backend starts exactly where the
+    process was started to send it (its startup file's url, or the default
+    one, and the key variable named there), and the build reads that
+    variable and checks that server as at startup. ConfigError, naming the
+    keys (never a value), when that is no configuration to apply hot: one
+    that would start the backend with any of them changed (kept, the start
+    would go to a destination the file does not name; taken, to one the
+    process was not started with — and a running proxy never begins to
+    send scanned text, or a credential, there), or one the kept values
+    make invalid (the running url with a changed ``api``)."""
     pinned = fresh
     changed: list[str] = []
     for path in RESTART_ONLY_PATHS:
@@ -1886,11 +1901,12 @@ def pin_restart_only_paths(fresh: Config, running: Config) -> tuple[Config, list
             changed.append(restart_only_name(path))
             pinned = _with_path_value(pinned, path, kept)
     names = ", ".join(restart_only_name(path) for path in RESTART_ONLY_PATHS)
-    if _llm_running(pinned.detection.ner) and not _llm_running(running.detection.ner):
+    if changed and _llm_running(pinned.detection.ner) and not _llm_running(running.detection.ner):
         raise ConfigError(
-            "[detection.ner] a reload cannot start the llm backend (the running configuration"
-            f" does not run it): where it sends the scanned text and its key ({names}) are"
-            " restart-only; restart the proxy to start it"
+            "[detection.ner] a reload cannot start the llm backend anywhere but where the proxy"
+            f" was started to send it: {', '.join(changed)} changed ({names} are restart-only,"
+            " and a reload starts the backend only at the values the proxy started with);"
+            " restart the proxy to start it at the new ones"
         )
     llm = pinned.detection.ner.llm
     problem = llm_url_problem(llm.url, allow_remote=llm.allow_remote) or _llm_url_api_problem(

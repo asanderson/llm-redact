@@ -616,9 +616,10 @@ class DashboardHost(Protocol):
     (``config.RESTART_ONLY_PATHS`` through ``config.restart_only_name``,
     e.g. ``detection.ner.llm.url``) — a label to show, not always a
     ``Config`` attribute. A ``fresh`` those keys refuse (one that would
-    start the llm backend, or one the kept values make invalid) raises
-    ``ConfigError`` with the running configuration kept, and
-    ``validate_config`` refuses it alike. ``preview`` runs the LIVE detection
+    start the llm backend with any of them changed — a reload starts it
+    only at the values the process started with —, or one the kept values
+    make invalid) raises ``ConfigError`` with the running configuration
+    kept, and ``validate_config`` refuses it alike. ``preview`` runs the LIVE detection
     pipeline over caller text on a throwaway vault (no upstream, vault,
     metrics or audit write) and returns ``{redacted, detections, warnings,
     blocked}`` — ``blocked`` is ``{"type": T}`` or None, never a value.

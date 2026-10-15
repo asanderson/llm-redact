@@ -155,14 +155,18 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
     the environment, no redirect followed, answers capped. `url`, `allow_remote` and
     `api_key_env` take a restart although `[detection]` reloads hot: a reload (SIGHUP, the
     llm-redact-pro config editor) keeps their running values, applies the rest of
-    `[detection]` and names them in its "require restart" warning (`detection.ner.llm.url`, …);
-    a reload that would start the backend (`"llm"` added to the backends, NER switched on with
-    it) is refused with the running configuration kept. Whoever can change `[detection]` can
-    therefore never make a running proxy send scanned text, or a key, somewhere it was not
-    started with. `config.RESTART_ONLY_PATHS` lists the three for the editor, and
-    `apply_config`'s restart-required list (the plugin API's `DashboardHost` contract) now
-    holds their dotted names beside the section names: an entry is a name to show, not always
-    a `Config` attribute.
+    `[detection]` and names them in its "require restart" warning (`detection.ner.llm.url`, …).
+    Those running values are the ones the proxy started with (no reload moves them), and a
+    reload may start the backend (`"llm"` added to the backends, NER switched on with it,
+    re-added after a reload removed it) only at them — the startup file's, or the defaults
+    when it had no `[detection.ner.llm]` table — the build reading the key and checking the
+    server as at startup; one that would start it with any of the three changed is refused
+    with the running configuration kept, naming the changed keys. Whoever can change
+    `[detection]` can therefore never make a running proxy send scanned text, or a key,
+    somewhere it was not started with. `config.RESTART_ONLY_PATHS` lists the three for the
+    editor, and `apply_config`'s restart-required list (the plugin API's `DashboardHost`
+    contract) now holds their dotted names beside the section names: an entry is a name to
+    show, not always a `Config` attribute.
   - **Only real values, and only ever more redaction.** A value is kept only when its text
     occurs verbatim in the text the model read (then it is redacted wherever it occurs in the
     string, never inside a placeholder an earlier turn left there); anything the model invents

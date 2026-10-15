@@ -438,15 +438,26 @@ keys, applies the rest of `[detection]` (the model, `timeout_ms`, the
 entities, ...), and names each kept key in its "require restart" warning
 (`detection.ner.llm.url`, `detection.ner.llm.allow_remote`,
 `detection.ner.llm.api_key_env`; the editor's answer lists the same names).
-A reload never STARTS the backend either: one that would run it while the
-running configuration does not — `"llm"` added to `backends`, NER switched
-on with it, its table added — is refused (`a reload cannot start the llm
-backend`) and the running configuration kept, even when the file named the
-same server at startup; and so is a reload the kept values make invalid (a
-changed `api` whose paths the running `url` already ends with). Restart the
-proxy to apply either. The startup and `serve --check` read the file as
-written. A running proxy therefore never begins to send scanned text, or a
-credential, to a destination it was not started with.
+The running values are the ones the proxy started with: no reload moves
+them. A reload STARTS the backend only at those values: one that would run
+it while the running configuration does not — `"llm"` added to `backends`,
+NER switched on with it, its table added, re-added after a reload removed
+it — is applied when the file names the `url`, `allow_remote` and
+`api_key_env` the proxy started with (its startup file's, or the defaults
+— the loopback Ollama URL above, no key — when that file had no
+`[detection.ner.llm]` table). The build then reads the key's variable and
+checks the server and its model exactly as at startup (any failure keeps
+the running configuration), and an open realtime connection is closed
+1012 to reconnect under the new detection policy, as for any `[detection]`
+change. A start with any of the three changed is refused (`a reload cannot
+start the llm backend anywhere but where the proxy was started to send it`,
+naming the changed keys, never a value) and the running configuration kept:
+kept, the running values would start it at a destination the file does not
+name. So is a reload the kept values make invalid (a changed `api` whose
+paths the running `url` already ends with). Restart the proxy to apply
+either. The startup and `serve --check` read the file as written. A running
+proxy therefore never begins to send scanned text, or a credential, to a
+destination it was not started with.
 
 **A server that requires a key** (vLLM started with `--api-key`, a hosted
 https endpoint, Ollama behind an authenticating reverse proxy or Ollama's

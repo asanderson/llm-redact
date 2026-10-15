@@ -33,8 +33,8 @@ and tags `vX.Y.Z`.
   any of them redacts is redacted, overlapping ones as one placeholder typed after the one
   starting first (`pay «IBAN_001»`), and a value in block mode among them refuses the request.
   Nothing 1.12.1 redacted or refused is forwarded now, with custom rules, NER spans and
-  `[detection.modes]` too: tests pin that against 1.12.1's pipeline (and, for the built-in rules,
-  against 1.12.0's).
+  `[detection.modes]` too: tests pin that against 1.12.1's pipeline (and, for the built-in rules
+  under the default modes, against 1.12.0's).
 
 ### Changed
 - A spaced IBAN no longer imposes the `iban` rule's mode on a value it overlaps (it did since

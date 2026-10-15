@@ -500,13 +500,15 @@ def _crossing(rng: random.Random, text: str, joining: list[Detection]) -> list[t
 
 
 def _generated(rng: random.Random) -> Iterable[str]:
-    """Cards in runs of digit groups and paper IBANs, next to words and
-    values the custom rules and NER spans take in."""
+    """Cards in runs of digit groups (some before an expiry) and paper
+    IBANs, next to words and values the custom rules and NER spans take
+    in."""
     iban = VALUE_GENERATORS["iban"][1]
     values = [gen(rng) for _type, gen in VALUE_GENERATORS.values()]
     for _ in range(1500):
         value = rng.choice(values)
         yield card_run(rng, value) + rng.choice(WORDS)
+        yield card_run(rng, value, expiry=True) + rng.choice(WORDS)
         yield f"Order {rng.randrange(1, 100)} " + card_run(rng, "") + rng.choice(WORDS)
         spaced = iban(rng).replace(" ", "")
         paper = " ".join(spaced[i : i + 4] for i in range(0, len(spaced), 4))

@@ -2,9 +2,11 @@
 ``prepare_config`` / ``apply_config(prepared=)`` / ``preview_snapshot``).
 
 The proxy's detectors, allowlist and modes are ONE immutable object
-(``proxy.DetectionSnapshot``) that ``apply_config`` swaps in one assignment:
-a preview on the dashboard's worker thread reads it once, so an apply on the
-event loop landing meanwhile never hands it a mix of two configurations.
+(``proxy.DetectionSnapshot``) that ``apply_config`` swaps in one assignment
+(``ProxyState.detectors``/``allowlist``/``modes`` are read-only views of it:
+a change is a new snapshot, never one attribute at a time): a preview on
+the dashboard's worker thread reads it once, so an apply on the event loop
+landing meanwhile never hands it a mix of two configurations.
 ``prepare_config`` runs validate_config's checks on a worker thread and KEEPS
 the detection objects it built, so a save loads every NER model once — not
 again, on the event loop, in the apply. A prepared build is adopted only for
@@ -81,18 +83,34 @@ def test_the_attributes_read_the_snapshot() -> None:
     assert state.overlay_builds is snapshot.overlay_builds
     # The static redactor detects through the snapshot's own plan.
     assert state.redactor.plan is snapshot.plan
-    # Derived from the snapshot's objects, never assigned.
-    with pytest.raises(AttributeError):
-        state.overlay_builds = snapshot.overlay_builds  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         snapshot.modes = {}  # type: ignore[misc]
 
 
+@pytest.mark.parametrize("name", ["detectors", "allowlist", "modes", "overlay_builds"])
+def test_the_attributes_are_read_only(name: str) -> None:
+    # Never assigned one at a time: a write would leave the snapshot's plan,
+    # overlay builds and generation derived from objects no longer running
+    # (the transitional setters that once derived a new snapshot are gone).
+    state = _state()
+    snapshot = state.detection_snapshot
+    attribute = vars(ProxyState)[name]
+    assert isinstance(attribute, property)
+    assert (attribute.fset, attribute.fdel) == (None, None)
+    with pytest.raises(AttributeError):
+        setattr(state, name, getattr(snapshot, name))
+    with pytest.raises(AttributeError):
+        delattr(state, name)
+    assert state.detection_snapshot is snapshot
+    assert getattr(state, name) is getattr(snapshot, name)
+    assert name not in vars(state)
+
+
 @pytest.mark.parametrize("name", ["detectors", "allowlist", "modes"])
-def test_a_transitional_setter_swaps_a_whole_new_snapshot(name: str) -> None:
-    # Writers that predate the snapshot (llm-redact-pro's tests add a
-    # detector with ``state.detectors = [...]``) keep working: the setter
-    # derives a new snapshot and swaps it in ONE assignment.
+def test_a_new_snapshot_is_the_one_way_to_change_them(name: str) -> None:
+    # What a test or a plugin that changes one of them does (llm-redact-pro's
+    # tests add a detector so): a new snapshot over the running one,
+    # assigned in ONE statement.
     state = _state()
     old = state.detection_snapshot
     redactor = state.redactor
@@ -102,7 +120,7 @@ def test_a_transitional_setter_swaps_a_whole_new_snapshot(name: str) -> None:
         "allowlist": type(old.allowlist)(),
         "modes": {"EMAIL": "warn"},
     }[name]
-    setattr(state, name, value)
+    state.detection_snapshot = dataclasses.replace(old, **{name: value})
     new = state.detection_snapshot
     assert new is not old and getattr(state, name) is value
     for other in {"detectors", "allowlist", "modes"} - {name}:
@@ -110,8 +128,9 @@ def test_a_transitional_setter_swaps_a_whole_new_snapshot(name: str) -> None:
     # Derived anew from the objects it holds: plan, overlay builds, generation.
     assert new.plan.source is new.detectors and new.generation != old.generation
     assert new.overlay_builds is not old.overlay_builds and new.detection == old.detection
+    assert state.overlay_builds is new.overlay_builds
     # A reader holding the old reference keeps it whole; the static redactor
-    # keeps what it was built over, as an attribute assignment left it.
+    # keeps what it was built over.
     assert old.plan.source is old.detectors and state.redactor is redactor
     # A build prepared against the replaced generation is no longer adopted.
     builds: list[DetectionConfig] = []
@@ -126,11 +145,16 @@ def test_a_transitional_setter_swaps_a_whole_new_snapshot(name: str) -> None:
     assert builds == [SECOND] and _spent(prepared)
 
 
-def test_a_preview_reads_what_a_transitional_setter_assigned() -> None:
+def test_a_preview_reads_a_swapped_snapshot() -> None:
     state = _state()
-    state.detectors = [*state.detectors, _Holding(released=True)]
+    snapshot = state.detection_snapshot
+    state.detection_snapshot = dataclasses.replace(
+        snapshot, detectors=[*snapshot.detectors, _Holding(released=True)]
+    )
     assert state.preview("from Ada")["detections"] == {"PERSON": 1}
-    state.modes = {"PERSON": "warn"}
+    state.detection_snapshot = dataclasses.replace(
+        state.detection_snapshot, modes={"PERSON": "warn"}
+    )
     answer = state.preview("from Ada")
     assert answer["warnings"] == {"PERSON": 1} and answer["detections"] == {}
 

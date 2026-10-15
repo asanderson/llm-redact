@@ -234,7 +234,11 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   NER model once, and a SIGHUP reload builds off the event loop.** The proxy's detectors,
   allowlists and modes are now one immutable snapshot that a reload or a save swaps in a single
   step, and the redaction preview reads it once: a preview a reload overlaps describes the
-  configuration live when it began, never the old detectors with the new modes. Three optional
+  configuration live when it began, never the old detectors with the new modes.
+  `ProxyState.detectors`, `allowlist` and `modes`, plain attributes before, are read-only views
+  of that snapshot: code that assigned one (a plugin's tests adding a detector) assigns a new
+  snapshot instead, `state.detection_snapshot = dataclasses.replace(state.detection_snapshot,
+  detectors=...)`, which derives its plan and overlay builds anew. Three optional
   members of `plugin_api.DashboardHost`, read with `getattr` (an older core lacks them), let a
   dashboard plugin use this: `preview_snapshot` (True), `prepare_config(candidate)` — the config
   check, raising the same errors as `validate_config`, keeping the NER models it loaded for a

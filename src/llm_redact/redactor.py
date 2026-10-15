@@ -553,11 +553,14 @@ class Redactor:
         the policy redacts nor the added string leaves in part."""
         redacting, passing = self._by_mode(winners)
         # Every united span an added match is part of is tier 0, so the
-        # configured resolution's own tier-0 rule drops each passing winner
-        # one overlaps; the other spans are disjoint from every winner (the
-        # configured winners are disjoint), so nothing else changes.
+        # tier-0 rule (``_resolve_tiers``) drops each passing winner one
+        # overlaps; the other spans are disjoint from every winner (the
+        # configured winners are disjoint), so nothing else changes. Not
+        # ``_resolve_overlaps``: it would cut an additive (llm) passing
+        # winner around the union into new values, each put to the
+        # overrides again and refused as a fragment.
         united = _unite(text, redacting + added)
-        return _resolve_overlaps(sorted(united + passing, key=lambda d: d.start))
+        return _resolve_tiers(sorted(united + passing, key=lambda d: d.start))
 
     def charge(self, count: int) -> None:
         """Count ``count`` more pieces of the body (an uploaded file's JSONL

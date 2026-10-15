@@ -60,6 +60,8 @@ loads `OpenMed/OpenMed-PII-SuperClinical-Small-44M-v1` instead of `dslim/bert-ba
   joined with every value they overlap, directly or through other overlapping values: whatever
   any of them redacts is redacted, overlapping ones as one placeholder typed after the one
   starting first (`pay «IBAN_001»`), and a value in block mode among them refuses the request.
+  (A finding of the new `llm` backend is not joined: like everywhere, it keeps only what lies
+  outside the other values, here as a placeholder of its own.)
   Nothing 1.12.1 redacted or refused is forwarded now, with custom rules, NER spans and
   `[detection.modes]` too: tests pin that against 1.12.1's pipeline (and, for the built-in rules
   under the default modes, against 1.12.0's).

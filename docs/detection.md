@@ -1134,9 +1134,10 @@ Every NER backend handles each string the redaction scans the same way:
    exact tie; an `llm` finding never displaces another detection and keeps
    only what lies outside the others' winners), and the winner's mode
    redacts it into the vault, forwards it (warn) or refuses the request
-   (block). A span overlapping a card read inside a run of digit groups or a
-   paper IBAN is joined with it instead
-   ([Values overlapping a card read in a run or a paper IBAN](#values-overlapping-a-card-read-in-a-run-or-a-paper-iban)).
+   (block). A span of any other backend overlapping a card read inside a
+   run of digit groups or a paper IBAN is joined with it instead
+   ([Values overlapping a card read in a run or a paper IBAN](#values-overlapping-a-card-read-in-a-run-or-a-paper-iban));
+   an `llm` finding is not: it keeps only what lies outside the card or IBAN.
 
 **Long strings.** A model reads a bounded number of tokens at a time and, left
 alone, ignores the rest of a longer string. The `hf`, `gliner` and `gliner2`

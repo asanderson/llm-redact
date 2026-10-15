@@ -23,8 +23,10 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from llm_redact.detection.base import ADDITIVE_TIER, Detection
 from llm_redact.detection.deny import DenyDetector, DenyEntry
 from llm_redact.detection.engine import (
+    Allowlist,
     DetectionConfig,
     DetectorPlan,
     build_allowlist,
@@ -213,6 +215,55 @@ def test_an_added_string_beats_an_approved_block() -> None:
     assert redactor.counts == Counter({"DENY": 1})
 
 
+class _Found:
+    """A stand-in detector finding ``surface`` as ``detector_type`` at
+    ``tier`` (``ADDITIVE_TIER``: the llm NER backend's)."""
+
+    name = "found"
+
+    def __init__(self, found: list[tuple[str, str, int]]) -> None:
+        self.found = found
+
+    def detect(self, text: str) -> list[Detection]:
+        detections = []
+        for surface, detector_type, tier in self.found:
+            at = text.find(surface)
+            if at >= 0:
+                end = at + len(surface)
+                detections.append(Detection(at, end, detector_type, surface, 120, tier))
+        return detections
+
+
+@pytest.mark.parametrize("tier", [1, ADDITIVE_TIER])
+def test_an_approved_or_warn_value_yields_to_a_union_at_any_tier(tier: int) -> None:
+    # An llm finding (ADDITIVE_TIER) forwarded as sent yields to an added
+    # match exactly as any other value does: dropped, never cut into
+    # fragments put to the overrides again.
+    value = "bob at example dot com"
+    text = f"mail {value} please"
+    detector = _Found([(value, "EMAIL", tier)])
+    approved = Approved(value)
+    blocking = Redactor(
+        [detector],
+        InMemoryVault(),
+        Allowlist(),
+        modes={"EMAIL": "block"},
+        added_deny=_plan(("example",)),
+    ).with_overrides(approved)
+    assert blocking.blocked_type(text) is None
+    assert blocking.redact_text(text) == "mail bob at «DENY_001» dot com please"
+    assert {value for _type, value in approved.asked} == {value}
+    warning = Redactor(
+        [detector],
+        InMemoryVault(),
+        Allowlist(),
+        modes={"EMAIL": "warn"},
+        added_deny=_plan(("example",)),
+    )
+    assert warning.redact_text(text) == "mail bob at «DENY_001» dot com please"
+    assert warning.warn_counts == Counter()
+
+
 def test_a_value_forwarded_as_sent_yields_to_a_union_it_starts_before() -> None:
     # The warn-mode email starts before the union of an added string and the
     # configured deny string it reaches into: the union is redacted whole,
@@ -347,3 +398,55 @@ def test_added_strings_redact_a_superset_and_refuse_alike(
     for value in added:
         for match in re.finditer(re.escape(value), text, re.IGNORECASE):
             assert set(range(match.start(), match.end())) <= redacted
+
+
+_SPANS = st.lists(
+    st.tuples(
+        st.integers(0, 40),
+        st.integers(1, 12),
+        st.sampled_from(["EMAIL", "PHONE"]),
+        st.sampled_from([1, ADDITIVE_TIER]),
+    ),
+    max_size=5,
+)
+
+
+@settings(deadline=None, max_examples=300)
+@given(
+    words=st.lists(_WORDS, min_size=1, max_size=14),
+    spans=_SPANS,
+    added=_ADDED,
+    modes=st.dictionaries(st.sampled_from(["EMAIL", "PHONE"]), st.sampled_from(["warn", "block"])),
+    approve=st.sets(st.integers(0, 4)),
+)
+def test_added_strings_put_no_new_value_to_the_overrides_and_blocked_type_agrees(
+    words: list[str],
+    spans: list[tuple[int, int, str, int]],
+    added: list[str],
+    modes: dict[str, str],
+    approve: set[int],
+) -> None:
+    text = "".join(words)
+    found = []
+    for start, length, detector_type, tier in spans:
+        surface = text[start : start + length]
+        if surface.strip():
+            found.append((surface, detector_type, tier))
+    # The values resolution hands on without the added strings (an llm
+    # finding is already cut around the others there, by design).
+    plain = Redactor([_Found(found)], InMemoryVault(), Allowlist(), modes=modes)
+    values = {d.value for d in plain._winners(text)}
+    approved = Approved(*(found[i][0] for i in approve if i < len(found)))
+    redactor = Redactor(
+        [_Found(found)], InMemoryVault(), Allowlist(), modes=modes, added_deny=_plan(tuple(added))
+    ).with_overrides(approved)
+    expected = redactor.blocked_type(text)
+    try:
+        redactor.redact_text(text)
+    except BlockedRequest as refused:
+        assert refused.detector_type == expected
+    else:
+        assert expected is None
+    # The added strings never make the overrides hear a new value (a
+    # fragment of one cut around them).
+    assert {value for _type, value in approved.asked} <= values

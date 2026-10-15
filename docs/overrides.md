@@ -108,7 +108,10 @@ redacted where the proxy can redact it — a binary file that `[extraction]
 convert` replaces by its redacted text included: the values of such a file are
 redacted, never put to an approval, never part of a code, and never use a
 one-time grant. A deny string where the proxy cannot redact it (a binary
-upload, a verbatim field) makes the whole refusal final: no code. A binary
+upload, a verbatim field) makes the whole refusal final: no code. So does a
+span joining a card read inside a run of digit groups, or a paper-format
+IBAN, with a value it overlaps ([detection.md](detection.md#values-overlapping-a-card-read-in-a-run-or-a-paper-iban)):
+no one approval names them all. A binary
 part that reads clean only because an approval let its values through is
 counted `overridden` in `inspected_uploads_total`, never `clean`.
 

@@ -65,8 +65,13 @@ class RegexRule:
     # A valid match a vetoed one may hold (None: none), given where the
     # next match of the pattern starts (the text's length when none does):
     # the scan itself stays finditer's, and what this returns lies before
-    # that next match. For a rule without anchors.
+    # that next match; it is joined (Detection.joins). For a rule without
+    # anchors.
     inside: Callable[[re.Match[str], int], re.Match[str] | None] | None = None
+    # Whether a match is joined with the values it overlaps instead of
+    # competing with them for its characters (Detection.joins; None: none
+    # is): a reading an earlier release did not make.
+    joins: Callable[[re.Match[str]], bool] | None = None
 
 
 # `\d` in a str pattern is any Unicode decimal digit (category Nd), not just
@@ -736,6 +741,12 @@ def _iban_ok(match: re.Match[str]) -> bool:
     return int("".join(str(int(ch, 36)) for ch in rearranged)) % 97 == 1
 
 
+def _iban_paper(match: re.Match[str]) -> bool:
+    """Whether an IBAN is written in the paper format (read since 1.12.1):
+    joined with the values it overlaps (Detection.joins)."""
+    return match.group(0)[4] in _IBAN_SEPARATORS
+
+
 def _iban_resume(match: re.Match[str]) -> int:
     """Where the scan goes on after a vetoed candidate: at its second group
     in the paper format, where an IBAN can start ("IS12 GB82 WEST 1234 5698
@@ -954,6 +965,7 @@ BUILTIN_RULES: tuple[RegexRule, ...] = (
         pattern=_iban_pattern(),
         validator=_iban_ok,
         resume=_iban_resume,
+        joins=_iban_paper,
     ),
     RegexRule(
         # Ethereum (and every EVM chain): 0x + 40 hex. A mixed-case address
@@ -1888,26 +1900,27 @@ class RegexDetector:
         if self._rule.resume is not None:
             return self._detections_from(self._resumed(text, self._rule.resume), validated=True)
         if self._rule.inside is not None:
-            return self._detections_from(self._insides(text, self._rule.inside), validated=True)
+            return self._insides(text, self._rule.inside)
         return self._detections_from(self._rule.pattern.finditer(text))
 
     def _insides(
         self, text: str, inside: Callable[["re.Match[str]", int], "re.Match[str] | None"]
-    ) -> Iterator["re.Match[str]"]:
+    ) -> Iterator[Detection]:
         """finditer's matches the validator accepts and, for each one it
-        vetoes, the match ``inside`` finds in it, before the next one: what
-        the validator accepted alone is found exactly as without it."""
+        vetoes, the match ``inside`` finds in it, before the next one,
+        joined (Detection.joins): what the validator accepted alone is found
+        exactly as without it."""
         validator = self._validator
         matches = self._rule.pattern.finditer(text)
         match = next(matches, None)
         while match is not None:
             following = next(matches, None)
             if validator is None or validator(match):
-                yield match
+                yield self._detection(match)
             elif (
                 found := inside(match, len(text) if following is None else following.start())
             ) is not None:
-                yield found
+                yield self._detection(found, joins=True)
             match = following
 
     def _resumed(
@@ -1927,21 +1940,28 @@ class RegexDetector:
     def _detections_from(
         self, matches: Iterable["re.Match[str]"], validated: bool = False
     ) -> Iterable[Detection]:
-        rule = self._rule
         validator = None if validated else self._validator
         for match in matches:
             if validator is not None and not validator(match):
                 continue
-            if rule.group and match.group("value") is not None:
-                start, end = match.span("value")
-                value = match.group("value")
-            else:
-                start, end = match.span(0)
-                value = match.group(0)
-            yield Detection(
-                start=start,
-                end=end,
-                detector_type=rule.detector_type,
-                value=value,
-                priority=rule.priority,
-            )
+            yield self._detection(match)
+
+    def _detection(self, match: "re.Match[str]", joins: bool = False) -> Detection:
+        """The detection a match the validator accepted makes: joined
+        (Detection.joins) when ``joins`` says so or the rule's own
+        ``joins`` does."""
+        rule = self._rule
+        if rule.group and match.group("value") is not None:
+            start, end = match.span("value")
+            value = match.group("value")
+        else:
+            start, end = match.span(0)
+            value = match.group(0)
+        return Detection(
+            start=start,
+            end=end,
+            detector_type=rule.detector_type,
+            value=value,
+            priority=rule.priority,
+            joins=joins or (rule.joins is not None and rule.joins(match)),
+        )

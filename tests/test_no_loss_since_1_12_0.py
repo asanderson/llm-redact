@@ -16,10 +16,12 @@ digit groups, next to every value. There are no exceptions: a loss is
 fixed in the rules.
 
 The same inputs check 1.12.1's pipeline too: this release's rules with
-credit_card's inside reading taken out, a digest pinning the five rules
-1.12.1 changed to their 1.12.1 definitions (1.12.1 is no subset of 1.12.0,
-so the 1.12.0 reference alone would not show that nothing 1.12.1 redacted
-is lost).
+credit_card's inside reading and the IBAN's joining (RegexRule.joins, a
+redactor matter: the references are the overlap sweep) taken out, a digest
+pinning the five rules 1.12.1 changed to their 1.12.1 definitions (1.12.1
+is no subset of 1.12.0, so the 1.12.0 reference alone would not show that
+nothing 1.12.1 redacted is lost). With custom rules and NER spans the
+1.12.1 reference is test_joined_values.py's.
 
 This holds under the default [detection.modes]: a newly read value wins
 an overlap like any longer match, so the value it takes in follows its
@@ -185,13 +187,20 @@ ALLOWLIST = build_allowlist(CONFIG)
 OLD_PLAN = DetectorPlan(
     [Frozen(det.name) if det.name in FROZEN_1_12_0 else det for det in build_detectors(CONFIG)]
 )
-# 1.12.1's pipeline: this release's rules, credit_card without the inside
-# reading 1.13.0 added (CHANGED_IN_1_12_1 pins the rest to 1.12.1).
+
+
+def as_1_12_1(rule: RegexRule) -> RegexRule:
+    """A rule as 1.12.1 defined it, while CHANGED_IN_1_12_1 holds: without
+    the fields 1.13.0 added (credit_card's inside reading, the paper IBAN's
+    joining)."""
+    return dataclasses.replace(rule, inside=None, joins=None)
+
+
+# 1.12.1's pipeline: this release's rules as 1.12.1 defined them
+# (CHANGED_IN_1_12_1 pins the five it changed).
 PLAN_1_12_1 = DetectorPlan(
     [
-        RegexDetector(dataclasses.replace(det.rule, inside=None))
-        if isinstance(det, RegexDetector) and det.name == "credit_card"
-        else det
+        RegexDetector(as_1_12_1(det.rule)) if isinstance(det, RegexDetector) else det
         for det in build_detectors(CONFIG)
     ]
 )
@@ -442,14 +451,24 @@ def test_every_other_rule_is_as_1_12_0_defined_it(monkeypatch: pytest.MonkeyPatc
 
 def test_the_1_12_1_reference_is_1_12_1() -> None:
     # 1.12.1's pipeline differs from this release's only in credit_card,
-    # whose inside reading it lacks.
+    # whose inside reading it lacks, and the paper IBAN's joining.
     changed = [rule for rule in BUILTIN_RULES if rule.name in FROZEN_1_12_0]
-    assert _digest(rule for rule in changed if rule.name != "credit_card") == CHANGED_IN_1_12_1
+    assert (
+        _digest(as_1_12_1(rule) for rule in changed if rule.name != "credit_card")
+        == CHANGED_IN_1_12_1
+    )
     previous = {det.name: det for det in PLAN_1_12_1.detectors}
-    card = previous["credit_card"]
-    assert isinstance(card, RegexDetector) and card.rule.inside is None
-    rule = next(rule for rule in BUILTIN_RULES if rule.name == "credit_card")
-    assert card.rule == dataclasses.replace(rule, inside=None)
+    for name in ("credit_card", "iban"):
+        rule = next(rule for rule in BUILTIN_RULES if rule.name == name)
+        old = previous[name]
+        assert isinstance(old, RegexDetector) and old.rule == as_1_12_1(rule) != rule
+    assert (
+        sum(
+            isinstance(det, RegexDetector) and det.rule != as_1_12_1(det.rule)
+            for det in build_detectors(CONFIG)
+        )
+        == 2
+    )
     assert [det.name for det in PLAN_1_12_1.detectors] == [
         det.name for det in build_detectors(CONFIG)
     ]

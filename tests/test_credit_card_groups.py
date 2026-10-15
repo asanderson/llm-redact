@@ -10,7 +10,8 @@ built-in rule's value can start inside it and run on (where the run ends,
 before one group, or before an expiry: test_no_rule_runs_on_from_inside_a_card
 tries every built-in pattern). That nothing 1.12.1 redacted is lost is
 test_no_loss_since_1_12_0.py (credit_card is frozen there, and 1.12.1's
-pipeline is checked too).
+pipeline is checked too); a custom rule's value or an NER span that overlaps
+such a card is joined with it (test_joined_values.py).
 """
 
 import dataclasses
@@ -331,7 +332,8 @@ def _cards_before_tails() -> Iterator[tuple[str, int, int]]:
 def test_no_rule_runs_on_from_inside_a_card() -> None:
     # Where _card_inside lets a card end, no other built-in rule's pattern
     # matches from a place inside the card (its own context around it) to
-    # one past its end: no built-in value can lose characters to the card.
+    # one past its end: no built-in value can lose characters to the card
+    # (a custom rule's or an NER span is joined with it, test_joined_values).
     patterns = [rule.pattern for rule in BUILTIN_RULES if rule.name != "credit_card"]
     tried = 0
     for text, start, end in _cards_before_tails():
